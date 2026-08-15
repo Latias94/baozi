@@ -289,6 +289,9 @@ pub mod __canonical_activation {
         ScopedRetainedStoreSessionOutcomeOwner, SealedCanonicalActivationRequest,
         StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
     };
+    pub use crate::concrete_store::{
+        RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreProducerHost,
+    };
 }
 pub use control::{
     CancellationOrigin, CancellationSignal, CancellationToken, ControlCause, OperationControl,

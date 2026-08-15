@@ -1251,6 +1251,9 @@ fn classify_activation_fault(cause: &StoreRuntimeError) -> ActivationFaultClassi
         | StoreRuntimeError::SuccessOutcomeRejected
         | StoreRuntimeError::CanonicalValidationContractRejected
         | StoreRuntimeError::UnverifiedControlledCause
+        | StoreRuntimeError::ObservedWorkOutstanding
+        | StoreRuntimeError::ObservedWorkExceedsAdmitted
+        | StoreRuntimeError::ObservedWorkIncomplete
         | StoreRuntimeError::FallbackOnly
         | StoreRuntimeError::Poisoned => ActivationFaultClassification::Contract,
         StoreRuntimeError::Control(cause) => {

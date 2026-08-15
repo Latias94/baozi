@@ -161,8 +161,9 @@ use triomphe::{Arc, UniqueArc};
 pub(crate) use operation::{
     BorrowedRetainedWorkPermit, RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError,
     RetainedFailureWorkPermit, RetainedFailureWorkStartError, RetainedPlanningBaseline,
-    RetainedPlanningContainmentAnchor, RetainedWorkConsumeError, RetainedWorkFinishError,
-    RetainedWorkPermit, RetainedWorkStartError,
+    RetainedPlanningContainmentAnchor, RetainedProducerHost, RetainedProducerWorkFinishError,
+    RetainedProducerWorkPermit, RetainedProducerWorkStartError, RetainedWorkConsumeError,
+    RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
 };
 pub(crate) use operation::{
     RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkControl,

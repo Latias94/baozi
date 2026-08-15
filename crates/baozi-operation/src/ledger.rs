@@ -1149,6 +1149,147 @@ where
             LinearWorkCompletion::Completed
         }
     }
+
+    /// Transfers one grouped physical completion into every admitted work dimension atomically.
+    ///
+    /// The complete prefix is validated under one ledger lock before any counter changes. Once
+    /// representable, every supplied unit is non-refundable and all dimensions advance together,
+    /// including when the resulting pending-capacity projection reports a terminal limit failure.
+    #[cfg(any(test, feature = "_u4-activation"))]
+    pub(crate) fn complete_batch_with_outcome(
+        &mut self,
+        amounts: [u64; N],
+    ) -> LinearWorkCompletion<D> {
+        if !self.active
+            || self.faulted
+            || amounts
+                .iter()
+                .zip(self.remaining.iter())
+                .any(|(amount, remaining)| amount > remaining)
+        {
+            return LinearWorkCompletion::NotCompleted(LedgerCause::InactiveLinearWorkPermit);
+        }
+
+        let mut aggregated = [0_u64; N];
+        for (index, amount) in amounts.iter().copied().enumerate() {
+            let first = self.positions[..index]
+                .iter()
+                .position(|position| *position == self.positions[index])
+                .unwrap_or(index);
+            let Some(value) = aggregated[first].checked_add(amount) else {
+                return LinearWorkCompletion::NotCompleted(LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Consumed,
+                    dimension: self.charges[index].0,
+                });
+            };
+            aggregated[first] = value;
+        }
+
+        let mut state = lock(&self.state);
+        if let Err(cause) = Ledger::<O, P, D>::ensure_open(&state) {
+            state.linear_work_faulted = true;
+            self.faulted = true;
+            return LinearWorkCompletion::NotCompleted(cause);
+        }
+
+        let mut consumed = [0_u64; N];
+        let mut pending_consumed = [0_u64; N];
+        let mut completion_failure = None;
+        let mut completed_prefix_exceeds_attempted = false;
+        for (index, amount) in aggregated.iter().copied().enumerate() {
+            if amount == 0 || self.positions[..index].contains(&self.positions[index]) {
+                continue;
+            }
+            let position = self.positions[index];
+            let dimension = self.charges[index].0;
+            let Some(entry) = state.dimensions.get(position) else {
+                state.linear_work_faulted = true;
+                self.faulted = true;
+                return LinearWorkCompletion::NotCompleted(LedgerCause::FinalSnapshotShapeMismatch);
+            };
+            if entry.dimension != dimension || entry.state.pending_consumed < amount {
+                state.linear_work_faulted = true;
+                self.faulted = true;
+                return LinearWorkCompletion::NotCompleted(LedgerCause::InactiveLinearWorkPermit);
+            }
+            let Some(next_consumed) = entry.state.consumed.checked_add(amount) else {
+                state.linear_work_faulted = true;
+                self.faulted = true;
+                return LinearWorkCompletion::NotCompleted(LedgerCause::ArithmeticOverflow {
+                    class: CounterClass::Consumed,
+                    dimension,
+                });
+            };
+            let next_pending = entry.state.pending_consumed - amount;
+            consumed[index] = next_consumed;
+            pending_consumed[index] = next_pending;
+            completed_prefix_exceeds_attempted |= next_consumed > entry.state.attempted;
+
+            if completion_failure.is_none() {
+                completion_failure = match next_consumed.checked_add(next_pending) {
+                    None => Some(LedgerCause::ArithmeticOverflow {
+                        class: CounterClass::Consumed,
+                        dimension,
+                    }),
+                    Some(effective) if effective > entry.state.attempted => {
+                        Some(LedgerCause::ConsumedExceedsAttempted {
+                            dimension,
+                            consumed: effective,
+                            attempted: entry.state.attempted,
+                        })
+                    }
+                    Some(effective) if effective > entry.policy.consumed_limit => {
+                        Some(LedgerCause::LimitExceeded {
+                            class: CounterClass::Consumed,
+                            dimension,
+                            value: effective,
+                            limit: entry.policy.consumed_limit,
+                        })
+                    }
+                    Some(_) => None,
+                };
+            }
+        }
+
+        let completes_permit = amounts
+            .iter()
+            .zip(self.remaining.iter())
+            .all(|(amount, remaining)| amount == remaining);
+        let active_linear_work_permits = if completes_permit {
+            let Some(active) = state.active_linear_work_permits.checked_sub(1) else {
+                state.linear_work_faulted = true;
+                self.faulted = true;
+                return LinearWorkCompletion::NotCompleted(LedgerCause::InactiveLinearWorkPermit);
+            };
+            active
+        } else {
+            state.active_linear_work_permits
+        };
+
+        for (index, amount) in aggregated.iter().copied().enumerate() {
+            if amount == 0 || self.positions[..index].contains(&self.positions[index]) {
+                continue;
+            }
+            let entry = &mut state.dimensions[self.positions[index]];
+            entry.state.pending_consumed = pending_consumed[index];
+            entry.state.consumed = consumed[index];
+        }
+        for (remaining, amount) in self.remaining.iter_mut().zip(amounts) {
+            *remaining -= amount;
+        }
+        if completes_permit {
+            state.active_linear_work_permits = active_linear_work_permits;
+            self.active = false;
+        }
+
+        if let Some(cause) = completion_failure {
+            state.linear_work_faulted |= completed_prefix_exceeds_attempted;
+            self.faulted = true;
+            LinearWorkCompletion::CompletedWithLedgerFailure(cause)
+        } else {
+            LinearWorkCompletion::Completed
+        }
+    }
 }
 
 impl<O, P, D, const N: usize> Drop for LinearWorkBatchPermit<O, P, D, N>

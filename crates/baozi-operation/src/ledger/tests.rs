@@ -704,6 +704,99 @@ fn linear_work_batch_aggregate_overflow_is_side_effect_free() {
 }
 
 #[test]
+fn linear_work_group_completion_commits_every_dimension_under_one_preflight() {
+    let ledger = test_ledger(limits());
+    let mut permit = ledger
+        .try_admit_linear_work_batch(&[(Dimension::Bytes, 3), (Dimension::Records, 4)])
+        .expect("the grouped work envelope is admitted");
+
+    let completion = permit.complete_batch_with_outcome([2, 3]);
+    assert!(completion.into_result().is_ok());
+
+    let bytes = ledger
+        .dimension_evidence(Dimension::Bytes)
+        .expect("byte evidence");
+    let records = ledger
+        .dimension_evidence(Dimension::Records)
+        .expect("record evidence");
+    assert_eq!((bytes.attempted(), bytes.consumed()), (3, 2));
+    assert_eq!((records.attempted(), records.consumed()), (4, 3));
+}
+
+#[test]
+fn linear_work_group_completion_rejects_the_whole_invalid_prefix() {
+    let ledger = test_ledger(limits());
+    let mut permit = ledger
+        .try_admit_linear_work_batch(&[(Dimension::Bytes, 3), (Dimension::Records, 4)])
+        .expect("the grouped work envelope is admitted");
+
+    assert!(matches!(
+        permit.complete_batch_with_outcome([2, 5]),
+        LinearWorkCompletion::NotCompleted(LedgerCause::InactiveLinearWorkPermit)
+    ));
+
+    let bytes = ledger
+        .dimension_evidence(Dimension::Bytes)
+        .expect("byte evidence");
+    let records = ledger
+        .dimension_evidence(Dimension::Records)
+        .expect("record evidence");
+    assert_eq!((bytes.attempted(), bytes.consumed()), (3, 0));
+    assert_eq!((records.attempted(), records.consumed()), (4, 0));
+}
+
+#[test]
+fn linear_work_group_completion_preserves_every_prefix_after_competing_observed_work() {
+    let constrained = LedgerLimits::new(
+        16,
+        [
+            (Dimension::Bytes, DimensionPolicy::counter(3, 2, 0)),
+            (Dimension::Records, DimensionPolicy::counter(3, 3, 0)),
+        ],
+    )
+    .expect("grouped pending observed-work limits");
+    let ledger = test_ledger(constrained);
+    let mut permit = ledger
+        .try_admit_linear_work_batch(&[(Dimension::Bytes, 2), (Dimension::Records, 2)])
+        .expect("the grouped permit reserves both consumed envelopes");
+
+    assert!(matches!(
+        ledger.charge_observed_batch(&[(Dimension::Bytes, 1)]),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: Dimension::Bytes,
+            value: 3,
+            limit: 2,
+        })
+    ));
+    ledger
+        .charge_observed_batch(&[(Dimension::Records, 1)])
+        .expect("the second competing action also completes before grouped completion");
+    assert!(matches!(
+        permit.complete_batch_with_outcome([1, 1]),
+        LinearWorkCompletion::CompletedWithLedgerFailure(LedgerCause::LimitExceeded {
+            class: CounterClass::Consumed,
+            dimension: Dimension::Bytes,
+            value: 3,
+            limit: 2,
+        })
+    ));
+    drop(permit);
+
+    let snapshot = ledger
+        .finish()
+        .expect("the terminal projection failure preserves a valid final evidence shape");
+    let bytes = snapshot
+        .dimension(Dimension::Bytes)
+        .expect("final byte evidence");
+    let records = snapshot
+        .dimension(Dimension::Records)
+        .expect("final record evidence");
+    assert_eq!((bytes.attempted(), bytes.consumed()), (3, 2));
+    assert_eq!((records.attempted(), records.consumed()), (3, 2));
+}
+
+#[test]
 fn linear_work_pending_capacity_prevents_oversell_and_drop_releases_the_suffix() {
     let constrained = LedgerLimits::new(
         16,

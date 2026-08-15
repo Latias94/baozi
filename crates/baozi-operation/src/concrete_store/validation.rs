@@ -752,6 +752,15 @@ pub enum StoreRuntimeError {
     CanonicalValidationContractRejected,
     /// A callback returned a control or ledger cause that its current capability did not issue.
     UnverifiedControlledCause,
+    /// Another producer observed-work owner is still unresolved.
+    #[cfg(feature = "_u4-activation")]
+    ObservedWorkOutstanding,
+    /// Producer completion exceeded the action's admitted observed-work envelope.
+    #[cfg(feature = "_u4-activation")]
+    ObservedWorkExceedsAdmitted,
+    /// Exact producer work completion left part of the admitted envelope unfinished.
+    #[cfg(feature = "_u4-activation")]
+    ObservedWorkIncomplete,
     FallbackOnly,
     Poisoned,
 }
@@ -846,6 +855,17 @@ impl fmt::Display for StoreRuntimeError {
             Self::UnverifiedControlledCause => formatter.write_str(
                 "retained store callback returned an unverified control or ledger cause",
             ),
+            #[cfg(feature = "_u4-activation")]
+            Self::ObservedWorkOutstanding => {
+                formatter.write_str("retained store producer has unresolved observed work")
+            }
+            #[cfg(feature = "_u4-activation")]
+            Self::ObservedWorkExceedsAdmitted => formatter.write_str(
+                "retained store producer completed work beyond its admitted envelope",
+            ),
+            #[cfg(feature = "_u4-activation")]
+            Self::ObservedWorkIncomplete => formatter
+                .write_str("retained store observed work did not complete its admitted envelope"),
             Self::FallbackOnly => {
                 formatter.write_str("retained store is restricted to minimal fallback")
             }

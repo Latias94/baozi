@@ -4,24 +4,25 @@ use super::publication_contract::{
 };
 use super::startup;
 use super::{
-    AccountPoisonReason, AccountPoisoned, AssemblyContainmentProvenance, CanonicalLineageAuthority,
-    FailureTerminalWorkState, FallbackPublicationBaseline, FinalizationContainmentError,
-    PhysicalStorageAccount, PreparationFailureClass, PreparationFailureCode,
-    PreparedRetainedPublication, PrimaryPublicationBatches, PublishedCanonicalAggregate,
-    QualifiedRetainedBlockTablePlan, RetainedAllocationError, RetainedAllocationPlan,
-    RetainedBatchLimits, RetainedBuildFailureCode, RetainedFailureTerminalWorkPlan,
-    RetainedHandleSharePlan, RetainedMembershipDestination, RetainedOperationStartError,
-    RetainedOperationStartPlan, RetainedOutcomeMode, RetainedPublicationAssembly,
-    RetainedPublicationOpenError, RetainedPublicationPlan, RetainedPublicationPrepareError,
-    RetainedStorageDropOutcome, RetainedWriterError, RetainedWriterPlan,
-    StartupCrossPlaneAdmissionFailure, StartupCrossPlanePlan, StartupPhysicalManifest,
-    StartupPhysicalNoMutation, StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
-    TerminalEvidenceBackingPlan, TerminalEvidenceKey, TerminalFallbackAttribution,
-    TerminalFallbackGuard, TerminalLedgerEvidence, TerminalPhysicalOwnershipManifest,
-    drop_retained_table_with_account_anchor, map_batch_error, try_create_retained_block_table,
-    try_open_publication_account, try_qualify_retained_block_table_plan,
-    unreachable_final_owner_state,
+    AccountPoisonReason, AssemblyContainmentProvenance, CanonicalLineageAuthority,
+    FailureTerminalWorkState, FallbackPublicationBaseline, PhysicalStorageAccount,
+    PreparationFailureClass, PreparationFailureCode, PreparedRetainedPublication,
+    PrimaryPublicationBatches, PublishedCanonicalAggregate, QualifiedRetainedBlockTablePlan,
+    RetainedAllocationError, RetainedAllocationPlan, RetainedBatchLimits, RetainedBuildFailureCode,
+    RetainedFailureTerminalWorkPlan, RetainedHandleSharePlan, RetainedMembershipDestination,
+    RetainedOperationStartError, RetainedOperationStartPlan, RetainedOutcomeMode,
+    RetainedPublicationAssembly, RetainedPublicationOpenError, RetainedPublicationPlan,
+    RetainedPublicationPrepareError, RetainedStorageDropOutcome, RetainedWriterError,
+    RetainedWriterPlan, StartupCrossPlaneAdmissionFailure, StartupCrossPlanePlan,
+    StartupPhysicalManifest, StartupPhysicalNoMutation, StartupRetainedPartGuard,
+    StartupTerminalEvidenceBuildError, TerminalEvidenceBackingPlan, TerminalEvidenceKey,
+    TerminalFallbackAttribution, TerminalFallbackGuard, TerminalLedgerEvidence,
+    TerminalPhysicalOwnershipManifest, drop_retained_table_with_account_anchor, map_batch_error,
+    try_create_retained_block_table, try_open_publication_account,
+    try_qualify_retained_block_table_plan, unreachable_final_owner_state,
 };
+#[cfg(feature = "_u4-activation")]
+use super::{AccountPoisoned, FinalizationContainmentError};
 #[cfg(test)]
 use super::{
     STARTUP_FAILURE_LEDGER_SNAPSHOT, STARTUP_READY_FINAL_OWNER_ALLOCATOR_ENTRIES,
@@ -36,6 +37,8 @@ use crate::ledger::{
     LinearWorkCompletion, LiveReservation, OutcomeEvidenceDestination, PhaseCompletionError,
     StartupAccountShareEnvelope, StartupAttributionBatchPlans, StartupRetainedAttribution,
 };
+#[cfg(feature = "_u4-activation")]
+use crate::ledger::{DimensionPolicy, DimensionSnapshot};
 use crate::{ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit};
 use std::fmt;
 use std::num::NonZeroU64;
@@ -313,6 +316,61 @@ where
     sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
 }
 
+/// Borrowed host authority for producer work before publication begins.
+///
+/// This capability can report semantic progress, inspect narrow scalar accounting, tighten policy,
+/// and admit one linear observed-work envelope. It exposes neither raw ledger ownership nor any
+/// publication, retained-table, or terminal-evidence authority.
+#[cfg(feature = "_u4-activation")]
+pub(crate) struct RetainedProducerHost<'a, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    coordinator: &'a mut OperationCoordinator<O, P, PP, U, D>,
+    failure_terminal_work_dimension: Option<D>,
+    permit_outstanding: &'a mut bool,
+    sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(crate) enum RetainedProducerWorkStartError<D> {
+    Control(ControlCause),
+    Ledger(LedgerCause<D>),
+    Outstanding,
+}
+
+#[cfg(feature = "_u4-activation")]
+pub(crate) enum RetainedProducerWorkFinishError {
+    Incomplete,
+}
+
+/// Linear observed-work authority for one pre-admitted producer action.
+///
+/// Grouped completion transfers every dimension under one ledger lock. Explicit partial finish is
+/// the only normal way to release an unfinished suffix. An unresolved drop records ProductGraph;
+/// forgetting the owner leaves the ledger permit active so final preparation fails closed.
+#[must_use = "observed work must finish exactly or explicitly resolve its completed prefix"]
+#[cfg(feature = "_u4-activation")]
+pub(crate) struct RetainedProducerWorkPermit<'a, O, P, PP, U, D, const N: usize>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    coordinator: &'a mut OperationCoordinator<O, P, PP, U, D>,
+    permit_outstanding: &'a mut bool,
+    sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
+    work: LinearWorkBatchPermit<O, P, D, N>,
+    remaining: [u64; N],
+    resolved: bool,
+}
+
 /// Poll-and-observed-work authority bound to one prevalidated dimension.
 ///
 /// This private capability is moved into a retained builder or validator closure. It cannot
@@ -448,6 +506,253 @@ where
     control: Option<RetainedFailureWorkControl<'a, O, P, PP, U, D>>,
     work: LinearWorkBatchPermit<O, P, D, 1>,
     remaining: u64,
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, P, PP, U, D> RetainedProducerHost<'_, O, P, PP, U, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
+        let result = self.coordinator.poll();
+        if let Err(cause) = &result {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::from_control(cause),
+            );
+        }
+        result
+    }
+
+    pub(crate) fn report_progress(
+        &mut self,
+        phase: PP,
+        unit: U,
+        completed: u64,
+        total: Option<u64>,
+    ) -> Result<(), ControlCause> {
+        let result = self
+            .coordinator
+            .report_progress(phase, unit, completed, total);
+        if let Err(cause) = &result {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::from_control(cause),
+            );
+        }
+        result
+    }
+
+    pub(crate) fn dimension_evidence(
+        &mut self,
+        dimension: D,
+    ) -> Result<DimensionSnapshot, LedgerCause<D>> {
+        self.validate_dimension(dimension)?;
+        let result = self.coordinator.dimension_evidence(dimension);
+        if result.is_err() {
+            self.record_ledger_failure();
+        }
+        result
+    }
+
+    pub(crate) fn tighten_dimension_policy(
+        &mut self,
+        dimension: D,
+        upper_bound: DimensionPolicy,
+    ) -> Result<(), LedgerCause<D>> {
+        self.validate_dimension(dimension)?;
+        let result = self
+            .coordinator
+            .tighten_dimension_policy(dimension, upper_bound);
+        if result.is_err() {
+            self.record_ledger_failure();
+        }
+        result
+    }
+
+    pub(crate) fn try_begin_observed_work<const N: usize>(
+        &mut self,
+        charges: [(D, u64); N],
+    ) -> Result<RetainedProducerWorkPermit<'_, O, P, PP, U, D, N>, RetainedProducerWorkStartError<D>>
+    {
+        if *self.permit_outstanding {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
+            );
+            return Err(RetainedProducerWorkStartError::Outstanding);
+        }
+        if !charges.iter().any(|(_, amount)| *amount != 0) {
+            self.record_ledger_failure();
+            return Err(RetainedProducerWorkStartError::Ledger(
+                LedgerCause::InactiveLinearWorkPermit,
+            ));
+        }
+        for &(dimension, _) in &charges {
+            self.validate_dimension(dimension)
+                .map_err(RetainedProducerWorkStartError::Ledger)?;
+        }
+        self.poll()
+            .map_err(RetainedProducerWorkStartError::Control)?;
+        let result = self
+            .coordinator
+            .retained_ledger()
+            .try_admit_linear_work_batch(&charges);
+        let work = match result {
+            Ok(work) => work,
+            Err(cause) => {
+                self.record_ledger_failure();
+                return Err(RetainedProducerWorkStartError::Ledger(cause));
+            }
+        };
+        *self.permit_outstanding = true;
+        Ok(RetainedProducerWorkPermit {
+            coordinator: &mut *self.coordinator,
+            permit_outstanding: &mut *self.permit_outstanding,
+            sticky_terminal_cause: &mut *self.sticky_terminal_cause,
+            work,
+            remaining: charges.map(|(_, amount)| amount),
+            resolved: false,
+        })
+    }
+
+    pub(crate) fn record_ledger_failure(&mut self) {
+        record_terminal_cause_with_precedence(
+            self.sticky_terminal_cause,
+            PreparationFailureCode::ledger(),
+        );
+    }
+
+    fn validate_dimension(&mut self, dimension: D) -> Result<(), LedgerCause<D>> {
+        if self.failure_terminal_work_dimension != Some(dimension)
+            && self
+                .coordinator
+                .retained_ledger()
+                .contains_dimension(dimension)
+        {
+            Ok(())
+        } else {
+            self.record_ledger_failure();
+            Err(LedgerCause::UnknownDimension { dimension })
+        }
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, P, PP, U, D, const N: usize> RetainedProducerWorkPermit<'_, O, P, PP, U, D, N>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    pub(crate) fn poll(&mut self) -> Result<(), ControlCause> {
+        let result = self.coordinator.poll();
+        if let Err(cause) = &result {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::from_control(cause),
+            );
+        }
+        result
+    }
+
+    pub(crate) fn report_progress(
+        &mut self,
+        phase: PP,
+        unit: U,
+        completed: u64,
+        total: Option<u64>,
+    ) -> Result<(), ControlCause> {
+        let result = self
+            .coordinator
+            .report_progress(phase, unit, completed, total);
+        if let Err(cause) = &result {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::from_control(cause),
+            );
+        }
+        result
+    }
+
+    pub(crate) const fn remaining(&self) -> [u64; N] {
+        self.remaining
+    }
+
+    pub(crate) fn complete_batch(
+        &mut self,
+        amounts: [u64; N],
+    ) -> Result<(), RetainedWorkConsumeError<D>> {
+        if amounts
+            .iter()
+            .zip(self.remaining.iter())
+            .any(|(amount, remaining)| amount > remaining)
+        {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_OVERRUN_CODE),
+            );
+            return Err(RetainedWorkConsumeError::ExceedsAttempted);
+        }
+        let completion = self.work.complete_batch_with_outcome(amounts);
+        if completion.prefix_was_applied() {
+            for (remaining, amount) in self.remaining.iter_mut().zip(amounts) {
+                *remaining -= amount;
+            }
+        }
+        completion.into_result().map_err(|cause| {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+            RetainedWorkConsumeError::Ledger(cause)
+        })
+    }
+
+    pub(crate) fn finish(mut self) -> Result<(), RetainedProducerWorkFinishError> {
+        if self.remaining.iter().any(|remaining| *remaining != 0) {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
+            );
+            return Err(RetainedProducerWorkFinishError::Incomplete);
+        }
+        *self.permit_outstanding = false;
+        self.resolved = true;
+        Ok(())
+    }
+
+    pub(crate) fn finish_partial(mut self) {
+        *self.permit_outstanding = false;
+        self.resolved = true;
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, P, PP, U, D, const N: usize> Drop for RetainedProducerWorkPermit<'_, O, P, PP, U, D, N>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug,
+{
+    fn drop(&mut self) {
+        if self.resolved {
+            return;
+        }
+        record_terminal_cause_with_precedence(
+            self.sticky_terminal_cause,
+            PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
+        );
+        *self.permit_outstanding = false;
+    }
 }
 
 impl<O, P, PP, U, D> RetainedWorkControl<'_, O, P, PP, U, D>
@@ -1111,6 +1416,23 @@ where
             poll,
             ledger,
             failure_terminal_work_dimension: *failure_terminal_work_dimension,
+            sticky_terminal_cause,
+        }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn producer_host(&mut self) -> RetainedProducerHost<'_, O, P, PP, U, D> {
+        let Self {
+            coordinator,
+            failure_terminal_work_dimension,
+            ordinary_work_permit_outstanding,
+            sticky_terminal_cause,
+            ..
+        } = self;
+        RetainedProducerHost {
+            coordinator,
+            failure_terminal_work_dimension: *failure_terminal_work_dimension,
+            permit_outstanding: ordinary_work_permit_outstanding,
             sticky_terminal_cause,
         }
     }

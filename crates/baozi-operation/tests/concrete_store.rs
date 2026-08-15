@@ -675,6 +675,9 @@ mod domain;
 mod evidence;
 #[path = "concrete_store/failure.rs"]
 mod failure;
+#[cfg(feature = "_u4-activation")]
+#[path = "concrete_store/producer_host.rs"]
+mod producer_host;
 #[path = "concrete_store/publication.rs"]
 mod publication;
 #[path = "concrete_store/sharing.rs"]

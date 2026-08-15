@@ -127,6 +127,8 @@ use std::marker::PhantomData;
 use crate::capacity::{CapacityPlan, CapacityPlanError};
 use crate::control::{OperationControl, ProgressPhase, ProgressUnit};
 use crate::coordinator::FinalProgress;
+#[cfg(feature = "_u4-activation")]
+use crate::ledger::DimensionPolicy;
 #[cfg(test)]
 use crate::ledger::PhaseCompletionError;
 use crate::ledger::{LedgerCause, LiveReservation};
@@ -149,6 +151,11 @@ use crate::retained::{
     RetainedOperationStartPlan, RetainedPublicationAssembly, RetainedPublicationError,
     RetainedPublicationOpenRecovery, RetainedPublicationPrepareError, RetainedSuccessValidation,
     RetainedWorkControl, RetainedWriterError, ValidatedRetainedFailure, ValidatedRetainedSuccess,
+};
+#[cfg(feature = "_u4-activation")]
+use crate::retained::{
+    RetainedProducerHost, RetainedProducerWorkFinishError, RetainedProducerWorkPermit,
+    RetainedProducerWorkStartError, RetainedWorkConsumeError,
 };
 #[cfg(feature = "_u4c-collector")]
 use crate::u4c_collector::{
@@ -1725,6 +1732,12 @@ type RawStoreOperation<O, PP, U> =
     RetainedOperation<O, StorePhaseKey, PP, U, StoreDimensionKey, StoreFallbackEnvelope>;
 type RawStoreControlCheckpoint<'a, O, PP, U> =
     RetainedControlCheckpoint<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
+#[cfg(feature = "_u4-activation")]
+type RawStoreProducerHost<'a, O, PP, U> =
+    RetainedProducerHost<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
+#[cfg(feature = "_u4-activation")]
+type RawStoreProducerWork<'a, O, PP, U, const N: usize> =
+    RetainedProducerWorkPermit<'a, O, StorePhaseKey, PP, U, StoreDimensionKey, N>;
 type RawStoreWorkControl<'a, O, PP, U> =
     RetainedWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 #[cfg(feature = "_u4-activation")]
@@ -1844,6 +1857,68 @@ where
     }
 }
 
+/// Narrow scalar view of one producer-owned accounting dimension.
+///
+/// Publication counters, high-water marks, raw policy, and ledger ownership remain private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "_u4-activation")]
+pub struct RetainedStoreDimensionState {
+    attempted: u64,
+    consumed: u64,
+    live_bytes: u64,
+}
+
+#[cfg(feature = "_u4-activation")]
+impl RetainedStoreDimensionState {
+    /// Returns non-refundable work admitted before producer actions began.
+    pub const fn attempted(self) -> u64 {
+        self.attempted
+    }
+
+    /// Returns the physically completed or observed work prefix.
+    pub const fn consumed(self) -> u64 {
+        self.consumed
+    }
+
+    /// Returns bytes currently retained in this dimension.
+    pub const fn live_bytes(self) -> u64 {
+        self.live_bytes
+    }
+}
+
+/// Borrowed host capability for producer work before retained publication begins.
+///
+/// The host can report semantic progress, inspect narrow accounting, tighten policy, and admit one
+/// linear observed-work action. It cannot access raw coordinator state, publish output, or mutate
+/// retained block tables.
+#[cfg(feature = "_u4-activation")]
+pub struct RetainedStoreProducerHost<'a, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    raw: RawStoreProducerHost<'a, O, PP, U>,
+    domain: &'a StoreKeyDomain,
+    terminal_only: bool,
+}
+
+/// Linear completion capability for one admitted producer action.
+///
+/// Each completion call records one physical prefix across every planned dimension atomically.
+/// Normal short reads and EOF must call [`Self::finish_partial`]. Dropping an unresolved owner
+/// records ProductGraph; forgetting it leaves an outstanding ledger permit and blocks preparation.
+#[must_use = "observed work must finish exactly or explicitly resolve its completed prefix"]
+#[cfg(feature = "_u4-activation")]
+pub struct RetainedStoreObservedWork<'a, O, PP, U, const N: usize>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    raw: RawStoreProducerWork<'a, O, PP, U, N>,
+}
+
 /// Borrowed control-and-budget capability for one retained-store producer.
 ///
 /// The checkpoint cannot report progress, open or publish output, or mutate retained storage.
@@ -1943,6 +2018,170 @@ where
             (None, Ok(value)) => Ok(value),
             (None, Err(_)) => Err(StoreWorkCallbackFailure::UnverifiedCause),
         }
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, PP, U> RetainedStoreProducerHost<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn ensure_mutable(&self) -> Result<(), StoreRuntimeError> {
+        if self.terminal_only {
+            Err(StoreRuntimeError::FallbackOnly)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn validate_dimension(
+        &mut self,
+        dimension: StoreDimensionKey,
+    ) -> Result<(), StoreRuntimeError> {
+        if !self.domain.owns_dimension(dimension) {
+            self.raw.record_ledger_failure();
+            return Err(StoreRuntimeError::ForeignDimensionDomain { dimension });
+        }
+        Ok(())
+    }
+
+    /// Polls cancellation and deadline state at the producer boundary.
+    pub fn poll(&mut self) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
+        self.raw.poll().map_err(StoreRuntimeError::Control)
+    }
+
+    /// Reports bounded owner-defined progress through the operation's single coordinator.
+    pub fn report_progress(
+        &mut self,
+        phase: PP,
+        unit: U,
+        completed: u64,
+        total: Option<u64>,
+    ) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
+        self.raw
+            .report_progress(phase, unit, completed, total)
+            .map_err(StoreRuntimeError::Control)
+    }
+
+    /// Copies attempted, consumed, and current live-byte state for one qualified dimension.
+    pub fn dimension_state(
+        &mut self,
+        dimension: StoreDimensionKey,
+    ) -> Result<RetainedStoreDimensionState, StoreRuntimeError> {
+        self.ensure_mutable()?;
+        self.validate_dimension(dimension)?;
+        self.raw
+            .dimension_evidence(dimension)
+            .map(|snapshot| RetainedStoreDimensionState {
+                attempted: snapshot.attempted(),
+                consumed: snapshot.consumed(),
+                live_bytes: snapshot.current_live_bytes(),
+            })
+            .map_err(StoreRuntimeError::Ledger)
+    }
+
+    /// Monotonically tightens one qualified dimension without replacing its ledger owner.
+    ///
+    /// A numerically wider request is harmless: every field remains bounded by the existing
+    /// policy. Counter-only and reservable-byte shapes cannot be changed.
+    pub fn tighten_dimension_policy(
+        &mut self,
+        dimension: StoreDimensionKey,
+        upper_bound: DimensionPolicy,
+    ) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
+        self.validate_dimension(dimension)?;
+        self.raw
+            .tighten_dimension_policy(dimension, upper_bound)
+            .map_err(StoreRuntimeError::Ledger)
+    }
+
+    /// Admits one fixed, domain-qualified observed-work envelope before its action begins.
+    ///
+    /// Attempted work is permanent at admission. Future completion calls accept one amount per
+    /// plan entry and commit the complete group under one ledger lock.
+    pub fn try_begin_observed_work<const N: usize>(
+        &mut self,
+        charges: [(StoreDimensionKey, u64); N],
+    ) -> Result<RetainedStoreObservedWork<'_, O, PP, U, N>, StoreRuntimeError> {
+        self.ensure_mutable()?;
+        for &(dimension, _) in &charges {
+            self.validate_dimension(dimension)?;
+        }
+        self.raw
+            .try_begin_observed_work(charges)
+            .map(|raw| RetainedStoreObservedWork { raw })
+            .map_err(|cause| match cause {
+                RetainedProducerWorkStartError::Control(cause) => StoreRuntimeError::Control(cause),
+                RetainedProducerWorkStartError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
+                RetainedProducerWorkStartError::Outstanding => {
+                    StoreRuntimeError::ObservedWorkOutstanding
+                }
+            })
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, PP, U, const N: usize> RetainedStoreObservedWork<'_, O, PP, U, N>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Polls cancellation and deadline state while the work owner remains live.
+    pub fn poll(&mut self) -> Result<(), StoreRuntimeError> {
+        self.raw.poll().map_err(StoreRuntimeError::Control)
+    }
+
+    /// Reports bounded semantic progress while the work owner remains live.
+    pub fn report_progress(
+        &mut self,
+        phase: PP,
+        unit: U,
+        completed: u64,
+        total: Option<u64>,
+    ) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .report_progress(phase, unit, completed, total)
+            .map_err(StoreRuntimeError::Control)
+    }
+
+    /// Returns the unfinished admitted suffix for every plan entry.
+    pub fn remaining(&self) -> [u64; N] {
+        self.raw.remaining()
+    }
+
+    /// Records one physically completed prefix across the complete dimension group.
+    ///
+    /// Invalid amounts change no consumed counter. Any ledger completion error is sticky even when
+    /// the caller ignores the returned value.
+    pub fn complete(&mut self, amounts: [u64; N]) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .complete_batch(amounts)
+            .map_err(|cause| match cause {
+                RetainedWorkConsumeError::ExceedsAttempted => {
+                    StoreRuntimeError::ObservedWorkExceedsAdmitted
+                }
+                RetainedWorkConsumeError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
+            })
+    }
+
+    /// Resolves an exactly completed work envelope.
+    pub fn finish(self) -> Result<(), StoreRuntimeError> {
+        self.raw.finish().map_err(|cause| match cause {
+            RetainedProducerWorkFinishError::Incomplete => {
+                StoreRuntimeError::ObservedWorkIncomplete
+            }
+        })
+    }
+
+    /// Resolves a normal short read or EOF while preserving its exact completed prefix.
+    pub fn finish_partial(self) {
+        self.raw.finish_partial();
     }
 }
 
@@ -2089,6 +2328,22 @@ where
         let terminal_only = raw.is_terminal_only();
         RetainedStoreControlCheckpoint {
             raw: raw.control_checkpoint(),
+            domain,
+            terminal_only,
+        }
+    }
+
+    /// Borrows the operation-level producer host before retained publication begins.
+    #[cfg(feature = "_u4-activation")]
+    pub fn producer_host(&mut self) -> RetainedStoreProducerHost<'_, O, PP, U> {
+        let Self {
+            raw,
+            domain,
+            lineage: _,
+        } = self;
+        let terminal_only = raw.is_terminal_only();
+        RetainedStoreProducerHost {
+            raw: raw.producer_host(),
             domain,
             terminal_only,
         }
