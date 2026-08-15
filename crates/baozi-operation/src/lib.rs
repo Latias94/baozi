@@ -95,6 +95,21 @@ pub use concrete_store::{
 /// use baozi_operation::__canonical_activation::CanonicalValidationWork;
 /// ```
 ///
+/// Scoped terminal receipts are invariant and cannot be widened into another transaction scope:
+///
+/// ```compile_fail
+/// use baozi_operation::__canonical_activation::CanonicalScopedDisposition;
+///
+/// fn substitute<'short, 'long>(
+///     receipt: CanonicalScopedDisposition<'short>,
+/// ) -> CanonicalScopedDisposition<'long>
+/// where
+///     'long: 'short,
+/// {
+///     receipt
+/// }
+/// ```
+///
 /// The successful joint-commit binder accepts only destructor-free descriptors:
 ///
 /// ```compile_fail
@@ -258,18 +273,21 @@ pub mod __canonical_activation {
     pub use crate::concrete_store::activation::{
         CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationRequestSealer,
         CanonicalActivationRequirements, CanonicalBuildControl, CanonicalCandidateStoreSession,
-        CanonicalCentralValidationOutcome, CanonicalFailureTerminalWorkPlan,
-        CanonicalFreezeInterruption, CanonicalFreezeInterruptionClass, CanonicalFreezePermit,
-        CanonicalFreezePermitIssue, CanonicalJointCommit, CanonicalJointSeal,
-        CanonicalMaterialization, CanonicalPreflightDecision, CanonicalRecordBuildRow,
-        CanonicalTableShape, CanonicalValidationDecision, CanonicalValidationMember,
-        CanonicalValidationRecordRow, CanonicalValidationSession, FailureEvidenceDecision,
-        FailureEvidenceMember, FailureEvidenceOutcome, FailureEvidenceRecordRow,
-        FailureEvidenceValidationSession, NeverActivatedStoreSession, OutcomeEvidenceBuildControl,
-        OutcomeEvidenceDecision, OutcomeEvidenceValidationMember,
-        OutcomeEvidenceValidationRecordRow, RetainedStoreSessionOutcomeOwner,
-        RootedFailureValidation, SealedCanonicalActivationRequest, StoreActivationContainment,
-        StoreCanonicalRejection, StoreNeverActivatedCause,
+        CanonicalCentralValidationOutcome, CanonicalFailureRequirements,
+        CanonicalFailureTerminalWorkPlan, CanonicalFreezeInterruption,
+        CanonicalFreezeInterruptionClass, CanonicalFreezePermit, CanonicalFreezePermitIssue,
+        CanonicalJointCommit, CanonicalJointSeal, CanonicalLane, CanonicalMaterialization,
+        CanonicalPlanSeal, CanonicalPlanning, CanonicalPreflightDecision, CanonicalRecordBuildRow,
+        CanonicalReservation, CanonicalScopedDisposition, CanonicalSealedPlan,
+        CanonicalSemanticWorkSession, CanonicalSuccessRequirements, CanonicalTableShape,
+        CanonicalValidationDecision, CanonicalValidationMember, CanonicalValidationRecordRow,
+        CanonicalValidationSession, FailureEvidenceDecision, FailureEvidenceMember,
+        FailureEvidenceOutcome, FailureEvidenceRecordRow, FailureEvidenceValidationSession,
+        NeverActivatedStoreSession, OutcomeEvidenceBuildControl, OutcomeEvidenceDecision,
+        OutcomeEvidenceValidationMember, OutcomeEvidenceValidationRecordRow,
+        RetainedStoreSessionOutcomeOwner, RootedFailureValidation,
+        ScopedRetainedStoreSessionOutcomeOwner, SealedCanonicalActivationRequest,
+        StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
     };
 }
 pub use control::{

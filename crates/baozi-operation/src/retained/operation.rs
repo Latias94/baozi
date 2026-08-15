@@ -4,22 +4,23 @@ use super::publication_contract::{
 };
 use super::startup;
 use super::{
-    AccountPoisonReason, AssemblyContainmentProvenance, CanonicalLineageAuthority,
-    FailureTerminalWorkState, FallbackPublicationBaseline, PhysicalStorageAccount,
-    PreparationFailureClass, PreparationFailureCode, PreparedRetainedPublication,
-    PrimaryPublicationBatches, PublishedCanonicalAggregate, QualifiedRetainedBlockTablePlan,
-    RetainedAllocationError, RetainedAllocationPlan, RetainedBatchLimits, RetainedBuildFailureCode,
-    RetainedFailureTerminalWorkPlan, RetainedHandleSharePlan, RetainedMembershipDestination,
-    RetainedOperationStartError, RetainedOperationStartPlan, RetainedOutcomeMode,
-    RetainedPublicationAssembly, RetainedPublicationOpenError, RetainedPublicationPlan,
-    RetainedPublicationPrepareError, RetainedStorageDropOutcome, RetainedWriterError,
-    RetainedWriterPlan, StartupCrossPlaneAdmissionFailure, StartupCrossPlanePlan,
-    StartupPhysicalManifest, StartupPhysicalNoMutation, StartupRetainedPartGuard,
-    StartupTerminalEvidenceBuildError, TerminalEvidenceBackingPlan, TerminalEvidenceKey,
-    TerminalFallbackAttribution, TerminalFallbackGuard, TerminalLedgerEvidence,
-    TerminalPhysicalOwnershipManifest, drop_retained_table_with_account_anchor, map_batch_error,
-    try_create_retained_block_table, try_open_publication_account,
-    try_qualify_retained_block_table_plan, unreachable_final_owner_state,
+    AccountPoisonReason, AccountPoisoned, AssemblyContainmentProvenance, CanonicalLineageAuthority,
+    FailureTerminalWorkState, FallbackPublicationBaseline, FinalizationContainmentError,
+    PhysicalStorageAccount, PreparationFailureClass, PreparationFailureCode,
+    PreparedRetainedPublication, PrimaryPublicationBatches, PublishedCanonicalAggregate,
+    QualifiedRetainedBlockTablePlan, RetainedAllocationError, RetainedAllocationPlan,
+    RetainedBatchLimits, RetainedBuildFailureCode, RetainedFailureTerminalWorkPlan,
+    RetainedHandleSharePlan, RetainedMembershipDestination, RetainedOperationStartError,
+    RetainedOperationStartPlan, RetainedOutcomeMode, RetainedPublicationAssembly,
+    RetainedPublicationOpenError, RetainedPublicationPlan, RetainedPublicationPrepareError,
+    RetainedStorageDropOutcome, RetainedWriterError, RetainedWriterPlan,
+    StartupCrossPlaneAdmissionFailure, StartupCrossPlanePlan, StartupPhysicalManifest,
+    StartupPhysicalNoMutation, StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
+    TerminalEvidenceBackingPlan, TerminalEvidenceKey, TerminalFallbackAttribution,
+    TerminalFallbackGuard, TerminalLedgerEvidence, TerminalPhysicalOwnershipManifest,
+    drop_retained_table_with_account_anchor, map_batch_error, try_create_retained_block_table,
+    try_open_publication_account, try_qualify_retained_block_table_plan,
+    unreachable_final_owner_state,
 };
 #[cfg(test)]
 use super::{
@@ -72,6 +73,71 @@ where
     ordinary_work_permit_partially_resolved: bool,
     sticky_terminal_cause: Option<PreparationFailureCode>,
     canonical_lineage: CanonicalLineageAuthority,
+}
+
+/// Allocation-free operation ledger state used to prove scoped planning cleanup.
+///
+/// This deliberately exposes neither the ledger nor any phase/dimension key. The initial snapshot
+/// is the planning baseline; open-time snapshots derive the exact state that may remain owned by
+/// canonical and evidence publication storage.
+#[cfg(feature = "_u4-activation")]
+#[derive(Clone, Copy)]
+pub(crate) struct RetainedPlanningBaseline {
+    current_live_bytes: u64,
+    active_reservations: u64,
+}
+
+#[cfg(feature = "_u4-activation")]
+impl RetainedPlanningBaseline {
+    fn checked_add_publication_storage(
+        self,
+        publication_live_bytes: u64,
+        publication_reservations: u64,
+    ) -> Option<Self> {
+        Some(Self {
+            current_live_bytes: self
+                .current_live_bytes
+                .checked_add(publication_live_bytes)?,
+            active_reservations: self
+                .active_reservations
+                .checked_add(publication_reservations)?,
+        })
+    }
+}
+
+/// Poison-only account anchor retained while an activation owner changes representation.
+///
+/// The anchor cannot reserve, publish, or expose the account. Its sole purpose is to turn an
+/// owner-consuming unwind into typed containment while reusing the account's first poison evidence.
+#[cfg(feature = "_u4-activation")]
+pub(crate) struct RetainedPlanningContainmentAnchor {
+    account: PhysicalStorageAccount,
+}
+
+#[cfg(feature = "_u4-activation")]
+impl RetainedPlanningContainmentAnchor {
+    pub(crate) fn share(&self) -> Self {
+        Self {
+            account: PhysicalStorageAccount {
+                inner: self.account.inner.share(),
+            },
+        }
+    }
+
+    pub(crate) fn contain(&self) -> FinalizationContainmentError {
+        let snapshot = self.account.snapshot();
+        let reason = snapshot
+            .first_poison_evidence()
+            .map_or(AccountPoisonReason::OwnershipGraphUnverified, |evidence| {
+                evidence.reason()
+            });
+        let account = if snapshot.poisoned() {
+            AccountPoisoned::new(snapshot)
+        } else {
+            self.account.record_poison(reason)
+        };
+        FinalizationContainmentError::new(account, reason)
+    }
 }
 
 /// Start-qualified, finite, single-use authority for terminal failure evidence.
@@ -152,6 +218,80 @@ where
         if let Some(cause) = cause {
             self.record_terminal_cause(cause);
         }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn planning_baseline(&self) -> RetainedPlanningBaseline {
+        let state = self.coordinator.retained_ledger().planning_state();
+        RetainedPlanningBaseline {
+            current_live_bytes: state.current_live_bytes(),
+            active_reservations: state.active_reservations(),
+        }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn planning_containment_anchor(&self) -> RetainedPlanningContainmentAnchor {
+        RetainedPlanningContainmentAnchor {
+            account: PhysicalStorageAccount {
+                inner: self.baseline.account().inner.share(),
+            },
+        }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    const fn planning_has_outstanding_work_permit(&self) -> bool {
+        self.failure_work_permit_outstanding || self.ordinary_work_permit_outstanding
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn planning_matches_baseline(&self, baseline: RetainedPlanningBaseline) -> bool {
+        if self.planning_has_outstanding_work_permit() {
+            return false;
+        }
+        let state = self.coordinator.retained_ledger().planning_state();
+        state.current_live_bytes() == baseline.current_live_bytes
+            && state.active_reservations() == baseline.active_reservations
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+    RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    D: Copy + Ord + fmt::Debug + Send + Sync + 'static,
+    F: Send + Sync + 'static,
+    CanonicalBlock: Send + Sync + 'static,
+    EvidenceBlock: Send + Sync + 'static,
+{
+    /// Derives the exact ledger state allowed after materialization releases every scratch owner.
+    ///
+    /// Publication attributions are structurally owned by the two batches. Summing those batches
+    /// admits table roots and materialized members while keeping unrelated scoped reservations out
+    /// of the baseline.
+    pub(crate) fn publication_storage_baseline(
+        &self,
+        planning_baseline: RetainedPlanningBaseline,
+    ) -> Option<RetainedPlanningBaseline> {
+        let canonical = self.canonical_batch.as_ref()?;
+        let evidence = self.evidence_batch.as_ref()?;
+        let publication_live_bytes = canonical
+            .live_bytes()?
+            .checked_add(evidence.live_bytes()?)?;
+        let publication_reservations = canonical
+            .active_count()?
+            .checked_add(evidence.active_count()?)?;
+        planning_baseline
+            .checked_add_publication_storage(publication_live_bytes, publication_reservations)
+    }
+
+    pub(crate) fn planning_matches_baseline(&self, baseline: RetainedPlanningBaseline) -> bool {
+        self.operation
+            .as_ref()
+            .is_some_and(|operation| operation.planning_matches_baseline(baseline))
     }
 }
 
@@ -529,6 +669,62 @@ where
 
     pub(crate) const fn remaining_units(&self) -> u64 {
         self.remaining
+    }
+
+    pub(crate) fn reserve(
+        &mut self,
+        phase: P,
+        bytes: u64,
+    ) -> Result<LiveReservation<O, P, D>, LedgerCause<D>> {
+        let control = self
+            .control
+            .as_mut()
+            .expect("an incomplete ordinary work permit retains its control");
+        let result = control.ledger.reserve(phase, control.dimension, bytes);
+        if result.is_err() {
+            record_terminal_cause_with_precedence(
+                control.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+        }
+        result
+    }
+
+    pub(crate) fn resize(
+        &mut self,
+        reservation: &mut LiveReservation<O, P, D>,
+        bytes: u64,
+    ) -> Result<(), LedgerCause<D>> {
+        let control = self
+            .control
+            .as_mut()
+            .expect("an incomplete ordinary work permit retains its control");
+        let result = control.ledger.resize_reservation(reservation, bytes);
+        if result.is_err() {
+            record_terminal_cause_with_precedence(
+                control.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+        }
+        result
+    }
+
+    pub(crate) fn validate_live_owner(
+        &mut self,
+        reservation: &LiveReservation<O, P, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        let control = self
+            .control
+            .as_mut()
+            .expect("an incomplete ordinary work permit retains its control");
+        let result = control.ledger.validate_live_reservation(reservation);
+        if result.is_err() {
+            record_terminal_cause_with_precedence(
+                control.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+        }
+        result
     }
 
     pub(crate) fn complete_units(

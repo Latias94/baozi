@@ -2,8 +2,10 @@ use std::cell::Cell;
 
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationRequestSealer,
-    CanonicalActivationRequirements, CanonicalCentralValidationOutcome, CanonicalFreezePermit,
-    CanonicalJointCommit, CanonicalJointSeal, CanonicalMaterialization, CanonicalPreflightDecision,
+    CanonicalActivationRequirements, CanonicalCentralValidationOutcome,
+    CanonicalFailureRequirements, CanonicalFreezePermit, CanonicalJointCommit, CanonicalJointSeal,
+    CanonicalMaterialization, CanonicalPlanSeal, CanonicalPreflightDecision, CanonicalReservation,
+    CanonicalScopedDisposition, CanonicalSealedPlan, CanonicalSuccessRequirements,
     CanonicalTableShape, CanonicalValidationDecision, CanonicalValidationMember,
     CanonicalValidationSession, FailureEvidenceDecision, FailureEvidenceMember,
     FailureEvidenceOutcome, OutcomeEvidenceDecision, OutcomeEvidenceValidationMember,
@@ -21,6 +23,12 @@ use super::*;
 struct TestActivation {
     policy: CanonicalActivationPolicy,
     requirements: CanonicalActivationRequirements,
+}
+
+struct TestScopedActivation {
+    policy: CanonicalActivationPolicy,
+    failure: CanonicalFailureRequirements,
+    success: CanonicalSuccessRequirements,
 }
 
 macro_rules! plan_activation {
@@ -44,6 +52,8 @@ mod failure_evidence;
 mod joint_commit;
 #[path = "activation/preflight_materialization.rs"]
 mod preflight_materialization;
+#[path = "activation/scoped_plan.rs"]
+mod scoped_plan;
 
 #[test]
 fn failure_evidence_member_remains_linear() {
@@ -259,6 +269,53 @@ fn activation_shape_with_dimensions(
     }
 }
 
+fn scoped_activation_shape(
+    keys: TestKeys,
+    canonical_blocks: usize,
+    evidence_blocks: usize,
+) -> TestScopedActivation {
+    scoped_activation_shape_with_dimensions(
+        keys,
+        canonical_blocks,
+        evidence_blocks,
+        keys.dimension,
+        keys.dimension,
+        keys.dimension,
+        keys.dimension,
+    )
+}
+
+fn scoped_activation_shape_with_dimensions(
+    keys: TestKeys,
+    canonical_blocks: usize,
+    evidence_blocks: usize,
+    materialization_work_dimension: StoreDimensionKey,
+    validation_work_dimension: StoreDimensionKey,
+    canonical_destination_dimension: StoreDimensionKey,
+    outcome_evidence_destination_dimension: StoreDimensionKey,
+) -> TestScopedActivation {
+    let policy = CanonicalActivationPolicy::new(
+        writer_plan(keys, canonical_blocks + 1, 2),
+        writer_plan(keys, evidence_blocks + 1, 2),
+        materialization_work_dimension,
+        validation_work_dimension,
+        canonical_destination_dimension,
+        outcome_evidence_destination_dimension,
+    );
+    TestScopedActivation {
+        policy,
+        failure: CanonicalFailureRequirements::new(
+            CanonicalTableShape::new(evidence_blocks, evidence_blocks).unwrap(),
+        ),
+        success: CanonicalSuccessRequirements::new(
+            CanonicalTableShape::new(canonical_blocks, canonical_blocks).unwrap(),
+            canonical_blocks,
+            NonZeroU64::MIN,
+        )
+        .unwrap(),
+    }
+}
+
 #[test]
 fn activation_requirements_reject_impossible_exact_shapes() {
     let factory = factory(1);
@@ -302,25 +359,64 @@ fn structural_work_requirement_counts_operation_owned_share_actions() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
-    let work = activation_shape(keys, 4, 1)
+    let legacy = activation_shape(keys, 4, 1).requirements;
+    let scoped = scoped_activation_shape(keys, 4, 1);
+    let expanded_canonical = scoped_activation_shape(keys, 5, 1);
+    let expanded_evidence = scoped_activation_shape(keys, 4, 2);
+    let work = legacy.structural_work_requirement();
+    let legacy_expanded_canonical_work = activation_shape_with_capacity(keys, 5, 5, keys, 1)
         .requirements
         .structural_work_requirement();
-    let expanded_canonical_work = activation_shape_with_capacity(keys, 5, 4, keys, 1)
+    let legacy_expanded_evidence_work = activation_shape(keys, 4, 2)
         .requirements
         .structural_work_requirement();
-    let expanded_evidence_work = activation_shape(keys, 4, 2)
-        .requirements
-        .structural_work_requirement();
-    let pre_activation_work = activation_shape(keys, 4, 1)
-        .requirements
-        .pre_activation_structural_work_requirement();
+    let pre_activation_work = legacy.pre_activation_structural_work_requirement();
+    let scoped_pre_activation_work = scoped
+        .failure
+        .pre_activation_structural_work_requirement()
+        .unwrap();
+    let scoped_work = scoped
+        .success
+        .structural_work_requirement(&scoped.failure)
+        .unwrap();
+    let expanded_canonical_work = expanded_canonical
+        .success
+        .structural_work_requirement(&expanded_canonical.failure)
+        .unwrap();
+    let expanded_evidence_work = expanded_evidence
+        .success
+        .structural_work_requirement(&expanded_evidence.failure)
+        .unwrap();
 
     assert_eq!(work, 24);
+    assert_eq!(scoped_work, work);
     assert_eq!(expanded_canonical_work, 26);
+    assert_eq!(expanded_canonical_work, legacy_expanded_canonical_work);
     assert_eq!(expanded_evidence_work, 26);
+    assert_eq!(expanded_evidence_work, legacy_expanded_evidence_work);
     assert_eq!(pre_activation_work, 8);
+    assert_eq!(scoped_pre_activation_work, pre_activation_work);
     drop(operation);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn structural_work_requirement_rejects_extreme_shape_overflow() {
+    let canonical = CanonicalTableShape::new(usize::MAX, usize::MAX).unwrap();
+    let evidence = CanonicalTableShape::new(1, 1).unwrap();
+    let failure = CanonicalFailureRequirements::new(evidence);
+    let success =
+        CanonicalSuccessRequirements::new(canonical, usize::MAX, NonZeroU64::MIN).unwrap();
+
+    assert_eq!(failure.pre_activation_structural_work_requirement(), Ok(8));
+    assert_eq!(
+        success.structural_work_requirement(&failure),
+        Err(StorePlanError::SizeOverflow)
+    );
+    assert!(matches!(
+        CanonicalActivationRequirements::new(canonical, evidence, usize::MAX, 0, NonZeroU64::MIN,),
+        Err(StorePlanError::SizeOverflow)
+    ));
 }
 
 #[derive(Debug, PartialEq, Eq)]

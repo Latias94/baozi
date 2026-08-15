@@ -977,6 +977,25 @@ pub(crate) struct Ledger<O, P, D> {
     operation_owner: PhantomData<fn() -> O>,
 }
 
+/// Allocation-free scalar observation used only to prove scoped planning cleanup.
+#[cfg(feature = "_u4-activation")]
+#[derive(Clone, Copy)]
+pub(crate) struct LedgerPlanningState {
+    current_live_bytes: u64,
+    active_reservations: u64,
+}
+
+#[cfg(feature = "_u4-activation")]
+impl LedgerPlanningState {
+    pub(crate) const fn current_live_bytes(self) -> u64 {
+        self.current_live_bytes
+    }
+
+    pub(crate) const fn active_reservations(self) -> u64 {
+        self.active_reservations
+    }
+}
+
 /// Linear ownership of consumed-capacity reserved for one admitted work envelope.
 ///
 /// Attempted evidence is recorded at admission. Each completed prefix moves the matching amount
@@ -2431,6 +2450,16 @@ where
     /// Captures immutable owner-neutral evidence without finalizing the ledger.
     pub fn try_snapshot(&self) -> Result<LedgerSnapshot<P, D>, LedgerEvidenceError> {
         try_snapshot(&mut lock(&self.state))
+    }
+
+    /// Observes only the transaction-temporary live state under one ledger lock.
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn planning_state(&self) -> LedgerPlanningState {
+        let state = lock(&self.state);
+        LedgerPlanningState {
+            current_live_bytes: state.current_live_bytes,
+            active_reservations: state.active_reservations,
+        }
     }
 
     pub(crate) fn try_grow_progress_evidence<T>(

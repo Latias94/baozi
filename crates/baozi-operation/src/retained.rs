@@ -160,8 +160,9 @@ use triomphe::{Arc, UniqueArc};
 #[cfg(feature = "_u4-activation")]
 pub(crate) use operation::{
     BorrowedRetainedWorkPermit, RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError,
-    RetainedFailureWorkPermit, RetainedFailureWorkStartError, RetainedWorkConsumeError,
-    RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
+    RetainedFailureWorkPermit, RetainedFailureWorkStartError, RetainedPlanningBaseline,
+    RetainedPlanningContainmentAnchor, RetainedWorkConsumeError, RetainedWorkFinishError,
+    RetainedWorkPermit, RetainedWorkStartError,
 };
 pub(crate) use operation::{
     RetainedControlCheckpoint, RetainedFailureWorkControl, RetainedOperation, RetainedWorkControl,

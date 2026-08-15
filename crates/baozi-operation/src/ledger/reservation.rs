@@ -656,13 +656,13 @@ where
             .try_fold(0_u64, |total, token| total.checked_add(token.core.bytes))
     }
 
-    pub(super) fn active_count(&self) -> Option<u64> {
+    pub(crate) fn active_count(&self) -> Option<u64> {
         u64::try_from(self.attributions.len())
             .ok()?
             .checked_add(u64::from(self.capacity_cover.is_some()))
     }
 
-    pub(super) fn live_bytes(&self) -> Option<u64> {
+    pub(crate) fn live_bytes(&self) -> Option<u64> {
         self.attribution_bytes()?
             .checked_add(self.account_capacity_bytes())
     }
