@@ -19,12 +19,11 @@ use crate::canonical_scene::store::schema::profile::{
 };
 use crate::extension::{ExtensionArrayRef, ExtensionValueRef};
 use crate::provenance::{MAX_OPERATION_EVIDENCE_SUMMARIES, OperationKind, SourceObjectLocator};
-use crate::{
-    SCENE_VALIDATION_POLL_INTERVAL, SceneReservationKind, SceneValidationControl,
-    SceneValidationLimits, SceneValidationWork,
-};
+use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
-use super::super::control::{OperationAuthoringControl, OperationAuthoringControlError};
+use super::super::control::{
+    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
+};
 use super::super::input::ProfileAuthoringBatch;
 use super::super::input::lineage::{
     LineageAuthoringBatch, ObservedResourceAuthoring, ProfileOwner, ProvenanceLocalId,
@@ -876,11 +875,11 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
 }
 
 type ProfileValidationResult<T, C> =
-    Result<T, ProfileAuthoringFailure<<C as SceneValidationControl>::Error>>;
+    Result<T, ProfileAuthoringFailure<<C as CanonicalAuthoringControl>::Error>>;
 
 struct ProfileValidationContext<'control, C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     limits: SceneValidationLimits,
     control: &'control mut C,
@@ -890,7 +889,7 @@ where
 
 impl<'control, C> ProfileValidationContext<'control, C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     const fn new(limits: SceneValidationLimits, control: &'control mut C) -> Self {
         Self {
@@ -909,40 +908,41 @@ where
         Ok(())
     }
 
-    fn work(
+    fn run_unit<R>(
         &mut self,
         category: SceneValidationWork,
-        amount: u64,
-    ) -> ProfileValidationResult<(), C> {
-        if amount == 0 {
-            return Ok(());
-        }
-        let final_work = self.work.checked_add(amount).ok_or(
-            ProfileAuthoringSemanticError::AccountingOverflow {
-                dimension: "profile validation work",
-            },
-        )?;
+        action: impl FnOnce() -> R,
+    ) -> ProfileValidationResult<R, C> {
+        let final_work =
+            self.work
+                .checked_add(1)
+                .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
+                    dimension: "profile validation work",
+                })?;
         enforce_limit::<C::Error>(
             ProfileAuthoringLimit::Work,
             final_work,
             self.limits.max_work(),
         )?;
-        self.control
-            .charge_work(category, amount)
+        let result = self
+            .control
+            .run_unit(category, action)
             .map_err(ProfileAuthoringFailure::Control)?;
         self.work = final_work;
-
-        let mut remaining = amount;
-        while remaining != 0 {
-            let until_poll = SCENE_VALIDATION_POLL_INTERVAL - self.work_since_poll;
-            let consumed = remaining.min(until_poll);
-            self.work_since_poll += consumed;
-            remaining -= consumed;
-            if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
-                self.poll_now()?;
-            }
+        self.work_since_poll += 1;
+        if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
+            self.poll_now()?;
         }
-        Ok(())
+        Ok(result)
+    }
+
+    fn run_semantic_unit<T>(
+        &mut self,
+        category: SceneValidationWork,
+        action: impl FnOnce() -> Result<T, ProfileAuthoringSemanticError>,
+    ) -> ProfileValidationResult<T, C> {
+        self.run_unit(category, action)?
+            .map_err(ProfileAuthoringFailure::Semantic)
     }
 
     fn reserve_scratch(&mut self, bytes: u64) -> ProfileValidationResult<C::Reservation, C> {
@@ -953,10 +953,10 @@ where
         )?;
         let reservation = self
             .control
-            .reserve(SceneReservationKind::ValidationScratch, bytes)
+            .reserve_scratch(bytes)
             .map_err(ProfileAuthoringFailure::Control)?;
         self.control
-            .validate_reservation(&reservation, SceneReservationKind::ValidationScratch)
+            .validate_scratch(&reservation)
             .map_err(ProfileAuthoringFailure::Control)?;
         Ok(reservation)
     }
@@ -972,7 +972,7 @@ where
             self.limits.max_scratch_bytes(),
         )?;
         self.control
-            .resize_reservation(reservation, SceneReservationKind::ValidationScratch, bytes)
+            .resize_scratch(reservation, bytes)
             .map_err(ProfileAuthoringFailure::Control)
     }
 
@@ -1098,8 +1098,49 @@ struct ProfileMetrics {
 }
 
 impl ProfileMetrics {
-    fn add_entity(&mut self, amount: u64) -> Result<(), ProfileAuthoringSemanticError> {
-        checked_add(&mut self.entities, amount, "profile entities")
+    fn add_entity(&mut self, maximum: u64) -> Result<(), ProfileAuthoringSemanticError> {
+        let entities = self.entities.checked_add(1).ok_or(
+            ProfileAuthoringSemanticError::AccountingOverflow {
+                dimension: "profile entities",
+            },
+        )?;
+        require_limit(ProfileAuthoringLimit::Entities, entities, maximum)?;
+        self.entities = entities;
+        Ok(())
+    }
+
+    fn add_edge(&mut self, maximum: u64) -> Result<(), ProfileAuthoringSemanticError> {
+        let edges =
+            self.edges
+                .checked_add(1)
+                .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
+                    dimension: "profile edges",
+                })?;
+        require_limit(ProfileAuthoringLimit::Edges, edges, maximum)?;
+        self.edges = edges;
+        Ok(())
+    }
+
+    fn add_reference(&mut self, maximum: u64) -> Result<(), ProfileAuthoringSemanticError> {
+        let references = self.references.checked_add(1).ok_or(
+            ProfileAuthoringSemanticError::AccountingOverflow {
+                dimension: "profile references",
+            },
+        )?;
+        require_limit(ProfileAuthoringLimit::References, references, maximum)?;
+        self.references = references;
+        Ok(())
+    }
+
+    fn add_payload_cell(&mut self, maximum: u64) -> Result<(), ProfileAuthoringSemanticError> {
+        let payload_cells = self.payload_cells.checked_add(1).ok_or(
+            ProfileAuthoringSemanticError::AccountingOverflow {
+                dimension: "profile payload cells",
+            },
+        )?;
+        require_limit(ProfileAuthoringLimit::PayloadCells, payload_cells, maximum)?;
+        self.payload_cells = payload_cells;
+        Ok(())
     }
 
     fn add_relation<C>(
@@ -1107,12 +1148,17 @@ impl ProfileMetrics {
         context: &mut ProfileValidationContext<'_, C>,
     ) -> ProfileValidationResult<(), C>
     where
-        C: SceneValidationControl,
+        C: CanonicalAuthoringControl,
     {
-        checked_add(&mut self.edges, 1, "profile edges")?;
-        checked_add(&mut self.references, 1, "profile references")?;
-        context.work(SceneValidationWork::GraphEdge, 1)?;
-        context.work(SceneValidationWork::Reference, 1)
+        let maximum_edges = context.limits.max_edges();
+        context.run_semantic_unit(SceneValidationWork::GraphEdge, || {
+            self.add_edge(maximum_edges)
+        })?;
+        let maximum_references = context.limits.max_references();
+        context.run_semantic_unit(SceneValidationWork::Reference, || {
+            self.add_reference(maximum_references)
+        })?;
+        Ok(())
     }
 
     fn add_payload<C>(
@@ -1121,14 +1167,15 @@ impl ProfileMetrics {
         context: &mut ProfileValidationContext<'_, C>,
     ) -> ProfileValidationResult<(), C>
     where
-        C: SceneValidationControl,
+        C: CanonicalAuthoringControl,
     {
-        checked_add(&mut self.payload_cells, cells, "profile payload cells")?;
-        context.work(SceneValidationWork::PayloadCell, cells)
-    }
-
-    fn add_accounted_payload(&mut self, cells: u64) -> Result<(), ProfileAuthoringSemanticError> {
-        checked_add(&mut self.payload_cells, cells, "profile payload cells")
+        let maximum = context.limits.max_payload_cells();
+        for _ in 0..cells {
+            context.run_semantic_unit(SceneValidationWork::PayloadCell, || {
+                self.add_payload_cell(maximum)
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -1346,7 +1393,7 @@ pub(in crate::canonical_scene::store) fn validate_profile_batch_with_control<'in
     control: &mut C,
 ) -> Result<ValidatedProfileBatch<'input, C::Reservation>, ProfileAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     validate_profile_batch_inner(profile, owners, limits, control)
 }
@@ -1358,7 +1405,7 @@ fn validate_profile_batch_inner<'input, C>(
     control: &mut C,
 ) -> Result<ValidatedProfileBatch<'input, C::Reservation>, ProfileAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let lineage = profile.lineage();
     let metadata = profile.metadata();
@@ -1501,36 +1548,6 @@ where
     metrics.canonical_bytes = retention_shape.canonical_bytes();
 
     enforce_limit::<C::Error>(
-        ProfileAuthoringLimit::Depth,
-        u64::from(metrics.maximum_depth),
-        limits.max_depth(),
-    )?;
-    enforce_limit::<C::Error>(
-        ProfileAuthoringLimit::Entities,
-        metrics.entities,
-        limits.max_entities(),
-    )?;
-    enforce_limit::<C::Error>(
-        ProfileAuthoringLimit::Edges,
-        metrics.edges,
-        limits.max_edges(),
-    )?;
-    enforce_limit::<C::Error>(
-        ProfileAuthoringLimit::References,
-        metrics.references,
-        limits.max_references(),
-    )?;
-    enforce_limit::<C::Error>(
-        ProfileAuthoringLimit::PayloadCells,
-        metrics.payload_cells,
-        limits.max_payload_cells(),
-    )?;
-    enforce_limit::<C::Error>(
-        ProfileAuthoringLimit::MetadataBytes,
-        metrics.metadata_bytes,
-        limits.max_metadata_bytes(),
-    )?;
-    enforce_limit::<C::Error>(
         ProfileAuthoringLimit::CanonicalBytes,
         metrics.canonical_bytes,
         limits.max_canonical_bytes(),
@@ -1585,31 +1602,34 @@ fn validate_resources<C>(
     context: &mut ProfileValidationContext<'_, C>,
 ) -> ProfileValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
+    let maximum_entities = context.limits.max_entities();
     for resource in lineage.resources().iter().copied() {
-        context.work(SceneValidationWork::Entity, 1)?;
-        metrics.add_entity(1)?;
-        let text_bytes = usize_to_u64(
-            resource.identity().as_str().len(),
-            "resource identity bytes",
-        )?;
-        let stability_text_bytes = stability_text_bytes(resource.stability())?;
-        checked_add(
-            &mut metrics.lineage_text_bytes,
-            text_bytes.checked_add(stability_text_bytes).ok_or(
+        let cells = context.run_semantic_unit(SceneValidationWork::Entity, || {
+            let text_bytes = usize_to_u64(
+                resource.identity().as_str().len(),
+                "resource identity bytes",
+            )?;
+            let stability_text_bytes = stability_text_bytes(resource.stability())?;
+            checked_add(
+                &mut metrics.lineage_text_bytes,
+                text_bytes.checked_add(stability_text_bytes).ok_or(
+                    ProfileAuthoringSemanticError::AccountingOverflow {
+                        dimension: "resource lineage text bytes",
+                    },
+                )?,
+                "profile lineage text bytes",
+            )?;
+            let (stability_cells, _stability_bytes) = stability_measure(resource.stability())?;
+            let cells = text_bytes.checked_add(stability_cells).ok_or(
                 ProfileAuthoringSemanticError::AccountingOverflow {
-                    dimension: "resource lineage text bytes",
+                    dimension: "resource identity semantic cells",
                 },
-            )?,
-            "profile lineage text bytes",
-        )?;
-        let (stability_cells, _stability_bytes) = stability_measure(resource.stability())?;
-        let cells = text_bytes.checked_add(stability_cells).ok_or(
-            ProfileAuthoringSemanticError::AccountingOverflow {
-                dimension: "resource identity semantic cells",
-            },
-        )?;
+            )?;
+            metrics.add_entity(maximum_entities)?;
+            Ok(cells)
+        })?;
         metrics.add_payload(cells, context)?;
     }
     Ok(())
@@ -1622,22 +1642,31 @@ fn validate_source_identities<C>(
     context: &mut ProfileValidationContext<'_, C>,
 ) -> ProfileValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
+    let maximum_entities = context.limits.max_entities();
+    let maximum_edges = context.limits.max_edges();
+    let maximum_references = context.limits.max_references();
     for (source_index, source) in lineage.source_identities().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
-        metrics.add_entity(1)?;
-        if source.resource().index() >= resource_count {
-            return Err(ProfileAuthoringSemanticError::ResourceOutOfRange {
-                source_index,
-                resource: source.resource().index(),
-                resource_count,
+        let cells = context.run_semantic_unit(SceneValidationWork::Entity, || {
+            let (cells, _bytes) = source_identity_measure(source)?;
+            account_source_retention(source, metrics)?;
+            metrics.add_entity(maximum_entities)?;
+            Ok(cells)
+        })?;
+        context.run_semantic_unit(SceneValidationWork::GraphEdge, || {
+            metrics.add_edge(maximum_edges)
+        })?;
+        context.run_semantic_unit(SceneValidationWork::Reference, || {
+            if source.resource().index() >= resource_count {
+                return Err(ProfileAuthoringSemanticError::ResourceOutOfRange {
+                    source_index,
+                    resource: source.resource().index(),
+                    resource_count,
+                });
             }
-            .into());
-        }
-        metrics.add_relation(context)?;
-        let (cells, _bytes) = source_identity_measure(source)?;
-        account_source_retention(source, metrics)?;
+            metrics.add_reference(maximum_references)
+        })?;
         metrics.add_payload(cells, context)?;
     }
     Ok(())
@@ -1651,36 +1680,58 @@ fn validate_provenance_nodes<C>(
     context: &mut ProfileValidationContext<'_, C>,
 ) -> ProfileValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
+    let maximum_entities = context.limits.max_entities();
+    let maximum_edges = context.limits.max_edges();
+    let maximum_references = context.limits.max_references();
+    let maximum_depth = context.limits.max_depth();
     for (node_index, node) in lineage.provenance_nodes().iter().copied().enumerate() {
         let node_id = u32::try_from(node_index).map_err(|_| {
             ProfileAuthoringSemanticError::CountDomainTooLarge {
                 collection: "provenance nodes",
             }
         })?;
-        context.work(SceneValidationWork::GraphNode, 1)?;
-        metrics.add_entity(1)?;
         let depth = match node {
             ProvenanceNodeAuthoring::Source(source) => {
-                if source.index() >= source_count {
-                    return Err(ProfileAuthoringSemanticError::SourceIdentityOutOfRange {
-                        node: node_id,
-                        source_index: source.index(),
-                        source_count,
+                context.run_semantic_unit(SceneValidationWork::GraphNode, || {
+                    require_limit(ProfileAuthoringLimit::Depth, 1, maximum_depth)?;
+                    metrics.add_entity(maximum_entities)
+                })?;
+                context.run_semantic_unit(SceneValidationWork::GraphEdge, || {
+                    metrics.add_edge(maximum_edges)
+                })?;
+                context.run_semantic_unit(SceneValidationWork::Reference, || {
+                    if source.index() >= source_count {
+                        return Err(ProfileAuthoringSemanticError::SourceIdentityOutOfRange {
+                            node: node_id,
+                            source_index: source.index(),
+                            source_count,
+                        });
                     }
-                    .into());
-                }
-                metrics.add_relation(context)?;
+                    metrics.add_reference(maximum_references)
+                })?;
                 metrics.add_payload(1, context)?;
                 1
             }
             ProvenanceNodeAuthoring::Operation(operation) => {
-                metrics.operation_count = metrics.operation_count.checked_add(1).ok_or(
-                    ProfileAuthoringSemanticError::AccountingOverflow {
-                        dimension: "provenance operation count",
-                    },
-                )?;
+                context.run_semantic_unit(SceneValidationWork::GraphNode, || {
+                    if operation.evidence().len() > MAX_OPERATION_EVIDENCE_SUMMARIES {
+                        return Err(ProfileAuthoringSemanticError::EvidenceLimitExceeded {
+                            node: node_id,
+                            actual: operation.evidence().len(),
+                            maximum: MAX_OPERATION_EVIDENCE_SUMMARIES,
+                        });
+                    }
+                    require_limit(ProfileAuthoringLimit::Depth, 1, maximum_depth)?;
+                    metrics.operation_count = metrics.operation_count.checked_add(1).ok_or(
+                        ProfileAuthoringSemanticError::AccountingOverflow {
+                            dimension: "provenance operation count",
+                        },
+                    )?;
+                    metrics.add_entity(maximum_entities)?;
+                    Ok(())
+                })?;
                 let depth = validate_operation_node(node_id, operation, depths, metrics, context)?;
                 let (cells, _bytes) = operation_measure(operation)?;
                 account_operation_retention(operation, metrics)?;
@@ -1702,66 +1753,84 @@ fn validate_operation_node<C>(
     context: &mut ProfileValidationContext<'_, C>,
 ) -> ProfileValidationResult<u32, C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
-    if operation.evidence().len() > MAX_OPERATION_EVIDENCE_SUMMARIES {
-        return Err(ProfileAuthoringSemanticError::EvidenceLimitExceeded {
-            node,
-            actual: operation.evidence().len(),
-            maximum: MAX_OPERATION_EVIDENCE_SUMMARIES,
-        }
-        .into());
-    }
     for (evidence, pair) in operation.evidence().windows(2).enumerate() {
-        if pair[0].code() >= pair[1].code() {
-            return Err(ProfileAuthoringSemanticError::EvidenceOrder {
-                node,
-                evidence: evidence + 1,
+        context.run_semantic_unit(SceneValidationWork::Traversal, || {
+            if pair[0].code() >= pair[1].code() {
+                return Err(ProfileAuthoringSemanticError::EvidenceOrder {
+                    node,
+                    evidence: evidence + 1,
+                });
             }
-            .into());
-        }
+            Ok(())
+        })?;
     }
 
     let mut maximum_parent_depth = 0_u32;
     let mut previous = None;
+    let maximum_edges = context.limits.max_edges();
+    let maximum_references = context.limits.max_references();
+    let maximum_depth = context.limits.max_depth();
     for parent in operation.parents().iter().copied() {
-        if parent.index() >= node {
-            return Err(ProfileAuthoringSemanticError::ParentNotBeforeChild {
-                node,
-                parent: parent.index(),
-            }
-            .into());
-        }
-        if let Some(previous) = previous {
-            if parent.index() == previous {
-                return Err(ProfileAuthoringSemanticError::DuplicateParent {
-                    node,
-                    parent: parent.index(),
+        let parent_edges = metrics.parent_edges;
+        let updated_parent_edges =
+            context.run_semantic_unit(SceneValidationWork::GraphEdge, || {
+                if let Some(previous) = previous {
+                    if parent.index() == previous {
+                        return Err(ProfileAuthoringSemanticError::DuplicateParent {
+                            node,
+                            parent: parent.index(),
+                        });
+                    }
+                    if parent.index() < previous {
+                        return Err(ProfileAuthoringSemanticError::ParentOrder {
+                            node,
+                            parent: parent.index(),
+                        });
+                    }
                 }
-                .into());
-            }
-            if parent.index() < previous {
-                return Err(ProfileAuthoringSemanticError::ParentOrder {
-                    node,
-                    parent: parent.index(),
-                }
-                .into());
-            }
-        }
+                let parent_edges = parent_edges.checked_add(1).ok_or(
+                    ProfileAuthoringSemanticError::AccountingOverflow {
+                        dimension: "provenance parent edges",
+                    },
+                )?;
+                metrics.add_edge(maximum_edges)?;
+                Ok(parent_edges)
+            })?;
+        metrics.parent_edges = updated_parent_edges;
         previous = Some(parent.index());
-        let parent_depth = *depths
-            .get(usize::try_from(parent.index()).map_err(|_| {
+        let parent_depth = context.run_semantic_unit(SceneValidationWork::Reference, || {
+            if parent.index() >= node {
+                return Err(ProfileAuthoringSemanticError::ParentNotBeforeChild {
+                    node,
+                    parent: parent.index(),
+                });
+            }
+            let parent_index = usize::try_from(parent.index()).map_err(|_| {
                 ProfileAuthoringSemanticError::AccountingOverflow {
                     dimension: "provenance parent index",
                 }
-            })?)
-            .ok_or(ProfileAuthoringSemanticError::ParentNotBeforeChild {
-                node,
-                parent: parent.index(),
             })?;
+            let parent_depth = *depths.get(parent_index).ok_or(
+                ProfileAuthoringSemanticError::AccountingOverflow {
+                    dimension: "compiled provenance parent depth",
+                },
+            )?;
+            let depth = parent_depth.checked_add(1).ok_or(
+                ProfileAuthoringSemanticError::AccountingOverflow {
+                    dimension: "provenance depth",
+                },
+            )?;
+            require_limit(
+                ProfileAuthoringLimit::Depth,
+                u64::from(depth),
+                maximum_depth,
+            )?;
+            metrics.add_reference(maximum_references)?;
+            Ok(parent_depth)
+        })?;
         maximum_parent_depth = maximum_parent_depth.max(parent_depth);
-        checked_add(&mut metrics.parent_edges, 1, "provenance parent edges")?;
-        metrics.add_relation(context)?;
     }
     let depth = maximum_parent_depth.checked_add(1).ok_or(
         ProfileAuthoringSemanticError::AccountingOverflow {
@@ -1777,7 +1846,7 @@ fn initialize_owner_plans<C>(
     context: &mut ProfileValidationContext<'_, C>,
 ) -> ProfileValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let owner_count = usize::try_from(owners.owner_count()).map_err(|_| {
         ProfileAuthoringSemanticError::AccountingOverflow {
@@ -1791,17 +1860,18 @@ where
         .into());
     }
     for ordinal in 0..owners.owner_count() {
-        context.work(SceneValidationWork::Traversal, 1)?;
         let owner =
             owners
                 .owner_at(ordinal)
                 .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
                     dimension: "compiled profile owner ordinal",
                 })?;
-        plans.push(ValidatedOwnerProvenancePlan {
-            owner,
-            input_index: usize::MAX,
-        });
+        context.run_unit(SceneValidationWork::Traversal, || {
+            plans.push(ValidatedOwnerProvenancePlan {
+                owner,
+                input_index: usize::MAX,
+            });
+        })?;
     }
     if u64::try_from(plans.len()).map_err(|_| {
         ProfileAuthoringSemanticError::AccountingOverflow {
@@ -1826,60 +1896,70 @@ fn validate_owner_provenance<C>(
     context: &mut ProfileValidationContext<'_, C>,
 ) -> ProfileValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
+    let maximum_edges = context.limits.max_edges();
+    let maximum_references = context.limits.max_references();
     for (input_index, authored) in lineage.owner_provenance().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let (owner, ordinal) = owners.normalize(authored.owner())?;
-        let plan =
-            plans
-                .get_mut(ordinal)
-                .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
+        let owner = context.run_semantic_unit(SceneValidationWork::Traversal, || {
+            let (owner, ordinal) = owners.normalize(authored.owner())?;
+            let plan = plans.get_mut(ordinal).ok_or(
+                ProfileAuthoringSemanticError::AccountingOverflow {
                     dimension: "compiled owner ordinal",
-                })?;
-        if plan.input_index != usize::MAX {
-            return Err(ProfileAuthoringSemanticError::DuplicateOwnerProvenance { owner }.into());
-        }
-        if authored.provenance().is_empty() {
-            return Err(ProfileAuthoringSemanticError::EmptyOwnerProvenance { owner }.into());
-        }
-        let attachment_count =
-            collection_count(authored.provenance().len(), "owner provenance attachments")?;
+                },
+            )?;
+            if plan.input_index != usize::MAX {
+                return Err(ProfileAuthoringSemanticError::DuplicateOwnerProvenance { owner });
+            }
+            if authored.provenance().is_empty() {
+                return Err(ProfileAuthoringSemanticError::EmptyOwnerProvenance { owner });
+            }
+            *plan = ValidatedOwnerProvenancePlan { owner, input_index };
+            Ok(owner)
+        })?;
         let mut previous = None;
         for provenance in authored.provenance().iter().copied() {
-            require_provenance(provenance, provenance_count, "owner provenance attachment")?;
-            if let Some(previous) = previous
-                && provenance.index() <= previous
-            {
-                return Err(ProfileAuthoringSemanticError::OwnerProvenanceOrder {
-                    owner,
-                    previous,
-                    current: provenance.index(),
-                }
-                .into());
-            }
+            let owner_attachments = metrics.owner_attachments;
+            let updated_owner_attachments =
+                context.run_semantic_unit(SceneValidationWork::GraphEdge, || {
+                    if let Some(previous) = previous
+                        && provenance.index() <= previous
+                    {
+                        return Err(ProfileAuthoringSemanticError::OwnerProvenanceOrder {
+                            owner,
+                            previous,
+                            current: provenance.index(),
+                        });
+                    }
+                    let owner_attachments = owner_attachments.checked_add(1).ok_or(
+                        ProfileAuthoringSemanticError::AccountingOverflow {
+                            dimension: "owner provenance attachments",
+                        },
+                    )?;
+                    metrics.add_edge(maximum_edges)?;
+                    Ok(owner_attachments)
+                })?;
+            metrics.owner_attachments = updated_owner_attachments;
             previous = Some(provenance.index());
-            metrics.add_relation(context)?;
+            context.run_semantic_unit(SceneValidationWork::Reference, || {
+                require_provenance(provenance, provenance_count, "owner provenance attachment")?;
+                metrics.add_reference(maximum_references)
+            })?;
         }
-        checked_add(
-            &mut metrics.owner_attachments,
-            u64::from(attachment_count),
-            "owner provenance attachments",
-        )?;
-        *plan = ValidatedOwnerProvenancePlan { owner, input_index };
     }
 
     if lineage.owner_provenance().len() == plans.len() {
         return Ok(());
     }
     for plan in plans.iter() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        if plan.input_index == usize::MAX {
-            return Err(ProfileAuthoringSemanticError::MissingOwnerProvenance {
-                owner: plan.owner,
+        context.run_semantic_unit(SceneValidationWork::Traversal, || {
+            if plan.input_index == usize::MAX {
+                return Err(ProfileAuthoringSemanticError::MissingOwnerProvenance {
+                    owner: plan.owner,
+                });
             }
-            .into());
-        }
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -1941,25 +2021,15 @@ fn initialize_scratch<T, C>(
 ) -> ProfileValidationResult<(), C>
 where
     T: Copy,
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     if !values.is_empty() || values.capacity() < length {
         return Err(ProfileAuthoringSemanticError::ScratchAllocation { resource }.into());
     }
-    let poll_chunk = usize::try_from(SCENE_VALIDATION_POLL_INTERVAL).map_err(|_| {
-        ProfileAuthoringSemanticError::AccountingOverflow {
-            dimension: "profile scratch initialization chunk",
-        }
-    })?;
     while values.len() < length {
-        let chunk = (length - values.len()).min(poll_chunk);
-        context.work(
-            SceneValidationWork::Traversal,
-            usize_to_u64(chunk, "profile scratch initialization work")?,
-        )?;
-        for _ in 0..chunk {
+        context.run_unit(SceneValidationWork::Traversal, || {
             values.push(value);
-        }
+        })?;
     }
     Ok(())
 }
@@ -2009,6 +2079,14 @@ fn enforce_limit<E>(
 where
     E: Error + Send + Sync + 'static,
 {
+    require_limit(limit, actual, maximum).map_err(ProfileAuthoringFailure::Semantic)
+}
+
+fn require_limit(
+    limit: ProfileAuthoringLimit,
+    actual: u64,
+    maximum: u64,
+) -> Result<(), ProfileAuthoringSemanticError> {
     if actual <= maximum {
         Ok(())
     } else {
@@ -2016,7 +2094,6 @@ where
             limit,
             actual,
             maximum,
-        }
-        .into())
+        })
     }
 }

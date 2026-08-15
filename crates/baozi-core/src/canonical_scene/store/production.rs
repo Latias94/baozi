@@ -8,6 +8,8 @@ mod scene;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(super) use control::CanonicalAuthoringControl;
 pub(super) use control::{OperationAuthoringControl, OperationAuthoringControlError};
 #[cfg(test)]
 pub(super) use input::ProfileAuthoringBatch;

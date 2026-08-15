@@ -15,12 +15,11 @@ use thiserror::Error;
 
 use crate::attribute::{AttributeDomain, AttributeSemantic, AttributeSemanticKind};
 use crate::geometry::TopologyKind;
-use crate::{
-    SCENE_VALIDATION_POLL_INTERVAL, SceneReservationKind, SceneValidationControl,
-    SceneValidationLimits, SceneValidationWork,
-};
+use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
-use super::super::control::{OperationAuthoringControl, OperationAuthoringControlError};
+use super::super::control::{
+    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
+};
 use super::super::input::Presence;
 use super::super::input::appearance::MaterialLocalId;
 use super::super::input::geometry::{
@@ -648,9 +647,9 @@ struct GeometryValidationStorage<R> {
 }
 
 type GeometryValidationResult<T, C> =
-    Result<T, GeometryAuthoringFailure<<C as SceneValidationControl>::Error>>;
+    Result<T, GeometryAuthoringFailure<<C as CanonicalAuthoringControl>::Error>>;
 
-struct GeometryValidationContext<'control, C: SceneValidationControl> {
+struct GeometryValidationContext<'control, C: CanonicalAuthoringControl> {
     control: &'control mut C,
     limits: SceneValidationLimits,
     work: u64,
@@ -664,7 +663,7 @@ struct GeometryValidationContext<'control, C: SceneValidationControl> {
     canonical_bytes: u64,
 }
 
-impl<'control, C: SceneValidationControl> GeometryValidationContext<'control, C> {
+impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control, C> {
     const fn new(limits: SceneValidationLimits, control: &'control mut C) -> Self {
         Self {
             control,
@@ -693,64 +692,74 @@ impl<'control, C: SceneValidationControl> GeometryValidationContext<'control, C>
         self.poll_now()
     }
 
-    fn work(&mut self, kind: SceneValidationWork, amount: u64) -> GeometryValidationResult<(), C> {
-        let final_work = self.work.checked_add(amount).ok_or(
-            GeometryAuthoringSemanticError::AccountingOverflow {
-                dimension: "validation work",
-            },
-        )?;
+    fn run_unit<R>(
+        &mut self,
+        kind: SceneValidationWork,
+        action: impl FnOnce() -> R,
+    ) -> GeometryValidationResult<R, C> {
+        let final_work =
+            self.work
+                .checked_add(1)
+                .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "validation work",
+                })?;
         enforce_limit::<C::Error>(
             GeometryAuthoringLimit::Work,
             final_work,
             self.limits.max_work(),
         )?;
 
-        let mut remaining = amount;
-        while remaining > 0 {
-            let until_poll = SCENE_VALIDATION_POLL_INTERVAL - self.work_since_poll;
-            let chunk = remaining.min(until_poll);
-            self.control
-                .charge_work(kind, chunk)
-                .map_err(GeometryAuthoringFailure::Control)?;
-            self.work = self.work.checked_add(chunk).ok_or(
-                GeometryAuthoringSemanticError::AccountingOverflow {
-                    dimension: "validation work",
-                },
-            )?;
-            self.work_since_poll += chunk;
-            remaining -= chunk;
-            if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
-                self.poll_now()?;
-            }
+        let result = self
+            .control
+            .run_unit(kind, action)
+            .map_err(GeometryAuthoringFailure::Control)?;
+        self.work = final_work;
+        self.work_since_poll += 1;
+        if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
+            self.poll_now()?;
         }
-        Ok(())
+        Ok(result)
     }
 
     fn add_relations(&mut self, amount: u64) -> GeometryValidationResult<(), C> {
-        let final_edges = self
-            .edges
-            .checked_add(amount)
-            .ok_or(GeometryAuthoringSemanticError::AccountingOverflow { dimension: "edges" })?;
-        let final_references = self.references.checked_add(amount).ok_or(
-            GeometryAuthoringSemanticError::AccountingOverflow {
-                dimension: "references",
-            },
-        )?;
-        enforce_limit::<C::Error>(
-            GeometryAuthoringLimit::Edges,
-            final_edges,
-            self.limits.max_edges(),
-        )?;
-        enforce_limit::<C::Error>(
-            GeometryAuthoringLimit::References,
-            final_references,
-            self.limits.max_references(),
-        )?;
+        for _ in 0..amount {
+            let current_edges = self.edges;
+            let max_edges = self.limits.max_edges();
+            let final_edges = self.run_unit(SceneValidationWork::GraphEdge, || {
+                let final_edges = current_edges.checked_add(1).ok_or(
+                    GeometryAuthoringSemanticError::AccountingOverflow { dimension: "edges" },
+                )?;
+                if final_edges > max_edges {
+                    return Err(GeometryAuthoringSemanticError::LimitExceeded {
+                        limit: GeometryAuthoringLimit::Edges,
+                        actual: final_edges,
+                        maximum: max_edges,
+                    });
+                }
+                Ok::<u64, GeometryAuthoringSemanticError>(final_edges)
+            })??;
+            self.edges = final_edges;
 
-        self.edges = final_edges;
-        self.references = final_references;
-        self.work(SceneValidationWork::GraphEdge, amount)?;
-        self.work(SceneValidationWork::Reference, amount)
+            let current_references = self.references;
+            let max_references = self.limits.max_references();
+            let final_references = self.run_unit(SceneValidationWork::Reference, || {
+                let final_references = current_references.checked_add(1).ok_or(
+                    GeometryAuthoringSemanticError::AccountingOverflow {
+                        dimension: "references",
+                    },
+                )?;
+                if final_references > max_references {
+                    return Err(GeometryAuthoringSemanticError::LimitExceeded {
+                        limit: GeometryAuthoringLimit::References,
+                        actual: final_references,
+                        maximum: max_references,
+                    });
+                }
+                Ok::<u64, GeometryAuthoringSemanticError>(final_references)
+            })??;
+            self.references = final_references;
+        }
+        Ok(())
     }
 
     fn add_payload(
@@ -850,10 +859,10 @@ impl<'control, C: SceneValidationControl> GeometryValidationContext<'control, C>
         )?;
         let reservation = self
             .control
-            .reserve(SceneReservationKind::ValidationScratch, bytes)
+            .reserve_scratch(bytes)
             .map_err(GeometryAuthoringFailure::Control)?;
         self.control
-            .validate_reservation(&reservation, SceneReservationKind::ValidationScratch)
+            .validate_scratch(&reservation)
             .map_err(GeometryAuthoringFailure::Control)?;
         Ok(reservation)
     }
@@ -869,7 +878,7 @@ impl<'control, C: SceneValidationControl> GeometryValidationContext<'control, C>
             self.limits.max_scratch_bytes(),
         )?;
         self.control
-            .resize_reservation(reservation, SceneReservationKind::ValidationScratch, bytes)
+            .resize_scratch(reservation, bytes)
             .map_err(GeometryAuthoringFailure::Control)
     }
 
@@ -915,7 +924,6 @@ where
     )
 }
 
-#[cfg(test)]
 pub(in crate::canonical_scene::store) fn validate_geometry_batch_with_control<'input, C>(
     input: GeometryAuthoringBatch<'input>,
     authored_node_count: usize,
@@ -924,7 +932,7 @@ pub(in crate::canonical_scene::store) fn validate_geometry_batch_with_control<'i
     control: &mut C,
 ) -> Result<ValidatedGeometryBatch<'input, C::Reservation>, GeometryAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     validate_geometry_batch_inner(
         input,
@@ -943,7 +951,7 @@ fn validate_geometry_batch_inner<'input, C>(
     control: &mut C,
 ) -> Result<ValidatedGeometryBatch<'input, C::Reservation>, GeometryAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let mut context = GeometryValidationContext::new(limits, control);
     context.poll_now()?;
@@ -1003,105 +1011,114 @@ where
 
     let mut expected_primitive_offset = 0_u32;
     for (logical_mesh_index, logical_mesh) in input.logical_meshes().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
-        let range = logical_mesh.primitives();
-        if range.count() == 0 {
-            return Err(GeometryAuthoringSemanticError::EmptyLogicalMesh {
-                logical_mesh: logical_mesh_index,
-            }
-            .into());
-        }
-        if range.offset() != expected_primitive_offset {
-            return Err(GeometryAuthoringSemanticError::LogicalMeshRangeOrder {
-                logical_mesh: logical_mesh_index,
-                expected: expected_primitive_offset,
-                actual: range.offset(),
-            }
-            .into());
-        }
-        let Some(end) = range.offset().checked_add(range.count()) else {
-            return Err(
-                GeometryAuthoringSemanticError::LogicalMeshRangeOutOfBounds {
+        let (range, end) = context.run_unit(SceneValidationWork::Entity, || {
+            let range = logical_mesh.primitives();
+            if range.count() == 0 {
+                return Err(GeometryAuthoringSemanticError::EmptyLogicalMesh {
                     logical_mesh: logical_mesh_index,
-                    primitive_count: input.primitives().len(),
-                }
-                .into(),
-            );
-        };
-        if end > primitive_count {
-            return Err(
-                GeometryAuthoringSemanticError::LogicalMeshRangeOutOfBounds {
+                });
+            }
+            if range.offset() != expected_primitive_offset {
+                return Err(GeometryAuthoringSemanticError::LogicalMeshRangeOrder {
                     logical_mesh: logical_mesh_index,
-                    primitive_count: input.primitives().len(),
-                }
-                .into(),
-            );
-        }
+                    expected: expected_primitive_offset,
+                    actual: range.offset(),
+                });
+            }
+            let Some(end) = range.offset().checked_add(range.count()) else {
+                return Err(
+                    GeometryAuthoringSemanticError::LogicalMeshRangeOutOfBounds {
+                        logical_mesh: logical_mesh_index,
+                        primitive_count: input.primitives().len(),
+                    },
+                );
+            };
+            if end > primitive_count {
+                return Err(
+                    GeometryAuthoringSemanticError::LogicalMeshRangeOutOfBounds {
+                        logical_mesh: logical_mesh_index,
+                        primitive_count: input.primitives().len(),
+                    },
+                );
+            }
+            Ok((range, end))
+        })??;
         context.add_relations(u64::from(range.count()))?;
         expected_primitive_offset = end;
     }
-    if expected_primitive_offset != primitive_count {
+    context.run_unit(SceneValidationWork::Traversal, || {
+        if expected_primitive_offset == primitive_count {
+            return Ok(());
+        }
         let unowned = primitive_count
             .checked_sub(expected_primitive_offset)
             .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
                 dimension: "unowned primitive count",
             })?;
-        return Err(GeometryAuthoringSemanticError::UnownedPrimitives {
+        Err(GeometryAuthoringSemanticError::UnownedPrimitives {
             unowned: u32_to_usize(unowned, "unowned primitive count")?,
-        }
-        .into());
-    }
+        })
+    })??;
 
     let mut expected_attribute_offset = 0_u32;
     for (primitive_index, primitive) in input.primitives().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
-        let attribute_range = primitive.attributes();
-        if attribute_range.offset() != expected_attribute_offset {
-            return Err(
-                GeometryAuthoringSemanticError::PrimitiveAttributeRangeOrder {
-                    primitive: primitive_index,
-                    expected: expected_attribute_offset,
-                    actual: attribute_range.offset(),
+        let (attribute_range, attribute_end, has_material, attribute_indices) =
+            context.run_unit(SceneValidationWork::Entity, || {
+                let attribute_range = primitive.attributes();
+                if attribute_range.offset() != expected_attribute_offset {
+                    return Err(
+                        GeometryAuthoringSemanticError::PrimitiveAttributeRangeOrder {
+                            primitive: primitive_index,
+                            expected: expected_attribute_offset,
+                            actual: attribute_range.offset(),
+                        },
+                    );
                 }
-                .into(),
-            );
-        }
-        let Some(attribute_end) = attribute_range
-            .offset()
-            .checked_add(attribute_range.count())
-        else {
-            return Err(
-                GeometryAuthoringSemanticError::PrimitiveAttributeRangeOutOfBounds {
-                    primitive: primitive_index,
-                    attribute_count: input.attributes().len(),
+                let Some(attribute_end) = attribute_range
+                    .offset()
+                    .checked_add(attribute_range.count())
+                else {
+                    return Err(
+                        GeometryAuthoringSemanticError::PrimitiveAttributeRangeOutOfBounds {
+                            primitive: primitive_index,
+                            attribute_count: input.attributes().len(),
+                        },
+                    );
+                };
+                if attribute_end > attribute_count {
+                    return Err(
+                        GeometryAuthoringSemanticError::PrimitiveAttributeRangeOutOfBounds {
+                            primitive: primitive_index,
+                            attribute_count: input.attributes().len(),
+                        },
+                    );
                 }
-                .into(),
-            );
-        };
-        if attribute_end > attribute_count {
-            return Err(
-                GeometryAuthoringSemanticError::PrimitiveAttributeRangeOutOfBounds {
-                    primitive: primitive_index,
-                    attribute_count: input.attributes().len(),
-                }
-                .into(),
-            );
-        }
-        context.add_relations(u64::from(attribute_range.count()))?;
 
-        if let Presence::Present(material) = primitive.material() {
-            if material.index() >= appearance_material_count {
-                return Err(GeometryAuthoringSemanticError::MaterialOutOfRange {
-                    primitive: primitive_index,
-                    material: material.index(),
-                    appearance_material_count,
-                }
-                .into());
-            }
+                let has_material = if let Presence::Present(material) = primitive.material() {
+                    if material.index() >= appearance_material_count {
+                        return Err(GeometryAuthoringSemanticError::MaterialOutOfRange {
+                            primitive: primitive_index,
+                            material: material.index(),
+                            appearance_material_count,
+                        });
+                    }
+                    true
+                } else {
+                    false
+                };
+                let attribute_indices = checked_range(attribute_range, input.attributes().len())?;
+                Ok((
+                    attribute_range,
+                    attribute_end,
+                    has_material,
+                    attribute_indices,
+                ))
+            })??;
+        context.add_relations(u64::from(attribute_range.count()))?;
+        if has_material {
             context.add_relations(1)?;
         }
 
-        let attribute_indices = checked_range(attribute_range, input.attributes().len())?;
         let plan = validate_primitive(
             primitive_index,
             primitive,
@@ -1113,40 +1130,42 @@ where
         storage.primitive_plans.push(plan);
         expected_attribute_offset = attribute_end;
     }
-    if expected_attribute_offset != attribute_count {
+    context.run_unit(SceneValidationWork::Traversal, || {
+        if expected_attribute_offset == attribute_count {
+            return Ok(());
+        }
         let unowned = attribute_count
             .checked_sub(expected_attribute_offset)
             .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
                 dimension: "unowned attribute count",
             })?;
-        return Err(GeometryAuthoringSemanticError::UnownedAttributes {
+        Err(GeometryAuthoringSemanticError::UnownedAttributes {
             unowned: u32_to_usize(unowned, "unowned attribute count")?,
-        }
-        .into());
-    }
+        })
+    })??;
 
     for (instance_index, instance) in input.mesh_instances().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
-        let owner = instance.owner().index();
-        if u32_to_usize(owner, "mesh instance owner")? >= authored_node_count {
-            return Err(GeometryAuthoringSemanticError::InstanceOwnerOutOfRange {
-                instance: instance_index,
-                owner,
-                node_count: authored_node_count,
+        context.run_unit(SceneValidationWork::Entity, || {
+            let owner = instance.owner().index();
+            if u32_to_usize(owner, "mesh instance owner")? >= authored_node_count {
+                return Err(GeometryAuthoringSemanticError::InstanceOwnerOutOfRange {
+                    instance: instance_index,
+                    owner,
+                    node_count: authored_node_count,
+                });
             }
-            .into());
-        }
-        context.add_relations(1)?;
 
-        let logical_mesh = instance.logical_mesh().index();
-        if logical_mesh >= logical_mesh_count {
-            return Err(GeometryAuthoringSemanticError::InstanceMeshOutOfRange {
-                instance: instance_index,
-                logical_mesh,
-                logical_mesh_count: input.logical_meshes().len(),
+            let logical_mesh = instance.logical_mesh().index();
+            if logical_mesh >= logical_mesh_count {
+                return Err(GeometryAuthoringSemanticError::InstanceMeshOutOfRange {
+                    instance: instance_index,
+                    logical_mesh,
+                    logical_mesh_count: input.logical_meshes().len(),
+                });
             }
-            .into());
-        }
+            Ok(())
+        })??;
+        context.add_relations(1)?;
         context.add_relations(1)?;
     }
 
@@ -1192,46 +1211,47 @@ fn validate_primitive<C>(
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<ValidatedGeometryPrimitivePlan, C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let mut previous_key: Option<(&AttributeSemantic, AttributeDomain)> = None;
     let mut position_index = None;
     let mut inferred_vertex_count = 0_u32;
     for attribute_index in attribute_indices.clone() {
-        context.work(SceneValidationWork::Entity, 1)?;
-        let attribute = attributes.get(attribute_index).ok_or(
-            GeometryAuthoringSemanticError::AccountingOverflow {
-                dimension: "primitive attribute lookup",
-            },
-        )?;
-        let key = (attribute.semantic(), attribute.domain());
-        if let Some(previous) = previous_key {
-            match previous.cmp(&key) {
-                std::cmp::Ordering::Equal => {
-                    return Err(GeometryAuthoringSemanticError::DuplicateAttributeKey {
-                        primitive: primitive_index,
-                        attribute: attribute_index,
+        context.run_unit(SceneValidationWork::Entity, || {
+            let attribute = attributes.get(attribute_index).ok_or(
+                GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "primitive attribute lookup",
+                },
+            )?;
+            let key = (attribute.semantic(), attribute.domain());
+            if let Some(previous) = previous_key {
+                match previous.cmp(&key) {
+                    std::cmp::Ordering::Equal => {
+                        return Err(GeometryAuthoringSemanticError::DuplicateAttributeKey {
+                            primitive: primitive_index,
+                            attribute: attribute_index,
+                        });
                     }
-                    .into());
-                }
-                std::cmp::Ordering::Greater => {
-                    return Err(GeometryAuthoringSemanticError::AttributeOrder {
-                        primitive: primitive_index,
-                        attribute: attribute_index,
+                    std::cmp::Ordering::Greater => {
+                        return Err(GeometryAuthoringSemanticError::AttributeOrder {
+                            primitive: primitive_index,
+                            attribute: attribute_index,
+                        });
                     }
-                    .into());
+                    std::cmp::Ordering::Less => {}
                 }
-                std::cmp::Ordering::Less => {}
             }
-        }
-        if attribute.semantic().kind() == AttributeSemanticKind::Position {
-            position_index = Some(attribute_index);
-        }
-        if attribute.domain() == AttributeDomain::Vertex {
-            inferred_vertex_count =
-                inferred_vertex_count.max(attribute_element_count(attribute_index, attribute)?);
-        }
-        previous_key = Some(key);
+            validate_attribute_authored_shape(attribute_index, attribute)?;
+            if attribute.semantic().kind() == AttributeSemanticKind::Position {
+                position_index = Some(attribute_index);
+            }
+            if attribute.domain() == AttributeDomain::Vertex {
+                inferred_vertex_count =
+                    inferred_vertex_count.max(attribute_element_count(attribute_index, attribute)?);
+            }
+            previous_key = Some(key);
+            Ok(())
+        })??;
     }
 
     let mut position_plan = match position_index {
@@ -1246,13 +1266,15 @@ where
     } else {
         infer_missing_position_vertex_count(primitive, inferred_vertex_count, context)?
     };
-    if vertex_count > 0 && position_plan.is_none() {
-        return Err(GeometryAuthoringSemanticError::MissingPosition {
-            primitive: primitive_index,
-            vertex_count,
+    context.run_unit(SceneValidationWork::Traversal, || {
+        if vertex_count > 0 && position_plan.is_none() {
+            return Err(GeometryAuthoringSemanticError::MissingPosition {
+                primitive: primitive_index,
+                vertex_count,
+            });
         }
-        .into());
-    }
+        Ok(())
+    })??;
 
     let (corner_count, index_count) =
         validate_index_stream(primitive_index, primitive.indices(), vertex_count, context)?;
@@ -1260,21 +1282,24 @@ where
         validate_topology(primitive_index, primitive.topology(), corner_count, context)?;
 
     for attribute_index in attribute_indices {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let attribute = &attributes[attribute_index];
-        if attribute.semantic().kind() == AttributeSemanticKind::Custom {
-            return Err(GeometryAuthoringSemanticError::CustomAttributeUnsupported {
-                attribute: attribute_index,
+        let expected = context.run_unit(SceneValidationWork::Traversal, || {
+            let attribute = &attributes[attribute_index];
+            if attribute.semantic().kind() == AttributeSemanticKind::Custom {
+                return Err(GeometryAuthoringSemanticError::CustomAttributeUnsupported {
+                    attribute: attribute_index,
+                });
             }
-            .into());
-        }
-        let expected = domain_cardinality(
-            attribute_index,
-            attribute.domain(),
-            vertex_count,
-            corner_count,
-            face_count,
-        )?;
+            let expected = domain_cardinality(
+                attribute_index,
+                attribute.domain(),
+                vertex_count,
+                corner_count,
+                face_count,
+            )?;
+            validate_expected_attribute_cardinality(attribute_index, attribute, expected)?;
+            Ok(expected)
+        })??;
+        let attribute = &attributes[attribute_index];
         let plan = match position_plan.take() {
             Some((position, plan)) if position == attribute_index => plan,
             Some((position, plan)) => {
@@ -1283,15 +1308,6 @@ where
             }
             None => validate_attribute(attribute_index, attribute, Some(expected), context)?,
         };
-        if plan.element_count() != expected {
-            return Err(GeometryAuthoringSemanticError::AttributeCardinality {
-                attribute: attribute_index,
-                domain: attribute.domain(),
-                expected,
-                actual: plan.element_count(),
-            }
-            .into());
-        }
         attribute_plans.push(plan);
     }
 
@@ -1312,17 +1328,18 @@ fn infer_missing_position_vertex_count<C>(
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<u32, C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     if let Presence::Present(indices) = primitive.indices() {
         for &index in indices {
-            context.work(SceneValidationWork::PayloadCell, 1)?;
-            let declared_count = index.checked_add(1).ok_or(
-                GeometryAuthoringSemanticError::CountDomainTooLarge {
-                    collection: "primitive vertices",
-                },
-            )?;
-            inferred = inferred.max(declared_count);
+            inferred = context.run_unit(SceneValidationWork::PayloadCell, || {
+                let declared_count = index.checked_add(1).ok_or(
+                    GeometryAuthoringSemanticError::CountDomainTooLarge {
+                        collection: "primitive vertices",
+                    },
+                )?;
+                Ok::<_, GeometryAuthoringSemanticError>(inferred.max(declared_count))
+            })??;
         }
     }
     Ok(inferred)
@@ -1352,7 +1369,7 @@ fn validate_index_stream<C>(
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<(u32, u32), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     match indices {
         Presence::Absent => Ok((vertex_count, 0)),
@@ -1360,16 +1377,17 @@ where
             let index_count = collection_count(indices.len(), "primitive indices")?;
             context.add_payload(0, u64::from(index_count), block_for_len(indices.len()))?;
             for (corner, &index) in indices.iter().enumerate() {
-                context.work(SceneValidationWork::PayloadCell, 1)?;
-                if index >= vertex_count {
-                    return Err(GeometryAuthoringSemanticError::VertexIndexOutOfRange {
-                        primitive: primitive_index,
-                        corner,
-                        index,
-                        vertex_count,
+                context.run_unit(SceneValidationWork::PayloadCell, || {
+                    if index >= vertex_count {
+                        return Err(GeometryAuthoringSemanticError::VertexIndexOutOfRange {
+                            primitive: primitive_index,
+                            corner,
+                            index,
+                            vertex_count,
+                        });
                     }
-                    .into());
-                }
+                    Ok(())
+                })??;
             }
             Ok((index_count, index_count))
         }
@@ -1383,63 +1401,95 @@ fn validate_topology<C>(
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<(TopologyKind, u32), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
-    match topology {
-        GeometryTopologyAuthoring::Points => Ok((TopologyKind::Points, corner_count)),
-        GeometryTopologyAuthoring::LineList => Ok((
-            TopologyKind::LineList,
-            list_face_count(primitive_index, TopologyKind::LineList, corner_count, 2)?,
-        )),
-        GeometryTopologyAuthoring::LineStrip => {
-            Ok((TopologyKind::LineStrip, corner_count.saturating_sub(1)))
+    let validated = match topology {
+        GeometryTopologyAuthoring::Points => context
+            .run_unit(SceneValidationWork::Traversal, || {
+                Ok::<_, GeometryAuthoringSemanticError>((TopologyKind::Points, corner_count))
+            })??,
+        GeometryTopologyAuthoring::LineList => {
+            context.run_unit(SceneValidationWork::Traversal, || {
+                Ok::<_, GeometryAuthoringSemanticError>((
+                    TopologyKind::LineList,
+                    list_face_count(primitive_index, TopologyKind::LineList, corner_count, 2)?,
+                ))
+            })??
         }
-        GeometryTopologyAuthoring::LineLoop => Ok((
-            TopologyKind::LineLoop,
-            if corner_count < 2 { 0 } else { corner_count },
-        )),
-        GeometryTopologyAuthoring::TriangleList => Ok((
-            TopologyKind::TriangleList,
-            list_face_count(primitive_index, TopologyKind::TriangleList, corner_count, 3)?,
-        )),
+        GeometryTopologyAuthoring::LineStrip => {
+            context.run_unit(SceneValidationWork::Traversal, || {
+                Ok::<_, GeometryAuthoringSemanticError>((
+                    TopologyKind::LineStrip,
+                    corner_count.saturating_sub(1),
+                ))
+            })??
+        }
+        GeometryTopologyAuthoring::LineLoop => {
+            context.run_unit(SceneValidationWork::Traversal, || {
+                Ok::<_, GeometryAuthoringSemanticError>((
+                    TopologyKind::LineLoop,
+                    if corner_count < 2 { 0 } else { corner_count },
+                ))
+            })??
+        }
+        GeometryTopologyAuthoring::TriangleList => {
+            context.run_unit(SceneValidationWork::Traversal, || {
+                Ok::<_, GeometryAuthoringSemanticError>((
+                    TopologyKind::TriangleList,
+                    list_face_count(primitive_index, TopologyKind::TriangleList, corner_count, 3)?,
+                ))
+            })??
+        }
         GeometryTopologyAuthoring::TriangleStrip => {
-            Ok((TopologyKind::TriangleStrip, corner_count.saturating_sub(2)))
+            context.run_unit(SceneValidationWork::Traversal, || {
+                Ok::<_, GeometryAuthoringSemanticError>((
+                    TopologyKind::TriangleStrip,
+                    corner_count.saturating_sub(2),
+                ))
+            })??
         }
         GeometryTopologyAuthoring::TriangleFan => {
-            Ok((TopologyKind::TriangleFan, corner_count.saturating_sub(2)))
+            context.run_unit(SceneValidationWork::Traversal, || {
+                Ok::<_, GeometryAuthoringSemanticError>((
+                    TopologyKind::TriangleFan,
+                    corner_count.saturating_sub(2),
+                ))
+            })??
         }
         GeometryTopologyAuthoring::Polygons(boundaries) => {
             let face_count = collection_count(boundaries.len(), "polygon faces")?;
             context.add_payload(0, u64::from(face_count), block_for_len(boundaries.len()))?;
             let mut boundary_corners = 0_u32;
             for (face, &face_corner_count) in boundaries.iter().enumerate() {
-                context.work(SceneValidationWork::PayloadCell, 1)?;
-                if face_corner_count < 3 {
-                    return Err(GeometryAuthoringSemanticError::PolygonFaceTooSmall {
-                        primitive: primitive_index,
-                        face,
-                        corner_count: face_corner_count,
+                boundary_corners = context.run_unit(SceneValidationWork::PayloadCell, || {
+                    if face_corner_count < 3 {
+                        return Err(GeometryAuthoringSemanticError::PolygonFaceTooSmall {
+                            primitive: primitive_index,
+                            face,
+                            corner_count: face_corner_count,
+                        });
                     }
-                    .into());
-                }
-                boundary_corners = boundary_corners.checked_add(face_corner_count).ok_or(
-                    GeometryAuthoringSemanticError::PolygonCornerCountOverflow {
+                    boundary_corners.checked_add(face_corner_count).ok_or(
+                        GeometryAuthoringSemanticError::PolygonCornerCountOverflow {
+                            primitive: primitive_index,
+                            face,
+                        },
+                    )
+                })??;
+            }
+            context.run_unit(SceneValidationWork::Traversal, || {
+                if boundary_corners != corner_count {
+                    return Err(GeometryAuthoringSemanticError::PolygonCornerCountMismatch {
                         primitive: primitive_index,
-                        face,
-                    },
-                )?;
-            }
-            if boundary_corners != corner_count {
-                return Err(GeometryAuthoringSemanticError::PolygonCornerCountMismatch {
-                    primitive: primitive_index,
-                    boundary_corners,
-                    corner_count,
+                        boundary_corners,
+                        corner_count,
+                    });
                 }
-                .into());
-            }
-            Ok((TopologyKind::Polygons, face_count))
+                Ok((TopologyKind::Polygons, face_count))
+            })??
         }
-    }
+    };
+    Ok(validated)
 }
 
 fn list_face_count(
@@ -1467,7 +1517,7 @@ fn validate_attribute<C>(
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<ValidatedGeometryAttribute, C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     match attribute.payload() {
         GeometryAttributePayloadAuthoring::DenseF32 {
@@ -1525,16 +1575,19 @@ where
             inspect_f32_values(attribute_index, source_values, context)?;
             if let Some(indices) = projection {
                 for (element, &index) in indices.iter().enumerate() {
-                    context.work(SceneValidationWork::PayloadCell, 1)?;
-                    if index >= source_element_count {
-                        return Err(GeometryAuthoringSemanticError::SourceProjectionOutOfRange {
-                            attribute: attribute_index,
-                            element,
-                            index,
-                            source_count: source_element_count,
+                    context.run_unit(SceneValidationWork::PayloadCell, || {
+                        if index >= source_element_count {
+                            return Err(
+                                GeometryAuthoringSemanticError::SourceProjectionOutOfRange {
+                                    attribute: attribute_index,
+                                    element,
+                                    index,
+                                    source_count: source_element_count,
+                                },
+                            );
                         }
-                        .into());
-                    }
+                        Ok(())
+                    })??;
                 }
             }
             Ok(ValidatedGeometryAttribute {
@@ -1622,7 +1675,7 @@ where
 trait GeometryScalar: Copy {
     const KIND: GeometryAttributeScalarKind;
 
-    fn inspect<C: SceneValidationControl>(
+    fn inspect<C: CanonicalAuthoringControl>(
         attribute_index: usize,
         values: &[Self],
         scalar_offset: usize,
@@ -1633,7 +1686,7 @@ trait GeometryScalar: Copy {
 impl GeometryScalar for f32 {
     const KIND: GeometryAttributeScalarKind = GeometryAttributeScalarKind::F32;
 
-    fn inspect<C: SceneValidationControl>(
+    fn inspect<C: CanonicalAuthoringControl>(
         attribute_index: usize,
         values: &[Self],
         scalar_offset: usize,
@@ -1646,7 +1699,7 @@ impl GeometryScalar for f32 {
 impl GeometryScalar for u32 {
     const KIND: GeometryAttributeScalarKind = GeometryAttributeScalarKind::U32;
 
-    fn inspect<C: SceneValidationControl>(
+    fn inspect<C: CanonicalAuthoringControl>(
         _attribute_index: usize,
         values: &[Self],
         _scalar_offset: usize,
@@ -1669,7 +1722,7 @@ fn validate_sparse_attribute<C, T>(
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<ValidatedGeometryAttribute, C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
     T: GeometryScalar,
 {
     let scalar_kind = T::KIND;
@@ -1743,24 +1796,23 @@ where
     T::inspect(attribute_index, default, values.len(), context)?;
     let mut previous = None;
     for (element, &index) in indices.iter().enumerate() {
-        context.work(SceneValidationWork::PayloadCell, 1)?;
-        if index >= logical_count {
-            return Err(GeometryAuthoringSemanticError::SparseIndexOutOfRange {
-                attribute: attribute_index,
-                element,
-                index,
-                logical_count,
+        previous = context.run_unit(SceneValidationWork::PayloadCell, || {
+            if index >= logical_count {
+                return Err(GeometryAuthoringSemanticError::SparseIndexOutOfRange {
+                    attribute: attribute_index,
+                    element,
+                    index,
+                    logical_count,
+                });
             }
-            .into());
-        }
-        if previous.is_some_and(|previous_index| index <= previous_index) {
-            return Err(GeometryAuthoringSemanticError::SparseIndexOrder {
-                attribute: attribute_index,
-                element,
+            if previous.is_some_and(|previous_index| index <= previous_index) {
+                return Err(GeometryAuthoringSemanticError::SparseIndexOrder {
+                    attribute: attribute_index,
+                    element,
+                });
             }
-            .into());
-        }
-        previous = Some(index);
+            Ok(Some(index))
+        })??;
     }
     Ok(ValidatedGeometryAttribute {
         input_index: attribute_index,
@@ -1806,6 +1858,151 @@ fn attribute_element_count(
         GeometryAttributePayloadAuthoring::SparseF32 { logical_count, .. }
         | GeometryAttributePayloadAuthoring::SparseU32 { logical_count, .. } => Ok(logical_count),
     }
+}
+
+fn validate_attribute_authored_shape(
+    attribute_index: usize,
+    attribute: &GeometryAttributeAuthoring<'_>,
+) -> Result<(), GeometryAuthoringSemanticError> {
+    match attribute.payload() {
+        GeometryAttributePayloadAuthoring::DenseF32 {
+            lanes,
+            source_values,
+            source_indices,
+        } => {
+            scalar_element_count(
+                attribute_index,
+                lanes,
+                source_values.len(),
+                "f32 attribute source elements",
+            )?;
+            validate_attribute_schema(
+                attribute_index,
+                attribute,
+                GeometryAttributeScalarKind::F32,
+                lanes,
+            )?;
+            if let Presence::Present(indices) = source_indices {
+                if attribute.domain() != AttributeDomain::Corner {
+                    return Err(GeometryAuthoringSemanticError::SourceProjectionDomain {
+                        attribute: attribute_index,
+                    });
+                }
+                collection_count(indices.len(), "attribute source projection elements")?;
+            }
+        }
+        GeometryAttributePayloadAuthoring::DenseU32 { lanes, values } => {
+            scalar_element_count(
+                attribute_index,
+                lanes,
+                values.len(),
+                "u32 attribute elements",
+            )?;
+            validate_attribute_schema(
+                attribute_index,
+                attribute,
+                GeometryAttributeScalarKind::U32,
+                lanes,
+            )?;
+        }
+        GeometryAttributePayloadAuthoring::SparseF32 {
+            lanes,
+            indices,
+            values,
+            default,
+            ..
+        } => validate_sparse_attribute_authored_shape(
+            attribute_index,
+            attribute,
+            GeometryAttributeScalarKind::F32,
+            lanes,
+            indices,
+            values.len(),
+            default.len(),
+        )?,
+        GeometryAttributePayloadAuthoring::SparseU32 {
+            lanes,
+            indices,
+            values,
+            default,
+            ..
+        } => validate_sparse_attribute_authored_shape(
+            attribute_index,
+            attribute,
+            GeometryAttributeScalarKind::U32,
+            lanes,
+            indices,
+            values.len(),
+            default.len(),
+        )?,
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_sparse_attribute_authored_shape(
+    attribute_index: usize,
+    attribute: &GeometryAttributeAuthoring<'_>,
+    scalar_kind: GeometryAttributeScalarKind,
+    lanes: u8,
+    indices: &[u32],
+    value_scalar_count: usize,
+    default_scalar_count: usize,
+) -> Result<(), GeometryAuthoringSemanticError> {
+    let explicit_element_count = scalar_element_count(
+        attribute_index,
+        lanes,
+        value_scalar_count,
+        "sparse attribute explicit elements",
+    )?;
+    validate_attribute_schema(attribute_index, attribute, scalar_kind, lanes)?;
+    if default_scalar_count != usize::from(lanes) {
+        return Err(GeometryAuthoringSemanticError::SparseDefaultShape {
+            attribute: attribute_index,
+            lanes,
+            actual: default_scalar_count,
+        });
+    }
+    let index_count = collection_count(indices.len(), "sparse attribute indices")?;
+    if explicit_element_count != index_count {
+        return Err(GeometryAuthoringSemanticError::SparseValueCount {
+            attribute: attribute_index,
+            index_count: indices.len(),
+            value_elements: u32_to_usize(explicit_element_count, "sparse explicit element count")?,
+        });
+    }
+    Ok(())
+}
+
+fn validate_expected_attribute_cardinality(
+    attribute_index: usize,
+    attribute: &GeometryAttributeAuthoring<'_>,
+    expected: u32,
+) -> Result<(), GeometryAuthoringSemanticError> {
+    if let GeometryAttributePayloadAuthoring::DenseF32 {
+        source_indices: Presence::Present(indices),
+        ..
+    } = attribute.payload()
+    {
+        let actual = collection_count(indices.len(), "attribute source projection elements")?;
+        if actual != expected {
+            return Err(
+                GeometryAuthoringSemanticError::SourceProjectionCardinality {
+                    attribute: attribute_index,
+                    expected,
+                    actual: indices.len(),
+                },
+            );
+        }
+        return Ok(());
+    }
+
+    check_attribute_cardinality(
+        attribute_index,
+        attribute.domain(),
+        attribute_element_count(attribute_index, attribute)?,
+        Some(expected),
+    )
 }
 
 fn scalar_element_count(
@@ -1898,7 +2095,7 @@ fn inspect_f32_values<C>(
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     inspect_f32_values_from(attribute_index, values, 0, context)
 }
@@ -1910,22 +2107,23 @@ fn inspect_f32_values_from<C>(
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     for (relative_scalar, value) in values.iter().enumerate() {
-        context.work(SceneValidationWork::PayloadCell, 1)?;
-        if !value.is_finite() {
-            let scalar = scalar_offset.checked_add(relative_scalar).ok_or(
-                GeometryAuthoringSemanticError::AccountingOverflow {
-                    dimension: "attribute scalar index",
-                },
-            )?;
-            return Err(GeometryAuthoringSemanticError::NonFiniteAttributeValue {
-                attribute: attribute_index,
-                scalar,
+        context.run_unit(SceneValidationWork::PayloadCell, || {
+            if !value.is_finite() {
+                let scalar = scalar_offset.checked_add(relative_scalar).ok_or(
+                    GeometryAuthoringSemanticError::AccountingOverflow {
+                        dimension: "attribute scalar index",
+                    },
+                )?;
+                return Err(GeometryAuthoringSemanticError::NonFiniteAttributeValue {
+                    attribute: attribute_index,
+                    scalar,
+                });
             }
-            .into());
-        }
+            Ok(())
+        })??;
     }
     Ok(())
 }
@@ -1935,10 +2133,10 @@ fn inspect_u32_values<C>(
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     for _ in values {
-        context.work(SceneValidationWork::PayloadCell, 1)?;
+        context.run_unit(SceneValidationWork::PayloadCell, || ())?;
     }
     Ok(())
 }
@@ -1978,7 +2176,7 @@ fn geometry_structural_bytes<C>(
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<u64, C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let logical_mesh_count = collection_count(input.logical_meshes().len(), "logical meshes")?;
     let primitive_count = collection_count(input.primitives().len(), "primitives")?;
@@ -1995,77 +2193,79 @@ where
     )?;
     let mut primitive_bytes = 0_u64;
     for primitive in input.primitives() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let boundary_block = matches!(
-            primitive.topology(),
-            GeometryTopologyAuthoring::Polygons(boundaries) if !boundaries.is_empty()
-        );
-        let index_block = matches!(
-            primitive.indices(),
-            Presence::Present(indices) if !indices.is_empty()
-        );
-        let reference_bytes = checked_sum_bytes(
-            [
-                reference_slot_bytes(boundary_block),
-                reference_slot_bytes(index_block),
-                reference_slot_bytes(matches!(primitive.material(), Presence::Present(_))),
-                reference_slot_bytes(primitive.attributes().count() != 0),
-            ],
-            "canonical primitive references",
-        )?;
-        primitive_bytes = primitive_bytes
-            .checked_add(PRIMITIVE_FIXED_BYTES)
-            .and_then(|bytes| bytes.checked_add(reference_bytes))
-            .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical primitive records",
-            })?;
+        primitive_bytes = context.run_unit(SceneValidationWork::Traversal, || {
+            let boundary_block = matches!(
+                primitive.topology(),
+                GeometryTopologyAuthoring::Polygons(boundaries) if !boundaries.is_empty()
+            );
+            let index_block = matches!(
+                primitive.indices(),
+                Presence::Present(indices) if !indices.is_empty()
+            );
+            let reference_bytes = checked_sum_bytes(
+                [
+                    reference_slot_bytes(boundary_block),
+                    reference_slot_bytes(index_block),
+                    reference_slot_bytes(matches!(primitive.material(), Presence::Present(_))),
+                    reference_slot_bytes(primitive.attributes().count() != 0),
+                ],
+                "canonical primitive references",
+            )?;
+            primitive_bytes
+                .checked_add(PRIMITIVE_FIXED_BYTES)
+                .and_then(|bytes| bytes.checked_add(reference_bytes))
+                .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "canonical primitive records",
+                })
+        })??;
     }
     let mut attribute_bytes = 0_u64;
     for attribute in input.attributes() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let (values, sparse_indices, sparse_default) = match attribute.payload() {
-            GeometryAttributePayloadAuthoring::DenseF32 {
-                source_values,
-                source_indices,
-                ..
-            } => (
-                match source_indices {
-                    Presence::Absent => !source_values.is_empty(),
-                    Presence::Present(indices) => !indices.is_empty(),
-                },
-                false,
-                false,
-            ),
-            GeometryAttributePayloadAuthoring::DenseU32 { values, .. } => {
-                (!values.is_empty(), false, false)
-            }
-            GeometryAttributePayloadAuthoring::SparseF32 {
-                indices,
-                values,
-                default,
-                ..
-            } => (!values.is_empty(), !indices.is_empty(), !default.is_empty()),
-            GeometryAttributePayloadAuthoring::SparseU32 {
-                indices,
-                values,
-                default,
-                ..
-            } => (!values.is_empty(), !indices.is_empty(), !default.is_empty()),
-        };
-        let reference_bytes = checked_sum_bytes(
-            [
-                reference_slot_bytes(values),
-                reference_slot_bytes(sparse_indices),
-                reference_slot_bytes(sparse_default),
-            ],
-            "canonical attribute references",
-        )?;
-        attribute_bytes = attribute_bytes
-            .checked_add(ATTRIBUTE_FIXED_BYTES)
-            .and_then(|bytes| bytes.checked_add(reference_bytes))
-            .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical attribute records",
-            })?;
+        attribute_bytes = context.run_unit(SceneValidationWork::Traversal, || {
+            let (values, sparse_indices, sparse_default) = match attribute.payload() {
+                GeometryAttributePayloadAuthoring::DenseF32 {
+                    source_values,
+                    source_indices,
+                    ..
+                } => (
+                    match source_indices {
+                        Presence::Absent => !source_values.is_empty(),
+                        Presence::Present(indices) => !indices.is_empty(),
+                    },
+                    false,
+                    false,
+                ),
+                GeometryAttributePayloadAuthoring::DenseU32 { values, .. } => {
+                    (!values.is_empty(), false, false)
+                }
+                GeometryAttributePayloadAuthoring::SparseF32 {
+                    indices,
+                    values,
+                    default,
+                    ..
+                } => (!values.is_empty(), !indices.is_empty(), !default.is_empty()),
+                GeometryAttributePayloadAuthoring::SparseU32 {
+                    indices,
+                    values,
+                    default,
+                    ..
+                } => (!values.is_empty(), !indices.is_empty(), !default.is_empty()),
+            };
+            let reference_bytes = checked_sum_bytes(
+                [
+                    reference_slot_bytes(values),
+                    reference_slot_bytes(sparse_indices),
+                    reference_slot_bytes(sparse_default),
+                ],
+                "canonical attribute references",
+            )?;
+            attribute_bytes
+                .checked_add(ATTRIBUTE_FIXED_BYTES)
+                .and_then(|bytes| bytes.checked_add(reference_bytes))
+                .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "canonical attribute records",
+                })
+        })??;
     }
     let structural_bytes = checked_sum_bytes(
         [

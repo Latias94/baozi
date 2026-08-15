@@ -3,13 +3,47 @@
     reason = "operation failures retain bounded store evidence inline without a failure-path allocation"
 )]
 
+use std::error::Error;
+
+use baozi_operation::__canonical_activation::{CanonicalReservation, CanonicalSemanticWorkSession};
 use baozi_operation::{
-    ControlCause, OperationOwner, ProgressPhase, ProgressUnit, RetainedStoreControlCheckpoint,
-    RetainedStoreReservation, StoreDimensionKey, StorePhaseKey, StoreRuntimeError,
+    ControlCause, FreshStoreLineage, OperationOwner, ProgressPhase, ProgressUnit,
+    RetainedStoreOperation, RetainedStoreReservation, StoreDimensionKey, StorePhaseKey,
+    StoreRuntimeError,
 };
 use thiserror::Error;
 
-use crate::{SceneReservationKind, SceneValidationControl, SceneValidationWork};
+use crate::SceneValidationWork;
+
+/// Core-owned control surface for one complete canonical authoring preflight.
+///
+/// Each work unit wraps the semantic action it accounts for. The scoped activation implementation
+/// can therefore admit the complete attempted envelope before validation while advancing consumed
+/// work only after the matching action returns normally. The trait remains private to canonical
+/// Scene construction and intentionally exposes no raw ledger key, progress channel, or terminal
+/// owner.
+pub(in crate::canonical_scene::store) trait CanonicalAuthoringControl {
+    type Error: Error + Send + Sync + 'static;
+    type Reservation;
+
+    fn poll(&mut self) -> Result<(), Self::Error>;
+
+    fn run_unit<R>(
+        &mut self,
+        work: SceneValidationWork,
+        action: impl FnOnce() -> R,
+    ) -> Result<R, Self::Error>;
+
+    fn reserve_scratch(&mut self, bytes: u64) -> Result<Self::Reservation, Self::Error>;
+
+    fn validate_scratch(&mut self, reservation: &Self::Reservation) -> Result<(), Self::Error>;
+
+    fn resize_scratch(
+        &mut self,
+        reservation: &mut Self::Reservation,
+        required_bytes: u64,
+    ) -> Result<(), Self::Error>;
+}
 
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum OperationAuthoringControlError {
@@ -17,49 +51,85 @@ pub(in crate::canonical_scene::store) enum OperationAuthoringControlError {
     Control(#[source] ControlCause),
     #[error("canonical node authoring accounting failed")]
     Store(#[source] StoreRuntimeError),
-    #[error("canonical node authoring cannot reserve {kind:?} storage")]
-    UnsupportedReservationKind { kind: SceneReservationKind },
-    #[error("canonical node authoring cannot transition {from:?} storage to {to:?}")]
-    UnsupportedReservationTransition {
-        from: SceneReservationKind,
-        to: SceneReservationKind,
-    },
 }
 
-pub(in crate::canonical_scene::store) struct OperationAuthoringControl<'checkpoint, O, PP, U>
-where
+pub(in crate::canonical_scene::store) struct OperationAuthoringControl<
+    'operation,
+    O,
+    PP,
+    U,
+    L = FreshStoreLineage,
+> where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    checkpoint: RetainedStoreControlCheckpoint<'checkpoint, O, PP, U>,
+    operation: &'operation mut RetainedStoreOperation<O, PP, U, L>,
     phase: StorePhaseKey,
     dimension: StoreDimensionKey,
 }
 
-impl<'checkpoint, O, PP, U> OperationAuthoringControl<'checkpoint, O, PP, U>
+/// Exact action-scoped adapter used by the import-bound activation transaction.
+///
+/// Explicit validator polls delegate to the operation-owned completion batch. The batch performs
+/// a real control observation only when its bounded checkpoint is due, so validators retain their
+/// scheduling shape without introducing a second counter or permitting scratch work to cross a
+/// pending cancellation checkpoint.
+#[allow(
+    dead_code,
+    reason = "consumed by the complete-batch scoped activation cutover in U4e"
+)]
+pub(in crate::canonical_scene::store) struct ScopedAuthoringControl<
+    'session,
+    'borrow,
+    'scope,
+    O,
+    PP,
+    U,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    session: &'session mut CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U>,
+}
+
+impl<'session, 'borrow, 'scope, O, PP, U>
+    ScopedAuthoringControl<'session, 'borrow, 'scope, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     pub(in crate::canonical_scene::store) const fn new(
-        checkpoint: RetainedStoreControlCheckpoint<'checkpoint, O, PP, U>,
+        session: &'session mut CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U>,
+    ) -> Self {
+        Self { session }
+    }
+}
+
+impl<'operation, O, PP, U, L> OperationAuthoringControl<'operation, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub(in crate::canonical_scene::store) const fn new(
+        operation: &'operation mut RetainedStoreOperation<O, PP, U, L>,
         phase: StorePhaseKey,
         dimension: StoreDimensionKey,
     ) -> Self {
         Self {
-            checkpoint,
+            operation,
             phase,
             dimension,
         }
     }
 
-    fn require_scratch(kind: SceneReservationKind) -> Result<(), OperationAuthoringControlError> {
-        if kind == SceneReservationKind::ValidationScratch {
-            Ok(())
-        } else {
-            Err(OperationAuthoringControlError::UnsupportedReservationKind { kind })
+    fn runtime_error(error: StoreRuntimeError) -> OperationAuthoringControlError {
+        match error {
+            StoreRuntimeError::Control(cause) => OperationAuthoringControlError::Control(cause),
+            cause => OperationAuthoringControlError::Store(cause),
         }
     }
 
@@ -68,7 +138,7 @@ where
     }
 }
 
-impl<O, PP, U> SceneValidationControl for OperationAuthoringControl<'_, O, PP, U>
+impl<O, PP, U, L> CanonicalAuthoringControl for OperationAuthoringControl<'_, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -78,59 +148,94 @@ where
     type Reservation = RetainedStoreReservation<O>;
 
     fn poll(&mut self) -> Result<(), Self::Error> {
-        self.checkpoint.poll().map_err(|error| match error {
-            StoreRuntimeError::Control(cause) => OperationAuthoringControlError::Control(cause),
-            cause => OperationAuthoringControlError::Store(cause),
-        })
+        self.operation
+            .producer_host()
+            .poll()
+            .map_err(Self::runtime_error)
     }
 
-    fn charge_work(&mut self, _work: SceneValidationWork, amount: u64) -> Result<(), Self::Error> {
-        self.checkpoint
-            .charge_observed(self.dimension, amount)
-            .map_err(Self::store_error)
-    }
-
-    fn reserve(
+    fn run_unit<R>(
         &mut self,
-        kind: SceneReservationKind,
-        bytes: u64,
-    ) -> Result<Self::Reservation, Self::Error> {
-        Self::require_scratch(kind)?;
-        self.checkpoint
+        _work: SceneValidationWork,
+        action: impl FnOnce() -> R,
+    ) -> Result<R, Self::Error> {
+        // This adapter exists only for the legacy construction rail. Keep its evidence truthful
+        // while U4e replaces the rail atomically: admission records attempted work, and completion
+        // becomes visible only after the corresponding semantic action returns normally.
+        let mut host = self.operation.producer_host();
+        let mut observed = host
+            .try_begin_observed_work([(self.dimension, 1)])
+            .map_err(Self::runtime_error)?;
+        let result = action();
+        if let Err(cause) = observed.complete([1]) {
+            observed.finish_partial();
+            return Err(Self::runtime_error(cause));
+        }
+        observed.finish().map_err(Self::runtime_error)?;
+        Ok(result)
+    }
+
+    fn reserve_scratch(&mut self, bytes: u64) -> Result<Self::Reservation, Self::Error> {
+        self.operation
+            .control_checkpoint()
             .reserve(self.phase, self.dimension, bytes)
             .map_err(Self::store_error)
     }
 
-    fn validate_reservation(
-        &mut self,
-        reservation: &Self::Reservation,
-        kind: SceneReservationKind,
-    ) -> Result<(), Self::Error> {
-        Self::require_scratch(kind)?;
-        self.checkpoint
+    fn validate_scratch(&mut self, reservation: &Self::Reservation) -> Result<(), Self::Error> {
+        self.operation
+            .control_checkpoint()
             .validate_live_owner(reservation)
             .map_err(Self::store_error)
     }
 
-    fn resize_reservation(
+    fn resize_scratch(
         &mut self,
         reservation: &mut Self::Reservation,
-        kind: SceneReservationKind,
         required_bytes: u64,
     ) -> Result<(), Self::Error> {
-        Self::require_scratch(kind)?;
-        self.checkpoint
+        self.operation
+            .control_checkpoint()
             .resize(reservation, required_bytes)
             .map_err(Self::store_error)
     }
+}
 
-    fn transition_reservation(
+impl<'session, 'borrow, 'scope, O, PP, U> CanonicalAuthoringControl
+    for ScopedAuthoringControl<'session, 'borrow, 'scope, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    type Error = StoreRuntimeError;
+    type Reservation = CanonicalReservation<'scope, O>;
+
+    fn poll(&mut self) -> Result<(), Self::Error> {
+        self.session.poll_if_due()
+    }
+
+    fn run_unit<R>(
         &mut self,
-        _reservation: &mut Self::Reservation,
-        from: SceneReservationKind,
-        to: SceneReservationKind,
-        _required_bytes: u64,
+        _work: SceneValidationWork,
+        action: impl FnOnce() -> R,
+    ) -> Result<R, Self::Error> {
+        self.session.run_unit(action)
+    }
+
+    fn reserve_scratch(&mut self, bytes: u64) -> Result<Self::Reservation, Self::Error> {
+        self.session.reserve(bytes)
+    }
+
+    fn validate_scratch(&mut self, reservation: &Self::Reservation) -> Result<(), Self::Error> {
+        self.session.validate_live_owner(reservation)
+    }
+
+    fn resize_scratch(
+        &mut self,
+        reservation: &mut Self::Reservation,
+        required_bytes: u64,
     ) -> Result<(), Self::Error> {
-        Err(OperationAuthoringControlError::UnsupportedReservationTransition { from, to })
+        self.session.resize(reservation, required_bytes)
     }
 }

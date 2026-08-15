@@ -247,9 +247,8 @@ impl SceneConstructionOperation {
     > {
         let keys = self.keys;
         let spatial_validation = {
-            let checkpoint = self.raw.control_checkpoint();
             let mut control =
-                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
             validate_spatial_batch(input.spatial(), input.nodes(), limits, &mut control)
         };
         let spatial = match spatial_validation {
@@ -272,9 +271,8 @@ impl SceneConstructionOperation {
             }
         };
         let validation = {
-            let checkpoint = self.raw.control_checkpoint();
             let mut control =
-                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
             validate_node_batch(input.nodes(), node_limits, &mut control)
         };
         let nodes = match validation {
@@ -299,9 +297,8 @@ impl SceneConstructionOperation {
             }
         };
         let appearance_validation = {
-            let checkpoint = self.raw.control_checkpoint();
             let mut control =
-                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
             validate_appearance_batch(input.appearance(), appearance_limits, &mut control)
         };
         let appearance = match appearance_validation {
@@ -329,9 +326,8 @@ impl SceneConstructionOperation {
             }
         };
         let geometry_validation = {
-            let checkpoint = self.raw.control_checkpoint();
             let mut control =
-                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
             validate_geometry_batch(
                 input.geometry(),
                 input.nodes().nodes().len(),
@@ -367,9 +363,8 @@ impl SceneConstructionOperation {
             }
         };
         let deformation_validation = {
-            let checkpoint = self.raw.control_checkpoint();
             let mut control =
-                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
             validate_deformation_batch(
                 input.deformation(),
                 &nodes,
@@ -407,9 +402,8 @@ impl SceneConstructionOperation {
                 }
             };
         let animation_validation = {
-            let checkpoint = self.raw.control_checkpoint();
             let mut control =
-                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
             let targets = AnimationTargetCatalog::new(&nodes, &deformation);
             validate_animation_batch(input.animations(), &targets, animation_limits, &mut control)
         };
@@ -465,9 +459,8 @@ impl SceneConstructionOperation {
             }
         };
         let profile_validation = {
-            let checkpoint = self.raw.control_checkpoint();
             let mut control =
-                OperationAuthoringControl::new(checkpoint, keys.phase, keys.dimension);
+                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
             validate_profile_batch(input.profile(), owners, profile_limits, &mut control)
         };
         let profile = match profile_validation {

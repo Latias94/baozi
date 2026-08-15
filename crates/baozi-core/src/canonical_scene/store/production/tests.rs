@@ -7,18 +7,17 @@ use thiserror::Error;
 use crate::entity::{AuthoredTransform, AuthoredTransformKind};
 use crate::math::Mat4;
 use crate::provenance::{ResourceIdentity, SourceObjectKind, SourceObjectLocator};
-use crate::{
-    FormatId, SceneReservationKind, SceneValidationControl, SceneValidationLimits,
-    SceneValidationWork,
-};
+use crate::{FormatId, SceneValidationLimits, SceneValidationWork};
 
 use super::plan::{
     NodeAuthoringLimit, NodeAuthoringSemanticError, validate_node_batch_with_control,
 };
 use super::*;
 
+mod appearance;
 mod geometry;
 mod profile;
+mod relation_limits;
 mod scene;
 mod spatial;
 
@@ -182,15 +181,12 @@ enum TestControlError {
     WorkRejected,
     #[error("test control rejected reservation resize")]
     ResizeRejected,
-    #[error("test reservation kind mismatch")]
-    ReservationKind,
 }
 
 struct TestReservation {
     live: Rc<Cell<usize>>,
     current_bytes: Rc<Cell<u64>>,
     drop_stage: Option<Rc<Cell<u8>>>,
-    kind: SceneReservationKind,
     bytes: u64,
 }
 
@@ -222,6 +218,8 @@ struct TestControl {
     peak_bytes: Rc<Cell<u64>>,
     polls: u64,
     work: u64,
+    traversal_work: u64,
+    last_work: Option<SceneValidationWork>,
     reserves: u64,
     resizes: u64,
     cancel_on_poll: Option<u64>,
@@ -235,13 +233,21 @@ impl TestControl {
         self.peak_bytes.get()
     }
 
+    fn traversal_work(&self) -> u64 {
+        self.traversal_work
+    }
+
+    fn last_work(&self) -> Option<SceneValidationWork> {
+        self.last_work
+    }
+
     fn update_peak_bytes(&self) {
         self.peak_bytes
             .set(self.peak_bytes.get().max(self.current_bytes.get()));
     }
 }
 
-impl SceneValidationControl for TestControl {
+impl CanonicalAuthoringControl for TestControl {
     type Error = TestControlError;
     type Reservation = TestReservation;
 
@@ -254,23 +260,28 @@ impl SceneValidationControl for TestControl {
         }
     }
 
-    fn charge_work(&mut self, _work: SceneValidationWork, amount: u64) -> Result<(), Self::Error> {
-        let final_work = self.work.saturating_add(amount);
+    fn run_unit<R>(
+        &mut self,
+        work: SceneValidationWork,
+        action: impl FnOnce() -> R,
+    ) -> Result<R, Self::Error> {
+        let final_work = self.work.saturating_add(1);
         if self
             .reject_work_after
             .is_some_and(|maximum| final_work > maximum)
         {
             return Err(TestControlError::WorkRejected);
         }
+        let result = action();
         self.work = final_work;
-        Ok(())
+        self.last_work = Some(work);
+        if matches!(work, SceneValidationWork::Traversal) {
+            self.traversal_work = self.traversal_work.saturating_add(1);
+        }
+        Ok(result)
     }
 
-    fn reserve(
-        &mut self,
-        kind: SceneReservationKind,
-        bytes: u64,
-    ) -> Result<Self::Reservation, Self::Error> {
+    fn reserve_scratch(&mut self, bytes: u64) -> Result<Self::Reservation, Self::Error> {
         self.reserves += 1;
         self.live.set(self.live.get() + 1);
         self.current_bytes.set(
@@ -284,32 +295,19 @@ impl SceneValidationControl for TestControl {
             live: Rc::clone(&self.live),
             current_bytes: Rc::clone(&self.current_bytes),
             drop_stage: self.reservation_drop_stage.as_ref().map(Rc::clone),
-            kind,
             bytes,
         })
     }
 
-    fn validate_reservation(
-        &mut self,
-        reservation: &Self::Reservation,
-        kind: SceneReservationKind,
-    ) -> Result<(), Self::Error> {
-        if reservation.kind == kind {
-            Ok(())
-        } else {
-            Err(TestControlError::ReservationKind)
-        }
+    fn validate_scratch(&mut self, _reservation: &Self::Reservation) -> Result<(), Self::Error> {
+        Ok(())
     }
 
-    fn resize_reservation(
+    fn resize_scratch(
         &mut self,
         reservation: &mut Self::Reservation,
-        kind: SceneReservationKind,
         required_bytes: u64,
     ) -> Result<(), Self::Error> {
-        if reservation.kind != kind {
-            return Err(TestControlError::ReservationKind);
-        }
         self.resizes += 1;
         if self.reject_resize_on == Some(self.resizes) {
             return Err(TestControlError::ResizeRejected);
@@ -324,32 +322,6 @@ impl SceneValidationControl for TestControl {
                 .checked_add(required_bytes)
                 .expect("test reservation resize bytes must be representable"),
         );
-        reservation.bytes = required_bytes;
-        self.update_peak_bytes();
-        Ok(())
-    }
-
-    fn transition_reservation(
-        &mut self,
-        reservation: &mut Self::Reservation,
-        from: SceneReservationKind,
-        to: SceneReservationKind,
-        required_bytes: u64,
-    ) -> Result<(), Self::Error> {
-        if reservation.kind != from {
-            return Err(TestControlError::ReservationKind);
-        }
-        let without_reservation = self
-            .current_bytes
-            .get()
-            .checked_sub(reservation.bytes)
-            .expect("test reservation transition must retain its prior bytes");
-        self.current_bytes.set(
-            without_reservation
-                .checked_add(required_bytes)
-                .expect("test reservation transition bytes must be representable"),
-        );
-        reservation.kind = to;
         reservation.bytes = required_bytes;
         self.update_peak_bytes();
         Ok(())
@@ -597,6 +569,7 @@ fn present_empty_is_valid_and_absent_is_not() {
         )),
         NodeAuthoringSemanticError::RootsAbsent
     ));
+    assert_eq!(control.last_work(), Some(SceneValidationWork::GraphNode));
 }
 
 #[test]

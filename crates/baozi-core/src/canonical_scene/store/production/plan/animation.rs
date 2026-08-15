@@ -15,12 +15,11 @@ use thiserror::Error;
 
 use crate::entity::AuthoredTransformKind;
 use crate::math::Quat;
-use crate::{
-    SCENE_VALIDATION_POLL_INTERVAL, SceneReservationKind, SceneValidationControl,
-    SceneValidationLimits, SceneValidationWork,
-};
+use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
-use super::super::control::{OperationAuthoringControl, OperationAuthoringControlError};
+use super::super::control::{
+    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
+};
 use super::super::input::animation::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
     AnimationExtrapolationAuthoring, AnimationInterpolationAuthoring, AnimationTargetAuthoring,
@@ -602,9 +601,9 @@ struct AnimationValidationStorage<R> {
 }
 
 type AnimationValidationResult<T, C> =
-    Result<T, AnimationAuthoringFailure<<C as SceneValidationControl>::Error>>;
+    Result<T, AnimationAuthoringFailure<<C as CanonicalAuthoringControl>::Error>>;
 
-struct AnimationValidationContext<'control, C: SceneValidationControl> {
+struct AnimationValidationContext<'control, C: CanonicalAuthoringControl> {
     control: &'control mut C,
     limits: SceneValidationLimits,
     work: u64,
@@ -619,7 +618,7 @@ struct AnimationValidationContext<'control, C: SceneValidationControl> {
     canonical_bytes: u64,
 }
 
-impl<'control, C: SceneValidationControl> AnimationValidationContext<'control, C> {
+impl<'control, C: CanonicalAuthoringControl> AnimationValidationContext<'control, C> {
     const fn new(limits: SceneValidationLimits, control: &'control mut C) -> Self {
         Self {
             control,
@@ -649,8 +648,12 @@ impl<'control, C: SceneValidationControl> AnimationValidationContext<'control, C
         self.poll_now()
     }
 
-    fn work(&mut self, kind: SceneValidationWork, amount: u64) -> AnimationValidationResult<(), C> {
-        let final_work = self.work.checked_add(amount).ok_or(
+    fn run_unit<R>(
+        &mut self,
+        kind: SceneValidationWork,
+        action: impl FnOnce() -> R,
+    ) -> AnimationValidationResult<R, C> {
+        let final_work = self.work.checked_add(1).ok_or(
             AnimationAuthoringSemanticError::AccountingOverflow {
                 dimension: "validation work",
             },
@@ -661,51 +664,64 @@ impl<'control, C: SceneValidationControl> AnimationValidationContext<'control, C
             self.limits.max_work(),
         )?;
 
-        let mut remaining = amount;
-        while remaining > 0 {
-            let until_poll = SCENE_VALIDATION_POLL_INTERVAL - self.work_since_poll;
-            let chunk = remaining.min(until_poll);
-            self.control
-                .charge_work(kind, chunk)
-                .map_err(AnimationAuthoringFailure::Control)?;
-            self.work = self.work.checked_add(chunk).ok_or(
-                AnimationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "validation work",
-                },
-            )?;
-            self.work_since_poll += chunk;
-            remaining -= chunk;
-            if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
-                self.poll_now()?;
-            }
+        let result = self
+            .control
+            .run_unit(kind, action)
+            .map_err(AnimationAuthoringFailure::Control)?;
+        self.work = final_work;
+        self.work_since_poll += 1;
+        if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
+            self.poll_now()?;
         }
-        Ok(())
+        Ok(result)
+    }
+
+    fn run_semantic_unit<T>(
+        &mut self,
+        kind: SceneValidationWork,
+        action: impl FnOnce() -> Result<T, AnimationAuthoringSemanticError>,
+    ) -> AnimationValidationResult<T, C> {
+        self.run_unit(kind, action)?
+            .map_err(AnimationAuthoringFailure::Semantic)
     }
 
     fn add_relation(&mut self) -> AnimationValidationResult<(), C> {
-        let final_edges = self
-            .edges
-            .checked_add(1)
-            .ok_or(AnimationAuthoringSemanticError::AccountingOverflow { dimension: "edges" })?;
-        let final_references = self.references.checked_add(1).ok_or(
-            AnimationAuthoringSemanticError::AccountingOverflow {
-                dimension: "references",
-            },
-        )?;
-        enforce_limit::<C::Error>(
-            AnimationAuthoringLimit::Edges,
-            final_edges,
-            self.limits.max_edges(),
-        )?;
-        enforce_limit::<C::Error>(
-            AnimationAuthoringLimit::References,
-            final_references,
-            self.limits.max_references(),
-        )?;
+        let current_edges = self.edges;
+        let max_edges = self.limits.max_edges();
+        let final_edges = self.run_semantic_unit(SceneValidationWork::GraphEdge, || {
+            let final_edges = current_edges.checked_add(1).ok_or(
+                AnimationAuthoringSemanticError::AccountingOverflow { dimension: "edges" },
+            )?;
+            if final_edges > max_edges {
+                return Err(AnimationAuthoringSemanticError::LimitExceeded {
+                    limit: AnimationAuthoringLimit::Edges,
+                    actual: final_edges,
+                    maximum: max_edges,
+                });
+            }
+            Ok(final_edges)
+        })?;
         self.edges = final_edges;
+
+        let current_references = self.references;
+        let max_references = self.limits.max_references();
+        let final_references = self.run_semantic_unit(SceneValidationWork::Reference, || {
+            let final_references = current_references.checked_add(1).ok_or(
+                AnimationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "references",
+                },
+            )?;
+            if final_references > max_references {
+                return Err(AnimationAuthoringSemanticError::LimitExceeded {
+                    limit: AnimationAuthoringLimit::References,
+                    actual: final_references,
+                    maximum: max_references,
+                });
+            }
+            Ok(final_references)
+        })?;
         self.references = final_references;
-        self.work(SceneValidationWork::GraphEdge, 1)?;
-        self.work(SceneValidationWork::Reference, 1)
+        Ok(())
     }
 
     fn set_structural_bytes(&mut self, bytes: u64) -> AnimationValidationResult<(), C> {
@@ -803,10 +819,10 @@ impl<'control, C: SceneValidationControl> AnimationValidationContext<'control, C
         )?;
         let reservation = self
             .control
-            .reserve(SceneReservationKind::ValidationScratch, bytes)
+            .reserve_scratch(bytes)
             .map_err(AnimationAuthoringFailure::Control)?;
         self.control
-            .validate_reservation(&reservation, SceneReservationKind::ValidationScratch)
+            .validate_scratch(&reservation)
             .map_err(AnimationAuthoringFailure::Control)?;
         Ok(reservation)
     }
@@ -822,7 +838,7 @@ impl<'control, C: SceneValidationControl> AnimationValidationContext<'control, C
             self.limits.max_scratch_bytes(),
         )?;
         self.control
-            .resize_reservation(reservation, SceneReservationKind::ValidationScratch, bytes)
+            .resize_scratch(reservation, bytes)
             .map_err(AnimationAuthoringFailure::Control)
     }
 
@@ -917,7 +933,7 @@ pub(in crate::canonical_scene::store) fn validate_animation_batch_with_control<'
     control: &mut C,
 ) -> Result<ValidatedAnimationBatch<'input, C::Reservation>, AnimationAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     validate_animation_batch_inner(input, targets, limits, control)
 }
@@ -929,7 +945,7 @@ fn validate_animation_batch_inner<'input, NR, DR, C>(
     control: &mut C,
 ) -> Result<ValidatedAnimationBatch<'input, C::Reservation>, AnimationAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let mut context = AnimationValidationContext::new(limits, control);
     context.poll_now()?;
@@ -963,10 +979,6 @@ where
     )?;
     let seen_target_plan = context
         .scratch_plan::<SeenAnimationTarget>(seen_target_count, "animation seen-target index")?;
-    context.work(
-        SceneValidationWork::Traversal,
-        usize_to_u64(seen_target_count, "animation seen-target initialization")?,
-    )?;
     let scratch_envelope = checked_sum_bytes(
         [
             scratch_envelope(clip_plan, "validated animation clip plans")?,
@@ -983,7 +995,9 @@ where
     let (mut seen_targets, seen_target_bytes) =
         context.allocate_scratch(seen_target_plan, "animation seen-target index")?;
     for _ in 0..seen_target_count {
-        seen_targets.push(SeenAnimationTarget::UNUSED);
+        context.run_unit(SceneValidationWork::Traversal, || {
+            seen_targets.push(SeenAnimationTarget::UNUSED);
+        })?;
     }
     let scratch_actual = checked_sum_bytes(
         [clip_plan_bytes, channel_plan_bytes, seen_target_bytes],
@@ -999,48 +1013,59 @@ where
 
     let mut expected_channel_offset = 0_u32;
     for (clip_index, clip) in input.clips().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
-        validate_clip_header(clip_index, clip)?;
+        let (channel_range, range) =
+            context.run_semantic_unit(SceneValidationWork::Entity, || {
+                validate_clip_header(clip_index, clip)?;
+                let channel_range = clip.channels();
+                if channel_range.offset() != expected_channel_offset {
+                    return Err(AnimationAuthoringSemanticError::ClipChannelRangeOrder {
+                        clip: clip_index,
+                        expected: expected_channel_offset,
+                        actual: channel_range.offset(),
+                    });
+                }
+                let range = checked_range(channel_range, input.channels().len()).map_err(|_| {
+                    AnimationAuthoringSemanticError::ClipChannelRangeOutOfBounds {
+                        clip: clip_index,
+                        channel_count: input.channels().len(),
+                    }
+                })?;
+                Ok((channel_range, range))
+            })?;
         if animation_rate_present(clip.time_domain()) {
             context.add_structural_bytes(LOGICAL_F64_BYTES - LOGICAL_U8_BYTES)?;
         }
-        let channel_range = clip.channels();
         if channel_range.count() != 0 {
             context.add_structural_bytes(LOGICAL_REFERENCE_BYTES - LOGICAL_U8_BYTES)?;
         }
-        if channel_range.offset() != expected_channel_offset {
-            return Err(AnimationAuthoringSemanticError::ClipChannelRangeOrder {
-                clip: clip_index,
-                expected: expected_channel_offset,
-                actual: channel_range.offset(),
-            }
-            .into());
-        }
-        let range = checked_range(channel_range, input.channels().len()).map_err(|_| {
-            AnimationAuthoringSemanticError::ClipChannelRangeOutOfBounds {
-                clip: clip_index,
-                channel_count: input.channels().len(),
-            }
-        })?;
         let first_channel = range.start;
         for channel_index in range.clone() {
-            context.work(SceneValidationWork::Entity, 1)?;
-            let channel = *input.channels().get(channel_index).ok_or(
-                AnimationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "animation channel lookup",
-                },
-            )?;
-            let target = validate_target(
-                clip_index,
-                channel_index - first_channel,
-                channel.target(),
-                targets,
-            )?;
+            let (channel, header) =
+                context.run_semantic_unit(SceneValidationWork::Entity, || {
+                    let channel = *input.channels().get(channel_index).ok_or(
+                        AnimationAuthoringSemanticError::AccountingOverflow {
+                            dimension: "animation channel lookup",
+                        },
+                    )?;
+                    let target = validate_target(
+                        clip_index,
+                        channel_index - first_channel,
+                        channel.target(),
+                        targets,
+                    )?;
+                    let header = validate_channel_header(
+                        clip_index,
+                        channel_index - first_channel,
+                        channel,
+                        target,
+                    )?;
+                    Ok((channel, header))
+                })?;
             validate_unique_target(
                 clip_index,
                 channel_index - first_channel,
                 channel.target(),
-                target.seen_index,
+                header.target.seen_index,
                 &mut storage.seen_targets,
                 &mut context,
             )?;
@@ -1051,7 +1076,7 @@ where
                 channel_index - first_channel,
                 channel_index,
                 channel,
-                target,
+                header,
                 &mut context,
             )?;
             storage.channel_plans.push(plan);
@@ -1070,14 +1095,22 @@ where
             channels: channel_range,
         });
     }
-    if expected_channel_offset != channel_count {
-        let unowned = usize::try_from(channel_count - expected_channel_offset).map_err(|_| {
+    context.run_semantic_unit(SceneValidationWork::Traversal, || {
+        if expected_channel_offset == channel_count {
+            return Ok(());
+        }
+        let unowned = channel_count.checked_sub(expected_channel_offset).ok_or(
+            AnimationAuthoringSemanticError::AccountingOverflow {
+                dimension: "unowned animation channels",
+            },
+        )?;
+        let unowned = usize::try_from(unowned).map_err(|_| {
             AnimationAuthoringSemanticError::AccountingOverflow {
                 dimension: "unowned animation channels",
             }
         })?;
-        return Err(AnimationAuthoringSemanticError::UnownedChannels { unowned }.into());
-    }
+        Err(AnimationAuthoringSemanticError::UnownedChannels { unowned })
+    })?;
 
     let payload_block_count = [
         context.time_scalars,
@@ -1168,7 +1201,7 @@ const fn animation_rate_present(domain: AnimationTimeDomainAuthoring) -> bool {
     )
 }
 
-fn validate_unique_target<C: SceneValidationControl>(
+fn validate_unique_target<C: CanonicalAuthoringControl>(
     clip: usize,
     channel: usize,
     target: AnimationTargetAuthoring,
@@ -1176,39 +1209,40 @@ fn validate_unique_target<C: SceneValidationControl>(
     seen_targets: &mut [SeenAnimationTarget],
     context: &mut AnimationValidationContext<'_, C>,
 ) -> AnimationValidationResult<(), C> {
-    context.work(SceneValidationWork::Traversal, 1)?;
-    let entry = seen_targets.get_mut(seen_index).ok_or(
-        AnimationAuthoringSemanticError::AccountingOverflow {
-            dimension: "animation seen-target lookup",
-        },
-    )?;
-    let clip_u32 =
-        u32::try_from(clip).map_err(|_| AnimationAuthoringSemanticError::AccountingOverflow {
-            dimension: "animation clip identity",
+    context.run_semantic_unit(SceneValidationWork::Traversal, || {
+        let entry = seen_targets.get_mut(seen_index).ok_or(
+            AnimationAuthoringSemanticError::AccountingOverflow {
+                dimension: "animation seen-target lookup",
+            },
+        )?;
+        let clip_u32 = u32::try_from(clip).map_err(|_| {
+            AnimationAuthoringSemanticError::AccountingOverflow {
+                dimension: "animation clip identity",
+            }
         })?;
-    let channel_u32 = u32::try_from(channel).map_err(|_| {
-        AnimationAuthoringSemanticError::AccountingOverflow {
-            dimension: "animation channel identity",
+        let channel_u32 = u32::try_from(channel).map_err(|_| {
+            AnimationAuthoringSemanticError::AccountingOverflow {
+                dimension: "animation channel identity",
+            }
+        })?;
+        if entry.clip == clip_u32 {
+            return Err(AnimationAuthoringSemanticError::DuplicateTarget {
+                clip,
+                target,
+                first_channel: usize::try_from(entry.channel).map_err(|_| {
+                    AnimationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "first duplicate animation channel",
+                    }
+                })?,
+                duplicate_channel: channel,
+            });
         }
-    })?;
-    if entry.clip == clip_u32 {
-        return Err(AnimationAuthoringSemanticError::DuplicateTarget {
-            clip,
-            target,
-            first_channel: usize::try_from(entry.channel).map_err(|_| {
-                AnimationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "first duplicate animation channel",
-                }
-            })?,
-            duplicate_channel: channel,
-        }
-        .into());
-    }
-    *entry = SeenAnimationTarget {
-        clip: clip_u32,
-        channel: channel_u32,
-    };
-    Ok(())
+        *entry = SeenAnimationTarget {
+            clip: clip_u32,
+            channel: channel_u32,
+        };
+        Ok(())
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -1216,6 +1250,15 @@ struct ValidatedAnimationTarget {
     canonical_index: u32,
     value_width: u32,
     seen_index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ValidatedAnimationChannelHeader<'input> {
+    target: ValidatedAnimationTarget,
+    time_count: u32,
+    value_count: u32,
+    in_tangents: Presence<(&'input [f32], u32)>,
+    out_tangents: Presence<(&'input [f32], u32)>,
 }
 
 fn validate_target<NR, DR>(
@@ -1333,46 +1376,19 @@ fn validate_node_target<NR, DR>(
     })
 }
 
-fn validate_channel<C: SceneValidationControl>(
+fn validate_channel_header<'input>(
     clip: usize,
     channel: usize,
-    input_index: usize,
-    input: AnimationChannelAuthoring<'_>,
+    input: AnimationChannelAuthoring<'input>,
     target: ValidatedAnimationTarget,
-    context: &mut AnimationValidationContext<'_, C>,
-) -> AnimationValidationResult<ValidatedAnimationChannelPlan, C> {
-    let value_width = target.value_width;
+) -> Result<ValidatedAnimationChannelHeader<'input>, AnimationAuthoringSemanticError> {
     let times = input.times();
     if times.is_empty() {
-        return Err(AnimationAuthoringSemanticError::EmptyChannel { clip, channel }.into());
+        return Err(AnimationAuthoringSemanticError::EmptyChannel { clip, channel });
     }
     let time_count = collection_count(times.len(), "animation key times")?;
-    let time_offset = scalar_offset(context.time_scalars, "animation time offset")?;
-    context.add_payload(AnimationPayloadPart::Times, u64::from(time_count))?;
-    let mut previous = None;
-    for (key, &time) in times.iter().enumerate() {
-        context.work(SceneValidationWork::PayloadCell, 1)?;
-        if !time.is_finite() {
-            return Err(
-                AnimationAuthoringSemanticError::NonFiniteTime { clip, channel, key }.into(),
-            );
-        }
-        if previous.is_some_and(|previous_time| previous_time >= time) {
-            return Err(
-                AnimationAuthoringSemanticError::TimesNotStrictlyIncreasing {
-                    clip,
-                    channel,
-                    previous_key: key - 1,
-                    key,
-                }
-                .into(),
-            );
-        }
-        previous = Some(time);
-    }
-
     let expected_scalars = u64::from(time_count)
-        .checked_mul(u64::from(value_width))
+        .checked_mul(u64::from(target.value_width))
         .ok_or(AnimationAuthoringSemanticError::AccountingOverflow {
             dimension: "animation sample scalar count",
         })?;
@@ -1382,10 +1398,118 @@ fn validate_channel<C: SceneValidationControl>(
             channel,
             expected: expected_scalars,
             actual: input.values().len(),
-        }
-        .into());
+        });
     }
     let value_count = collection_count(input.values().len(), "animation value scalars")?;
+    let in_tangents = validate_tangent_header(
+        clip,
+        channel,
+        AnimationSamplePart::InTangents,
+        input.interpolation(),
+        input.in_tangents(),
+        expected_scalars,
+    )?;
+    let out_tangents = validate_tangent_header(
+        clip,
+        channel,
+        AnimationSamplePart::OutTangents,
+        input.interpolation(),
+        input.out_tangents(),
+        expected_scalars,
+    )?;
+    Ok(ValidatedAnimationChannelHeader {
+        target,
+        time_count,
+        value_count,
+        in_tangents,
+        out_tangents,
+    })
+}
+
+fn validate_tangent_header(
+    clip: usize,
+    channel: usize,
+    part: AnimationSamplePart,
+    interpolation: AnimationInterpolationAuthoring,
+    payload: Presence<&[f32]>,
+    expected_scalars: u64,
+) -> Result<Presence<(&[f32], u32)>, AnimationAuthoringSemanticError> {
+    match (interpolation, payload) {
+        (AnimationInterpolationAuthoring::CubicSpline, Presence::Absent) => {
+            Err(AnimationAuthoringSemanticError::MissingTangents {
+                clip,
+                channel,
+                part,
+            })
+        }
+        (
+            AnimationInterpolationAuthoring::Step | AnimationInterpolationAuthoring::Linear,
+            Presence::Present(_),
+        ) => Err(AnimationAuthoringSemanticError::UnexpectedTangents {
+            clip,
+            channel,
+            part,
+        }),
+        (
+            AnimationInterpolationAuthoring::Step | AnimationInterpolationAuthoring::Linear,
+            Presence::Absent,
+        ) => Ok(Presence::Absent),
+        (AnimationInterpolationAuthoring::CubicSpline, Presence::Present(values)) => {
+            if usize_to_u64(values.len(), "animation tangent scalar count")? != expected_scalars {
+                return Err(AnimationAuthoringSemanticError::TangentShape {
+                    clip,
+                    channel,
+                    part,
+                    expected: expected_scalars,
+                    actual: values.len(),
+                });
+            }
+            let count = collection_count(values.len(), "animation tangent scalars")?;
+            Ok(Presence::Present((values, count)))
+        }
+    }
+}
+
+fn validate_channel<'input, C: CanonicalAuthoringControl>(
+    clip: usize,
+    channel: usize,
+    input_index: usize,
+    input: AnimationChannelAuthoring<'input>,
+    header: ValidatedAnimationChannelHeader<'input>,
+    context: &mut AnimationValidationContext<'_, C>,
+) -> AnimationValidationResult<ValidatedAnimationChannelPlan, C> {
+    let ValidatedAnimationChannelHeader {
+        target,
+        time_count,
+        value_count,
+        in_tangents,
+        out_tangents,
+    } = header;
+    let value_width = target.value_width;
+    let times = input.times();
+    let time_offset = scalar_offset(context.time_scalars, "animation time offset")?;
+    context.add_payload(AnimationPayloadPart::Times, u64::from(time_count))?;
+    let mut previous = None;
+    for (key, &time) in times.iter().enumerate() {
+        context.run_semantic_unit(SceneValidationWork::PayloadCell, || {
+            if !time.is_finite() {
+                return Err(AnimationAuthoringSemanticError::NonFiniteTime { clip, channel, key });
+            }
+            if previous.is_some_and(|previous_time| previous_time >= time) {
+                return Err(
+                    AnimationAuthoringSemanticError::TimesNotStrictlyIncreasing {
+                        clip,
+                        channel,
+                        previous_key: key - 1,
+                        key,
+                    },
+                );
+            }
+            Ok(())
+        })?;
+        previous = Some(time);
+    }
+
     let value_offset = scalar_offset(context.value_scalars, "animation value offset")?;
     context.add_payload(AnimationPayloadPart::Values, u64::from(value_count))?;
     validate_f32_samples(
@@ -1404,10 +1528,8 @@ fn validate_channel<C: SceneValidationControl>(
         clip,
         channel,
         AnimationSamplePart::InTangents,
-        input.interpolation(),
-        input.in_tangents(),
+        in_tangents,
         value_width,
-        expected_scalars,
         AnimationPayloadPart::InTangents,
         context,
     )?;
@@ -1415,10 +1537,8 @@ fn validate_channel<C: SceneValidationControl>(
         clip,
         channel,
         AnimationSamplePart::OutTangents,
-        input.interpolation(),
-        input.out_tangents(),
+        out_tangents,
         value_width,
-        expected_scalars,
         AnimationPayloadPart::OutTangents,
         context,
     )?;
@@ -1445,51 +1565,18 @@ fn validate_channel<C: SceneValidationControl>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_tangent_part<C: SceneValidationControl>(
+fn validate_tangent_part<C: CanonicalAuthoringControl>(
     clip: usize,
     channel: usize,
     part: AnimationSamplePart,
-    interpolation: AnimationInterpolationAuthoring,
-    payload: Presence<&[f32]>,
+    payload: Presence<(&[f32], u32)>,
     value_width: u32,
-    expected_scalars: u64,
     payload_part: AnimationPayloadPart,
     context: &mut AnimationValidationContext<'_, C>,
 ) -> AnimationValidationResult<(Presence<u32>, u32), C> {
-    match (interpolation, payload) {
-        (AnimationInterpolationAuthoring::CubicSpline, Presence::Absent) => {
-            Err(AnimationAuthoringSemanticError::MissingTangents {
-                clip,
-                channel,
-                part,
-            }
-            .into())
-        }
-        (
-            AnimationInterpolationAuthoring::Step | AnimationInterpolationAuthoring::Linear,
-            Presence::Present(_),
-        ) => Err(AnimationAuthoringSemanticError::UnexpectedTangents {
-            clip,
-            channel,
-            part,
-        }
-        .into()),
-        (
-            AnimationInterpolationAuthoring::Step | AnimationInterpolationAuthoring::Linear,
-            Presence::Absent,
-        ) => Ok((Presence::Absent, 0)),
-        (AnimationInterpolationAuthoring::CubicSpline, Presence::Present(values)) => {
-            if usize_to_u64(values.len(), "animation tangent scalar count")? != expected_scalars {
-                return Err(AnimationAuthoringSemanticError::TangentShape {
-                    clip,
-                    channel,
-                    part,
-                    expected: expected_scalars,
-                    actual: values.len(),
-                }
-                .into());
-            }
-            let count = collection_count(values.len(), "animation tangent scalars")?;
+    match payload {
+        Presence::Absent => Ok((Presence::Absent, 0)),
+        Presence::Present((values, count)) => {
             let current = match payload_part {
                 AnimationPayloadPart::InTangents => context.in_tangent_scalars,
                 AnimationPayloadPart::OutTangents => context.out_tangent_scalars,
@@ -1508,7 +1595,7 @@ fn validate_tangent_part<C: SceneValidationControl>(
     }
 }
 
-fn validate_f32_samples<C: SceneValidationControl>(
+fn validate_f32_samples<C: CanonicalAuthoringControl>(
     clip: usize,
     channel: usize,
     part: AnimationSamplePart,
@@ -1522,38 +1609,43 @@ fn validate_f32_samples<C: SceneValidationControl>(
         }
     })?;
     for (scalar, value) in values.iter().enumerate() {
-        context.work(SceneValidationWork::PayloadCell, 1)?;
-        if !value.is_finite() {
-            return Err(AnimationAuthoringSemanticError::NonFiniteSample {
-                clip,
-                channel,
-                part,
-                sample: scalar / width,
-                component: scalar % width,
+        context.run_semantic_unit(SceneValidationWork::PayloadCell, || {
+            if value.is_finite() {
+                Ok(())
+            } else {
+                Err(AnimationAuthoringSemanticError::NonFiniteSample {
+                    clip,
+                    channel,
+                    part,
+                    sample: scalar / width,
+                    component: scalar % width,
+                })
             }
-            .into());
-        }
+        })?;
     }
     Ok(())
 }
 
-fn validate_rotation_values<C: SceneValidationControl>(
+fn validate_rotation_values<C: CanonicalAuthoringControl>(
     clip: usize,
     channel: usize,
     values: &[f32],
     context: &mut AnimationValidationContext<'_, C>,
 ) -> AnimationValidationResult<(), C> {
     for (sample, components) in values.chunks_exact(4).enumerate() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let rotation = Quat::from_xyzw(components[0], components[1], components[2], components[3]);
-        if !rotation.is_unit() {
-            return Err(AnimationAuthoringSemanticError::NonUnitQuaternion {
-                clip,
-                channel,
-                sample,
+        context.run_semantic_unit(SceneValidationWork::Traversal, || {
+            let rotation =
+                Quat::from_xyzw(components[0], components[1], components[2], components[3]);
+            if rotation.is_unit() {
+                Ok(())
+            } else {
+                Err(AnimationAuthoringSemanticError::NonUnitQuaternion {
+                    clip,
+                    channel,
+                    sample,
+                })
             }
-            .into());
-        }
+        })?;
     }
     Ok(())
 }

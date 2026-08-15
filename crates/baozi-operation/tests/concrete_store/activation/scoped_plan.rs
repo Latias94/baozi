@@ -14,6 +14,64 @@ fn semantic_units(units: u64) -> NonZeroU64 {
     NonZeroU64::new(units).expect("semantic work fixtures are nonzero")
 }
 
+fn operation_with_scoped_semantic_limit(
+    account: &PhysicalStorageAccount,
+    semantic_work_limit: u64,
+) -> (TestOperation, TestKeys) {
+    let TestVocabulary { domain, keys } = test_vocabulary();
+    let failure_terminal_work = unbounded_failure_terminal_work(keys);
+    let primary_attempted_limit = failure_terminal_work
+        .ordinary_attempted_work_limit()
+        .checked_sub(semantic_work_limit)
+        .expect("the scoped semantic dimension fits the ordinary attempted budget");
+    let primary_consumed_limit = failure_terminal_work
+        .ordinary_consumed_work_limit()
+        .checked_sub(semantic_work_limit)
+        .expect("the scoped semantic dimension fits the ordinary consumed budget");
+    let primary_policy = DimensionPolicy::reservable_bytes(
+        primary_attempted_limit,
+        primary_consumed_limit,
+        u64::MAX,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(u64::MAX);
+    let semantic_policy = DimensionPolicy::reservable_bytes(
+        semantic_work_limit,
+        semantic_work_limit,
+        u64::MAX,
+        u64::MAX,
+    );
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (keys.dimension, primary_policy),
+            (keys.other_dimension, semantic_policy),
+            (
+                keys.failure_terminal_dimension,
+                failure_terminal_work.requirement().dimension_policy(),
+            ),
+        ],
+    )
+    .expect("scoped semantic ledger limits");
+    let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase])
+        .expect("scoped semantic ledger plan");
+    let start = RetainedStoreStartPlan::new(
+        writer_plan(keys, TEST_TERMINAL_ATTRIBUTION_SLOTS, 8),
+        RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
+        StoreFallbackEnvelope::new(91),
+        keys.dimension,
+        TEST_FALLBACK_OUTCOME_EVIDENCE,
+        keys.dimension,
+        TEST_SNAPSHOT_OUTCOME_EVIDENCE,
+        failure_terminal_work,
+    );
+    (
+        TestOperation::try_start(OperationControl::default(), ledger_plan, account, start)
+            .expect("scoped semantic operation"),
+        keys,
+    )
+}
+
 struct ScratchPlan<'scope> {
     values: Vec<u8>,
     scratch: CanonicalReservation<'scope, TestOwner>,
@@ -901,6 +959,222 @@ fn finish_rejected_preserves_the_exact_partial_semantic_prefix_without_contract_
 }
 
 #[test]
+fn semantic_work_admission_is_atomic_at_exact_one_short_and_zero_capacity() {
+    const REQUESTED_UNITS: u64 = 2;
+
+    for (semantic_work_limit, expected_admitted, expected_attempted, expected_cause) in [
+        (
+            REQUESTED_UNITS,
+            true,
+            REQUESTED_UNITS,
+            StorePreparationFailureClass::Requested,
+        ),
+        (
+            1,
+            false,
+            REQUESTED_UNITS,
+            StorePreparationFailureClass::Ledger,
+        ),
+        (
+            0,
+            false,
+            REQUESTED_UNITS,
+            StorePreparationFailureClass::Ledger,
+        ),
+    ] {
+        let factory = factory(1);
+        let account = account(&factory);
+        let (operation, keys) = operation_with_scoped_semantic_limit(&account, semantic_work_limit);
+        let TestScopedActivation {
+            policy,
+            failure,
+            success: _,
+        } = scoped_activation_shape_with_dimensions(
+            keys,
+            1,
+            1,
+            keys.other_dimension,
+            keys.dimension,
+            keys.dimension,
+            keys.dimension,
+        );
+        let owner = operation
+            .into_scoped_session_outcome_owner(policy, failure)
+            .unwrap();
+        let admitted = Cell::new(false);
+
+        let outcome: ScopedOutcome<PreflightRejection> = owner
+            .plan_and_activate_scoped(|mut planning| {
+                match planning.begin_semantic_work(semantic_units(REQUESTED_UNITS)) {
+                    Ok(semantic) => {
+                        admitted.set(true);
+                        semantic.finish_rejected().unwrap();
+                    }
+                    Err(cause) => {
+                        assert!(matches!(cause, StoreRuntimeError::Ledger(_)));
+                    }
+                }
+                planning.reject(PreflightRejection::Unsupported, 56)
+            })
+            .unwrap();
+
+        assert_eq!(admitted.get(), expected_admitted);
+        let never_activated = match outcome {
+            CanonicalActivationOutcome::NeverActivated(state) => state,
+            CanonicalActivationOutcome::Activated(_)
+            | CanonicalActivationOutcome::Rejected(_)
+            | CanonicalActivationOutcome::Fallback(_) => {
+                panic!("semantic work admission must remain pre-activation")
+            }
+        };
+        let (prepared, _) = never_activated
+            .prepare_minimal_fallback()
+            .unwrap()
+            .into_parts();
+        let published = prepared.handoff();
+        let semantic_work = published
+            .ledger_evidence
+            .dimension(keys.other_dimension)
+            .expect("the isolated semantic dimension remains queryable");
+        assert_eq!(semantic_work.attempted(), expected_attempted);
+        assert_eq!(semantic_work.consumed(), 0);
+        assert_eq!(
+            store_failure_cause(&published.ledger_evidence).class(),
+            expected_cause
+        );
+        drop(published);
+        assert!(!account.snapshot().poisoned());
+    }
+}
+
+#[test]
+fn semantic_domain_rejection_consumes_the_returned_action_unit() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation_with_scoped_semantic_limit(&account, 1);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape_with_dimensions(
+        keys,
+        1,
+        1,
+        keys.other_dimension,
+        keys.dimension,
+        keys.dimension,
+        keys.dimension,
+    );
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+
+    let outcome: ScopedOutcome<PreflightRejection> = owner
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let rejection = semantic
+                .run_unit(|| Err::<(), _>("invalid domain value"))
+                .unwrap();
+            assert_eq!(rejection, Err("invalid domain value"));
+            semantic.finish_rejected().unwrap();
+            planning.reject(PreflightRejection::Unsupported, 57)
+        })
+        .unwrap();
+
+    let never_activated = match outcome {
+        CanonicalActivationOutcome::NeverActivated(state) => state,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("a returned semantic rejection must remain pre-activation")
+        }
+    };
+    let (prepared, _) = never_activated
+        .prepare_minimal_fallback()
+        .unwrap()
+        .into_parts();
+    let published = prepared.handoff();
+    let semantic_work = published
+        .ledger_evidence
+        .dimension(keys.other_dimension)
+        .expect("the rejected semantic action remains queryable");
+    assert_eq!(semantic_work.attempted(), 1);
+    assert_eq!(semantic_work.consumed(), 1);
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::Requested
+    );
+    drop(published);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn caught_semantic_action_panic_preserves_the_exact_completed_prefix() {
+    for completed_prefix in [0_u64, 1] {
+        let factory = factory(1);
+        let account = account(&factory);
+        let (operation, keys) = operation_with_scoped_semantic_limit(&account, 2);
+        let TestScopedActivation {
+            policy,
+            failure,
+            success: _,
+        } = scoped_activation_shape_with_dimensions(
+            keys,
+            1,
+            1,
+            keys.other_dimension,
+            keys.dimension,
+            keys.dimension,
+            keys.dimension,
+        );
+        let owner = operation
+            .into_scoped_session_outcome_owner(policy, failure)
+            .unwrap();
+
+        let outcome: ScopedOutcome<PreflightRejection> = owner
+            .plan_and_activate_scoped(|mut planning| {
+                let mut semantic = planning.begin_semantic_work(semantic_units(2)).unwrap();
+                if completed_prefix == 1 {
+                    semantic.run_unit(|| ()).unwrap();
+                }
+                let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = semantic.run_unit(|| -> () { panic!("caught semantic action panic") });
+                }));
+                assert!(panicked.is_err());
+                semantic.finish_rejected().unwrap();
+                planning.reject(PreflightRejection::Unsupported, 58)
+            })
+            .unwrap();
+
+        let never_activated = match outcome {
+            CanonicalActivationOutcome::NeverActivated(state) => state,
+            CanonicalActivationOutcome::Activated(_)
+            | CanonicalActivationOutcome::Rejected(_)
+            | CanonicalActivationOutcome::Fallback(_) => {
+                panic!("a caught semantic panic must remain pre-activation")
+            }
+        };
+        let (prepared, _) = never_activated
+            .prepare_minimal_fallback()
+            .unwrap()
+            .into_parts();
+        let published = prepared.handoff();
+        let semantic_work = published
+            .ledger_evidence
+            .dimension(keys.other_dimension)
+            .expect("the panicking semantic action remains queryable");
+        assert_eq!(semantic_work.attempted(), 2);
+        assert_eq!(semantic_work.consumed(), completed_prefix);
+        assert_eq!(
+            store_failure_cause(&published.ledger_evidence).class(),
+            StorePreparationFailureClass::Requested
+        );
+        drop(published);
+        assert!(!account.snapshot().poisoned());
+    }
+}
+
+#[test]
 fn semantic_work_polling_is_bounded_at_255_256_and_257_units() {
     assert_eq!(scoped_semantic_case(255, 255, None), (255, 255, 255, false));
     assert_eq!(scoped_semantic_case(256, 256, None), (256, 256, 256, false));
@@ -912,6 +1186,7 @@ fn semantic_work_polling_is_bounded_at_255_256_and_257_units() {
 
 #[test]
 fn cancellation_in_the_last_semantic_action_precedes_requested_rejection() {
+    let baseline = scoped_semantic_baseline();
     let factory = factory(1);
     let account = account(&factory);
     let cancellation = CancellationToken::new();
@@ -953,12 +1228,320 @@ fn cancellation_in_the_last_semantic_action_precedes_requested_rejection() {
         .unwrap()
         .into_parts();
     let published = prepared.handoff();
+    let work = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("the final semantic action remains visible in ledger evidence");
+    assert_eq!(
+        work.attempted()
+            .checked_sub(baseline.0)
+            .expect("semantic attempted work includes the startup baseline"),
+        1
+    );
+    assert_eq!(
+        work.consumed()
+            .checked_sub(baseline.1)
+            .expect("semantic consumed work includes the startup baseline"),
+        1
+    );
     assert_eq!(
         store_failure_cause(&published.ledger_evidence).class(),
         StorePreparationFailureClass::Control
     );
     drop(published);
     assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn due_control_poll_precedes_scratch_reservation_after_the_checkpoint() {
+    let baseline = scoped_semantic_baseline();
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (operation, keys) = operation_with_control(&account, control);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+
+    let outcome: ScopedOutcome<PreflightRejection> = owner
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work(semantic_units(256)).unwrap();
+            for index in 0..256 {
+                semantic
+                    .run_unit(|| {
+                        if index == 255 {
+                            cancellation.cancel();
+                        }
+                    })
+                    .unwrap();
+            }
+            let before_scratch = account.snapshot();
+            assert!(matches!(
+                semantic.reserve(1),
+                Err(StoreRuntimeError::Control(_))
+            ));
+            let after_scratch = account.snapshot();
+            assert_eq!(
+                after_scratch.live_retained_allocations(),
+                before_scratch.live_retained_allocations()
+            );
+            assert_eq!(
+                after_scratch.live_retained_bytes(),
+                before_scratch.live_retained_bytes()
+            );
+            assert_eq!(
+                after_scratch.total_admitted_retained_allocations(),
+                before_scratch.total_admitted_retained_allocations()
+            );
+            assert_eq!(
+                after_scratch.peak_retained_allocations(),
+                before_scratch.peak_retained_allocations()
+            );
+            assert!(matches!(
+                semantic.finish_rejected(),
+                Err(StoreRuntimeError::Control(_))
+            ));
+            planning.reject(PreflightRejection::Unsupported, 54)
+        })
+        .unwrap();
+
+    let never_activated = match outcome {
+        CanonicalActivationOutcome::NeverActivated(state) => state,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("a due cancellation must stop scratch before activation")
+        }
+    };
+    assert!(matches!(
+        never_activated.cause(),
+        StoreNeverActivatedCause::Runtime(StoreRuntimeError::Control(_))
+    ));
+    let (prepared, _) = never_activated
+        .prepare_minimal_fallback()
+        .unwrap()
+        .into_parts();
+    let published = prepared.handoff();
+    let work = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("checkpointed semantic work remains queryable");
+    assert_eq!(
+        work.attempted()
+            .checked_sub(baseline.0)
+            .expect("semantic attempted work includes the startup baseline"),
+        256
+    );
+    assert_eq!(
+        work.consumed()
+            .checked_sub(baseline.1)
+            .expect("semantic consumed work includes the startup baseline"),
+        256
+    );
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::Control
+    );
+    drop(published);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn semantic_work_rejects_the_first_unit_beyond_the_admitted_envelope() {
+    const ADMITTED_UNITS: u64 = 2;
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+    let completed = Cell::new(0_u64);
+    let extra_action_executed = Cell::new(false);
+
+    let result: Result<ScopedOutcome<PreflightRejection>, _> =
+        owner.plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning
+                .begin_semantic_work(semantic_units(ADMITTED_UNITS))
+                .unwrap();
+            for _ in 0..ADMITTED_UNITS {
+                semantic
+                    .run_unit(|| completed.set(completed.get() + 1))
+                    .unwrap();
+            }
+
+            assert!(matches!(
+                semantic.run_unit(|| extra_action_executed.set(true)),
+                Err(StoreRuntimeError::ConstructionInvariantUnverified)
+            ));
+            assert_eq!(completed.get(), ADMITTED_UNITS);
+            assert!(!extra_action_executed.get());
+            assert!(matches!(
+                semantic.finish_rejected(),
+                Err(StoreRuntimeError::ConstructionInvariantUnverified)
+            ));
+            planning.reject(PreflightRejection::Unsupported, 59)
+        });
+
+    assert!(result.is_err());
+    assert_eq!(completed.get(), ADMITTED_UNITS);
+    assert!(!extra_action_executed.get());
+    assert_fail_closed_containment(&account);
+}
+
+#[test]
+fn due_control_poll_precedes_live_owner_validation_after_the_checkpoint() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (operation, keys) = operation_with_control(&account, control);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+
+    let outcome: ScopedOutcome<PreflightRejection> = owner
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work(semantic_units(256)).unwrap();
+            let scratch = semantic.reserve(4).unwrap();
+            for index in 0..256 {
+                semantic
+                    .run_unit(|| {
+                        if index == 255 {
+                            cancellation.cancel();
+                        }
+                    })
+                    .unwrap();
+            }
+
+            let before_validation = account.snapshot();
+            assert!(matches!(
+                semantic.validate_live_owner(&scratch),
+                Err(StoreRuntimeError::Control(_))
+            ));
+            let after_validation = account.snapshot();
+            assert_eq!(
+                after_validation.live_retained_bytes(),
+                before_validation.live_retained_bytes()
+            );
+            assert_eq!(
+                after_validation.live_retained_allocations(),
+                before_validation.live_retained_allocations()
+            );
+            assert_eq!(
+                after_validation.total_admitted_retained_bytes(),
+                before_validation.total_admitted_retained_bytes()
+            );
+            assert_eq!(
+                after_validation.total_admitted_retained_allocations(),
+                before_validation.total_admitted_retained_allocations()
+            );
+            assert_eq!(
+                after_validation.peak_retained_bytes(),
+                before_validation.peak_retained_bytes()
+            );
+            assert_eq!(
+                after_validation.peak_retained_allocations(),
+                before_validation.peak_retained_allocations()
+            );
+            assert!(matches!(
+                semantic.finish_rejected(),
+                Err(StoreRuntimeError::Control(_))
+            ));
+            drop(scratch);
+            planning.reject(PreflightRejection::Unsupported, 60)
+        })
+        .unwrap();
+
+    assert_control_never_activated(outcome, &account);
+}
+
+#[test]
+fn due_control_poll_precedes_scratch_resize_after_the_checkpoint() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let cancellation = CancellationToken::new();
+    let control = OperationControl::default().with_cancellation(cancellation.clone());
+    let (operation, keys) = operation_with_control(&account, control);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+
+    let outcome: ScopedOutcome<PreflightRejection> = owner
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work(semantic_units(256)).unwrap();
+            let mut scratch = semantic.reserve(4).unwrap();
+            for index in 0..256 {
+                semantic
+                    .run_unit(|| {
+                        if index == 255 {
+                            cancellation.cancel();
+                        }
+                    })
+                    .unwrap();
+            }
+
+            let before_resize = account.snapshot();
+            assert!(matches!(
+                semantic.resize(&mut scratch, 8),
+                Err(StoreRuntimeError::Control(_))
+            ));
+            let after_resize = account.snapshot();
+            assert_eq!(
+                after_resize.live_retained_bytes(),
+                before_resize.live_retained_bytes()
+            );
+            assert_eq!(
+                after_resize.live_retained_allocations(),
+                before_resize.live_retained_allocations()
+            );
+            assert_eq!(
+                after_resize.total_admitted_retained_bytes(),
+                before_resize.total_admitted_retained_bytes()
+            );
+            assert_eq!(
+                after_resize.total_admitted_retained_allocations(),
+                before_resize.total_admitted_retained_allocations()
+            );
+            assert_eq!(
+                after_resize.peak_retained_bytes(),
+                before_resize.peak_retained_bytes()
+            );
+            assert_eq!(
+                after_resize.peak_retained_allocations(),
+                before_resize.peak_retained_allocations()
+            );
+            assert!(matches!(
+                semantic.finish_rejected(),
+                Err(StoreRuntimeError::Control(_))
+            ));
+            drop(scratch);
+            planning.reject(PreflightRejection::Unsupported, 61)
+        })
+        .unwrap();
+
+    assert_control_never_activated(outcome, &account);
 }
 
 #[test]

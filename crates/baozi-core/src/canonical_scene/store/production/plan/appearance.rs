@@ -13,15 +13,12 @@ use baozi_operation::{
 use thiserror::Error;
 
 use crate::appearance::{
-    AppearanceBehaviorKind, AppearanceBuildError, MaterialSemanticsRef, TextureBindingSemanticsRef,
-    TextureRole, validate_material_semantics, validate_material_texture_binding_semantics,
-    validate_texture_binding_semantics,
+    AppearanceBehaviorKind, AppearanceBuildError, MaterialSemanticsRef,
+    MaterialTextureBindingSemanticsValidator, TextureBindingSemanticsRef, TextureRole,
+    validate_material_semantics, validate_texture_binding_semantics,
 };
 use crate::image::{MAX_ENCODED_IMAGE_BYTES, SamplerState};
-use crate::{
-    SCENE_VALIDATION_POLL_INTERVAL, SceneReservationKind, SceneValidationControl,
-    SceneValidationLimits, SceneValidationWork,
-};
+use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
 use super::super::super::schema::appearance::{
     APPEARANCE_BINDING_SEMANTIC_STRIDE, APPEARANCE_CHANNEL_ZERO, APPEARANCE_MATERIAL_FACTOR_STRIDE,
@@ -30,7 +27,9 @@ use super::super::super::schema::appearance::{
     encode_appearance_color_interpretation, encode_appearance_coordinate_source,
     encode_appearance_shading_model, encode_appearance_texture_role,
 };
-use super::super::control::{OperationAuthoringControl, OperationAuthoringControlError};
+use super::super::control::{
+    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
+};
 use super::super::input::Presence;
 use super::super::input::appearance::{
     AppearanceAuthoringBatch, ImageAuthoring, ImageLocalId, ImagePayloadAuthoring,
@@ -649,9 +648,9 @@ struct AppearanceValidationStorage<R> {
 }
 
 type AppearanceValidationResult<T, C> =
-    Result<T, AppearanceAuthoringFailure<<C as SceneValidationControl>::Error>>;
+    Result<T, AppearanceAuthoringFailure<<C as CanonicalAuthoringControl>::Error>>;
 
-struct AppearanceValidationContext<'control, C: SceneValidationControl> {
+struct AppearanceValidationContext<'control, C: CanonicalAuthoringControl> {
     control: &'control mut C,
     limits: SceneValidationLimits,
     work: u64,
@@ -662,7 +661,7 @@ struct AppearanceValidationContext<'control, C: SceneValidationControl> {
     canonical_bytes: u64,
 }
 
-impl<'control, C: SceneValidationControl> AppearanceValidationContext<'control, C> {
+impl<'control, C: CanonicalAuthoringControl> AppearanceValidationContext<'control, C> {
     const fn new(limits: SceneValidationLimits, control: &'control mut C) -> Self {
         Self {
             control,
@@ -688,12 +687,12 @@ impl<'control, C: SceneValidationControl> AppearanceValidationContext<'control, 
         self.poll_now()
     }
 
-    fn work(
+    fn run_unit<R>(
         &mut self,
         kind: SceneValidationWork,
-        amount: u64,
-    ) -> AppearanceValidationResult<(), C> {
-        let final_work = self.work.checked_add(amount).ok_or(
+        action: impl FnOnce() -> R,
+    ) -> AppearanceValidationResult<R, C> {
+        let final_work = self.work.checked_add(1).ok_or(
             AppearanceAuthoringSemanticError::AccountingOverflow {
                 dimension: "validation work",
             },
@@ -703,52 +702,61 @@ impl<'control, C: SceneValidationControl> AppearanceValidationContext<'control, 
             final_work,
             self.limits.max_work(),
         )?;
-
-        let mut remaining = amount;
-        while remaining > 0 {
-            let until_poll = SCENE_VALIDATION_POLL_INTERVAL - self.work_since_poll;
-            let chunk = remaining.min(until_poll);
-            self.control
-                .charge_work(kind, chunk)
-                .map_err(AppearanceAuthoringFailure::Control)?;
-            self.work = self.work.checked_add(chunk).ok_or(
-                AppearanceAuthoringSemanticError::AccountingOverflow {
-                    dimension: "validation work",
-                },
-            )?;
-            self.work_since_poll += chunk;
-            remaining -= chunk;
-            if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
-                self.poll_now()?;
-            }
+        let result = self
+            .control
+            .run_unit(kind, action)
+            .map_err(AppearanceAuthoringFailure::Control)?;
+        self.work = final_work;
+        self.work_since_poll = self.work_since_poll.checked_add(1).ok_or(
+            AppearanceAuthoringSemanticError::AccountingOverflow {
+                dimension: "validation work poll interval",
+            },
+        )?;
+        if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
+            self.poll_now()?;
         }
-        Ok(())
+        Ok(result)
     }
 
     fn add_relations(&mut self, amount: u64) -> AppearanceValidationResult<(), C> {
-        let final_edges = self
-            .edges
-            .checked_add(amount)
-            .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow { dimension: "edges" })?;
-        let final_references = self.references.checked_add(amount).ok_or(
-            AppearanceAuthoringSemanticError::AccountingOverflow {
-                dimension: "references",
-            },
-        )?;
-        enforce_limit::<C::Error>(
-            AppearanceAuthoringLimit::Edges,
-            final_edges,
-            self.limits.max_edges(),
-        )?;
-        enforce_limit::<C::Error>(
-            AppearanceAuthoringLimit::References,
-            final_references,
-            self.limits.max_references(),
-        )?;
-        self.edges = final_edges;
-        self.references = final_references;
-        self.work(SceneValidationWork::GraphEdge, amount)?;
-        self.work(SceneValidationWork::Reference, amount)
+        for _ in 0..amount {
+            let current_edges = self.edges;
+            let max_edges = self.limits.max_edges();
+            let final_edges = self.run_unit(SceneValidationWork::GraphEdge, || {
+                let final_edges = current_edges.checked_add(1).ok_or(
+                    AppearanceAuthoringSemanticError::AccountingOverflow { dimension: "edges" },
+                )?;
+                if final_edges > max_edges {
+                    return Err(AppearanceAuthoringSemanticError::LimitExceeded {
+                        limit: AppearanceAuthoringLimit::Edges,
+                        actual: final_edges,
+                        maximum: max_edges,
+                    });
+                }
+                Ok::<u64, AppearanceAuthoringSemanticError>(final_edges)
+            })??;
+            self.edges = final_edges;
+
+            let current_references = self.references;
+            let max_references = self.limits.max_references();
+            let final_references = self.run_unit(SceneValidationWork::Reference, || {
+                let final_references = current_references.checked_add(1).ok_or(
+                    AppearanceAuthoringSemanticError::AccountingOverflow {
+                        dimension: "references",
+                    },
+                )?;
+                if final_references > max_references {
+                    return Err(AppearanceAuthoringSemanticError::LimitExceeded {
+                        limit: AppearanceAuthoringLimit::References,
+                        actual: final_references,
+                        maximum: max_references,
+                    });
+                }
+                Ok::<u64, AppearanceAuthoringSemanticError>(final_references)
+            })??;
+            self.references = final_references;
+        }
+        Ok(())
     }
 
     fn add_payload_bytes(&mut self, amount: u64) -> AppearanceValidationResult<(), C> {
@@ -812,10 +820,10 @@ impl<'control, C: SceneValidationControl> AppearanceValidationContext<'control, 
         )?;
         let reservation = self
             .control
-            .reserve(SceneReservationKind::ValidationScratch, bytes)
+            .reserve_scratch(bytes)
             .map_err(AppearanceAuthoringFailure::Control)?;
         self.control
-            .validate_reservation(&reservation, SceneReservationKind::ValidationScratch)
+            .validate_scratch(&reservation)
             .map_err(AppearanceAuthoringFailure::Control)?;
         Ok(reservation)
     }
@@ -831,7 +839,7 @@ impl<'control, C: SceneValidationControl> AppearanceValidationContext<'control, 
             self.limits.max_scratch_bytes(),
         )?;
         self.control
-            .resize_reservation(reservation, SceneReservationKind::ValidationScratch, bytes)
+            .resize_scratch(reservation, bytes)
             .map_err(AppearanceAuthoringFailure::Control)
     }
 
@@ -915,7 +923,7 @@ pub(in crate::canonical_scene::store) fn validate_appearance_batch_with_control<
     control: &mut C,
 ) -> Result<ValidatedAppearanceBatch<'input, C::Reservation>, AppearanceAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     validate_appearance_batch_inner(input, limits, control)
 }
@@ -926,7 +934,7 @@ fn validate_appearance_batch_inner<'input, C>(
     control: &mut C,
 ) -> Result<ValidatedAppearanceBatch<'input, C::Reservation>, AppearanceAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let mut context = AppearanceValidationContext::new(limits, control);
     context.poll_now()?;
@@ -1015,15 +1023,16 @@ where
     let mut payload_offset = 0_u32;
     let mut media_type_offset = 0_u32;
     for (image_index, image) in input.images().iter().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
-        let ImagePayloadAuthoring::Encoded { bytes, media_type } = image.payload();
-        if bytes.is_empty() {
-            return Err(AppearanceAuthoringSemanticError::EmptyEncodedPayload {
-                image: image_index,
+        let (bytes, media_type) = context.run_unit(SceneValidationWork::Entity, || {
+            let ImagePayloadAuthoring::Encoded { bytes, media_type } = image.payload();
+            if bytes.is_empty() {
+                return Err(AppearanceAuthoringSemanticError::EmptyEncodedPayload {
+                    image: image_index,
+                });
             }
-            .into());
-        }
-        validate_encoded_payload_limit(image_index, bytes.len())?;
+            validate_encoded_payload_limit(image_index, bytes.len())?;
+            Ok::<_, AppearanceAuthoringSemanticError>((bytes, media_type))
+        })??;
         let payload_count = collection_count(bytes.len(), "encoded image payload bytes")?;
         let next_payload_offset = payload_offset.checked_add(payload_count).ok_or(
             AppearanceAuthoringSemanticError::AccountingOverflow {
@@ -1031,18 +1040,19 @@ where
             },
         )?;
         context.add_payload_bytes(u64::from(payload_count))?;
-        context.work(SceneValidationWork::PayloadCell, u64::from(payload_count))?;
+        for byte in bytes {
+            context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
+        }
 
         let (media_type_count, media_type_present) = match media_type {
             Presence::Absent => (0_u32, false),
             Presence::Present(media_type) => {
                 let media_type_count =
                     collection_count(media_type.as_str().len(), "image media type bytes")?;
-                context.work(
-                    SceneValidationWork::PayloadCell,
-                    u64::from(media_type_count),
-                )?;
                 context.add_payload_bytes(u64::from(media_type_count))?;
+                for byte in media_type.as_str().as_bytes() {
+                    context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
+                }
                 (media_type_count, true)
             }
         };
@@ -1063,140 +1073,148 @@ where
         media_type_offset = next_media_type_offset;
     }
 
-    for _ in input.samplers() {
-        context.work(SceneValidationWork::Entity, 1)?;
+    for sampler in input.samplers() {
+        context.run_unit(SceneValidationWork::Entity, || *sampler)?;
     }
 
     for (texture_index, texture) in input.textures().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
-        if texture.image().index() >= image_count {
-            return Err(AppearanceAuthoringSemanticError::TextureImageOutOfRange {
-                texture: texture_index,
-                image: texture.image().index(),
-                image_count,
+        context.run_unit(SceneValidationWork::Entity, || {
+            if texture.image().index() >= image_count {
+                return Err(AppearanceAuthoringSemanticError::TextureImageOutOfRange {
+                    texture: texture_index,
+                    image: texture.image().index(),
+                    image_count,
+                });
             }
-            .into());
-        }
-        if texture.sampler().index() >= sampler_count {
-            return Err(AppearanceAuthoringSemanticError::TextureSamplerOutOfRange {
-                texture: texture_index,
-                sampler: texture.sampler().index(),
-                sampler_count,
+            if texture.sampler().index() >= sampler_count {
+                return Err(AppearanceAuthoringSemanticError::TextureSamplerOutOfRange {
+                    texture: texture_index,
+                    sampler: texture.sampler().index(),
+                    sampler_count,
+                });
             }
-            .into());
-        }
-        let _ = u32_to_usize(texture.image().index(), "texture image index")?;
-        let _ = u32_to_usize(texture.sampler().index(), "texture sampler index")?;
+            let _ = u32_to_usize(texture.image().index(), "texture image index")?;
+            let _ = u32_to_usize(texture.sampler().index(), "texture sampler index")?;
+            Ok::<(), AppearanceAuthoringSemanticError>(())
+        })??;
         context.add_relations(2)?;
     }
 
     let mut source_key_offset = 0_u32;
     let mut binding_semantic_scalar_offset = 0_u32;
     for (binding_index, binding) in input.bindings().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
-        if binding.texture().index() >= texture_count {
-            return Err(AppearanceAuthoringSemanticError::BindingTextureOutOfRange {
-                binding: binding_index,
-                texture: binding.texture().index(),
-                texture_count,
-            }
-            .into());
-        }
-        let _ = u32_to_usize(binding.texture().index(), "binding texture index")?;
         let semantics = binding.semantics();
-        if let Some(behavior) = namespaced_binding_behavior(semantics) {
-            return Err(
-                AppearanceAuthoringSemanticError::NamespacedBindingBehaviorUnsupported {
-                    binding: binding_index,
-                    behavior,
+        let (binding_plan, next_source_key_offset, next_binding_semantic_scalar_offset, source_key) =
+            context.run_unit(SceneValidationWork::Entity, || {
+                if binding.texture().index() >= texture_count {
+                    return Err(AppearanceAuthoringSemanticError::BindingTextureOutOfRange {
+                        binding: binding_index,
+                        texture: binding.texture().index(),
+                        texture_count,
+                    });
                 }
-                .into(),
-            );
-        }
-        validate_texture_binding_semantics(semantics).map_err(|source| {
-            AppearanceAuthoringSemanticError::InvalidBindingSemantics {
-                binding: binding_index,
-                source,
-            }
-        })?;
-        let Some(role_tag) = encode_appearance_texture_role(binding.role()) else {
-            return Err(
-                AppearanceAuthoringSemanticError::NamespacedTextureRoleUnsupported {
-                    binding: binding_index,
+                let _ = u32_to_usize(binding.texture().index(), "binding texture index")?;
+                if let Some(behavior) = namespaced_binding_behavior(semantics) {
+                    return Err(
+                        AppearanceAuthoringSemanticError::NamespacedBindingBehaviorUnsupported {
+                            binding: binding_index,
+                            behavior,
+                        },
+                    );
                 }
-                .into(),
-            );
-        };
-        let Some((coordinate_source_tag, coordinate_set)) =
-            encode_appearance_coordinate_source(semantics.coordinate_source())
-        else {
-            return Err(AppearanceAuthoringSemanticError::BindingEncodingInvariant {
-                binding: binding_index,
-            }
-            .into());
-        };
-        let crate::appearance::TextureChannelMapping::Swizzle(swizzle) =
-            semantics.channel_mapping()
-        else {
-            return Err(AppearanceAuthoringSemanticError::BindingEncodingInvariant {
-                binding: binding_index,
-            }
-            .into());
-        };
-        let mut channel_tags = [APPEARANCE_CHANNEL_ZERO; 4];
-        for (channel_index, channel) in swizzle.channels().iter().copied().enumerate() {
-            channel_tags[channel_index] = encode_appearance_channel(channel);
+                validate_texture_binding_semantics(semantics).map_err(|source| {
+                    AppearanceAuthoringSemanticError::InvalidBindingSemantics {
+                        binding: binding_index,
+                        source,
+                    }
+                })?;
+                let Some(role_tag) = encode_appearance_texture_role(binding.role()) else {
+                    return Err(
+                        AppearanceAuthoringSemanticError::NamespacedTextureRoleUnsupported {
+                            binding: binding_index,
+                        },
+                    );
+                };
+                let Some((coordinate_source_tag, coordinate_set)) =
+                    encode_appearance_coordinate_source(semantics.coordinate_source())
+                else {
+                    return Err(AppearanceAuthoringSemanticError::BindingEncodingInvariant {
+                        binding: binding_index,
+                    });
+                };
+                let crate::appearance::TextureChannelMapping::Swizzle(swizzle) =
+                    semantics.channel_mapping()
+                else {
+                    return Err(AppearanceAuthoringSemanticError::BindingEncodingInvariant {
+                        binding: binding_index,
+                    });
+                };
+                let mut channel_tags = [APPEARANCE_CHANNEL_ZERO; 4];
+                for (channel_index, channel) in swizzle.channels().iter().copied().enumerate() {
+                    channel_tags[channel_index] = encode_appearance_channel(channel);
+                }
+                let Some(color_interpretation_tag) =
+                    encode_appearance_color_interpretation(semantics.color_interpretation())
+                else {
+                    return Err(AppearanceAuthoringSemanticError::BindingEncodingInvariant {
+                        binding: binding_index,
+                    });
+                };
+                let Some(blend_operation_tag) =
+                    encode_appearance_blend_operation(semantics.blend())
+                else {
+                    return Err(AppearanceAuthoringSemanticError::BindingEncodingInvariant {
+                        binding: binding_index,
+                    });
+                };
+                let source_key = semantics.source_key().map(|key| key.as_str());
+                let source_key_count = match source_key {
+                    Some(source_key) => collection_count(source_key.len(), "source key bytes")?,
+                    None => 0,
+                };
+                let next_source_key_offset = source_key_offset
+                    .checked_add(source_key_count)
+                    .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
+                        dimension: "source key byte offset",
+                    })?;
+                let next_binding_semantic_scalar_offset = binding_semantic_scalar_offset
+                    .checked_add(binding_semantic_stride)
+                    .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
+                        dimension: "binding semantic scalar offset",
+                    })?;
+                Ok::<_, AppearanceAuthoringSemanticError>((
+                    ValidatedAppearanceBindingPlan {
+                        input_index: binding_index,
+                        role_tag,
+                        coordinate_source_tag,
+                        coordinate_set,
+                        channel_lane_count: swizzle.lane_count(),
+                        channel_tags,
+                        color_interpretation_tag,
+                        semantic_scalar_offset: binding_semantic_scalar_offset,
+                        blend_operation_tag,
+                        source_key_offset,
+                        source_key_count,
+                    },
+                    next_source_key_offset,
+                    next_binding_semantic_scalar_offset,
+                    source_key,
+                ))
+            })??;
+        for scalar in 0..binding_semantic_stride {
+            context.run_unit(SceneValidationWork::PayloadCell, || scalar)?;
         }
-        let Some(color_interpretation_tag) =
-            encode_appearance_color_interpretation(semantics.color_interpretation())
-        else {
-            return Err(AppearanceAuthoringSemanticError::BindingEncodingInvariant {
-                binding: binding_index,
+        if let Some(source_key) = source_key {
+            for byte in source_key.as_bytes() {
+                context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
             }
-            .into());
-        };
-        let Some(blend_operation_tag) = encode_appearance_blend_operation(semantics.blend()) else {
-            return Err(AppearanceAuthoringSemanticError::BindingEncodingInvariant {
-                binding: binding_index,
-            }
-            .into());
-        };
-        let source_key_count = match semantics.source_key() {
-            Some(source_key) => collection_count(source_key.as_str().len(), "source key bytes")?,
-            None => 0,
-        };
-        let next_source_key_offset = source_key_offset.checked_add(source_key_count).ok_or(
-            AppearanceAuthoringSemanticError::AccountingOverflow {
-                dimension: "source key byte offset",
-            },
-        )?;
-        let next_binding_semantic_scalar_offset = binding_semantic_scalar_offset
-            .checked_add(binding_semantic_stride)
-            .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
-                dimension: "binding semantic scalar offset",
-            })?;
-        context.work(
-            SceneValidationWork::PayloadCell,
-            u64::from(binding_semantic_stride) + u64::from(source_key_count),
-        )?;
+        }
         context.add_payload_cells_and_bytes(
             u64::from(binding_semantic_stride),
             u64::from(binding_semantic_stride) * LOGICAL_F32_BYTES,
         )?;
-        context.add_payload_bytes(u64::from(source_key_count))?;
-        storage.binding_plans.push(ValidatedAppearanceBindingPlan {
-            input_index: binding_index,
-            role_tag,
-            coordinate_source_tag,
-            coordinate_set,
-            channel_lane_count: swizzle.lane_count(),
-            channel_tags,
-            color_interpretation_tag,
-            semantic_scalar_offset: binding_semantic_scalar_offset,
-            blend_operation_tag,
-            source_key_offset,
-            source_key_count,
-        });
+        context.add_payload_bytes(u64::from(binding_plan.source_key_count))?;
+        storage.binding_plans.push(binding_plan);
         source_key_offset = next_source_key_offset;
         binding_semantic_scalar_offset = next_binding_semantic_scalar_offset;
         context.add_relations(1)?;
@@ -1205,147 +1223,160 @@ where
     let mut expected_binding_offset = 0_u32;
     let mut material_factor_offset = 0_u32;
     for (material_index, material) in input.materials().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
         let semantics = material.semantics();
-        if let Some(behavior) = namespaced_material_behavior(semantics) {
-            return Err(
-                AppearanceAuthoringSemanticError::NamespacedMaterialBehaviorUnsupported {
-                    material: material_index,
-                    behavior,
-                }
-                .into(),
-            );
-        }
-        validate_material_semantics(semantics).map_err(|source| {
-            AppearanceAuthoringSemanticError::InvalidMaterialSemantics {
-                material: material_index,
-                source,
+        let (
+            material_plan,
+            end,
+            binding_start,
+            binding_end,
+            range_count,
+            next_material_factor_offset,
+        ) = context.run_unit(SceneValidationWork::Entity, || {
+            if let Some(behavior) = namespaced_material_behavior(semantics) {
+                return Err(
+                    AppearanceAuthoringSemanticError::NamespacedMaterialBehaviorUnsupported {
+                        material: material_index,
+                        behavior,
+                    },
+                );
             }
-        })?;
-        let Some(shading_model_tag) = encode_appearance_shading_model(semantics.shading_model())
-        else {
-            return Err(
-                AppearanceAuthoringSemanticError::MaterialEncodingInvariant {
+            validate_material_semantics(semantics).map_err(|source| {
+                AppearanceAuthoringSemanticError::InvalidMaterialSemantics {
                     material: material_index,
+                    source,
                 }
-                .into(),
-            );
-        };
-        let Some(alpha_mode_tag) = encode_appearance_alpha_mode(semantics.alpha_mode()) else {
-            return Err(
-                AppearanceAuthoringSemanticError::MaterialEncodingInvariant {
-                    material: material_index,
-                }
-                .into(),
-            );
-        };
-        let alpha_cutoff = semantics.alpha_mode().mask_cutoff().unwrap_or(0.0);
-        let factors = semantics.factors();
-        let pbr_metallic_roughness_presence = if factors.pbr_metallic_roughness().is_some() {
-            APPEARANCE_PRESENCE_PRESENT
-        } else {
-            APPEARANCE_PRESENCE_ABSENT
-        };
-        let pbr_specular_glossiness_presence = if factors.pbr_specular_glossiness().is_some() {
-            APPEARANCE_PRESENCE_PRESENT
-        } else {
-            APPEARANCE_PRESENCE_ABSENT
-        };
-        let legacy_presence = if factors.legacy().is_some() {
-            APPEARANCE_PRESENCE_PRESENT
-        } else {
-            APPEARANCE_PRESENCE_ABSENT
-        };
-        let range = material.bindings();
-        if range.offset() != expected_binding_offset {
-            return Err(
-                AppearanceAuthoringSemanticError::MaterialBindingRangeOrder {
-                    material: material_index,
-                    expected: expected_binding_offset,
-                    actual: range.offset(),
-                }
-                .into(),
-            );
-        }
-        let Some(end) = range.offset().checked_add(range.count()) else {
-            return Err(
-                AppearanceAuthoringSemanticError::MaterialBindingRangeOutOfBounds {
-                    material: material_index,
-                    binding_count: input.bindings().len(),
-                }
-                .into(),
-            );
-        };
-        if end > binding_count {
-            return Err(
-                AppearanceAuthoringSemanticError::MaterialBindingRangeOutOfBounds {
-                    material: material_index,
-                    binding_count: input.bindings().len(),
-                }
-                .into(),
-            );
-        }
-        let binding_start = u32_to_usize(range.offset(), "material binding offset")?;
-        let binding_end = u32_to_usize(end, "material binding end")?;
-        context.work(SceneValidationWork::Traversal, u64::from(range.count()))?;
-        validate_material_texture_binding_semantics(
-            input.bindings()[binding_start..binding_end]
-                .iter()
-                .map(|binding| binding.semantics()),
-        )
-        .map_err(|source| {
-            AppearanceAuthoringSemanticError::InvalidMaterialBindingSemantics {
-                material: material_index,
-                source,
-            }
-        })?;
-        let next_material_factor_offset = material_factor_offset
-            .checked_add(material_factor_stride)
-            .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
-                dimension: "material factor scalar offset",
             })?;
-        context.work(
-            SceneValidationWork::PayloadCell,
-            u64::from(material_factor_stride),
-        )?;
+            let Some(shading_model_tag) =
+                encode_appearance_shading_model(semantics.shading_model())
+            else {
+                return Err(
+                    AppearanceAuthoringSemanticError::MaterialEncodingInvariant {
+                        material: material_index,
+                    },
+                );
+            };
+            let Some(alpha_mode_tag) = encode_appearance_alpha_mode(semantics.alpha_mode()) else {
+                return Err(
+                    AppearanceAuthoringSemanticError::MaterialEncodingInvariant {
+                        material: material_index,
+                    },
+                );
+            };
+            let alpha_cutoff = semantics.alpha_mode().mask_cutoff().unwrap_or(0.0);
+            let factors = semantics.factors();
+            let pbr_metallic_roughness_presence = if factors.pbr_metallic_roughness().is_some() {
+                APPEARANCE_PRESENCE_PRESENT
+            } else {
+                APPEARANCE_PRESENCE_ABSENT
+            };
+            let pbr_specular_glossiness_presence = if factors.pbr_specular_glossiness().is_some() {
+                APPEARANCE_PRESENCE_PRESENT
+            } else {
+                APPEARANCE_PRESENCE_ABSENT
+            };
+            let legacy_presence = if factors.legacy().is_some() {
+                APPEARANCE_PRESENCE_PRESENT
+            } else {
+                APPEARANCE_PRESENCE_ABSENT
+            };
+            let range = material.bindings();
+            if range.offset() != expected_binding_offset {
+                return Err(
+                    AppearanceAuthoringSemanticError::MaterialBindingRangeOrder {
+                        material: material_index,
+                        expected: expected_binding_offset,
+                        actual: range.offset(),
+                    },
+                );
+            }
+            let Some(end) = range.offset().checked_add(range.count()) else {
+                return Err(
+                    AppearanceAuthoringSemanticError::MaterialBindingRangeOutOfBounds {
+                        material: material_index,
+                        binding_count: input.bindings().len(),
+                    },
+                );
+            };
+            if end > binding_count {
+                return Err(
+                    AppearanceAuthoringSemanticError::MaterialBindingRangeOutOfBounds {
+                        material: material_index,
+                        binding_count: input.bindings().len(),
+                    },
+                );
+            }
+            let binding_start = u32_to_usize(range.offset(), "material binding offset")?;
+            let binding_end = u32_to_usize(end, "material binding end")?;
+            let next_material_factor_offset = material_factor_offset
+                .checked_add(material_factor_stride)
+                .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
+                    dimension: "material factor scalar offset",
+                })?;
+            Ok::<_, AppearanceAuthoringSemanticError>((
+                ValidatedAppearanceMaterialPlan {
+                    input_index: material_index,
+                    binding_start,
+                    binding_end,
+                    shading_model_tag,
+                    alpha_mode_tag,
+                    alpha_cutoff,
+                    double_sided_tag: if semantics.double_sided() {
+                        APPEARANCE_PRESENCE_PRESENT
+                    } else {
+                        APPEARANCE_PRESENCE_ABSENT
+                    },
+                    pbr_metallic_roughness_presence,
+                    pbr_specular_glossiness_presence,
+                    legacy_presence,
+                    factor_offset: material_factor_offset,
+                },
+                end,
+                binding_start,
+                binding_end,
+                range.count(),
+                next_material_factor_offset,
+            ))
+        })??;
+        let material_bindings = &input.bindings()[binding_start..binding_end];
+        let mut binding_validator =
+            MaterialTextureBindingSemanticsValidator::new(material_bindings.len());
+        for binding in material_bindings {
+            context.run_unit(SceneValidationWork::Traversal, || {
+                binding_validator
+                    .validate_next(binding.semantics())
+                    .map_err(|source| {
+                        AppearanceAuthoringSemanticError::InvalidMaterialBindingSemantics {
+                            material: material_index,
+                            source,
+                        }
+                    })
+            })??;
+        }
+        for scalar in 0..material_factor_stride {
+            context.run_unit(SceneValidationWork::PayloadCell, || scalar)?;
+        }
         context.add_payload_cells_and_bytes(
             u64::from(material_factor_stride),
             u64::from(material_factor_stride) * LOGICAL_F32_BYTES,
         )?;
-        storage
-            .material_plans
-            .push(ValidatedAppearanceMaterialPlan {
-                input_index: material_index,
-                binding_start,
-                binding_end,
-                shading_model_tag,
-                alpha_mode_tag,
-                alpha_cutoff,
-                double_sided_tag: if semantics.double_sided() {
-                    APPEARANCE_PRESENCE_PRESENT
-                } else {
-                    APPEARANCE_PRESENCE_ABSENT
-                },
-                pbr_metallic_roughness_presence,
-                pbr_specular_glossiness_presence,
-                legacy_presence,
-                factor_offset: material_factor_offset,
-            });
+        storage.material_plans.push(material_plan);
         material_factor_offset = next_material_factor_offset;
-        context.add_relations(u64::from(range.count()))?;
+        context.add_relations(u64::from(range_count))?;
         expected_binding_offset = end;
     }
-    if expected_binding_offset != binding_count {
+    context.run_unit(SceneValidationWork::Traversal, || {
+        if expected_binding_offset == binding_count {
+            return Ok(());
+        }
         let unowned = binding_count.checked_sub(expected_binding_offset).ok_or(
             AppearanceAuthoringSemanticError::AccountingOverflow {
                 dimension: "unowned material binding count",
             },
         )?;
-        return Err(AppearanceAuthoringSemanticError::UnownedBindings {
+        Err(AppearanceAuthoringSemanticError::UnownedBindings {
             unowned: u32_to_usize(unowned, "unowned material bindings")?,
-        }
-        .into());
-    }
+        })
+    })??;
     if binding_semantic_scalar_offset != binding_semantic_scalar_count
         || material_factor_offset != material_factor_scalar_count
     {
@@ -1442,7 +1473,7 @@ fn appearance_structural_bytes<C>(
     context: &mut AppearanceValidationContext<'_, C>,
 ) -> AppearanceValidationResult<u64, C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let image_count = collection_count(input.images().len(), "images")?;
     let sampler_count = collection_count(input.samplers().len(), "samplers")?;
@@ -1454,69 +1485,75 @@ where
     let mut media_type_bytes = 0_u64;
     let mut image_rows = 0_u64;
     for image in input.images() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let ImagePayloadAuthoring::Encoded { bytes, media_type } = image.payload();
-        let payload_count = usize_to_u64(bytes.len(), "encoded image payload bytes")?;
-        let media_count = match media_type {
-            Presence::Absent => 0,
-            Presence::Present(media_type) => {
-                usize_to_u64(media_type.as_str().len(), "image media type bytes")?
-            }
-        };
-        payload_bytes = payload_bytes.checked_add(payload_count).ok_or(
-            AppearanceAuthoringSemanticError::AccountingOverflow {
-                dimension: "encoded image payload bytes",
-            },
-        )?;
-        media_type_bytes = media_type_bytes.checked_add(media_count).ok_or(
-            AppearanceAuthoringSemanticError::AccountingOverflow {
-                dimension: "image media type bytes",
-            },
-        )?;
-        image_rows = image_rows
-            .checked_add(IMAGE_ROW_FIXED_BYTES)
-            .and_then(|bytes| bytes.checked_add(reference_slot_bytes(payload_count != 0)))
-            .and_then(|bytes| bytes.checked_add(reference_slot_bytes(media_count != 0)))
-            .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical image records",
-            })?;
+        context.run_unit(SceneValidationWork::Traversal, || {
+            let ImagePayloadAuthoring::Encoded { bytes, media_type } = image.payload();
+            let payload_count = usize_to_u64(bytes.len(), "encoded image payload bytes")?;
+            let media_count = match media_type {
+                Presence::Absent => 0,
+                Presence::Present(media_type) => {
+                    usize_to_u64(media_type.as_str().len(), "image media type bytes")?
+                }
+            };
+            payload_bytes = payload_bytes.checked_add(payload_count).ok_or(
+                AppearanceAuthoringSemanticError::AccountingOverflow {
+                    dimension: "encoded image payload bytes",
+                },
+            )?;
+            media_type_bytes = media_type_bytes.checked_add(media_count).ok_or(
+                AppearanceAuthoringSemanticError::AccountingOverflow {
+                    dimension: "image media type bytes",
+                },
+            )?;
+            image_rows = image_rows
+                .checked_add(IMAGE_ROW_FIXED_BYTES)
+                .and_then(|bytes| bytes.checked_add(reference_slot_bytes(payload_count != 0)))
+                .and_then(|bytes| bytes.checked_add(reference_slot_bytes(media_count != 0)))
+                .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
+                    dimension: "canonical image records",
+                })?;
+            Ok::<(), AppearanceAuthoringSemanticError>(())
+        })??;
     }
 
     let mut material_rows = 0_u64;
     for material in input.materials() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        material_rows = material_rows
-            .checked_add(MATERIAL_ROW_FIXED_BYTES)
-            .and_then(|bytes| {
-                bytes.checked_add(reference_slot_bytes(material.bindings().count() != 0))
-            })
-            .and_then(|bytes| bytes.checked_add(LOGICAL_REFERENCE_BYTES))
-            .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical material records",
-            })?;
+        context.run_unit(SceneValidationWork::Traversal, || {
+            material_rows = material_rows
+                .checked_add(MATERIAL_ROW_FIXED_BYTES)
+                .and_then(|bytes| {
+                    bytes.checked_add(reference_slot_bytes(material.bindings().count() != 0))
+                })
+                .and_then(|bytes| bytes.checked_add(LOGICAL_REFERENCE_BYTES))
+                .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
+                    dimension: "canonical material records",
+                })?;
+            Ok::<(), AppearanceAuthoringSemanticError>(())
+        })??;
     }
 
     let mut source_key_bytes = 0_u64;
     let mut binding_rows = 0_u64;
     for binding in input.bindings() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let source_key_count = binding
-            .semantics()
-            .source_key()
-            .map_or(0, |key| key.as_str().len());
-        let source_key_count = usize_to_u64(source_key_count, "source key bytes")?;
-        source_key_bytes = source_key_bytes.checked_add(source_key_count).ok_or(
-            AppearanceAuthoringSemanticError::AccountingOverflow {
-                dimension: "source key bytes",
-            },
-        )?;
-        binding_rows = binding_rows
-            .checked_add(BINDING_ROW_FIXED_BYTES)
-            .and_then(|bytes| bytes.checked_add(LOGICAL_REFERENCE_BYTES))
-            .and_then(|bytes| bytes.checked_add(reference_slot_bytes(source_key_count != 0)))
-            .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical material binding records",
-            })?;
+        context.run_unit(SceneValidationWork::Traversal, || {
+            let source_key_count = binding
+                .semantics()
+                .source_key()
+                .map_or(0, |key| key.as_str().len());
+            let source_key_count = usize_to_u64(source_key_count, "source key bytes")?;
+            source_key_bytes = source_key_bytes.checked_add(source_key_count).ok_or(
+                AppearanceAuthoringSemanticError::AccountingOverflow {
+                    dimension: "source key bytes",
+                },
+            )?;
+            binding_rows = binding_rows
+                .checked_add(BINDING_ROW_FIXED_BYTES)
+                .and_then(|bytes| bytes.checked_add(LOGICAL_REFERENCE_BYTES))
+                .and_then(|bytes| bytes.checked_add(reference_slot_bytes(source_key_count != 0)))
+                .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
+                    dimension: "canonical material binding records",
+                })?;
+            Ok::<(), AppearanceAuthoringSemanticError>(())
+        })??;
     }
 
     let directory_reference_bytes = checked_sum_bytes(

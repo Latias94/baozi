@@ -13,10 +13,7 @@ use baozi_operation::{
 use thiserror::Error;
 
 use crate::deform::{MorphDeltaSemantic, SkinMatrixSpace, SkinMatrixSpaces};
-use crate::{
-    SCENE_VALIDATION_POLL_INTERVAL, SceneReservationKind, SceneValidationControl,
-    SceneValidationLimits, SceneValidationWork,
-};
+use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
 use super::super::super::schema::deformation::{
     DEFORMATION_DIRECTORY_FIXED_BYTES, DEFORMATION_LOGICAL_MORPH_FIXED_BYTES,
@@ -24,7 +21,9 @@ use super::super::super::schema::deformation::{
     DEFORMATION_MORPH_DELTA_FIXED_BYTES, DEFORMATION_MORPH_TARGET_FIXED_BYTES,
     DEFORMATION_PRIMITIVE_FIXED_BYTES, DEFORMATION_SKIN_FIXED_BYTES,
 };
-use super::super::control::{OperationAuthoringControl, OperationAuthoringControlError};
+use super::super::control::{
+    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
+};
 use super::super::input::Presence;
 use super::super::input::deformation::{
     DeformationAuthoringBatch, InfluenceRowsAuthoring, LogicalMorphAuthoring,
@@ -42,6 +41,7 @@ const LOGICAL_F32_BYTES: u64 = 4;
 const LOGICAL_REFERENCE_BYTES: u64 = 4;
 const MORPH_DELTA_LANES: u32 = 3;
 const INVERSE_BIND_SCALARS: u32 = 16;
+const INVERSE_BIND_SCALAR_COUNT: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) enum DeformationAuthoringLimit {
@@ -1036,9 +1036,9 @@ struct SkinValidationCursors {
 }
 
 type DeformationValidationResult<T, C> =
-    Result<T, DeformationAuthoringFailure<<C as SceneValidationControl>::Error>>;
+    Result<T, DeformationAuthoringFailure<<C as CanonicalAuthoringControl>::Error>>;
 
-struct DeformationValidationContext<'control, C: SceneValidationControl> {
+struct DeformationValidationContext<'control, C: CanonicalAuthoringControl> {
     control: &'control mut C,
     limits: SceneValidationLimits,
     work: u64,
@@ -1051,7 +1051,7 @@ struct DeformationValidationContext<'control, C: SceneValidationControl> {
     canonical_bytes: u64,
 }
 
-impl<'control, C: SceneValidationControl> DeformationValidationContext<'control, C> {
+impl<'control, C: CanonicalAuthoringControl> DeformationValidationContext<'control, C> {
     const fn new(limits: SceneValidationLimits, control: &'control mut C) -> Self {
         Self {
             control,
@@ -1079,12 +1079,12 @@ impl<'control, C: SceneValidationControl> DeformationValidationContext<'control,
         self.poll_now()
     }
 
-    fn work(
+    fn run_unit<R>(
         &mut self,
         kind: SceneValidationWork,
-        amount: u64,
-    ) -> DeformationValidationResult<(), C> {
-        let final_work = self.work.checked_add(amount).ok_or(
+        action: impl FnOnce() -> R,
+    ) -> DeformationValidationResult<R, C> {
+        let final_work = self.work.checked_add(1).ok_or(
             DeformationAuthoringSemanticError::AccountingOverflow {
                 dimension: "validation work",
             },
@@ -1094,51 +1094,58 @@ impl<'control, C: SceneValidationControl> DeformationValidationContext<'control,
             final_work,
             self.limits.max_work(),
         )?;
-        let mut remaining = amount;
-        while remaining != 0 {
-            let until_poll = SCENE_VALIDATION_POLL_INTERVAL - self.work_since_poll;
-            let chunk = remaining.min(until_poll);
-            self.control
-                .charge_work(kind, chunk)
-                .map_err(DeformationAuthoringFailure::Control)?;
-            self.work = self.work.checked_add(chunk).ok_or(
-                DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "validation work",
-                },
-            )?;
-            self.work_since_poll += chunk;
-            remaining -= chunk;
-            if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
-                self.poll_now()?;
-            }
+
+        let result = self
+            .control
+            .run_unit(kind, action)
+            .map_err(DeformationAuthoringFailure::Control)?;
+        self.work = final_work;
+        self.work_since_poll += 1;
+        if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
+            self.poll_now()?;
         }
-        Ok(())
+        Ok(result)
     }
 
     fn add_relations(&mut self, amount: u64) -> DeformationValidationResult<(), C> {
-        let edges = self
-            .edges
-            .checked_add(amount)
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow { dimension: "edges" })?;
-        let references = self.references.checked_add(amount).ok_or(
-            DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "references",
-            },
-        )?;
-        enforce_limit::<C::Error>(
-            DeformationAuthoringLimit::Edges,
-            edges,
-            self.limits.max_edges(),
-        )?;
-        enforce_limit::<C::Error>(
-            DeformationAuthoringLimit::References,
-            references,
-            self.limits.max_references(),
-        )?;
-        self.edges = edges;
-        self.references = references;
-        self.work(SceneValidationWork::GraphEdge, amount)?;
-        self.work(SceneValidationWork::Reference, amount)
+        for _ in 0..amount {
+            let current_edges = self.edges;
+            let max_edges = self.limits.max_edges();
+            let final_edges = self.run_unit(SceneValidationWork::GraphEdge, || {
+                let final_edges = current_edges.checked_add(1).ok_or(
+                    DeformationAuthoringSemanticError::AccountingOverflow { dimension: "edges" },
+                )?;
+                if final_edges > max_edges {
+                    return Err(DeformationAuthoringSemanticError::LimitExceeded {
+                        limit: DeformationAuthoringLimit::Edges,
+                        actual: final_edges,
+                        maximum: max_edges,
+                    });
+                }
+                Ok::<u64, DeformationAuthoringSemanticError>(final_edges)
+            })??;
+            self.edges = final_edges;
+
+            let current_references = self.references;
+            let max_references = self.limits.max_references();
+            let final_references = self.run_unit(SceneValidationWork::Reference, || {
+                let final_references = current_references.checked_add(1).ok_or(
+                    DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "references",
+                    },
+                )?;
+                if final_references > max_references {
+                    return Err(DeformationAuthoringSemanticError::LimitExceeded {
+                        limit: DeformationAuthoringLimit::References,
+                        actual: final_references,
+                        maximum: max_references,
+                    });
+                }
+                Ok::<u64, DeformationAuthoringSemanticError>(final_references)
+            })??;
+            self.references = final_references;
+        }
+        Ok(())
     }
 
     fn add_payload(
@@ -1239,10 +1246,10 @@ impl<'control, C: SceneValidationControl> DeformationValidationContext<'control,
         )?;
         let reservation = self
             .control
-            .reserve(SceneReservationKind::ValidationScratch, bytes)
+            .reserve_scratch(bytes)
             .map_err(DeformationAuthoringFailure::Control)?;
         self.control
-            .validate_reservation(&reservation, SceneReservationKind::ValidationScratch)
+            .validate_scratch(&reservation)
             .map_err(DeformationAuthoringFailure::Control)?;
         Ok(reservation)
     }
@@ -1258,7 +1265,7 @@ impl<'control, C: SceneValidationControl> DeformationValidationContext<'control,
             self.limits.max_scratch_bytes(),
         )?;
         self.control
-            .resize_reservation(reservation, SceneReservationKind::ValidationScratch, bytes)
+            .resize_scratch(reservation, bytes)
             .map_err(DeformationAuthoringFailure::Control)
     }
 
@@ -1302,7 +1309,6 @@ where
     validate_deformation_batch_inner(input, nodes, geometry, limits, control)
 }
 
-#[cfg(test)]
 pub(in crate::canonical_scene::store) fn validate_deformation_batch_with_control<
     'input,
     NR,
@@ -1316,7 +1322,7 @@ pub(in crate::canonical_scene::store) fn validate_deformation_batch_with_control
     control: &mut C,
 ) -> Result<ValidatedDeformationBatch<'input, C::Reservation>, DeformationAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     validate_deformation_batch_inner(input, nodes, geometry, limits, control)
 }
@@ -1329,7 +1335,7 @@ fn validate_deformation_batch_inner<'input, NR, GR, C>(
     control: &mut C,
 ) -> Result<ValidatedDeformationBatch<'input, C::Reservation>, DeformationAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let mut context = DeformationValidationContext::new(limits, control);
     context.poll_now()?;
@@ -1664,29 +1670,43 @@ fn validate_skins<C, R>(
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     for (skin_index, skin) in input.skins().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
         let matrix_spaces = skin.matrix_spaces();
-        if !has_canonical_skin_base_spaces(matrix_spaces) {
-            return Err(
-                DeformationAuthoringSemanticError::NonCanonicalSkinMatrixSpaces {
-                    skin: skin_index,
-                }
-                .into(),
-            );
-        }
-        if skin.joints().len() != skin.inverse_bind_matrices().len() {
-            return Err(
-                DeformationAuthoringSemanticError::InverseBindCountMismatch {
-                    skin: skin_index,
-                    joint_count: skin.joints().len(),
-                    inverse_bind_count: skin.inverse_bind_matrices().len(),
-                }
-                .into(),
-            );
-        }
+        context.run_unit(SceneValidationWork::Entity, || {
+            if !has_canonical_skin_base_spaces(matrix_spaces) {
+                return Err(
+                    DeformationAuthoringSemanticError::NonCanonicalSkinMatrixSpaces {
+                        skin: skin_index,
+                    },
+                );
+            }
+            if skin.joints().len() != skin.inverse_bind_matrices().len() {
+                return Err(
+                    DeformationAuthoringSemanticError::InverseBindCountMismatch {
+                        skin: skin_index,
+                        joint_count: skin.joints().len(),
+                        inverse_bind_count: skin.inverse_bind_matrices().len(),
+                    },
+                );
+            }
+            if let Some(correction) = matrix_spaces.correction()
+                && (correction.from() != matrix_spaces.input_position()
+                    || correction.to() != matrix_spaces.output_position())
+            {
+                return Err(
+                    DeformationAuthoringSemanticError::ContradictorySkinCorrectionSpaces {
+                        skin: skin_index,
+                        from: correction.from(),
+                        to: correction.to(),
+                        expected_from: matrix_spaces.input_position(),
+                        expected_to: matrix_spaces.output_position(),
+                    },
+                );
+            }
+            Ok::<(), DeformationAuthoringSemanticError>(())
+        })??;
         let joint_count = collection_count(skin.joints().len(), "skin joints")?;
         let joint_offset =
             advance_cursor(&mut cursors.joint_nodes, joint_count, "skin joint nodes")?;
@@ -1705,92 +1725,87 @@ where
             Presence::Present(name) => {
                 let count = collection_count(name.as_str().len(), "skin name bytes")?;
                 let offset = advance_cursor(&mut cursors.name_bytes, count, "skin name bytes")?;
-                context.work(SceneValidationWork::PayloadCell, u64::from(count))?;
+                for byte in name.as_str().as_bytes() {
+                    context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
+                }
                 context.add_payload_bytes(u64::from(count))?;
                 (offset, count)
             }
         };
 
         for (joint_index, joint) in skin.joints().iter().copied().enumerate() {
-            context.work(SceneValidationWork::Traversal, 1)?;
-            if usize::try_from(joint.index()).map_or(true, |index| index >= authored_node_count) {
-                return Err(DeformationAuthoringSemanticError::JointNodeOutOfRange {
-                    skin: skin_index,
-                    joint: joint_index,
-                    node: joint.index(),
-                    node_count: authored_node_count,
+            context.run_unit(SceneValidationWork::Traversal, || {
+                if usize::try_from(joint.index()).map_or(true, |index| index >= authored_node_count)
+                {
+                    return Err(DeformationAuthoringSemanticError::JointNodeOutOfRange {
+                        skin: skin_index,
+                        joint: joint_index,
+                        node: joint.index(),
+                        node_count: authored_node_count,
+                    });
                 }
-                .into());
-            }
+                Ok::<(), DeformationAuthoringSemanticError>(())
+            })??;
         }
         context.add_relations(u64::from(joint_count))?;
 
         if let Presence::Present(root) = skin.skeleton_root() {
-            context.work(SceneValidationWork::Traversal, 1)?;
-            if usize::try_from(root.index()).map_or(true, |index| index >= authored_node_count) {
-                return Err(DeformationAuthoringSemanticError::SkeletonRootOutOfRange {
-                    skin: skin_index,
-                    node: root.index(),
-                    node_count: authored_node_count,
+            context.run_unit(SceneValidationWork::Traversal, || {
+                if usize::try_from(root.index()).map_or(true, |index| index >= authored_node_count)
+                {
+                    return Err(DeformationAuthoringSemanticError::SkeletonRootOutOfRange {
+                        skin: skin_index,
+                        node: root.index(),
+                        node_count: authored_node_count,
+                    });
                 }
-                .into());
-            }
+                Ok::<(), DeformationAuthoringSemanticError>(())
+            })??;
             context.add_relations(1)?;
         }
 
         for (joint, matrix) in skin.inverse_bind_matrices().iter().copied().enumerate() {
-            context.work(
-                SceneValidationWork::PayloadCell,
-                u64::from(INVERSE_BIND_SCALARS),
-            )?;
-            if !matrix.is_finite() {
-                return Err(DeformationAuthoringSemanticError::NonFiniteInverseBind {
-                    skin: skin_index,
-                    joint,
-                }
-                .into());
-            }
-            if !matrix.is_affine() {
-                return Err(DeformationAuthoringSemanticError::NonAffineInverseBind {
-                    skin: skin_index,
-                    joint,
-                }
-                .into());
+            for (scalar, value) in matrix.cols.into_iter().flatten().enumerate() {
+                context.run_unit(SceneValidationWork::PayloadCell, || {
+                    if !value.is_finite() {
+                        return Err(DeformationAuthoringSemanticError::NonFiniteInverseBind {
+                            skin: skin_index,
+                            joint,
+                        });
+                    }
+                    if scalar + 1 == INVERSE_BIND_SCALAR_COUNT && !matrix.is_affine() {
+                        return Err(DeformationAuthoringSemanticError::NonAffineInverseBind {
+                            skin: skin_index,
+                            joint,
+                        });
+                    }
+                    Ok::<(), DeformationAuthoringSemanticError>(())
+                })??;
             }
         }
         let (correction_matrix_scalar_offset, correction_matrix_scalar_count) =
             match matrix_spaces.correction() {
                 None => (0, 0),
                 Some(correction) => {
-                    if correction.from() != matrix_spaces.input_position()
-                        || correction.to() != matrix_spaces.output_position()
-                    {
-                        return Err(
-                            DeformationAuthoringSemanticError::ContradictorySkinCorrectionSpaces {
-                                skin: skin_index,
-                                from: correction.from(),
-                                to: correction.to(),
-                                expected_from: matrix_spaces.input_position(),
-                                expected_to: matrix_spaces.output_position(),
+                    let matrix = correction.matrix();
+                    for (scalar, value) in matrix.cols.into_iter().flatten().enumerate() {
+                        context.run_unit(SceneValidationWork::PayloadCell, || {
+                            if !value.is_finite() {
+                                return Err(
+                                    DeformationAuthoringSemanticError::NonFiniteSkinCorrection {
+                                        skin: skin_index,
+                                    },
+                                );
                             }
-                            .into(),
-                        );
-                    }
-                    context.work(
-                        SceneValidationWork::PayloadCell,
-                        u64::from(INVERSE_BIND_SCALARS),
-                    )?;
-                    if !correction.matrix().is_finite() {
-                        return Err(DeformationAuthoringSemanticError::NonFiniteSkinCorrection {
-                            skin: skin_index,
-                        }
-                        .into());
-                    }
-                    if !correction.matrix().is_affine() {
-                        return Err(DeformationAuthoringSemanticError::NonAffineSkinCorrection {
-                            skin: skin_index,
-                        }
-                        .into());
+                            if scalar + 1 == INVERSE_BIND_SCALAR_COUNT && !matrix.is_affine() {
+                                return Err(
+                                    DeformationAuthoringSemanticError::NonAffineSkinCorrection {
+                                        skin: skin_index,
+                                    },
+                                );
+                            }
+                            Ok::<(), DeformationAuthoringSemanticError>(())
+                        })??;
                     }
                     let offset = advance_cursor(
                         &mut cursors.correction_scalars,
@@ -1823,7 +1838,7 @@ fn validate_logical_morphs<C, R>(
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let definition_count = collection_count(
         input.morph_target_definitions().len(),
@@ -1831,43 +1846,43 @@ where
     )?;
     let mut expected_definition_offset = 0_u32;
     for (logical_mesh, morph) in input.logical_meshes().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
         let definitions = morph.definitions();
-        if definitions.offset() != expected_definition_offset {
-            return Err(
-                DeformationAuthoringSemanticError::MorphDefinitionRangeOrder {
-                    logical_mesh,
-                    expected: expected_definition_offset,
-                    actual: definitions.offset(),
-                }
-                .into(),
-            );
-        }
         let definition_end = u64::from(definitions.offset()) + u64::from(definitions.count());
-        if definition_end > u64::from(definition_count) {
-            return Err(
-                DeformationAuthoringSemanticError::MorphDefinitionRangeOutOfRange {
-                    logical_mesh,
-                    offset: definitions.offset(),
-                    end: definition_end,
-                    definition_count,
-                }
-                .into(),
-            );
-        }
+        context.run_unit(SceneValidationWork::Entity, || {
+            if definitions.offset() != expected_definition_offset {
+                return Err(
+                    DeformationAuthoringSemanticError::MorphDefinitionRangeOrder {
+                        logical_mesh,
+                        expected: expected_definition_offset,
+                        actual: definitions.offset(),
+                    },
+                );
+            }
+            if definition_end > u64::from(definition_count) {
+                return Err(
+                    DeformationAuthoringSemanticError::MorphDefinitionRangeOutOfRange {
+                        logical_mesh,
+                        offset: definitions.offset(),
+                        end: definition_end,
+                        definition_count,
+                    },
+                );
+            }
+            let target_count = definitions.count();
+            if usize::try_from(target_count).map_or(true, |target_count| {
+                target_count != morph.default_weights().len()
+            }) {
+                return Err(
+                    DeformationAuthoringSemanticError::LogicalMorphWidthMismatch {
+                        logical_mesh,
+                        definition_count: target_count,
+                        default_count: morph.default_weights().len(),
+                    },
+                );
+            }
+            Ok::<(), DeformationAuthoringSemanticError>(())
+        })??;
         let target_count = definitions.count();
-        if usize::try_from(target_count).map_or(true, |target_count| {
-            target_count != morph.default_weights().len()
-        }) {
-            return Err(
-                DeformationAuthoringSemanticError::LogicalMorphWidthMismatch {
-                    logical_mesh,
-                    definition_count: target_count,
-                    default_count: morph.default_weights().len(),
-                }
-                .into(),
-            );
-        }
         let definition_range = checked_range(definitions, input.morph_target_definitions().len())?;
         let authored_definitions = input
             .morph_target_definitions()
@@ -1887,49 +1902,55 @@ where
             .into());
         }
         storage.uniqueness.clear();
-        storage.uniqueness.resize(target_width, 0);
-        for (target, definition) in authored_definitions.iter().copied().enumerate() {
-            context.work(SceneValidationWork::Entity, 1)?;
-            let identity = definition.identity().value();
-            if identity >= target_count {
-                return Err(
-                    DeformationAuthoringSemanticError::MorphTargetIdentityOutOfRange {
-                        logical_mesh,
-                        target,
-                        identity,
-                        target_count,
-                    }
-                    .into(),
-                );
-            }
-            let identity_index = usize::try_from(identity).map_err(|_| {
-                DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "morph target identity",
-                }
+        for _ in 0..target_width {
+            context.run_unit(SceneValidationWork::Traversal, || {
+                storage.uniqueness.push(0);
             })?;
-            let seen = storage.uniqueness.get_mut(identity_index).ok_or(
-                DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "morph identity uniqueness slot",
-                },
-            )?;
-            if *seen != 0 {
-                return Err(
-                    DeformationAuthoringSemanticError::DuplicateMorphTargetIdentity {
-                        logical_mesh,
-                        target,
-                        identity,
+        }
+        for (target, definition) in authored_definitions.iter().copied().enumerate() {
+            let identity = definition.identity().value();
+            context.run_unit(SceneValidationWork::Entity, || {
+                if identity >= target_count {
+                    return Err(
+                        DeformationAuthoringSemanticError::MorphTargetIdentityOutOfRange {
+                            logical_mesh,
+                            target,
+                            identity,
+                            target_count,
+                        },
+                    );
+                }
+                let identity_index = usize::try_from(identity).map_err(|_| {
+                    DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "morph target identity",
                     }
-                    .into(),
-                );
-            }
-            *seen = 1;
+                })?;
+                let seen = storage.uniqueness.get_mut(identity_index).ok_or(
+                    DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "morph identity uniqueness slot",
+                    },
+                )?;
+                if *seen != 0 {
+                    return Err(
+                        DeformationAuthoringSemanticError::DuplicateMorphTargetIdentity {
+                            logical_mesh,
+                            target,
+                            identity,
+                        },
+                    );
+                }
+                *seen = 1;
+                Ok::<(), DeformationAuthoringSemanticError>(())
+            })??;
 
             let (name_byte_offset, definition_name_byte_count) = match definition.name() {
                 Presence::Absent => (0, 0),
                 Presence::Present(name) => {
                     let count = collection_count(name.as_str().len(), "morph target name bytes")?;
                     let offset = advance_cursor(name_byte_count, count, "morph target name bytes")?;
-                    context.work(SceneValidationWork::PayloadCell, u64::from(count))?;
+                    for byte in name.as_str().as_bytes() {
+                        context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
+                    }
                     context.add_payload_bytes(u64::from(count))?;
                     (offset, count)
                 }
@@ -1950,16 +1971,17 @@ where
             "logical morph default weights",
         )?;
         for (target, weight) in morph.default_weights().iter().copied().enumerate() {
-            context.work(SceneValidationWork::PayloadCell, 1)?;
-            if !weight.is_finite() {
-                return Err(
-                    DeformationAuthoringSemanticError::NonFiniteDefaultMorphWeight {
-                        logical_mesh,
-                        target,
-                    }
-                    .into(),
-                );
-            }
+            context.run_unit(SceneValidationWork::PayloadCell, || {
+                if !weight.is_finite() {
+                    return Err(
+                        DeformationAuthoringSemanticError::NonFiniteDefaultMorphWeight {
+                            logical_mesh,
+                            target,
+                        },
+                    );
+                }
+                Ok::<(), DeformationAuthoringSemanticError>(())
+            })??;
         }
         context.add_payload(u64::from(target_count), 0)?;
         storage.logical_morph_plans.push(ValidatedLogicalMorphPlan {
@@ -1974,13 +1996,15 @@ where
             }
         })?;
     }
-    if expected_definition_offset != definition_count {
-        return Err(DeformationAuthoringSemanticError::UnownedMorphDefinitions {
-            owned: expected_definition_offset,
-            definition_count,
+    context.run_unit(SceneValidationWork::Traversal, || {
+        if expected_definition_offset != definition_count {
+            return Err(DeformationAuthoringSemanticError::UnownedMorphDefinitions {
+                owned: expected_definition_offset,
+                definition_count,
+            });
         }
-        .into());
-    }
+        Ok::<(), DeformationAuthoringSemanticError>(())
+    })??;
     Ok(())
 }
 
@@ -1996,7 +2020,7 @@ fn validate_primitives<C, R, GR>(
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     for (logical_mesh_index, geometry_mesh) in geometry
         .input()
@@ -2077,15 +2101,44 @@ fn validate_primitive<C, R>(
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<Option<PaletteJointLocation>, C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
-    context.work(SceneValidationWork::Entity, 1)?;
+    let influences = context.run_unit(SceneValidationWork::Entity, || {
+        let influences = authored.influences();
+        if let Presence::Present(rows) = influences {
+            let expected_offsets = u64::from(vertex_count) + 1;
+            if u64::try_from(rows.vertex_offsets().len()) != Ok(expected_offsets) {
+                return Err(
+                    DeformationAuthoringSemanticError::InfluenceOffsetCountMismatch {
+                        primitive: primitive_index,
+                        expected: expected_offsets,
+                        actual: rows.vertex_offsets().len(),
+                    },
+                );
+            }
+        }
+        if authored.morph_targets().len()
+            != usize::try_from(target_count).map_err(|_| {
+                DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "logical morph target count",
+                }
+            })?
+        {
+            return Err(
+                DeformationAuthoringSemanticError::PrimitiveMorphTargetCountMismatch {
+                    primitive: primitive_index,
+                    expected: target_count,
+                    actual: authored.morph_targets().len(),
+                },
+            );
+        }
+        Ok::<_, DeformationAuthoringSemanticError>(influences)
+    })??;
     let (row_offset_offset, row_offset_count, influence_offset, primitive_influence_count, maximum) =
-        match authored.influences() {
+        match influences {
             Presence::Absent => (0, 0, 0, 0, None),
             Presence::Present(rows) => validate_influence_rows(
                 primitive_index,
-                vertex_count,
                 rows,
                 influence_row_offset_count,
                 influence_count,
@@ -2094,50 +2147,34 @@ where
             )?,
         };
 
-    if authored.morph_targets().len()
-        != usize::try_from(target_count).map_err(|_| {
-            DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "logical morph target count",
-            }
-        })?
-    {
-        return Err(
-            DeformationAuthoringSemanticError::PrimitiveMorphTargetCountMismatch {
-                primitive: primitive_index,
-                expected: target_count,
-                actual: authored.morph_targets().len(),
-            }
-            .into(),
-        );
-    }
-
     let target_offset = collection_count(storage.morph_target_plans.len(), "morph target offset")?;
     for (target_index, target) in authored.morph_targets().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
+        let deltas = context.run_unit(SceneValidationWork::Entity, || target.deltas())?;
         let delta_offset = collection_count(storage.morph_delta_plans.len(), "morph delta offset")?;
         let mut previous_semantic = None;
-        for (delta_index, delta) in target.deltas().iter().copied().enumerate() {
-            context.work(SceneValidationWork::Entity, 1)?;
-            let ordinal = morph_semantic_ordinal(delta.semantic());
-            if let Some(previous) = previous_semantic {
-                if ordinal == previous {
-                    return Err(DeformationAuthoringSemanticError::DuplicateMorphSemantic {
-                        primitive: primitive_index,
-                        target: target_index,
-                        delta: delta_index,
-                        semantic: delta.semantic(),
+        for (delta_index, delta) in deltas.iter().copied().enumerate() {
+            let ordinal = context.run_unit(SceneValidationWork::Entity, || {
+                let ordinal = morph_semantic_ordinal(delta.semantic());
+                if let Some(previous) = previous_semantic {
+                    if ordinal == previous {
+                        return Err(DeformationAuthoringSemanticError::DuplicateMorphSemantic {
+                            primitive: primitive_index,
+                            target: target_index,
+                            delta: delta_index,
+                            semantic: delta.semantic(),
+                        });
                     }
-                    .into());
-                }
-                if ordinal < previous {
-                    return Err(DeformationAuthoringSemanticError::MorphSemanticOrder {
-                        primitive: primitive_index,
-                        target: target_index,
-                        delta: delta_index,
+                    if ordinal < previous {
+                        return Err(DeformationAuthoringSemanticError::MorphSemanticOrder {
+                            primitive: primitive_index,
+                            target: target_index,
+                            delta: delta_index,
+                        });
                     }
-                    .into());
                 }
-            }
+                validate_morph_delta_shape(primitive_index, target_index, delta, vertex_count)?;
+                Ok::<u8, DeformationAuthoringSemanticError>(ordinal)
+            })??;
             previous_semantic = Some(ordinal);
             let plan = validate_morph_delta(
                 primitive_index,
@@ -2150,7 +2187,7 @@ where
             )?;
             storage.morph_delta_plans.push(plan);
         }
-        let delta_count = collection_count(target.deltas().len(), "morph target deltas")?;
+        let delta_count = collection_count(deltas.len(), "morph target deltas")?;
         context.add_relations(u64::from(delta_count))?;
         storage.morph_target_plans.push(ValidatedMorphTargetPlan {
             primitive_index: usize_to_u32(primitive_index, "primitive index")?,
@@ -2173,7 +2210,6 @@ where
 
 fn validate_influence_rows<C>(
     primitive: usize,
-    vertex_count: u32,
     rows: InfluenceRowsAuthoring<'_>,
     row_offset_cursor: &mut u32,
     influence_cursor: &mut u32,
@@ -2181,163 +2217,147 @@ fn validate_influence_rows<C>(
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(u32, u32, u32, u32, Option<PaletteJointLocation>), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
-    let expected_offsets = u64::from(vertex_count) + 1;
-    if u64::try_from(rows.vertex_offsets().len()) != Ok(expected_offsets) {
-        return Err(
-            DeformationAuthoringSemanticError::InfluenceOffsetCountMismatch {
-                primitive,
-                expected: expected_offsets,
-                actual: rows.vertex_offsets().len(),
-            }
-            .into(),
-        );
-    }
     let row_offset_count = collection_count(rows.vertex_offsets().len(), "influence row offsets")?;
     let influence_count = collection_count(rows.influences().len(), "influences")?;
     let row_offset_offset =
         advance_cursor(row_offset_cursor, row_offset_count, "influence row offsets")?;
     let influence_offset = advance_cursor(influence_cursor, influence_count, "influence cells")?;
-    let first = rows.vertex_offsets().first().copied().ok_or(
-        DeformationAuthoringSemanticError::AccountingOverflow {
-            dimension: "influence first offset",
-        },
-    )?;
-    if first != 0 {
-        return Err(DeformationAuthoringSemanticError::InfluenceFirstOffset {
-            primitive,
-            actual: first,
-        }
-        .into());
-    }
+    let offset_len = rows.vertex_offsets().len();
     for (position, offset) in rows.vertex_offsets().iter().copied().enumerate() {
-        context.work(SceneValidationWork::PayloadCell, 1)?;
-        if offset > influence_count {
-            return Err(
-                DeformationAuthoringSemanticError::InfluenceOffsetOutOfRange {
+        context.run_unit(SceneValidationWork::PayloadCell, || {
+            if position == 0 && offset != 0 {
+                return Err(DeformationAuthoringSemanticError::InfluenceFirstOffset {
                     primitive,
-                    position,
-                    offset,
-                    influence_count,
-                }
-                .into(),
-            );
-        }
-    }
-    for (position, pair) in rows.vertex_offsets().windows(2).enumerate() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        if pair[0] > pair[1] {
-            return Err(DeformationAuthoringSemanticError::InfluenceOffsetOrder {
-                primitive,
-                position: position + 1,
-                previous: pair[0],
-                current: pair[1],
+                    actual: offset,
+                });
             }
-            .into());
-        }
-    }
-    let final_offset = rows.vertex_offsets().last().copied().ok_or(
-        DeformationAuthoringSemanticError::AccountingOverflow {
-            dimension: "influence final offset",
-        },
-    )?;
-    if final_offset != influence_count {
-        return Err(DeformationAuthoringSemanticError::InfluenceFinalOffset {
-            primitive,
-            expected: influence_count,
-            actual: final_offset,
-        }
-        .into());
+            if offset > influence_count {
+                return Err(
+                    DeformationAuthoringSemanticError::InfluenceOffsetOutOfRange {
+                        primitive,
+                        position,
+                        offset,
+                        influence_count,
+                    },
+                );
+            }
+            if position + 1 == offset_len && offset != influence_count {
+                return Err(DeformationAuthoringSemanticError::InfluenceFinalOffset {
+                    primitive,
+                    expected: influence_count,
+                    actual: offset,
+                });
+            }
+            Ok::<(), DeformationAuthoringSemanticError>(())
+        })??;
     }
 
     let mut maximum = None;
     for (vertex, offsets) in rows.vertex_offsets().windows(2).enumerate() {
-        let start = usize::try_from(offsets[0]).map_err(|_| {
-            DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "influence row start",
-            }
-        })?;
-        let end = usize::try_from(offsets[1]).map_err(|_| {
-            DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "influence row end",
-            }
-        })?;
-        let row = rows.influences().get(start..end).ok_or(
-            DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "validated influence row",
-            },
-        )?;
-        let row_width = collection_count(row.len(), "influence row width")?;
-        if uniqueness.capacity() < row.len() {
-            return Err(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "influence source-order uniqueness capacity",
-            }
-            .into());
-        }
+        let (start, row, row_width) =
+            context.run_unit(SceneValidationWork::Traversal, || {
+                if offsets[0] > offsets[1] {
+                    return Err(DeformationAuthoringSemanticError::InfluenceOffsetOrder {
+                        primitive,
+                        position: vertex + 1,
+                        previous: offsets[0],
+                        current: offsets[1],
+                    });
+                }
+                let start = usize::try_from(offsets[0]).map_err(|_| {
+                    DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "influence row start",
+                    }
+                })?;
+                let end = usize::try_from(offsets[1]).map_err(|_| {
+                    DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "influence row end",
+                    }
+                })?;
+                let row = rows.influences().get(start..end).ok_or(
+                    DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "validated influence row",
+                    },
+                )?;
+                let row_width = collection_count(row.len(), "influence row width")?;
+                if uniqueness.capacity() < row.len() {
+                    return Err(DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "influence source-order uniqueness capacity",
+                    });
+                }
+                Ok::<_, DeformationAuthoringSemanticError>((start, row, row_width))
+            })??;
         uniqueness.clear();
-        uniqueness.resize(row.len(), 0);
+        for _ in 0..row.len() {
+            context.run_unit(SceneValidationWork::Traversal, || uniqueness.push(0))?;
+        }
         for (relative, influence) in row.iter().copied().enumerate() {
             let influence_index = start.checked_add(relative).ok_or(
                 DeformationAuthoringSemanticError::AccountingOverflow {
                     dimension: "influence index",
                 },
             )?;
-            context.work(SceneValidationWork::PayloadCell, 3)?;
-            if !influence.weight().is_finite() {
-                return Err(
-                    DeformationAuthoringSemanticError::NonFiniteInfluenceWeight {
+            context.run_unit(SceneValidationWork::PayloadCell, || {
+                if !influence.weight().is_finite() {
+                    return Err(
+                        DeformationAuthoringSemanticError::NonFiniteInfluenceWeight {
+                            primitive,
+                            influence: influence_index,
+                        },
+                    );
+                }
+                if influence.weight() < 0.0 {
+                    return Err(DeformationAuthoringSemanticError::NegativeInfluenceWeight {
                         primitive,
                         influence: influence_index,
-                    }
-                    .into(),
-                );
-            }
-            if influence.weight() < 0.0 {
-                return Err(DeformationAuthoringSemanticError::NegativeInfluenceWeight {
-                    primitive,
-                    influence: influence_index,
+                    });
                 }
-                .into());
-            }
-            if influence.source_order() >= row_width {
-                return Err(
-                    DeformationAuthoringSemanticError::InfluenceSourceOrderOutOfRange {
-                        primitive,
-                        vertex: usize_to_u32(vertex, "influence vertex")?,
-                        influence: influence_index,
-                        source_order: influence.source_order(),
-                        row_width,
-                    }
-                    .into(),
-                );
-            }
-            let source_order = usize::try_from(influence.source_order()).map_err(|_| {
-                DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "influence source order",
+                Ok::<(), DeformationAuthoringSemanticError>(())
+            })??;
+            let palette_joint =
+                context.run_unit(SceneValidationWork::PayloadCell, || influence.joint())?;
+            let candidate = context.run_unit(SceneValidationWork::PayloadCell, || {
+                if influence.source_order() >= row_width {
+                    return Err(
+                        DeformationAuthoringSemanticError::InfluenceSourceOrderOutOfRange {
+                            primitive,
+                            vertex: usize_to_u32(vertex, "influence vertex")?,
+                            influence: influence_index,
+                            source_order: influence.source_order(),
+                            row_width,
+                        },
+                    );
                 }
-            })?;
-            let seen = uniqueness.get_mut(source_order).ok_or(
-                DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "influence source-order uniqueness slot",
-                },
-            )?;
-            if *seen != 0 {
-                return Err(
-                    DeformationAuthoringSemanticError::DuplicateInfluenceSourceOrder {
-                        primitive,
-                        vertex: usize_to_u32(vertex, "influence vertex")?,
-                        source_order: influence.source_order(),
+                let source_order = usize::try_from(influence.source_order()).map_err(|_| {
+                    DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "influence source order",
                     }
-                    .into(),
-                );
-            }
-            *seen = 1;
-            let candidate = PaletteJointLocation {
-                primitive: usize_to_u32(primitive, "palette primitive")?,
-                influence: usize_to_u32(influence_index, "palette influence")?,
-                palette_joint: influence.joint(),
-            };
+                })?;
+                let seen = uniqueness.get_mut(source_order).ok_or(
+                    DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "influence source-order uniqueness slot",
+                    },
+                )?;
+                if *seen != 0 {
+                    return Err(
+                        DeformationAuthoringSemanticError::DuplicateInfluenceSourceOrder {
+                            primitive,
+                            vertex: usize_to_u32(vertex, "influence vertex")?,
+                            source_order: influence.source_order(),
+                        },
+                    );
+                }
+                *seen = 1;
+                Ok::<PaletteJointLocation, DeformationAuthoringSemanticError>(
+                    PaletteJointLocation {
+                        primitive: usize_to_u32(primitive, "palette primitive")?,
+                        influence: usize_to_u32(influence_index, "palette influence")?,
+                        palette_joint,
+                    },
+                )
+            })??;
             if maximum.is_none_or(|current: PaletteJointLocation| {
                 candidate.palette_joint > current.palette_joint
             }) {
@@ -2366,6 +2386,64 @@ where
     ))
 }
 
+fn validate_morph_delta_shape(
+    primitive: usize,
+    target: usize,
+    delta: MorphDeltaAuthoring<'_>,
+    vertex_count: u32,
+) -> Result<(), DeformationAuthoringSemanticError> {
+    let semantic = delta.semantic();
+    match delta.payload() {
+        MorphDeltaPayloadAuthoring::Dense { values } => {
+            let expected = u64::from(vertex_count)
+                .checked_mul(u64::from(MORPH_DELTA_LANES))
+                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "dense morph scalar count",
+                })?;
+            if u64::try_from(values.len()) != Ok(expected) {
+                return Err(DeformationAuthoringSemanticError::DenseMorphScalarCount {
+                    primitive,
+                    target,
+                    semantic,
+                    expected,
+                    actual: values.len(),
+                });
+            }
+        }
+        MorphDeltaPayloadAuthoring::Sparse {
+            logical_count,
+            indices,
+            values,
+        } => {
+            if logical_count != vertex_count {
+                return Err(DeformationAuthoringSemanticError::SparseMorphLogicalCount {
+                    primitive,
+                    target,
+                    semantic,
+                    expected: vertex_count,
+                    actual: logical_count,
+                });
+            }
+            let expected = u64::try_from(indices.len())
+                .ok()
+                .and_then(|count| count.checked_mul(u64::from(MORPH_DELTA_LANES)))
+                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "sparse morph scalar count",
+                })?;
+            if u64::try_from(values.len()) != Ok(expected) {
+                return Err(DeformationAuthoringSemanticError::SparseMorphScalarCount {
+                    primitive,
+                    target,
+                    semantic,
+                    index_count: indices.len(),
+                    actual: values.len(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_morph_delta<C>(
     primitive: usize,
@@ -2377,93 +2455,52 @@ fn validate_morph_delta<C>(
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<ValidatedMorphDeltaPlan, C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let semantic = delta.semantic();
     let (payload_kind, logical_count, explicit_count, values, sparse_indices) =
         match delta.payload() {
-            MorphDeltaPayloadAuthoring::Dense { values } => {
-                let expected = u64::from(vertex_count)
-                    .checked_mul(u64::from(MORPH_DELTA_LANES))
-                    .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                        dimension: "dense morph scalar count",
-                    })?;
-                if u64::try_from(values.len()) != Ok(expected) {
-                    return Err(DeformationAuthoringSemanticError::DenseMorphScalarCount {
-                        primitive,
-                        target,
-                        semantic,
-                        expected,
-                        actual: values.len(),
-                    }
-                    .into());
-                }
-                (
-                    DeformationMorphPayloadKind::Dense,
-                    vertex_count,
-                    vertex_count,
-                    values,
-                    &[][..],
-                )
-            }
+            MorphDeltaPayloadAuthoring::Dense { values } => (
+                DeformationMorphPayloadKind::Dense,
+                vertex_count,
+                vertex_count,
+                values,
+                &[][..],
+            ),
             MorphDeltaPayloadAuthoring::Sparse {
                 logical_count,
                 indices,
                 values,
             } => {
-                if logical_count != vertex_count {
-                    return Err(DeformationAuthoringSemanticError::SparseMorphLogicalCount {
-                        primitive,
-                        target,
-                        semantic,
-                        expected: vertex_count,
-                        actual: logical_count,
-                    }
-                    .into());
-                }
-                let expected = u64::try_from(indices.len())
-                    .ok()
-                    .and_then(|count| count.checked_mul(u64::from(MORPH_DELTA_LANES)))
-                    .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                        dimension: "sparse morph scalar count",
-                    })?;
-                if u64::try_from(values.len()) != Ok(expected) {
-                    return Err(DeformationAuthoringSemanticError::SparseMorphScalarCount {
-                        primitive,
-                        target,
-                        semantic,
-                        index_count: indices.len(),
-                        actual: values.len(),
-                    }
-                    .into());
-                }
                 for (element, index) in indices.iter().copied().enumerate() {
-                    context.work(SceneValidationWork::PayloadCell, 1)?;
-                    if index >= logical_count {
-                        return Err(
-                            DeformationAuthoringSemanticError::SparseMorphIndexOutOfRange {
+                    context.run_unit(SceneValidationWork::PayloadCell, || {
+                        if index >= logical_count {
+                            return Err(
+                                DeformationAuthoringSemanticError::SparseMorphIndexOutOfRange {
+                                    primitive,
+                                    target,
+                                    semantic,
+                                    element,
+                                    index,
+                                    logical_count,
+                                },
+                            );
+                        }
+                        Ok::<(), DeformationAuthoringSemanticError>(())
+                    })??;
+                }
+                for (element, pair) in indices.windows(2).enumerate() {
+                    context.run_unit(SceneValidationWork::Traversal, || {
+                        if pair[0] >= pair[1] {
+                            return Err(DeformationAuthoringSemanticError::SparseMorphIndexOrder {
                                 primitive,
                                 target,
                                 semantic,
-                                element,
-                                index,
-                                logical_count,
-                            }
-                            .into(),
-                        );
-                    }
-                }
-                for (element, pair) in indices.windows(2).enumerate() {
-                    context.work(SceneValidationWork::Traversal, 1)?;
-                    if pair[0] >= pair[1] {
-                        return Err(DeformationAuthoringSemanticError::SparseMorphIndexOrder {
-                            primitive,
-                            target,
-                            semantic,
-                            element: element + 1,
+                                element: element + 1,
+                            });
                         }
-                        .into());
-                    }
+                        Ok::<(), DeformationAuthoringSemanticError>(())
+                    })??;
                 }
                 (
                     DeformationMorphPayloadKind::Sparse,
@@ -2476,16 +2513,17 @@ where
         };
 
     for (scalar, value) in values.iter().copied().enumerate() {
-        context.work(SceneValidationWork::PayloadCell, 1)?;
-        if !value.is_finite() {
-            return Err(DeformationAuthoringSemanticError::NonFiniteMorphDelta {
-                primitive,
-                target,
-                semantic,
-                scalar,
+        context.run_unit(SceneValidationWork::PayloadCell, || {
+            if !value.is_finite() {
+                return Err(DeformationAuthoringSemanticError::NonFiniteMorphDelta {
+                    primitive,
+                    target,
+                    semantic,
+                    scalar,
+                });
             }
-            .into());
-        }
+            Ok::<(), DeformationAuthoringSemanticError>(())
+        })??;
     }
     let value_count = collection_count(values.len(), "morph delta values")?;
     let sparse_index_count = collection_count(sparse_indices.len(), "morph sparse indices")?;
@@ -2516,98 +2554,102 @@ fn validate_mesh_instances<C, R, GR>(
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     for (instance_index, authored) in input.mesh_instances().iter().copied().enumerate() {
-        context.work(SceneValidationWork::Entity, 1)?;
-        let geometry_instance = *geometry
-            .input()
-            .mesh_instances()
-            .get(instance_index)
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "geometry mesh instance",
-            })?;
-        let logical_mesh = geometry_instance.logical_mesh().index();
-        let logical_plan = storage
-            .logical_morph_plans
-            .get(usize::try_from(logical_mesh).map_err(|_| {
-                DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "instance logical mesh index",
-                }
-            })?)
-            .copied()
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "instance logical morph plan",
-            })?;
-
-        let skin = match authored.skin() {
-            Presence::Absent => None,
-            Presence::Present(skin) => {
-                if skin.index() >= collection_count(input.skins().len(), "skins")? {
-                    return Err(DeformationAuthoringSemanticError::InstanceSkinOutOfRange {
-                        instance: instance_index,
-                        skin: skin.index(),
-                        skin_count: collection_count(input.skins().len(), "skins")?,
+        let (logical_mesh, skin) = context.run_unit(SceneValidationWork::Entity, || {
+            let geometry_instance = *geometry
+                .input()
+                .mesh_instances()
+                .get(instance_index)
+                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "geometry mesh instance",
+                })?;
+            let logical_mesh = geometry_instance.logical_mesh().index();
+            let logical_plan = storage
+                .logical_morph_plans
+                .get(usize::try_from(logical_mesh).map_err(|_| {
+                    DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "instance logical mesh index",
                     }
-                    .into());
-                }
-                context.add_relations(1)?;
-                let skin_plan = storage
-                    .skin_plans
-                    .get(usize::try_from(skin.index()).map_err(|_| {
-                        DeformationAuthoringSemanticError::AccountingOverflow {
-                            dimension: "instance skin index",
-                        }
-                    })?)
-                    .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                        dimension: "instance skin plan",
-                    })?;
-                if let Some(maximum) = logical_plan.maximum_palette_joint
-                    && maximum.palette_joint >= skin_plan.joint_count
-                {
-                    return Err(DeformationAuthoringSemanticError::PaletteJointOutOfRange {
-                        instance: instance_index,
-                        logical_mesh,
-                        skin: skin.index(),
-                        joint_count: skin_plan.joint_count,
-                        primitive: maximum.primitive,
-                        influence: maximum.influence,
-                        palette_joint: maximum.palette_joint,
+                })?)
+                .copied()
+                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "instance logical morph plan",
+                })?;
+            let skin = match authored.skin() {
+                Presence::Absent => None,
+                Presence::Present(skin) => {
+                    let skin_count = collection_count(input.skins().len(), "skins")?;
+                    if skin.index() >= skin_count {
+                        return Err(DeformationAuthoringSemanticError::InstanceSkinOutOfRange {
+                            instance: instance_index,
+                            skin: skin.index(),
+                            skin_count,
+                        });
                     }
-                    .into());
+                    let skin_plan = storage
+                        .skin_plans
+                        .get(usize::try_from(skin.index()).map_err(|_| {
+                            DeformationAuthoringSemanticError::AccountingOverflow {
+                                dimension: "instance skin index",
+                            }
+                        })?)
+                        .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                            dimension: "instance skin plan",
+                        })?;
+                    if let Some(maximum) = logical_plan.maximum_palette_joint
+                        && maximum.palette_joint >= skin_plan.joint_count
+                    {
+                        return Err(DeformationAuthoringSemanticError::PaletteJointOutOfRange {
+                            instance: instance_index,
+                            logical_mesh,
+                            skin: skin.index(),
+                            joint_count: skin_plan.joint_count,
+                            primitive: maximum.primitive,
+                            influence: maximum.influence,
+                            palette_joint: maximum.palette_joint,
+                        });
+                    }
+                    Some(skin)
                 }
-                Some(skin)
-            }
-        };
-
-        let (morph_weight_offset, morph_weight_count) = match authored.morph_weights() {
-            Presence::Absent => (0, 0),
-            Presence::Present(weights) => {
-                if weights.len()
+            };
+            if let Presence::Present(weights) = authored.morph_weights()
+                && weights.len()
                     != usize::try_from(logical_plan.target_count).map_err(|_| {
                         DeformationAuthoringSemanticError::AccountingOverflow {
                             dimension: "instance morph target count",
                         }
                     })?
-                {
-                    return Err(DeformationAuthoringSemanticError::InstanceMorphWidth {
-                        instance: instance_index,
-                        expected: logical_plan.target_count,
-                        actual: weights.len(),
-                    }
-                    .into());
-                }
+            {
+                return Err(DeformationAuthoringSemanticError::InstanceMorphWidth {
+                    instance: instance_index,
+                    expected: logical_plan.target_count,
+                    actual: weights.len(),
+                });
+            }
+            Ok::<_, DeformationAuthoringSemanticError>((logical_mesh, skin))
+        })??;
+
+        if skin.is_some() {
+            context.add_relations(1)?;
+        }
+
+        let (morph_weight_offset, morph_weight_count) = match authored.morph_weights() {
+            Presence::Absent => (0, 0),
+            Presence::Present(weights) => {
                 for (target, weight) in weights.iter().copied().enumerate() {
-                    context.work(SceneValidationWork::PayloadCell, 1)?;
-                    if !weight.is_finite() {
-                        return Err(
-                            DeformationAuthoringSemanticError::NonFiniteInstanceMorphWeight {
-                                instance: instance_index,
-                                target,
-                            }
-                            .into(),
-                        );
-                    }
+                    context.run_unit(SceneValidationWork::PayloadCell, || {
+                        if !weight.is_finite() {
+                            return Err(
+                                DeformationAuthoringSemanticError::NonFiniteInstanceMorphWeight {
+                                    instance: instance_index,
+                                    target,
+                                },
+                            );
+                        }
+                        Ok::<(), DeformationAuthoringSemanticError>(())
+                    })??;
                 }
                 let count = collection_count(weights.len(), "instance morph weights")?;
                 let offset = advance_cursor(morph_weight_cursor, count, "instance morph weights")?;
@@ -2812,7 +2854,7 @@ fn deformation_structural_bytes<C>(
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(u64, DeformationScratchShape), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let skin_count = collection_count(input.skins().len(), "skins")?;
     let morph_definition_count = collection_count(
@@ -2837,89 +2879,95 @@ where
     let mut instance_weights = 0_u64;
     let mut skin_bytes = 0_u64;
     for skin in input.skins() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let name_bytes = match skin.name() {
-            Presence::Absent => 0,
-            Presence::Present(name) => name.as_str().len(),
-        };
-        skin_name_bytes = checked_add_len(skin_name_bytes, name_bytes, "skin name bytes")?;
-        joint_nodes = checked_add_len(joint_nodes, skin.joints().len(), "skin joint nodes")?;
-        inverse_bind_scalars = inverse_bind_scalars
-            .checked_add(
-                usize_to_u64(skin.inverse_bind_matrices().len(), "inverse-bind matrices")?
-                    .checked_mul(u64::from(INVERSE_BIND_SCALARS))
-                    .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                        dimension: "inverse-bind scalars",
-                    })?,
-            )
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "inverse-bind scalars",
-            })?;
-        let has_correction = skin.matrix_spaces().correction().is_some();
-        if has_correction {
-            skin_correction_scalars = skin_correction_scalars
-                .checked_add(u64::from(INVERSE_BIND_SCALARS))
+        context.run_unit(SceneValidationWork::Traversal, || {
+            let name_bytes = match skin.name() {
+                Presence::Absent => 0,
+                Presence::Present(name) => name.as_str().len(),
+            };
+            skin_name_bytes = checked_add_len(skin_name_bytes, name_bytes, "skin name bytes")?;
+            joint_nodes = checked_add_len(joint_nodes, skin.joints().len(), "skin joint nodes")?;
+            inverse_bind_scalars = inverse_bind_scalars
+                .checked_add(
+                    usize_to_u64(skin.inverse_bind_matrices().len(), "inverse-bind matrices")?
+                        .checked_mul(u64::from(INVERSE_BIND_SCALARS))
+                        .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                            dimension: "inverse-bind scalars",
+                        })?,
+                )
                 .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "skin correction scalars",
+                    dimension: "inverse-bind scalars",
                 })?;
-        }
-        skin_bytes = skin_bytes
-            .checked_add(DEFORMATION_SKIN_FIXED_BYTES)
-            .and_then(|bytes| {
-                bytes.checked_add(checked_reference_slots([
-                    !skin.joints().is_empty(),
-                    !skin.inverse_bind_matrices().is_empty(),
-                    !skin.joints().is_empty()
-                        || matches!(skin.skeleton_root(), Presence::Present(_)),
-                    has_correction,
-                    name_bytes != 0,
-                ]))
-            })
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "deformation skin records",
-            })?;
+            let has_correction = skin.matrix_spaces().correction().is_some();
+            if has_correction {
+                skin_correction_scalars = skin_correction_scalars
+                    .checked_add(u64::from(INVERSE_BIND_SCALARS))
+                    .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "skin correction scalars",
+                    })?;
+            }
+            skin_bytes = skin_bytes
+                .checked_add(DEFORMATION_SKIN_FIXED_BYTES)
+                .and_then(|bytes| {
+                    bytes.checked_add(checked_reference_slots([
+                        !skin.joints().is_empty(),
+                        !skin.inverse_bind_matrices().is_empty(),
+                        !skin.joints().is_empty()
+                            || matches!(skin.skeleton_root(), Presence::Present(_)),
+                        has_correction,
+                        name_bytes != 0,
+                    ]))
+                })
+                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "deformation skin records",
+                })?;
+            Ok::<(), DeformationAuthoringSemanticError>(())
+        })??;
     }
 
     let mut morph_definition_bytes = 0_u64;
     for definition in input.morph_target_definitions() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let name_bytes = match definition.name() {
-            Presence::Absent => 0,
-            Presence::Present(name) => name.as_str().len(),
-        };
-        morph_name_bytes =
-            checked_add_len(morph_name_bytes, name_bytes, "morph target name bytes")?;
-        morph_definition_bytes = morph_definition_bytes
-            .checked_add(DEFORMATION_MORPH_DEFINITION_FIXED_BYTES)
-            .and_then(|bytes| bytes.checked_add(reference_slot_bytes(name_bytes != 0)))
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "morph definition records",
-            })?;
+        context.run_unit(SceneValidationWork::Traversal, || {
+            let name_bytes = match definition.name() {
+                Presence::Absent => 0,
+                Presence::Present(name) => name.as_str().len(),
+            };
+            morph_name_bytes =
+                checked_add_len(morph_name_bytes, name_bytes, "morph target name bytes")?;
+            morph_definition_bytes = morph_definition_bytes
+                .checked_add(DEFORMATION_MORPH_DEFINITION_FIXED_BYTES)
+                .and_then(|bytes| bytes.checked_add(reference_slot_bytes(name_bytes != 0)))
+                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "morph definition records",
+                })?;
+            Ok::<(), DeformationAuthoringSemanticError>(())
+        })??;
     }
 
     let mut logical_bytes = 0_u64;
     for logical in input.logical_meshes() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        maximum_uniqueness_count = maximum_uniqueness_count.max(valid_morph_definition_width(
-            logical.definitions(),
-            input.morph_target_definitions().len(),
-        ));
-        morph_defaults = checked_add_len(
-            morph_defaults,
-            logical.default_weights().len(),
-            "morph default weights",
-        )?;
-        logical_bytes = logical_bytes
-            .checked_add(DEFORMATION_LOGICAL_MORPH_FIXED_BYTES)
-            .and_then(|bytes| {
-                bytes.checked_add(checked_reference_slots([
-                    logical.definitions().count() != 0,
-                    !logical.default_weights().is_empty(),
-                ]))
-            })
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "logical morph records",
-            })?;
+        context.run_unit(SceneValidationWork::Traversal, || {
+            maximum_uniqueness_count = maximum_uniqueness_count.max(valid_morph_definition_width(
+                logical.definitions(),
+                input.morph_target_definitions().len(),
+            ));
+            morph_defaults = checked_add_len(
+                morph_defaults,
+                logical.default_weights().len(),
+                "morph default weights",
+            )?;
+            logical_bytes = logical_bytes
+                .checked_add(DEFORMATION_LOGICAL_MORPH_FIXED_BYTES)
+                .and_then(|bytes| {
+                    bytes.checked_add(checked_reference_slots([
+                        logical.definitions().count() != 0,
+                        !logical.default_weights().is_empty(),
+                    ]))
+                })
+                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "logical morph records",
+                })?;
+            Ok::<(), DeformationAuthoringSemanticError>(())
+        })??;
     }
 
     let mut primitive_bytes = 0_u64;
@@ -2928,84 +2976,97 @@ where
     let mut morph_target_count = 0_usize;
     let mut morph_delta_count = 0_usize;
     for primitive in input.primitives() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        morph_target_count = morph_target_count
-            .checked_add(primitive.morph_targets().len())
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "morph target count",
-            })?;
-        let (has_rows, row_count, influence_count) = match primitive.influences() {
-            Presence::Absent => (false, 0, 0),
-            Presence::Present(rows) => {
-                let Ok(influence_count) = u32::try_from(rows.influences().len()) else {
-                    return Err(DeformationAuthoringSemanticError::CountDomainTooLarge {
-                        collection: "influences",
-                    }
-                    .into());
-                };
-                for pair in rows.vertex_offsets().windows(2) {
-                    context.work(SceneValidationWork::Traversal, 1)?;
+        let rows = context.run_unit(SceneValidationWork::Traversal, || {
+            morph_target_count = morph_target_count
+                .checked_add(primitive.morph_targets().len())
+                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "morph target count",
+                })?;
+            let (has_rows, rows, row_count, influence_count) = match primitive.influences() {
+                Presence::Absent => (false, None, 0, 0),
+                Presence::Present(rows) => {
+                    let influence_count = u32::try_from(rows.influences().len()).map_err(|_| {
+                        DeformationAuthoringSemanticError::CountDomainTooLarge {
+                            collection: "influences",
+                        }
+                    })?;
+                    (
+                        true,
+                        Some((rows, influence_count)),
+                        rows.vertex_offsets().len(),
+                        rows.influences().len(),
+                    )
+                }
+            };
+            influence_row_offsets =
+                checked_add_len(influence_row_offsets, row_count, "influence row offsets")?;
+            influences = checked_add_len(influences, influence_count, "influences")?;
+            primitive_bytes = primitive_bytes
+                .checked_add(DEFORMATION_PRIMITIVE_FIXED_BYTES)
+                .and_then(|bytes| {
+                    bytes.checked_add(checked_reference_slots([
+                        has_rows && row_count != 0,
+                        has_rows && influence_count != 0,
+                        has_rows && influence_count != 0,
+                        has_rows && influence_count != 0,
+                        !primitive.morph_targets().is_empty(),
+                    ]))
+                })
+                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "primitive deformation records",
+                })?;
+            Ok::<_, DeformationAuthoringSemanticError>(rows)
+        })??;
+        if let Some((rows, influence_count)) = rows {
+            for pair in rows.vertex_offsets().windows(2) {
+                context.run_unit(SceneValidationWork::Traversal, || {
                     if pair[0] <= pair[1]
                         && pair[1] <= influence_count
                         && let Ok(width) = usize::try_from(pair[1] - pair[0])
                     {
                         maximum_uniqueness_count = maximum_uniqueness_count.max(width);
                     }
-                }
-                (true, rows.vertex_offsets().len(), rows.influences().len())
-            }
-        };
-        influence_row_offsets =
-            checked_add_len(influence_row_offsets, row_count, "influence row offsets")?;
-        influences = checked_add_len(influences, influence_count, "influences")?;
-        primitive_bytes = primitive_bytes
-            .checked_add(DEFORMATION_PRIMITIVE_FIXED_BYTES)
-            .and_then(|bytes| {
-                bytes.checked_add(checked_reference_slots([
-                    has_rows && row_count != 0,
-                    has_rows && influence_count != 0,
-                    has_rows && influence_count != 0,
-                    has_rows && influence_count != 0,
-                    !primitive.morph_targets().is_empty(),
-                ]))
-            })
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "primitive deformation records",
-            })?;
-        for target in primitive.morph_targets() {
-            context.work(SceneValidationWork::Traversal, 1)?;
-            morph_delta_count = morph_delta_count.checked_add(target.deltas().len()).ok_or(
-                DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "morph delta count",
-                },
-            )?;
-            target_bytes = target_bytes
-                .checked_add(DEFORMATION_MORPH_TARGET_FIXED_BYTES)
-                .and_then(|bytes| {
-                    bytes.checked_add(reference_slot_bytes(!target.deltas().is_empty()))
-                })
-                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "morph target records",
                 })?;
-            for delta in target.deltas() {
-                context.work(SceneValidationWork::Traversal, 1)?;
-                let (values, sparse) = match delta.payload() {
-                    MorphDeltaPayloadAuthoring::Dense { values } => (values.len(), 0),
-                    MorphDeltaPayloadAuthoring::Sparse {
-                        indices, values, ..
-                    } => (values.len(), indices.len()),
-                };
-                morph_values = checked_add_len(morph_values, values, "morph values")?;
-                morph_sparse_indices =
-                    checked_add_len(morph_sparse_indices, sparse, "morph sparse indices")?;
-                delta_bytes = delta_bytes
-                    .checked_add(DEFORMATION_MORPH_DELTA_FIXED_BYTES)
+            }
+        }
+        for target in primitive.morph_targets() {
+            let deltas = context.run_unit(SceneValidationWork::Traversal, || {
+                morph_delta_count = morph_delta_count.checked_add(target.deltas().len()).ok_or(
+                    DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "morph delta count",
+                    },
+                )?;
+                target_bytes = target_bytes
+                    .checked_add(DEFORMATION_MORPH_TARGET_FIXED_BYTES)
                     .and_then(|bytes| {
-                        bytes.checked_add(checked_reference_slots([values != 0, sparse != 0]))
+                        bytes.checked_add(reference_slot_bytes(!target.deltas().is_empty()))
                     })
                     .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                        dimension: "morph delta records",
+                        dimension: "morph target records",
                     })?;
+                Ok::<_, DeformationAuthoringSemanticError>(target.deltas())
+            })??;
+            for delta in deltas {
+                context.run_unit(SceneValidationWork::Traversal, || {
+                    let (values, sparse) = match delta.payload() {
+                        MorphDeltaPayloadAuthoring::Dense { values } => (values.len(), 0),
+                        MorphDeltaPayloadAuthoring::Sparse {
+                            indices, values, ..
+                        } => (values.len(), indices.len()),
+                    };
+                    morph_values = checked_add_len(morph_values, values, "morph values")?;
+                    morph_sparse_indices =
+                        checked_add_len(morph_sparse_indices, sparse, "morph sparse indices")?;
+                    delta_bytes = delta_bytes
+                        .checked_add(DEFORMATION_MORPH_DELTA_FIXED_BYTES)
+                        .and_then(|bytes| {
+                            bytes.checked_add(checked_reference_slots([values != 0, sparse != 0]))
+                        })
+                        .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                            dimension: "morph delta records",
+                        })?;
+                    Ok::<(), DeformationAuthoringSemanticError>(())
+                })??;
             }
         }
     }
@@ -3015,23 +3076,26 @@ where
 
     let mut instance_bytes = 0_u64;
     for instance in input.mesh_instances() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let weights = match instance.morph_weights() {
-            Presence::Absent => 0,
-            Presence::Present(weights) => weights.len(),
-        };
-        instance_weights = checked_add_len(instance_weights, weights, "instance morph weights")?;
-        instance_bytes = instance_bytes
-            .checked_add(DEFORMATION_MESH_INSTANCE_FIXED_BYTES)
-            .and_then(|bytes| {
-                bytes.checked_add(checked_reference_slots([
-                    matches!(instance.skin(), Presence::Present(_)),
-                    weights != 0,
-                ]))
-            })
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "mesh instance deformation records",
-            })?;
+        context.run_unit(SceneValidationWork::Traversal, || {
+            let weights = match instance.morph_weights() {
+                Presence::Absent => 0,
+                Presence::Present(weights) => weights.len(),
+            };
+            instance_weights =
+                checked_add_len(instance_weights, weights, "instance morph weights")?;
+            instance_bytes = instance_bytes
+                .checked_add(DEFORMATION_MESH_INSTANCE_FIXED_BYTES)
+                .and_then(|bytes| {
+                    bytes.checked_add(checked_reference_slots([
+                        matches!(instance.skin(), Presence::Present(_)),
+                        weights != 0,
+                    ]))
+                })
+                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "mesh instance deformation records",
+                })?;
+            Ok::<(), DeformationAuthoringSemanticError>(())
+        })??;
     }
 
     let directory_reference_bytes = checked_reference_slots([

@@ -20,13 +20,12 @@ use baozi_operation::{
 use thiserror::Error;
 
 use crate::entity::AuthoredTransformKind;
-use crate::{
-    SCENE_VALIDATION_POLL_INTERVAL, SceneReservationKind, SceneValidationControl,
-    SceneValidationLimits, SceneValidationWork,
-};
+use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
 use super::super::schema::{NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_TRS_SCALAR_COUNT};
-use super::control::{OperationAuthoringControl, OperationAuthoringControlError};
+use super::control::{
+    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
+};
 use super::input::{NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence};
 
 const MATRIX_SCALARS_PER_NODE: u64 = NODE_SCENE_MATRIX_SCALAR_COUNT as u64;
@@ -361,6 +360,11 @@ enum VisitState {
     Depth(u32),
 }
 
+enum ParentTraversalStep {
+    Resolved(u32),
+    Continue(usize),
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct ChildRange {
     start: u32,
@@ -377,9 +381,10 @@ struct ValidationStorage<R> {
     reservation: R,
 }
 
-type ValidationResult<T, C> = Result<T, NodeAuthoringFailure<<C as SceneValidationControl>::Error>>;
+type ValidationResult<T, C> =
+    Result<T, NodeAuthoringFailure<<C as CanonicalAuthoringControl>::Error>>;
 
-struct ValidationContext<'control, C: SceneValidationControl> {
+struct ValidationContext<'control, C: CanonicalAuthoringControl> {
     control: &'control mut C,
     limits: SceneValidationLimits,
     work: u64,
@@ -391,7 +396,7 @@ struct ValidationContext<'control, C: SceneValidationControl> {
     trs_scalars: u64,
 }
 
-impl<'control, C: SceneValidationControl> ValidationContext<'control, C> {
+impl<'control, C: CanonicalAuthoringControl> ValidationContext<'control, C> {
     const fn new(limits: SceneValidationLimits, control: &'control mut C) -> Self {
         Self {
             control,
@@ -416,101 +421,126 @@ impl<'control, C: SceneValidationControl> ValidationContext<'control, C> {
         self.poll_now()
     }
 
-    fn work(&mut self, kind: SceneValidationWork, amount: u64) -> ValidationResult<(), C> {
+    fn ensure_work_capacity(&self, amount: u64) -> ValidationResult<u64, C> {
         let final_work = self.work.checked_add(amount).ok_or(
             NodeAuthoringSemanticError::AccountingOverflow {
                 dimension: "validation work",
             },
         )?;
         enforce_limit::<C::Error>(NodeAuthoringLimit::Work, final_work, self.limits.max_work())?;
+        Ok(final_work)
+    }
 
-        let mut remaining = amount;
-        while remaining > 0 {
-            let until_poll = SCENE_VALIDATION_POLL_INTERVAL - self.work_since_poll;
-            let chunk = remaining.min(until_poll);
-            self.control
-                .charge_work(kind, chunk)
-                .map_err(NodeAuthoringFailure::Control)?;
-            self.work = self.work.checked_add(chunk).ok_or(
-                NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "validation work",
-                },
-            )?;
-            self.work_since_poll += chunk;
-            remaining -= chunk;
-            if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
-                self.poll_now()?;
-            }
+    fn run_unit<R>(
+        &mut self,
+        kind: SceneValidationWork,
+        action: impl FnOnce() -> R,
+    ) -> ValidationResult<R, C> {
+        let final_work = self.ensure_work_capacity(1)?;
+        let outcome = self
+            .control
+            .run_unit(kind, action)
+            .map_err(NodeAuthoringFailure::Control)?;
+        self.work = final_work;
+        self.work_since_poll = self.work_since_poll.checked_add(1).ok_or(
+            NodeAuthoringSemanticError::AccountingOverflow {
+                dimension: "validation work poll interval",
+            },
+        )?;
+        if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
+            self.poll_now()?;
         }
-        Ok(())
+        Ok(outcome)
+    }
+
+    fn run_semantic_unit<R>(
+        &mut self,
+        kind: SceneValidationWork,
+        action: impl FnOnce() -> Result<R, NodeAuthoringSemanticError>,
+    ) -> ValidationResult<R, C> {
+        self.run_unit(kind, action)?
+            .map_err(NodeAuthoringFailure::Semantic)
     }
 
     fn add_relation(&mut self) -> ValidationResult<(), C> {
-        self.edges = self
-            .edges
-            .checked_add(1)
-            .ok_or(NodeAuthoringSemanticError::AccountingOverflow { dimension: "edges" })?;
-        enforce_limit::<C::Error>(
-            NodeAuthoringLimit::Edges,
-            self.edges,
-            self.limits.max_edges(),
-        )?;
+        let edges = self.edges;
+        let maximum_edges = self.limits.max_edges();
+        self.edges = self.run_semantic_unit(SceneValidationWork::GraphEdge, || {
+            let next = edges
+                .checked_add(1)
+                .ok_or(NodeAuthoringSemanticError::AccountingOverflow { dimension: "edges" })?;
+            check_limit(NodeAuthoringLimit::Edges, next, maximum_edges)?;
+            Ok(next)
+        })?;
 
-        self.references = self.references.checked_add(1).ok_or(
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "references",
-            },
-        )?;
-        enforce_limit::<C::Error>(
-            NodeAuthoringLimit::References,
-            self.references,
-            self.limits.max_references(),
-        )?;
-        self.work(SceneValidationWork::GraphEdge, 1)?;
-        self.work(SceneValidationWork::Reference, 1)
+        let references = self.references;
+        let maximum_references = self.limits.max_references();
+        self.references = self.run_semantic_unit(SceneValidationWork::Reference, || {
+            let next = references.checked_add(1).ok_or(
+                NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "references",
+                },
+            )?;
+            check_limit(NodeAuthoringLimit::References, next, maximum_references)?;
+            Ok(next)
+        })?;
+        Ok(())
     }
 
     fn add_transform(&mut self, kind: AuthoredTransformKind) -> ValidationResult<(), C> {
         let scalar_count = match kind {
-            AuthoredTransformKind::Matrix => {
-                self.matrix_scalars = self
-                    .matrix_scalars
-                    .checked_add(MATRIX_SCALARS_PER_NODE)
-                    .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-                        dimension: "matrix scalars",
-                    })?;
-                MATRIX_SCALARS_PER_NODE
-            }
-            AuthoredTransformKind::Trs => {
-                self.trs_scalars = self.trs_scalars.checked_add(TRS_SCALARS_PER_NODE).ok_or(
-                    NodeAuthoringSemanticError::AccountingOverflow {
-                        dimension: "TRS scalars",
-                    },
-                )?;
-                TRS_SCALARS_PER_NODE
-            }
+            AuthoredTransformKind::Matrix => MATRIX_SCALARS_PER_NODE,
+            AuthoredTransformKind::Trs => TRS_SCALARS_PER_NODE,
         };
-        self.semantic_cells = self.semantic_cells.checked_add(scalar_count).ok_or(
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "semantic cells",
-            },
-        )?;
-        if self.semantic_cells > u64::from(u32::MAX) {
-            return Err(NodeAuthoringSemanticError::TransformDomainTooLarge {
-                scalar_count: self.semantic_cells,
-            }
-            .into());
-        }
-        enforce_limit::<C::Error>(
-            NodeAuthoringLimit::SemanticCells,
-            self.semantic_cells,
-            self.limits.max_payload_cells(),
-        )?;
-        self.work(SceneValidationWork::PayloadCell, scalar_count)
-    }
+        self.ensure_work_capacity(scalar_count)?;
 
-    fn record_depth(&self, depth: u64) -> ValidationResult<(), C> {
-        enforce_limit::<C::Error>(NodeAuthoringLimit::Depth, depth, self.limits.max_depth())
+        let mut matrix_scalars = self.matrix_scalars;
+        let mut trs_scalars = self.trs_scalars;
+        let mut semantic_cells = self.semantic_cells;
+        let maximum_semantic_cells = self.limits.max_payload_cells();
+        for _ in 0..scalar_count {
+            (matrix_scalars, trs_scalars, semantic_cells) =
+                self.run_semantic_unit(SceneValidationWork::PayloadCell, || {
+                    let next_matrix_scalars = if kind == AuthoredTransformKind::Matrix {
+                        matrix_scalars.checked_add(1).ok_or(
+                            NodeAuthoringSemanticError::AccountingOverflow {
+                                dimension: "matrix scalars",
+                            },
+                        )?
+                    } else {
+                        matrix_scalars
+                    };
+                    let next_trs_scalars = if kind == AuthoredTransformKind::Trs {
+                        trs_scalars.checked_add(1).ok_or(
+                            NodeAuthoringSemanticError::AccountingOverflow {
+                                dimension: "TRS scalars",
+                            },
+                        )?
+                    } else {
+                        trs_scalars
+                    };
+                    let next_semantic_cells = semantic_cells.checked_add(1).ok_or(
+                        NodeAuthoringSemanticError::AccountingOverflow {
+                            dimension: "semantic cells",
+                        },
+                    )?;
+                    if next_semantic_cells > u64::from(u32::MAX) {
+                        return Err(NodeAuthoringSemanticError::TransformDomainTooLarge {
+                            scalar_count: next_semantic_cells,
+                        });
+                    }
+                    check_limit(
+                        NodeAuthoringLimit::SemanticCells,
+                        next_semantic_cells,
+                        maximum_semantic_cells,
+                    )?;
+                    Ok((next_matrix_scalars, next_trs_scalars, next_semantic_cells))
+                })?;
+        }
+        self.matrix_scalars = matrix_scalars;
+        self.trs_scalars = trs_scalars;
+        self.semantic_cells = semantic_cells;
+        Ok(())
     }
 
     fn scratch_plan<T>(
@@ -530,10 +560,10 @@ impl<'control, C: SceneValidationControl> ValidationContext<'control, C> {
         )?;
         let reservation = self
             .control
-            .reserve(SceneReservationKind::ValidationScratch, bytes)
+            .reserve_scratch(bytes)
             .map_err(NodeAuthoringFailure::Control)?;
         self.control
-            .validate_reservation(&reservation, SceneReservationKind::ValidationScratch)
+            .validate_scratch(&reservation)
             .map_err(NodeAuthoringFailure::Control)?;
         Ok(reservation)
     }
@@ -549,7 +579,7 @@ impl<'control, C: SceneValidationControl> ValidationContext<'control, C> {
             self.limits.max_scratch_bytes(),
         )?;
         self.control
-            .resize_reservation(reservation, SceneReservationKind::ValidationScratch, bytes)
+            .resize_scratch(reservation, bytes)
             .map_err(NodeAuthoringFailure::Control)
     }
 
@@ -576,18 +606,14 @@ impl<'control, C: SceneValidationControl> ValidationContext<'control, C> {
         count: usize,
         value: T,
     ) -> ValidationResult<(), C> {
+        let remaining = count.checked_sub(values.len()).ok_or(
+            NodeAuthoringSemanticError::AccountingOverflow {
+                dimension: "scratch fill length",
+            },
+        )?;
+        self.ensure_work_capacity(usize_to_u64(remaining, "validation work")?)?;
         while values.len() < count {
-            let remaining = count - values.len();
-            let until_poll = usize::try_from(SCENE_VALIDATION_POLL_INTERVAL - self.work_since_poll)
-                .map_err(|_| NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "validation work",
-                })?;
-            let amount = remaining.min(until_poll);
-            self.work(
-                SceneValidationWork::Traversal,
-                usize_to_u64(amount, "validation work")?,
-            )?;
-            values.extend(std::iter::repeat_n(value, amount));
+            self.run_unit(SceneValidationWork::Traversal, || values.push(value))?;
         }
         Ok(())
     }
@@ -616,7 +642,7 @@ pub(super) fn validate_node_batch_with_control<'a, C>(
     control: &mut C,
 ) -> Result<ValidatedNodeBatch<'a, C::Reservation>, NodeAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     validate_node_batch_inner(input, limits, control)
 }
@@ -627,15 +653,11 @@ fn validate_node_batch_inner<'a, C>(
     control: &mut C,
 ) -> Result<ValidatedNodeBatch<'a, C::Reservation>, NodeAuthoringFailure<C::Error>>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     let mut context = ValidationContext::new(limits, control);
     context.poll_now()?;
 
-    let roots = match input.roots() {
-        Presence::Absent => return Err(NodeAuthoringSemanticError::RootsAbsent.into()),
-        Presence::Present(roots) => roots,
-    };
     let nodes = input.nodes();
     let maximum_authored_nodes = (u32::MAX as usize).saturating_sub(1);
     if nodes.len() > maximum_authored_nodes {
@@ -655,9 +677,15 @@ where
         canonical_node_count,
         limits.max_nodes(),
     )?;
-    context.record_depth(1)?;
-
-    context.work(SceneValidationWork::GraphNode, 1)?;
+    let maximum_depth = context.limits.max_depth();
+    let roots = context.run_semantic_unit(SceneValidationWork::GraphNode, || {
+        let roots = match input.roots() {
+            Presence::Absent => return Err(NodeAuthoringSemanticError::RootsAbsent),
+            Presence::Present(roots) => roots,
+        };
+        check_limit(NodeAuthoringLimit::Depth, 1, maximum_depth)?;
+        Ok(roots)
+    })?;
 
     let order_plan = context.scratch_plan::<usize>(nodes.len(), "canonical node order")?;
     let index_plan = context.scratch_plan::<u32>(nodes.len(), "canonical index by local node")?;
@@ -714,128 +742,151 @@ where
     )?;
 
     for (root_index, &root) in roots.iter().enumerate() {
-        context.work(SceneValidationWork::GraphEdge, 1)?;
-        let local = local_index(root)?;
-        if local >= nodes.len() {
-            return Err(NodeAuthoringSemanticError::RootOutOfRange {
-                root_index,
-                root: root.index(),
-                node_count: nodes.len(),
+        let maximum_depth = context.limits.max_depth();
+        context.run_semantic_unit(SceneValidationWork::GraphEdge, || {
+            let local = local_index(root)?;
+            if local >= nodes.len() {
+                return Err(NodeAuthoringSemanticError::RootOutOfRange {
+                    root_index,
+                    root: root.index(),
+                    node_count: nodes.len(),
+                });
             }
-            .into());
-        }
-        let state = storage.visit_state_by_local.get_mut(local).ok_or(
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "root visit state",
-            },
-        )?;
-        if !matches!(state, VisitState::Unseen) {
-            return Err(NodeAuthoringSemanticError::DuplicateRoot {
-                root: root.index(),
-                duplicate_index: root_index,
+            let state = storage.visit_state_by_local.get(local).ok_or(
+                NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "root visit state",
+                },
+            )?;
+            if !matches!(state, VisitState::Unseen) {
+                return Err(NodeAuthoringSemanticError::DuplicateRoot {
+                    root: root.index(),
+                    duplicate_index: root_index,
+                });
             }
-            .into());
-        }
-        if let Presence::Present(parent) = nodes[local].parent() {
-            return Err(NodeAuthoringSemanticError::RootHasParent {
-                root: local,
-                parent: parent.node().index(),
+            if let Presence::Present(parent) = nodes[local].parent() {
+                return Err(NodeAuthoringSemanticError::RootHasParent {
+                    root: local,
+                    parent: parent.node().index(),
+                });
             }
-            .into());
-        }
-        context.record_depth(2)?;
-        *state = VisitState::Depth(2);
+            check_limit(NodeAuthoringLimit::Depth, 2, maximum_depth)?;
+            *storage.visit_state_by_local.get_mut(local).ok_or(
+                NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "root visit state",
+                },
+            )? = VisitState::Depth(2);
+            Ok(())
+        })?;
         context.add_relation()?;
     }
 
     for (node_index, node) in nodes.iter().copied().enumerate() {
-        context.work(SceneValidationWork::GraphNode, 1)?;
-        let declared_root = matches!(
-            storage.visit_state_by_local.get(node_index),
-            Some(VisitState::Depth(2))
-        );
-        match (declared_root, node.parent()) {
-            (true, Presence::Absent) => {}
-            (true, Presence::Present(parent)) => {
-                return Err(NodeAuthoringSemanticError::RootHasParent {
-                    root: node_index,
-                    parent: parent.node().index(),
-                }
-                .into());
-            }
-            (false, Presence::Absent) => {
-                return Err(NodeAuthoringSemanticError::MissingRoot { node: node_index }.into());
-            }
-            (false, Presence::Present(parent)) => {
-                let parent_index = local_index(parent.node())?;
-                if parent_index >= nodes.len() {
-                    return Err(NodeAuthoringSemanticError::ParentOutOfRange {
-                        node: node_index,
-                        parent: parent.node().index(),
-                        node_count: nodes.len(),
+        let has_parent_relation =
+            context.run_semantic_unit(SceneValidationWork::GraphNode, || {
+                let declared_root = matches!(
+                    storage.visit_state_by_local.get(node_index),
+                    Some(VisitState::Depth(2))
+                );
+                match (declared_root, node.parent()) {
+                    (true, Presence::Absent) => Ok(false),
+                    (true, Presence::Present(parent)) => {
+                        Err(NodeAuthoringSemanticError::RootHasParent {
+                            root: node_index,
+                            parent: parent.node().index(),
+                        })
                     }
-                    .into());
+                    (false, Presence::Absent) => {
+                        Err(NodeAuthoringSemanticError::MissingRoot { node: node_index })
+                    }
+                    (false, Presence::Present(parent)) => {
+                        let parent_index = local_index(parent.node())?;
+                        if parent_index >= nodes.len() {
+                            return Err(NodeAuthoringSemanticError::ParentOutOfRange {
+                                node: node_index,
+                                parent: parent.node().index(),
+                                node_count: nodes.len(),
+                            });
+                        }
+                        if parent_index == node_index {
+                            return Err(NodeAuthoringSemanticError::SelfParent {
+                                node: node_index,
+                            });
+                        }
+                        Ok(true)
+                    }
                 }
-                if parent_index == node_index {
-                    return Err(NodeAuthoringSemanticError::SelfParent { node: node_index }.into());
-                }
-                context.add_relation()?;
-            }
+            })?;
+        if has_parent_relation {
+            context.add_relation()?;
         }
         context.add_transform(node.authored_transform().kind())?;
     }
 
     for start in 0..nodes.len() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        if matches!(
-            storage.visit_state_by_local.get(start),
-            Some(VisitState::Depth(_))
-        ) {
+        let already_resolved = context.run_unit(SceneValidationWork::Traversal, || {
+            matches!(
+                storage.visit_state_by_local.get(start),
+                Some(VisitState::Depth(_))
+            )
+        })?;
+        if already_resolved {
             continue;
         }
 
         storage.canonical_order.clear();
         let mut cursor = start;
         let mut resolved_depth = loop {
-            context.work(SceneValidationWork::Traversal, 1)?;
-            let state = *storage.visit_state_by_local.get(cursor).ok_or(
-                NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "node traversal state",
-                },
-            )?;
-            match state {
-                VisitState::Depth(depth) => break depth,
-                VisitState::Visiting => {
-                    return Err(NodeAuthoringSemanticError::Cycle { node: cursor }.into());
+            let step = context.run_semantic_unit(SceneValidationWork::Traversal, || {
+                let state = *storage.visit_state_by_local.get(cursor).ok_or(
+                    NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "node traversal state",
+                    },
+                )?;
+                match state {
+                    VisitState::Depth(depth) => Ok(ParentTraversalStep::Resolved(depth)),
+                    VisitState::Visiting => Err(NodeAuthoringSemanticError::Cycle { node: cursor }),
+                    VisitState::Unseen => {
+                        *storage.visit_state_by_local.get_mut(cursor).ok_or(
+                            NodeAuthoringSemanticError::AccountingOverflow {
+                                dimension: "node traversal state",
+                            },
+                        )? = VisitState::Visiting;
+                        storage.canonical_order.push(cursor);
+                        let Presence::Present(parent) = nodes[cursor].parent() else {
+                            return Err(NodeAuthoringSemanticError::MissingRoot { node: cursor });
+                        };
+                        Ok(ParentTraversalStep::Continue(local_index(parent.node())?))
+                    }
                 }
-                VisitState::Unseen => {
-                    *storage.visit_state_by_local.get_mut(cursor).ok_or(
-                        NodeAuthoringSemanticError::AccountingOverflow {
-                            dimension: "node traversal state",
-                        },
-                    )? = VisitState::Visiting;
-                    storage.canonical_order.push(cursor);
-                    let Presence::Present(parent) = nodes[cursor].parent() else {
-                        return Err(NodeAuthoringSemanticError::MissingRoot { node: cursor }.into());
-                    };
-                    cursor = local_index(parent.node())?;
-                }
+            })?;
+            match step {
+                ParentTraversalStep::Resolved(depth) => break depth,
+                ParentTraversalStep::Continue(parent) => cursor = parent,
             }
         };
 
         while let Some(node) = storage.canonical_order.pop() {
-            context.work(SceneValidationWork::Traversal, 1)?;
-            resolved_depth = resolved_depth.checked_add(1).ok_or(
-                NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "node depth",
-                },
-            )?;
-            context.record_depth(u64::from(resolved_depth))?;
-            *storage.visit_state_by_local.get_mut(node).ok_or(
-                NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "node traversal state",
-                },
-            )? = VisitState::Depth(resolved_depth);
+            let maximum_depth = context.limits.max_depth();
+            resolved_depth = context.run_semantic_unit(SceneValidationWork::Traversal, || {
+                let next_depth = resolved_depth.checked_add(1).ok_or(
+                    NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "node depth",
+                    },
+                )?;
+                if u64::from(next_depth) > maximum_depth {
+                    return Err(NodeAuthoringSemanticError::LimitExceeded {
+                        limit: NodeAuthoringLimit::Depth,
+                        actual: u64::from(next_depth),
+                        maximum: maximum_depth,
+                    });
+                }
+                *storage.visit_state_by_local.get_mut(node).ok_or(
+                    NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "node traversal state",
+                    },
+                )? = VisitState::Depth(next_depth);
+                Ok(next_depth)
+            })?;
         }
     }
 
@@ -901,7 +952,7 @@ fn compile_canonical_breadth_first_order<C, R>(
     context: &mut ValidationContext<'_, C>,
 ) -> ValidationResult<(), C>
 where
-    C: SceneValidationControl,
+    C: CanonicalAuthoringControl,
 {
     storage.canonical_order.clear();
     storage.canonical_index_by_local.clear();
@@ -916,34 +967,35 @@ where
     )?;
 
     for node in nodes.iter().copied() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let Presence::Present(parent) = node.parent() else {
-            continue;
-        };
-        let parent_local = local_index(parent.node())?;
-        let range = storage.child_ranges_by_local.get_mut(parent_local).ok_or(
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "child-count parent",
-            },
-        )?;
-        range.count =
-            range
-                .count
-                .checked_add(1)
-                .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
+        context.run_semantic_unit(SceneValidationWork::Traversal, || {
+            let Presence::Present(parent) = node.parent() else {
+                return Ok(());
+            };
+            let parent_local = local_index(parent.node())?;
+            let range = storage.child_ranges_by_local.get_mut(parent_local).ok_or(
+                NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "child-count parent",
+                },
+            )?;
+            range.count = range.count.checked_add(1).ok_or(
+                NodeAuthoringSemanticError::AccountingOverflow {
                     dimension: "child count",
-                })?;
+                },
+            )?;
+            Ok(())
+        })?;
     }
 
     let mut next_child_slot = 0_u32;
     for range in &mut storage.child_ranges_by_local {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        range.start = next_child_slot;
-        next_child_slot = next_child_slot.checked_add(range.count).ok_or(
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "ordered child slots",
-            },
-        )?;
+        next_child_slot = context.run_semantic_unit(SceneValidationWork::Traversal, || {
+            range.start = next_child_slot;
+            next_child_slot.checked_add(range.count).ok_or(
+                NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "ordered child slots",
+                },
+            )
+        })?;
     }
 
     let non_root_count = nodes.len().checked_sub(roots.len()).ok_or(
@@ -960,147 +1012,151 @@ where
     context.fill_scratch(&mut storage.ordered_children, non_root_count, usize::MAX)?;
 
     for (local, node) in nodes.iter().copied().enumerate() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let Presence::Present(parent) = node.parent() else {
-            continue;
-        };
-        let parent_local = local_index(parent.node())?;
-        let child_range = storage
-            .child_ranges_by_local
-            .get(parent_local)
-            .copied()
-            .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "ordered child range",
+        context.run_semantic_unit(SceneValidationWork::Traversal, || {
+            let Presence::Present(parent) = node.parent() else {
+                return Ok(());
+            };
+            let parent_local = local_index(parent.node())?;
+            let child_range = storage
+                .child_ranges_by_local
+                .get(parent_local)
+                .copied()
+                .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "ordered child range",
+                })?;
+            let ordinal = parent.child_ordinal();
+            if ordinal >= child_range.count {
+                return Err(NodeAuthoringSemanticError::ChildOrdinalOutOfRange {
+                    node: usize_to_u32(local, "child local node")?,
+                    parent: parent.node().index(),
+                    ordinal,
+                    child_count: child_range.count,
+                });
+            }
+            let child_slot = child_range.start.checked_add(ordinal).ok_or(
+                NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "ordered child slot",
+                },
+            )?;
+            let child_slot = usize::try_from(child_slot).map_err(|_| {
+                NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "ordered child slot",
+                }
             })?;
-        let ordinal = parent.child_ordinal();
-        if ordinal >= child_range.count {
-            return Err(NodeAuthoringSemanticError::ChildOrdinalOutOfRange {
-                node: usize_to_u32(local, "child local node")?,
-                parent: parent.node().index(),
-                ordinal,
-                child_count: child_range.count,
+            let assigned = storage.ordered_children.get_mut(child_slot).ok_or(
+                NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "ordered child slot",
+                },
+            )?;
+            if *assigned != usize::MAX {
+                return Err(NodeAuthoringSemanticError::DuplicateChildOrdinal {
+                    parent: parent.node().index(),
+                    ordinal,
+                    first: usize_to_u32(*assigned, "first child local node")?,
+                    duplicate: usize_to_u32(local, "duplicate child local node")?,
+                });
             }
-            .into());
-        }
-        let child_slot = child_range.start.checked_add(ordinal).ok_or(
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "ordered child slot",
-            },
-        )?;
-        let child_slot = usize::try_from(child_slot).map_err(|_| {
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "ordered child slot",
-            }
+            *assigned = local;
+            Ok(())
         })?;
-        let assigned = storage.ordered_children.get_mut(child_slot).ok_or(
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "ordered child slot",
-            },
-        )?;
-        if *assigned != usize::MAX {
-            return Err(NodeAuthoringSemanticError::DuplicateChildOrdinal {
-                parent: parent.node().index(),
-                ordinal,
-                first: usize_to_u32(*assigned, "first child local node")?,
-                duplicate: usize_to_u32(local, "duplicate child local node")?,
-            }
-            .into());
-        }
-        *assigned = local;
     }
 
     for (root_position, &root) in roots.iter().enumerate() {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let local = local_index(root)?;
-        *storage.canonical_order.get_mut(root_position).ok_or(
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical root position",
-            },
-        )? = local;
-        *storage.canonical_index_by_local.get_mut(local).ok_or(
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical root index",
-            },
-        )? = usize_to_u32(root_position, "canonical root index")?
-            .checked_add(1)
-            .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical root index",
-            })?;
+        context.run_semantic_unit(SceneValidationWork::Traversal, || {
+            let local = local_index(root)?;
+            *storage.canonical_order.get_mut(root_position).ok_or(
+                NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "canonical root position",
+                },
+            )? = local;
+            *storage.canonical_index_by_local.get_mut(local).ok_or(
+                NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "canonical root index",
+                },
+            )? = usize_to_u32(root_position, "canonical root index")?
+                .checked_add(1)
+                .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "canonical root index",
+                })?;
+            Ok(())
+        })?;
     }
 
     let mut read_cursor = 0_usize;
     let mut write_cursor = roots.len();
     while read_cursor < write_cursor {
-        context.work(SceneValidationWork::Traversal, 1)?;
-        let parent_local = *storage.canonical_order.get(read_cursor).ok_or(
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical breadth-first parent",
-            },
-        )?;
-        let child_range = storage
-            .child_ranges_by_local
-            .get(parent_local)
-            .copied()
-            .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical breadth-first child range",
+        let (child_range, end) =
+            context.run_semantic_unit(SceneValidationWork::Traversal, || {
+                let parent_local = *storage.canonical_order.get(read_cursor).ok_or(
+                    NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "canonical breadth-first parent",
+                    },
+                )?;
+                let child_range = storage
+                    .child_ranges_by_local
+                    .get(parent_local)
+                    .copied()
+                    .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "canonical breadth-first child range",
+                    })?;
+                let end = child_range.start.checked_add(child_range.count).ok_or(
+                    NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "canonical breadth-first child range",
+                    },
+                )?;
+                read_cursor = read_cursor.checked_add(1).ok_or(
+                    NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "canonical breadth-first traversal",
+                    },
+                )?;
+                Ok((child_range, end))
             })?;
-        let end = child_range.start.checked_add(child_range.count).ok_or(
-            NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical breadth-first child range",
-            },
-        )?;
         for child_slot in child_range.start..end {
-            context.work(SceneValidationWork::Traversal, 1)?;
-            let child_slot = usize::try_from(child_slot).map_err(|_| {
-                NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "canonical breadth-first child slot",
+            context.run_semantic_unit(SceneValidationWork::Traversal, || {
+                let child_slot = usize::try_from(child_slot).map_err(|_| {
+                    NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "canonical breadth-first child slot",
+                    }
+                })?;
+                let child = *storage.ordered_children.get(child_slot).ok_or(
+                    NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "canonical breadth-first child slot",
+                    },
+                )?;
+                if child == usize::MAX {
+                    return Err(NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "canonical breadth-first child gap",
+                    });
                 }
+                let canonical_index = usize_to_u32(write_cursor, "canonical node index")?
+                    .checked_add(1)
+                    .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "canonical node index",
+                    })?;
+                let mapped = storage.canonical_index_by_local.get_mut(child).ok_or(
+                    NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "canonical local index",
+                    },
+                )?;
+                if *mapped != 0 {
+                    return Err(NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "duplicate canonical child",
+                    });
+                }
+                *storage.canonical_order.get_mut(write_cursor).ok_or(
+                    NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "canonical node order",
+                    },
+                )? = child;
+                *mapped = canonical_index;
+                write_cursor = write_cursor.checked_add(1).ok_or(
+                    NodeAuthoringSemanticError::AccountingOverflow {
+                        dimension: "canonical node order",
+                    },
+                )?;
+                Ok(())
             })?;
-            let child = *storage.ordered_children.get(child_slot).ok_or(
-                NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "canonical breadth-first child slot",
-                },
-            )?;
-            if child == usize::MAX {
-                return Err(NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "canonical breadth-first child gap",
-                }
-                .into());
-            }
-            let canonical_index = usize_to_u32(write_cursor, "canonical node index")?
-                .checked_add(1)
-                .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "canonical node index",
-                })?;
-            let mapped = storage.canonical_index_by_local.get_mut(child).ok_or(
-                NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "canonical local index",
-                },
-            )?;
-            if *mapped != 0 {
-                return Err(NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "duplicate canonical child",
-                }
-                .into());
-            }
-            *storage.canonical_order.get_mut(write_cursor).ok_or(
-                NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "canonical node order",
-                },
-            )? = child;
-            *mapped = canonical_index;
-            write_cursor = write_cursor.checked_add(1).ok_or(
-                NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "canonical node order",
-                },
-            )?;
         }
-        read_cursor =
-            read_cursor
-                .checked_add(1)
-                .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "canonical breadth-first traversal",
-                })?;
     }
 
     if write_cursor != nodes.len() || read_cursor != nodes.len() {
@@ -1217,6 +1273,14 @@ fn enforce_limit<E>(
 where
     E: Error + Send + Sync + 'static,
 {
+    check_limit(limit, actual, maximum).map_err(NodeAuthoringFailure::Semantic)
+}
+
+fn check_limit(
+    limit: NodeAuthoringLimit,
+    actual: u64,
+    maximum: u64,
+) -> Result<(), NodeAuthoringSemanticError> {
     if actual <= maximum {
         Ok(())
     } else {
@@ -1224,7 +1288,6 @@ where
             limit,
             actual,
             maximum,
-        }
-        .into())
+        })
     }
 }

@@ -2321,20 +2321,48 @@ fn validate_binding_blend(
     }
 }
 
-pub(crate) fn validate_material_texture_binding_semantics<'a>(
-    bindings: impl ExactSizeIterator<Item = TextureBindingSemanticsRef<'a>>,
-) -> Result<(), AppearanceBuildError> {
-    let binding_count = bindings.len();
-    let mut builtin_first_indices = [None; TextureRoleKind::BUILTIN_COUNT];
-    let mut namespaced_first_indices = HashMap::new();
-    let mut namespaced_capacity_reserved = false;
-    let mut metallic = None;
-    let mut roughness = None;
-    let mut metallic_roughness = None;
-    for (duplicate_index, binding) in bindings.enumerate() {
+pub(crate) struct MaterialTextureBindingSemanticsValidator<'a> {
+    binding_count: usize,
+    next_index: usize,
+    builtin_first_indices: [Option<usize>; TextureRoleKind::BUILTIN_COUNT],
+    namespaced_first_indices: HashMap<TextureBindingAuthorityKey<'a>, usize>,
+    namespaced_capacity_reserved: bool,
+    metallic: Option<usize>,
+    roughness: Option<usize>,
+    metallic_roughness: Option<usize>,
+}
+
+impl<'a> MaterialTextureBindingSemanticsValidator<'a> {
+    pub(crate) fn new(binding_count: usize) -> Self {
+        Self {
+            binding_count,
+            next_index: 0,
+            builtin_first_indices: [None; TextureRoleKind::BUILTIN_COUNT],
+            namespaced_first_indices: HashMap::new(),
+            namespaced_capacity_reserved: false,
+            metallic: None,
+            roughness: None,
+            metallic_roughness: None,
+        }
+    }
+
+    pub(crate) fn validate_next(
+        &mut self,
+        binding: TextureBindingSemanticsRef<'a>,
+    ) -> Result<(), AppearanceBuildError> {
+        if self.next_index >= self.binding_count {
+            return Err(AppearanceBuildError::LimitExceeded {
+                resource: AppearanceBuildResource::TextureBindings,
+                dimension: AppearanceLimitDimension::Count,
+                requested: self.next_index.saturating_add(1),
+                maximum: self.binding_count,
+            });
+        }
+        let duplicate_index = self.next_index;
+        self.next_index += 1;
         let role = binding.role().kind();
         if let Some(role_index) = role.builtin_index() {
-            let first_index = &mut builtin_first_indices[role_index];
+            let first_index = &mut self.builtin_first_indices[role_index];
             if let Some(first_index) = *first_index {
                 return Err(AppearanceBuildError::DuplicateBindingAuthority {
                     first_index,
@@ -2343,34 +2371,39 @@ pub(crate) fn validate_material_texture_binding_semantics<'a>(
             }
             *first_index = Some(duplicate_index);
         } else {
-            if !namespaced_capacity_reserved {
-                namespaced_first_indices
-                    .try_reserve(binding_count)
+            if !self.namespaced_capacity_reserved {
+                self.namespaced_first_indices
+                    .try_reserve(self.binding_count)
                     .map_err(|_| AppearanceBuildError::AllocationFailed {
                         resource: AppearanceBuildResource::BindingAuthorityScratch,
                     })?;
-                namespaced_capacity_reserved = true;
+                self.namespaced_capacity_reserved = true;
             }
             let authority = binding.authority_key();
-            if let Some(&first_index) = namespaced_first_indices.get(&authority) {
+            if let Some(&first_index) = self.namespaced_first_indices.get(&authority) {
                 return Err(AppearanceBuildError::DuplicateBindingAuthority {
                     first_index,
                     duplicate_index,
                 });
             }
-            namespaced_first_indices.insert(authority, duplicate_index);
+            self.namespaced_first_indices
+                .insert(authority, duplicate_index);
         }
 
         let conflict = match role {
-            TextureRoleKind::Metallic => {
-                metallic_roughness.map(|index| (index, TextureRoleKind::MetallicRoughness))
-            }
-            TextureRoleKind::Roughness => {
-                metallic_roughness.map(|index| (index, TextureRoleKind::MetallicRoughness))
-            }
-            TextureRoleKind::MetallicRoughness => metallic
+            TextureRoleKind::Metallic => self
+                .metallic_roughness
+                .map(|index| (index, TextureRoleKind::MetallicRoughness)),
+            TextureRoleKind::Roughness => self
+                .metallic_roughness
+                .map(|index| (index, TextureRoleKind::MetallicRoughness)),
+            TextureRoleKind::MetallicRoughness => self
+                .metallic
                 .map(|index| (index, TextureRoleKind::Metallic))
-                .or_else(|| roughness.map(|index| (index, TextureRoleKind::Roughness))),
+                .or_else(|| {
+                    self.roughness
+                        .map(|index| (index, TextureRoleKind::Roughness))
+                }),
             _ => None,
         };
         if let Some((first_index, first_role)) = conflict {
@@ -2382,11 +2415,23 @@ pub(crate) fn validate_material_texture_binding_semantics<'a>(
             });
         }
         match role {
-            TextureRoleKind::Metallic => metallic = Some(duplicate_index),
-            TextureRoleKind::Roughness => roughness = Some(duplicate_index),
-            TextureRoleKind::MetallicRoughness => metallic_roughness = Some(duplicate_index),
+            TextureRoleKind::Metallic => self.metallic = Some(duplicate_index),
+            TextureRoleKind::Roughness => self.roughness = Some(duplicate_index),
+            TextureRoleKind::MetallicRoughness => {
+                self.metallic_roughness = Some(duplicate_index);
+            }
             _ => {}
         }
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_material_texture_binding_semantics<'a>(
+    bindings: impl ExactSizeIterator<Item = TextureBindingSemanticsRef<'a>>,
+) -> Result<(), AppearanceBuildError> {
+    let mut validator = MaterialTextureBindingSemanticsValidator::new(bindings.len());
+    for binding in bindings {
+        validator.validate_next(binding)?;
     }
     Ok(())
 }

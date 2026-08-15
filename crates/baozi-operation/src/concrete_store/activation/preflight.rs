@@ -1886,14 +1886,20 @@ where
         Ok(())
     }
 
-    /// Runs one semantic action after bounded control polling and records it only on normal return.
-    pub fn run_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, StoreRuntimeError> {
+    /// Flushes and polls when the bounded completion checkpoint has been reached.
+    pub fn poll_if_due(&mut self) -> Result<(), StoreRuntimeError> {
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
         if self.work_batch.poll_due() {
             self.poll_now()?;
         }
+        Ok(())
+    }
+
+    /// Runs one semantic action after bounded control polling and records it only on normal return.
+    pub fn run_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, StoreRuntimeError> {
+        self.poll_if_due()?;
         if self
             .permit
             .as_ref()
@@ -1916,9 +1922,7 @@ where
         &mut self,
         bytes: u64,
     ) -> Result<CanonicalReservation<'scope, O>, StoreRuntimeError> {
-        if let Some(cause) = preserved_fault(self.first_fault) {
-            return Err(cause);
-        }
+        self.poll_if_due()?;
         let result = self
             .permit
             .as_mut()
@@ -1940,9 +1944,7 @@ where
         reservation: &mut CanonicalReservation<'scope, O>,
         bytes: u64,
     ) -> Result<(), StoreRuntimeError> {
-        if let Some(cause) = preserved_fault(self.first_fault) {
-            return Err(cause);
-        }
+        self.poll_if_due()?;
         let result = self
             .permit
             .as_mut()
@@ -1960,9 +1962,7 @@ where
         &mut self,
         reservation: &CanonicalReservation<'scope, O>,
     ) -> Result<(), StoreRuntimeError> {
-        if let Some(cause) = preserved_fault(self.first_fault) {
-            return Err(cause);
-        }
+        self.poll_if_due()?;
         let result = self
             .permit
             .as_mut()

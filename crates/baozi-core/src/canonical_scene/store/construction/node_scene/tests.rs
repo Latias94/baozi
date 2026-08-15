@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::{panic, panic::AssertUnwindSafe};
 
 use baozi_operation::{
     CancellationSignal, CancellationToken, PhysicalStorageAccountFactory,
@@ -8,7 +9,6 @@ use baozi_operation::{
 };
 
 use crate::FormatId;
-use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneProfileCursor, NodeSceneProfileStep,
@@ -19,16 +19,16 @@ use crate::canonical_scene::store::construction::{
     SceneConstructionOperation, failure_terminal_work_requirement, tracer_scene_open_failure_code,
 };
 use crate::canonical_scene::store::production::{
-    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
-    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
-    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LineageAuthoringBatch,
-    LogicalMorphAuthoring, MetadataAuthoringBatch, MetadataAuthoringEntry, NodeAuthoringBatch,
-    NodeAuthoringFailure, NodeAuthoringLimit, NodeAuthoringNode, NodeAuthoringSemanticError,
-    NodeLocalId, NodeParent, ObservedResourceAuthoring, OperationAuthoringControlError,
-    OwnerProvenanceAuthoring, Presence, PrimitiveDeformationAuthoring, ProfileAuthoringBatch,
-    ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ResourceIdentityLocalId,
-    SceneAuthoringBatch, SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId,
-    SpatialAuthoringBatch, SpatialAuthoringFailure,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, CanonicalAuthoringControl,
+    DeformationAuthoringBatch, GeometryAttributeAuthoring, GeometryAuthoringBatch,
+    GeometryLogicalMeshAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
+    LineageAuthoringBatch, LogicalMorphAuthoring, MetadataAuthoringBatch, MetadataAuthoringEntry,
+    NodeAuthoringBatch, NodeAuthoringFailure, NodeAuthoringLimit, NodeAuthoringNode,
+    NodeAuthoringSemanticError, NodeLocalId, NodeParent, ObservedResourceAuthoring,
+    OperationAuthoringControl, OperationAuthoringControlError, OwnerProvenanceAuthoring, Presence,
+    PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId,
+    ProvenanceNodeAuthoring, ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason,
+    SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch, SpatialAuthoringFailure,
 };
 use crate::canonical_scene::store::profile_provenance::{
     PROFILE_PROVENANCE_ADDRESS_SCALARS, corrupt_profile_address_for_test,
@@ -40,6 +40,7 @@ use crate::math::{Mat4, Quat, Vec3};
 use crate::namespaced::NamespacedName;
 use crate::provenance::{ResourceIdentity, SourceObjectKind, SourceObjectLocator};
 use crate::scene_space::SceneSpace;
+use crate::{SceneValidationLimits, SceneValidationWork};
 
 use super::materialization::NodeScenePlanningFault;
 use super::profile::ProfileBuildFault;
@@ -105,7 +106,9 @@ pub(in crate::canonical_scene::store) use profile_closure::{
     collect_profile_closure_negative_cases_for_probe, inspect_profile_closure_semantics_for_probe,
 };
 
-const SINGLE_TRS_DOMAIN_AUTHORING_VALIDATION_WORK: u64 = 43;
+// Geometry owns two closure checks, while deformation and animation each own one. These four
+// finalization actions remain explicit even when their authored collections are empty.
+const SINGLE_TRS_DOMAIN_AUTHORING_VALIDATION_WORK: u64 = 48;
 const SINGLE_TRS_PROFILE_OWNER_COUNT: u64 = 3;
 const SINGLE_TRS_PROFILE_PROVENANCE_COUNT: u64 = 1;
 const SINGLE_TRS_PROFILE_ATTACHMENT_COUNT: u64 = 3;
@@ -125,7 +128,7 @@ const SINGLE_TRS_AUTHORING_VALIDATION_WORK: u64 =
     SINGLE_TRS_DOMAIN_AUTHORING_VALIDATION_WORK + SINGLE_TRS_PROFILE_AUTHORING_VALIDATION_WORK;
 // The sealed core plan owns only the seven-domain semantic validation envelope. Retained-store
 // startup and structural work remain operation-owned and are intentionally excluded.
-const SINGLE_TRS_SEALED_SEMANTIC_WORK: u64 = 57;
+const SINGLE_TRS_SEALED_SEMANTIC_WORK: u64 = 62;
 const SINGLE_TRS_PROFILE_CONTENT_MATERIALIZATION_WORK: u64 = SINGLE_TRS_PROFILE_PROVENANCE_COUNT
     * 2
     + SINGLE_TRS_PROFILE_DIGEST_BYTES
@@ -1221,6 +1224,48 @@ fn authoring_work_budget_rejection_preserves_exact_error_and_rich_evidence() {
         terminal_requirement.consumed_work_limit()
     );
     assert_released(failure, &account);
+}
+
+#[test]
+fn panicking_legacy_authoring_action_preserves_attempted_without_consumed() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let mut operation =
+        SceneConstructionOperation::with_account(&account, test_limits()).expect("test operation");
+    let keys = operation.keys;
+    let baseline = operation
+        .raw
+        .producer_host()
+        .dimension_state(keys.dimension)
+        .expect("authoring work baseline");
+
+    let panicked = panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut control =
+            OperationAuthoringControl::new(&mut operation.raw, keys.phase, keys.dimension);
+        let _ = control.run_unit(SceneValidationWork::Traversal, || -> () {
+            panic!("semantic action panic")
+        });
+    }));
+    assert!(panicked.is_err());
+
+    let published = operation
+        .raw
+        .prepare_minimal_fallback(FALLBACK_CODE)
+        .expect("panicking authoring remains terminally publishable")
+        .handoff();
+    let work = published
+        .ledger_evidence
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("authoring panic work dimension");
+    assert_eq!(work.attempted(), baseline.attempted() + 1);
+    assert_eq!(work.consumed(), baseline.consumed());
+    assert_eq!(
+        terminal_failure_class(&published.ledger_evidence),
+        StorePreparationFailureClass::ProductGraph
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]

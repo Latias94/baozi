@@ -116,8 +116,8 @@ fn obj_corner_domains_preserve_shared_positions_without_tuple_vertex_expansion()
     assert_eq!(validated.u32_scalar_count(), 8);
     assert_eq!(validated.payload_block_count(), 5);
     assert_eq!(validated.canonical_bytes(), 454);
-    assert_eq!(validated.validation_work(), 73);
-    assert_eq!(control.work, 73);
+    assert_eq!(validated.validation_work(), 77);
+    assert_eq!(control.work, 77);
 
     let primitive = validated
         .primitive(0)
