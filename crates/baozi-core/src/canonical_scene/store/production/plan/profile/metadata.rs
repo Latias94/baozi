@@ -4,14 +4,14 @@ pub(super) fn validate_metadata<C, R>(
     metadata: MetadataAuthoringBatch<'_>,
     owners: ProfileOwnerCatalog<'_>,
     limits: SceneValidationLimits,
-    storage: &mut ProfileValidationStorage<R>,
+    storage: &mut ProfileValidationScratch<R>,
     metrics: &mut ProfileMetrics,
     context: &mut ProfileValidationContext<'_, C>,
 ) -> ProfileValidationResult<(), C>
 where
     C: CanonicalAuthoringControl,
 {
-    let ProfileValidationStorage {
+    let ProfileValidationScratch {
         metadata_owner_counts: owner_counts,
         metadata_owner_cursors: owner_cursors,
         metadata_last_inputs: last_inputs,

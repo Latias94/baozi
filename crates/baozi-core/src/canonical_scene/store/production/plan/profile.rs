@@ -603,14 +603,14 @@ struct ValidatedMetadataPlan {
     input_index: usize,
 }
 
-struct ProfileValidationStorage<R> {
+struct ProfileValidationScratch<R> {
     provenance_depths: Vec<u32>,
     owner_plans: Vec<ValidatedOwnerProvenancePlan>,
     metadata_owner_counts: Vec<u32>,
     metadata_owner_cursors: Vec<u32>,
     metadata_last_inputs: Vec<u32>,
     metadata_plans: Vec<ValidatedMetadataPlan>,
-    // Every compiled-plan allocation above must drop before its accounting token.
+    // Every scratch allocation above must drop before its accounting token.
     reservation: R,
 }
 
@@ -658,8 +658,11 @@ impl<'input> ValidatedMetadataEntry<'input> {
 
 #[must_use = "dropping the validated profile batch releases its compiled-plan reservation"]
 pub(in crate::canonical_scene::store) struct ValidatedProfileBatch<'input, R> {
-    lineage: LineageAuthoringBatch<'input>,
-    metadata: MetadataAuthoringBatch<'input>,
+    compiled: ProfileValidationStorage<R>,
+    input: ProfileAuthoringBatch<'input>,
+}
+
+struct ProfileValidationStorage<R> {
     resource_count: u32,
     source_count: u32,
     provenance_node_count: u32,
@@ -681,11 +684,20 @@ pub(in crate::canonical_scene::store) struct ValidatedProfileBatch<'input, R> {
     provenance_depths: Vec<u32>,
     owner_plans: Vec<ValidatedOwnerProvenancePlan>,
     metadata_plans: Vec<ValidatedMetadataPlan>,
+    #[cfg(test)]
+    storage_drop_probe: Option<ProfileStorageDropProbe>,
     // Every compiled-plan allocation above must drop before its accounting token.
     reservation: R,
 }
 
 impl<'input, R> ValidatedProfileBatch<'input, R> {
+    const fn new(
+        input: ProfileAuthoringBatch<'input>,
+        compiled: ProfileValidationStorage<R>,
+    ) -> Self {
+        Self { compiled, input }
+    }
+
     /// Fresh producer construction always emits one lineage segment.
     /// Derived operations append later segments through the retained edit path.
     pub(in crate::canonical_scene::store) const fn segment_count(&self) -> u32 {
@@ -693,106 +705,106 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
     }
 
     pub(in crate::canonical_scene::store) const fn lineage(&self) -> LineageAuthoringBatch<'input> {
-        self.lineage
+        self.input.lineage()
     }
 
     pub(in crate::canonical_scene::store) const fn metadata(
         &self,
     ) -> MetadataAuthoringBatch<'input> {
-        self.metadata
+        self.input.metadata()
     }
 
     pub(in crate::canonical_scene::store) const fn resource_count(&self) -> u32 {
-        self.resource_count
+        self.compiled.resource_count
     }
 
     pub(in crate::canonical_scene::store) const fn source_count(&self) -> u32 {
-        self.source_count
+        self.compiled.source_count
     }
 
     pub(in crate::canonical_scene::store) const fn operation_count(&self) -> u32 {
-        self.operation_count
+        self.compiled.operation_count
     }
 
     pub(in crate::canonical_scene::store) const fn provenance_node_count(&self) -> u32 {
-        self.provenance_node_count
+        self.compiled.provenance_node_count
     }
 
     pub(in crate::canonical_scene::store) const fn parent_edge_count(&self) -> u64 {
-        self.parent_edge_count
+        self.compiled.parent_edge_count
     }
 
     pub(in crate::canonical_scene::store) const fn owner_attachment_count(&self) -> u64 {
-        self.owner_attachment_count
+        self.compiled.owner_attachment_count
     }
 
     pub(in crate::canonical_scene::store) fn owner_count(&self) -> u64 {
-        u64::from(self.owner_count)
+        u64::from(self.compiled.owner_count)
     }
 
     pub(in crate::canonical_scene::store) fn owner_at(
         &self,
         ordinal: u64,
     ) -> Option<CanonicalProfileOwner> {
-        self.owner_plans
+        self.compiled
+            .owner_plans
             .get(usize::try_from(ordinal).ok()?)
             .map(|plan| plan.owner)
     }
 
     pub(in crate::canonical_scene::store) const fn metadata_entry_count(&self) -> u32 {
-        self.metadata_entry_count
+        self.compiled.metadata_entry_count
     }
 
     pub(in crate::canonical_scene::store) const fn entity_count(&self) -> u64 {
-        self.entity_count
+        self.compiled.entity_count
     }
 
     pub(in crate::canonical_scene::store) const fn edge_count(&self) -> u64 {
-        self.edge_count
+        self.compiled.edge_count
     }
 
     pub(in crate::canonical_scene::store) const fn reference_count(&self) -> u64 {
-        self.reference_count
+        self.compiled.reference_count
     }
 
     pub(in crate::canonical_scene::store) const fn payload_cell_count(&self) -> u64 {
-        self.payload_cell_count
+        self.compiled.payload_cell_count
     }
 
     pub(in crate::canonical_scene::store) const fn metadata_bytes(&self) -> u64 {
-        self.metadata_bytes
+        self.compiled.metadata_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
-        self.canonical_bytes
+        self.compiled.canonical_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn retention_shape(&self) -> ProfileRetentionShape {
-        self.retention_shape
+        self.compiled.retention_shape
     }
 
     pub(in crate::canonical_scene::store) const fn validation_work(&self) -> u64 {
-        self.validation_work
+        self.compiled.validation_work
     }
 
     pub(in crate::canonical_scene::store) const fn scratch_bytes(&self) -> u64 {
-        self.scratch_bytes
+        self.compiled.scratch_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn maximum_depth(&self) -> u32 {
-        self.maximum_depth
+        self.compiled.maximum_depth
     }
 
     pub(in crate::canonical_scene::store) fn source_identity(
         &self,
         source: SourceIdentityLocalId,
     ) -> Option<ValidatedSourceIdentity<'_, 'input>> {
-        let source = *self
-            .lineage
+        let lineage = self.input.lineage();
+        let source = *lineage
             .source_identities()
             .get(usize::try_from(source.index()).ok()?)?;
-        let resource = *self
-            .lineage
+        let resource = *lineage
             .resources()
             .get(usize::try_from(source.resource().index()).ok()?)?;
         Some(ValidatedSourceIdentity {
@@ -807,7 +819,8 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         node: ProvenanceLocalId,
     ) -> Option<SourceIdentityLocalId> {
         match self
-            .lineage
+            .input
+            .lineage()
             .provenance_nodes()
             .get(usize::try_from(node.index()).ok()?)?
         {
@@ -821,7 +834,8 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         node: ProvenanceLocalId,
     ) -> Option<ProvenanceOperationAuthoring<'input>> {
         match self
-            .lineage
+            .input
+            .lineage()
             .provenance_nodes()
             .get(usize::try_from(node.index()).ok()?)?
         {
@@ -834,7 +848,8 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         &self,
         node: ProvenanceLocalId,
     ) -> Option<u32> {
-        self.provenance_depths
+        self.compiled
+            .provenance_depths
             .get(usize::try_from(node.index()).ok()?)
             .copied()
     }
@@ -844,11 +859,16 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         owner: CanonicalProfileOwner,
     ) -> Option<&'input [ProvenanceLocalId]> {
         let plan = self
+            .compiled
             .owner_plans
             .binary_search_by_key(&owner, |plan| plan.owner)
             .ok()
-            .and_then(|index| self.owner_plans.get(index))?;
-        let input = self.lineage.owner_provenance().get(plan.input_index)?;
+            .and_then(|index| self.compiled.owner_plans.get(index))?;
+        let input = self
+            .input
+            .lineage()
+            .owner_provenance()
+            .get(plan.input_index)?;
         Some(input.provenance())
     }
 
@@ -856,8 +876,15 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         &self,
         ordinal: u64,
     ) -> Option<(CanonicalProfileOwner, &'input [ProvenanceLocalId])> {
-        let plan = *self.owner_plans.get(usize::try_from(ordinal).ok()?)?;
-        let input = self.lineage.owner_provenance().get(plan.input_index)?;
+        let plan = *self
+            .compiled
+            .owner_plans
+            .get(usize::try_from(ordinal).ok()?)?;
+        let input = self
+            .input
+            .lineage()
+            .owner_provenance()
+            .get(plan.input_index)?;
         Some((plan.owner, input.provenance()))
     }
 
@@ -865,12 +892,67 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         &self,
         canonical_index: usize,
     ) -> Option<ValidatedMetadataEntry<'input>> {
-        let plan = *self.metadata_plans.get(canonical_index)?;
-        let input = *self.metadata.entries().get(plan.input_index)?;
+        let plan = *self.compiled.metadata_plans.get(canonical_index)?;
+        let input = *self.input.metadata().entries().get(plan.input_index)?;
         Some(ValidatedMetadataEntry {
             owner: plan.owner,
             input,
         })
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store) fn install_storage_drop_probe(
+        &mut self,
+        stage: std::rc::Rc<std::cell::Cell<u8>>,
+    ) {
+        self.compiled.storage_drop_probe = Some(ProfileStorageDropProbe(stage));
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store::production) fn into_compiled_facts_for_test(
+        self,
+    ) -> ([u32; 5], [usize; 3], R) {
+        let ProfileValidationStorage {
+            resource_count,
+            source_count,
+            provenance_node_count,
+            owner_count,
+            metadata_entry_count,
+            provenance_depths,
+            owner_plans,
+            metadata_plans,
+            reservation,
+            ..
+        } = self.compiled;
+        (
+            [
+                resource_count,
+                source_count,
+                provenance_node_count,
+                owner_count,
+                metadata_entry_count,
+            ],
+            [
+                provenance_depths.len(),
+                owner_plans.len(),
+                metadata_plans.len(),
+            ],
+            reservation,
+        )
+    }
+}
+
+#[cfg(test)]
+struct ProfileStorageDropProbe(std::rc::Rc<std::cell::Cell<u8>>);
+
+#[cfg(test)]
+impl Drop for ProfileStorageDropProbe {
+    fn drop(&mut self) {
+        assert_eq!(
+            self.0.replace(1),
+            0,
+            "compiled profile storage must begin the coupled drop sequence"
+        );
     }
 }
 
@@ -1497,7 +1579,7 @@ where
         "retained profile scratch allocation",
     )?;
     context.resize_scratch(&mut reservation, peak_scratch_bytes)?;
-    let mut storage = ProfileValidationStorage {
+    let mut storage = ProfileValidationScratch {
         provenance_depths,
         owner_plans,
         metadata_owner_counts,
@@ -1553,22 +1635,19 @@ where
         limits.max_canonical_bytes(),
     )?;
 
-    let ProfileValidationStorage {
+    let ProfileValidationScratch {
         provenance_depths,
         owner_plans,
         metadata_owner_counts,
         metadata_owner_cursors,
         metadata_last_inputs,
         metadata_plans,
-        mut reservation,
+        reservation,
     } = storage;
     drop(metadata_last_inputs);
     drop(metadata_owner_cursors);
     drop(metadata_owner_counts);
-    context.resize_scratch(&mut reservation, retained_scratch_bytes)?;
-    let validated = ValidatedProfileBatch {
-        lineage,
-        metadata,
+    let compiled = ProfileValidationStorage {
         resource_count,
         source_count,
         provenance_node_count,
@@ -1590,8 +1669,12 @@ where
         provenance_depths,
         owner_plans,
         metadata_plans,
+        #[cfg(test)]
+        storage_drop_probe: None,
         reservation,
     };
+    let mut validated = ValidatedProfileBatch::new(profile, compiled);
+    context.resize_scratch(&mut validated.compiled.reservation, retained_scratch_bytes)?;
     context.finish()?;
     Ok(validated)
 }

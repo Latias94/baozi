@@ -1,3 +1,5 @@
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use crate::canonical_scene::store::profile_provenance::issued_profile_segment_nonce_count_for_test;
@@ -178,6 +180,98 @@ fn validated_domains<'input>(
         deformation,
         animation,
     }
+}
+
+fn validate_minimal_profile<'input>(
+    lineage: LineageAuthoringBatch<'input>,
+    metadata: MetadataAuthoringBatch<'input>,
+    control: &mut TestControl,
+) -> ValidatedProfileBatch<'input, TestReservation> {
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [trs(Presence::Absent)];
+    let mut setup_control = TestControl::default();
+    let domains = validated_domains(&roots, &nodes, &mut setup_control);
+
+    validate_profile_batch_with_control(
+        lineage,
+        metadata,
+        domains.owners(),
+        SceneValidationLimits::default(),
+        control,
+    )
+    .expect("the minimal profile fixture must validate")
+}
+
+#[test]
+fn compiled_profile_facts_do_not_borrow_authored_storage() {
+    let mut control = TestControl::default();
+    let compiled = {
+        let resources = Vec::from(resource_rows());
+        let sources = vec![source_row(RESOURCE_ID)];
+        let provenance = vec![ProvenanceNodeAuthoring::source(SOURCE_ID)];
+        let scene_provenance = vec![SOURCE_PROVENANCE];
+        let synthetic_root_provenance = vec![SOURCE_PROVENANCE];
+        let node_provenance = vec![SOURCE_PROVENANCE];
+        let owners = mandatory_owner_rows(
+            &scene_provenance,
+            &synthetic_root_provenance,
+            &node_provenance,
+        );
+        let metadata = vec![MetadataAuthoringEntry::new(
+            ProfileOwner::Node(NodeLocalId::new(0)),
+            &vocabulary().metadata_key,
+            ExtensionValueRef::F64(2.0),
+        )];
+
+        validate_minimal_profile(
+            LineageAuthoringBatch::new(&resources, &sources, &provenance, &owners),
+            MetadataAuthoringBatch::new(&metadata),
+            &mut control,
+        )
+        .into_compiled_facts_for_test()
+    };
+
+    assert_eq!(compiled.0, [1, 1, 1, 3, 1]);
+    assert_eq!(compiled.1, [1, 3, 1]);
+
+    drop(compiled);
+    assert_eq!(control.live.get(), 0);
+}
+
+#[test]
+fn compiled_profile_storage_drops_before_its_reservation() {
+    let resources = resource_rows();
+    let sources = [source_row(RESOURCE_ID)];
+    let provenance = [ProvenanceNodeAuthoring::source(SOURCE_ID)];
+    let scene_provenance = [SOURCE_PROVENANCE];
+    let synthetic_root_provenance = [SOURCE_PROVENANCE];
+    let node_provenance = [SOURCE_PROVENANCE];
+    let owners = mandatory_owner_rows(
+        &scene_provenance,
+        &synthetic_root_provenance,
+        &node_provenance,
+    );
+    let metadata = [MetadataAuthoringEntry::new(
+        ProfileOwner::Node(NodeLocalId::new(0)),
+        &vocabulary().metadata_key,
+        ExtensionValueRef::F64(2.0),
+    )];
+    let stage = Rc::new(Cell::new(0));
+    let mut control = TestControl {
+        reservation_drop_stage: Some(Rc::clone(&stage)),
+        ..TestControl::default()
+    };
+    let mut validated = validate_minimal_profile(
+        LineageAuthoringBatch::new(&resources, &sources, &provenance, &owners),
+        MetadataAuthoringBatch::new(&metadata),
+        &mut control,
+    );
+
+    validated.install_storage_drop_probe(Rc::clone(&stage));
+    drop(validated);
+
+    assert_eq!(stage.get(), 2);
+    assert_eq!(control.live.get(), 0);
 }
 
 #[test]
