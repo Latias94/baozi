@@ -10,10 +10,6 @@ type ScopedOutcome<E> = CanonicalActivationOutcome<
     SequenceTag,
 >;
 
-fn semantic_units(units: u64) -> NonZeroU64 {
-    NonZeroU64::new(units).expect("semantic work fixtures are nonzero")
-}
-
 fn operation_with_scoped_semantic_limit(
     account: &PhysicalStorageAccount,
     semantic_work_limit: u64,
@@ -114,7 +110,7 @@ fn scoped_activation_permit_moves_the_core_plan_only_at_activation() {
     // core-owned execution plan. The plan moves behind the owner-consuming transition only here.
     let outcome = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             let mut scratch = semantic.reserve(4).unwrap();
             semantic.resize(&mut scratch, 8).unwrap();
             semantic.validate_live_owner(&scratch).unwrap();
@@ -280,7 +276,7 @@ fn abandoning_a_scoped_activation_releases_scratch_before_containment() {
     let poison_seen_while_dropping = Cell::new(false);
 
     let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
-        let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+        let mut semantic = planning.begin_semantic_work().unwrap();
         let scratch = semantic.reserve(1).unwrap();
         semantic.run_unit(|| ()).unwrap();
         let completion = semantic.finish_exact().unwrap();
@@ -403,7 +399,7 @@ fn scoped_materialization_panic_drops_the_plan_before_account_containment() {
     let poison_seen_while_dropping = Cell::new(false);
 
     let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
-        let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+        let mut semantic = planning.begin_semantic_work().unwrap();
         let scratch = semantic.reserve(1).unwrap();
         semantic.run_unit(|| ()).unwrap();
         let completion = semantic.finish_exact().unwrap();
@@ -518,7 +514,7 @@ fn panic_after_pending_rejected_is_fail_closed() {
 
     let result: Result<ScopedOutcome<MaterializationRejection>, _> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             semantic.run_unit(|| ()).unwrap();
             let completion = semantic.finish_exact().unwrap();
             let permit = match planning.seal_activation(success, completion) {
@@ -556,7 +552,7 @@ fn panic_after_pending_activated_is_fail_closed() {
 
     let result: Result<ScopedOutcome<MaterializationRejection>, _> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             semantic.run_unit(|| ()).unwrap();
             let completion = semantic.finish_exact().unwrap();
             let permit = match planning.seal_activation(success, completion) {
@@ -601,14 +597,18 @@ fn control_interruption_then_reject_preserves_runtime_never_activated() {
         .into_scoped_session_outcome_owner(policy, failure)
         .unwrap();
     cancellation.cancel();
+    let action_executed = Cell::new(false);
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let cause = match planning.begin_semantic_work(NonZeroU64::MIN) {
-                Ok(_) => panic!("pre-cancelled semantic admission must retain Control"),
-                Err(cause) => cause,
-            };
+            let mut semantic = planning.begin_semantic_work().unwrap();
+            let cause = semantic.run_unit(|| action_executed.set(true)).unwrap_err();
             assert!(matches!(cause, StoreRuntimeError::Control(_)));
+            assert!(!action_executed.get());
+            assert!(matches!(
+                semantic.finish_rejected(),
+                Err(StoreRuntimeError::Control(_))
+            ));
             planning.reject(PreflightRejection::Unsupported, 41)
         })
         .unwrap();
@@ -649,7 +649,7 @@ fn ledger_interruption_then_reject_preserves_runtime_never_activated() {
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             let cause = match semantic.reserve(u64::MAX) {
                 Ok(reservation) => {
                     let cause = match semantic.reserve(1) {
@@ -662,7 +662,10 @@ fn ledger_interruption_then_reject_preserves_runtime_never_activated() {
                 Err(cause) => cause,
             };
             assert!(matches!(cause, StoreRuntimeError::Ledger(_)));
-            semantic.finish_rejected().unwrap();
+            assert!(matches!(
+                semantic.finish_rejected(),
+                Err(StoreRuntimeError::Ledger(_))
+            ));
             planning.reject(PreflightRejection::Unsupported, 42)
         })
         .unwrap();
@@ -706,8 +709,9 @@ fn runtime_fault_before_semantic_completion_resolves_without_activation() {
 
     let outcome: ScopedOutcome<()> = owner
         .plan_and_activate_scoped(|mut planning| {
+            let semantic = planning.begin_semantic_work().unwrap();
             assert!(matches!(
-                planning.begin_semantic_work(NonZeroU64::MIN),
+                semantic.finish_rejected(),
                 Err(StoreRuntimeError::Control(_))
             ));
             planning.reject((), 42)
@@ -750,7 +754,7 @@ fn forgetting_a_semantic_session_cannot_publish_a_requested_disposition() {
 
     let result: Result<ScopedOutcome<PreflightRejection>, _> =
         owner.plan_and_activate_scoped(|mut planning| {
-            let semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let semantic = planning.begin_semantic_work().unwrap();
             std::mem::forget(semantic);
             planning.reject(PreflightRejection::Unsupported, 43)
         });
@@ -780,7 +784,7 @@ fn assert_forgotten_reservation_is_contained(terminal: ForgottenReservationTermi
 
     let result: Result<ScopedOutcome<MaterializationRejection>, _> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             let scratch = semantic.reserve(1).unwrap();
             semantic.run_unit(|| ()).unwrap();
             let completion = semantic.finish_exact().unwrap();
@@ -824,11 +828,7 @@ fn forgetting_a_detached_reservation_cannot_publish_rejected() {
     assert_forgotten_reservation_is_contained(ForgottenReservationTerminal::Rejected);
 }
 
-fn scoped_semantic_case(
-    attempted_units: u64,
-    execute_limit: u64,
-    cancel_after: Option<u64>,
-) -> (u64, u64, u64, bool) {
+fn scoped_semantic_case(execute_limit: u64, cancel_after: Option<u64>) -> (u64, u64, u64, bool) {
     let baseline = scoped_semantic_baseline();
     let factory = factory(1);
     let account = account(&factory);
@@ -848,9 +848,7 @@ fn scoped_semantic_case(
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning
-                .begin_semantic_work(semantic_units(attempted_units))
-                .unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             while executed.get() < execute_limit {
                 let result = semantic.run_unit(|| {
                     let completed = executed.get() + 1;
@@ -864,15 +862,11 @@ fn scoped_semantic_case(
                     break;
                 }
             }
-            if executed.get() == attempted_units && !interrupted.get() {
-                let _completion = semantic.finish_exact().unwrap();
+            let finish = semantic.finish_rejected();
+            if interrupted.get() {
+                assert!(matches!(finish, Err(StoreRuntimeError::Control(_))));
             } else {
-                let finish = semantic.finish_rejected();
-                if interrupted.get() {
-                    assert!(matches!(finish, Err(StoreRuntimeError::Control(_))));
-                } else {
-                    finish.unwrap();
-                }
+                finish.unwrap();
             }
             planning.reject(PreflightRejection::Unsupported, 51)
         })
@@ -955,32 +949,35 @@ fn scoped_semantic_baseline() -> (u64, u64) {
 
 #[test]
 fn finish_rejected_preserves_the_exact_partial_semantic_prefix_without_contract_fault() {
-    assert_eq!(scoped_semantic_case(3, 1, None), (3, 1, 1, false));
+    assert_eq!(scoped_semantic_case(1, None), (1, 1, 1, false));
 }
 
 #[test]
-fn semantic_work_admission_is_atomic_at_exact_one_short_and_zero_capacity() {
+fn semantic_work_is_admitted_per_action_at_exact_one_short_and_zero_capacity() {
     const REQUESTED_UNITS: u64 = 2;
 
-    for (semantic_work_limit, expected_admitted, expected_attempted, expected_cause) in [
+    for (
+        semantic_work_limit,
+        expected_executed,
+        expected_attempted,
+        expected_consumed,
+        expected_cause,
+    ) in [
         (
             REQUESTED_UNITS,
-            true,
+            REQUESTED_UNITS,
+            REQUESTED_UNITS,
             REQUESTED_UNITS,
             StorePreparationFailureClass::Requested,
         ),
         (
             1,
-            false,
+            1,
             REQUESTED_UNITS,
+            1,
             StorePreparationFailureClass::Ledger,
         ),
-        (
-            0,
-            false,
-            REQUESTED_UNITS,
-            StorePreparationFailureClass::Ledger,
-        ),
+        (0, 0, 1, 0, StorePreparationFailureClass::Ledger),
     ] {
         let factory = factory(1);
         let account = account(&factory);
@@ -1001,24 +998,33 @@ fn semantic_work_admission_is_atomic_at_exact_one_short_and_zero_capacity() {
         let owner = operation
             .into_scoped_session_outcome_owner(policy, failure)
             .unwrap();
-        let admitted = Cell::new(false);
+        let executed = Cell::new(0_u64);
 
         let outcome: ScopedOutcome<PreflightRejection> = owner
             .plan_and_activate_scoped(|mut planning| {
-                match planning.begin_semantic_work(semantic_units(REQUESTED_UNITS)) {
-                    Ok(semantic) => {
-                        admitted.set(true);
-                        semantic.finish_rejected().unwrap();
+                let mut semantic = planning.begin_semantic_work().unwrap();
+                let mut admission_failed = false;
+                for _ in 0..REQUESTED_UNITS {
+                    match semantic.run_unit(|| executed.set(executed.get() + 1)) {
+                        Ok(()) => {}
+                        Err(StoreRuntimeError::Ledger(_)) => {
+                            admission_failed = true;
+                            break;
+                        }
+                        Err(cause) => panic!("unexpected semantic-work failure: {cause:?}"),
                     }
-                    Err(cause) => {
-                        assert!(matches!(cause, StoreRuntimeError::Ledger(_)));
-                    }
+                }
+                let finish = semantic.finish_rejected();
+                if admission_failed {
+                    assert!(matches!(finish, Err(StoreRuntimeError::Ledger(_))));
+                } else {
+                    finish.unwrap();
                 }
                 planning.reject(PreflightRejection::Unsupported, 56)
             })
             .unwrap();
 
-        assert_eq!(admitted.get(), expected_admitted);
+        assert_eq!(executed.get(), expected_executed);
         let never_activated = match outcome {
             CanonicalActivationOutcome::NeverActivated(state) => state,
             CanonicalActivationOutcome::Activated(_)
@@ -1037,7 +1043,7 @@ fn semantic_work_admission_is_atomic_at_exact_one_short_and_zero_capacity() {
             .dimension(keys.other_dimension)
             .expect("the isolated semantic dimension remains queryable");
         assert_eq!(semantic_work.attempted(), expected_attempted);
-        assert_eq!(semantic_work.consumed(), 0);
+        assert_eq!(semantic_work.consumed(), expected_consumed);
         assert_eq!(
             store_failure_cause(&published.ledger_evidence).class(),
             expected_cause
@@ -1071,7 +1077,7 @@ fn semantic_domain_rejection_consumes_the_returned_action_unit() {
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             let rejection = semantic
                 .run_unit(|| Err::<(), _>("invalid domain value"))
                 .unwrap();
@@ -1109,7 +1115,7 @@ fn semantic_domain_rejection_consumes_the_returned_action_unit() {
 }
 
 #[test]
-fn caught_semantic_action_panic_preserves_the_exact_completed_prefix() {
+fn caught_semantic_action_panic_cannot_be_downgraded_to_requested() {
     for completed_prefix in [0_u64, 1] {
         let factory = factory(1);
         let account = account(&factory);
@@ -1130,58 +1136,38 @@ fn caught_semantic_action_panic_preserves_the_exact_completed_prefix() {
         let owner = operation
             .into_scoped_session_outcome_owner(policy, failure)
             .unwrap();
+        let completed = Cell::new(0_u64);
 
-        let outcome: ScopedOutcome<PreflightRejection> = owner
-            .plan_and_activate_scoped(|mut planning| {
-                let mut semantic = planning.begin_semantic_work(semantic_units(2)).unwrap();
+        let result: Result<ScopedOutcome<PreflightRejection>, _> =
+            owner.plan_and_activate_scoped(|mut planning| {
+                let mut semantic = planning.begin_semantic_work().unwrap();
                 if completed_prefix == 1 {
-                    semantic.run_unit(|| ()).unwrap();
+                    semantic
+                        .run_unit(|| completed.set(completed.get() + 1))
+                        .unwrap();
                 }
                 let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _ = semantic.run_unit(|| -> () { panic!("caught semantic action panic") });
                 }));
                 assert!(panicked.is_err());
-                semantic.finish_rejected().unwrap();
+                assert!(matches!(
+                    semantic.finish_rejected(),
+                    Err(StoreRuntimeError::ConstructionInvariantUnverified)
+                ));
                 planning.reject(PreflightRejection::Unsupported, 58)
-            })
-            .unwrap();
+            });
 
-        let never_activated = match outcome {
-            CanonicalActivationOutcome::NeverActivated(state) => state,
-            CanonicalActivationOutcome::Activated(_)
-            | CanonicalActivationOutcome::Rejected(_)
-            | CanonicalActivationOutcome::Fallback(_) => {
-                panic!("a caught semantic panic must remain pre-activation")
-            }
-        };
-        let (prepared, _) = never_activated
-            .prepare_minimal_fallback()
-            .unwrap()
-            .into_parts();
-        let published = prepared.handoff();
-        let semantic_work = published
-            .ledger_evidence
-            .dimension(keys.other_dimension)
-            .expect("the panicking semantic action remains queryable");
-        assert_eq!(semantic_work.attempted(), 2);
-        assert_eq!(semantic_work.consumed(), completed_prefix);
-        assert_eq!(
-            store_failure_cause(&published.ledger_evidence).class(),
-            StorePreparationFailureClass::Requested
-        );
-        drop(published);
-        assert!(!account.snapshot().poisoned());
+        assert!(result.is_err());
+        assert_eq!(completed.get(), completed_prefix);
+        assert_fail_closed_containment(&account);
     }
 }
 
 #[test]
-fn semantic_work_polling_is_bounded_at_255_256_and_257_units() {
-    assert_eq!(scoped_semantic_case(255, 255, None), (255, 255, 255, false));
-    assert_eq!(scoped_semantic_case(256, 256, None), (256, 256, 256, false));
-    assert_eq!(
-        scoped_semantic_case(257, 257, Some(256)),
-        (257, 256, 256, true)
-    );
+fn semantic_work_records_exact_255_256_and_cancelled_257_prefixes() {
+    assert_eq!(scoped_semantic_case(255, None), (255, 255, 255, false));
+    assert_eq!(scoped_semantic_case(256, None), (256, 256, 256, false));
+    assert_eq!(scoped_semantic_case(257, Some(256)), (256, 256, 256, true));
 }
 
 #[test]
@@ -1203,7 +1189,7 @@ fn cancellation_in_the_last_semantic_action_precedes_requested_rejection() {
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             semantic.run_unit(|| cancellation.cancel()).unwrap();
             let cause = semantic.finish_rejected().unwrap_err();
             assert!(matches!(cause, StoreRuntimeError::Control(_)));
@@ -1271,7 +1257,7 @@ fn due_control_poll_precedes_scratch_reservation_after_the_checkpoint() {
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(semantic_units(256)).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             for index in 0..256 {
                 semantic
                     .run_unit(|| {
@@ -1353,54 +1339,6 @@ fn due_control_poll_precedes_scratch_reservation_after_the_checkpoint() {
 }
 
 #[test]
-fn semantic_work_rejects_the_first_unit_beyond_the_admitted_envelope() {
-    const ADMITTED_UNITS: u64 = 2;
-
-    let factory = factory(1);
-    let account = account(&factory);
-    let (operation, keys) = operation(&account);
-    let TestScopedActivation {
-        policy,
-        failure,
-        success: _,
-    } = scoped_activation_shape(keys, 1, 1);
-    let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
-        .unwrap();
-    let completed = Cell::new(0_u64);
-    let extra_action_executed = Cell::new(false);
-
-    let result: Result<ScopedOutcome<PreflightRejection>, _> =
-        owner.plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning
-                .begin_semantic_work(semantic_units(ADMITTED_UNITS))
-                .unwrap();
-            for _ in 0..ADMITTED_UNITS {
-                semantic
-                    .run_unit(|| completed.set(completed.get() + 1))
-                    .unwrap();
-            }
-
-            assert!(matches!(
-                semantic.run_unit(|| extra_action_executed.set(true)),
-                Err(StoreRuntimeError::ConstructionInvariantUnverified)
-            ));
-            assert_eq!(completed.get(), ADMITTED_UNITS);
-            assert!(!extra_action_executed.get());
-            assert!(matches!(
-                semantic.finish_rejected(),
-                Err(StoreRuntimeError::ConstructionInvariantUnverified)
-            ));
-            planning.reject(PreflightRejection::Unsupported, 59)
-        });
-
-    assert!(result.is_err());
-    assert_eq!(completed.get(), ADMITTED_UNITS);
-    assert!(!extra_action_executed.get());
-    assert_fail_closed_containment(&account);
-}
-
-#[test]
 fn due_control_poll_precedes_live_owner_validation_after_the_checkpoint() {
     let factory = factory(1);
     let account = account(&factory);
@@ -1418,7 +1356,7 @@ fn due_control_poll_precedes_live_owner_validation_after_the_checkpoint() {
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(semantic_units(256)).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             let scratch = semantic.reserve(4).unwrap();
             for index in 0..256 {
                 semantic
@@ -1490,7 +1428,7 @@ fn due_control_poll_precedes_scratch_resize_after_the_checkpoint() {
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(semantic_units(256)).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             let mut scratch = semantic.reserve(4).unwrap();
             for index in 0..256 {
                 semantic
@@ -1571,7 +1509,7 @@ fn cancellation_before_direct_reject_precedes_the_requested_cause() {
 }
 
 #[test]
-fn incomplete_semantic_work_cannot_issue_a_completion() {
+fn empty_semantic_work_cannot_issue_a_completion() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
@@ -1587,8 +1525,7 @@ fn incomplete_semantic_work_cannot_issue_a_completion() {
 
     let result: Result<ScopedOutcome<PreflightRejection>, _> =
         owner.plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(semantic_units(2)).unwrap();
-            semantic.run_unit(|| ()).unwrap();
+            let semantic = planning.begin_semantic_work().unwrap();
             assert!(matches!(
                 semantic.finish_exact(),
                 Err(StoreRuntimeError::ConstructionInvariantUnverified)
@@ -1602,52 +1539,6 @@ fn incomplete_semantic_work_cannot_issue_a_completion() {
         baseline_allocations
     );
     assert_fail_closed_containment(&account);
-}
-
-fn assert_semantic_completion_mismatch(completed_units: u64, required_units: u64) {
-    let factory = factory(1);
-    let account = account(&factory);
-    let (operation, keys) = operation(&account);
-    let TestScopedActivation {
-        policy,
-        failure,
-        success: _,
-    } = scoped_activation_shape(keys, 1, 1);
-    let success = CanonicalSuccessRequirements::new(
-        CanonicalTableShape::new(1, 1).unwrap(),
-        1,
-        NonZeroU64::new(required_units).unwrap(),
-        NonZeroU64::MIN,
-    )
-    .unwrap();
-    let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
-        .unwrap();
-
-    let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
-        let mut semantic = planning
-            .begin_semantic_work(semantic_units(completed_units))
-            .unwrap();
-        for _ in 0..completed_units {
-            semantic.run_unit(|| ()).unwrap();
-        }
-        let completion = semantic.finish_exact().unwrap();
-        match planning.seal_activation(success, completion) {
-            CanonicalActivationSeal::Sealed(_) => {
-                panic!("a mismatched semantic completion cannot issue an activation permit")
-            }
-            CanonicalActivationSeal::Unsealed(failure) => failure.finish_after_plan_drop(),
-        }
-    });
-
-    assert!(result.is_err());
-    assert_fail_closed_containment(&account);
-}
-
-#[test]
-fn semantic_completion_must_match_the_sealed_success_envelope_exactly() {
-    assert_semantic_completion_mismatch(1, 2);
-    assert_semantic_completion_mismatch(2, 1);
 }
 
 #[test]
@@ -1668,7 +1559,7 @@ fn cancellation_after_finish_exact_prevents_success_from_sealing() {
 
     let outcome: ScopedOutcome<()> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             semantic.run_unit(|| ()).unwrap();
             let completion = semantic.finish_exact().unwrap();
             cancellation.cancel();
@@ -1704,7 +1595,7 @@ fn cancelled_seal_releases_scoped_plan_before_never_activated() {
 
     let outcome: ScopedOutcome<()> = owner
         .plan_and_activate_scoped(|mut planning| {
-            let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+            let mut semantic = planning.begin_semantic_work().unwrap();
             let scratch = semantic.reserve(1).unwrap();
             semantic.validate_live_owner(&scratch).unwrap();
             semantic.run_unit(|| ()).unwrap();
@@ -1736,46 +1627,6 @@ fn cancelled_seal_releases_scoped_plan_before_never_activated() {
 }
 
 #[test]
-fn cancellation_cannot_mask_a_semantic_completion_mismatch() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let cancellation = CancellationToken::new();
-    let control = OperationControl::default().with_cancellation(cancellation.clone());
-    let (operation, keys) = operation_with_control(&account, control);
-    let TestScopedActivation {
-        policy,
-        failure,
-        success: _,
-    } = scoped_activation_shape(keys, 1, 1);
-    let mismatched_success = CanonicalSuccessRequirements::new(
-        CanonicalTableShape::new(1, 1).unwrap(),
-        1,
-        NonZeroU64::new(2).unwrap(),
-        NonZeroU64::MIN,
-    )
-    .unwrap();
-    let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
-        .unwrap();
-
-    let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
-        let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
-        semantic.run_unit(|| ()).unwrap();
-        let completion = semantic.finish_exact().unwrap();
-        cancellation.cancel();
-        match planning.seal_activation(mismatched_success, completion) {
-            CanonicalActivationSeal::Sealed(_) => {
-                panic!("a mismatched completion cannot issue an activation permit")
-            }
-            CanonicalActivationSeal::Unsealed(failure) => failure.finish_after_plan_drop(),
-        }
-    });
-
-    assert!(result.is_err());
-    assert_fail_closed_containment(&account);
-}
-
-#[test]
 fn semantic_action_panics_are_contained_after_the_exact_completed_prefix() {
     for completed_prefix in [0_u64, 1] {
         let factory = factory(1);
@@ -1793,7 +1644,7 @@ fn semantic_action_panics_are_contained_after_the_exact_completed_prefix() {
 
         let result: Result<ScopedOutcome<PreflightRejection>, _> =
             owner.plan_and_activate_scoped(|mut planning| {
-                let mut semantic = planning.begin_semantic_work(semantic_units(2)).unwrap();
+                let mut semantic = planning.begin_semantic_work().unwrap();
                 if completed_prefix == 1 {
                     semantic
                         .run_unit(|| completed.set(completed.get() + 1))

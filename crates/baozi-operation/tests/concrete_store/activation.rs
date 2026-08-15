@@ -312,7 +312,6 @@ fn scoped_activation_shape_with_dimensions(
             CanonicalTableShape::new(canonical_blocks, canonical_blocks).unwrap(),
             canonical_blocks,
             NonZeroU64::MIN,
-            NonZeroU64::MIN,
         )
         .unwrap(),
     }
@@ -408,8 +407,7 @@ fn structural_work_requirement_rejects_extreme_shape_overflow() {
     let evidence = CanonicalTableShape::new(1, 1).unwrap();
     let failure = CanonicalFailureRequirements::new(evidence);
     let success =
-        CanonicalSuccessRequirements::new(canonical, usize::MAX, NonZeroU64::MIN, NonZeroU64::MIN)
-            .unwrap();
+        CanonicalSuccessRequirements::new(canonical, usize::MAX, NonZeroU64::MIN).unwrap();
 
     assert_eq!(failure.pre_activation_structural_work_requirement(), Ok(8));
     assert_eq!(

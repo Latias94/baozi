@@ -15,13 +15,12 @@ use thiserror::Error;
 
 use crate::SceneValidationWork;
 
-/// Core-owned control surface for one complete canonical authoring preflight.
+/// Core-owned control surface for one canonical authoring preflight.
 ///
 /// Each work unit wraps the semantic action it accounts for. The scoped activation implementation
-/// can therefore admit the complete attempted envelope before validation while advancing consumed
-/// work only after the matching action returns normally. The trait remains private to canonical
-/// Scene construction and intentionally exposes no raw ledger key, progress channel, or terminal
-/// owner.
+/// therefore admits attempted work immediately before that action and advances consumed work only
+/// after it returns normally. The trait remains private to canonical Scene construction and
+/// intentionally exposes no raw ledger key, progress channel, or terminal owner.
 pub(in crate::canonical_scene::store) trait CanonicalAuthoringControl {
     type Error: Error + Send + Sync + 'static;
     type Reservation;
@@ -69,12 +68,11 @@ pub(in crate::canonical_scene::store) struct OperationAuthoringControl<
     dimension: StoreDimensionKey,
 }
 
-/// Exact action-scoped adapter used by the import-bound activation transaction.
+/// Action-scoped adapter used by the import-bound activation transaction.
 ///
-/// Explicit validator polls delegate to the operation-owned completion batch. The batch performs
-/// a real control observation only when its bounded checkpoint is due, so validators retain their
-/// scheduling shape without introducing a second counter or permitting scratch work to cross a
-/// pending cancellation checkpoint.
+/// Explicit validator polls delegate to the operation-owned checkpoint cadence. Validators retain
+/// their scheduling shape without introducing a second work counter or permitting scratch work to
+/// cross a pending cancellation checkpoint.
 #[allow(
     dead_code,
     reason = "consumed by the complete-batch scoped activation cutover in U4e"
@@ -86,23 +84,24 @@ pub(in crate::canonical_scene::store) struct ScopedAuthoringControl<
     O,
     PP,
     U,
+    L = FreshStoreLineage,
 > where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    session: &'session mut CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U>,
+    session: &'session mut CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U, L>,
 }
 
-impl<'session, 'borrow, 'scope, O, PP, U>
-    ScopedAuthoringControl<'session, 'borrow, 'scope, O, PP, U>
+impl<'session, 'borrow, 'scope, O, PP, U, L>
+    ScopedAuthoringControl<'session, 'borrow, 'scope, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     pub(in crate::canonical_scene::store) const fn new(
-        session: &'session mut CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U>,
+        session: &'session mut CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U, L>,
     ) -> Self {
         Self { session }
     }
@@ -201,8 +200,8 @@ where
     }
 }
 
-impl<'session, 'borrow, 'scope, O, PP, U> CanonicalAuthoringControl
-    for ScopedAuthoringControl<'session, 'borrow, 'scope, O, PP, U>
+impl<'session, 'borrow, 'scope, O, PP, U, L> CanonicalAuthoringControl
+    for ScopedAuthoringControl<'session, 'borrow, 'scope, O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,

@@ -1503,36 +1503,36 @@ pub struct CanonicalPlanning<
     receipt_brand: &'scope ScopedReceiptBrand,
 }
 
-/// Linear role-bound semantic-work session for authority-free complete-batch preflight.
+/// Linear role-bound semantic-work session for authority-free semantic preflight.
 ///
-/// Admission records the entire attempted envelope before the first action. Each `run_unit`
-/// advances consumed work only after its action returns normally. Scratch storage remains metered
-/// by the same permit without exposing a raw phase, dimension, ledger, or operation owner.
-pub struct CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U>
+/// Each `run_unit` admits its own attempted unit immediately before the action and advances
+/// consumed work only after that action returns normally. Scratch storage remains metered by the
+/// same operation without exposing a raw phase, dimension, ledger, or operation owner.
+pub struct CanonicalSemanticWorkSession<'borrow, 'scope, O, PP, U, L = FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    permit: Option<RawOutcomeEvidenceWorkPermit<'borrow, O, PP, U>>,
+    operation: &'borrow mut RetainedStoreOperation<O, PP, U, L>,
     first_fault: &'borrow mut Option<ActivationFirstFault>,
     phase: StorePhaseKey,
+    dimension: StoreDimensionKey,
     state: &'borrow mut ScopedSemanticState,
     receipt_brand: &'scope ScopedReceiptBrand,
-    admitted_units: NonZeroU64,
     work_batch: work_batch::CompletionPrefixBatch,
+    completed_any: bool,
     resolved: bool,
     scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
 }
 
-/// Linear proof that one scoped semantic-work envelope completed exactly.
+/// Linear proof that one scoped semantic pass completed at least one metered action.
 ///
 /// The private brand prevents completion from one planning transaction from sealing another. The
 /// token carries no Scene payload, retained owner, ledger key, or publication authority.
 #[must_use = "semantic completion must seal its matching activation exactly once"]
 pub struct CanonicalSemanticCompletion<'scope> {
     receipt_brand: &'scope ScopedReceiptBrand,
-    completed_units: NonZeroU64,
     invariant: PhantomData<fn(&'scope mut ()) -> &'scope mut ()>,
 }
 
@@ -1789,14 +1789,13 @@ impl CanonicalFailureRequirements {
 
 /// Success-only requirements sealed after complete semantic preflight.
 ///
-/// Failure evidence remains session-bound. The exact nonzero semantic-work envelope must match the
-/// operation-issued completion token, while canonical shape and validation work remain derived from
-/// the same core execution plan that activation consumes.
+/// Failure evidence remains session-bound. The operation-issued completion token proves that the
+/// matching transaction resolved a nonempty action-derived semantic pass; canonical shape and
+/// validation work remain derived from the same core execution plan that activation consumes.
 #[must_use = "success requirements must seal exactly one activation permit"]
 pub struct CanonicalSuccessRequirements {
     canonical: CanonicalTableShape,
     expected_materialized_blocks: usize,
-    semantic_preflight_work: NonZeroU64,
     validation_work: NonZeroU64,
 }
 
@@ -1804,7 +1803,6 @@ impl CanonicalSuccessRequirements {
     pub fn new(
         canonical: CanonicalTableShape,
         expected_materialized_blocks: usize,
-        semantic_preflight_work: NonZeroU64,
         validation_work: NonZeroU64,
     ) -> Result<Self, StorePlanError> {
         if expected_materialized_blocks == 0
@@ -1815,7 +1813,6 @@ impl CanonicalSuccessRequirements {
         Ok(Self {
             canonical,
             expected_materialized_blocks,
-            semantic_preflight_work,
             validation_work,
         })
     }
@@ -3054,7 +3051,6 @@ mod scoped_transition_tests {
                 CanonicalTableShape::new(1, 1).unwrap(),
                 1,
                 NonZeroU64::MIN,
-                NonZeroU64::MIN,
             )
             .unwrap(),
         )
@@ -3070,7 +3066,7 @@ mod scoped_transition_tests {
 
         let result: Result<TestOutcome, StoreActivationContainment> = owner
             .plan_and_activate_scoped(|mut planning| {
-                let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+                let mut semantic = planning.begin_semantic_work().unwrap();
                 semantic.run_unit(|| ()).unwrap();
                 let completion = semantic.finish_exact().unwrap();
                 let permit = match planning.seal_activation(success, completion) {
@@ -3132,7 +3128,7 @@ mod scoped_transition_tests {
 
         let result: Result<TestOutcome, StoreActivationContainment> = owner
             .plan_and_activate_scoped(|mut planning| {
-                let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+                let mut semantic = planning.begin_semantic_work().unwrap();
                 let scratch = semantic.reserve(1).unwrap();
                 semantic.validate_live_owner(&scratch).unwrap();
                 semantic.run_unit(|| ()).unwrap();
@@ -3226,7 +3222,7 @@ mod scoped_transition_tests {
 
         let result: Result<TestOutcome, StoreActivationContainment> = owner
             .plan_and_activate_scoped(|mut planning| {
-                let mut semantic = planning.begin_semantic_work(NonZeroU64::MIN).unwrap();
+                let mut semantic = planning.begin_semantic_work().unwrap();
                 let scratch = semantic.reserve(1).unwrap();
                 semantic.validate_live_owner(&scratch).unwrap();
                 semantic.run_unit(|| ()).unwrap();

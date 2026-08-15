@@ -61,6 +61,23 @@ impl CompletionPrefixBatch {
         Ok(())
     }
 
+    /// Advances only the bounded control-poll cadence for work completed synchronously elsewhere.
+    pub(super) fn note_observed_unit(&mut self) -> Result<(), ()> {
+        if self.poll_due {
+            return Err(());
+        }
+        let completed_since_poll = self
+            .completed_since_poll
+            .checked_add(1)
+            .filter(|completed| *completed <= WORK_CHECKPOINT_UNITS)
+            .ok_or(())?;
+        self.completed_since_poll = completed_since_poll;
+        if self.completed_since_poll == WORK_CHECKPOINT_UNITS {
+            self.poll_due = true;
+        }
+        Ok(())
+    }
+
     pub(super) fn note_completed_unit(&mut self) -> Result<(), ()> {
         self.note_completed(NonZeroU64::MIN)
     }

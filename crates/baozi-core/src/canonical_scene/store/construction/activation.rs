@@ -438,7 +438,6 @@ impl SceneMaterializationPlan {
         Ok(CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(canonical_blocks, canonical_blocks)?,
             canonical_blocks,
-            self.semantic_work_units(),
             self.validation_work_units(),
         )?)
     }
@@ -825,7 +824,7 @@ fn drive_fresh_two_node_activation(
         let semantic_work_units = execution.semantic_work_units();
         let mut semantic_valid = true;
         let semantic_result = {
-            let start = planning.begin_semantic_work(semantic_work_units);
+            let start = planning.begin_semantic_work();
             match start {
                 Ok(mut semantic) => {
                     let mut runtime_interrupted = false;
