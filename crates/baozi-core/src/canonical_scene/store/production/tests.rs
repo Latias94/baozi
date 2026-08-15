@@ -15,6 +15,7 @@ use super::plan::{
 use super::*;
 
 mod appearance;
+mod deformation;
 mod geometry;
 mod profile;
 mod relation_limits;

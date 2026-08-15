@@ -676,7 +676,11 @@ impl<'input> ValidatedMeshInstanceDeformation<'_, 'input> {
 
 #[must_use = "dropping the validated deformation batch releases its compiled-plan reservation"]
 pub(in crate::canonical_scene::store) struct ValidatedDeformationBatch<'input, R> {
+    compiled: DeformationValidationStorage<R>,
     input: DeformationAuthoringBatch<'input>,
+}
+
+struct DeformationValidationStorage<R> {
     skin_count: u32,
     logical_morph_count: u32,
     morph_definition_count: u32,
@@ -713,11 +717,20 @@ pub(in crate::canonical_scene::store) struct ValidatedDeformationBatch<'input, R
     morph_target_plans: Vec<ValidatedMorphTargetPlan>,
     morph_delta_plans: Vec<ValidatedMorphDeltaPlan>,
     mesh_instance_plans: Vec<ValidatedMeshInstanceDeformationPlan>,
+    #[cfg(test)]
+    storage_drop_probe: Option<DeformationStorageDropProbe>,
     // Every compiled-plan allocation above must drop before its accounting token.
     reservation: R,
 }
 
 impl<'input, R> ValidatedDeformationBatch<'input, R> {
+    const fn new(
+        input: DeformationAuthoringBatch<'input>,
+        compiled: DeformationValidationStorage<R>,
+    ) -> Self {
+        Self { compiled, input }
+    }
+
     pub(in crate::canonical_scene::store) const fn input(
         &self,
     ) -> DeformationAuthoringBatch<'input> {
@@ -725,119 +738,119 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
     }
 
     pub(in crate::canonical_scene::store) const fn skin_count(&self) -> u32 {
-        self.skin_count
+        self.compiled.skin_count
     }
 
     pub(in crate::canonical_scene::store) const fn logical_morph_count(&self) -> u32 {
-        self.logical_morph_count
+        self.compiled.logical_morph_count
     }
 
     pub(in crate::canonical_scene::store) const fn morph_definition_count(&self) -> u32 {
-        self.morph_definition_count
+        self.compiled.morph_definition_count
     }
 
     pub(in crate::canonical_scene::store) const fn primitive_count(&self) -> u32 {
-        self.primitive_count
+        self.compiled.primitive_count
     }
 
     pub(in crate::canonical_scene::store) const fn morph_target_count(&self) -> u32 {
-        self.morph_target_count
+        self.compiled.morph_target_count
     }
 
     pub(in crate::canonical_scene::store) const fn morph_delta_count(&self) -> u32 {
-        self.morph_delta_count
+        self.compiled.morph_delta_count
     }
 
     pub(in crate::canonical_scene::store) const fn mesh_instance_count(&self) -> u32 {
-        self.mesh_instance_count
+        self.compiled.mesh_instance_count
     }
 
     pub(in crate::canonical_scene::store) const fn joint_node_count(&self) -> u32 {
-        self.joint_node_count
+        self.compiled.joint_node_count
     }
 
     pub(in crate::canonical_scene::store) const fn inverse_bind_scalar_count(&self) -> u32 {
-        self.inverse_bind_scalar_count
+        self.compiled.inverse_bind_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn skin_correction_scalar_count(&self) -> u32 {
-        self.skin_correction_scalar_count
+        self.compiled.skin_correction_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn skin_name_byte_count(&self) -> u32 {
-        self.skin_name_byte_count
+        self.compiled.skin_name_byte_count
     }
 
     pub(in crate::canonical_scene::store) const fn influence_row_offset_count(&self) -> u32 {
-        self.influence_row_offset_count
+        self.compiled.influence_row_offset_count
     }
 
     pub(in crate::canonical_scene::store) const fn influence_count(&self) -> u32 {
-        self.influence_count
+        self.compiled.influence_count
     }
 
     pub(in crate::canonical_scene::store) const fn morph_default_weight_count(&self) -> u32 {
-        self.morph_default_weight_count
+        self.compiled.morph_default_weight_count
     }
 
     pub(in crate::canonical_scene::store) const fn morph_name_byte_count(&self) -> u32 {
-        self.morph_name_byte_count
+        self.compiled.morph_name_byte_count
     }
 
     pub(in crate::canonical_scene::store) const fn morph_value_count(&self) -> u32 {
-        self.morph_value_count
+        self.compiled.morph_value_count
     }
 
     pub(in crate::canonical_scene::store) const fn morph_sparse_index_count(&self) -> u32 {
-        self.morph_sparse_index_count
+        self.compiled.morph_sparse_index_count
     }
 
     pub(in crate::canonical_scene::store) const fn instance_morph_weight_count(&self) -> u32 {
-        self.instance_morph_weight_count
+        self.compiled.instance_morph_weight_count
     }
 
     pub(in crate::canonical_scene::store) const fn f32_scalar_count(&self) -> u64 {
-        self.f32_scalar_count
+        self.compiled.f32_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn u32_scalar_count(&self) -> u64 {
-        self.u32_scalar_count
+        self.compiled.u32_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
-        self.payload_block_count
+        self.compiled.payload_block_count
     }
 
     pub(in crate::canonical_scene::store) const fn entity_count(&self) -> u64 {
-        self.entity_count
+        self.compiled.entity_count
     }
 
     pub(in crate::canonical_scene::store) const fn edge_count(&self) -> u64 {
-        self.edge_count
+        self.compiled.edge_count
     }
 
     pub(in crate::canonical_scene::store) const fn reference_count(&self) -> u64 {
-        self.reference_count
+        self.compiled.reference_count
     }
 
     pub(in crate::canonical_scene::store) const fn semantic_cell_count(&self) -> u64 {
-        self.semantic_cell_count
+        self.compiled.semantic_cell_count
     }
 
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
-        self.canonical_bytes
+        self.compiled.canonical_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn validation_work(&self) -> u64 {
-        self.validation_work
+        self.compiled.validation_work
     }
 
     pub(in crate::canonical_scene::store) const fn scratch_bytes(&self) -> u64 {
-        self.scratch_bytes
+        self.compiled.scratch_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn maximum_uniqueness_capacity(&self) -> usize {
-        self.maximum_uniqueness_capacity
+        self.compiled.maximum_uniqueness_capacity
     }
 
     pub(in crate::canonical_scene::store) fn skin(
@@ -846,7 +859,7 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
     ) -> Option<ValidatedSkin<'_, 'input>> {
         Some(ValidatedSkin {
             input: *self.input.skins().get(index)?,
-            plan: self.skin_plans.get(index)?,
+            plan: self.compiled.skin_plans.get(index)?,
         })
     }
 
@@ -856,7 +869,7 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
     ) -> Option<ValidatedLogicalMorph<'_, 'input>> {
         Some(ValidatedLogicalMorph {
             input: *self.input.logical_meshes().get(index)?,
-            plan: self.logical_morph_plans.get(index)?,
+            plan: self.compiled.logical_morph_plans.get(index)?,
         })
     }
 
@@ -866,7 +879,7 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
     ) -> Option<ValidatedMorphTargetDefinition<'_, 'input>> {
         Some(ValidatedMorphTargetDefinition {
             input: *self.input.morph_target_definitions().get(index)?,
-            plan: self.morph_definition_plans.get(index)?,
+            plan: self.compiled.morph_definition_plans.get(index)?,
         })
     }
 
@@ -877,7 +890,7 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
             .morph_target_definitions()
             .iter()
             .copied()
-            .zip(&self.morph_definition_plans)
+            .zip(&self.compiled.morph_definition_plans)
             .map(|(input, plan)| ValidatedMorphTargetDefinition { input, plan })
     }
 
@@ -885,13 +898,14 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
         &self,
         index: usize,
     ) -> Option<ValidatedPrimitiveDeformation<'_, 'input>> {
-        let plan = self.primitive_plans.get(index)?;
-        let target_range = checked_range(plan.morph_targets, self.morph_target_plans.len()).ok()?;
+        let plan = self.compiled.primitive_plans.get(index)?;
+        let target_range =
+            checked_range(plan.morph_targets, self.compiled.morph_target_plans.len()).ok()?;
         Some(ValidatedPrimitiveDeformation {
             input: *self.input.primitives().get(index)?,
             plan,
-            targets: self.morph_target_plans.get(target_range)?,
-            deltas: &self.morph_delta_plans,
+            targets: self.compiled.morph_target_plans.get(target_range)?,
+            deltas: &self.compiled.morph_delta_plans,
         })
     }
 
@@ -901,8 +915,61 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
     ) -> Option<ValidatedMeshInstanceDeformation<'_, 'input>> {
         Some(ValidatedMeshInstanceDeformation {
             input: *self.input.mesh_instances().get(index)?,
-            plan: self.mesh_instance_plans.get(index)?,
+            plan: self.compiled.mesh_instance_plans.get(index)?,
         })
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store) fn install_storage_drop_probe(
+        &mut self,
+        stage: std::rc::Rc<std::cell::Cell<u8>>,
+    ) {
+        self.compiled.storage_drop_probe = Some(DeformationStorageDropProbe(stage));
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store::production) fn into_compiled_facts_for_test(
+        self,
+    ) -> (u32, [usize; 7], R) {
+        let DeformationValidationStorage {
+            skin_count,
+            skin_plans,
+            logical_morph_plans,
+            morph_definition_plans,
+            primitive_plans,
+            morph_target_plans,
+            morph_delta_plans,
+            mesh_instance_plans,
+            reservation,
+            ..
+        } = self.compiled;
+        (
+            skin_count,
+            [
+                skin_plans.len(),
+                logical_morph_plans.len(),
+                morph_definition_plans.len(),
+                primitive_plans.len(),
+                morph_target_plans.len(),
+                morph_delta_plans.len(),
+                mesh_instance_plans.len(),
+            ],
+            reservation,
+        )
+    }
+}
+
+#[cfg(test)]
+struct DeformationStorageDropProbe(std::rc::Rc<std::cell::Cell<u8>>);
+
+#[cfg(test)]
+impl Drop for DeformationStorageDropProbe {
+    fn drop(&mut self) {
+        assert_eq!(
+            self.0.replace(1),
+            0,
+            "compiled deformation storage must begin the coupled drop sequence"
+        );
     }
 }
 
@@ -910,20 +977,23 @@ impl<R> fmt::Debug for ValidatedDeformationBatch<'_, R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ValidatedDeformationBatch")
-            .field("skin_count", &self.skin_count)
-            .field("logical_morph_count", &self.logical_morph_count)
-            .field("morph_definition_count", &self.morph_definition_count)
-            .field("primitive_count", &self.primitive_count)
-            .field("morph_target_count", &self.morph_target_count)
-            .field("morph_delta_count", &self.morph_delta_count)
-            .field("mesh_instance_count", &self.mesh_instance_count)
-            .field("influence_count", &self.influence_count)
-            .field("canonical_bytes", &self.canonical_bytes)
-            .field("validation_work", &self.validation_work)
-            .field("scratch_bytes", &self.scratch_bytes)
+            .field("skin_count", &self.compiled.skin_count)
+            .field("logical_morph_count", &self.compiled.logical_morph_count)
+            .field(
+                "morph_definition_count",
+                &self.compiled.morph_definition_count,
+            )
+            .field("primitive_count", &self.compiled.primitive_count)
+            .field("morph_target_count", &self.compiled.morph_target_count)
+            .field("morph_delta_count", &self.compiled.morph_delta_count)
+            .field("mesh_instance_count", &self.compiled.mesh_instance_count)
+            .field("influence_count", &self.compiled.influence_count)
+            .field("canonical_bytes", &self.compiled.canonical_bytes)
+            .field("validation_work", &self.compiled.validation_work)
+            .field("scratch_bytes", &self.compiled.scratch_bytes)
             .field(
                 "maximum_uniqueness_capacity",
-                &self.maximum_uniqueness_capacity,
+                &self.compiled.maximum_uniqueness_capacity,
             )
             .field("reservation", &"<held>")
             .finish()
@@ -1014,7 +1084,7 @@ struct DeformationCapacityPlans {
     uniqueness: CapacityPlan,
 }
 
-struct DeformationValidationStorage<R> {
+struct DeformationValidationScratch<R> {
     skin_plans: Vec<ValidatedSkinPlan>,
     logical_morph_plans: Vec<ValidatedLogicalMorphPlan>,
     morph_definition_plans: Vec<ValidatedMorphTargetDefinitionPlan>,
@@ -1429,7 +1499,7 @@ where
             dimension: "deformation scratch allocation",
         },
     )?;
-    let mut storage = DeformationValidationStorage {
+    let mut storage = DeformationValidationScratch {
         skin_plans,
         logical_morph_plans,
         morph_definition_plans,
@@ -1605,7 +1675,7 @@ where
     let semantic_cell_count = context.semantic_cells;
     let f32_scalar_count = context.f32_scalars;
     let u32_scalar_count = context.u32_scalars;
-    let DeformationValidationStorage {
+    let DeformationValidationScratch {
         skin_plans,
         logical_morph_plans,
         morph_definition_plans,
@@ -1617,8 +1687,7 @@ where
         reservation,
     } = storage;
     drop(uniqueness);
-    let mut validated = ValidatedDeformationBatch {
-        input,
+    let compiled = DeformationValidationStorage {
         skin_count,
         logical_morph_count,
         morph_definition_count,
@@ -1655,9 +1724,12 @@ where
         morph_target_plans,
         morph_delta_plans,
         mesh_instance_plans,
+        #[cfg(test)]
+        storage_drop_probe: None,
         reservation,
     };
-    context.resize_scratch(&mut validated.reservation, retained_scratch_bytes)?;
+    let mut validated = ValidatedDeformationBatch::new(input, compiled);
+    context.resize_scratch(&mut validated.compiled.reservation, retained_scratch_bytes)?;
     context.finish()?;
     Ok(validated)
 }
@@ -1666,7 +1738,7 @@ fn validate_skins<C, R>(
     input: DeformationAuthoringBatch<'_>,
     authored_node_count: usize,
     cursors: &mut SkinValidationCursors,
-    storage: &mut DeformationValidationStorage<R>,
+    storage: &mut DeformationValidationScratch<R>,
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
@@ -1834,7 +1906,7 @@ fn validate_logical_morphs<C, R>(
     input: DeformationAuthoringBatch<'_>,
     default_weight_count: &mut u32,
     name_byte_count: &mut u32,
-    storage: &mut DeformationValidationStorage<R>,
+    storage: &mut DeformationValidationScratch<R>,
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
@@ -2016,7 +2088,7 @@ fn validate_primitives<C, R, GR>(
     influence_count: &mut u32,
     morph_value_count: &mut u32,
     morph_sparse_index_count: &mut u32,
-    storage: &mut DeformationValidationStorage<R>,
+    storage: &mut DeformationValidationScratch<R>,
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
@@ -2097,7 +2169,7 @@ fn validate_primitive<C, R>(
     influence_count: &mut u32,
     morph_value_count: &mut u32,
     morph_sparse_index_count: &mut u32,
-    storage: &mut DeformationValidationStorage<R>,
+    storage: &mut DeformationValidationScratch<R>,
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<Option<PaletteJointLocation>, C>
 where
@@ -2550,7 +2622,7 @@ fn validate_mesh_instances<C, R, GR>(
     input: DeformationAuthoringBatch<'_>,
     geometry: &ValidatedGeometryBatch<'_, GR>,
     morph_weight_cursor: &mut u32,
-    storage: &mut DeformationValidationStorage<R>,
+    storage: &mut DeformationValidationScratch<R>,
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
