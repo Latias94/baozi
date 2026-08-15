@@ -3,7 +3,7 @@ use std::sync::{Arc, OnceLock};
 
 use baozi_operation::{
     CancellationSignal, CancellationToken, PhysicalStorageAccountFactory,
-    PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
+    PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits, StorePlanError,
     StorePreparationFailureClass, StoreRuntimeError, StoreTerminalCause,
 };
 
@@ -41,13 +41,15 @@ use crate::namespaced::NamespacedName;
 use crate::provenance::{ResourceIdentity, SourceObjectKind, SourceObjectLocator};
 use crate::scene_space::SceneSpace;
 
+use super::materialization::NodeScenePlanningFault;
 use super::profile::ProfileBuildFault;
 use super::publication::post_evidence_build_failure_code;
 use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_NODE_AUTHORING_REJECTION_CODE,
-    NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults, NodeSceneConstructionRejection,
-    NodeSceneConstructionTerminal, NodeSceneDraft, NodeSceneDraftBuild, NodeSceneRichFailure,
-    PendingNodeSceneDraft, PreparedNodeSceneConstruction,
+    NODE_SCENE_PLANNING_REJECTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults,
+    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
+    NodeSceneDraftBuild, NodeSceneRichFailure, PendingNodeSceneDraft,
+    PreparedNodeSceneConstruction,
 };
 
 mod chunking;
@@ -121,6 +123,9 @@ const SINGLE_TRS_PROFILE_AUTHORING_VALIDATION_WORK: u64 = SINGLE_TRS_PROFILE_OWN
     + SINGLE_TRS_PROFILE_OWNER_COUNT;
 const SINGLE_TRS_AUTHORING_VALIDATION_WORK: u64 =
     SINGLE_TRS_DOMAIN_AUTHORING_VALIDATION_WORK + SINGLE_TRS_PROFILE_AUTHORING_VALIDATION_WORK;
+// The sealed core plan owns only the seven-domain semantic validation envelope. Retained-store
+// startup and structural work remain operation-owned and are intentionally excluded.
+const SINGLE_TRS_SEALED_SEMANTIC_WORK: u64 = 57;
 const SINGLE_TRS_PROFILE_CONTENT_MATERIALIZATION_WORK: u64 = SINGLE_TRS_PROFILE_PROVENANCE_COUNT
     * 2
     + SINGLE_TRS_PROFILE_DIGEST_BYTES
@@ -587,6 +592,80 @@ fn exact_draft_pair_from_local_authoring_vecs(
         NodeSceneDraftBuild::Failure(_) => {
             panic!("valid materialization must preserve an exact canonical draft pair")
         }
+    }
+}
+
+#[test]
+fn validated_input_seals_exact_semantic_work_before_canonical_storage_opens() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let validated = SceneConstructionOperation::with_account(&account, test_limits())
+        .expect("sealed-plan Scene operation")
+        .try_validate_node_batch(single_trs_batch(), SceneValidationLimits::default())
+        .unwrap_or_else(|_| panic!("single-node input must seal a construction plan"));
+
+    assert_eq!(
+        validated.bound.semantic_work().get(),
+        SINGLE_TRS_SEALED_SEMANTIC_WORK
+    );
+    assert!(account.snapshot().live_retained_allocations() > 0);
+
+    drop(validated);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn planning_rejections_preserve_rich_evidence_without_canonical_commitment() {
+    for planning_fault in [
+        NodeScenePlanningFault::SealedPlan,
+        NodeScenePlanningFault::Publication,
+    ] {
+        let factory = test_factory();
+        let account = test_account(&factory, 256);
+        let operation = SceneConstructionOperation::with_account(&account, test_limits())
+            .expect("planning-fault Scene operation");
+        let before = account.snapshot();
+
+        let rejected = match operation.try_validate_node_batch_with_planning_fault(
+            single_trs_batch(),
+            SceneValidationLimits::default(),
+            planning_fault,
+        ) {
+            Ok(_) => panic!("{planning_fault:?} must reject physical planning"),
+            Err(rejected) => rejected,
+        };
+        assert!(matches!(
+            rejected.failure(),
+            NodeSceneConstructionRejection::Planning(StorePlanError::InvalidBlockTable)
+        ));
+        assert_eq!(
+            account.snapshot(),
+            before,
+            "{planning_fault:?} must release every validation reservation before returning"
+        );
+
+        let (prepared, rejection) = rejected
+            .prepare_rich_failure()
+            .expect("planning rejection must retain rich failure evidence");
+        assert!(matches!(
+            rejection,
+            NodeSceneConstructionRejection::Planning(StorePlanError::InvalidBlockTable)
+        ));
+        let failure = rich_failure(prepared);
+        assert_eq!(
+            terminal_failure_code(failure.ledger_evidence()),
+            NODE_SCENE_PLANNING_REJECTION_CODE
+        );
+        assert_eq!(
+            failure
+                .ledger_evidence()
+                .dimension_by_semantic(STORE_DIMENSION)
+                .expect("planning rejection dimension")
+                .committed_canonical_output(),
+            0
+        );
+        assert_released(failure, &account);
     }
 }
 

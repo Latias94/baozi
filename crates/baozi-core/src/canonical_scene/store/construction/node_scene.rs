@@ -1,8 +1,8 @@
 use baozi_operation::{
     OutcomeEvidenceRecordRef, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
-    PublishedRichFailureStore, RecordBlock, RetainedStoreReservation, RetainedStoreWorkControl,
-    StoreBuildError, StoreControlledError, StoreFailureAssembly, StoreFailureValidation,
-    StoreLedgerEvidence, StoreRuntimeError, StoreWorkError, ValidatedStoreSuccess,
+    PublishedRichFailureStore, RecordBlock, RetainedStoreWorkControl, StoreBuildError,
+    StoreControlledError, StoreFailureAssembly, StoreFailureValidation, StoreLedgerEvidence,
+    StorePlanError, StoreRuntimeError, StoreWorkError, ValidatedStoreSuccess,
 };
 use thiserror::Error;
 
@@ -13,9 +13,7 @@ use super::super::production::{
     AnimationAuthoringFailure, AppearanceAuthoringFailure, DeformationAuthoringFailure,
     GeometryAuthoringFailure, NodeAuthoringFailure, OperationAuthoringControlError,
     ProfileAuthoringFailure, ProfileOwnerCatalogError, SceneAuthoringAggregateError,
-    SpatialAuthoringFailure, ValidatedAnimationBatch, ValidatedAppearanceBatch,
-    ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch,
-    ValidatedSpatialBatch,
+    SpatialAuthoringFailure,
 };
 use super::super::schema::{
     CanonicalBlockRef, NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema,
@@ -76,6 +74,7 @@ const NODE_SCENE_AGGREGATE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1106;
 const NODE_SCENE_SPATIAL_AUTHORING_REJECTION_CODE: u32 = 0x5343_1107;
 const NODE_SCENE_PROFILE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1108;
 const NODE_SCENE_PROFILE_OWNER_CATALOG_REJECTION_CODE: u32 = 0x5343_1109;
+const NODE_SCENE_PLANNING_REJECTION_CODE: u32 = 0x5343_110a;
 
 #[derive(Clone, Copy)]
 struct NodeSceneBuildFaults {
@@ -386,16 +385,7 @@ struct FreshNodeSceneOwner {
 /// A validated canonical Scene input coupled to the exact fresh operation that paid for it.
 #[must_use = "the validated node Scene construction must be prepared or deliberately dropped"]
 pub(in crate::canonical_scene::store) struct ValidatedNodeSceneConstruction<'input> {
-    profile: ValidatedProfileBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    animations: ValidatedAnimationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    deformation:
-        ValidatedDeformationBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    geometry: ValidatedGeometryBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    appearance: ValidatedAppearanceBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    nodes: ValidatedNodeBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    spatial: ValidatedSpatialBatch<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    // The operation owner must outlive every compiled-plan reservation above.
-    owner: FreshNodeSceneOwner,
+    bound: materialization::BoundNodeScenePlan<'input>,
 }
 
 #[derive(Debug, Error)]
@@ -418,6 +408,8 @@ pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection {
     ProfileAuthoring(#[source] ProfileAuthoringFailure<OperationAuthoringControlError>),
     #[error("aggregate authoring validation rejected the Scene batch")]
     Aggregate(#[source] SceneAuthoringAggregateError),
+    #[error("canonical Scene physical planning rejected the validated batch")]
+    Planning(#[source] StorePlanError),
 }
 
 impl NodeSceneConstructionRejection {
@@ -432,6 +424,7 @@ impl NodeSceneConstructionRejection {
             Self::ProfileOwnerCatalog(_) => NODE_SCENE_PROFILE_OWNER_CATALOG_REJECTION_CODE,
             Self::ProfileAuthoring(_) => NODE_SCENE_PROFILE_AUTHORING_REJECTION_CODE,
             Self::Aggregate(_) => NODE_SCENE_AGGREGATE_AUTHORING_REJECTION_CODE,
+            Self::Planning(_) => NODE_SCENE_PLANNING_REJECTION_CODE,
         }
     }
 }

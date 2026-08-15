@@ -103,6 +103,7 @@ impl SceneAuthoringRejection {
             NodeSceneConstructionRejection::ProfileOwnerCatalog(_)
             | NodeSceneConstructionRejection::ProfileAuthoring(_) => SceneAuthoringDomain::Profile,
             NodeSceneConstructionRejection::Aggregate(_) => SceneAuthoringDomain::Aggregate,
+            NodeSceneConstructionRejection::Planning(_) => SceneAuthoringDomain::Planning,
         };
         Self { domain, source }
     }
@@ -134,6 +135,7 @@ pub(crate) enum SceneAuthoringDomain {
     Animation,
     Profile,
     Aggregate,
+    Planning,
 }
 
 /// Invalid pairing between a completed continuation and the parser result presented to it.
@@ -310,6 +312,7 @@ mod tests {
 
     use baozi_operation::{
         OperationControl, PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
+        StorePlanError,
     };
 
     use crate::FormatId;
@@ -335,6 +338,15 @@ mod tests {
         Presence::Absent,
         Presence::Absent,
     )];
+
+    #[test]
+    fn planning_rejection_has_a_distinct_authoring_domain() {
+        let rejection = SceneAuthoringRejection::from_node_scene(
+            NodeSceneConstructionRejection::Planning(StorePlanError::InvalidBlockTable),
+        );
+
+        assert_eq!(rejection.domain(), SceneAuthoringDomain::Planning);
+    }
 
     struct ProfileFixtureVocabulary {
         resource: ResourceIdentity,
