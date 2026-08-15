@@ -14,6 +14,7 @@ use super::plan::{
 };
 use super::*;
 
+mod animation;
 mod appearance;
 mod deformation;
 mod geometry;

@@ -462,7 +462,11 @@ impl<'input> ValidatedAnimationChannel<'_, 'input> {
 
 #[must_use = "dropping the validated animation batch releases its compiled-plan reservation"]
 pub(in crate::canonical_scene::store) struct ValidatedAnimationBatch<'input, R> {
+    compiled: AnimationValidationStorage<R>,
     input: AnimationAuthoringBatch<'input>,
+}
+
+struct AnimationValidationStorage<R> {
     clip_count: u32,
     channel_count: u32,
     time_scalar_count: u64,
@@ -479,82 +483,91 @@ pub(in crate::canonical_scene::store) struct ValidatedAnimationBatch<'input, R> 
     scratch_bytes: u64,
     clip_plans: Vec<ValidatedAnimationClipPlan>,
     channel_plans: Vec<ValidatedAnimationChannelPlan>,
+    #[cfg(test)]
+    storage_drop_probe: Option<AnimationStorageDropProbe>,
     // Every compiled-plan allocation above must drop before its accounting token.
     reservation: R,
 }
 
 impl<'input, R> ValidatedAnimationBatch<'input, R> {
+    const fn new(
+        input: AnimationAuthoringBatch<'input>,
+        compiled: AnimationValidationStorage<R>,
+    ) -> Self {
+        Self { compiled, input }
+    }
+
     pub(in crate::canonical_scene::store) const fn input(&self) -> AnimationAuthoringBatch<'input> {
         self.input
     }
 
     pub(in crate::canonical_scene::store) const fn clip_count(&self) -> u32 {
-        self.clip_count
+        self.compiled.clip_count
     }
 
     pub(in crate::canonical_scene::store) const fn channel_count(&self) -> u32 {
-        self.channel_count
+        self.compiled.channel_count
     }
 
     pub(in crate::canonical_scene::store) const fn time_scalar_count(&self) -> u64 {
-        self.time_scalar_count
+        self.compiled.time_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn value_scalar_count(&self) -> u64 {
-        self.value_scalar_count
+        self.compiled.value_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn in_tangent_scalar_count(&self) -> u64 {
-        self.in_tangent_scalar_count
+        self.compiled.in_tangent_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn out_tangent_scalar_count(&self) -> u64 {
-        self.out_tangent_scalar_count
+        self.compiled.out_tangent_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
-        self.payload_block_count
+        self.compiled.payload_block_count
     }
 
     pub(in crate::canonical_scene::store) const fn entity_count(&self) -> u64 {
-        self.entity_count
+        self.compiled.entity_count
     }
 
     pub(in crate::canonical_scene::store) const fn edge_count(&self) -> u64 {
-        self.edge_count
+        self.compiled.edge_count
     }
 
     pub(in crate::canonical_scene::store) const fn reference_count(&self) -> u64 {
-        self.reference_count
+        self.compiled.reference_count
     }
 
     pub(in crate::canonical_scene::store) const fn semantic_cell_count(&self) -> u64 {
-        self.semantic_cell_count
+        self.compiled.semantic_cell_count
     }
 
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
-        self.canonical_bytes
+        self.compiled.canonical_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn validation_work(&self) -> u64 {
-        self.validation_work
+        self.compiled.validation_work
     }
 
     pub(in crate::canonical_scene::store) const fn scratch_bytes(&self) -> u64 {
-        self.scratch_bytes
+        self.compiled.scratch_bytes
     }
 
     pub(in crate::canonical_scene::store) fn clip(
         &self,
         index: usize,
     ) -> Option<ValidatedAnimationClip<'_, 'input>> {
-        let plan = self.clip_plans.get(index)?;
+        let plan = self.compiled.clip_plans.get(index)?;
         let input = *self.input.clips().get(plan.input_index)?;
-        let range = checked_range(plan.channels, self.channel_plans.len()).ok()?;
+        let range = checked_range(plan.channels, self.compiled.channel_plans.len()).ok()?;
         Some(ValidatedAnimationClip {
             input,
             plan,
-            channels: self.channel_plans.get(range.clone())?,
+            channels: self.compiled.channel_plans.get(range.clone())?,
             input_channels: self.input.channels().get(range)?,
         })
     }
@@ -563,9 +576,50 @@ impl<'input, R> ValidatedAnimationBatch<'input, R> {
         &self,
         index: usize,
     ) -> Option<ValidatedAnimationChannel<'_, 'input>> {
-        let plan = self.channel_plans.get(index)?;
+        let plan = self.compiled.channel_plans.get(index)?;
         let input = self.input.channels().get(plan.input_index)?;
         Some(ValidatedAnimationChannel { input, plan })
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store) fn install_storage_drop_probe(
+        &mut self,
+        stage: std::rc::Rc<std::cell::Cell<u8>>,
+    ) {
+        self.compiled.storage_drop_probe = Some(AnimationStorageDropProbe(stage));
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store::production) fn into_compiled_facts_for_test(
+        self,
+    ) -> ([u32; 2], [usize; 2], R) {
+        let AnimationValidationStorage {
+            clip_count,
+            channel_count,
+            clip_plans,
+            channel_plans,
+            reservation,
+            ..
+        } = self.compiled;
+        (
+            [clip_count, channel_count],
+            [clip_plans.len(), channel_plans.len()],
+            reservation,
+        )
+    }
+}
+
+#[cfg(test)]
+struct AnimationStorageDropProbe(std::rc::Rc<std::cell::Cell<u8>>);
+
+#[cfg(test)]
+impl Drop for AnimationStorageDropProbe {
+    fn drop(&mut self) {
+        assert_eq!(
+            self.0.replace(1),
+            0,
+            "compiled animation storage must begin the coupled drop sequence"
+        );
     }
 }
 
@@ -573,26 +627,32 @@ impl<R> fmt::Debug for ValidatedAnimationBatch<'_, R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ValidatedAnimationBatch")
-            .field("clip_count", &self.clip_count)
-            .field("channel_count", &self.channel_count)
-            .field("time_scalar_count", &self.time_scalar_count)
-            .field("value_scalar_count", &self.value_scalar_count)
-            .field("in_tangent_scalar_count", &self.in_tangent_scalar_count)
-            .field("out_tangent_scalar_count", &self.out_tangent_scalar_count)
-            .field("payload_block_count", &self.payload_block_count)
-            .field("entity_count", &self.entity_count)
-            .field("edge_count", &self.edge_count)
-            .field("reference_count", &self.reference_count)
-            .field("semantic_cell_count", &self.semantic_cell_count)
-            .field("canonical_bytes", &self.canonical_bytes)
-            .field("validation_work", &self.validation_work)
-            .field("scratch_bytes", &self.scratch_bytes)
+            .field("clip_count", &self.compiled.clip_count)
+            .field("channel_count", &self.compiled.channel_count)
+            .field("time_scalar_count", &self.compiled.time_scalar_count)
+            .field("value_scalar_count", &self.compiled.value_scalar_count)
+            .field(
+                "in_tangent_scalar_count",
+                &self.compiled.in_tangent_scalar_count,
+            )
+            .field(
+                "out_tangent_scalar_count",
+                &self.compiled.out_tangent_scalar_count,
+            )
+            .field("payload_block_count", &self.compiled.payload_block_count)
+            .field("entity_count", &self.compiled.entity_count)
+            .field("edge_count", &self.compiled.edge_count)
+            .field("reference_count", &self.compiled.reference_count)
+            .field("semantic_cell_count", &self.compiled.semantic_cell_count)
+            .field("canonical_bytes", &self.compiled.canonical_bytes)
+            .field("validation_work", &self.compiled.validation_work)
+            .field("scratch_bytes", &self.compiled.scratch_bytes)
             .field("reservation", &"<held>")
             .finish()
     }
 }
 
-struct AnimationValidationStorage<R> {
+struct AnimationValidationScratch<R> {
     clip_plans: Vec<ValidatedAnimationClipPlan>,
     channel_plans: Vec<ValidatedAnimationChannelPlan>,
     seen_targets: Vec<SeenAnimationTarget>,
@@ -1004,7 +1064,7 @@ where
         "animation scratch allocation",
     )?;
     context.resize_scratch(&mut reservation, scratch_actual)?;
-    let mut storage = AnimationValidationStorage {
+    let mut storage = AnimationValidationScratch {
         clip_plans,
         channel_plans,
         seen_targets,
@@ -1126,20 +1186,18 @@ where
             dimension: "animation payload block count",
         }
     })?;
-    let AnimationValidationStorage {
+    let AnimationValidationScratch {
         clip_plans,
         channel_plans,
         seen_targets,
-        mut reservation,
+        reservation,
     } = storage;
     drop(seen_targets);
     let retained_scratch_bytes = checked_sum_bytes(
         [clip_plan_bytes, channel_plan_bytes],
         "retained animation scratch allocation",
     )?;
-    context.resize_scratch(&mut reservation, retained_scratch_bytes)?;
-    let validated = ValidatedAnimationBatch {
-        input,
+    let compiled = AnimationValidationStorage {
         clip_count,
         channel_count,
         time_scalar_count: context.time_scalars,
@@ -1156,8 +1214,12 @@ where
         scratch_bytes: retained_scratch_bytes,
         clip_plans,
         channel_plans,
+        #[cfg(test)]
+        storage_drop_probe: None,
         reservation,
     };
+    let mut validated = ValidatedAnimationBatch::new(input, compiled);
+    context.resize_scratch(&mut validated.compiled.reservation, retained_scratch_bytes)?;
     context.finish()?;
     Ok(validated)
 }
