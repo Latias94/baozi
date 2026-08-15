@@ -4,6 +4,9 @@ use crate::appearance::{
     TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelMapping,
     TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
 };
+use crate::canonical_scene::store::construction::node_scene::{
+    NodeSceneConstructionRejection, validate_node_scene_batches_for_test,
+};
 
 use super::super::plan::animation::{
     AnimationTargetCatalog, validate_animation_batch_with_control,
@@ -24,9 +27,11 @@ use super::super::{
     AnimationInterpolationAuthoring, AnimationTargetAuthoring, AppearanceAuthoringBatch,
     AuthoringRange, DeformationAuthoringBatch, GeometryAuthoringBatch, MaterialAuthoring,
     MaterialBindingAuthoring, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence,
-    SceneAuthoringBatch, SpatialAuthoringBatch, TextureLocalId,
+    ProfileAuthoringBatch, SceneAuthoringBatch, SpatialAuthoringBatch, TextureLocalId,
 };
-use super::{TestControl, profile_fixture, trs, validate};
+use super::{
+    LineageAuthoringBatch, MetadataAuthoringBatch, TestControl, profile_fixture, trs, validate,
+};
 use crate::scene_space::SceneSpace;
 
 struct EmptySceneInput<'input> {
@@ -79,6 +84,52 @@ fn checked_total<const N: usize>(values: [u64; N]) -> u64 {
         .into_iter()
         .try_fold(0_u64, u64::checked_add)
         .expect("test metric total is representable")
+}
+
+#[test]
+fn generic_scene_preflight_releases_prior_domains_after_profile_rejection() {
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [trs(Presence::Absent)];
+    let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+    let node_input = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+    let appearance = AppearanceAuthoringBatch::empty();
+    let geometry = GeometryAuthoringBatch::empty();
+    let deformation = DeformationAuthoringBatch::empty();
+    let animation = AnimationAuthoringBatch::empty();
+    let invalid_profile = ProfileAuthoringBatch::new(
+        LineageAuthoringBatch::new(&[], &[], &[], &[]),
+        MetadataAuthoringBatch::empty(),
+    );
+    let input = SceneAuthoringBatch::new(
+        spatial,
+        node_input,
+        appearance,
+        geometry,
+        deformation,
+        animation,
+        invalid_profile,
+    );
+    let mut control = TestControl::default();
+
+    let rejection = match validate_node_scene_batches_for_test(
+        input,
+        SceneValidationLimits::default(),
+        &mut control,
+    ) {
+        Ok(_) => panic!("incomplete profile lineage must reject full-scene preflight"),
+        Err(rejection) => rejection,
+    };
+
+    assert!(matches!(
+        rejection,
+        NodeSceneConstructionRejection::ProfileAuthoring(_)
+    ));
+    assert!(
+        control.peak_bytes() > 0,
+        "earlier domains must have acquired validation storage before the late rejection"
+    );
+    assert_eq!(control.live.get(), 0);
+    assert_eq!(control.current_bytes.get(), 0);
 }
 
 #[test]

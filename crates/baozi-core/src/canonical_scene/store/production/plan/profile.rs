@@ -3,10 +3,7 @@
     reason = "profile authoring failures retain bounded control evidence inline without a failure-path allocation"
 )]
 
-use baozi_operation::{
-    CapacityPlan, CapacityPlanError, OperationOwner, ProgressPhase, ProgressUnit,
-    RetainedStoreReservation,
-};
+use baozi_operation::{CapacityPlan, CapacityPlanError};
 use std::error::Error;
 use thiserror::Error;
 
@@ -21,9 +18,7 @@ use crate::extension::{ExtensionArrayRef, ExtensionValueRef};
 use crate::provenance::{MAX_OPERATION_EVIDENCE_SUMMARIES, OperationKind, SourceObjectLocator};
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
-use super::super::control::{
-    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
-};
+use super::super::control::CanonicalAuthoringControl;
 use super::super::input::ProfileAuthoringBatch;
 use super::super::input::lineage::{
     LineageAuthoringBatch, ObservedResourceAuthoring, ProfileOwner, ProvenanceLocalId,
@@ -1450,24 +1445,6 @@ fn retention_count(
         .map_err(|_| ProfileAuthoringSemanticError::CountDomainTooLarge { collection })
 }
 
-pub(in crate::canonical_scene::store) fn validate_profile_batch<'input, O, PP, U>(
-    profile: ProfileAuthoringBatch<'input>,
-    owners: ProfileOwnerCatalog<'_>,
-    limits: SceneValidationLimits,
-    control: &mut OperationAuthoringControl<'_, O, PP, U>,
-) -> Result<
-    ValidatedProfileBatch<'input, RetainedStoreReservation<O>>,
-    ProfileAuthoringFailure<OperationAuthoringControlError>,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    validate_profile_batch_inner(profile, owners, limits, control)
-}
-
-#[cfg(test)]
 pub(in crate::canonical_scene::store) fn validate_profile_batch_with_control<'input, C>(
     profile: ProfileAuthoringBatch<'input>,
     owners: ProfileOwnerCatalog<'_>,

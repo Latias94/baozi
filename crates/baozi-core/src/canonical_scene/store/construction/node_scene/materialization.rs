@@ -14,14 +14,16 @@ use crate::canonical_scene::store::production::{
     ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::production::{
-    AnimationTargetCatalog, OperationAuthoringControl, Presence, ProfileOwnerCatalog,
-    SceneAuthoringBatch, ValidatedAnimationBatch, ValidatedAppearanceBatch,
+    AnimationTargetCatalog, CanonicalAuthoringControl, OperationAuthoringControl, Presence,
+    ProfileOwnerCatalog, SceneAuthoringBatch, ValidatedAnimationBatch, ValidatedAppearanceBatch,
     ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch,
     ValidatedSpatialBatch, animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
-    profile_limits_after_animation, validate_animation_batch, validate_appearance_batch,
-    validate_deformation_batch, validate_geometry_batch, validate_node_batch,
-    validate_profile_batch, validate_scene_aggregate, validate_spatial_batch,
+    profile_limits_after_animation, validate_animation_batch_with_control,
+    validate_appearance_batch_with_control, validate_deformation_batch_with_control,
+    validate_geometry_batch_with_control, validate_node_batch_with_control,
+    validate_profile_batch_with_control, validate_scene_aggregate,
+    validate_spatial_batch_with_control,
 };
 use crate::canonical_scene::store::schema::animation::AnimationDirectorySchema;
 use crate::canonical_scene::store::schema::appearance::AppearanceDirectorySchema;
@@ -194,29 +196,39 @@ impl SceneConstructionOperation {
 
     #[cfg(test)]
     pub(super) fn try_validate_node_batch_with_planning_fault<'input>(
-        self,
+        mut self,
         input: NodeAuthoringBatch<'input>,
         limits: SceneValidationLimits,
         planning_fault: NodeScenePlanningFault,
     ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
-        let (operation, batches) =
-            self.try_validate_scene_batches(test_scene_authoring_batch(input), limits)?;
+        let keys = self.keys;
+        let validation = {
+            let mut control =
+                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
+            validate_node_scene_batches(test_scene_authoring_batch(input), limits, &mut control)
+        };
+        let batches = match validation {
+            Ok(batches) => batches,
+            Err(failure) => {
+                return Err(RejectedNodeSceneConstruction {
+                    operation: self,
+                    failure,
+                });
+            }
+        };
         match planning_fault {
             NodeScenePlanningFault::SealedPlan => {
                 drop(batches);
-                Err(planning_rejection(
-                    operation,
-                    StorePlanError::InvalidBlockTable,
-                ))
+                Err(planning_rejection(self, StorePlanError::InvalidBlockTable))
             }
             NodeScenePlanningFault::Publication => {
                 let plan = match NodeSceneSealedPlan::try_new(batches) {
                     Ok(plan) => plan,
-                    Err(failure) => return Err(planning_rejection(operation, failure)),
+                    Err(failure) => return Err(planning_rejection(self, failure)),
                 };
                 Err(reject_bound_plan(
                     plan,
-                    operation,
+                    self,
                     StorePlanError::InvalidBlockTable,
                 ))
             }
@@ -224,291 +236,141 @@ impl SceneConstructionOperation {
     }
 
     fn try_validate_scene_batch<'input>(
-        self,
-        input: SceneAuthoringBatch<'input>,
-        limits: SceneValidationLimits,
-    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
-        let (operation, batches) = self.try_validate_scene_batches(input, limits)?;
-        seal_node_scene_plan(operation, batches)
-    }
-
-    fn try_validate_scene_batches<'input>(
         mut self,
         input: SceneAuthoringBatch<'input>,
         limits: SceneValidationLimits,
-    ) -> Result<
-        (
-            SceneConstructionOperation,
-            ValidatedNodeSceneBatches<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-        ),
-        RejectedNodeSceneConstruction,
-    > {
+    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
         let keys = self.keys;
-        let spatial_validation = {
-            let mut control =
-                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
-            validate_spatial_batch(input.spatial(), input.nodes(), limits, &mut control)
-        };
-        let spatial = match spatial_validation {
-            Ok(spatial) => spatial,
-            Err(failure) => {
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::SpatialAuthoring(failure),
-                });
-            }
-        };
-        let node_limits = match node_limits_after_spatial(&spatial, limits) {
-            Ok(node_limits) => node_limits,
-            Err(failure) => {
-                drop(spatial);
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::Aggregate(failure),
-                });
-            }
-        };
         let validation = {
             let mut control =
                 OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
-            validate_node_batch(spatial.node_input(), node_limits, &mut control)
+            validate_and_seal_node_scene_plan(input, limits, &mut control)
         };
-        let nodes = match validation {
-            Ok(nodes) => nodes,
+        let plan = match validation {
+            Ok(plan) => plan,
             Err(failure) => {
-                drop(spatial);
                 return Err(RejectedNodeSceneConstruction {
                     operation: self,
-                    failure: NodeSceneConstructionRejection::NodeAuthoring(failure),
+                    failure,
                 });
             }
         };
-        let appearance_limits = match appearance_limits_after_nodes(&nodes, node_limits) {
-            Ok(appearance_limits) => appearance_limits,
-            Err(failure) => {
-                drop(nodes);
-                drop(spatial);
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::Aggregate(failure),
-                });
-            }
-        };
-        let appearance_validation = {
-            let mut control =
-                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
-            validate_appearance_batch(input.appearance(), appearance_limits, &mut control)
-        };
-        let appearance = match appearance_validation {
-            Ok(appearance) => appearance,
-            Err(failure) => {
-                drop(nodes);
-                drop(spatial);
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::AppearanceAuthoring(failure),
-                });
-            }
-        };
-        let geometry_limits = match geometry_limits_after_appearance(&appearance, appearance_limits)
-        {
-            Ok(geometry_limits) => geometry_limits,
-            Err(failure) => {
-                drop(appearance);
-                drop(nodes);
-                drop(spatial);
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::Aggregate(failure),
-                });
-            }
-        };
-        let geometry_validation = {
-            let mut control =
-                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
-            validate_geometry_batch(
-                input.geometry(),
-                nodes.authored_node_count(),
-                appearance.material_count(),
-                geometry_limits,
-                &mut control,
-            )
-        };
-        let geometry = match geometry_validation {
-            Ok(geometry) => geometry,
-            Err(failure) => {
-                drop(appearance);
-                drop(nodes);
-                drop(spatial);
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::GeometryAuthoring(failure),
-                });
-            }
-        };
-        let deformation_limits = match deformation_limits_after_geometry(&geometry, geometry_limits)
-        {
-            Ok(deformation_limits) => deformation_limits,
-            Err(failure) => {
-                drop(geometry);
-                drop(appearance);
-                drop(nodes);
-                drop(spatial);
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::Aggregate(failure),
-                });
-            }
-        };
-        let deformation_validation = {
-            let mut control =
-                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
-            validate_deformation_batch(
-                input.deformation(),
-                &nodes,
-                &geometry,
-                deformation_limits,
-                &mut control,
-            )
-        };
-        let deformation = match deformation_validation {
-            Ok(deformation) => deformation,
-            Err(failure) => {
-                drop(geometry);
-                drop(appearance);
-                drop(nodes);
-                drop(spatial);
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::DeformationAuthoring(failure),
-                });
-            }
-        };
-        let animation_limits =
-            match animation_limits_after_deformation(&deformation, deformation_limits) {
-                Ok(animation_limits) => animation_limits,
-                Err(failure) => {
-                    drop(deformation);
-                    drop(geometry);
-                    drop(appearance);
-                    drop(nodes);
-                    drop(spatial);
-                    return Err(RejectedNodeSceneConstruction {
-                        operation: self,
-                        failure: NodeSceneConstructionRejection::Aggregate(failure),
-                    });
-                }
-            };
-        let animation_validation = {
-            let mut control =
-                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
-            let targets = AnimationTargetCatalog::new(&nodes, &deformation);
-            validate_animation_batch(input.animations(), &targets, animation_limits, &mut control)
-        };
-        let animations = match animation_validation {
-            Ok(animations) => animations,
-            Err(failure) => {
-                drop(deformation);
-                drop(geometry);
-                drop(appearance);
-                drop(nodes);
-                drop(spatial);
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::AnimationAuthoring(failure),
-                });
-            }
-        };
-        let profile_limits = match profile_limits_after_animation(&animations, animation_limits) {
-            Ok(profile_limits) => profile_limits,
-            Err(failure) => {
-                drop(animations);
-                drop(deformation);
-                drop(geometry);
-                drop(appearance);
-                drop(nodes);
-                drop(spatial);
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::Aggregate(failure),
-                });
-            }
-        };
-        let owners = match ProfileOwnerCatalog::from_validated(
-            &spatial,
-            &nodes,
-            &appearance,
-            &geometry,
-            &deformation,
-            &animations,
-        ) {
-            Ok(owners) => owners,
-            Err(failure) => {
-                drop(animations);
-                drop(deformation);
-                drop(geometry);
-                drop(appearance);
-                drop(nodes);
-                drop(spatial);
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::ProfileOwnerCatalog(failure),
-                });
-            }
-        };
-        let profile_validation = {
-            let mut control =
-                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
-            validate_profile_batch(input.profile(), owners, profile_limits, &mut control)
-        };
-        let profile = match profile_validation {
-            Ok(profile) => profile,
-            Err(failure) => {
-                drop(animations);
-                drop(deformation);
-                drop(geometry);
-                drop(appearance);
-                drop(nodes);
-                drop(spatial);
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure: NodeSceneConstructionRejection::ProfileAuthoring(failure),
-                });
-            }
-        };
-        if let Err(failure) = validate_scene_aggregate(
-            &spatial,
-            &nodes,
-            &appearance,
-            &geometry,
-            &deformation,
-            &animations,
-            &profile,
-            limits,
-        ) {
-            drop(profile);
-            drop(animations);
-            drop(deformation);
-            drop(geometry);
-            drop(appearance);
-            drop(nodes);
-            drop(spatial);
-            return Err(RejectedNodeSceneConstruction {
-                operation: self,
-                failure: NodeSceneConstructionRejection::Aggregate(failure),
-            });
-        }
-        let batches = ValidatedNodeSceneBatches {
-            profile,
-            animations,
-            deformation,
-            geometry,
-            appearance,
-            nodes,
-            spatial,
-        };
-        Ok((self, batches))
+        let bound = BoundNodeScenePlan::try_bind(plan, self)?;
+        Ok(ValidatedNodeSceneConstruction { bound })
     }
+}
+
+fn validate_node_scene_batches<'input, C>(
+    input: SceneAuthoringBatch<'input>,
+    limits: SceneValidationLimits,
+    control: &mut C,
+) -> Result<
+    ValidatedNodeSceneBatches<'input, C::Reservation>,
+    NodeSceneConstructionRejection<C::Error>,
+>
+where
+    C: CanonicalAuthoringControl,
+{
+    let spatial =
+        validate_spatial_batch_with_control(input.spatial(), input.nodes(), limits, control)
+            .map_err(NodeSceneConstructionRejection::SpatialAuthoring)?;
+    let node_limits = node_limits_after_spatial(&spatial, limits)
+        .map_err(NodeSceneConstructionRejection::Aggregate)?;
+    let nodes = validate_node_batch_with_control(spatial.node_input(), node_limits, control)
+        .map_err(NodeSceneConstructionRejection::NodeAuthoring)?;
+    let appearance_limits = appearance_limits_after_nodes(&nodes, node_limits)
+        .map_err(NodeSceneConstructionRejection::Aggregate)?;
+    let appearance =
+        validate_appearance_batch_with_control(input.appearance(), appearance_limits, control)
+            .map_err(NodeSceneConstructionRejection::AppearanceAuthoring)?;
+    let geometry_limits = geometry_limits_after_appearance(&appearance, appearance_limits)
+        .map_err(NodeSceneConstructionRejection::Aggregate)?;
+    let geometry = validate_geometry_batch_with_control(
+        input.geometry(),
+        nodes.authored_node_count(),
+        appearance.material_count(),
+        geometry_limits,
+        control,
+    )
+    .map_err(NodeSceneConstructionRejection::GeometryAuthoring)?;
+    let deformation_limits = deformation_limits_after_geometry(&geometry, geometry_limits)
+        .map_err(NodeSceneConstructionRejection::Aggregate)?;
+    let deformation = validate_deformation_batch_with_control(
+        input.deformation(),
+        &nodes,
+        &geometry,
+        deformation_limits,
+        control,
+    )
+    .map_err(NodeSceneConstructionRejection::DeformationAuthoring)?;
+    let animation_limits = animation_limits_after_deformation(&deformation, deformation_limits)
+        .map_err(NodeSceneConstructionRejection::Aggregate)?;
+    let targets = AnimationTargetCatalog::new(&nodes, &deformation);
+    let animations = validate_animation_batch_with_control(
+        input.animations(),
+        &targets,
+        animation_limits,
+        control,
+    )
+    .map_err(NodeSceneConstructionRejection::AnimationAuthoring)?;
+    let profile_limits = profile_limits_after_animation(&animations, animation_limits)
+        .map_err(NodeSceneConstructionRejection::Aggregate)?;
+    let owners = ProfileOwnerCatalog::from_validated(
+        &spatial,
+        &nodes,
+        &appearance,
+        &geometry,
+        &deformation,
+        &animations,
+    )
+    .map_err(NodeSceneConstructionRejection::ProfileOwnerCatalog)?;
+    let profile =
+        validate_profile_batch_with_control(input.profile(), owners, profile_limits, control)
+            .map_err(NodeSceneConstructionRejection::ProfileAuthoring)?;
+    validate_scene_aggregate(
+        &spatial,
+        &nodes,
+        &appearance,
+        &geometry,
+        &deformation,
+        &animations,
+        &profile,
+        limits,
+    )
+    .map_err(NodeSceneConstructionRejection::Aggregate)?;
+    Ok(ValidatedNodeSceneBatches {
+        profile,
+        animations,
+        deformation,
+        geometry,
+        appearance,
+        nodes,
+        spatial,
+    })
+}
+
+#[cfg(test)]
+pub(in crate::canonical_scene::store) fn validate_node_scene_batches_for_test<'input, C>(
+    input: SceneAuthoringBatch<'input>,
+    limits: SceneValidationLimits,
+    control: &mut C,
+) -> Result<(), NodeSceneConstructionRejection<C::Error>>
+where
+    C: CanonicalAuthoringControl,
+{
+    validate_node_scene_batches(input, limits, control).map(drop)
+}
+
+fn validate_and_seal_node_scene_plan<'input, C>(
+    input: SceneAuthoringBatch<'input>,
+    limits: SceneValidationLimits,
+    control: &mut C,
+) -> Result<NodeSceneSealedPlan<'input, C::Reservation>, NodeSceneConstructionRejection<C::Error>>
+where
+    C: CanonicalAuthoringControl,
+{
+    let batches = validate_node_scene_batches(input, limits, control)?;
+    NodeSceneSealedPlan::try_new(batches).map_err(NodeSceneConstructionRejection::Planning)
 }
 
 fn planning_rejection(
@@ -519,18 +381,6 @@ fn planning_rejection(
         operation,
         failure: NodeSceneConstructionRejection::Planning(failure),
     }
-}
-
-fn seal_node_scene_plan<'input>(
-    operation: SceneConstructionOperation,
-    batches: ValidatedNodeSceneBatches<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
-    let plan = match NodeSceneSealedPlan::try_new(batches) {
-        Ok(plan) => plan,
-        Err(failure) => return Err(planning_rejection(operation, failure)),
-    };
-    let bound = BoundNodeScenePlan::try_bind(plan, operation)?;
-    Ok(ValidatedNodeSceneConstruction { bound })
 }
 
 impl<'input> SceneAuthoringOperation<'input> {

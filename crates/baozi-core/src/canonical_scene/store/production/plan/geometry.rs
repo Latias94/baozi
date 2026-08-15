@@ -7,19 +7,14 @@ use std::error::Error;
 use std::fmt;
 use std::ops::Range;
 
-use baozi_operation::{
-    CapacityPlan, CapacityPlanError, OperationOwner, ProgressPhase, ProgressUnit,
-    RetainedStoreReservation,
-};
+use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
 use crate::attribute::{AttributeDomain, AttributeSemantic, AttributeSemanticKind};
 use crate::geometry::TopologyKind;
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
-use super::super::control::{
-    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
-};
+use super::super::control::CanonicalAuthoringControl;
 use super::super::input::Presence;
 use super::super::input::appearance::MaterialLocalId;
 use super::super::input::geometry::{
@@ -935,30 +930,6 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
             .map_err(|cause| GeometryAuthoringSemanticError::ScratchCapacity { resource, cause })?;
         Ok((values, actual_bytes))
     }
-}
-
-pub(in crate::canonical_scene::store) fn validate_geometry_batch<'input, O, PP, U>(
-    input: GeometryAuthoringBatch<'input>,
-    authored_node_count: usize,
-    appearance_material_count: u32,
-    limits: SceneValidationLimits,
-    control: &mut OperationAuthoringControl<'_, O, PP, U>,
-) -> Result<
-    ValidatedGeometryBatch<'input, RetainedStoreReservation<O>>,
-    GeometryAuthoringFailure<OperationAuthoringControlError>,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    validate_geometry_batch_inner(
-        input,
-        authored_node_count,
-        appearance_material_count,
-        limits,
-        control,
-    )
 }
 
 pub(in crate::canonical_scene::store) fn validate_geometry_batch_with_control<'input, C>(

@@ -6,10 +6,7 @@
 use std::error::Error;
 use std::fmt;
 
-use baozi_operation::{
-    CapacityPlan, CapacityPlanError, OperationOwner, ProgressPhase, ProgressUnit,
-    RetainedStoreReservation,
-};
+use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
 use crate::entity::{
@@ -18,9 +15,7 @@ use crate::entity::{
 use crate::scene_space::SceneSpaceValidationError;
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
-use super::super::control::{
-    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
-};
+use super::super::control::CanonicalAuthoringControl;
 use super::super::input::spatial::{CameraAuthoring, LightAuthoring, SpatialAuthoringBatch};
 use super::super::input::{NodeAuthoringBatch, Presence};
 
@@ -384,24 +379,6 @@ impl<'control, C: CanonicalAuthoringControl> SpatialValidationContext<'control, 
     }
 }
 
-pub(in crate::canonical_scene::store) fn validate_spatial_batch<'input, O, PP, U>(
-    input: SpatialAuthoringBatch<'input>,
-    nodes: NodeAuthoringBatch<'input>,
-    limits: SceneValidationLimits,
-    control: &mut OperationAuthoringControl<'_, O, PP, U>,
-) -> Result<
-    ValidatedSpatialBatch<'input, RetainedStoreReservation<O>>,
-    SpatialAuthoringFailure<OperationAuthoringControlError>,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    validate_spatial_batch_inner(input, nodes, limits, control)
-}
-
-#[cfg(test)]
 pub(in crate::canonical_scene::store) fn validate_spatial_batch_with_control<'input, C>(
     input: SpatialAuthoringBatch<'input>,
     nodes: NodeAuthoringBatch<'input>,

@@ -6,10 +6,7 @@
 use std::error::Error;
 use std::fmt;
 
-use baozi_operation::{
-    CapacityPlan, CapacityPlanError, OperationOwner, ProgressPhase, ProgressUnit,
-    RetainedStoreReservation,
-};
+use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
 use crate::appearance::{
@@ -27,9 +24,7 @@ use super::super::super::schema::appearance::{
     encode_appearance_color_interpretation, encode_appearance_coordinate_source,
     encode_appearance_shading_model, encode_appearance_texture_role,
 };
-use super::super::control::{
-    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
-};
+use super::super::control::CanonicalAuthoringControl;
 use super::super::input::Presence;
 use super::super::input::appearance::{
     AppearanceAuthoringBatch, ImageAuthoring, ImageLocalId, ImagePayloadAuthoring,
@@ -966,23 +961,6 @@ pub(in crate::canonical_scene::store) fn appearance_shape_scratch_envelope(
     )
 }
 
-pub(in crate::canonical_scene::store) fn validate_appearance_batch<'input, O, PP, U>(
-    input: AppearanceAuthoringBatch<'input>,
-    limits: SceneValidationLimits,
-    control: &mut OperationAuthoringControl<'_, O, PP, U>,
-) -> Result<
-    ValidatedAppearanceBatch<'input, RetainedStoreReservation<O>>,
-    AppearanceAuthoringFailure<OperationAuthoringControlError>,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    validate_appearance_batch_inner(input, limits, control)
-}
-
-#[cfg(test)]
 pub(in crate::canonical_scene::store) fn validate_appearance_batch_with_control<'input, C>(
     input: AppearanceAuthoringBatch<'input>,
     limits: SceneValidationLimits,

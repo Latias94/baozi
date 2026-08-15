@@ -6,10 +6,7 @@
 use std::error::Error;
 use std::fmt;
 
-use baozi_operation::{
-    CapacityPlan, CapacityPlanError, OperationOwner, ProgressPhase, ProgressUnit,
-    RetainedStoreReservation,
-};
+use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
 use crate::deform::{MorphDeltaSemantic, SkinMatrixSpace, SkinMatrixSpaces};
@@ -21,9 +18,7 @@ use super::super::super::schema::deformation::{
     DEFORMATION_MORPH_DELTA_FIXED_BYTES, DEFORMATION_MORPH_TARGET_FIXED_BYTES,
     DEFORMATION_PRIMITIVE_FIXED_BYTES, DEFORMATION_SKIN_FIXED_BYTES,
 };
-use super::super::control::{
-    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
-};
+use super::super::control::CanonicalAuthoringControl;
 use super::super::input::Presence;
 use super::super::input::deformation::{
     DeformationAuthoringBatch, InfluenceRowsAuthoring, LogicalMorphAuthoring,
@@ -1359,24 +1354,6 @@ impl<'control, C: CanonicalAuthoringControl> DeformationValidationContext<'contr
             })?;
         Ok((values, actual_bytes))
     }
-}
-
-pub(in crate::canonical_scene::store) fn validate_deformation_batch<'input, NR, GR, O, PP, U>(
-    input: DeformationAuthoringBatch<'input>,
-    nodes: &ValidatedNodeBatch<'_, NR>,
-    geometry: &ValidatedGeometryBatch<'_, GR>,
-    limits: SceneValidationLimits,
-    control: &mut OperationAuthoringControl<'_, O, PP, U>,
-) -> Result<
-    ValidatedDeformationBatch<'input, RetainedStoreReservation<O>>,
-    DeformationAuthoringFailure<OperationAuthoringControlError>,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    validate_deformation_batch_inner(input, nodes, geometry, limits, control)
 }
 
 pub(in crate::canonical_scene::store) fn validate_deformation_batch_with_control<

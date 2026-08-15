@@ -13,19 +13,14 @@ pub(super) mod spatial;
 use std::error::Error;
 use std::fmt;
 
-use baozi_operation::{
-    CapacityPlan, CapacityPlanError, OperationOwner, ProgressPhase, ProgressUnit,
-    RetainedStoreReservation,
-};
+use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
 use crate::entity::AuthoredTransformKind;
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
 use super::super::schema::{NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_TRS_SCALAR_COUNT};
-use super::control::{
-    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
-};
+use super::control::CanonicalAuthoringControl;
 use super::input::{NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence};
 
 const MATRIX_SCALARS_PER_NODE: u64 = NODE_SCENE_MATRIX_SCALAR_COUNT as u64;
@@ -674,24 +669,7 @@ impl<'control, C: CanonicalAuthoringControl> ValidationContext<'control, C> {
     }
 }
 
-pub(in crate::canonical_scene::store) fn validate_node_batch<'input, O, PP, U>(
-    input: NodeAuthoringBatch<'input>,
-    limits: SceneValidationLimits,
-    control: &mut OperationAuthoringControl<'_, O, PP, U>,
-) -> Result<
-    ValidatedNodeBatch<'input, RetainedStoreReservation<O>>,
-    NodeAuthoringFailure<OperationAuthoringControlError>,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    validate_node_batch_inner(input, limits, control)
-}
-
-#[cfg(test)]
-pub(super) fn validate_node_batch_with_control<'input, C>(
+pub(in crate::canonical_scene::store) fn validate_node_batch_with_control<'input, C>(
     input: NodeAuthoringBatch<'input>,
     limits: SceneValidationLimits,
     control: &mut C,

@@ -8,9 +8,9 @@ mod scene;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(super) use control::CanonicalAuthoringControl;
-pub(super) use control::{OperationAuthoringControl, OperationAuthoringControlError};
+pub(super) use control::{
+    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
+};
 #[cfg(test)]
 pub(super) use input::NodeAuthoringBatch;
 #[cfg(test)]
@@ -72,37 +72,37 @@ pub(super) use input::{Presence, SceneAuthoringBatch};
 pub(super) use plan::animation::AnimationAuthoringSemanticError;
 pub(super) use plan::animation::{
     AnimationAuthoringFailure, AnimationTargetCatalog, ValidatedAnimationBatch,
-    validate_animation_batch,
+    validate_animation_batch_with_control,
 };
 #[cfg(test)]
 pub(super) use plan::appearance::AppearanceAuthoringSemanticError;
 pub(super) use plan::appearance::{
-    AppearanceAuthoringFailure, ValidatedAppearanceBatch, validate_appearance_batch,
+    AppearanceAuthoringFailure, ValidatedAppearanceBatch, validate_appearance_batch_with_control,
 };
 #[cfg(test)]
 pub(super) use plan::deformation::DeformationAuthoringSemanticError;
 pub(super) use plan::deformation::{
     DeformationAuthoringFailure, DeformationMorphPayloadKind, ValidatedDeformationBatch,
-    validate_deformation_batch,
+    validate_deformation_batch_with_control,
 };
 #[cfg(test)]
 pub(super) use plan::geometry::GeometryAuthoringSemanticError;
 pub(super) use plan::geometry::{
     GeometryAttributePayloadKind, GeometryAttributeScalarKind, GeometryAuthoringFailure,
-    ValidatedGeometryBatch, validate_geometry_batch,
+    ValidatedGeometryBatch, validate_geometry_batch_with_control,
 };
 pub(super) use plan::profile::{
     CanonicalProfileOwner, ProfileAuthoringFailure, ProfileOwnerCatalog, ProfileOwnerCatalogError,
-    ValidatedProfileBatch, validate_profile_batch,
+    ValidatedProfileBatch, validate_profile_batch_with_control,
 };
 #[cfg(test)]
 pub(super) use plan::profile::{ProfileAuthoringLimit, ProfileAuthoringSemanticError};
 #[cfg(test)]
 pub(super) use plan::spatial::SpatialAuthoringSemanticError;
 pub(super) use plan::spatial::{
-    SpatialAuthoringFailure, ValidatedSpatialBatch, validate_spatial_batch,
+    SpatialAuthoringFailure, ValidatedSpatialBatch, validate_spatial_batch_with_control,
 };
-pub(super) use plan::{NodeAuthoringFailure, ValidatedNodeBatch, validate_node_batch};
+pub(super) use plan::{NodeAuthoringFailure, ValidatedNodeBatch, validate_node_batch_with_control};
 #[cfg(test)]
 pub(super) use plan::{NodeAuthoringLimit, NodeAuthoringSemanticError};
 pub(super) use scene::{

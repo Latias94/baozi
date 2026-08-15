@@ -31,6 +31,8 @@ mod deformation;
 pub(crate) mod edit;
 mod geometry;
 mod materialization;
+#[cfg(test)]
+pub(in crate::canonical_scene::store) use materialization::validate_node_scene_batches_for_test;
 mod profile;
 mod publication;
 mod scratch;
@@ -389,30 +391,37 @@ pub(in crate::canonical_scene::store) struct ValidatedNodeSceneConstruction<'inp
 }
 
 #[derive(Debug, Error)]
-pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection {
+pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection<
+    E = OperationAuthoringControlError,
+> where
+    E: std::error::Error + Send + Sync + 'static,
+{
     #[error("spatial authoring validation rejected the Scene batch")]
-    SpatialAuthoring(#[source] SpatialAuthoringFailure<OperationAuthoringControlError>),
+    SpatialAuthoring(#[source] SpatialAuthoringFailure<E>),
     #[error("node-domain authoring validation rejected the Scene batch")]
-    NodeAuthoring(#[source] NodeAuthoringFailure<OperationAuthoringControlError>),
+    NodeAuthoring(#[source] NodeAuthoringFailure<E>),
     #[error("appearance-domain authoring validation rejected the Scene batch")]
-    AppearanceAuthoring(#[source] AppearanceAuthoringFailure<OperationAuthoringControlError>),
+    AppearanceAuthoring(#[source] AppearanceAuthoringFailure<E>),
     #[error("geometry-domain authoring validation rejected the Scene batch")]
-    GeometryAuthoring(#[source] GeometryAuthoringFailure<OperationAuthoringControlError>),
+    GeometryAuthoring(#[source] GeometryAuthoringFailure<E>),
     #[error("deformation-domain authoring validation rejected the Scene batch")]
-    DeformationAuthoring(#[source] DeformationAuthoringFailure<OperationAuthoringControlError>),
+    DeformationAuthoring(#[source] DeformationAuthoringFailure<E>),
     #[error("animation-domain authoring validation rejected the Scene batch")]
-    AnimationAuthoring(#[source] AnimationAuthoringFailure<OperationAuthoringControlError>),
+    AnimationAuthoring(#[source] AnimationAuthoringFailure<E>),
     #[error("profile owner catalog construction rejected the Scene batch")]
     ProfileOwnerCatalog(#[source] ProfileOwnerCatalogError),
     #[error("profile authoring validation rejected the Scene batch")]
-    ProfileAuthoring(#[source] ProfileAuthoringFailure<OperationAuthoringControlError>),
+    ProfileAuthoring(#[source] ProfileAuthoringFailure<E>),
     #[error("aggregate authoring validation rejected the Scene batch")]
     Aggregate(#[source] SceneAuthoringAggregateError),
     #[error("canonical Scene physical planning rejected the validated batch")]
     Planning(#[source] StorePlanError),
 }
 
-impl NodeSceneConstructionRejection {
+impl<E> NodeSceneConstructionRejection<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
     const fn stable_code(&self) -> u32 {
         match self {
             Self::SpatialAuthoring(_) => NODE_SCENE_SPATIAL_AUTHORING_REJECTION_CODE,

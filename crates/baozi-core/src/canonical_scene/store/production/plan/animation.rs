@@ -7,19 +7,14 @@ use std::error::Error;
 use std::fmt;
 use std::ops::Range;
 
-use baozi_operation::{
-    CapacityPlan, CapacityPlanError, OperationOwner, ProgressPhase, ProgressUnit,
-    RetainedStoreReservation,
-};
+use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
 use crate::entity::AuthoredTransformKind;
 use crate::math::Quat;
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
-use super::super::control::{
-    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
-};
+use super::super::control::CanonicalAuthoringControl;
 use super::super::input::animation::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
     AnimationExtrapolationAuthoring, AnimationInterpolationAuthoring, AnimationTargetAuthoring,
@@ -968,24 +963,6 @@ pub(in crate::canonical_scene::store) fn animation_shape_scratch_envelope(
     )
 }
 
-pub(in crate::canonical_scene::store) fn validate_animation_batch<'input, NR, DR, O, PP, U>(
-    input: AnimationAuthoringBatch<'input>,
-    targets: &AnimationTargetCatalog<'_, '_, NR, DR>,
-    limits: SceneValidationLimits,
-    control: &mut OperationAuthoringControl<'_, O, PP, U>,
-) -> Result<
-    ValidatedAnimationBatch<'input, RetainedStoreReservation<O>>,
-    AnimationAuthoringFailure<OperationAuthoringControlError>,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    validate_animation_batch_inner(input, targets, limits, control)
-}
-
-#[cfg(test)]
 pub(in crate::canonical_scene::store) fn validate_animation_batch_with_control<'input, NR, DR, C>(
     input: AnimationAuthoringBatch<'input>,
     targets: &AnimationTargetCatalog<'_, '_, NR, DR>,
