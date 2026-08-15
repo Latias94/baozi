@@ -485,7 +485,11 @@ impl<'input> ValidatedGeometryAttributeView<'_, 'input> {
 
 #[must_use = "dropping the validated geometry batch releases its compiled-plan reservation"]
 pub(in crate::canonical_scene::store) struct ValidatedGeometryBatch<'input, R> {
+    compiled: GeometryValidationStorage<R>,
     input: GeometryAuthoringBatch<'input>,
+}
+
+struct GeometryValidationStorage<R> {
     logical_mesh_count: u32,
     primitive_count: u32,
     mesh_instance_count: u32,
@@ -509,77 +513,85 @@ pub(in crate::canonical_scene::store) struct ValidatedGeometryBatch<'input, R> {
 }
 
 impl<'input, R> ValidatedGeometryBatch<'input, R> {
+    const fn new(
+        input: GeometryAuthoringBatch<'input>,
+        compiled: GeometryValidationStorage<R>,
+    ) -> Self {
+        Self { compiled, input }
+    }
+
     pub(in crate::canonical_scene::store) const fn input(&self) -> GeometryAuthoringBatch<'input> {
         self.input
     }
 
     pub(in crate::canonical_scene::store) const fn logical_mesh_count(&self) -> u32 {
-        self.logical_mesh_count
+        self.compiled.logical_mesh_count
     }
 
     pub(in crate::canonical_scene::store) const fn primitive_count(&self) -> u32 {
-        self.primitive_count
+        self.compiled.primitive_count
     }
 
     pub(in crate::canonical_scene::store) const fn mesh_instance_count(&self) -> u32 {
-        self.mesh_instance_count
+        self.compiled.mesh_instance_count
     }
 
     pub(in crate::canonical_scene::store) const fn attribute_count(&self) -> u32 {
-        self.attribute_count
+        self.compiled.attribute_count
     }
 
     pub(in crate::canonical_scene::store) const fn f32_scalar_count(&self) -> u64 {
-        self.f32_scalar_count
+        self.compiled.f32_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn u32_scalar_count(&self) -> u64 {
-        self.u32_scalar_count
+        self.compiled.u32_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
-        self.payload_block_count
+        self.compiled.payload_block_count
     }
 
     pub(in crate::canonical_scene::store) const fn entity_count(&self) -> u64 {
-        self.entity_count
+        self.compiled.entity_count
     }
 
     pub(in crate::canonical_scene::store) const fn edge_count(&self) -> u64 {
-        self.edge_count
+        self.compiled.edge_count
     }
 
     pub(in crate::canonical_scene::store) const fn reference_count(&self) -> u64 {
-        self.reference_count
+        self.compiled.reference_count
     }
 
     pub(in crate::canonical_scene::store) const fn semantic_cell_count(&self) -> u64 {
-        self.semantic_cell_count
+        self.compiled.semantic_cell_count
     }
 
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
-        self.canonical_bytes
+        self.compiled.canonical_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn validation_work(&self) -> u64 {
-        self.validation_work
+        self.compiled.validation_work
     }
 
     pub(in crate::canonical_scene::store) const fn scratch_bytes(&self) -> u64 {
-        self.scratch_bytes
+        self.compiled.scratch_bytes
     }
 
     pub(in crate::canonical_scene::store) fn primitive(
         &self,
         index: usize,
     ) -> Option<ValidatedGeometryPrimitive<'_, 'input>> {
-        let plan = self.primitive_plans.get(index)?;
+        let plan = self.compiled.primitive_plans.get(index)?;
         let input = *self.input.primitives().get(plan.input_index)?;
-        let range = checked_range(plan.attribute_plans, self.attribute_plans.len()).ok()?;
+        let range =
+            checked_range(plan.attribute_plans, self.compiled.attribute_plans.len()).ok()?;
         Some(ValidatedGeometryPrimitive {
             input,
             plan,
-            attributes: self.attribute_plans.get(range.clone())?,
+            attributes: self.compiled.attribute_plans.get(range.clone())?,
             input_attributes: self.input.attributes(),
         })
     }
@@ -588,7 +600,7 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
         &self,
         index: usize,
     ) -> Option<ValidatedGeometryAttributeView<'_, 'input>> {
-        let plan = self.attribute_plans.get(index)?;
+        let plan = self.compiled.attribute_plans.get(index)?;
         let input = self.input.attributes().get(plan.input_index)?;
         Some(ValidatedGeometryAttributeView { input, plan })
     }
@@ -598,7 +610,32 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
         &mut self,
         stage: std::rc::Rc<std::cell::Cell<u8>>,
     ) {
-        self.storage_drop_probe = Some(GeometryStorageDropProbe(stage));
+        self.compiled.storage_drop_probe = Some(GeometryStorageDropProbe(stage));
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store::production) fn into_compiled_facts_for_test(
+        self,
+    ) -> (u32, u32, u32, u32, usize, usize, R) {
+        let GeometryValidationStorage {
+            logical_mesh_count,
+            primitive_count,
+            mesh_instance_count,
+            attribute_count,
+            primitive_plans,
+            attribute_plans,
+            reservation,
+            ..
+        } = self.compiled;
+        (
+            logical_mesh_count,
+            primitive_count,
+            mesh_instance_count,
+            attribute_count,
+            primitive_plans.len(),
+            attribute_plans.len(),
+            reservation,
+        )
     }
 }
 
@@ -606,20 +643,20 @@ impl<R> fmt::Debug for ValidatedGeometryBatch<'_, R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ValidatedGeometryBatch")
-            .field("logical_mesh_count", &self.logical_mesh_count)
-            .field("primitive_count", &self.primitive_count)
-            .field("mesh_instance_count", &self.mesh_instance_count)
-            .field("attribute_count", &self.attribute_count)
-            .field("f32_scalar_count", &self.f32_scalar_count)
-            .field("u32_scalar_count", &self.u32_scalar_count)
-            .field("payload_block_count", &self.payload_block_count)
-            .field("entity_count", &self.entity_count)
-            .field("edge_count", &self.edge_count)
-            .field("reference_count", &self.reference_count)
-            .field("semantic_cell_count", &self.semantic_cell_count)
-            .field("canonical_bytes", &self.canonical_bytes)
-            .field("validation_work", &self.validation_work)
-            .field("scratch_bytes", &self.scratch_bytes)
+            .field("logical_mesh_count", &self.compiled.logical_mesh_count)
+            .field("primitive_count", &self.compiled.primitive_count)
+            .field("mesh_instance_count", &self.compiled.mesh_instance_count)
+            .field("attribute_count", &self.compiled.attribute_count)
+            .field("f32_scalar_count", &self.compiled.f32_scalar_count)
+            .field("u32_scalar_count", &self.compiled.u32_scalar_count)
+            .field("payload_block_count", &self.compiled.payload_block_count)
+            .field("entity_count", &self.compiled.entity_count)
+            .field("edge_count", &self.compiled.edge_count)
+            .field("reference_count", &self.compiled.reference_count)
+            .field("semantic_cell_count", &self.compiled.semantic_cell_count)
+            .field("canonical_bytes", &self.compiled.canonical_bytes)
+            .field("validation_work", &self.compiled.validation_work)
+            .field("scratch_bytes", &self.compiled.scratch_bytes)
             .field("reservation", &"<held>")
             .finish()
     }
@@ -639,7 +676,7 @@ impl Drop for GeometryStorageDropProbe {
     }
 }
 
-struct GeometryValidationStorage<R> {
+struct GeometryValidationScratch<R> {
     primitive_plans: Vec<ValidatedGeometryPrimitivePlan>,
     attribute_plans: Vec<ValidatedGeometryAttribute>,
     // Every allocation above must drop before its accounting token.
@@ -1003,7 +1040,7 @@ where
         "geometry scratch allocation",
     )?;
     context.resize_scratch(&mut reservation, scratch_actual)?;
-    let mut storage = GeometryValidationStorage {
+    let mut storage = GeometryValidationScratch {
         primitive_plans,
         attribute_plans,
         reservation,
@@ -1171,13 +1208,12 @@ where
 
     let canonical_bytes = context.canonical_bytes;
     let validation_work = context.work;
-    let GeometryValidationStorage {
+    let GeometryValidationScratch {
         primitive_plans,
         attribute_plans,
         reservation,
     } = storage;
-    let validated = ValidatedGeometryBatch {
-        input,
+    let compiled = GeometryValidationStorage {
         logical_mesh_count,
         primitive_count,
         mesh_instance_count,
@@ -1198,6 +1234,7 @@ where
         storage_drop_probe: None,
         reservation,
     };
+    let validated = ValidatedGeometryBatch::new(input, compiled);
     context.finish()?;
     Ok(validated)
 }

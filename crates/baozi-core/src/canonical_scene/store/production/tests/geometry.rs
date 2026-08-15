@@ -48,6 +48,52 @@ fn reject_geometry(
 }
 
 #[test]
+fn compiled_geometry_facts_do_not_borrow_authored_storage() {
+    let mut control = TestControl::default();
+    let compiled = {
+        let positions = vec![0.0_f32, 0.0, 0.0];
+        let attributes = vec![GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        )];
+        let primitives = vec![GeometryPrimitiveAuthoring::new(
+            GeometryTopologyAuthoring::Points,
+            Presence::Absent,
+            Presence::Absent,
+            AuthoringRange::new(0, 1),
+        )];
+        let logical_meshes = vec![GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+        let instances = vec![GeometryMeshInstanceAuthoring::new(
+            NodeLocalId::new(0),
+            LogicalMeshLocalId::new(0),
+        )];
+
+        validate_geometry_batch_with_control(
+            GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &instances),
+            1,
+            0,
+            SceneValidationLimits::default(),
+            &mut control,
+        )
+        .expect("temporary authored storage must compile into owned geometry facts")
+        .into_compiled_facts_for_test()
+    };
+
+    assert_eq!(compiled.0, 1);
+    assert_eq!(compiled.1, 1);
+    assert_eq!(compiled.2, 1);
+    assert_eq!(compiled.3, 1);
+    assert_eq!(compiled.4, 1);
+    assert_eq!(compiled.5, 1);
+
+    drop(compiled);
+    assert_eq!(control.live.get(), 0);
+}
+
+#[test]
 fn obj_corner_domains_preserve_shared_positions_without_tuple_vertex_expansion() {
     let positions = [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
     let position_indices = [0_u32, 1, 2, 0, 2, 1];
