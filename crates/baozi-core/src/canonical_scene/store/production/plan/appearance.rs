@@ -417,7 +417,11 @@ impl<'view, 'input> ValidatedAppearanceMaterial<'view, 'input> {
 
 #[must_use = "dropping the validated appearance batch releases its compiled-plan reservation"]
 pub(in crate::canonical_scene::store) struct ValidatedAppearanceBatch<'input, R> {
+    compiled: AppearanceValidationStorage<R>,
     input: AppearanceAuthoringBatch<'input>,
+}
+
+struct AppearanceValidationStorage<R> {
     image_count: u32,
     sampler_count: u32,
     texture_count: u32,
@@ -439,11 +443,20 @@ pub(in crate::canonical_scene::store) struct ValidatedAppearanceBatch<'input, R>
     image_plans: Vec<ValidatedAppearanceImagePlan>,
     material_plans: Vec<ValidatedAppearanceMaterialPlan>,
     binding_plans: Vec<ValidatedAppearanceBindingPlan>,
+    #[cfg(test)]
+    storage_drop_probe: Option<AppearanceStorageDropProbe>,
     // Every compiled-plan allocation above must drop before its accounting token.
     reservation: R,
 }
 
 impl<'input, R> ValidatedAppearanceBatch<'input, R> {
+    const fn new(
+        input: AppearanceAuthoringBatch<'input>,
+        compiled: AppearanceValidationStorage<R>,
+    ) -> Self {
+        Self { compiled, input }
+    }
+
     pub(in crate::canonical_scene::store) const fn input(
         &self,
     ) -> AppearanceAuthoringBatch<'input> {
@@ -451,75 +464,75 @@ impl<'input, R> ValidatedAppearanceBatch<'input, R> {
     }
 
     pub(in crate::canonical_scene::store) const fn image_count(&self) -> u32 {
-        self.image_count
+        self.compiled.image_count
     }
 
     pub(in crate::canonical_scene::store) const fn sampler_count(&self) -> u32 {
-        self.sampler_count
+        self.compiled.sampler_count
     }
 
     pub(in crate::canonical_scene::store) const fn texture_count(&self) -> u32 {
-        self.texture_count
+        self.compiled.texture_count
     }
 
     pub(in crate::canonical_scene::store) const fn material_count(&self) -> u32 {
-        self.material_count
+        self.compiled.material_count
     }
 
     pub(in crate::canonical_scene::store) const fn binding_count(&self) -> u32 {
-        self.binding_count
+        self.compiled.binding_count
     }
 
     pub(in crate::canonical_scene::store) const fn image_payload_byte_count(&self) -> u32 {
-        self.image_payload_byte_count
+        self.compiled.image_payload_byte_count
     }
 
     pub(in crate::canonical_scene::store) const fn media_type_byte_count(&self) -> u32 {
-        self.media_type_byte_count
+        self.compiled.media_type_byte_count
     }
 
     pub(in crate::canonical_scene::store) const fn source_key_byte_count(&self) -> u32 {
-        self.source_key_byte_count
+        self.compiled.source_key_byte_count
     }
 
     pub(in crate::canonical_scene::store) const fn binding_semantic_scalar_count(&self) -> u32 {
-        self.binding_semantic_scalar_count
+        self.compiled.binding_semantic_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn material_factor_scalar_count(&self) -> u32 {
-        self.material_factor_scalar_count
+        self.compiled.material_factor_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
-        self.payload_block_count
+        self.compiled.payload_block_count
     }
 
     pub(in crate::canonical_scene::store) const fn entity_count(&self) -> u64 {
-        self.entity_count
+        self.compiled.entity_count
     }
 
     pub(in crate::canonical_scene::store) const fn edge_count(&self) -> u64 {
-        self.edge_count
+        self.compiled.edge_count
     }
 
     pub(in crate::canonical_scene::store) const fn reference_count(&self) -> u64 {
-        self.reference_count
+        self.compiled.reference_count
     }
 
     pub(in crate::canonical_scene::store) const fn semantic_cell_count(&self) -> u64 {
-        self.semantic_cell_count
+        self.compiled.semantic_cell_count
     }
 
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
-        self.canonical_bytes
+        self.compiled.canonical_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn validation_work(&self) -> u64 {
-        self.validation_work
+        self.compiled.validation_work
     }
 
     pub(in crate::canonical_scene::store) const fn scratch_bytes(&self) -> u64 {
-        self.scratch_bytes
+        self.compiled.scratch_bytes
     }
 
     pub(in crate::canonical_scene::store) fn images(
@@ -528,7 +541,7 @@ impl<'input, R> ValidatedAppearanceBatch<'input, R> {
         self.input
             .images()
             .iter()
-            .zip(&self.image_plans)
+            .zip(&self.compiled.image_plans)
             .map(|(input, plan)| ValidatedAppearanceImage { input, plan })
     }
 
@@ -537,7 +550,7 @@ impl<'input, R> ValidatedAppearanceBatch<'input, R> {
         index: usize,
     ) -> Option<ValidatedAppearanceImage<'_, 'input>> {
         let input = self.input.images().get(index)?;
-        let plan = self.image_plans.get(index)?;
+        let plan = self.compiled.image_plans.get(index)?;
         Some(ValidatedAppearanceImage { input, plan })
     }
 
@@ -565,7 +578,7 @@ impl<'input, R> ValidatedAppearanceBatch<'input, R> {
         self.input
             .bindings()
             .iter()
-            .zip(&self.binding_plans)
+            .zip(&self.compiled.binding_plans)
             .map(|(input, plan)| ValidatedAppearanceBinding { input, plan })
     }
 
@@ -575,12 +588,12 @@ impl<'input, R> ValidatedAppearanceBatch<'input, R> {
         self.input
             .materials()
             .iter()
-            .zip(&self.material_plans)
+            .zip(&self.compiled.material_plans)
             .map(|(input, plan)| ValidatedAppearanceMaterial {
                 input,
                 plan,
                 bindings: &self.input.bindings()[plan.binding_start..plan.binding_end],
-                binding_plans: &self.binding_plans[plan.binding_start..plan.binding_end],
+                binding_plans: &self.compiled.binding_plans[plan.binding_start..plan.binding_end],
             })
     }
 
@@ -589,12 +602,13 @@ impl<'input, R> ValidatedAppearanceBatch<'input, R> {
         index: usize,
     ) -> Option<ValidatedAppearanceMaterial<'_, 'input>> {
         let input = self.input.materials().get(index)?;
-        let plan = self.material_plans.get(index)?;
+        let plan = self.compiled.material_plans.get(index)?;
         let bindings = self
             .input
             .bindings()
             .get(plan.binding_start..plan.binding_end)?;
         let binding_plans = self
+            .compiled
             .binding_plans
             .get(plan.binding_start..plan.binding_end)?;
         Some(ValidatedAppearanceMaterial {
@@ -604,42 +618,94 @@ impl<'input, R> ValidatedAppearanceBatch<'input, R> {
             binding_plans,
         })
     }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store) fn install_storage_drop_probe(
+        &mut self,
+        stage: std::rc::Rc<std::cell::Cell<u8>>,
+    ) {
+        self.compiled.storage_drop_probe = Some(AppearanceStorageDropProbe(stage));
+    }
+
+    #[cfg(test)]
+    pub(in crate::canonical_scene::store::production) fn into_compiled_facts_for_test(
+        self,
+    ) -> (u32, usize, usize, usize, R) {
+        let AppearanceValidationStorage {
+            image_count,
+            image_plans,
+            material_plans,
+            binding_plans,
+            reservation,
+            ..
+        } = self.compiled;
+        (
+            image_count,
+            image_plans.len(),
+            material_plans.len(),
+            binding_plans.len(),
+            reservation,
+        )
+    }
+}
+
+#[cfg(test)]
+struct AppearanceStorageDropProbe(std::rc::Rc<std::cell::Cell<u8>>);
+
+#[cfg(test)]
+impl Drop for AppearanceStorageDropProbe {
+    fn drop(&mut self) {
+        assert_eq!(
+            self.0.replace(1),
+            0,
+            "compiled appearance storage must begin the coupled drop sequence"
+        );
+    }
 }
 
 impl<R> fmt::Debug for ValidatedAppearanceBatch<'_, R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ValidatedAppearanceBatch")
-            .field("image_count", &self.image_count)
-            .field("sampler_count", &self.sampler_count)
-            .field("texture_count", &self.texture_count)
-            .field("material_count", &self.material_count)
-            .field("binding_count", &self.binding_count)
-            .field("image_payload_byte_count", &self.image_payload_byte_count)
-            .field("media_type_byte_count", &self.media_type_byte_count)
-            .field("source_key_byte_count", &self.source_key_byte_count)
+            .field("image_count", &self.compiled.image_count)
+            .field("sampler_count", &self.compiled.sampler_count)
+            .field("texture_count", &self.compiled.texture_count)
+            .field("material_count", &self.compiled.material_count)
+            .field("binding_count", &self.compiled.binding_count)
+            .field(
+                "image_payload_byte_count",
+                &self.compiled.image_payload_byte_count,
+            )
+            .field(
+                "media_type_byte_count",
+                &self.compiled.media_type_byte_count,
+            )
+            .field(
+                "source_key_byte_count",
+                &self.compiled.source_key_byte_count,
+            )
             .field(
                 "binding_semantic_scalar_count",
-                &self.binding_semantic_scalar_count,
+                &self.compiled.binding_semantic_scalar_count,
             )
             .field(
                 "material_factor_scalar_count",
-                &self.material_factor_scalar_count,
+                &self.compiled.material_factor_scalar_count,
             )
-            .field("payload_block_count", &self.payload_block_count)
-            .field("entity_count", &self.entity_count)
-            .field("edge_count", &self.edge_count)
-            .field("reference_count", &self.reference_count)
-            .field("semantic_cell_count", &self.semantic_cell_count)
-            .field("canonical_bytes", &self.canonical_bytes)
-            .field("validation_work", &self.validation_work)
-            .field("scratch_bytes", &self.scratch_bytes)
+            .field("payload_block_count", &self.compiled.payload_block_count)
+            .field("entity_count", &self.compiled.entity_count)
+            .field("edge_count", &self.compiled.edge_count)
+            .field("reference_count", &self.compiled.reference_count)
+            .field("semantic_cell_count", &self.compiled.semantic_cell_count)
+            .field("canonical_bytes", &self.compiled.canonical_bytes)
+            .field("validation_work", &self.compiled.validation_work)
+            .field("scratch_bytes", &self.compiled.scratch_bytes)
             .field("reservation", &"<held>")
             .finish()
     }
 }
 
-struct AppearanceValidationStorage<R> {
+struct AppearanceValidationScratch<R> {
     image_plans: Vec<ValidatedAppearanceImagePlan>,
     material_plans: Vec<ValidatedAppearanceMaterialPlan>,
     binding_plans: Vec<ValidatedAppearanceBindingPlan>,
@@ -995,7 +1061,7 @@ where
         "appearance scratch allocation",
     )?;
     context.resize_scratch(&mut reservation, scratch_actual)?;
-    let mut storage = AppearanceValidationStorage {
+    let mut storage = AppearanceValidationScratch {
         image_plans,
         material_plans,
         binding_plans,
@@ -1395,8 +1461,13 @@ where
         .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
             dimension: "appearance payload block count",
         })?;
-    let validated = ValidatedAppearanceBatch {
-        input,
+    let AppearanceValidationScratch {
+        image_plans,
+        material_plans,
+        binding_plans,
+        reservation,
+    } = storage;
+    let compiled = AppearanceValidationStorage {
         image_count,
         sampler_count,
         texture_count,
@@ -1415,12 +1486,14 @@ where
         canonical_bytes: context.canonical_bytes,
         validation_work: context.work,
         scratch_bytes: scratch_actual,
-        image_plans: storage.image_plans,
-        material_plans: storage.material_plans,
-        binding_plans: storage.binding_plans,
-        reservation: storage.reservation,
+        image_plans,
+        material_plans,
+        binding_plans,
+        #[cfg(test)]
+        storage_drop_probe: None,
+        reservation,
     };
-    Ok(validated)
+    Ok(ValidatedAppearanceBatch::new(input, compiled))
 }
 
 fn namespaced_binding_behavior(

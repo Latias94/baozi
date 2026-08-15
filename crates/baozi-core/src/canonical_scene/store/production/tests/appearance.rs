@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use crate::appearance::{
     AlphaMode, AppearanceBuildError, ColorInterpretation, MaterialFactors, MaterialSemanticsRef,
     ShadingModel, TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelMapping,
@@ -15,6 +18,54 @@ use super::super::{
     TextureLocalId,
 };
 use super::{SceneValidationLimits, TestControl};
+
+#[test]
+fn compiled_appearance_facts_do_not_borrow_authored_storage() {
+    let mut control = TestControl::default();
+    let compiled = {
+        let image_bytes = vec![1_u8, 2, 3];
+        let images = vec![ImageAuthoring::encoded(&image_bytes, Presence::Absent)];
+
+        validate_appearance_batch_with_control(
+            AppearanceAuthoringBatch::new(&images, &[], &[], &[], &[]),
+            SceneValidationLimits::default(),
+            &mut control,
+        )
+        .expect("temporary authored storage must compile into owned appearance facts")
+        .into_compiled_facts_for_test()
+    };
+
+    assert_eq!(compiled.0, 1);
+    assert_eq!(compiled.1, 1);
+    assert_eq!(compiled.2, 0);
+    assert_eq!(compiled.3, 0);
+
+    drop(compiled);
+    assert_eq!(control.live.get(), 0);
+}
+
+#[test]
+fn compiled_appearance_storage_drops_before_its_reservation() {
+    let image_bytes = [1_u8];
+    let images = [ImageAuthoring::encoded(&image_bytes, Presence::Absent)];
+    let stage = Rc::new(Cell::new(0));
+    let mut control = TestControl {
+        reservation_drop_stage: Some(Rc::clone(&stage)),
+        ..TestControl::default()
+    };
+    let mut validated = validate_appearance_batch_with_control(
+        AppearanceAuthoringBatch::new(&images, &[], &[], &[], &[]),
+        SceneValidationLimits::default(),
+        &mut control,
+    )
+    .expect("appearance plan must validate before its coupled drop-order proof");
+
+    validated.install_storage_drop_probe(Rc::clone(&stage));
+    drop(validated);
+
+    assert_eq!(stage.get(), 2);
+    assert_eq!(control.live.get(), 0);
+}
 
 #[test]
 fn duplicate_material_binding_stops_at_the_exact_completed_prefix() {
