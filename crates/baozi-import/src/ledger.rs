@@ -148,7 +148,7 @@ pub enum ImportDimension {
 }
 
 impl ImportDimension {
-    const ALL: [Self; 48] = [
+    pub(crate) const ALL: [Self; 48] = [
         Self::AssetOpen,
         Self::DependencyReference,
         Self::PrimaryBytes,

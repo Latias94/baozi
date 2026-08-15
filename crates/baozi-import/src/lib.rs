@@ -23,6 +23,11 @@ mod request_wire;
 mod scope;
 mod session;
 mod source_scope;
+#[allow(
+    dead_code,
+    reason = "the private retained-store host bootstrap precedes the atomic ImportSession cutover"
+)]
+mod store;
 
 pub use config::{
     ConformancePolicy, DetectionOptions, DetectionOptionsError, FormatSelection, ImportConfig,
