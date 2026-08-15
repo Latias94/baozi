@@ -264,7 +264,6 @@ struct SceneActivationPlan {
     nodes_plan: RecordPlan,
     directory_plan: RecordPlan,
     authored: [f32; MATRIX_SCALAR_COUNT],
-    brand: ConstructionBrand,
 }
 
 #[cfg(test)]
@@ -303,10 +302,8 @@ type SceneRecordBuildControl<'writer, 'permit, 'operation> = CanonicalBuildContr
 >;
 
 impl SceneActivationRequest {
-    fn try_new(
-        brand: ConstructionBrand,
-        authored: TwoNodeAuthoredMatrices,
-    ) -> Result<Self, SceneConstructionError> {
+    /// Plans the complete bounded activation without borrowing storage or operation authority.
+    fn try_plan(authored: TwoNodeAuthoredMatrices) -> Result<Self, SceneConstructionError> {
         let (failure_requirements, success_requirements) = scene_activation_requirements()?;
         let matrices_plan = SequencePlan::<f32>::new(MATRIX_SCALAR_COUNT)?;
         let references_plan = RecordPlan::new(REFERENCE_COUNT, REFERENCE_FIELD_COUNT)?;
@@ -322,7 +319,6 @@ impl SceneActivationRequest {
                 nodes_plan,
                 directory_plan,
                 authored: authored.scalars(),
-                brand,
             },
             evidence_plan,
         })
@@ -638,165 +634,132 @@ impl SceneConstructionOperation {
         self,
         authored: TwoNodeAuthoredMatrices,
     ) -> Result<SceneActivationTransition, SceneConstructionError> {
+        let request = SceneActivationRequest::try_plan(authored)?;
         let Self { raw, brand, keys } = self;
-        let expected_brand = brand;
-        let SceneActivationRequest {
-            failure_requirements,
-            success_requirements,
-            plan,
-            evidence_plan,
-        } = SceneActivationRequest::try_new(brand, authored)?;
-        let policy = scene_activation_policy(keys)?;
-        let owner = raw.into_scoped_session_outcome_owner(policy, failure_requirements)?;
+        drive_fresh_two_node_activation(raw, brand, keys, request)
+    }
+}
 
-        let outcome = owner.plan_and_activate_scoped(move |mut planning| {
-            let semantic_work_units = plan.semantic_work_units();
-            let mut semantic_valid = true;
-            let semantic_complete = match planning.begin_semantic_work(semantic_work_units) {
-                Ok(mut semantic) => {
-                    let mut runtime_interrupted = false;
-                    for index in 0..semantic_work_units {
-                        match semantic.run_unit(|| {
-                            authored_activation_matrix_scalar_is_valid(&plan.authored, index)
-                        }) {
-                            Ok(valid) => semantic_valid &= valid,
-                            Err(_) => {
-                                runtime_interrupted = true;
-                                break;
-                            }
+/// Consumes an existing retained owner only after its complete authority-free request is available.
+fn drive_fresh_two_node_activation(
+    raw: SceneStoreOperation,
+    brand: ConstructionBrand,
+    keys: SceneStoreKeys,
+    request: SceneActivationRequest,
+) -> Result<SceneActivationTransition, SceneConstructionError> {
+    let SceneActivationRequest {
+        failure_requirements,
+        success_requirements,
+        plan,
+        evidence_plan,
+    } = request;
+    let policy = scene_activation_policy(keys)?;
+    let owner = raw.into_scoped_session_outcome_owner(policy, failure_requirements)?;
+
+    let outcome = owner.plan_and_activate_scoped(move |mut planning| {
+        let semantic_work_units = plan.semantic_work_units();
+        let mut semantic_valid = true;
+        let semantic_complete = match planning.begin_semantic_work(semantic_work_units) {
+            Ok(mut semantic) => {
+                let mut runtime_interrupted = false;
+                for index in 0..semantic_work_units {
+                    match semantic.run_unit(|| {
+                        authored_activation_matrix_scalar_is_valid(&plan.authored, index)
+                    }) {
+                        Ok(valid) => semantic_valid &= valid,
+                        Err(_) => {
+                            runtime_interrupted = true;
+                            break;
                         }
-                    }
-                    if runtime_interrupted {
-                        let _ = semantic.finish_rejected();
-                        false
-                    } else {
-                        semantic.finish_exact().is_ok()
                     }
                 }
-                Err(_) => false,
-            };
-            if !semantic_complete || !semantic_valid {
-                return planning.reject((), SEMANTIC_REJECTION_CODE);
+                if runtime_interrupted {
+                    let _ = semantic.finish_rejected();
+                    false
+                } else {
+                    semantic.finish_exact().is_ok()
+                }
             }
-            let sealed = match planning.seal_plan(success_requirements, plan) {
-                CanonicalPlanSeal::Sealed(sealed) => sealed,
-                CanonicalPlanSeal::Terminal(disposition) => return disposition,
-            };
-            sealed.activate(move |mut lane, plan| {
-                let matrices = match lane.try_retain_sequence(
-                    plan.matrices_plan,
-                    AuthoredMatrixSchema,
-                    |control| write_activation_matrices(control, &plan.authored),
-                ) {
-                    Ok(matrices) => CanonicalBlockRef::from_store(matrices),
-                    Err(_) => {
-                        return lane
-                            .reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
-                                (),
-                                FALLBACK_CODE,
-                            );
-                    }
-                };
-                let references = match lane.try_retain_records(
-                    plan.references_plan,
-                    ReferenceTableSchema,
-                    write_activation_references,
-                ) {
-                    Ok(references) => CanonicalBlockRef::from_store(references),
-                    Err(_) => {
-                        return lane
-                            .reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
-                                (),
-                                FALLBACK_CODE,
-                            );
-                    }
-                };
-                let nodes =
-                    match lane.try_retain_records(plan.nodes_plan, NodeTableSchema, |control| {
-                        write_activation_nodes(control, matrices)
-                    }) {
-                        Ok(nodes) => CanonicalBlockRef::from_store(nodes),
-                        Err(_) => {
-                            return lane
-                                .reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
-                                    (),
-                                    FALLBACK_CODE,
-                                );
-                        }
-                    };
-                let directory =
-                    match lane.try_retain_records(plan.directory_plan, DirectorySchema, |control| {
-                        write_activation_directory(control, nodes, references, matrices)
-                    }) {
-                        Ok(directory) => CanonicalBlockRef::from_store(directory),
-                        Err(_) => {
-                            return lane
-                                .reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
-                                    (),
-                                    FALLBACK_CODE,
-                                );
-                        }
-                    };
-                let refs = SceneBlockRefs {
-                    directory,
-                    nodes,
-                    references,
-                    matrices,
-                };
-                lane.complete::<_, (), _, _>(
-                    directory.into_store(),
-                    SceneActivationOutput {
-                        draft: SceneDraft {
-                            brand: plan.brand,
-                            directory,
-                        },
-                        refs,
-                    },
-                )
-            })
-        })?;
-
-        let activated = match outcome {
-            CanonicalActivationOutcome::Activated(activated) => activated,
-            CanonicalActivationOutcome::Rejected(rejected) => {
-                let failure = rejected.build_failure_evidence(|lane| {
-                    let evidence = match lane.try_retain_records(
-                        evidence_plan,
-                        OutcomeEvidenceSchema,
-                        |writer| writer.write_row(write_outcome_evidence_row),
-                    ) {
-                        Ok(evidence) => evidence,
-                        Err(_) => return lane.abort(),
-                    };
-                    lane.complete(evidence)
-                })?;
-                return prepare_failure_outcome(failure).map(SceneActivationTransition::Terminal);
-            }
-            CanonicalActivationOutcome::NeverActivated(never_activated) => {
-                let failure = never_activated.build_failure_evidence(|lane| {
-                    let evidence = match lane.try_retain_records(
-                        evidence_plan,
-                        OutcomeEvidenceSchema,
-                        |writer| writer.write_row(write_outcome_evidence_row),
-                    ) {
-                        Ok(evidence) => evidence,
-                        Err(_) => return lane.abort(),
-                    };
-                    lane.complete(evidence)
-                })?;
-                return prepare_failure_outcome(failure).map(SceneActivationTransition::Terminal);
-            }
-            CanonicalActivationOutcome::Fallback(fallback) => {
-                let (store, _cause) = fallback.into_parts();
-                return Ok(SceneActivationTransition::Terminal(
-                    PreparedSceneConstruction::MinimalFallback(PreparedTracerSceneFallback {
-                        store,
-                    }),
-                ));
-            }
+            Err(_) => false,
         };
-        let outcome = activated.validate_centrally(
-            |lane, _output| {
+        if !semantic_complete || !semantic_valid {
+            return planning.reject((), SEMANTIC_REJECTION_CODE);
+        }
+        let sealed = match planning.seal_plan(success_requirements, plan) {
+            CanonicalPlanSeal::Sealed(sealed) => sealed,
+            CanonicalPlanSeal::Terminal(disposition) => return disposition,
+        };
+        sealed.activate(move |mut lane, plan| {
+            let matrices = match lane.try_retain_sequence(
+                plan.matrices_plan,
+                AuthoredMatrixSchema,
+                |control| write_activation_matrices(control, &plan.authored),
+            ) {
+                Ok(matrices) => CanonicalBlockRef::from_store(matrices),
+                Err(_) => {
+                    return lane.reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
+                        (),
+                        FALLBACK_CODE,
+                    );
+                }
+            };
+            let references = match lane.try_retain_records(
+                plan.references_plan,
+                ReferenceTableSchema,
+                write_activation_references,
+            ) {
+                Ok(references) => CanonicalBlockRef::from_store(references),
+                Err(_) => {
+                    return lane.reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
+                        (),
+                        FALLBACK_CODE,
+                    );
+                }
+            };
+            let nodes = match lane.try_retain_records(plan.nodes_plan, NodeTableSchema, |control| {
+                write_activation_nodes(control, matrices)
+            }) {
+                Ok(nodes) => CanonicalBlockRef::from_store(nodes),
+                Err(_) => {
+                    return lane.reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
+                        (),
+                        FALLBACK_CODE,
+                    );
+                }
+            };
+            let directory =
+                match lane.try_retain_records(plan.directory_plan, DirectorySchema, |control| {
+                    write_activation_directory(control, nodes, references, matrices)
+                }) {
+                    Ok(directory) => CanonicalBlockRef::from_store(directory),
+                    Err(_) => {
+                        return lane
+                            .reject::<SceneActivationOutput, (), RecordBlock, DirectorySchema>(
+                                (),
+                                FALLBACK_CODE,
+                            );
+                    }
+                };
+            let refs = SceneBlockRefs {
+                directory,
+                nodes,
+                references,
+                matrices,
+            };
+            lane.complete::<_, (), _, _>(
+                directory.into_store(),
+                SceneActivationOutput {
+                    draft: SceneDraft { brand, directory },
+                    refs,
+                },
+            )
+        })
+    })?;
+
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(activated) => activated,
+        CanonicalActivationOutcome::Rejected(rejected) => {
+            let failure = rejected.build_failure_evidence(|lane| {
                 let evidence =
                     match lane.try_retain_records(evidence_plan, OutcomeEvidenceSchema, |writer| {
                         writer.write_row(write_outcome_evidence_row)
@@ -805,47 +768,73 @@ impl SceneConstructionOperation {
                         Err(_) => return lane.abort(),
                     };
                 lane.complete(evidence)
-            },
-            |session, directory, evidence, output| {
-                let identity_valid = directory.identifies(output.draft.directory.into_store())
-                    && output.draft.brand == expected_brand
-                    && output.refs.directory == output.draft.directory;
-                let valid = if identity_valid {
-                    validate_scene_graph_metered(session, directory, evidence)?
-                } else {
-                    false
+            })?;
+            return prepare_failure_outcome(failure).map(SceneActivationTransition::Terminal);
+        }
+        CanonicalActivationOutcome::NeverActivated(never_activated) => {
+            let failure = never_activated.build_failure_evidence(|lane| {
+                let evidence =
+                    match lane.try_retain_records(evidence_plan, OutcomeEvidenceSchema, |writer| {
+                        writer.write_row(write_outcome_evidence_row)
+                    }) {
+                        Ok(evidence) => evidence,
+                        Err(_) => return lane.abort(),
+                    };
+                lane.complete(evidence)
+            })?;
+            return prepare_failure_outcome(failure).map(SceneActivationTransition::Terminal);
+        }
+        CanonicalActivationOutcome::Fallback(fallback) => {
+            let (store, _cause) = fallback.into_parts();
+            return Ok(SceneActivationTransition::Terminal(
+                PreparedSceneConstruction::MinimalFallback(PreparedTracerSceneFallback { store }),
+            ));
+        }
+    };
+    let outcome = activated.validate_centrally(
+        |lane, _output| {
+            let evidence =
+                match lane.try_retain_records(evidence_plan, OutcomeEvidenceSchema, |writer| {
+                    writer.write_row(write_outcome_evidence_row)
+                }) {
+                    Ok(evidence) => evidence,
+                    Err(_) => return lane.abort(),
                 };
-                Ok(if valid {
-                    CanonicalValidationDecision::accept(TracerSceneValidationProof {
-                        brand: expected_brand,
-                    })
-                } else {
-                    CanonicalValidationDecision::reject((), SEMANTIC_REJECTION_CODE)
-                })
-            },
-        )?;
-        match outcome {
-            CanonicalCentralValidationOutcome::Candidate(candidate) => Ok(
-                SceneActivationTransition::Candidate(PendingSceneActivation { candidate }),
-            ),
-            CanonicalCentralValidationOutcome::Rejected(rejected) => prepare_failure_validation(
-                rejected.validate_rich_failure(validate_failure_evidence)?,
-            )
-            .map(SceneActivationTransition::Terminal),
-            CanonicalCentralValidationOutcome::Interrupted(interrupted) => {
-                prepare_failure_validation(
-                    interrupted.validate_rich_failure(validate_failure_evidence)?,
-                )
+            lane.complete(evidence)
+        },
+        |session, directory, evidence, output| {
+            let identity_valid = directory.identifies(output.draft.directory.into_store())
+                && output.draft.brand == brand
+                && output.refs.directory == output.draft.directory;
+            let valid = if identity_valid {
+                validate_scene_graph_metered(session, directory, evidence)?
+            } else {
+                false
+            };
+            Ok(if valid {
+                CanonicalValidationDecision::accept(TracerSceneValidationProof { brand })
+            } else {
+                CanonicalValidationDecision::reject((), SEMANTIC_REJECTION_CODE)
+            })
+        },
+    )?;
+    match outcome {
+        CanonicalCentralValidationOutcome::Candidate(candidate) => Ok(
+            SceneActivationTransition::Candidate(PendingSceneActivation { candidate }),
+        ),
+        CanonicalCentralValidationOutcome::Rejected(rejected) => {
+            prepare_failure_validation(rejected.validate_rich_failure(validate_failure_evidence)?)
                 .map(SceneActivationTransition::Terminal)
-            }
-            CanonicalCentralValidationOutcome::Fallback(fallback) => {
-                let (store, _cause) = fallback.into_parts();
-                Ok(SceneActivationTransition::Terminal(
-                    PreparedSceneConstruction::MinimalFallback(PreparedTracerSceneFallback {
-                        store,
-                    }),
-                ))
-            }
+        }
+        CanonicalCentralValidationOutcome::Interrupted(interrupted) => prepare_failure_validation(
+            interrupted.validate_rich_failure(validate_failure_evidence)?,
+        )
+        .map(SceneActivationTransition::Terminal),
+        CanonicalCentralValidationOutcome::Fallback(fallback) => {
+            let (store, _cause) = fallback.into_parts();
+            Ok(SceneActivationTransition::Terminal(
+                PreparedSceneConstruction::MinimalFallback(PreparedTracerSceneFallback { store }),
+            ))
         }
     }
 }
