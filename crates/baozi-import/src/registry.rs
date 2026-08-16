@@ -896,7 +896,7 @@ mod tests {
             }
             self.release_success.wait();
             if hint.extension() == Some("abort") {
-                return match scope.begin_work(u64::MAX) {
+                return match scope.with_work(u64::MAX, || Ok(DetectionOutcome::NoMatch)) {
                     Ok(_) => panic!("oversized detector work must be rejected"),
                     Err(abort) => Err(abort),
                 };
@@ -1046,10 +1046,10 @@ mod tests {
             &self,
             _probe: &Probe<'_>,
             _hint: &ReadHint,
-            _scope: &DetectionScope<'_>,
+            scope: &DetectionScope<'_>,
         ) -> DetectionResult<DetectionOutcome> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            panic!("detector panic")
+            scope.with_work(1, || panic!("detector panic"))
         }
 
         fn parse(&self, _scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {

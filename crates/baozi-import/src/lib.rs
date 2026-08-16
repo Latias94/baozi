@@ -47,7 +47,7 @@ pub use descriptor::{
     TextDecodingMode, TextHardCapDimension, TextHardCaps, TextLexicalMode, TextNewline,
     TextProfile, TextProfileBuilder, TextProfileError, TextProfileField, TextSourceEncoding,
 };
-pub use detection::{DetectionAbort, DetectionResult, DetectionScope, DetectionWorkPermit};
+pub use detection::{DetectionAbort, DetectionResult, DetectionScope};
 pub use diagnostic::{
     DiagnosticByteRange, DiagnosticCause, DiagnosticCode, DiagnosticDetail, DiagnosticDetailSink,
     DiagnosticDetailValue, DiagnosticLineColumn, DiagnosticSeverity, DiagnosticSource,

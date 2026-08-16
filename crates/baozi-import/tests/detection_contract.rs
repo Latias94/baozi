@@ -103,16 +103,13 @@ impl FormatImporter for TestImporter {
         _hint: &ReadHint,
         scope: &DetectionScope<'_>,
     ) -> DetectionResult<DetectionOutcome> {
-        let work = if probe.bytes().is_empty() {
-            None
+        if probe.bytes().is_empty() {
+            Ok(self.detector.outcome(probe))
         } else {
-            Some(scope.begin_work(probe.bytes().len() as u64)?)
-        };
-        let outcome = self.detector.outcome(probe);
-        if let Some(work) = work {
-            work.complete()?;
+            scope.with_work(probe.bytes().len() as u64, || {
+                Ok(self.detector.outcome(probe))
+            })
         }
-        Ok(outcome)
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {

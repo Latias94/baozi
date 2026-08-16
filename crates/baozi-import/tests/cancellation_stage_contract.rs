@@ -194,16 +194,18 @@ impl FormatImporter for DetectorScanCancellationImporter {
     ) -> DetectionResult<DetectionOutcome> {
         let mut chunks = probe.bytes().chunks_exact(DETECTOR_WORK_CHUNK_BYTES);
         let first = chunks.next().expect("detector fixture has a first chunk");
-        let first_work = scope.begin_work(first.len() as u64)?;
-        self.scanned_bytes.fetch_add(first.len(), Ordering::AcqRel);
-        first_work.complete()?;
+        scope.with_work(first.len() as u64, || {
+            self.scanned_bytes.fetch_add(first.len(), Ordering::AcqRel);
+            Ok(())
+        })?;
 
         self.cancellation.cancel();
 
         let second = chunks.next().expect("detector fixture has a second chunk");
-        let second_work = scope.begin_work(second.len() as u64)?;
-        self.scanned_bytes.fetch_add(second.len(), Ordering::AcqRel);
-        second_work.complete()?;
+        scope.with_work(second.len() as u64, || {
+            self.scanned_bytes.fetch_add(second.len(), Ordering::AcqRel);
+            Ok(())
+        })?;
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
@@ -255,9 +257,9 @@ impl FormatImporter for LatchThenPanicDetectorImporter {
 #[derive(Clone, Copy)]
 enum DetectorContractViolation {
     ZeroWork,
-    MultiplePermits,
-    DroppedPermit,
-    PollDuringPermit,
+    NestedWork,
+    CallbackError,
+    PollDuringCallback,
     ReplayAbort,
 }
 
@@ -279,20 +281,20 @@ impl FormatImporter for DetectorContractImporter {
                 "Detector zero work",
                 "detector-zero-work",
             ),
-            DetectorContractViolation::MultiplePermits => (
-                "dev.baozi.test.detector-multiple-permits",
-                "Detector multiple permits",
-                "detector-multiple-permits",
+            DetectorContractViolation::NestedWork => (
+                "dev.baozi.test.detector-nested-work",
+                "Detector nested work",
+                "detector-nested-work",
             ),
-            DetectorContractViolation::DroppedPermit => (
-                "dev.baozi.test.detector-dropped-permit",
-                "Detector dropped permit",
-                "detector-dropped-permit",
+            DetectorContractViolation::CallbackError => (
+                "dev.baozi.test.detector-callback-error",
+                "Detector callback error",
+                "detector-callback-error",
             ),
-            DetectorContractViolation::PollDuringPermit => (
-                "dev.baozi.test.detector-poll-during-permit",
-                "Detector poll during permit",
-                "detector-poll-during-permit",
+            DetectorContractViolation::PollDuringCallback => (
+                "dev.baozi.test.detector-poll-during-callback",
+                "Detector poll during callback",
+                "detector-poll-during-callback",
             ),
             DetectorContractViolation::ReplayAbort => (
                 "dev.baozi.test.detector-replay-abort",
@@ -311,24 +313,45 @@ impl FormatImporter for DetectorContractImporter {
     ) -> DetectionResult<DetectionOutcome> {
         match self.violation {
             DetectorContractViolation::ZeroWork => {
-                assert!(scope.begin_work(0).is_err());
+                assert!(
+                    scope
+                        .with_work(0, || Ok(DetectionOutcome::NoMatch))
+                        .is_err()
+                );
             }
-            DetectorContractViolation::MultiplePermits => {
-                let first = scope.begin_work(1)?;
-                assert!(scope.begin_work(1).is_err());
-                assert!(first.complete().is_err());
+            DetectorContractViolation::NestedWork => {
+                assert!(
+                    scope
+                        .with_work(1, || {
+                            assert!(
+                                scope
+                                    .with_work(1, || Ok(DetectionOutcome::NoMatch))
+                                    .is_err()
+                            );
+                            Ok(DetectionOutcome::NoMatch)
+                        })
+                        .is_err()
+                );
             }
-            DetectorContractViolation::DroppedPermit => {
-                drop(scope.begin_work(1)?);
+            DetectorContractViolation::CallbackError => {
+                return scope.with_work(1, || {
+                    scope.poll()?;
+                    Ok(DetectionOutcome::NoMatch)
+                });
             }
-            DetectorContractViolation::PollDuringPermit => {
-                let permit = scope.begin_work(1)?;
-                assert!(scope.poll().is_err());
-                assert!(permit.complete().is_err());
+            DetectorContractViolation::PollDuringCallback => {
+                assert!(
+                    scope
+                        .with_work(1, || {
+                            assert!(scope.poll().is_err());
+                            Ok(DetectionOutcome::NoMatch)
+                        })
+                        .is_err()
+                );
             }
             DetectorContractViolation::ReplayAbort => {
                 if self.detect_calls.fetch_add(1, Ordering::AcqRel) == 0 {
-                    let stale = match scope.begin_work(u64::MAX) {
+                    let stale = match scope.with_work(u64::MAX, || Ok(DetectionOutcome::NoMatch)) {
                         Ok(_) => panic!("oversized detector work must be rejected"),
                         Err(abort) => abort,
                     };
@@ -644,21 +667,21 @@ fn detector_panic_cannot_replace_latched_cancellation_and_poisons_registration()
 }
 
 #[test]
-fn detector_cannot_hold_multiple_work_permits() {
+fn detector_cannot_nest_work_callbacks() {
     let parse_calls = Arc::new(AtomicUsize::new(0));
     let request = request_for(DetectorContractImporter {
-        violation: DetectorContractViolation::MultiplePermits,
+        violation: DetectorContractViolation::NestedWork,
         detect_calls: AtomicUsize::new(0),
         parse_calls: Arc::clone(&parse_calls),
     });
 
     let failure = import_bytes(
         &request,
-        AssetPath::new("asset.detector-multiple-permits").expect("valid multiple permit source"),
+        AssetPath::new("asset.detector-nested-work").expect("valid nested work source"),
         DETECTOR_SCAN_BYTES,
         ImportOperationControl::default(),
     )
-    .expect_err("a second outstanding detector permit must terminate the session");
+    .expect_err("nested detector work must terminate the session");
 
     assert_detector_contract_failure(&failure, "detection-work-already-in-progress", 1, 1);
     assert_eq!(parse_calls.load(Ordering::Acquire), 0);
@@ -686,39 +709,39 @@ fn detector_cannot_admit_zero_sized_work() {
 }
 
 #[test]
-fn detector_cannot_drop_unfinished_work_and_return_a_match() {
+fn detector_callback_error_preserves_attempted_without_consumed_work() {
     let parse_calls = Arc::new(AtomicUsize::new(0));
     let request = request_for(DetectorContractImporter {
-        violation: DetectorContractViolation::DroppedPermit,
+        violation: DetectorContractViolation::CallbackError,
         detect_calls: AtomicUsize::new(0),
         parse_calls: Arc::clone(&parse_calls),
     });
 
     let failure = import_bytes(
         &request,
-        AssetPath::new("asset.detector-dropped-permit").expect("valid dropped permit source"),
+        AssetPath::new("asset.detector-callback-error").expect("valid callback error source"),
         DETECTOR_SCAN_BYTES,
         ImportOperationControl::default(),
     )
-    .expect_err("dropping unfinished detector work must terminate the session");
+    .expect_err("a detector callback error must terminate the session");
 
-    assert_detector_contract_failure(&failure, "detection-work-permit-dropped", 1, 0);
+    assert_detector_contract_failure(&failure, "detection-poll-during-work", 1, 0);
     assert_eq!(parse_calls.load(Ordering::Acquire), 0);
 }
 
 #[test]
-fn detector_poll_during_work_latches_contract_after_consumed_work() {
+fn detector_poll_during_callback_latches_contract_after_consumed_work() {
     let parse_calls = Arc::new(AtomicUsize::new(0));
     let request = request_for(DetectorContractImporter {
-        violation: DetectorContractViolation::PollDuringPermit,
+        violation: DetectorContractViolation::PollDuringCallback,
         detect_calls: AtomicUsize::new(0),
         parse_calls: Arc::clone(&parse_calls),
     });
 
     let failure = import_bytes(
         &request,
-        AssetPath::new("asset.detector-poll-during-permit")
-            .expect("valid poll during permit source"),
+        AssetPath::new("asset.detector-poll-during-callback")
+            .expect("valid poll during callback source"),
         DETECTOR_SCAN_BYTES,
         ImportOperationControl::default(),
     )

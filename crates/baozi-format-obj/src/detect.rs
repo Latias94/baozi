@@ -52,10 +52,9 @@ fn strip_bom_accounted<'text>(
     if inspected == 0 {
         return Ok(text);
     }
-    let permit = scope.begin_work(inspected as u64)?;
-    let stripped = text.strip_prefix(UTF8_BOM).unwrap_or(text);
-    permit.complete()?;
-    Ok(stripped)
+    scope.with_work(inspected as u64, || {
+        Ok(text.strip_prefix(UTF8_BOM).unwrap_or(text))
+    })
 }
 
 fn scan_obj_text(text: &str) -> bool {
@@ -115,10 +114,7 @@ fn account_detection_work<T>(
     if byte_count == 0 {
         return Ok(work());
     }
-    let permit = scope.begin_work(byte_count as u64)?;
-    let result = work();
-    permit.complete()?;
-    Ok(result)
+    scope.with_work(byte_count as u64, || Ok(work()))
 }
 
 fn has_float_components<'a>(mut tokens: impl Iterator<Item = &'a str>, minimum: usize) -> bool {

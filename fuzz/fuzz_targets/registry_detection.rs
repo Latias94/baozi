@@ -218,19 +218,19 @@ impl FormatImporter for SyntheticImporter {
         _hint: &ReadHint,
         scope: &DetectionScope<'_>,
     ) -> DetectionResult<DetectionOutcome> {
-        let permit = match self.plan {
+        let measured = match self.plan {
             DetectorPlan::ProbeByte { offset, .. }
                 if probe.bytes().get(usize::from(offset)).is_some() =>
             {
-                Some(scope.begin_work(1)?)
+                true
             }
-            _ => None,
+            _ => false,
         };
-        let outcome = self.plan.detect(probe);
-        if let Some(permit) = permit {
-            permit.complete()?;
+        if measured {
+            scope.with_work(1, || Ok(self.plan.detect(probe)))
+        } else {
+            Ok(self.plan.detect(probe))
         }
-        Ok(outcome)
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {

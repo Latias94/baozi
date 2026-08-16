@@ -46,8 +46,5 @@ fn starts_with_accounted(
     if inspected == 0 {
         return Ok(bytes.starts_with(prefix));
     }
-    let permit = scope.begin_work(inspected as u64)?;
-    let result = bytes.starts_with(prefix);
-    permit.complete()?;
-    Ok(result)
+    scope.with_work(inspected as u64, || Ok(bytes.starts_with(prefix)))
 }

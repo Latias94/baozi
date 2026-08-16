@@ -47,6 +47,16 @@ impl fmt::Display for DetectionAbort {
 impl std::error::Error for DetectionAbort {}
 
 /// Capability-limited cancellation and work accounting for one detector invocation.
+///
+/// Detector work is callback-scoped; the former escaping permit API is intentionally absent.
+///
+/// ```compile_fail
+/// use baozi_import::DetectionScope;
+///
+/// fn escaping_work_is_not_available(scope: &DetectionScope<'_>) {
+///     let _permit = scope.begin_work(1);
+/// }
+/// ```
 pub struct DetectionScope<'session> {
     coordinator: &'session RefCell<ImportCoordinator>,
     terminal: &'session RefCell<Option<ScopeAbortCause>>,
@@ -85,8 +95,32 @@ impl<'session> DetectionScope<'session> {
         self.poll_active()
     }
 
-    /// Admits one bounded detector work chunk after polling operation control.
-    pub fn begin_work(&self, amount: u64) -> DetectionResult<DetectionWorkPermit<'_, 'session>> {
+    /// Runs one bounded detector work chunk after polling operation control.
+    ///
+    /// The work capability is confined to this call: success records the complete chunk and polls
+    /// control once more, while an error preserves attempted work without fabricating completion.
+    /// A panic clears the callback-active marker before it continues into the registry's existing
+    /// containment boundary.
+    pub fn with_work<T>(
+        &self,
+        amount: u64,
+        action: impl FnOnce() -> DetectionResult<T>,
+    ) -> DetectionResult<T> {
+        let mut work = self.begin_work(amount)?;
+        match action() {
+            Ok(value) => {
+                work.complete()?;
+                Ok(value)
+            }
+            Err(cause) => {
+                work.finish_partial();
+                let _ = self.poll_active();
+                Err(cause)
+            }
+        }
+    }
+
+    fn begin_work(&self, amount: u64) -> DetectionResult<DetectionWorkGuard<'_, 'session>> {
         self.preflight_active()?;
         if self.work_outstanding.get() {
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
@@ -113,7 +147,7 @@ impl<'session> DetectionScope<'session> {
             .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
 
         self.work_outstanding.set(true);
-        Ok(DetectionWorkPermit {
+        Ok(DetectionWorkGuard {
             scope: self,
             amount,
             finished: false,
@@ -123,7 +157,7 @@ impl<'session> DetectionScope<'session> {
     pub(crate) fn into_terminal_abort(self) -> Option<ScopeAbort> {
         if self.work_outstanding.replace(false) {
             let _ = self.abort(ScopeAbortCause::DescriptorContract {
-                code: "detection-work-permit-forgotten",
+                code: "detection-work-callback-unresolved",
             });
         }
         self.terminal.borrow_mut().take().map(ScopeAbort::new)
@@ -173,31 +207,34 @@ impl<'session> DetectionScope<'session> {
     }
 }
 
-/// Linear permit for one detector work chunk.
-#[must_use = "complete the permit after detector work is consumed"]
-pub struct DetectionWorkPermit<'scope, 'session> {
+struct DetectionWorkGuard<'scope, 'session> {
     scope: &'scope DetectionScope<'session>,
     amount: u64,
     finished: bool,
 }
 
-impl DetectionWorkPermit<'_, '_> {
-    /// Commits consumed work, then polls control before the detector continues.
-    pub fn complete(mut self) -> DetectionResult<()> {
+impl DetectionWorkGuard<'_, '_> {
+    fn complete(&mut self) -> DetectionResult<()> {
         let committed = self.scope.commit_work(self.amount);
         self.scope.work_outstanding.set(false);
         self.finished = true;
         committed?;
         self.scope.poll_active()
     }
+
+    fn finish_partial(&mut self) {
+        self.scope.work_outstanding.set(false);
+        self.finished = true;
+    }
 }
 
-impl Drop for DetectionWorkPermit<'_, '_> {
+impl Drop for DetectionWorkGuard<'_, '_> {
     fn drop(&mut self) {
         if !self.finished && self.scope.work_outstanding.replace(false) {
-            let _ = self.scope.abort(ScopeAbortCause::DescriptorContract {
-                code: "detection-work-permit-dropped",
-            });
+            debug_assert!(
+                std::thread::panicking(),
+                "the private detector work guard may only be abandoned by unwinding"
+            );
         }
     }
 }

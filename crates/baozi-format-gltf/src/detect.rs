@@ -97,8 +97,5 @@ fn account_detection_work<T>(
     if byte_count == 0 {
         return Ok(work());
     }
-    let permit = scope.begin_work(byte_count as u64)?;
-    let result = work();
-    permit.complete()?;
-    Ok(result)
+    scope.with_work(byte_count as u64, || Ok(work()))
 }

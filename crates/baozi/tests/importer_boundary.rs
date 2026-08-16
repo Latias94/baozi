@@ -43,20 +43,18 @@ impl FormatImporter for OpenOnceImporter {
         _hint: &ReadHint,
         scope: &DetectionScope<'_>,
     ) -> DetectionResult<DetectionOutcome> {
-        let permit = if probe.bytes().is_empty() {
-            None
-        } else {
-            Some(scope.begin_work(probe.bytes().len() as u64)?)
+        let detect = || {
+            Ok(if probe.bytes() == b"stable primary" {
+                DetectionOutcome::Match(ReadConfidence::Certain)
+            } else {
+                DetectionOutcome::NoMatch
+            })
         };
-        let outcome = if probe.bytes() == b"stable primary" {
-            DetectionOutcome::Match(ReadConfidence::Certain)
+        if probe.bytes().is_empty() {
+            detect()
         } else {
-            DetectionOutcome::NoMatch
-        };
-        if let Some(permit) = permit {
-            permit.complete()?;
+            scope.with_work(probe.bytes().len() as u64, detect)
         }
-        Ok(outcome)
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<baozi_core::SceneDraft> {
