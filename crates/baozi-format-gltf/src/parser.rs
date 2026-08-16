@@ -7,9 +7,10 @@ use baozi_core::{
 };
 use baozi_import::{
     CameraBuildConfig, DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass,
-    MaterialBuildConfig, MeshBuildConfig, MeteredOrderedMap, MeteredSceneVec, MeteredString,
-    MeteredVec, NodeBuildConfig, ParseFailure, ParseResult, ParseScope, SceneValueParts,
-    ScopedSceneBuilder, SkinBuildConfig, TextureBuildConfig, TextureSlotBuildConfig,
+    ImportWorkScope, MaterialBuildConfig, MeshBuildConfig, MeteredOrderedMap, MeteredSceneVec,
+    MeteredString, MeteredVec, NodeBuildConfig, ParseFailure, ParseResult, ParseScope,
+    SceneValueParts, ScopedSceneBuilder, SkinBuildConfig, TextureBuildConfig,
+    TextureSlotBuildConfig,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::{DecodeError, DecodeSliceError, Engine as _};
@@ -1799,6 +1800,47 @@ fn collect_exact<'scope, T>(
     Ok(collected)
 }
 
+fn collect_exact_with_work<'scope, T, const N: usize>(
+    ctx: &'scope ParseScope<'_>,
+    work: &mut ImportWorkScope<'_, '_, N>,
+    expected: usize,
+    allocation: &'static str,
+    operation: &'static str,
+    mut values: impl Iterator<Item = T>,
+    per_item: [u64; N],
+) -> Result<MeteredVec<'scope, T>> {
+    let mut collected = ctx.metered_vec(ImportStorageClass::FormatNormalization, allocation);
+    collected.try_reserve(expected)?;
+    loop {
+        if collected.len().is_multiple_of(PARSER_POLL_INTERVAL) {
+            work.poll()?;
+        }
+        let next =
+            finish_gltf_operation(operation, catch_unwind(AssertUnwindSafe(|| values.next())))?;
+        let Some(value) = next else {
+            break;
+        };
+        if collected.len() == expected {
+            return Err(gltf_parse_error(
+                ctx,
+                format!("{allocation} produced more than {expected} values"),
+            ));
+        }
+        collected.try_push_reserved(value)?;
+        work.complete(per_item)?;
+    }
+    if collected.len() != expected {
+        return Err(gltf_parse_error(
+            ctx,
+            format!(
+                "{allocation} produced {} values, expected {expected}",
+                collected.len()
+            ),
+        ));
+    }
+    Ok(collected)
+}
+
 fn try_vec_capacity<'scope, T>(
     ctx: &'scope ParseScope<'_>,
     class: ImportStorageClass,
@@ -2173,17 +2215,20 @@ fn preflight_node_graph<'document, 'scope>(
             (ImportWorkClass::GraphWork, to_u64(node_count)),
         ],
         |work| -> Result<_> {
-            let nodes = safe_gltf(ctx, "glTF nodes", || {
-                collect_exact(
-                    ctx,
-                    ImportStorageClass::FormatNormalization,
-                    node_count,
-                    "gltf-node-list",
-                    gltf.nodes(),
-                )
-            })??;
-            work.complete_all()?;
-            Ok(nodes)
+            work.poll()?;
+            let nodes = finish_gltf_operation(
+                "glTF node iterator construction",
+                catch_unwind(AssertUnwindSafe(|| gltf.nodes())),
+            )?;
+            collect_exact_with_work(
+                ctx,
+                work,
+                node_count,
+                "gltf-node-list",
+                "glTF node iteration",
+                nodes,
+                [1, 1],
+            )
         },
     )?;
     let mut children = try_vec_capacity(
@@ -2208,17 +2253,36 @@ fn preflight_node_graph<'document, 'scope>(
                 (ImportWorkClass::GraphWork, to_u64(child_count)),
             ],
             |work| -> Result<_> {
-                let child_indices = safe_gltf(ctx, "glTF node children", || {
-                    collect_exact(
-                        ctx,
-                        ImportStorageClass::FormatNormalization,
-                        child_count,
-                        "gltf-node-child-list",
-                        node.children().map(|child| child.index()),
-                    )
-                })??;
-                for &child_index in child_indices.as_slice() {
-                    work.poll()?;
+                let mut child_indices = ctx.metered_vec(
+                    ImportStorageClass::FormatNormalization,
+                    "gltf-node-child-list",
+                );
+                child_indices.try_reserve(child_count)?;
+                work.poll()?;
+                let mut node_children = finish_gltf_operation(
+                    "glTF node child iterator construction",
+                    catch_unwind(AssertUnwindSafe(|| node.children())),
+                )?;
+                loop {
+                    if child_indices.len().is_multiple_of(PARSER_POLL_INTERVAL) {
+                        work.poll()?;
+                    }
+                    let next = finish_gltf_operation(
+                        "glTF node child iteration",
+                        catch_unwind(AssertUnwindSafe(|| node_children.next())),
+                    )?;
+                    let Some(child) = next else {
+                        break;
+                    };
+                    if child_indices.len() == child_count {
+                        return Err(gltf_parse_error(
+                            ctx,
+                            format!(
+                                "gltf-node-child-list produced more than {child_count} values"
+                            ),
+                        ));
+                    }
+                    let child_index = child.index();
                     if child_index >= node_count {
                         return Err(gltf_parse_error(
                             ctx,
@@ -2241,8 +2305,18 @@ fn preflight_node_graph<'document, 'scope>(
                             ),
                         ));
                     }
+                    child_indices.try_push_reserved(child_index)?;
                     parents.as_mut_slice()[child_index] = Some(parent_index);
                     work.complete([1, 1])?;
+                }
+                if child_indices.len() != child_count {
+                    return Err(gltf_parse_error(
+                        ctx,
+                        format!(
+                            "gltf-node-child-list produced {} values, expected {child_count}",
+                            child_indices.len()
+                        ),
+                    ));
                 }
                 Ok(child_indices)
             },
@@ -2381,30 +2455,36 @@ fn select_and_validate_scene_roots<'scope>(
     parents: &[Option<usize>],
 ) -> Result<MeteredVec<'scope, usize>> {
     let scene_count = safe_gltf(ctx, "glTF scene count", || gltf.scenes().len())?;
-    let mut scene_roots = try_vec_capacity(
-        ctx,
+    let mut scene_roots = ctx.metered_vec(
         ImportStorageClass::FormatNormalization,
-        scene_count,
         "gltf-scene-root-lists",
-    )?;
+    );
 
     for (scene_index, scene) in gltf.scenes().enumerate() {
         poll_parser_loop(ctx, scene_index)?;
         let roots = ctx.with_work(ImportWorkClass::GraphWork, 1, |work| -> Result<_> {
-            let root_count = safe_gltf(ctx, "glTF scene root count", || scene.nodes().len())?;
+            scene_roots.try_reserve(1)?;
+            work.poll()?;
+            let root_count = finish_gltf_operation(
+                "glTF scene root count",
+                catch_unwind(AssertUnwindSafe(|| scene.nodes().len())),
+            )?;
             work.complete_all()?;
             work.replenish(to_u64(root_count))?;
-            let roots = safe_gltf(ctx, "glTF scene roots", || {
-                collect_exact(
-                    ctx,
-                    ImportStorageClass::FormatNormalization,
-                    root_count,
-                    "gltf-scene-roots",
-                    scene.nodes().map(|node| node.index()),
-                )
-            })??;
-            work.complete_all()?;
-            Ok(roots)
+            work.poll()?;
+            let roots = finish_gltf_operation(
+                "glTF scene root iterator construction",
+                catch_unwind(AssertUnwindSafe(|| scene.nodes())),
+            )?;
+            collect_exact_with_work(
+                ctx,
+                work,
+                root_count,
+                "gltf-scene-roots",
+                "glTF scene root iteration",
+                roots.map(|node| node.index()),
+                [1],
+            )
         })?;
         scene_roots.try_push_reserved(roots)?;
     }
@@ -2465,28 +2545,36 @@ fn select_and_validate_scene_roots<'scope>(
             }
             Ok(roots)
         }
-        None => {
-            let mut roots = try_vec_capacity(
-                ctx,
+        None => ctx.with_work(ImportWorkClass::GraphWork, 1, |work| -> Result<_> {
+            let mut roots = ctx.metered_vec(
                 ImportStorageClass::FormatNormalization,
-                parents.len(),
                 "gltf-derived-scene-roots",
-            )?;
-            for (node_index, parent) in parents.iter().enumerate() {
-                poll_parser_loop(ctx, node_index)?;
-                if parent.is_none() {
+            );
+            work.complete_all()?;
+            for (chunk_index, chunk) in parents.chunks(PARSER_POLL_INTERVAL).enumerate() {
+                work.poll()?;
+                let root_count = chunk.iter().filter(|parent| parent.is_none()).count();
+                if root_count == 0 {
+                    continue;
+                }
+                work.replenish(to_u64(root_count))?;
+                roots.try_reserve(root_count)?;
+                let base = chunk_index
+                    .checked_mul(PARSER_POLL_INTERVAL)
+                    .ok_or_else(|| ctx.allocation_failure("gltf-derived-root-index"))?;
+                for (offset, parent) in chunk.iter().enumerate() {
+                    if parent.is_some() {
+                        continue;
+                    }
+                    let node_index = base
+                        .checked_add(offset)
+                        .ok_or_else(|| ctx.allocation_failure("gltf-derived-root-index"))?;
                     roots.try_push_reserved(node_index)?;
+                    work.complete([1])?;
                 }
             }
-            let synthetic_work = roots
-                .len()
-                .checked_add(1)
-                .ok_or_else(|| ctx.allocation_failure("gltf-derived-root-work"))?;
-            ctx.with_work(ImportWorkClass::GraphWork, to_u64(synthetic_work), |work| {
-                work.complete_all()
-            })?;
             Ok(roots)
-        }
+        }),
     }
 }
 

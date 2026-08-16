@@ -1,11 +1,40 @@
 mod common;
 
 use baozi_format_gltf::GltfFailureCode;
-use baozi_import::{ImportDimension, ImportFailure, ImportReport, ImportResult};
+use baozi_import::{
+    ImportCause, ImportDimension, ImportFailure, ImportOperationControl, ImportProgressPhase,
+    ImportProgressUnit, ImportReport, ImportResult, ScopeAbortCause,
+};
+use baozi_operation::{
+    CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
+};
 use common::{
     GltfTestOptions, TestResult, assert_gltf_failure, assert_resource_limit, expected_error,
-    import_assets, import_assets_result,
+    import_assets, import_assets_result, import_assets_result_with_control,
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
+const GRAPH_POLL_INTERVAL: usize = 4_096;
+
+#[derive(Clone)]
+struct GraphPollCancellation {
+    armed: Arc<AtomicBool>,
+    polls: Arc<AtomicUsize>,
+    cancel_on: Option<usize>,
+}
+
+impl CancellationSignal for GraphPollCancellation {
+    fn is_cancelled(&self) -> bool {
+        if !self.armed.load(Ordering::SeqCst) {
+            return false;
+        }
+        let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+        self.cancel_on.is_some_and(|cancel_on| poll >= cancel_on)
+    }
+}
 
 fn graph_document(scene_fields: &str, nodes: &str) -> Vec<u8> {
     format!(
@@ -35,6 +64,84 @@ fn import_graph_result(
     Ok(result)
 }
 
+fn controlled_graph_result(
+    document: &[u8],
+    options: GltfTestOptions,
+    cancel_on: Option<usize>,
+) -> TestResult<(ImportResult<ImportReport>, usize)> {
+    let armed = Arc::new(AtomicBool::new(false));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let signal = GraphPollCancellation {
+        armed: Arc::clone(&armed),
+        polls: Arc::clone(&polls),
+        cancel_on,
+    };
+    let control = ImportOperationControl::default()
+        .with_cancellation(signal)
+        .with_progress_observer(
+            move |event: ProgressEvent<ImportProgressPhase, ImportProgressUnit>| {
+                if event.phase() == ImportProgressPhase::Detect {
+                    armed.store(true, Ordering::SeqCst);
+                }
+                ProgressDecision::Continue
+            },
+        );
+    let (result, diagnostics) = import_assets_result_with_control(
+        "graph.gltf",
+        [("graph.gltf", document.to_vec())],
+        options,
+        control,
+    )?;
+    assert!(diagnostics.is_empty());
+    Ok((result, polls.load(Ordering::SeqCst)))
+}
+
+fn assert_cancelled(failure: &ImportFailure) {
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::Control(ControlCause::Cancelled {
+                    origin: CancellationOrigin::Signal,
+                })
+            )
+    ));
+}
+
+fn cancelled_dimension_counts(
+    document: &[u8],
+    cancel_on: usize,
+    dimension: ImportDimension,
+) -> TestResult<(u64, u64)> {
+    let (result, polls) =
+        controlled_graph_result(document, GltfTestOptions::memory(), Some(cancel_on))?;
+    let failure = expected_error(result)?;
+    assert_cancelled(&failure);
+    assert_eq!(polls, cancel_on);
+    Ok(dimension_counts(&failure, dimension))
+}
+
+fn first_cancelled_prefix_at_least(
+    document: &[u8],
+    total_polls: usize,
+    dimension: ImportDimension,
+    target_consumed: u64,
+) -> TestResult<(usize, (u64, u64))> {
+    let mut low = 1usize;
+    let mut high = total_polls;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let (_, consumed) = cancelled_dimension_counts(document, middle, dimension)?;
+        if consumed >= target_consumed {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    Ok((low, cancelled_dimension_counts(document, low, dimension)?))
+}
+
 fn assert_parse_failure(document: Vec<u8>, expected_message: &str) -> TestResult<()> {
     let error = expected_error(import_graph_result(document, GltfTestOptions::memory())?)?;
     assert_gltf_failure(
@@ -60,6 +167,84 @@ fn dimension_counts(error: &ImportFailure, dimension: ImportDimension) -> (u64, 
         .dimension(dimension)
         .expect("tested graph dimension is configured");
     (snapshot.attempted(), snapshot.consumed())
+}
+
+#[test]
+fn large_node_and_scene_root_cancellation_preserves_exact_completed_prefixes() -> TestResult<()> {
+    let item_count = GRAPH_POLL_INTERVAL + 1;
+    let roots = (0..item_count)
+        .map(|index| index.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let nodes = (0..item_count).map(|_| "{}").collect::<Vec<_>>().join(", ");
+    let document = scene_with_roots(&roots, &nodes);
+    let (calibration, total_polls) =
+        controlled_graph_result(&document, GltfTestOptions::memory(), None)?;
+    let _report = calibration?;
+    assert!(total_polls > 0);
+
+    let (_, node_counts) = first_cancelled_prefix_at_least(
+        &document,
+        total_polls,
+        ImportDimension::GraphNodes,
+        GRAPH_POLL_INTERVAL as u64,
+    )?;
+    assert_eq!(node_counts, (item_count as u64, GRAPH_POLL_INTERVAL as u64));
+
+    let root_prefix = (item_count + 1 + GRAPH_POLL_INTERVAL) as u64;
+    let (_, root_counts) = first_cancelled_prefix_at_least(
+        &document,
+        total_polls,
+        ImportDimension::GraphWork,
+        root_prefix,
+    )?;
+    assert_eq!(root_counts, ((item_count * 2 + 1) as u64, root_prefix));
+    Ok(())
+}
+
+#[test]
+fn scene_graph_work_is_admitted_before_scene_root_list_storage() -> TestResult<()> {
+    let scene_count = GRAPH_POLL_INTERVAL;
+    let scenes = (0..scene_count)
+        .map(|_| r#"{ "nodes": [] }"#)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let document = graph_document(&format!(r#""scene": 0, "scenes": [{scenes}],"#), "");
+
+    let mut calibration_options = GltfTestOptions::memory();
+    calibration_options.limits.max_graph_work = 0;
+    let (calibration, total_polls) = controlled_graph_result(&document, calibration_options, None)?;
+    let calibration_failure = expected_error(calibration)?;
+    assert_resource_limit(&calibration_failure, "max_graph_work");
+    assert!(total_polls > 8);
+
+    let mut pre_admission_peaks = Vec::new();
+    for cancel_on in (total_polls - 8)..=total_polls {
+        let (result, polls) =
+            controlled_graph_result(&document, GltfTestOptions::memory(), Some(cancel_on))?;
+        let failure = expected_error(result)?;
+        assert_cancelled(&failure);
+        assert_eq!(polls, cancel_on);
+        if dimension_counts(&failure, ImportDimension::GraphWork).0 == 0 {
+            pre_admission_peaks.push(failure.ledger().peak_live_bytes());
+        }
+    }
+    let pre_scene_root_peak = *pre_admission_peaks
+        .iter()
+        .min()
+        .expect("calibration window is non-empty");
+
+    let mut options = GltfTestOptions::memory();
+    options.limits.max_graph_work = 0;
+    options.limits.max_live_bytes = pre_scene_root_peak;
+    let failure = expected_error(import_graph_result(document, options)?)?;
+    assert_resource_limit(&failure, "max_graph_work");
+    assert_eq!(
+        dimension_counts(&failure, ImportDimension::GraphWork),
+        (1, 0)
+    );
+    assert_eq!(failure.ledger().peak_live_bytes(), pre_scene_root_peak);
+    Ok(())
 }
 
 #[test]
