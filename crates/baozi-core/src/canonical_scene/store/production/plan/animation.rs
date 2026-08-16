@@ -706,7 +706,7 @@ impl<'control, C: CanonicalAuthoringControl> AnimationValidationContext<'control
     fn run_unit<R>(
         &mut self,
         kind: SceneValidationWork,
-        action: impl FnOnce() -> R,
+        action: impl FnMut() -> R,
     ) -> AnimationValidationResult<R, C> {
         let final_work = self.work.checked_add(1).ok_or(
             AnimationAuthoringSemanticError::AccountingOverflow {
@@ -734,7 +734,7 @@ impl<'control, C: CanonicalAuthoringControl> AnimationValidationContext<'control
     fn run_semantic_unit<T>(
         &mut self,
         kind: SceneValidationWork,
-        action: impl FnOnce() -> Result<T, AnimationAuthoringSemanticError>,
+        action: impl FnMut() -> Result<T, AnimationAuthoringSemanticError>,
     ) -> AnimationValidationResult<T, C> {
         self.run_unit(kind, action)?
             .map_err(AnimationAuthoringFailure::Semantic)

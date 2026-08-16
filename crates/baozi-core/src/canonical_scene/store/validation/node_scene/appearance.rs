@@ -1,12 +1,17 @@
+use baozi_operation::__canonical_activation::{
+    CanonicalValidationMember, CanonicalValidationSession,
+};
 use baozi_operation::{
-    CanonicalBytesRef, CanonicalRecordRef, CanonicalRecordView, CanonicalSequenceRef,
-    CanonicalUtf8Ref, StoreValidationSession,
+    ByteBlock, CanonicalBytesRef, CanonicalRecordRef, CanonicalRecordView, CanonicalSequenceRef,
+    CanonicalUtf8Ref, OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, ScalarSequence,
+    StoreValidationSession, StoreWorkError, Utf8Block,
 };
 
 use crate::appearance::{
-    MaterialFactors, MaterialSemanticsRef, TextureBindingSemanticsRef, TextureChannel,
-    TextureChannelMapping, TextureChannelSwizzle, TextureRoleKind, TextureSourceKey,
-    validate_material_semantics, validate_texture_binding_semantics,
+    MAX_TEXTURE_SOURCE_KEY_BYTES, MaterialFactors, MaterialSemanticsRef,
+    TextureBindingSemanticsRef, TextureChannel, TextureChannelMapping, TextureChannelSwizzle,
+    TextureRoleKind, TextureSourceKey, validate_material_semantics,
+    validate_texture_binding_semantics,
 };
 use crate::canonical_scene::store::production::{Presence, ValidatedAppearanceBatch};
 use crate::canonical_scene::store::schema::CanonicalBlockRef;
@@ -32,7 +37,7 @@ use crate::canonical_scene::store::schema::appearance::{
     decode_appearance_texture_role, encode_appearance_address_mode,
     encode_appearance_mipmap_filter, encode_appearance_texel_filter,
 };
-use crate::extension::ExtensionMediaType;
+use crate::extension::{ExtensionMediaType, MAX_EXTENSION_MEDIA_TYPE_BYTES};
 
 use super::super::require_scalar;
 
@@ -52,17 +57,53 @@ pub(super) struct AppearanceValidatedRefs {
         Option<CanonicalBlockRef<AppearanceMaterialFactorScalarSchema>>,
 }
 
+/// Validation-scoped appearance members retained for cross-domain checks.
 #[derive(Clone, Copy)]
-pub(super) struct AppearanceCanonicalCounts {
-    images: u32,
-    samplers: u32,
-    textures: u32,
-    materials: u32,
-    bindings: u32,
+pub(super) struct AppearanceValidationMembers<'session> {
+    pub(super) images:
+        Option<CanonicalValidationMember<'session, RecordBlock, AppearanceImageTableSchema>>,
+    pub(super) samplers:
+        Option<CanonicalValidationMember<'session, RecordBlock, AppearanceSamplerTableSchema>>,
+    pub(super) textures:
+        Option<CanonicalValidationMember<'session, RecordBlock, AppearanceTextureTableSchema>>,
+    pub(super) materials:
+        Option<CanonicalValidationMember<'session, RecordBlock, AppearanceMaterialTableSchema>>,
+    pub(super) bindings:
+        Option<CanonicalValidationMember<'session, RecordBlock, AppearanceBindingTableSchema>>,
+    pub(super) image_payloads:
+        Option<CanonicalValidationMember<'session, ByteBlock, AppearanceEncodedImagePayloadSchema>>,
+    pub(super) media_types:
+        Option<CanonicalValidationMember<'session, Utf8Block, AppearanceMediaTypeSchema>>,
+    pub(super) source_keys:
+        Option<CanonicalValidationMember<'session, Utf8Block, AppearanceSourceKeySchema>>,
+    pub(super) binding_semantic_scalars: Option<
+        CanonicalValidationMember<
+            'session,
+            ScalarSequence<f32>,
+            AppearanceBindingSemanticScalarSchema,
+        >,
+    >,
+    pub(super) material_factor_scalars: Option<
+        CanonicalValidationMember<
+            'session,
+            ScalarSequence<f32>,
+            AppearanceMaterialFactorScalarSchema,
+        >,
+    >,
+    pub(super) counts: AppearanceCanonicalCounts,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct AppearanceCanonicalCounts {
+    pub(super) images: u32,
+    pub(super) samplers: u32,
+    pub(super) textures: u32,
+    pub(super) materials: u32,
+    pub(super) bindings: u32,
 }
 
 impl AppearanceCanonicalCounts {
-    pub(super) const fn new(
+    pub(in crate::canonical_scene::store) const fn new(
         images: u32,
         samplers: u32,
         textures: u32,
@@ -75,6 +116,208 @@ impl AppearanceCanonicalCounts {
             textures,
             materials,
             bindings,
+        }
+    }
+}
+
+/// Exact borrowed scratch shape required by typed appearance validation.
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct AppearanceValidationScratchRequirements {
+    image_media_counts: usize,
+    bindings: usize,
+    materials: usize,
+}
+
+impl AppearanceValidationScratchRequirements {
+    pub(in crate::canonical_scene::store) fn from_counts(
+        counts: AppearanceCanonicalCounts,
+    ) -> Option<Self> {
+        Some(Self {
+            image_media_counts: usize::try_from(counts.images).ok()?,
+            bindings: usize::try_from(counts.bindings).ok()?,
+            materials: usize::try_from(counts.materials).ok()?,
+        })
+    }
+
+    pub(in crate::canonical_scene::store) const fn image_media_counts(self) -> usize {
+        self.image_media_counts
+    }
+
+    pub(in crate::canonical_scene::store) const fn bindings(self) -> usize {
+        self.bindings
+    }
+
+    pub(in crate::canonical_scene::store) const fn materials(self) -> usize {
+        self.materials
+    }
+
+    pub(in crate::canonical_scene::store) fn initialization_work_units(self) -> Option<u64> {
+        [self.image_media_counts, self.bindings, self.materials]
+            .into_iter()
+            .try_fold(0_u64, |total, count| {
+                total.checked_add(u64::try_from(count).ok()?)
+            })
+    }
+
+    pub(in crate::canonical_scene::store) fn semantic_projection_work_units(self) -> Option<u64> {
+        u64::try_from(self.bindings).ok()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct AppearanceBindingValidationScratch {
+    role: u8,
+    coordinate_source: u8,
+    coordinate_set: u32,
+    channel_lane_count: u8,
+    channels: [u8; 4],
+    color_interpretation: u8,
+    blend_operation: u8,
+    semantic_values: [f32; APPEARANCE_BINDING_SEMANTIC_STRIDE],
+    source_key_count: u32,
+}
+
+impl AppearanceBindingValidationScratch {
+    pub(in crate::canonical_scene::store) const EMPTY: Self = Self {
+        role: 0,
+        coordinate_source: 0,
+        coordinate_set: 0,
+        channel_lane_count: 0,
+        channels: [0; 4],
+        color_interpretation: 0,
+        blend_operation: 0,
+        semantic_values: [0.0; APPEARANCE_BINDING_SEMANTIC_STRIDE],
+        source_key_count: 0,
+    };
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct AppearanceMaterialValidationScratch {
+    shading_model: u8,
+    alpha_mode: u8,
+    alpha_cutoff: f32,
+    double_sided: u8,
+    pbr_metallic_roughness_presence: u8,
+    pbr_specular_glossiness_presence: u8,
+    legacy_presence: u8,
+    binding_offset: u32,
+    binding_count: u32,
+}
+
+impl AppearanceMaterialValidationScratch {
+    pub(in crate::canonical_scene::store) const EMPTY: Self = Self {
+        shading_model: 0,
+        alpha_mode: 0,
+        alpha_cutoff: 0.0,
+        double_sided: 0,
+        pbr_metallic_roughness_presence: 0,
+        pbr_specular_glossiness_presence: 0,
+        legacy_presence: 0,
+        binding_offset: 0,
+        binding_count: 0,
+    };
+}
+
+/// Borrowed, reservation-backed scratch used only during typed appearance validation.
+pub(in crate::canonical_scene::store) struct AppearanceValidationScratch<'scratch> {
+    image_media_counts: &'scratch mut [u32],
+    bindings: &'scratch mut [AppearanceBindingValidationScratch],
+    materials: &'scratch mut [AppearanceMaterialValidationScratch],
+}
+
+type AppearanceScratchParts<'scratch> = (
+    &'scratch mut [u32],
+    &'scratch mut [AppearanceBindingValidationScratch],
+    &'scratch mut [AppearanceMaterialValidationScratch],
+);
+
+impl<'scratch> AppearanceValidationScratch<'scratch> {
+    pub(in crate::canonical_scene::store) const fn new(
+        image_media_counts: &'scratch mut [u32],
+        bindings: &'scratch mut [AppearanceBindingValidationScratch],
+        materials: &'scratch mut [AppearanceMaterialValidationScratch],
+    ) -> Self {
+        Self {
+            image_media_counts,
+            bindings,
+            materials,
+        }
+    }
+
+    fn parts(
+        &mut self,
+        requirements: AppearanceValidationScratchRequirements,
+    ) -> Option<AppearanceScratchParts<'_>> {
+        if self.image_media_counts.len() != requirements.image_media_counts
+            || self.bindings.len() != requirements.bindings
+            || self.materials.len() != requirements.materials
+        {
+            return None;
+        }
+        Some((
+            &mut *self.image_media_counts,
+            &mut *self.bindings,
+            &mut *self.materials,
+        ))
+    }
+}
+
+type AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U> =
+    CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>;
+
+#[derive(Clone, Copy)]
+struct AppearanceDirectoryMembers<'session> {
+    images: Option<CanonicalValidationMember<'session, RecordBlock, AppearanceImageTableSchema>>,
+    samplers:
+        Option<CanonicalValidationMember<'session, RecordBlock, AppearanceSamplerTableSchema>>,
+    textures:
+        Option<CanonicalValidationMember<'session, RecordBlock, AppearanceTextureTableSchema>>,
+    materials:
+        Option<CanonicalValidationMember<'session, RecordBlock, AppearanceMaterialTableSchema>>,
+    bindings:
+        Option<CanonicalValidationMember<'session, RecordBlock, AppearanceBindingTableSchema>>,
+    image_payloads:
+        Option<CanonicalValidationMember<'session, ByteBlock, AppearanceEncodedImagePayloadSchema>>,
+    media_types: Option<CanonicalValidationMember<'session, Utf8Block, AppearanceMediaTypeSchema>>,
+    source_keys: Option<CanonicalValidationMember<'session, Utf8Block, AppearanceSourceKeySchema>>,
+    binding_semantic_scalars: Option<
+        CanonicalValidationMember<
+            'session,
+            ScalarSequence<f32>,
+            AppearanceBindingSemanticScalarSchema,
+        >,
+    >,
+    material_factor_scalars: Option<
+        CanonicalValidationMember<
+            'session,
+            ScalarSequence<f32>,
+            AppearanceMaterialFactorScalarSchema,
+        >,
+    >,
+    image_payload_byte_count: usize,
+    media_type_byte_count: usize,
+    source_key_byte_count: usize,
+    binding_semantic_scalar_count: usize,
+    material_factor_scalar_count: usize,
+}
+
+impl<'session> AppearanceDirectoryMembers<'session> {
+    const fn validated(
+        self,
+        counts: AppearanceCanonicalCounts,
+    ) -> AppearanceValidationMembers<'session> {
+        AppearanceValidationMembers {
+            images: self.images,
+            samplers: self.samplers,
+            textures: self.textures,
+            materials: self.materials,
+            bindings: self.bindings,
+            image_payloads: self.image_payloads,
+            media_types: self.media_types,
+            source_keys: self.source_keys,
+            binding_semantic_scalars: self.binding_semantic_scalars,
+            material_factor_scalars: self.material_factor_scalars,
+            counts,
         }
     }
 }
@@ -532,6 +775,1253 @@ impl<R> AppearanceEquivalence for FreshAppearanceEquivalence<'_, '_, R> {
             )
         }
     }
+}
+
+/// Validates the canonical appearance closure exclusively through typed, metered visits.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn validate_appearance_canonical_structure_metered<
+    'session,
+    'storage,
+    'control,
+    'operation,
+    O,
+    PP,
+    U,
+>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    appearance: CanonicalValidationMember<'session, RecordBlock, AppearanceDirectorySchema>,
+    counts: AppearanceCanonicalCounts,
+    scratch: &mut AppearanceValidationScratch<'_>,
+) -> Result<Option<AppearanceValidationMembers<'session>>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(requirements) = AppearanceValidationScratchRequirements::from_counts(counts) else {
+        return Ok(None);
+    };
+    let Some((image_media_counts, binding_scratch, material_scratch)) = scratch.parts(requirements)
+    else {
+        return Ok(None);
+    };
+    let Some(directory) = visit_appearance_directory(session, appearance, counts)? else {
+        return Ok(None);
+    };
+
+    if !visit_appearance_images(session, directory, image_media_counts)?
+        || !visit_appearance_samplers(session, directory, counts)?
+        || !visit_appearance_textures(session, directory, counts)?
+        || !visit_appearance_bindings(session, directory, counts, binding_scratch)?
+        || !visit_appearance_materials(session, directory, counts, material_scratch)?
+        || !visit_appearance_image_payloads(session, directory)?
+        || !visit_appearance_media_types(session, directory, image_media_counts)?
+        || !visit_appearance_binding_semantics(session, directory, binding_scratch)?
+        || !visit_appearance_source_keys(session, directory, binding_scratch)?
+        || !visit_appearance_material_factors(session, directory, material_scratch)?
+        || !validate_material_binding_authority_metered(session, binding_scratch, material_scratch)?
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(directory.validated(counts)))
+}
+
+#[allow(clippy::too_many_lines)]
+fn visit_appearance_directory<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    appearance: CanonicalValidationMember<'session, RecordBlock, AppearanceDirectorySchema>,
+    counts: AppearanceCanonicalCounts,
+) -> Result<Option<AppearanceDirectoryMembers<'session>>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let (Ok(binding_stride), Ok(factor_stride)) = (
+        u32::try_from(APPEARANCE_BINDING_SEMANTIC_STRIDE),
+        u32::try_from(APPEARANCE_MATERIAL_FACTOR_STRIDE),
+    ) else {
+        return Ok(None);
+    };
+    let expected_binding_semantic_scalar_count = counts.bindings.checked_mul(binding_stride);
+    let expected_material_factor_scalar_count = counts.materials.checked_mul(factor_stride);
+    let (Some(expected_binding_semantic_scalar_count), Some(expected_material_factor_scalar_count)) = (
+        expected_binding_semantic_scalar_count,
+        expected_material_factor_scalar_count,
+    ) else {
+        return Ok(None);
+    };
+
+    let mut schema_revision = None;
+    let mut image_count = None;
+    let mut images = None;
+    let mut images_absent = None;
+    let mut sampler_count = None;
+    let mut samplers = None;
+    let mut samplers_absent = None;
+    let mut texture_count = None;
+    let mut textures = None;
+    let mut textures_absent = None;
+    let mut material_count = None;
+    let mut materials = None;
+    let mut materials_absent = None;
+    let mut binding_count = None;
+    let mut bindings = None;
+    let mut bindings_absent = None;
+    let mut image_payload_byte_count = None;
+    let mut image_payloads = None;
+    let mut image_payloads_absent = None;
+    let mut media_type_byte_count = None;
+    let mut media_types = None;
+    let mut media_types_absent = None;
+    let mut source_key_byte_count = None;
+    let mut source_keys = None;
+    let mut source_keys_absent = None;
+    let mut binding_semantic_scalar_count = None;
+    let mut binding_semantic_scalars = None;
+    let mut binding_semantic_scalars_absent = None;
+    let mut material_factor_scalar_count = None;
+    let mut material_factor_scalars = None;
+    let mut material_factor_scalars_absent = None;
+
+    let complete = session.visit_canonical_records(
+        appearance,
+        1,
+        APPEARANCE_DIRECTORY_FIELD_COUNT,
+        |_row_index, row| {
+            schema_revision = row
+                .scalar(appearance_directory_field::SCHEMA_REVISION, |value: u32| {
+                    value
+                })?;
+            image_count =
+                row.scalar(appearance_directory_field::IMAGE_COUNT, |value: u32| value)?;
+            if image_count == Some(0) {
+                images_absent =
+                    row.scalar(appearance_directory_field::IMAGES, |value: u8| value)?;
+            } else {
+                images = row.record_ref::<AppearanceImageTableSchema, _>(
+                    appearance_directory_field::IMAGES,
+                    |value| value,
+                )?;
+            }
+            sampler_count = row
+                .scalar(appearance_directory_field::SAMPLER_COUNT, |value: u32| {
+                    value
+                })?;
+            if sampler_count == Some(0) {
+                samplers_absent =
+                    row.scalar(appearance_directory_field::SAMPLERS, |value: u8| value)?;
+            } else {
+                samplers = row.record_ref::<AppearanceSamplerTableSchema, _>(
+                    appearance_directory_field::SAMPLERS,
+                    |value| value,
+                )?;
+            }
+            texture_count = row
+                .scalar(appearance_directory_field::TEXTURE_COUNT, |value: u32| {
+                    value
+                })?;
+            if texture_count == Some(0) {
+                textures_absent =
+                    row.scalar(appearance_directory_field::TEXTURES, |value: u8| value)?;
+            } else {
+                textures = row.record_ref::<AppearanceTextureTableSchema, _>(
+                    appearance_directory_field::TEXTURES,
+                    |value| value,
+                )?;
+            }
+            material_count = row
+                .scalar(appearance_directory_field::MATERIAL_COUNT, |value: u32| {
+                    value
+                })?;
+            if material_count == Some(0) {
+                materials_absent =
+                    row.scalar(appearance_directory_field::MATERIALS, |value: u8| value)?;
+            } else {
+                materials = row.record_ref::<AppearanceMaterialTableSchema, _>(
+                    appearance_directory_field::MATERIALS,
+                    |value| value,
+                )?;
+            }
+            binding_count = row
+                .scalar(appearance_directory_field::BINDING_COUNT, |value: u32| {
+                    value
+                })?;
+            if binding_count == Some(0) {
+                bindings_absent =
+                    row.scalar(appearance_directory_field::BINDINGS, |value: u8| value)?;
+            } else {
+                bindings = row.record_ref::<AppearanceBindingTableSchema, _>(
+                    appearance_directory_field::BINDINGS,
+                    |value| value,
+                )?;
+            }
+            image_payload_byte_count = row.scalar(
+                appearance_directory_field::IMAGE_PAYLOAD_BYTE_COUNT,
+                |value: u32| value,
+            )?;
+            if image_payload_byte_count == Some(0) {
+                image_payloads_absent = row
+                    .scalar(appearance_directory_field::IMAGE_PAYLOADS, |value: u8| {
+                        value
+                    })?;
+            } else {
+                image_payloads = row.bytes_ref::<AppearanceEncodedImagePayloadSchema, _>(
+                    appearance_directory_field::IMAGE_PAYLOADS,
+                    |value| value,
+                )?;
+            }
+            media_type_byte_count = row.scalar(
+                appearance_directory_field::MEDIA_TYPE_BYTE_COUNT,
+                |value: u32| value,
+            )?;
+            if media_type_byte_count == Some(0) {
+                media_types_absent =
+                    row.scalar(appearance_directory_field::MEDIA_TYPES, |value: u8| value)?;
+            } else {
+                media_types = row.utf8_ref::<AppearanceMediaTypeSchema, _>(
+                    appearance_directory_field::MEDIA_TYPES,
+                    |value| value,
+                )?;
+            }
+            source_key_byte_count = row.scalar(
+                appearance_directory_field::SOURCE_KEY_BYTE_COUNT,
+                |value: u32| value,
+            )?;
+            if source_key_byte_count == Some(0) {
+                source_keys_absent =
+                    row.scalar(appearance_directory_field::SOURCE_KEYS, |value: u8| value)?;
+            } else {
+                source_keys = row.utf8_ref::<AppearanceSourceKeySchema, _>(
+                    appearance_directory_field::SOURCE_KEYS,
+                    |value| value,
+                )?;
+            }
+            binding_semantic_scalar_count = row.scalar(
+                appearance_directory_field::BINDING_SEMANTIC_SCALAR_COUNT,
+                |value: u32| value,
+            )?;
+            if binding_semantic_scalar_count == Some(0) {
+                binding_semantic_scalars_absent = row.scalar(
+                    appearance_directory_field::BINDING_SEMANTIC_SCALARS,
+                    |value: u8| value,
+                )?;
+            } else {
+                binding_semantic_scalars = row
+                    .sequence_ref::<f32, AppearanceBindingSemanticScalarSchema, _>(
+                        appearance_directory_field::BINDING_SEMANTIC_SCALARS,
+                        |value| value,
+                    )?;
+            }
+            material_factor_scalar_count = row.scalar(
+                appearance_directory_field::MATERIAL_FACTOR_SCALAR_COUNT,
+                |value: u32| value,
+            )?;
+            if material_factor_scalar_count == Some(0) {
+                material_factor_scalars_absent = row.scalar(
+                    appearance_directory_field::MATERIAL_FACTOR_SCALARS,
+                    |value: u8| value,
+                )?;
+            } else {
+                material_factor_scalars = row
+                    .sequence_ref::<f32, AppearanceMaterialFactorScalarSchema, _>(
+                        appearance_directory_field::MATERIAL_FACTOR_SCALARS,
+                        |value| value,
+                    )?;
+            }
+            Ok(true)
+        },
+    )?;
+
+    if !complete
+        || schema_revision != Some(APPEARANCE_SCHEMA_REVISION)
+        || !optional_directory_member_valid(image_count, counts.images, images, images_absent)
+        || !optional_directory_member_valid(
+            sampler_count,
+            counts.samplers,
+            samplers,
+            samplers_absent,
+        )
+        || !optional_directory_member_valid(
+            texture_count,
+            counts.textures,
+            textures,
+            textures_absent,
+        )
+        || !optional_directory_member_valid(
+            material_count,
+            counts.materials,
+            materials,
+            materials_absent,
+        )
+        || !optional_directory_member_valid(
+            binding_count,
+            counts.bindings,
+            bindings,
+            bindings_absent,
+        )
+        || !optional_payload_member_valid(
+            image_payload_byte_count,
+            image_payloads,
+            image_payloads_absent,
+        )
+        || !optional_payload_member_valid(media_type_byte_count, media_types, media_types_absent)
+        || !optional_payload_member_valid(source_key_byte_count, source_keys, source_keys_absent)
+        || !optional_directory_member_valid(
+            binding_semantic_scalar_count,
+            expected_binding_semantic_scalar_count,
+            binding_semantic_scalars,
+            binding_semantic_scalars_absent,
+        )
+        || !optional_directory_member_valid(
+            material_factor_scalar_count,
+            expected_material_factor_scalar_count,
+            material_factor_scalars,
+            material_factor_scalars_absent,
+        )
+    {
+        return Ok(None);
+    }
+
+    let (
+        Some(image_payload_byte_count),
+        Some(media_type_byte_count),
+        Some(source_key_byte_count),
+        Some(binding_semantic_scalar_count),
+        Some(material_factor_scalar_count),
+    ) = (
+        image_payload_byte_count.and_then(|count| usize::try_from(count).ok()),
+        media_type_byte_count.and_then(|count| usize::try_from(count).ok()),
+        source_key_byte_count.and_then(|count| usize::try_from(count).ok()),
+        binding_semantic_scalar_count.and_then(|count| usize::try_from(count).ok()),
+        material_factor_scalar_count.and_then(|count| usize::try_from(count).ok()),
+    )
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(AppearanceDirectoryMembers {
+        images,
+        samplers,
+        textures,
+        materials,
+        bindings,
+        image_payloads,
+        media_types,
+        source_keys,
+        binding_semantic_scalars,
+        material_factor_scalars,
+        image_payload_byte_count,
+        media_type_byte_count,
+        source_key_byte_count,
+        binding_semantic_scalar_count,
+        material_factor_scalar_count,
+    }))
+}
+
+fn optional_directory_member_valid<T: Copy>(
+    actual_count: Option<u32>,
+    expected_count: u32,
+    member: Option<T>,
+    absent: Option<u8>,
+) -> bool {
+    actual_count == Some(expected_count)
+        && if expected_count == 0 {
+            member.is_none() && absent == Some(0)
+        } else {
+            member.is_some() && absent.is_none()
+        }
+}
+
+fn optional_payload_member_valid<T: Copy>(
+    count: Option<u32>,
+    member: Option<T>,
+    absent: Option<u8>,
+) -> bool {
+    match count {
+        Some(0) => member.is_none() && absent == Some(0),
+        Some(_) => member.is_some() && absent.is_none(),
+        None => false,
+    }
+}
+
+fn visit_appearance_images<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: AppearanceDirectoryMembers<'session>,
+    image_media_counts: &mut [u32],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(images) = directory.images else {
+        return Ok(image_media_counts.is_empty()
+            && directory.image_payloads.is_none()
+            && directory.media_types.is_none()
+            && directory.image_payload_byte_count == 0
+            && directory.media_type_byte_count == 0);
+    };
+    let Some(payloads) = directory.image_payloads else {
+        return Ok(false);
+    };
+    let mut payload_cursor = 0_usize;
+    let mut media_cursor = 0_usize;
+    let complete = session.visit_canonical_records(
+        images,
+        image_media_counts.len(),
+        APPEARANCE_IMAGE_FIELD_COUNT,
+        |row_index, row| {
+            let image = row.scalar(appearance_image_field::IMAGE, |value: u32| value)?;
+            let payload_kind =
+                row.scalar(appearance_image_field::PAYLOAD_KIND, |value: u8| value)?;
+            let payload_offset =
+                row.scalar(appearance_image_field::PAYLOAD_OFFSET, |value: u32| value)?;
+            let payload_count =
+                row.scalar(appearance_image_field::PAYLOAD_COUNT, |value: u32| value)?;
+            let mut payload_ref = None;
+            let mut payload_absent = None;
+            if payload_count == Some(0) {
+                payload_absent = row.scalar(appearance_image_field::PAYLOADS, |value: u8| value)?;
+            } else {
+                payload_ref = row.bytes_ref::<AppearanceEncodedImagePayloadSchema, _>(
+                    appearance_image_field::PAYLOADS,
+                    |value| value,
+                )?;
+            }
+            let media_presence = row
+                .scalar(appearance_image_field::MEDIA_TYPE_PRESENCE, |value: u8| {
+                    value
+                })?;
+            let media_encoding = row
+                .scalar(appearance_image_field::MEDIA_TYPE_ENCODING, |value: u8| {
+                    value
+                })?;
+            let media_offset = row
+                .scalar(appearance_image_field::MEDIA_TYPE_OFFSET, |value: u32| {
+                    value
+                })?;
+            let media_count =
+                row.scalar(appearance_image_field::MEDIA_TYPE_COUNT, |value: u32| value)?;
+            let mut media_ref = None;
+            let mut media_absent = None;
+            if media_count == Some(0) {
+                media_absent =
+                    row.scalar(appearance_image_field::MEDIA_TYPES, |value: u8| value)?;
+            } else {
+                media_ref = row.utf8_ref::<AppearanceMediaTypeSchema, _>(
+                    appearance_image_field::MEDIA_TYPES,
+                    |value| value,
+                )?;
+            }
+
+            let Some(payload_count) = payload_count.and_then(|count| usize::try_from(count).ok())
+            else {
+                return Ok(false);
+            };
+            let Some(media_count_usize) = media_count.and_then(|count| usize::try_from(count).ok())
+            else {
+                return Ok(false);
+            };
+            let Some(next_payload_cursor) = payload_cursor.checked_add(payload_count) else {
+                return Ok(false);
+            };
+            let Some(next_media_cursor) = media_cursor.checked_add(media_count_usize) else {
+                return Ok(false);
+            };
+            let valid = image == u32::try_from(row_index).ok()
+                && payload_kind == Some(APPEARANCE_IMAGE_PAYLOAD_ENCODED)
+                && payload_offset == u32::try_from(payload_cursor).ok()
+                && payload_count != 0
+                && payload_ref == Some(payloads)
+                && payload_absent.is_none()
+                && media_encoding == Some(APPEARANCE_MEDIA_TYPE_UTF8)
+                && media_offset == u32::try_from(media_cursor).ok()
+                && match media_count {
+                    Some(0) => {
+                        media_presence == Some(APPEARANCE_PRESENCE_ABSENT)
+                            && media_ref.is_none()
+                            && media_absent == Some(0)
+                    }
+                    Some(_) => {
+                        media_presence == Some(APPEARANCE_PRESENCE_PRESENT)
+                            && media_ref == directory.media_types
+                            && media_ref.is_some()
+                            && media_absent.is_none()
+                    }
+                    None => false,
+                };
+            let Some(slot) = image_media_counts.get_mut(row_index) else {
+                return Ok(false);
+            };
+            *slot = media_count.unwrap_or(0);
+            payload_cursor = next_payload_cursor;
+            media_cursor = next_media_cursor;
+            Ok(valid)
+        },
+    )?;
+    Ok(complete
+        && payload_cursor == directory.image_payload_byte_count
+        && media_cursor == directory.media_type_byte_count)
+}
+
+fn visit_appearance_samplers<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: AppearanceDirectoryMembers<'session>,
+    counts: AppearanceCanonicalCounts,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(samplers) = directory.samplers else {
+        return Ok(counts.samplers == 0);
+    };
+    let Some(expected_rows) = usize::try_from(counts.samplers).ok() else {
+        return Ok(false);
+    };
+    session.visit_canonical_records(
+        samplers,
+        expected_rows,
+        APPEARANCE_SAMPLER_FIELD_COUNT,
+        |row_index, row| {
+            let sampler = row.scalar(appearance_sampler_field::SAMPLER, |value: u32| value)?;
+            let minification =
+                row.scalar(appearance_sampler_field::MINIFICATION, |value: u8| value)?;
+            let magnification =
+                row.scalar(appearance_sampler_field::MAGNIFICATION, |value: u8| value)?;
+            let mipmap = row.scalar(appearance_sampler_field::MIPMAP, |value: u8| value)?;
+            let address_u = row.scalar(appearance_sampler_field::ADDRESS_U, |value: u8| value)?;
+            let address_v = row.scalar(appearance_sampler_field::ADDRESS_V, |value: u8| value)?;
+            let address_w = row.scalar(appearance_sampler_field::ADDRESS_W, |value: u8| value)?;
+            Ok(sampler == u32::try_from(row_index).ok()
+                && minification.is_some_and(|tag| tag <= APPEARANCE_TEXEL_FILTER_LINEAR)
+                && magnification.is_some_and(|tag| tag <= APPEARANCE_TEXEL_FILTER_LINEAR)
+                && mipmap.is_some_and(|tag| tag <= APPEARANCE_MIPMAP_FILTER_LINEAR)
+                && address_u.is_some_and(|tag| tag <= APPEARANCE_ADDRESS_CLAMP_TO_BORDER)
+                && address_v.is_some_and(|tag| tag <= APPEARANCE_ADDRESS_CLAMP_TO_BORDER)
+                && address_w.is_some_and(|tag| tag <= APPEARANCE_ADDRESS_CLAMP_TO_BORDER))
+        },
+    )
+}
+
+fn visit_appearance_textures<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: AppearanceDirectoryMembers<'session>,
+    counts: AppearanceCanonicalCounts,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(textures) = directory.textures else {
+        return Ok(counts.textures == 0);
+    };
+    let (Some(images), Some(samplers), Some(expected_rows)) = (
+        directory.images,
+        directory.samplers,
+        usize::try_from(counts.textures).ok(),
+    ) else {
+        return Ok(false);
+    };
+    session.visit_canonical_records(
+        textures,
+        expected_rows,
+        APPEARANCE_TEXTURE_FIELD_COUNT,
+        |row_index, row| {
+            let texture = row.scalar(appearance_texture_field::TEXTURE, |value: u32| value)?;
+            let image = row.scalar(appearance_texture_field::IMAGE, |value: u32| value)?;
+            let image_ref = row.record_ref::<AppearanceImageTableSchema, _>(
+                appearance_texture_field::IMAGES,
+                |value| value,
+            )?;
+            let sampler = row.scalar(appearance_texture_field::SAMPLER, |value: u32| value)?;
+            let sampler_ref = row.record_ref::<AppearanceSamplerTableSchema, _>(
+                appearance_texture_field::SAMPLERS,
+                |value| value,
+            )?;
+            Ok(texture == u32::try_from(row_index).ok()
+                && image.is_some_and(|index| index < counts.images)
+                && image_ref == Some(images)
+                && sampler.is_some_and(|index| index < counts.samplers)
+                && sampler_ref == Some(samplers))
+        },
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn visit_appearance_bindings<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: AppearanceDirectoryMembers<'session>,
+    counts: AppearanceCanonicalCounts,
+    scratch: &mut [AppearanceBindingValidationScratch],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(bindings) = directory.bindings else {
+        return Ok(scratch.is_empty()
+            && counts.bindings == 0
+            && directory.binding_semantic_scalars.is_none()
+            && directory.source_keys.is_none());
+    };
+    let (Some(textures), Some(semantic_scalars)) =
+        (directory.textures, directory.binding_semantic_scalars)
+    else {
+        return Ok(false);
+    };
+    let Ok(semantic_stride) = u32::try_from(APPEARANCE_BINDING_SEMANTIC_STRIDE) else {
+        return Ok(false);
+    };
+    let mut semantic_cursor = 0_usize;
+    let mut source_key_cursor = 0_usize;
+    let complete = session.visit_canonical_records(
+        bindings,
+        scratch.len(),
+        APPEARANCE_BINDING_FIELD_COUNT,
+        |row_index, row| {
+            let binding = row.scalar(appearance_binding_field::BINDING, |value: u32| value)?;
+            let texture = row.scalar(appearance_binding_field::TEXTURE, |value: u32| value)?;
+            let textures_ref = row.record_ref::<AppearanceTextureTableSchema, _>(
+                appearance_binding_field::TEXTURES,
+                |value| value,
+            )?;
+            let role = row.scalar(appearance_binding_field::ROLE, |value: u8| value)?;
+            let coordinate_source = row
+                .scalar(appearance_binding_field::COORDINATE_SOURCE, |value: u8| {
+                    value
+                })?;
+            let coordinate_set =
+                row.scalar(appearance_binding_field::COORDINATE_SET, |value: u32| value)?;
+            let channel_lane_count = row
+                .scalar(appearance_binding_field::CHANNEL_LANE_COUNT, |value: u8| {
+                    value
+                })?;
+            let channel_0 = row.scalar(appearance_binding_field::CHANNEL_0, |value: u8| value)?;
+            let channel_1 = row.scalar(appearance_binding_field::CHANNEL_1, |value: u8| value)?;
+            let channel_2 = row.scalar(appearance_binding_field::CHANNEL_2, |value: u8| value)?;
+            let channel_3 = row.scalar(appearance_binding_field::CHANNEL_3, |value: u8| value)?;
+            let color_interpretation = row.scalar(
+                appearance_binding_field::COLOR_INTERPRETATION,
+                |value: u8| value,
+            )?;
+            let semantic_offset = row.scalar(
+                appearance_binding_field::SEMANTIC_SCALAR_OFFSET,
+                |value: u32| value,
+            )?;
+            let semantic_count = row.scalar(
+                appearance_binding_field::SEMANTIC_SCALAR_COUNT,
+                |value: u32| value,
+            )?;
+            let mut semantic_ref = None;
+            let mut semantic_absent = None;
+            if semantic_count == Some(0) {
+                semantic_absent = row
+                    .scalar(appearance_binding_field::SEMANTIC_SCALARS, |value: u8| {
+                        value
+                    })?;
+            } else {
+                semantic_ref = row.sequence_ref::<f32, AppearanceBindingSemanticScalarSchema, _>(
+                    appearance_binding_field::SEMANTIC_SCALARS,
+                    |value| value,
+                )?;
+            }
+            let blend_operation =
+                row.scalar(appearance_binding_field::BLEND_OPERATION, |value: u8| value)?;
+            let source_key_offset = row
+                .scalar(appearance_binding_field::SOURCE_KEY_OFFSET, |value: u32| {
+                    value
+                })?;
+            let source_key_count = row
+                .scalar(appearance_binding_field::SOURCE_KEY_COUNT, |value: u32| {
+                    value
+                })?;
+            let mut source_key_ref = None;
+            let mut source_key_absent = None;
+            if source_key_count == Some(0) {
+                source_key_absent =
+                    row.scalar(appearance_binding_field::SOURCE_KEYS, |value: u8| value)?;
+            } else {
+                source_key_ref = row.utf8_ref::<AppearanceSourceKeySchema, _>(
+                    appearance_binding_field::SOURCE_KEYS,
+                    |value| value,
+                )?;
+            }
+
+            let channels = [
+                channel_0.unwrap_or(0),
+                channel_1.unwrap_or(0),
+                channel_2.unwrap_or(0),
+                channel_3.unwrap_or(0),
+            ];
+            let Some(semantic_count_usize) =
+                semantic_count.and_then(|count| usize::try_from(count).ok())
+            else {
+                return Ok(false);
+            };
+            let Some(source_key_count_usize) =
+                source_key_count.and_then(|count| usize::try_from(count).ok())
+            else {
+                return Ok(false);
+            };
+            let Some(next_semantic_cursor) = semantic_cursor.checked_add(semantic_count_usize)
+            else {
+                return Ok(false);
+            };
+            let Some(next_source_key_cursor) =
+                source_key_cursor.checked_add(source_key_count_usize)
+            else {
+                return Ok(false);
+            };
+            let Some(slot) = scratch.get_mut(row_index) else {
+                return Ok(false);
+            };
+            *slot = AppearanceBindingValidationScratch {
+                role: role.unwrap_or(0),
+                coordinate_source: coordinate_source.unwrap_or(0),
+                coordinate_set: coordinate_set.unwrap_or(0),
+                channel_lane_count: channel_lane_count.unwrap_or(0),
+                channels,
+                color_interpretation: color_interpretation.unwrap_or(0),
+                blend_operation: blend_operation.unwrap_or(0),
+                semantic_values: [0.0; APPEARANCE_BINDING_SEMANTIC_STRIDE],
+                source_key_count: source_key_count.unwrap_or(0),
+            };
+            let source_key_valid = match source_key_count {
+                Some(0) => source_key_ref.is_none() && source_key_absent == Some(0),
+                Some(_) => {
+                    source_key_ref == directory.source_keys
+                        && source_key_ref.is_some()
+                        && source_key_absent.is_none()
+                }
+                None => false,
+            };
+            let valid = binding == u32::try_from(row_index).ok()
+                && texture.is_some_and(|index| index < counts.textures)
+                && textures_ref == Some(textures)
+                && role.and_then(decode_appearance_texture_role).is_some()
+                && coordinate_source
+                    .zip(coordinate_set)
+                    .and_then(|(tag, set)| decode_appearance_coordinate_source(tag, set))
+                    .is_some()
+                && channel_lane_count
+                    .and_then(|lane_count| decode_channel_mapping(lane_count, channels))
+                    .is_some()
+                && color_interpretation
+                    .and_then(decode_appearance_color_interpretation)
+                    .is_some()
+                && blend_operation
+                    .and_then(decode_appearance_blend_operation)
+                    .is_some()
+                && semantic_offset == u32::try_from(semantic_cursor).ok()
+                && semantic_count == Some(semantic_stride)
+                && semantic_ref == Some(semantic_scalars)
+                && semantic_absent.is_none()
+                && source_key_offset == u32::try_from(source_key_cursor).ok()
+                && source_key_valid;
+            semantic_cursor = next_semantic_cursor;
+            source_key_cursor = next_source_key_cursor;
+            Ok(valid)
+        },
+    )?;
+    Ok(complete
+        && semantic_cursor == directory.binding_semantic_scalar_count
+        && source_key_cursor == directory.source_key_byte_count)
+}
+
+#[allow(clippy::too_many_lines)]
+fn visit_appearance_materials<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: AppearanceDirectoryMembers<'session>,
+    counts: AppearanceCanonicalCounts,
+    scratch: &mut [AppearanceMaterialValidationScratch],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(materials) = directory.materials else {
+        return Ok(scratch.is_empty()
+            && counts.materials == 0
+            && counts.bindings == 0
+            && directory.material_factor_scalars.is_none());
+    };
+    let Some(factor_scalars) = directory.material_factor_scalars else {
+        return Ok(false);
+    };
+    let (Ok(factor_stride), Ok(expected_binding_rows)) = (
+        u32::try_from(APPEARANCE_MATERIAL_FACTOR_STRIDE),
+        usize::try_from(counts.bindings),
+    ) else {
+        return Ok(false);
+    };
+    let mut binding_cursor = 0_usize;
+    let mut factor_cursor = 0_usize;
+    let complete = session.visit_canonical_records(
+        materials,
+        scratch.len(),
+        APPEARANCE_MATERIAL_FIELD_COUNT,
+        |row_index, row| {
+            let material = row.scalar(appearance_material_field::MATERIAL, |value: u32| value)?;
+            let shading_model =
+                row.scalar(appearance_material_field::SHADING_MODEL, |value: u8| value)?;
+            let alpha_mode =
+                row.scalar(appearance_material_field::ALPHA_MODE, |value: u8| value)?;
+            let alpha_cutoff =
+                row.scalar(appearance_material_field::ALPHA_CUTOFF, |value: f32| value)?;
+            let double_sided =
+                row.scalar(appearance_material_field::DOUBLE_SIDED, |value: u8| value)?;
+            let pbr_metallic_roughness_presence = row.scalar(
+                appearance_material_field::PBR_METALLIC_ROUGHNESS_PRESENCE,
+                |value: u8| value,
+            )?;
+            let pbr_specular_glossiness_presence = row.scalar(
+                appearance_material_field::PBR_SPECULAR_GLOSSINESS_PRESENCE,
+                |value: u8| value,
+            )?;
+            let legacy_presence = row
+                .scalar(appearance_material_field::LEGACY_PRESENCE, |value: u8| {
+                    value
+                })?;
+            let binding_offset = row
+                .scalar(appearance_material_field::BINDING_OFFSET, |value: u32| {
+                    value
+                })?;
+            let binding_count =
+                row.scalar(appearance_material_field::BINDING_COUNT, |value: u32| value)?;
+            let mut bindings_ref = None;
+            let mut bindings_absent = None;
+            if binding_count == Some(0) {
+                bindings_absent =
+                    row.scalar(appearance_material_field::BINDINGS, |value: u8| value)?;
+            } else {
+                bindings_ref = row.record_ref::<AppearanceBindingTableSchema, _>(
+                    appearance_material_field::BINDINGS,
+                    |value| value,
+                )?;
+            }
+            let factor_offset =
+                row.scalar(appearance_material_field::FACTOR_OFFSET, |value: u32| value)?;
+            let factor_count =
+                row.scalar(appearance_material_field::FACTOR_COUNT, |value: u32| value)?;
+            let mut factors_ref = None;
+            let mut factors_absent = None;
+            if factor_count == Some(0) {
+                factors_absent =
+                    row.scalar(appearance_material_field::FACTORS, |value: u8| value)?;
+            } else {
+                factors_ref = row.sequence_ref::<f32, AppearanceMaterialFactorScalarSchema, _>(
+                    appearance_material_field::FACTORS,
+                    |value| value,
+                )?;
+            }
+
+            let Some(binding_count_usize) =
+                binding_count.and_then(|count| usize::try_from(count).ok())
+            else {
+                return Ok(false);
+            };
+            let Some(factor_count_usize) =
+                factor_count.and_then(|count| usize::try_from(count).ok())
+            else {
+                return Ok(false);
+            };
+            let Some(next_binding_cursor) = binding_cursor.checked_add(binding_count_usize) else {
+                return Ok(false);
+            };
+            let Some(next_factor_cursor) = factor_cursor.checked_add(factor_count_usize) else {
+                return Ok(false);
+            };
+            let Some(slot) = scratch.get_mut(row_index) else {
+                return Ok(false);
+            };
+            *slot = AppearanceMaterialValidationScratch {
+                shading_model: shading_model.unwrap_or(0),
+                alpha_mode: alpha_mode.unwrap_or(0),
+                alpha_cutoff: alpha_cutoff.unwrap_or(0.0),
+                double_sided: double_sided.unwrap_or(0),
+                pbr_metallic_roughness_presence: pbr_metallic_roughness_presence.unwrap_or(0),
+                pbr_specular_glossiness_presence: pbr_specular_glossiness_presence.unwrap_or(0),
+                legacy_presence: legacy_presence.unwrap_or(0),
+                binding_offset: binding_offset.unwrap_or(0),
+                binding_count: binding_count.unwrap_or(0),
+            };
+            let binding_ref_valid = match binding_count {
+                Some(0) => bindings_ref.is_none() && bindings_absent == Some(0),
+                Some(_) => {
+                    bindings_ref == directory.bindings
+                        && bindings_ref.is_some()
+                        && bindings_absent.is_none()
+                }
+                None => false,
+            };
+            let valid = material == u32::try_from(row_index).ok()
+                && shading_model
+                    .and_then(decode_appearance_shading_model)
+                    .is_some()
+                && alpha_mode
+                    .zip(alpha_cutoff)
+                    .and_then(|(mode, cutoff)| decode_appearance_alpha_mode(mode, cutoff))
+                    .is_some()
+                && double_sided.and_then(decode_presence).is_some()
+                && pbr_metallic_roughness_presence
+                    .and_then(decode_presence)
+                    .is_some()
+                && pbr_specular_glossiness_presence
+                    .and_then(decode_presence)
+                    .is_some()
+                && legacy_presence.and_then(decode_presence).is_some()
+                && binding_offset == u32::try_from(binding_cursor).ok()
+                && next_binding_cursor <= expected_binding_rows
+                && binding_ref_valid
+                && factor_offset == u32::try_from(factor_cursor).ok()
+                && factor_count == Some(factor_stride)
+                && factors_ref == Some(factor_scalars)
+                && factors_absent.is_none();
+            binding_cursor = next_binding_cursor;
+            factor_cursor = next_factor_cursor;
+            Ok(valid)
+        },
+    )?;
+    Ok(complete
+        && binding_cursor == expected_binding_rows
+        && factor_cursor == directory.material_factor_scalar_count)
+}
+
+fn visit_appearance_image_payloads<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: AppearanceDirectoryMembers<'session>,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    match directory.image_payloads {
+        Some(payloads) => session.visit_canonical_bytes(
+            payloads,
+            directory.image_payload_byte_count,
+            |_index, _byte| true,
+        ),
+        None => Ok(directory.image_payload_byte_count == 0),
+    }
+}
+
+fn visit_appearance_media_types<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: AppearanceDirectoryMembers<'session>,
+    image_media_counts: &[u32],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(media_types) = directory.media_types else {
+        return Ok(directory.media_type_byte_count == 0
+            && image_media_counts.iter().all(|&count| count == 0));
+    };
+    let mut image_index = 0_usize;
+    let mut segment_len = 0_usize;
+    let mut segment = [0_u8; MAX_EXTENSION_MEDIA_TYPE_BYTES];
+    let complete = session.visit_canonical_utf8_bytes(
+        media_types,
+        directory.media_type_byte_count,
+        |_byte_index, byte| {
+            while image_media_counts.get(image_index) == Some(&0) {
+                image_index += 1;
+            }
+            let Some(segment_count) = image_media_counts
+                .get(image_index)
+                .and_then(|&count| usize::try_from(count).ok())
+            else {
+                return false;
+            };
+            if segment_count > segment.len() || segment_len >= segment_count {
+                return false;
+            }
+            segment[segment_len] = byte;
+            segment_len += 1;
+            if segment_len != segment_count {
+                return true;
+            }
+            let valid = std::str::from_utf8(&segment[..segment_len])
+                .ok()
+                .and_then(|value| ExtensionMediaType::new(value).ok())
+                .is_some();
+            image_index += 1;
+            segment_len = 0;
+            valid
+        },
+    )?;
+    while image_media_counts.get(image_index) == Some(&0) {
+        image_index += 1;
+    }
+    Ok(complete && segment_len == 0 && image_index == image_media_counts.len())
+}
+
+fn visit_appearance_binding_semantics<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: AppearanceDirectoryMembers<'session>,
+    scratch: &mut [AppearanceBindingValidationScratch],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(semantic_scalars) = directory.binding_semantic_scalars else {
+        return Ok(directory.binding_semantic_scalar_count == 0 && scratch.is_empty());
+    };
+    let complete = session.visit_canonical_sequence(
+        semantic_scalars,
+        directory.binding_semantic_scalar_count,
+        |index, value| {
+            let binding_index = index / APPEARANCE_BINDING_SEMANTIC_STRIDE;
+            let scalar_index = index % APPEARANCE_BINDING_SEMANTIC_STRIDE;
+            let Some(binding) = scratch.get_mut(binding_index) else {
+                return false;
+            };
+            binding.semantic_values[scalar_index] = value;
+            scalar_index + 1 != APPEARANCE_BINDING_SEMANTIC_STRIDE
+                || binding.source_key_count != 0
+                || validate_binding_scratch(binding, None)
+        },
+    )?;
+    Ok(complete)
+}
+
+fn visit_appearance_source_keys<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: AppearanceDirectoryMembers<'session>,
+    scratch: &[AppearanceBindingValidationScratch],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(source_keys) = directory.source_keys else {
+        return Ok(directory.source_key_byte_count == 0
+            && scratch.iter().all(|binding| binding.source_key_count == 0));
+    };
+    let mut binding_index = 0_usize;
+    let mut segment_len = 0_usize;
+    let mut segment = [0_u8; MAX_TEXTURE_SOURCE_KEY_BYTES];
+    let complete = session.visit_canonical_utf8_bytes(
+        source_keys,
+        directory.source_key_byte_count,
+        |_byte_index, byte| {
+            while scratch
+                .get(binding_index)
+                .is_some_and(|binding| binding.source_key_count == 0)
+            {
+                binding_index += 1;
+            }
+            let Some((binding, segment_count)) = scratch.get(binding_index).and_then(|binding| {
+                usize::try_from(binding.source_key_count)
+                    .ok()
+                    .map(|count| (binding, count))
+            }) else {
+                return false;
+            };
+            if segment_count > segment.len() || segment_len >= segment_count {
+                return false;
+            }
+            segment[segment_len] = byte;
+            segment_len += 1;
+            if segment_len != segment_count {
+                return true;
+            }
+            let source_key = std::str::from_utf8(&segment[..segment_len])
+                .ok()
+                .and_then(|value| TextureSourceKey::try_new(value).ok());
+            let valid = source_key
+                .as_ref()
+                .is_some_and(|source_key| validate_binding_scratch(binding, Some(source_key)));
+            binding_index += 1;
+            segment_len = 0;
+            valid
+        },
+    )?;
+    while scratch
+        .get(binding_index)
+        .is_some_and(|binding| binding.source_key_count == 0)
+    {
+        binding_index += 1;
+    }
+    Ok(complete && segment_len == 0 && binding_index == scratch.len())
+}
+
+fn validate_binding_scratch(
+    binding: &AppearanceBindingValidationScratch,
+    source_key: Option<&TextureSourceKey>,
+) -> bool {
+    let Some(role) = decode_appearance_texture_role(binding.role) else {
+        return false;
+    };
+    let Some(coordinate_source) =
+        decode_appearance_coordinate_source(binding.coordinate_source, binding.coordinate_set)
+    else {
+        return false;
+    };
+    let Some(channel_mapping) =
+        decode_channel_mapping(binding.channel_lane_count, binding.channels)
+    else {
+        return false;
+    };
+    let Some(color_interpretation) =
+        decode_appearance_color_interpretation(binding.color_interpretation)
+    else {
+        return false;
+    };
+    let Some(blend) = decode_appearance_blend_operation(binding.blend_operation) else {
+        return false;
+    };
+    let Some((transform, strength)) =
+        decode_appearance_binding_numeric_semantics(&binding.semantic_values)
+    else {
+        return false;
+    };
+    validate_texture_binding_semantics(TextureBindingSemanticsRef::new(
+        &role,
+        &coordinate_source,
+        &channel_mapping,
+        &color_interpretation,
+        transform,
+        strength,
+        &blend,
+        source_key,
+    ))
+    .is_ok()
+}
+
+fn visit_appearance_material_factors<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: AppearanceDirectoryMembers<'session>,
+    materials: &[AppearanceMaterialValidationScratch],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(factor_scalars) = directory.material_factor_scalars else {
+        return Ok(directory.material_factor_scalar_count == 0 && materials.is_empty());
+    };
+    let mut values = [0.0_f32; APPEARANCE_MATERIAL_FACTOR_STRIDE];
+    session.visit_canonical_sequence(
+        factor_scalars,
+        directory.material_factor_scalar_count,
+        |index, value| {
+            let material_index = index / APPEARANCE_MATERIAL_FACTOR_STRIDE;
+            let scalar_index = index % APPEARANCE_MATERIAL_FACTOR_STRIDE;
+            values[scalar_index] = value;
+            scalar_index + 1 != APPEARANCE_MATERIAL_FACTOR_STRIDE
+                || materials
+                    .get(material_index)
+                    .is_some_and(|material| validate_material_scratch(material, &values))
+        },
+    )
+}
+
+fn validate_material_scratch(
+    material: &AppearanceMaterialValidationScratch,
+    factor_values: &[f32; APPEARANCE_MATERIAL_FACTOR_STRIDE],
+) -> bool {
+    let Some(shading_model) = decode_appearance_shading_model(material.shading_model) else {
+        return false;
+    };
+    let Some(alpha_mode) = decode_appearance_alpha_mode(material.alpha_mode, material.alpha_cutoff)
+    else {
+        return false;
+    };
+    let Some(double_sided) = decode_presence(material.double_sided) else {
+        return false;
+    };
+    let Some(factors) = decode_appearance_material_factors(
+        factor_values,
+        material.pbr_metallic_roughness_presence,
+        material.pbr_specular_glossiness_presence,
+        material.legacy_presence,
+    ) else {
+        return false;
+    };
+    validate_material_semantics(MaterialSemanticsRef::new(
+        &shading_model,
+        &alpha_mode,
+        double_sided,
+        factors,
+    ))
+    .is_ok()
+}
+
+fn validate_material_binding_authority_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut AppearanceValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    bindings: &[AppearanceBindingValidationScratch],
+    materials: &[AppearanceMaterialValidationScratch],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    for material in materials {
+        let Some(range) = checked_range(
+            material.binding_offset,
+            material.binding_count,
+            bindings.len(),
+        ) else {
+            return Ok(false);
+        };
+        let mut seen = [false; TextureRoleKind::BUILTIN_COUNT];
+        let mut metallic = false;
+        let mut roughness = false;
+        let mut metallic_roughness = false;
+        for binding in &bindings[range] {
+            let Some(valid) = session.run_validation_unit(|| {
+                let tag = binding.role;
+                let Some(role_seen) = seen.get_mut(usize::from(tag)) else {
+                    return false;
+                };
+                if *role_seen {
+                    return false;
+                }
+                *role_seen = true;
+                match tag {
+                    APPEARANCE_ROLE_METALLIC if metallic_roughness => false,
+                    APPEARANCE_ROLE_ROUGHNESS if metallic_roughness => false,
+                    APPEARANCE_ROLE_METALLIC_ROUGHNESS if metallic || roughness => false,
+                    APPEARANCE_ROLE_METALLIC => {
+                        metallic = true;
+                        true
+                    }
+                    APPEARANCE_ROLE_ROUGHNESS => {
+                        roughness = true;
+                        true
+                    }
+                    APPEARANCE_ROLE_METALLIC_ROUGHNESS => {
+                        metallic_roughness = true;
+                        true
+                    }
+                    _ => true,
+                }
+            })?
+            else {
+                return Ok(false);
+            };
+            if !valid {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 pub(super) fn validate_appearance_canonical_structure(

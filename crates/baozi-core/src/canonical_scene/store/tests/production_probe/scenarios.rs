@@ -25,8 +25,8 @@ use super::super::super::construction::node_scene::{
     NodeSceneConstructionTerminal, OBJ_SOURCE_VECTOR_SCHEMA_ID,
     ObjCapabilityCanonicalShapeObservation, ObjCapabilitySourceShapeObservation,
     ProfileClosureCanonicalShapeObservation, ProfileClosureNegativeCaseObservation,
-    ProfileClosurePreflightStorageObservation, build_evidence_publication_limit_terminal_for_probe,
-    build_gltf_capability_scene_for_probe, build_obj_capability_scene_for_probe,
+    ProfileClosurePreflightStorageObservation, build_gltf_capability_scene_for_probe,
+    build_minimal_fallback_terminal_for_probe, build_obj_capability_scene_for_probe,
     build_profile_closure_scene_for_probe, build_protected_terminal_activation_for_probe,
     capture_gltf_capability_snapshots_for_probe, capture_obj_capability_snapshots_for_probe,
     capture_profile_closure_snapshots_for_probe, collect_gltf_capability_vectors_for_probe,
@@ -1793,9 +1793,7 @@ pub(super) fn collect_minimal_fallback() -> MinimalFallbackReport {
         MeasurementSession::begin().expect("minimal fallback measurement must start");
     let mut prepared = None;
     let construction_allocations = allocation_counter::measure(|| {
-        prepared = Some(build_evidence_publication_limit_terminal_for_probe(
-            &account,
-        ));
+        prepared = Some(build_minimal_fallback_terminal_for_probe(&account));
     });
     let construction_measurement = construction_session
         .finish()
@@ -1818,10 +1816,10 @@ pub(super) fn collect_minimal_fallback() -> MinimalFallbackReport {
     let fallback = match terminal.expect("minimal fallback handoff must set a terminal") {
         NodeSceneConstructionTerminal::MinimalFallback(fallback) => fallback,
         NodeSceneConstructionTerminal::Success(_) => {
-            panic!("evidence publication rejection must not publish canonical data")
+            panic!("a clean validator panic must not publish canonical data")
         }
         NodeSceneConstructionTerminal::RichFailure(_) => {
-            panic!("unbound evidence must terminate as minimal fallback")
+            panic!("a clean validator panic must terminate as minimal fallback")
         }
     };
     assert!(fallback.account().is_same_account(&account));

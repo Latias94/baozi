@@ -12,7 +12,7 @@ use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneProfileMetadataValue, NodeSceneProfileStep,
 };
 use crate::canonical_scene::store::construction::node_scene::{
-    NodeSceneConstructionTerminal, NodeSceneSuccessParts, ValidatedNodeScene,
+    NodeSceneConstructionTerminal, NodeSceneDraftBuild, NodeSceneSuccessParts, ValidatedNodeScene,
 };
 use crate::canonical_scene::store::construction::{
     SceneConstructionLimits, SceneConstructionOperation,
@@ -35,7 +35,7 @@ use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKin
 use crate::extension::{
     ExtensionArrayRef, ExtensionMediaType, ExtensionSchemaId, ExtensionValueRef,
 };
-use crate::identity::NodeId;
+use crate::identity::{NodeId, SceneGenerationId};
 use crate::math::{Color, Mat4, Quat, Vec2, Vec3, Vec4};
 use crate::namespaced::NamespacedName;
 use crate::provenance::{
@@ -476,22 +476,27 @@ fn publish_scene_input(
     account: &PhysicalStorageAccount,
     input: SceneAuthoringBatch<'_>,
 ) -> NodeSceneSuccessParts {
-    let prepared = SceneConstructionOperation::with_account_for_scene_input(
+    let build = SceneConstructionOperation::with_account_for_scene_input(
         account,
         operation_limits(),
         input,
         SceneValidationLimits::default(),
     )
     .expect("snapshot Scene input admission")
-    .try_validate()
-    .unwrap_or_else(|rejected| {
-        panic!(
-            "snapshot input must pass authoring validation: {:?}",
-            rejected.failure()
-        )
-    })
-    .prepare()
-    .expect("snapshot Scene must prepare");
+    .finish_draft()
+    .expect("snapshot Scene construction");
+    let prepared = match build {
+        NodeSceneDraftBuild::Draft { draft, owner } => owner
+            .prepare_with_generation_source(draft, SceneGenerationId::reserve)
+            .expect("snapshot Scene must prepare"),
+        NodeSceneDraftBuild::Failure {
+            authoring_rejection,
+            prepared,
+        } => {
+            drop(prepared);
+            panic!("snapshot Scene construction failed: {authoring_rejection:?}");
+        }
+    };
     match prepared.handoff() {
         NodeSceneConstructionTerminal::Success(parts) => parts,
         NodeSceneConstructionTerminal::RichFailure(_) => {

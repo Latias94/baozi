@@ -515,7 +515,7 @@ where
 fn run_metadata_payload_cell<C, T>(
     metrics: &mut ProfileMetrics,
     context: &mut ProfileValidationContext<'_, C>,
-    action: impl FnOnce() -> Result<T, ProfileAuthoringSemanticError>,
+    mut action: impl FnMut() -> Result<T, ProfileAuthoringSemanticError>,
 ) -> ProfileValidationResult<T, C>
 where
     C: CanonicalAuthoringControl,

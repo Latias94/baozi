@@ -1,8 +1,16 @@
+use std::cell::Cell;
+use std::num::NonZeroU64;
+
+use baozi_operation::__canonical_activation::{
+    CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationSeal,
+    CanonicalCentralValidationOutcome, CanonicalFailureRequirements, CanonicalLane,
+    CanonicalMaterialization, CanonicalRecordBuildRow, CanonicalSuccessRequirements,
+    CanonicalTableShape, CanonicalValidationDecision,
+};
 use baozi_operation::{
-    CanonicalRecordRowWriter, OutcomeEvidenceRecordRef, RecordBlock, RecordPlan,
-    RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStorePublicationPlan,
-    RetainedStoreReservation, RetainedStoreWriterPlan, SequencePlan, StoreBuildError,
-    StoreControlledError, StorePlanError, StoreRuntimeError,
+    OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit, RecordBlock,
+    RecordPlan, RetainedStoreBatchLimits, RetainedStoreWriterPlan, SequencePlan, StoreBuildError,
+    StoreControlledError, StorePlanError, StoreRuntimeError, StoredScalar,
 };
 
 use crate::SceneValidationLimits;
@@ -14,8 +22,8 @@ use crate::canonical_scene::store::production::{
     ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::production::{
-    AnimationTargetCatalog, CanonicalAuthoringControl, OperationAuthoringControl, Presence,
-    ProfileOwnerCatalog, SceneAuthoringBatch, ValidatedAnimationBatch, ValidatedAppearanceBatch,
+    AnimationTargetCatalog, CanonicalAuthoringControl, Presence, ProfileOwnerCatalog,
+    SceneAuthoringBatch, ScopedAuthoringControl, ValidatedAnimationBatch, ValidatedAppearanceBatch,
     ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch,
     ValidatedSpatialBatch, animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
@@ -41,7 +49,6 @@ use crate::canonical_scene::store::schema::{
     SCENE_SCHEMA_REVISION, SceneDirectorySchema, SceneGeometryDirectorySchema,
 };
 use crate::entity::AuthoredTransformKind;
-use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 #[cfg(test)]
 use crate::provenance::{OperationKind, OptionsDigest};
 #[cfg(test)]
@@ -49,7 +56,7 @@ use crate::scene_space::SceneSpace;
 
 use super::super::{
     SceneAuthoringOperation, SceneConstructionError, SceneConstructionOperation,
-    SceneConstructionOwner, SceneStoreAssembly, SceneStoreKeys, SceneStoreOperation,
+    SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit, SceneStoreKeys,
 };
 use super::animation::{AnimationMaterializationPlans, AnimationTargetTableRefs, retain_animation};
 use super::appearance::{AppearanceMaterializationPlans, retain_appearance};
@@ -62,19 +69,18 @@ use super::geometry::{
 };
 use super::profile::{ProfileMaterializationPlans, retain_profile};
 use super::publication::{
-    node_scene_failure_code, post_evidence_failure_code,
-    prepare_node_minimal_fallback_from_assembly, prepare_node_minimal_fallback_from_open_recovery,
-    prepare_node_minimal_fallback_from_operation, prepare_node_rich_failure_from_assembly,
+    prepare_node_activation_failure, prepare_node_central_failure, prepare_node_central_fallback,
+    validate_node_scene_failure_evidence,
 };
+use super::scratch::{NodeSceneValidationScratchPlan, ScopedNodeSceneValidationScratchOwner};
 mod spatial;
 use super::{
-    FreshNodeSceneOwner, NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_COMMITMENT_REJECTION_CODE,
-    NodeSceneBuildFaults, NodeSceneConstructionRejection, NodeSceneDraft, NodeSceneDraftBuild,
-    NodeSceneWorkMeter, PendingNodeSceneDraft, PreparedNodeSceneConstruction,
-    PreparedNodeSceneFailure, RejectedNodeSceneConstruction, SceneEvidenceCounts,
-    ValidatedNodeSceneConstruction,
+    NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneBuildFaults, NodeSceneConstructionRejection,
+    NodeSceneDraft, NodeSceneDraftBuild, PendingNodeSceneDraft, SceneEvidenceCounts,
 };
 use spatial::{RetainedSpatialRefs, SpatialMaterializationPlans, retain_spatial};
+
+use crate::canonical_scene::store::validation::validate_node_scene_canonical_graph_metered;
 
 #[cfg(test)]
 const TEST_PROFILE_MAX_NODES: usize = 64;
@@ -131,7 +137,7 @@ fn test_node_profile(node_count: usize) -> ProfileAuthoringBatch<'static> {
 }
 
 #[cfg(test)]
-fn test_scene_authoring_batch<'input>(
+pub(super) fn test_scene_authoring_batch<'input>(
     input: NodeAuthoringBatch<'input>,
 ) -> SceneAuthoringBatch<'input> {
     let profile = test_node_profile(input.nodes().len());
@@ -151,113 +157,6 @@ fn test_scene_authoring_batch<'input>(
 pub(super) enum NodeScenePlanningFault {
     SealedPlan,
     Publication,
-}
-
-impl RejectedNodeSceneConstruction {
-    pub(in crate::canonical_scene::store) const fn failure(
-        &self,
-    ) -> &NodeSceneConstructionRejection {
-        &self.failure
-    }
-
-    pub(in crate::canonical_scene::store) fn prepare_rich_failure(
-        self,
-    ) -> Result<
-        (
-            PreparedNodeSceneConstruction,
-            NodeSceneConstructionRejection,
-        ),
-        SceneConstructionError,
-    > {
-        let Self {
-            operation:
-                SceneConstructionOperation {
-                    raw,
-                    brand: _,
-                    keys,
-                },
-            failure,
-        } = self;
-        let cause = failure.stable_code();
-        let prepared = prepare_node_authoring_rejection(raw, keys, cause)?.into();
-        Ok((prepared, failure))
-    }
-}
-
-impl SceneConstructionOperation {
-    #[cfg(test)]
-    pub(super) fn try_validate_node_batch<'input>(
-        self,
-        input: NodeAuthoringBatch<'input>,
-        limits: SceneValidationLimits,
-    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
-        self.try_validate_scene_batch(test_scene_authoring_batch(input), limits)
-    }
-
-    #[cfg(test)]
-    pub(super) fn try_validate_node_batch_with_planning_fault<'input>(
-        mut self,
-        input: NodeAuthoringBatch<'input>,
-        limits: SceneValidationLimits,
-        planning_fault: NodeScenePlanningFault,
-    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
-        let keys = self.keys;
-        let validation = {
-            let mut control =
-                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
-            validate_node_scene_batches(test_scene_authoring_batch(input), limits, &mut control)
-        };
-        let batches = match validation {
-            Ok(batches) => batches,
-            Err(failure) => {
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure,
-                });
-            }
-        };
-        match planning_fault {
-            NodeScenePlanningFault::SealedPlan => {
-                drop(batches);
-                Err(planning_rejection(self, StorePlanError::InvalidBlockTable))
-            }
-            NodeScenePlanningFault::Publication => {
-                let plan = match NodeSceneSealedPlan::try_new(batches) {
-                    Ok(plan) => plan,
-                    Err(failure) => return Err(planning_rejection(self, failure)),
-                };
-                Err(reject_bound_plan(
-                    plan,
-                    self,
-                    StorePlanError::InvalidBlockTable,
-                ))
-            }
-        }
-    }
-
-    fn try_validate_scene_batch<'input>(
-        mut self,
-        input: SceneAuthoringBatch<'input>,
-        limits: SceneValidationLimits,
-    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
-        let keys = self.keys;
-        let validation = {
-            let mut control =
-                OperationAuthoringControl::new(&mut self.raw, keys.phase, keys.dimension);
-            validate_and_seal_node_scene_plan(input, limits, &mut control)
-        };
-        let plan = match validation {
-            Ok(plan) => plan,
-            Err(failure) => {
-                return Err(RejectedNodeSceneConstruction {
-                    operation: self,
-                    failure,
-                });
-            }
-        };
-        let bound = BoundNodeScenePlan::try_bind(plan, self)?;
-        Ok(ValidatedNodeSceneConstruction { bound })
-    }
 }
 
 fn validate_node_scene_batches<'input, C>(
@@ -364,35 +263,63 @@ where
 fn validate_and_seal_node_scene_plan<'input, C>(
     input: SceneAuthoringBatch<'input>,
     limits: SceneValidationLimits,
+    failure_evidence: NodeSceneFailureEvidencePlan,
     control: &mut C,
 ) -> Result<NodeSceneSealedPlan<'input, C::Reservation>, NodeSceneConstructionRejection<C::Error>>
 where
     C: CanonicalAuthoringControl,
 {
     let batches = validate_node_scene_batches(input, limits, control)?;
-    NodeSceneSealedPlan::try_new(batches).map_err(NodeSceneConstructionRejection::Planning)
-}
-
-fn planning_rejection(
-    operation: SceneConstructionOperation,
-    failure: StorePlanError,
-) -> RejectedNodeSceneConstruction {
-    RejectedNodeSceneConstruction {
-        operation,
-        failure: NodeSceneConstructionRejection::Planning(failure),
-    }
+    NodeSceneSealedPlan::try_new(batches, failure_evidence)
+        .map_err(NodeSceneConstructionRejection::Planning)
 }
 
 impl<'input> SceneAuthoringOperation<'input> {
-    pub(in crate::canonical_scene::store) fn try_validate(
+    /// Runs the complete fresh Scene authoring transaction through the sole scoped activation rail.
+    pub(in crate::canonical_scene::store) fn finish_draft(
         self,
-    ) -> Result<ValidatedNodeSceneConstruction<'input>, RejectedNodeSceneConstruction> {
+    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
+        self.finish_draft_with_faults(NodeSceneBuildFaults::none())
+    }
+
+    #[cfg(test)]
+    pub(super) fn finish_draft_with_test_faults(
+        self,
+        faults: NodeSceneBuildFaults,
+    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
+        self.finish_draft_with_faults(faults)
+    }
+
+    #[cfg(test)]
+    pub(super) fn finish_draft_with_planning_fault_for_test(
+        self,
+        planning: NodeScenePlanningFault,
+    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
+        self.finish_draft_with_faults(NodeSceneBuildFaults {
+            planning: Some(planning),
+            ..NodeSceneBuildFaults::none()
+        })
+    }
+
+    fn finish_draft_with_faults(
+        self,
+        faults: NodeSceneBuildFaults,
+    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
         let Self {
-            operation,
+            operation: SceneConstructionOperation { raw, brand, keys },
             input,
             validation_limits,
+            terminal_attribution_slots,
         } = self;
-        operation.try_validate_scene_batch(input, validation_limits)
+        drive_node_scene_activation(
+            raw,
+            brand,
+            keys,
+            input,
+            validation_limits,
+            terminal_attribution_slots,
+            faults,
+        )
     }
 }
 
@@ -430,24 +357,65 @@ struct ValidatedNodeSceneBatches<'input, R> {
 /// materialization shape derived from those collections. Operation-specific publication keys stay
 /// outside this value and are bound by the consuming session adapter before canonical storage opens.
 pub(super) struct NodeSceneSealedPlan<'input, R> {
-    batches: ValidatedNodeSceneBatches<'input, R>,
-    materialization: NodeSceneMaterializationPlans,
+    execution: NodeSceneExecutionPlan<'input, R>,
+    success_requirements: CanonicalSuccessRequirements,
 }
 
-/// Legacy operation binding for one exact sealed plan.
-///
-/// Publication is derived while the operation and plan are consumed together. Keeping the fields
-/// private to this module prevents a sibling operation's publication plan from being substituted
-/// while the legacy construction rail remains in use.
-pub(super) struct BoundNodeScenePlan<'input> {
-    plan: NodeSceneSealedPlan<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-    publication: RetainedStorePublicationPlan,
-    // The operation owner must outlive every compiled-plan reservation above.
-    owner: FreshNodeSceneOwner,
+struct NodeSceneExecutionPlan<'input, R> {
+    batches: ValidatedNodeSceneBatches<'input, R>,
+    materialization: NodeSceneMaterializationPlans,
+    geometry_reference_scratch: GeometryReferenceScratchPlan,
+    validation_scratch: NodeSceneValidationScratchPlan,
+}
+
+#[derive(Clone, Copy)]
+struct NodeSceneFailureEvidencePlan {
+    records: RecordPlan,
+}
+
+impl NodeSceneFailureEvidencePlan {
+    fn try_new() -> Result<Self, StorePlanError> {
+        Ok(Self {
+            records: RecordPlan::new(1, NODE_SCENE_EVIDENCE_FIELD_COUNT)?,
+        })
+    }
+
+    fn requirements(self) -> Result<CanonicalFailureRequirements, StorePlanError> {
+        Ok(CanonicalFailureRequirements::new(CanonicalTableShape::new(
+            1, 1,
+        )?))
+    }
+
+    fn validation_work_units(self) -> Result<u64, StorePlanError> {
+        record_validation_work(self.records)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct NodeSceneMaterializedRefs {
+    pub(in crate::canonical_scene::store) directory: CanonicalBlockRef<SceneDirectorySchema>,
+    pub(in crate::canonical_scene::store) nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
+    pub(in crate::canonical_scene::store) references:
+        Option<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>>,
+    pub(in crate::canonical_scene::store) transforms:
+        Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
+    pub(in crate::canonical_scene::store) spatial: RetainedSpatialRefs,
+    pub(in crate::canonical_scene::store) appearance: super::appearance::RetainedAppearanceRefs,
+    pub(in crate::canonical_scene::store) geometry: super::geometry::RetainedGeometryRefs,
+    pub(in crate::canonical_scene::store) deformation: super::deformation::RetainedDeformationRefs,
+    pub(in crate::canonical_scene::store) animation: super::animation::RetainedAnimationRefs,
+    pub(in crate::canonical_scene::store) profile: super::profile::RetainedProfileRefs,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct NodeSceneActivationOutput {
+    pub(in crate::canonical_scene::store) draft: NodeSceneDraft,
+    pub(in crate::canonical_scene::store) refs: NodeSceneMaterializedRefs,
+    pub(in crate::canonical_scene::store) evidence_counts: SceneEvidenceCounts,
+    pub(in crate::canonical_scene::store) validation_scratch: NodeSceneValidationScratchPlan,
 }
 
 struct NodeSceneMaterializationPlans {
-    evidence: RecordPlan,
     transforms: Option<SequencePlan<f32>>,
     references: Option<RecordPlan>,
     nodes: RecordPlan,
@@ -469,72 +437,89 @@ struct NodeSceneMaterializationPlans {
 }
 
 impl<'input, R> NodeSceneSealedPlan<'input, R> {
-    fn try_new(batches: ValidatedNodeSceneBatches<'input, R>) -> Result<Self, StorePlanError> {
+    fn try_new(
+        batches: ValidatedNodeSceneBatches<'input, R>,
+        failure_evidence: NodeSceneFailureEvidencePlan,
+    ) -> Result<Self, StorePlanError> {
         let materialization = NodeSceneMaterializationPlans::new(&batches)?;
+        let geometry_reference_scratch = GeometryReferenceScratchPlan::try_new(&batches.geometry)?;
+        let validation_scratch = NodeSceneValidationScratchPlan::try_new(
+            materialization.evidence_counts(),
+            batches.deformation.maximum_uniqueness_capacity(),
+            materialization.deformation.influence_row_offset_count(),
+            materialization.deformation.influence_count(),
+            materialization.animation.metered_counts(),
+            materialization.profile.metered_counts()?,
+        )?;
+        let success_requirements =
+            materialization.success_requirements(validation_scratch, failure_evidence)?;
         Ok(Self {
-            batches,
-            materialization,
+            execution: NodeSceneExecutionPlan {
+                batches,
+                materialization,
+                geometry_reference_scratch,
+                validation_scratch,
+            },
+            success_requirements,
         })
     }
 
-    fn publication_plan(
-        &self,
-        keys: SceneStoreKeys,
-    ) -> Result<RetainedStorePublicationPlan, StorePlanError> {
-        self.materialization.publication_plan(keys)
-    }
-
-    fn into_parts(
+    fn into_seal_parts(
         self,
     ) -> (
-        ValidatedNodeSceneBatches<'input, R>,
-        NodeSceneMaterializationPlans,
+        NodeSceneExecutionPlan<'input, R>,
+        CanonicalSuccessRequirements,
     ) {
-        (self.batches, self.materialization)
+        (self.execution, self.success_requirements)
     }
-}
-
-impl<'input> BoundNodeScenePlan<'input> {
-    fn try_bind(
-        plan: NodeSceneSealedPlan<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-        operation: SceneConstructionOperation,
-    ) -> Result<Self, RejectedNodeSceneConstruction> {
-        let keys = operation.keys;
-        let publication = match plan.publication_plan(keys) {
-            Ok(publication) => publication,
-            Err(failure) => {
-                return Err(reject_bound_plan(plan, operation, failure));
-            }
-        };
-        let SceneConstructionOperation { raw, brand, keys } = operation;
-        Ok(Self {
-            plan,
-            publication,
-            owner: FreshNodeSceneOwner { raw, brand, keys },
-        })
-    }
-
-    fn into_parts(
-        self,
-    ) -> (
-        NodeSceneSealedPlan<'input, RetainedStoreReservation<SceneConstructionOwner>>,
-        RetainedStorePublicationPlan,
-        FreshNodeSceneOwner,
-    ) {
-        (self.plan, self.publication, self.owner)
-    }
-}
-
-fn reject_bound_plan(
-    plan: NodeSceneSealedPlan<'_, RetainedStoreReservation<SceneConstructionOwner>>,
-    operation: SceneConstructionOperation,
-    failure: StorePlanError,
-) -> RejectedNodeSceneConstruction {
-    drop(plan);
-    planning_rejection(operation, failure)
 }
 
 impl NodeSceneMaterializationPlans {
+    fn success_requirements(
+        &self,
+        validation_scratch: NodeSceneValidationScratchPlan,
+        failure_evidence: NodeSceneFailureEvidencePlan,
+    ) -> Result<CanonicalSuccessRequirements, StorePlanError> {
+        let canonical_block_count = usize::try_from(self.canonical_block_count)
+            .map_err(|_| StorePlanError::SizeOverflow)?;
+        let validation_work =
+            NonZeroU64::new(self.validation_work_units(validation_scratch, failure_evidence)?)
+                .ok_or(StorePlanError::InvalidBlockTable)?;
+        CanonicalSuccessRequirements::new(
+            CanonicalTableShape::new(canonical_block_count, canonical_block_count)?,
+            canonical_block_count,
+            validation_work,
+        )
+    }
+
+    fn validation_work_units(
+        &self,
+        validation_scratch: NodeSceneValidationScratchPlan,
+        failure_evidence: NodeSceneFailureEvidencePlan,
+    ) -> Result<u64, StorePlanError> {
+        [
+            failure_evidence.validation_work_units()?,
+            optional_sequence_validation_work(self.transforms)?,
+            optional_record_validation_work(self.references)?,
+            record_validation_work(self.nodes)?,
+            self.spatial.validation_work_units()?,
+            self.appearance.validation_work_units()?,
+            self.geometry.validation_work_units()?,
+            self.deformation.validation_work_units()?,
+            self.animation.validation_work_units()?,
+            self.profile.validation_work_units()?,
+            record_validation_work(self.directory)?,
+            validation_scratch.initialization_work_units(),
+            validation_scratch.semantic_projection_work_units(),
+            u64::from(self.spatial.camera_count()),
+            u64::from(self.spatial.light_count()),
+        ]
+        .into_iter()
+        .try_fold(0_u64, |total, work| {
+            total.checked_add(work).ok_or(StorePlanError::SizeOverflow)
+        })
+    }
+
     fn evidence_counts(&self) -> SceneEvidenceCounts {
         let profile = self.profile.evidence_counts();
         SceneEvidenceCounts {
@@ -596,7 +581,6 @@ impl NodeSceneMaterializationPlans {
         let transform_scalar_count_usize =
             usize::try_from(transform_scalar_count).map_err(|_| StorePlanError::SizeOverflow)?;
 
-        let evidence = RecordPlan::new(1, NODE_SCENE_EVIDENCE_FIELD_COUNT)?;
         let nodes = RecordPlan::new(
             usize::try_from(node_count).map_err(|_| StorePlanError::SizeOverflow)?,
             NODE_SCENE_NODE_FIELD_COUNT,
@@ -654,7 +638,6 @@ impl NodeSceneMaterializationPlans {
         let build_invariant = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)?;
 
         Ok(Self {
-            evidence,
             transforms,
             references,
             nodes,
@@ -675,41 +658,28 @@ impl NodeSceneMaterializationPlans {
             build_invariant,
         })
     }
+}
 
-    fn publication_plan(
-        &self,
-        keys: SceneStoreKeys,
-    ) -> Result<RetainedStorePublicationPlan, StorePlanError> {
-        let canonical_block_count = usize::try_from(self.canonical_block_count)
-            .map_err(|_| StorePlanError::SizeOverflow)?;
-        let evidence_block_count = 1_usize;
-        let canonical_writer = node_scene_writer_plan(
-            keys,
-            canonical_block_count
-                .checked_add(1)
-                .ok_or(StorePlanError::InvalidBlockTable)?,
-        )?;
-        let evidence_writer = node_scene_writer_plan(
-            keys,
-            evidence_block_count
-                .checked_add(1)
-                .ok_or(StorePlanError::InvalidBlockTable)?,
-        )?;
-        let canonical_table = RetainedStoreBlockTablePlan::new(
-            canonical_writer,
-            canonical_block_count,
-            canonical_block_count,
-        )?;
-        let evidence_table = RetainedStoreBlockTablePlan::new(
-            evidence_writer,
-            evidence_block_count,
-            evidence_block_count,
-        )?;
-        Ok(RetainedStorePublicationPlan::success(
-            canonical_table,
-            evidence_table,
-        ))
-    }
+fn record_validation_work(plan: RecordPlan) -> Result<u64, StorePlanError> {
+    let cells = plan
+        .rows()
+        .checked_mul(plan.fields())
+        .ok_or(StorePlanError::SizeOverflow)?;
+    u64::try_from(cells).map_err(|_| StorePlanError::SizeOverflow)
+}
+
+fn optional_record_validation_work(plan: Option<RecordPlan>) -> Result<u64, StorePlanError> {
+    plan.map(record_validation_work)
+        .transpose()
+        .map(|work| work.unwrap_or(0))
+}
+
+fn optional_sequence_validation_work<T: StoredScalar>(
+    plan: Option<SequencePlan<T>>,
+) -> Result<u64, StorePlanError> {
+    plan.map(|plan| u64::try_from(plan.element_count()).map_err(|_| StorePlanError::SizeOverflow))
+        .transpose()
+        .map(|work| work.unwrap_or(0))
 }
 
 fn node_scene_writer_plan(
@@ -724,545 +694,501 @@ fn node_scene_writer_plan(
     ))
 }
 
-fn prepare_node_authoring_rejection(
-    raw: SceneStoreOperation,
+fn node_scene_activation_policy(
     keys: SceneStoreKeys,
-    cause: u32,
-) -> Result<PreparedNodeSceneFailure, SceneConstructionError> {
-    let evidence_plan = match RecordPlan::new(1, NODE_SCENE_EVIDENCE_FIELD_COUNT) {
-        Ok(plan) => plan,
-        Err(_) => {
-            return prepare_node_minimal_fallback_from_operation(
-                raw,
-                NODE_SCENE_BUILD_INVARIANT_CODE,
-            );
-        }
-    };
-    let evidence_table = match node_scene_writer_plan(keys, 2)
-        .and_then(|writer| RetainedStoreBlockTablePlan::new(writer, 1, 1))
-    {
-        Ok(table) => table,
-        Err(_) => {
-            return prepare_node_minimal_fallback_from_operation(
-                raw,
-                NODE_SCENE_BUILD_INVARIANT_CODE,
-            );
-        }
-    };
-    let mut assembly = match raw
-        .try_publication_assembly(RetainedStorePublicationPlan::rich_failure(evidence_table))
-    {
-        Ok(assembly) => assembly,
-        Err(error) => {
-            return prepare_node_minimal_fallback_from_open_recovery(error.into_disposition()?);
-        }
-    };
-    let counts = SceneEvidenceCounts::authoring_rejection();
-    let evidence = match retain_node_scene_evidence_counts(&mut assembly, evidence_plan, counts) {
-        Ok(evidence) => evidence,
-        Err(build_cause) => {
-            return prepare_node_minimal_fallback_from_assembly(
-                assembly,
-                node_scene_failure_code(&build_cause),
-            );
-        }
-    };
-    if assembly
-        .try_commit_outcome_evidence(keys.dimension, 1)
-        .is_err()
-    {
-        return prepare_node_minimal_fallback_from_assembly(
-            assembly,
-            NODE_SCENE_COMMITMENT_REJECTION_CODE,
-        );
-    }
-    prepare_node_rich_failure_from_assembly(assembly, evidence, counts, cause)
+    canonical_attribution_slots: usize,
+) -> Result<CanonicalActivationPolicy, StorePlanError> {
+    Ok(CanonicalActivationPolicy::new(
+        node_scene_writer_plan(keys, canonical_attribution_slots)?,
+        node_scene_writer_plan(keys, 2)?,
+        keys.dimension,
+        keys.dimension,
+        keys.dimension,
+        keys.dimension,
+    ))
 }
 
-impl NodeSceneDraftBuild {
-    fn failure(
-        prepared: Result<PreparedNodeSceneFailure, SceneConstructionError>,
-    ) -> Result<Self, SceneConstructionError> {
-        prepared.map(Self::Failure)
-    }
-
-    pub(super) fn prepare_with_generation_source(
-        self,
-        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        match self {
-            Self::Draft { draft, owner } => {
-                owner.prepare_with_generation_source(draft, reserve_generation)
-            }
-            Self::Failure(failure) => Ok(failure.into()),
-        }
-    }
-}
-
-impl ValidatedNodeSceneConstruction<'_> {
-    /// Materializes and centrally validates only the batch already coupled to this typestate.
-    pub(in crate::canonical_scene::store) fn prepare(
-        self,
-    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        self.prepare_with_generation_source(SceneGenerationId::reserve)
-    }
-
-    pub(super) fn prepare_with_generation_source(
-        self,
-        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        self.finish_draft_with_faults(NodeSceneBuildFaults::none())?
-            .prepare_with_generation_source(reserve_generation)
-    }
-
-    #[cfg(test)]
-    pub(super) fn prepare_with_faults(
-        self,
-        faults: NodeSceneBuildFaults,
-    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        self.finish_draft_with_faults(faults)?
-            .prepare_with_generation_source(SceneGenerationId::reserve)
-    }
-
-    /// Freezes an owned draft after materialization and releases every source-backed batch.
-    pub(in crate::canonical_scene::store) fn finish_draft(
-        self,
-    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
-        self.finish_draft_with_faults(NodeSceneBuildFaults::none())
-    }
-
-    fn finish_draft_with_faults(
-        self,
-        mut faults: NodeSceneBuildFaults,
-    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
-        let Self { bound } = self;
-        let (plan, publication, owner) = bound.into_parts();
-        let (batches, plans) = plan.into_parts();
-        let FreshNodeSceneOwner { raw, brand, keys } = owner;
-        let mut assembly: SceneStoreAssembly = match raw.try_publication_assembly(publication) {
-            Ok(assembly) => assembly,
-            Err(error) => {
-                drop(batches);
-                return NodeSceneDraftBuild::failure(
-                    prepare_node_minimal_fallback_from_open_recovery(error.into_disposition()?),
-                );
-            }
-        };
-
-        let evidence = match retain_node_scene_evidence(&mut assembly, &plans) {
-            Ok(evidence) => evidence,
-            Err(cause) => {
-                drop(batches);
-                return NodeSceneDraftBuild::failure(prepare_node_minimal_fallback_from_assembly(
-                    assembly,
-                    node_scene_failure_code(&cause),
-                ));
-            }
-        };
-        if let Err(_cause) =
-            assembly.try_commit_outcome_evidence(keys.dimension, faults.outcome_evidence_commitment)
-        {
-            drop(batches);
-            return NodeSceneDraftBuild::failure(prepare_node_minimal_fallback_from_assembly(
-                assembly,
-                NODE_SCENE_COMMITMENT_REJECTION_CODE,
-            ));
-        }
-        let geometry_scratch_plan =
-            match try_plan_geometry_reference_scratch(&mut assembly, &batches.geometry) {
-                Ok(plan) => plan,
+fn materialize_node_scene<'lane, R>(
+    mut lane: CanonicalLane<
+        'lane,
+        SceneConstructionOwner,
+        SceneConstructionPhase,
+        SceneConstructionUnit,
+    >,
+    plan: &NodeSceneExecutionPlan<'_, R>,
+    brand: super::super::ConstructionBrand,
+    mut faults: NodeSceneBuildFaults,
+) -> CanonicalMaterialization<
+    'lane,
+    NodeSceneActivationOutput,
+    NodeSceneConstructionRejection<StoreRuntimeError>,
+    RecordBlock,
+    SceneDirectorySchema,
+> {
+    macro_rules! materialize {
+        ($expression:expr) => {
+            match $expression {
+                Ok(value) => value,
                 Err(cause) => {
-                    drop(batches);
-                    return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                        assembly, evidence, &plans, cause,
-                    ));
+                    let rejection = NodeSceneConstructionRejection::Materialization(cause);
+                    let stable_code = rejection.stable_code();
+                    return lane.reject(rejection, stable_code);
                 }
-            };
-        let mut work = NodeSceneWorkMeter::new();
-        let spatial_refs = match retain_spatial(
-            &mut assembly,
-            &plans.spatial,
-            &batches.spatial,
-            keys,
-            &mut work,
-            plans.build_invariant,
-        ) {
-            Ok(spatial) => spatial,
-            Err(cause) => {
-                drop(batches);
-                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                    assembly, evidence, &plans, cause,
-                ));
             }
         };
-        let transforms = match plans.transforms {
-            Some(plan) => match retain_node_scene_transforms(
-                &mut assembly,
-                plan,
-                &batches.nodes,
-                &plans,
-                keys,
-                &mut work,
-                &mut faults,
-            ) {
-                Ok(transforms) => Some(transforms),
-                Err(cause) => {
-                    drop(batches);
-                    return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                        assembly, evidence, &plans, cause,
-                    ));
-                }
-            },
-            None => None,
-        };
-        let references = match plans.references {
-            Some(plan) => match retain_node_scene_references(
-                &mut assembly,
-                plan,
-                &batches.nodes,
-                &plans,
-                keys,
-                &mut work,
-            ) {
-                Ok(references) => Some(references),
-                Err(cause) => {
-                    drop(batches);
-                    return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                        assembly, evidence, &plans, cause,
-                    ));
-                }
-            },
-            None => None,
-        };
-        let node_payloads = RetainedNodePayloadRefs {
-            transforms,
-            spatial: spatial_refs,
-        };
-        let nodes_ref = match retain_node_scene_nodes(
-            &mut assembly,
-            plans.nodes,
-            node_payloads,
-            &batches.nodes,
-            &plans,
-            keys,
-            &mut work,
-        ) {
-            Ok(nodes) => nodes,
-            Err(cause) => {
-                drop(batches);
-                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                    assembly, evidence, &plans, cause,
-                ));
-            }
-        };
-        let appearance_refs = match retain_appearance(
-            &mut assembly,
-            &plans.appearance,
-            &batches.appearance,
-            keys,
-            &mut work,
-            plans.build_invariant,
-        ) {
-            Ok(appearance) => appearance,
-            Err(cause) => {
-                drop(batches);
-                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                    assembly, evidence, &plans, cause,
-                ));
-            }
-        };
-        let geometry_scratch =
-            match try_create_geometry_reference_scratch(&mut assembly, keys, geometry_scratch_plan)
-            {
-                Ok(scratch) => scratch,
-                Err(cause) => {
-                    drop(batches);
-                    return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                        assembly, evidence, &plans, cause,
-                    ));
-                }
-            };
-        let geometry_refs = match retain_geometry(
-            &mut assembly,
-            &plans.geometry,
-            geometry_scratch,
-            &batches.geometry,
-            &batches.nodes,
-            nodes_ref,
-            appearance_refs.materials(),
-            keys,
-            &mut work,
-            &mut faults,
-            plans.build_invariant,
-        ) {
-            Ok(geometry) => geometry,
-            Err(cause) => {
-                drop(batches);
-                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                    assembly, evidence, &plans, cause,
-                ));
-            }
-        };
-        let deformation_refs = match retain_deformation(
-            &mut assembly,
-            &plans.deformation,
-            &batches.deformation,
-            &batches.nodes,
-            DeformationDependencyTableRefs::new(
-                nodes_ref,
-                geometry_refs.logical_meshes(),
-                geometry_refs.primitives(),
-                geometry_refs.mesh_instances(),
-            ),
-            keys,
-            &mut work,
-            plans.build_invariant,
-        ) {
-            Ok(deformation) => deformation,
-            Err(cause) => {
-                drop(batches);
-                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                    assembly, evidence, &plans, cause,
-                ));
-            }
-        };
-        let animation_refs = match retain_animation(
-            &mut assembly,
-            &plans.animation,
-            &batches.animations,
-            AnimationTargetTableRefs::new(nodes_ref, deformation_refs.mesh_instances()),
-            keys,
-            &mut work,
-            plans.build_invariant,
-        ) {
-            Ok(animation) => animation,
-            Err(cause) => {
-                drop(batches);
-                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                    assembly, evidence, &plans, cause,
-                ));
-            }
-        };
-        let profile_refs = match retain_profile(
-            &mut assembly,
-            &plans.profile,
-            &batches.profile,
-            keys,
-            &mut work,
-            &mut faults.profile,
-            plans.build_invariant,
-        ) {
-            Ok(profile) => profile,
-            Err(cause) => {
-                drop(batches);
-                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                    assembly, evidence, &plans, cause,
-                ));
-            }
-        };
-        let directory = match retain_node_scene_directory(
-            &mut assembly,
-            plans.directory,
-            NodeSceneDirectoryRefs {
-                nodes: nodes_ref,
-                references,
-                transforms,
-            },
-            SceneDomainDirectoryRefs {
-                spatial: spatial_refs.directory(),
-                appearance: appearance_refs.directory(),
-                geometry: geometry_refs.directory(),
-                deformation: deformation_refs.directory(),
-                animation: animation_refs.directory(),
-                profile: profile_refs.directory(),
-            },
-            &plans,
-            keys,
-            &mut work,
-        ) {
-            Ok(directory) => directory,
-            Err(cause) => {
-                drop(batches);
-                return NodeSceneDraftBuild::failure(prepare_node_post_evidence_failure(
-                    assembly, evidence, &plans, cause,
-                ));
-            }
-        };
-        let evidence_counts = plans.evidence_counts();
-        let deformation_uniqueness_capacity = batches.deformation.maximum_uniqueness_capacity();
-        let draft = NodeSceneDraft { brand, directory };
-        let owner = PendingNodeSceneDraft {
-            assembly,
-            brand,
-            keys,
-            expected_directory: directory,
-            evidence,
-            evidence_counts,
-            work,
-            deformation_uniqueness_capacity,
-        };
-        // No source authoring slice or compiled validation plan crosses the draft boundary.
-        drop(batches);
-        Ok(NodeSceneDraftBuild::Draft { draft, owner })
     }
-}
 
-fn try_plan_geometry_reference_scratch<R>(
-    assembly: &mut SceneStoreAssembly,
-    geometry: &ValidatedGeometryBatch<'_, R>,
-) -> Result<GeometryReferenceScratchPlan, StoreRuntimeError> {
-    let mut checkpoint = assembly.try_control_checkpoint()?;
-    GeometryReferenceScratchPlan::try_new(&mut checkpoint, geometry)
-}
-
-fn try_create_geometry_reference_scratch(
-    assembly: &mut SceneStoreAssembly,
-    keys: SceneStoreKeys,
-    plan: GeometryReferenceScratchPlan,
-) -> Result<GeometryReferenceScratch, StoreRuntimeError> {
-    let mut checkpoint = assembly.try_control_checkpoint()?;
-    GeometryReferenceScratch::try_new(&mut checkpoint, keys, plan)
-}
-
-fn retain_node_scene_evidence(
-    assembly: &mut SceneStoreAssembly,
-    plans: &NodeSceneMaterializationPlans,
-) -> Result<OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>, StoreRuntimeError> {
-    retain_node_scene_evidence_counts(assembly, plans.evidence, plans.evidence_counts())
-}
-
-fn retain_node_scene_evidence_counts(
-    assembly: &mut SceneStoreAssembly,
-    plan: RecordPlan,
-    counts: SceneEvidenceCounts,
-) -> Result<OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>, StoreRuntimeError> {
-    assembly.try_retain_outcome_evidence_records(plan, NodeSceneOutcomeEvidenceSchema, |writer| {
-        writer.write_row(|row| {
-            row.write_scalar(SCENE_SCHEMA_REVISION)?;
-            row.write_scalar(NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE)?;
-            row.write_scalar(counts.canonical_block_count)?;
-            row.write_scalar(counts.node_count)?;
-            row.write_scalar(counts.camera_count)?;
-            row.write_scalar(counts.light_count)?;
-            row.write_scalar(counts.image_count)?;
-            row.write_scalar(counts.sampler_count)?;
-            row.write_scalar(counts.texture_count)?;
-            row.write_scalar(counts.material_count)?;
-            row.write_scalar(counts.material_binding_count)?;
-            row.write_scalar(counts.logical_mesh_count)?;
-            row.write_scalar(counts.primitive_count)?;
-            row.write_scalar(counts.attribute_count)?;
-            row.write_scalar(counts.mesh_instance_count)?;
-            row.write_scalar(counts.skin_count)?;
-            row.write_scalar(counts.logical_morph_count)?;
-            row.write_scalar(counts.morph_definition_count)?;
-            row.write_scalar(counts.primitive_deformation_count)?;
-            row.write_scalar(counts.morph_target_count)?;
-            row.write_scalar(counts.morph_delta_count)?;
-            row.write_scalar(counts.animation_clip_count)?;
-            row.write_scalar(counts.animation_channel_count)?;
-            row.write_scalar(counts.payload_block_count)?;
-            row.write_scalar(counts.profile_segment_count)?;
-            row.write_scalar(counts.profile_resource_count)?;
-            row.write_scalar(counts.profile_source_count)?;
-            row.write_scalar(counts.profile_provenance_count)?;
-            row.write_scalar(counts.profile_operation_count)?;
-            row.write_scalar(counts.profile_parent_count)?;
-            row.write_scalar(counts.profile_owner_count)?;
-            row.write_scalar(counts.profile_attachment_count)?;
-            row.write_scalar(counts.profile_metadata_entry_count)?;
-            row.write_scalar(counts.shareable_leaf_block_count)
-        })
-    })
-}
-
-fn retain_node_scene_transforms(
-    assembly: &mut SceneStoreAssembly,
-    plan: SequencePlan<f32>,
-    batch: &ValidatedNodeBatch<'_, RetainedStoreReservation<SceneConstructionOwner>>,
-    plans: &NodeSceneMaterializationPlans,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
-    faults: &mut NodeSceneBuildFaults,
-) -> Result<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>, StoreRuntimeError> {
-    let nodes = batch.input().nodes();
+    let NodeSceneExecutionPlan {
+        batches,
+        materialization: plans,
+        geometry_reference_scratch,
+        validation_scratch,
+    } = plan;
     let failure = plans.build_invariant;
-    assembly
-        .try_retain_canonical_sequence_controlled(
+    let spatial = materialize!(retain_spatial(
+        &mut lane,
+        &plans.spatial,
+        &batches.spatial,
+        failure,
+    ));
+    let transforms = match plans.transforms {
+        Some(plan) => Some(materialize!(retain_node_scene_transforms(
+            &mut lane,
             plan,
-            keys.dimension,
-            NodeSceneAuthoredTransformSchema,
-            |writer, control| {
-                for &local in batch.canonical_order() {
-                    let authored = nodes.get(local).ok_or(failure)?.authored_transform();
-                    if let Some(matrix) = authored.authored_matrix() {
-                        work.observe(
-                            control,
-                            u64::try_from(NODE_SCENE_MATRIX_SCALAR_COUNT).map_err(|_| failure)?,
-                        )?;
-                        for mut column in matrix.cols {
-                            column[0] = faults.transform_scalar(column[0]);
-                            writer.extend_from_slice(&column)?;
+            &batches.nodes,
+            plans,
+            &mut faults,
+        ))),
+        None => None,
+    };
+    let references = match plans.references {
+        Some(plan) => Some(materialize!(retain_node_scene_references(
+            &mut lane,
+            plan,
+            &batches.nodes,
+            plans,
+        ))),
+        None => None,
+    };
+    let nodes = materialize!(retain_node_scene_nodes(
+        &mut lane,
+        plans.nodes,
+        RetainedNodePayloadRefs {
+            transforms,
+            spatial,
+        },
+        &batches.nodes,
+        plans,
+    ));
+    let appearance = materialize!(retain_appearance(
+        &mut lane,
+        &plans.appearance,
+        &batches.appearance,
+        failure,
+    ));
+    let geometry_scratch = materialize!(GeometryReferenceScratch::try_new(
+        &mut lane,
+        *geometry_reference_scratch,
+    ));
+    let geometry = materialize!(retain_geometry(
+        &mut lane,
+        &plans.geometry,
+        geometry_scratch,
+        &batches.geometry,
+        &batches.nodes,
+        nodes,
+        appearance.materials(),
+        &mut faults,
+        failure,
+    ));
+    let deformation = materialize!(retain_deformation(
+        &mut lane,
+        &plans.deformation,
+        &batches.deformation,
+        &batches.nodes,
+        DeformationDependencyTableRefs::new(
+            nodes,
+            geometry.logical_meshes(),
+            geometry.primitives(),
+            geometry.mesh_instances(),
+        ),
+        failure,
+    ));
+    let animation = materialize!(retain_animation(
+        &mut lane,
+        &plans.animation,
+        &batches.animations,
+        AnimationTargetTableRefs::new(nodes, deformation.mesh_instances()),
+        failure,
+    ));
+    let profile = materialize!(retain_profile(
+        &mut lane,
+        &plans.profile,
+        &batches.profile,
+        &mut faults.profile,
+        failure,
+    ));
+    let directory = materialize!(retain_node_scene_directory(
+        &mut lane,
+        plans.directory,
+        NodeSceneDirectoryRefs {
+            nodes,
+            references,
+            transforms,
+        },
+        SceneDomainDirectoryRefs {
+            spatial: spatial.directory(),
+            appearance: appearance.directory(),
+            geometry: geometry.directory(),
+            deformation: deformation.directory(),
+            animation: animation.directory(),
+            profile: profile.directory(),
+        },
+        plans,
+    ));
+    let draft = NodeSceneDraft { brand, directory };
+    let output = NodeSceneActivationOutput {
+        draft,
+        refs: NodeSceneMaterializedRefs {
+            directory,
+            nodes,
+            references,
+            transforms,
+            spatial,
+            appearance,
+            geometry,
+            deformation,
+            animation,
+            profile,
+        },
+        evidence_counts: plans.evidence_counts(),
+        validation_scratch: *validation_scratch,
+    };
+    lane.complete(directory.into_store(), output)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the scoped driver consumes the sole retained owner together with its complete producer batch and bounded policy"
+)]
+fn drive_node_scene_activation<'input>(
+    raw: super::super::SceneStoreOperation,
+    brand: super::super::ConstructionBrand,
+    keys: SceneStoreKeys,
+    input: SceneAuthoringBatch<'input>,
+    validation_limits: SceneValidationLimits,
+    terminal_attribution_slots: usize,
+    faults: NodeSceneBuildFaults,
+) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
+    #[cfg(test)]
+    let panic_central_validator = faults.panic_central_validator;
+    let failure_evidence = NodeSceneFailureEvidencePlan::try_new()?;
+    let failure_requirements = failure_evidence.requirements()?;
+    let policy = node_scene_activation_policy(keys, terminal_attribution_slots)?;
+    let evidence_plan = failure_evidence.records;
+    let owner = raw.into_scoped_session_outcome_owner(policy, failure_requirements)?;
+    let sealed_counts = Cell::new(SceneEvidenceCounts::authoring_rejection());
+    let sealed_counts_ref = &sealed_counts;
+
+    let outcome = owner.plan_and_activate_scoped(move |mut planning| {
+        let preflight = match planning.begin_semantic_work() {
+            Ok(mut semantic) => {
+                let validation = {
+                    let mut control = ScopedAuthoringControl::new(&mut semantic);
+                    validate_and_seal_node_scene_plan(
+                        input,
+                        validation_limits,
+                        failure_evidence,
+                        &mut control,
+                    )
+                };
+                match validation {
+                    Ok(plan) => match semantic.finish_exact() {
+                        Ok(completion) => Ok((plan, completion)),
+                        Err(_) => {
+                            drop(plan);
+                            Err(NodeSceneConstructionRejection::<StoreRuntimeError>::Materialization(
+                                StoreRuntimeError::ConstructionInvariantUnverified,
+                            ))
                         }
-                    } else if let Some(trs) = authored.authored_trs() {
-                        work.observe(
-                            control,
-                            u64::try_from(NODE_SCENE_TRS_SCALAR_COUNT).map_err(|_| failure)?,
-                        )?;
-                        let translation = trs.translation();
-                        let rotation = trs.rotation();
-                        let scale = trs.scale();
-                        writer.extend_from_slice(&[
-                            faults.transform_scalar(translation.x),
-                            translation.y,
-                            translation.z,
-                            rotation.x,
-                            rotation.y,
-                            rotation.z,
-                            rotation.w,
-                            scale.x,
-                            scale.y,
-                            scale.z,
-                        ])?;
-                    } else {
-                        return Err(failure.into());
+                    },
+                    Err(rejection) => {
+                        let _ = semantic.finish_rejected();
+                        Err(rejection)
                     }
                 }
-                Ok(())
+            }
+            Err(_) => Err(
+                NodeSceneConstructionRejection::<StoreRuntimeError>::Materialization(
+                    StoreRuntimeError::ConstructionInvariantUnverified,
+                ),
+            ),
+        };
+        let (plan, completion) = match preflight {
+            Ok(ready) => ready,
+            Err(rejection) => {
+                let stable_code = rejection.stable_code();
+                return planning.reject(rejection, stable_code);
+            }
+        };
+        #[cfg(test)]
+        if matches!(faults.planning, Some(NodeScenePlanningFault::SealedPlan)) {
+            drop(plan);
+            let rejection = NodeSceneConstructionRejection::<StoreRuntimeError>::Planning(
+                StorePlanError::InvalidBlockTable,
+            );
+            let stable_code = rejection.stable_code();
+            return planning.reject(rejection, stable_code);
+        }
+        sealed_counts_ref.set(plan.execution.materialization.evidence_counts());
+        let (execution, success_requirements) = plan.into_seal_parts();
+        #[cfg(test)]
+        if matches!(faults.planning, Some(NodeScenePlanningFault::Publication)) {
+            drop(execution);
+            let rejection = NodeSceneConstructionRejection::<StoreRuntimeError>::Planning(
+                StorePlanError::InvalidBlockTable,
+            );
+            let stable_code = rejection.stable_code();
+            return planning.reject(rejection, stable_code);
+        }
+        let permit = match planning.seal_activation(success_requirements, completion) {
+            CanonicalActivationSeal::Sealed(permit) => permit,
+            CanonicalActivationSeal::Unsealed(failure) => {
+                drop(execution);
+                return failure.finish_after_plan_drop();
+            }
+        };
+        permit.activate(execution, move |lane, execution| {
+            materialize_node_scene(lane, execution, brand, faults)
+        })
+    })?;
+
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(activated) => activated,
+        CanonicalActivationOutcome::Rejected(rejected) => {
+            let counts = sealed_counts.get();
+            let failure = rejected.build_failure_evidence(|lane| {
+                match lane.try_retain_records(
+                    evidence_plan,
+                    NodeSceneOutcomeEvidenceSchema,
+                    |writer| writer.write_row(|row| write_node_scene_evidence_row(row, counts)),
+                ) {
+                    Ok(evidence) => lane.complete(evidence),
+                    Err(_) => lane.abort(),
+                }
+            });
+            return prepare_node_activation_failure(failure, counts);
+        }
+        CanonicalActivationOutcome::NeverActivated(never_activated) => {
+            let counts = sealed_counts.get();
+            let failure = never_activated.build_failure_evidence(|lane| {
+                match lane.try_retain_records(
+                    evidence_plan,
+                    NodeSceneOutcomeEvidenceSchema,
+                    |writer| writer.write_row(|row| write_node_scene_evidence_row(row, counts)),
+                ) {
+                    Ok(evidence) => lane.complete(evidence),
+                    Err(_) => lane.abort(),
+                }
+            });
+            return prepare_node_activation_failure(failure, counts);
+        }
+        CanonicalActivationOutcome::Fallback(fallback) => {
+            let (store, _cause) = fallback.into_parts();
+            return Ok(prepare_node_central_fallback(store));
+        }
+    };
+
+    let central_counts = activated.output().evidence_counts;
+    let outcome = activated.validate_centrally(
+        |lane, output| match lane.try_retain_records(
+            evidence_plan,
+            NodeSceneOutcomeEvidenceSchema,
+            |writer| {
+                writer.write_row(|row| write_node_scene_evidence_row(row, output.evidence_counts))
             },
-        )
-        .map(CanonicalBlockRef::from_store)
+        ) {
+            Ok(evidence) => lane.complete(evidence),
+            Err(_) => lane.abort(),
+        },
+        |planning, output| {
+            #[cfg(test)]
+            if panic_central_validator {
+                panic!("injected clean central validator panic");
+            }
+            planning.validate_with(
+                |checkpoint| {
+                    ScopedNodeSceneValidationScratchOwner::try_allocate(
+                        checkpoint,
+                        output.validation_scratch,
+                    )
+                },
+                |session, directory, evidence, scratch| {
+                    let initialized = scratch.initialize(session, output.validation_scratch)?;
+                    let proof = if initialized && output.draft.brand == brand {
+                        let mut scratch = scratch.metered_view();
+                        validate_node_scene_canonical_graph_metered(
+                            session,
+                            directory,
+                            evidence,
+                            output.evidence_counts,
+                            output.refs,
+                            output.validation_scratch,
+                            &mut scratch,
+                        )?
+                    } else {
+                        None
+                    };
+                    Ok(match proof {
+                        Some(proof) => CanonicalValidationDecision::accept(proof),
+                        None => CanonicalValidationDecision::reject(
+                            NodeSceneConstructionRejection::<StoreRuntimeError>::Materialization(
+                                StoreRuntimeError::ConstructionInvariantUnverified,
+                            ),
+                            NODE_SCENE_BUILD_INVARIANT_CODE,
+                        ),
+                    })
+                },
+            )
+        },
+    )?;
+    match outcome {
+        CanonicalCentralValidationOutcome::Candidate(candidate) => {
+            let draft = candidate.output().draft;
+            Ok(NodeSceneDraftBuild::Draft {
+                draft,
+                owner: PendingNodeSceneDraft { candidate },
+            })
+        }
+        CanonicalCentralValidationOutcome::Rejected(rejected) => {
+            prepare_node_central_failure(rejected.validate_rich_failure(|session, root| {
+                validate_node_scene_failure_evidence(session, root, central_counts)
+            }))
+        }
+        CanonicalCentralValidationOutcome::Interrupted(interrupted) => {
+            prepare_node_central_failure(interrupted.validate_rich_failure(|session, root| {
+                validate_node_scene_failure_evidence(session, root, central_counts)
+            }))
+        }
+        CanonicalCentralValidationOutcome::Fallback(fallback) => {
+            let (store, _cause) = fallback.into_parts();
+            Ok(prepare_node_central_fallback(store))
+        }
+    }
 }
 
-fn retain_node_scene_references(
-    assembly: &mut SceneStoreAssembly,
-    plan: RecordPlan,
-    batch: &ValidatedNodeBatch<'_, RetainedStoreReservation<SceneConstructionOwner>>,
+fn write_node_scene_evidence_row(
+    row: &mut OutcomeEvidenceRecordRowWriter<'_>,
+    counts: SceneEvidenceCounts,
+) -> Result<(), StoreBuildError> {
+    row.write_scalar(SCENE_SCHEMA_REVISION)?;
+    row.write_scalar(NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE)?;
+    row.write_scalar(counts.canonical_block_count)?;
+    row.write_scalar(counts.node_count)?;
+    row.write_scalar(counts.camera_count)?;
+    row.write_scalar(counts.light_count)?;
+    row.write_scalar(counts.image_count)?;
+    row.write_scalar(counts.sampler_count)?;
+    row.write_scalar(counts.texture_count)?;
+    row.write_scalar(counts.material_count)?;
+    row.write_scalar(counts.material_binding_count)?;
+    row.write_scalar(counts.logical_mesh_count)?;
+    row.write_scalar(counts.primitive_count)?;
+    row.write_scalar(counts.attribute_count)?;
+    row.write_scalar(counts.mesh_instance_count)?;
+    row.write_scalar(counts.skin_count)?;
+    row.write_scalar(counts.logical_morph_count)?;
+    row.write_scalar(counts.morph_definition_count)?;
+    row.write_scalar(counts.primitive_deformation_count)?;
+    row.write_scalar(counts.morph_target_count)?;
+    row.write_scalar(counts.morph_delta_count)?;
+    row.write_scalar(counts.animation_clip_count)?;
+    row.write_scalar(counts.animation_channel_count)?;
+    row.write_scalar(counts.payload_block_count)?;
+    row.write_scalar(counts.profile_segment_count)?;
+    row.write_scalar(counts.profile_resource_count)?;
+    row.write_scalar(counts.profile_source_count)?;
+    row.write_scalar(counts.profile_provenance_count)?;
+    row.write_scalar(counts.profile_operation_count)?;
+    row.write_scalar(counts.profile_parent_count)?;
+    row.write_scalar(counts.profile_owner_count)?;
+    row.write_scalar(counts.profile_attachment_count)?;
+    row.write_scalar(counts.profile_metadata_entry_count)?;
+    row.write_scalar(counts.shareable_leaf_block_count)
+}
+
+fn retain_node_scene_transforms<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
+    plan: SequencePlan<f32>,
+    batch: &ValidatedNodeBatch<'_, R>,
     plans: &NodeSceneMaterializationPlans,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
-) -> Result<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>, StoreRuntimeError> {
+    faults: &mut NodeSceneBuildFaults,
+) -> Result<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let nodes = batch.input().nodes();
+    let failure = plans.build_invariant;
+    lane.try_retain_sequence(plan, NodeSceneAuthoredTransformSchema, |control| {
+        for &local in batch.canonical_order() {
+            let authored = nodes.get(local).ok_or(failure)?.authored_transform();
+            if let Some(matrix) = authored.authored_matrix() {
+                for mut column in matrix.cols {
+                    column[0] = faults.transform_scalar(column[0]);
+                    control.extend_from_slice(&column)?;
+                }
+            } else if let Some(trs) = authored.authored_trs() {
+                let translation = trs.translation();
+                let rotation = trs.rotation();
+                let scale = trs.scale();
+                control.extend_from_slice(&[
+                    faults.transform_scalar(translation.x),
+                    translation.y,
+                    translation.z,
+                    rotation.x,
+                    rotation.y,
+                    rotation.z,
+                    rotation.w,
+                    scale.x,
+                    scale.y,
+                    scale.z,
+                ])?;
+            } else {
+                return Err(failure.into());
+            }
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
+}
+
+fn retain_node_scene_references<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
+    plan: RecordPlan,
+    batch: &ValidatedNodeBatch<'_, R>,
+    plans: &NodeSceneMaterializationPlans,
+) -> Result<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let mapping = batch.canonical_index_by_local();
     let failure = plans.build_invariant;
-    assembly
-        .try_retain_canonical_records_controlled(
-            plan,
-            keys.dimension,
-            NodeSceneChildReferenceTableSchema,
-            |writer, control| {
-                for (source_row, &local) in batch.canonical_order().iter().enumerate() {
-                    work.observe(control, 1)?;
-                    let reference = u32::try_from(source_row).map_err(|_| failure)?;
-                    let child = *mapping.get(local).ok_or(failure)?;
-                    writer.write_row(|row| {
-                        row.write_scalar(reference)?;
-                        row.write_scalar(child)
-                    })?;
-                }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+    lane.try_retain_records(plan, NodeSceneChildReferenceTableSchema, |control| {
+        for (source_row, &local) in batch.canonical_order().iter().enumerate() {
+            let reference = u32::try_from(source_row).map_err(|_| failure)?;
+            let child = *mapping.get(local).ok_or(failure)?;
+            control.write_row(|row| {
+                row.write_scalar(reference)?;
+                row.write_scalar(child)
+            })?;
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
 #[derive(Clone, Copy)]
@@ -1271,15 +1197,18 @@ struct RetainedNodePayloadRefs {
     spatial: RetainedSpatialRefs,
 }
 
-fn retain_node_scene_nodes(
-    assembly: &mut SceneStoreAssembly,
+fn retain_node_scene_nodes<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: RecordPlan,
     payloads: RetainedNodePayloadRefs,
-    batch: &ValidatedNodeBatch<'_, RetainedStoreReservation<SceneConstructionOwner>>,
+    batch: &ValidatedNodeBatch<'_, R>,
     plans: &NodeSceneMaterializationPlans,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
-) -> Result<CanonicalBlockRef<NodeSceneNodeTableSchema>, StoreRuntimeError> {
+) -> Result<CanonicalBlockRef<NodeSceneNodeTableSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let RetainedNodePayloadRefs {
         transforms,
         spatial,
@@ -1287,119 +1216,114 @@ fn retain_node_scene_nodes(
     let authored_nodes = batch.input().nodes();
     let mapping = batch.canonical_index_by_local();
     let failure = plans.build_invariant;
-    assembly
-        .try_retain_canonical_records_controlled(
-            plan,
-            keys.dimension,
-            NodeSceneNodeTableSchema,
-            |writer, control| {
-                work.observe(control, 1)?;
-                writer.write_row(|row| {
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(PRESENCE_PRESENT)?;
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(plans.source_root_count)?;
-                    row.write_scalar(NODE_SCENE_TRANSFORM_SYNTHETIC)?;
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(0_u32)?;
-                    row.write_scalar(0_u8)?;
-                    write_node_spatial_attachment::<SpatialCameraTableSchema>(
-                        row,
-                        None,
-                        spatial.cameras(),
-                        failure,
-                    )?;
-                    write_node_spatial_attachment::<SpatialLightTableSchema>(
-                        row,
-                        None,
-                        spatial.lights(),
-                        failure,
-                    )
-                })?;
+    lane.try_retain_records(plan, NodeSceneNodeTableSchema, |control| {
+        control.write_row(|row| {
+            row.write_scalar(0_u32)?;
+            row.write_scalar(PRESENCE_PRESENT)?;
+            row.write_scalar(0_u32)?;
+            row.write_scalar(plans.source_root_count)?;
+            row.write_scalar(NODE_SCENE_TRANSFORM_SYNTHETIC)?;
+            row.write_scalar(0_u32)?;
+            row.write_scalar(0_u32)?;
+            row.write_scalar(0_u8)?;
+            write_node_spatial_attachment::<SpatialCameraTableSchema>(
+                row,
+                None,
+                spatial.cameras(),
+                failure,
+            )?;
+            write_node_spatial_attachment::<SpatialLightTableSchema>(
+                row,
+                None,
+                spatial.lights(),
+                failure,
+            )
+        })?;
 
-                if batch.canonical_order().is_empty() {
-                    if transforms.is_some()
-                        || plans.transform_scalar_count != 0
-                        || plans.source_root_count != 0
-                    {
-                        return Err(failure.into());
-                    }
-                    return Ok(());
-                }
-                let transforms = transforms.ok_or(failure)?;
-                let mut transform_offset = 0_u32;
-                let mut child_reference_offset = plans.source_root_count;
-                for &local in batch.canonical_order() {
-                    work.observe(control, 1)?;
-                    let authored_node = authored_nodes.get(local).ok_or(failure)?;
-                    let authored = authored_node.authored_transform();
-                    let (kind, transform_length) = match authored.kind() {
-                        AuthoredTransformKind::Matrix => (
-                            NODE_SCENE_TRANSFORM_MATRIX,
-                            u32::try_from(NODE_SCENE_MATRIX_SCALAR_COUNT).map_err(|_| failure)?,
-                        ),
-                        AuthoredTransformKind::Trs => (
-                            NODE_SCENE_TRANSFORM_TRS,
-                            u32::try_from(NODE_SCENE_TRS_SCALAR_COUNT).map_err(|_| failure)?,
-                        ),
-                    };
-                    let node = *mapping.get(local).ok_or(failure)?;
-                    let child_count = batch.child_count_by_local(local).ok_or(failure)?;
-                    writer.write_row(|row| {
-                        row.write_scalar(node)?;
-                        row.write_scalar(PRESENCE_PRESENT)?;
-                        row.write_scalar(child_reference_offset)?;
-                        row.write_scalar(child_count)?;
-                        row.write_scalar(kind)?;
-                        row.write_scalar(transform_offset)?;
-                        row.write_scalar(transform_length)?;
-                        row.write_sequence_ref(transforms.into_store())?;
-                        write_node_spatial_attachment::<SpatialCameraTableSchema>(
-                            row,
-                            match authored_node.camera() {
-                                Presence::Absent => None,
-                                Presence::Present(camera) => Some(camera.index()),
-                            },
-                            spatial.cameras(),
-                            failure,
-                        )?;
-                        write_node_spatial_attachment::<SpatialLightTableSchema>(
-                            row,
-                            match authored_node.light() {
-                                Presence::Absent => None,
-                                Presence::Present(light) => Some(light.index()),
-                            },
-                            spatial.lights(),
-                            failure,
-                        )
-                    })?;
-                    transform_offset = transform_offset
-                        .checked_add(transform_length)
-                        .ok_or(failure)?;
-                    child_reference_offset = child_reference_offset
-                        .checked_add(child_count)
-                        .ok_or(failure)?;
-                }
-                if transform_offset != plans.transform_scalar_count
-                    || child_reference_offset != plans.source_node_count
-                {
-                    return Err(failure.into());
-                }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+        if batch.canonical_order().is_empty() {
+            if transforms.is_some()
+                || plans.transform_scalar_count != 0
+                || plans.source_root_count != 0
+            {
+                return Err(failure.into());
+            }
+            return Ok(());
+        }
+        let transforms = transforms.ok_or(failure)?;
+        let mut transform_offset = 0_u32;
+        let mut child_reference_offset = plans.source_root_count;
+        for &local in batch.canonical_order() {
+            let authored_node = authored_nodes.get(local).ok_or(failure)?;
+            let authored = authored_node.authored_transform();
+            let (kind, transform_length) = match authored.kind() {
+                AuthoredTransformKind::Matrix => (
+                    NODE_SCENE_TRANSFORM_MATRIX,
+                    u32::try_from(NODE_SCENE_MATRIX_SCALAR_COUNT).map_err(|_| failure)?,
+                ),
+                AuthoredTransformKind::Trs => (
+                    NODE_SCENE_TRANSFORM_TRS,
+                    u32::try_from(NODE_SCENE_TRS_SCALAR_COUNT).map_err(|_| failure)?,
+                ),
+            };
+            let node = *mapping.get(local).ok_or(failure)?;
+            let child_count = batch.child_count_by_local(local).ok_or(failure)?;
+            control.write_row(|row| {
+                row.write_scalar(node)?;
+                row.write_scalar(PRESENCE_PRESENT)?;
+                row.write_scalar(child_reference_offset)?;
+                row.write_scalar(child_count)?;
+                row.write_scalar(kind)?;
+                row.write_scalar(transform_offset)?;
+                row.write_scalar(transform_length)?;
+                row.write_sequence_ref(transforms.into_store())?;
+                write_node_spatial_attachment::<SpatialCameraTableSchema>(
+                    row,
+                    match authored_node.camera() {
+                        Presence::Absent => None,
+                        Presence::Present(camera) => Some(camera.index()),
+                    },
+                    spatial.cameras(),
+                    failure,
+                )?;
+                write_node_spatial_attachment::<SpatialLightTableSchema>(
+                    row,
+                    match authored_node.light() {
+                        Presence::Absent => None,
+                        Presence::Present(light) => Some(light.index()),
+                    },
+                    spatial.lights(),
+                    failure,
+                )
+            })?;
+            transform_offset = transform_offset
+                .checked_add(transform_length)
+                .ok_or(failure)?;
+            child_reference_offset = child_reference_offset
+                .checked_add(child_count)
+                .ok_or(failure)?;
+        }
+        if transform_offset != plans.transform_scalar_count
+            || child_reference_offset != plans.source_node_count
+        {
+            return Err(failure.into());
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_node_scene_directory(
-    assembly: &mut SceneStoreAssembly,
+fn retain_node_scene_directory<'lane, O, PP, U, L>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: RecordPlan,
     refs: NodeSceneDirectoryRefs,
     domains: SceneDomainDirectoryRefs,
     plans: &NodeSceneMaterializationPlans,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
-) -> Result<CanonicalBlockRef<SceneDirectorySchema>, StoreRuntimeError> {
+) -> Result<CanonicalBlockRef<SceneDirectorySchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let failure = plans.build_invariant;
     let NodeSceneDirectoryRefs {
         nodes,
@@ -1414,59 +1338,50 @@ fn retain_node_scene_directory(
         animation,
         profile,
     } = domains;
-    assembly
-        .try_retain_canonical_records_controlled(
-            plan,
-            keys.dimension,
-            SceneDirectorySchema,
-            |writer, control| {
-                work.observe(control, 1)?;
-                writer
-                    .write_row(|row| {
-                        row.write_scalar(SCENE_SCHEMA_REVISION)?;
-                        row.write_scalar(0_u32)?;
-                        row.write_scalar(plans.node_count)?;
-                        row.write_record_ref(nodes.into_store())?;
-                        if plans.source_node_count == 0 {
-                            if references.is_some() || transforms.is_some() {
-                                return Err(failure);
-                            }
-                            row.write_scalar(PRESENCE_ABSENT)?;
-                            row.write_scalar(0_u32)?;
-                            row.write_scalar(0_u8)?;
-                            row.write_scalar(PRESENCE_ABSENT)?;
-                            row.write_scalar(0_u32)?;
-                            row.write_scalar(0_u8)?;
-                        } else {
-                            let references = references.ok_or(failure)?;
-                            let transforms = transforms.ok_or(failure)?;
-                            row.write_scalar(PRESENCE_PRESENT)?;
-                            row.write_scalar(plans.source_node_count)?;
-                            row.write_record_ref(references.into_store())?;
-                            row.write_scalar(PRESENCE_PRESENT)?;
-                            row.write_scalar(plans.transform_scalar_count)?;
-                            row.write_sequence_ref(transforms.into_store())?;
-                        }
-                        row.write_scalar(plans.source_root_count)?;
-                        row.write_record_ref(spatial.into_store())?;
-                        row.write_record_ref(appearance.into_store())?;
-                        row.write_record_ref(geometry.into_store())?;
-                        row.write_record_ref(deformation.into_store())?;
-                        row.write_record_ref(animation.into_store())?;
-                        row.write_record_ref(profile.into_store())
-                    })
-                    .map_err(StoreControlledError::from)
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+    lane.try_retain_records(plan, SceneDirectorySchema, |control| {
+        control.write_row(|row| {
+            row.write_scalar(SCENE_SCHEMA_REVISION)?;
+            row.write_scalar(0_u32)?;
+            row.write_scalar(plans.node_count)?;
+            row.write_record_ref(nodes.into_store())?;
+            if plans.source_node_count == 0 {
+                if references.is_some() || transforms.is_some() {
+                    return Err(failure.into());
+                }
+                row.write_scalar(PRESENCE_ABSENT)?;
+                row.write_scalar(0_u32)?;
+                row.write_scalar(0_u8)?;
+                row.write_scalar(PRESENCE_ABSENT)?;
+                row.write_scalar(0_u32)?;
+                row.write_scalar(0_u8)?;
+            } else {
+                let references = references.ok_or(failure)?;
+                let transforms = transforms.ok_or(failure)?;
+                row.write_scalar(PRESENCE_PRESENT)?;
+                row.write_scalar(plans.source_node_count)?;
+                row.write_record_ref(references.into_store())?;
+                row.write_scalar(PRESENCE_PRESENT)?;
+                row.write_scalar(plans.transform_scalar_count)?;
+                row.write_sequence_ref(transforms.into_store())?;
+            }
+            row.write_scalar(plans.source_root_count)?;
+            row.write_record_ref(spatial.into_store())?;
+            row.write_record_ref(appearance.into_store())?;
+            row.write_record_ref(geometry.into_store())?;
+            row.write_record_ref(deformation.into_store())?;
+            row.write_record_ref(animation.into_store())?;
+            row.write_record_ref(profile.into_store())
+        })
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
 fn write_node_spatial_attachment<Tag>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     local: Option<u32>,
     table: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = RecordBlock>,
 {
@@ -1480,25 +1395,6 @@ where
             row.write_scalar(PRESENCE_ABSENT)?;
             row.write_scalar(0_u8)?;
             row.write_scalar(0_u8)
-        }
-    }
-}
-
-fn prepare_node_post_evidence_failure(
-    assembly: SceneStoreAssembly,
-    evidence: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-    plans: &NodeSceneMaterializationPlans,
-    cause: StoreRuntimeError,
-) -> Result<PreparedNodeSceneFailure, SceneConstructionError> {
-    match post_evidence_failure_code(&cause) {
-        Some(cause) => prepare_node_rich_failure_from_assembly(
-            assembly,
-            evidence,
-            plans.evidence_counts(),
-            cause,
-        ),
-        None => {
-            prepare_node_minimal_fallback_from_assembly(assembly, node_scene_failure_code(&cause))
         }
     }
 }

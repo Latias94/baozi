@@ -37,9 +37,9 @@ use super::production::{SceneAuthoringBatch, SceneInputEnvelope, SceneInputEnvel
 use super::schema::{
     AuthoredMatrixSchema, CANONICAL_BLOCK_COUNT, CanonicalBlockRef, DIRECTORY_FIELD_COUNT,
     DirectorySchema, EVIDENCE_FIELD_COUNT, EVIDENCE_OUTCOME_CANDIDATE, MATRIX_SCALAR_COUNT,
-    MATRIX_SCALARS_PER_NODE, NODE_COUNT, NODE_FIELD_COUNT, NodeTableSchema, OutcomeEvidenceSchema,
-    PRESENCE_ABSENT, PRESENCE_PRESENT, REFERENCE_COUNT, REFERENCE_FIELD_COUNT,
-    ReferenceTableSchema, SCHEMA_REVISION,
+    MATRIX_SCALARS_PER_NODE, NODE_COUNT, NODE_FIELD_COUNT, NODE_SCENE_EVIDENCE_FIELD_COUNT,
+    NodeTableSchema, OutcomeEvidenceSchema, PRESENCE_ABSENT, PRESENCE_PRESENT, REFERENCE_COUNT,
+    REFERENCE_FIELD_COUNT, ReferenceTableSchema, SCHEMA_REVISION,
 };
 use super::validation::{validate_evidence_graph, validate_scene_graph};
 
@@ -79,8 +79,10 @@ static NEXT_CONSTRUCTION_BRAND: AtomicU64 = AtomicU64::new(1);
 
 fn failure_terminal_work_requirement()
 -> Result<RetainedStoreFailureTerminalWorkRequirement, StorePlanError> {
-    RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_members(
+    RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_work(
         FAILURE_TERMINAL_EVIDENCE_MEMBERS,
+        NODE_SCENE_EVIDENCE_FIELD_COUNT as u64,
+        NODE_SCENE_EVIDENCE_FIELD_COUNT as u64,
     )
 }
 
@@ -720,6 +722,7 @@ pub(in crate::canonical_scene::store) struct SceneAuthoringOperation<'input> {
     operation: SceneConstructionOperation,
     input: SceneAuthoringBatch<'input>,
     validation_limits: SceneValidationLimits,
+    terminal_attribution_slots: usize,
 }
 
 #[cfg(test)]
@@ -770,16 +773,19 @@ impl SceneConstructionOperation {
         validation_limits: SceneValidationLimits,
     ) -> Result<SceneAuthoringOperation<'input>, SceneConstructionStartError> {
         let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
-        let operation = Self::start_with_control_and_attribution_slots(
+        let terminal_attribution_slots = envelope.terminal_attribution_slots();
+        let operation = Self::start_with_control_and_attribution_slots_and_failure_work(
             account,
             limits,
             control,
-            envelope.terminal_attribution_slots(),
+            terminal_attribution_slots,
+            SceneFailureEvidenceWork::exact_single_record(NODE_SCENE_EVIDENCE_FIELD_COUNT),
         )?;
         Ok(SceneAuthoringOperation {
             operation,
             input,
             validation_limits,
+            terminal_attribution_slots,
         })
     }
 
@@ -964,11 +970,27 @@ impl SceneConstructionOperation {
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
         terminal_attribution_slots: usize,
     ) -> Result<Self, SceneConstructionStartError> {
-        let start = try_plan_scene_operation(
+        Self::start_with_control_and_attribution_slots_and_failure_work(
+            account,
             limits,
             control,
             terminal_attribution_slots,
             SceneFailureEvidenceWork::legacy(),
+        )
+    }
+
+    fn start_with_control_and_attribution_slots_and_failure_work(
+        account: &PhysicalStorageAccount,
+        limits: SceneConstructionLimits,
+        control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
+        terminal_attribution_slots: usize,
+        failure_evidence_work: SceneFailureEvidenceWork,
+    ) -> Result<Self, SceneConstructionStartError> {
+        let start = try_plan_scene_operation(
+            limits,
+            control,
+            terminal_attribution_slots,
+            failure_evidence_work,
         )?;
         let raw = SceneStoreOperation::try_start(
             start.control,

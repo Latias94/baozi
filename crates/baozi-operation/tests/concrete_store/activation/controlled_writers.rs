@@ -91,10 +91,9 @@ fn rejected_sequence_prefix_work(completed: usize) -> (u64, u64) {
     let (operation, keys) = operation(&account);
     let planned = completed.checked_add(1).expect("test plan remains bounded");
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             let cause = lane
                 .try_retain_sequence(
@@ -135,25 +134,27 @@ fn pre_cancelled_work_rejects_before_the_writer_factory() {
     let account = account(&factory);
     let cancellation = CancellationToken::new();
     let control = OperationControl::default().with_cancellation(cancellation.clone());
-    let (operation, keys) = operation_with_materialization_work_limit(
-        &account,
-        control,
-        u64::try_from(UNALLOCATABLE_SEQUENCE_ELEMENTS).unwrap(),
-    );
-    cancellation.cancel();
+    let materialization_work_limit = u64::try_from(UNALLOCATABLE_SEQUENCE_ELEMENTS)
+        .unwrap()
+        .checked_add(1)
+        .expect("the scoped semantic unit fits beside writer work");
+    let (operation, keys) =
+        operation_with_materialization_work_limit(&account, control, materialization_work_limit);
     let builder_called = std::cell::Cell::new(false);
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape_with_dimensions(
+        scoped_activation_shape_with_dimensions(
             keys,
+            1,
+            1,
             keys.other_dimension,
             keys.dimension,
             keys.dimension,
             keys.dimension,
         ),
-        |preflight| preflight.seal(),
         |mut lane| {
+            cancellation.cancel();
             let cause = lane
                 .try_retain_sequence(
                     SequencePlan::<u8>::new(UNALLOCATABLE_SEQUENCE_ELEMENTS).unwrap(),
@@ -188,16 +189,17 @@ fn ledger_work_rejection_precedes_the_writer_factory() {
         operation_with_materialization_work_limit(&account, OperationControl::default(), 1_024);
     let builder_called = std::cell::Cell::new(false);
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape_with_dimensions(
+        scoped_activation_shape_with_dimensions(
             keys,
+            1,
+            1,
             keys.other_dimension,
             keys.dimension,
             keys.dimension,
             keys.dimension,
         ),
-        |preflight| preflight.seal(),
         |mut lane| {
             let cause = lane
                 .try_retain_sequence(
@@ -226,26 +228,30 @@ fn ledger_work_rejection_precedes_the_writer_factory() {
 
 #[cfg(target_pointer_width = "64")]
 #[test]
-fn writer_factory_build_failure_preserves_only_attempted_work() {
+fn writer_factory_build_failure_preserves_the_writer_as_attempted_only() {
     let factory = factory(1);
     let account = account(&factory);
+    let writer_work = u64::try_from(UNALLOCATABLE_SEQUENCE_ELEMENTS).unwrap();
     let (operation, keys) = operation_with_materialization_work_limit(
         &account,
         OperationControl::default(),
-        u64::try_from(UNALLOCATABLE_SEQUENCE_ELEMENTS).unwrap(),
+        writer_work
+            .checked_add(1)
+            .expect("the scoped semantic unit fits beside writer work"),
     );
     let builder_called = std::cell::Cell::new(false);
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape_with_dimensions(
+        scoped_activation_shape_with_dimensions(
             keys,
+            1,
+            1,
             keys.other_dimension,
             keys.dimension,
             keys.dimension,
             keys.dimension,
         ),
-        |preflight| preflight.seal(),
         |mut lane| {
             let cause = lane
                 .try_retain_sequence(
@@ -276,11 +282,8 @@ fn writer_factory_build_failure_preserves_only_attempted_work() {
         .ledger_evidence
         .dimension(keys.other_dimension)
         .expect("writer work remains queryable");
-    assert_eq!(
-        work.attempted(),
-        u64::try_from(UNALLOCATABLE_SEQUENCE_ELEMENTS).unwrap()
-    );
-    assert_eq!(work.consumed(), 0);
+    assert_eq!(work.attempted() - work.consumed(), writer_work);
+    assert_eq!(work.consumed(), 1);
     drop(published);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -300,10 +303,9 @@ fn rejected_sequence_work(fault: ExactSequenceFault) -> (u64, u64) {
         ExactSequenceFault::Overrun => 1,
     };
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             let cause = lane
                 .try_retain_sequence(
@@ -381,10 +383,9 @@ fn canonical_sequence_cancellation_is_observed_at_the_256_unit_boundary() {
     let (operation, keys) = operation_with_control(&account, control);
     let completed = Cell::new(0_usize);
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             let cause = lane
                 .try_retain_sequence(
@@ -432,10 +433,9 @@ fn canonical_sequence_finish_polls_after_flushing_the_final_prefix() {
     let control = OperationControl::default().with_cancellation(cancellation.clone());
     let (operation, keys) = operation_with_control(&account, control);
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             let cause = lane
                 .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
@@ -471,10 +471,9 @@ fn canonical_sequence_and_bytes_split_writes_honor_the_shared_checkpoint() {
     let sequence_tail = [2_u8; 256];
     let bytes_tail = [4_u8; 256];
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 2, 1),
-        |preflight| preflight.seal::<()>(),
+        scoped_activation_shape(keys, 2, 1),
         |mut lane| {
             let _sequence = lane
                 .try_retain_sequence(
@@ -512,10 +511,9 @@ fn canonical_utf8_preserves_a_scalar_across_the_256_byte_boundary() {
     let value = format!("{}é", "a".repeat(255));
     assert_eq!(value.len(), 257);
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal::<()>(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             let root = lane
                 .try_retain_utf8(Utf8Plan::new(value.len()).unwrap(), TextTag, |writer| {
@@ -539,10 +537,9 @@ fn canonical_record_rollback_does_not_account_uncommitted_fields() {
     let account = account(&factory);
     let (operation, keys) = operation(&account);
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             let cause = lane
                 .try_retain_records(
@@ -593,10 +590,9 @@ fn canonical_record_accepts_one_complete_64_field_row() {
     let account = account(&factory);
     let (operation, keys) = operation(&account);
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal::<()>(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             let root = lane
                 .try_retain_records(
@@ -635,10 +631,9 @@ fn canonical_record_cancellation_is_observed_at_the_256_field_boundary() {
     let (operation, keys) = operation_with_control(&account, control);
     let completed = Cell::new(0_usize);
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             let cause = lane
                 .try_retain_records(
@@ -697,14 +692,13 @@ fn activation_reservation_survives_reborrows_for_multiple_canonical_writes() {
     let account = account(&factory);
     let (operation, keys) = operation(&account);
 
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 2, 1),
-        |preflight| preflight.seal::<()>(),
+        scoped_activation_shape(keys, 2, 1),
         |mut lane| {
             let mut reservation = {
                 let mut checkpoint = lane.control_checkpoint().unwrap();
-                checkpoint.reserve(keys.phase, keys.dimension, 2).unwrap()
+                checkpoint.reserve(2).unwrap()
             };
 
             let _first = lane

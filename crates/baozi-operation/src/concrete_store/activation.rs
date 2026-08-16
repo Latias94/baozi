@@ -23,14 +23,14 @@ use super::{
     RetainedStoreFailureTerminalWorkRequirement, RetainedStoreOperation,
     RetainedStorePublicationAssembly, RetainedStorePublicationPlan, RetainedStoreReservation,
     RetainedStoreWorkControl, RetainedStoreWriterPlan, ScalarSequence, SequencePlan,
-    SequenceWriter, StoreActivationBrand, StoreBuildCallbackFailure, StoreBuildError,
-    StoreControlledError, StoreControlledSuccessValidation, StoreDimensionKey,
-    StoreEvidenceValidationSession, StoreFailureAssembly, StoreFailureValidation,
-    StoreFallbackOnly, StoreKeyDomain, StorePhaseKey, StorePlanError, StorePrepareError,
-    StoreRuntimeError, StoreSuccessFreezeContribution, StoreSuccessFreezePermit,
-    StoreSuccessFreezePermitIssue, StoreValidationSession, StoreWorkError, StoredBlock,
-    StoredScalar, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure, ValidatedStoreSuccess,
-    classify_prepared_fallback, map_publication_error, map_writer_error,
+    SequenceWriter, StoreBuildCallbackFailure, StoreBuildError, StoreControlledError,
+    StoreControlledSuccessValidation, StoreDimensionKey, StoreEvidenceValidationSession,
+    StoreFailureAssembly, StoreFailureValidation, StoreFallbackOnly, StoreKeyDomain, StorePhaseKey,
+    StorePlanError, StorePrepareError, StoreRuntimeError, StoreSuccessFreezeContribution,
+    StoreSuccessFreezePermit, StoreSuccessFreezePermitIssue, StoreValidationSession,
+    StoreWorkError, StoredBlock, StoredScalar, Utf8Block, Utf8Plan, Utf8Writer,
+    ValidatedStoreFailure, ValidatedStoreSuccess, classify_prepared_fallback,
+    map_publication_error, map_writer_error,
 };
 use crate::control::{ProgressPhase, ProgressUnit, discard_untrusted_panic_payload};
 use crate::coordinator::FinalProgress;
@@ -53,7 +53,8 @@ mod preflight;
 mod work_batch;
 
 pub use canonical_validation::{
-    CanonicalValidationMember, CanonicalValidationRecordRow, CanonicalValidationSession,
+    CanonicalValidationCheckpoint, CanonicalValidationMember, CanonicalValidationPlanning,
+    CanonicalValidationPreparationError, CanonicalValidationRecordRow, CanonicalValidationSession,
     OutcomeEvidenceValidationMember, OutcomeEvidenceValidationRecordRow,
 };
 
@@ -955,19 +956,6 @@ where
     visited: u64,
 }
 
-/// Linear owner for one session outcome and one still-dormant canonical authority.
-#[must_use = "the session outcome owner must run its scoped activation transition"]
-pub struct RetainedStoreSessionOutcomeOwner<O, PP, U, L = FreshStoreLineage>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    operation: Option<RetainedStoreOperation<O, PP, U, L>>,
-    roles: Option<BoundActivationRoles>,
-    failure_work: FailureEvidenceWorkBudget,
-}
-
 struct ScopedDormantActivation<O, PP, U, L>
 where
     O: OperationOwner,
@@ -1029,10 +1017,6 @@ where
 }
 
 /// Scoped-only session owner with its failure shape bound before authoring begins.
-///
-/// Unlike [`RetainedStoreSessionOutcomeOwner`], this type exposes only
-/// `plan_and_activate_scoped`; the legacy request/sealer rail stays isolated until the core
-/// cutover removes it.
 #[must_use = "the scoped session outcome owner must run its activation transaction"]
 pub struct ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, L = FreshStoreLineage>
 where
@@ -1045,35 +1029,6 @@ where
     scoped_failure: BoundScopedFailureRequest,
     planning_baseline: RetainedPlanningBaseline,
     failure_work: FailureEvidenceWorkBudget,
-}
-
-#[allow(
-    clippy::type_complexity,
-    reason = "the typed canonical root must remain coupled to every activation outcome"
-)]
-fn finish_rejected<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
-    assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
-    failure_work: FailureEvidenceWorkBudget,
-    outcome_evidence_destination_dimension: StoreDimensionKey,
-    cause: StoreCanonicalRejection<E>,
-    failure_code: PreparationFailureCode,
-) -> Result<
-    CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
-    StoreActivationContainment,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    finish_rejected_session(
-        assembly,
-        failure_work,
-        outcome_evidence_destination_dimension,
-        cause,
-        failure_code,
-    )
-    .map(CanonicalActivationOutcome::Rejected)
 }
 
 fn finish_rejected_session<O, PP, U, E, L>(
@@ -1172,6 +1127,21 @@ fn note_later_contract<T>(
     if let Err(cause) = result {
         let _ = preserve_first_fault::<()>(first_fault, Err(cause));
     }
+}
+
+fn preserve_runtime_fault_then_drop_result<R>(
+    first_fault: &mut Option<ActivationFirstFault>,
+    cause: StoreRuntimeError,
+    result: R,
+) -> Result<R, StoreRuntimeError> {
+    let failure = preserve_first_fault(first_fault, Err(cause));
+    if drop_scoped_value(result).is_err() {
+        note_later_contract::<()>(
+            first_fault,
+            Err(StoreRuntimeError::ConstructionInvariantUnverified),
+        );
+    }
+    failure
 }
 
 fn drop_verified_rejection<E>(rejection: VerifiedRejection<E>) -> Result<(), ()> {
@@ -1430,19 +1400,6 @@ where
     }
 }
 
-/// Borrowed preflight capability. It cannot open or mutate retained tables.
-pub struct CanonicalPreflight<'scope, O, PP, U, L = FreshStoreLineage>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    operation: &'scope mut RetainedStoreOperation<O, PP, U, L>,
-    request: &'scope BoundActivationRequest,
-    first_fault: &'scope mut Option<ActivationFirstFault>,
-    semantic_work_complete: &'scope mut bool,
-}
-
 /// Control-and-budget facade whose every failure is preserved by the activation transaction.
 pub struct CanonicalControlCheckpoint<'borrow, 'activation, O, PP, U>
 where
@@ -1463,6 +1420,8 @@ where
     U: ProgressUnit,
 {
     inner: CanonicalControlCheckpoint<'borrow, 'activation, O, PP, U>,
+    phase: StorePhaseKey,
+    dimension: StoreDimensionKey,
 }
 
 /// Scoped live-storage reservation for canonical construction scratch.
@@ -1538,10 +1497,11 @@ pub struct CanonicalSemanticCompletion<'scope> {
 
 /// Payload-free permit for one scoped canonical activation.
 ///
-/// Core retains ownership of its concrete execution plan until [`Self::activate`] atomically moves
-/// that plan and its materializer behind the owner-consuming open transition. Operation proves only
-/// the semantic completion receipt, transaction brand, physical shape, ledger roles, and retained
-/// publication authority; it never interprets the core plan.
+/// Core retains ownership of its concrete execution plan until [`Self::activate`] places that plan
+/// and its materializer behind the owner-consuming open transition. Materialization receives only a
+/// shared plan view; the transaction drops the plan in a separate panic boundary before final
+/// containment. Operation proves only the semantic completion receipt, transaction brand, physical
+/// shape, ledger roles, and retained publication authority; it never interprets the core plan.
 #[must_use = "the activation permit must activate exactly once"]
 pub struct CanonicalActivationPermit<
     'scope,
@@ -1691,24 +1651,6 @@ where
     semantic_state: ScopedSemanticState,
 }
 
-/// Opaque result returned by the scoped preflight callback.
-#[must_use = "return the sealed activation or verified rejection to the owning session"]
-pub struct CanonicalPreflightDecision<'scope, E> {
-    state: CanonicalPreflightState<E>,
-    scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
-}
-
-impl<E> CanonicalPreflightDecision<'_, E> {
-    fn into_state(self) -> CanonicalPreflightState<E> {
-        self.state
-    }
-}
-
-enum CanonicalPreflightState<E> {
-    Activate,
-    Rejected(VerifiedRejection<E>),
-}
-
 /// Operation-neutral retained table shape used by one canonical activation request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalTableShape {
@@ -1793,6 +1735,7 @@ impl CanonicalFailureRequirements {
 /// matching transaction resolved a nonempty action-derived semantic pass; canonical shape and
 /// validation work remain derived from the same core execution plan that activation consumes.
 #[must_use = "success requirements must seal exactly one activation permit"]
+#[derive(Clone, Copy)]
 pub struct CanonicalSuccessRequirements {
     canonical: CanonicalTableShape,
     expected_materialized_blocks: usize,
@@ -1838,67 +1781,6 @@ struct BoundScopedSuccessRequest {
     canonical_destination_dimension: StoreDimensionKey,
     validation_work: NonZeroU64,
     expected_materialized_blocks: usize,
-}
-
-/// Keyless requirements produced by canonical core preflight.
-///
-/// The request describes exact physical shape plus semantic-preflight and validation work. Ledger
-/// roles, writer keys, destination dimensions, publication authority, and commitment amounts
-/// remain operation-owned.
-#[must_use = "canonical requirements must be sealed by their operation-issued sealer"]
-pub struct CanonicalActivationRequirements {
-    canonical: CanonicalTableShape,
-    outcome_evidence: CanonicalTableShape,
-    expected_materialized_blocks: usize,
-    semantic_preflight_work: u64,
-    validation_work: NonZeroU64,
-    pre_activation_structural_work_requirement: u64,
-    structural_work_requirement: u64,
-}
-
-impl CanonicalActivationRequirements {
-    pub fn new(
-        canonical: CanonicalTableShape,
-        outcome_evidence: CanonicalTableShape,
-        expected_materialized_blocks: usize,
-        semantic_preflight_work: u64,
-        validation_work: NonZeroU64,
-    ) -> Result<Self, StorePlanError> {
-        if expected_materialized_blocks == 0
-            || expected_materialized_blocks > canonical.max_new_blocks
-        {
-            return Err(StorePlanError::InvalidBlockTable);
-        }
-        let pre_activation_structural_work_requirement =
-            canonical_pre_activation_structural_work_requirement()?;
-        let structural_work_requirement =
-            canonical_structural_work_requirement(canonical, outcome_evidence)?;
-        Ok(Self {
-            canonical,
-            outcome_evidence,
-            expected_materialized_blocks,
-            semantic_preflight_work,
-            validation_work,
-            pre_activation_structural_work_requirement,
-            structural_work_requirement,
-        })
-    }
-
-    /// Returns the operation-owned work that is complete before the activation lane can open.
-    pub const fn pre_activation_structural_work_requirement(&self) -> u64 {
-        self.pre_activation_structural_work_requirement
-    }
-
-    /// Returns structural startup plus the exact producer semantic-preflight envelope.
-    pub const fn pre_activation_work_requirement(&self) -> Option<u64> {
-        self.pre_activation_structural_work_requirement
-            .checked_add(self.semantic_preflight_work)
-    }
-
-    /// Returns the work bound derived from the exact table plans this shape owns.
-    pub const fn structural_work_requirement(&self) -> u64 {
-        self.structural_work_requirement
-    }
 }
 
 /// Host-owned role policy consumed before any canonical activation request is accepted.
@@ -1968,77 +1850,6 @@ impl CanonicalActivationPolicy {
 
 struct BoundActivationRoles {
     policy: CanonicalActivationPolicy,
-    brand: StoreActivationBrand,
-}
-
-/// Linear sealer issued by the operation owner for one matching keyless request.
-#[must_use = "the activation sealer must seal exactly one canonical request"]
-pub struct CanonicalActivationRequestSealer {
-    brand: StoreActivationBrand,
-}
-
-impl CanonicalActivationRequestSealer {
-    pub fn seal(
-        self,
-        requirements: CanonicalActivationRequirements,
-    ) -> SealedCanonicalActivationRequest {
-        SealedCanonicalActivationRequest {
-            brand: self.brand,
-            requirements,
-        }
-    }
-}
-
-/// Single-use keyless request accepted only by the outcome owner that issued its sealer.
-#[must_use = "the sealed activation request must be consumed by its session outcome owner"]
-pub struct SealedCanonicalActivationRequest {
-    brand: StoreActivationBrand,
-    requirements: CanonicalActivationRequirements,
-}
-
-struct BoundActivationRequest {
-    canonical_plan: RetainedStoreBlockTablePlan,
-    outcome_evidence_plan: RetainedStoreBlockTablePlan,
-    materialization_work_dimension: StoreDimensionKey,
-    validation_work_dimension: StoreDimensionKey,
-    canonical_destination_dimension: StoreDimensionKey,
-    outcome_evidence_destination_dimension: StoreDimensionKey,
-    semantic_preflight_work: u64,
-    validation_work: NonZeroU64,
-    expected_materialized_blocks: usize,
-}
-
-impl BoundActivationRoles {
-    fn bind(
-        self,
-        request: SealedCanonicalActivationRequest,
-    ) -> Result<BoundActivationRequest, StorePlanError> {
-        if request.brand != self.brand {
-            return Err(StorePlanError::InvalidBlockTable);
-        }
-        let CanonicalActivationRequirements {
-            canonical,
-            outcome_evidence,
-            expected_materialized_blocks,
-            semantic_preflight_work,
-            validation_work,
-            pre_activation_structural_work_requirement: _,
-            structural_work_requirement: _,
-        } = request.requirements;
-        Ok(BoundActivationRequest {
-            canonical_plan: canonical.bind(self.policy.canonical_writer)?,
-            outcome_evidence_plan: outcome_evidence.bind(self.policy.outcome_evidence_writer)?,
-            materialization_work_dimension: self.policy.materialization_work_dimension,
-            validation_work_dimension: self.policy.validation_work_dimension,
-            canonical_destination_dimension: self.policy.canonical_destination_dimension,
-            outcome_evidence_destination_dimension: self
-                .policy
-                .outcome_evidence_destination_dimension,
-            semantic_preflight_work,
-            validation_work,
-            expected_materialized_blocks,
-        })
-    }
 }
 
 struct VerifiedRejection<E> {
@@ -2055,6 +1866,7 @@ where
 {
     assembly: &'lane mut RetainedStorePublicationAssembly<O, PP, U, L>,
     first_fault: &'lane mut Option<ActivationFirstFault>,
+    materialization_phase: StorePhaseKey,
     materialization_work_dimension: StoreDimensionKey,
 }
 
@@ -2106,6 +1918,7 @@ pub struct ActivatedCanonicalStoreSession<
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
     output: T,
     failure_work: FailureEvidenceWorkBudget,
+    validation_phase: StorePhaseKey,
     validation_work_dimension: StoreDimensionKey,
     canonical_destination_dimension: StoreDimensionKey,
     outcome_evidence_destination_dimension: StoreDimensionKey,
@@ -2907,6 +2720,15 @@ mod scoped_transition_tests {
         marker: Option<TransitionDropMarker<'probe>>,
     }
 
+    struct PanickingResultDrop<'probe>(&'probe Cell<bool>);
+
+    impl Drop for PanickingResultDrop<'_> {
+        fn drop(&mut self) {
+            self.0.set(true);
+            panic!("injected semantic result drop panic");
+        }
+    }
+
     impl Drop for PanickingTrackedPlan<'_, '_> {
         fn drop(&mut self) {
             drop(
@@ -3056,6 +2878,32 @@ mod scoped_transition_tests {
         )
     }
 
+    #[test]
+    fn semantic_result_drop_fault_preserves_runtime_first_cause_and_latches_contract() {
+        let dropped = Cell::new(false);
+        let mut first_fault = None;
+
+        let result = preserve_runtime_fault_then_drop_result(
+            &mut first_fault,
+            StoreRuntimeError::Control(crate::ControlCause::DeadlineExceeded),
+            PanickingResultDrop(&dropped),
+        );
+
+        assert!(matches!(
+            result,
+            Err(StoreRuntimeError::Control(
+                crate::ControlCause::DeadlineExceeded
+            ))
+        ));
+        assert!(dropped.get());
+        let first_fault = first_fault.expect("the runtime first cause remains recorded");
+        assert!(matches!(
+            first_fault.cause,
+            StoreRuntimeError::Control(crate::ControlCause::DeadlineExceeded)
+        ));
+        assert!(first_fault.contract_seen);
+    }
+
     fn assert_owner_consuming_transition_panic_is_contained(point: ScopedTransitionPanicPoint) {
         let account = account();
         let (operation, keys) = operation(&account);
@@ -3076,7 +2924,7 @@ mod scoped_transition_tests {
                     }
                 };
                 test_panic_scoped_transition_at(point);
-                permit.activate((), |lane, ()| match point {
+                permit.activate((), |lane, _plan| match point {
                     ScopedTransitionPanicPoint::TryOpenActivation => {
                         panic!("try_open_activation fault must run before materialization")
                     }

@@ -817,11 +817,16 @@ fn drive_fresh_two_node_activation(
     let policy = program.activation_policy(keys)?;
     let failure_requirements = program.failure_requirements()?;
     let (execution, failure_evidence) = program.into_parts();
+    let (execution, success_requirements) = execution.into_seal_parts();
+    let mut execution = Some(execution);
     let evidence_plan = failure_evidence.records;
     let owner = raw.into_scoped_session_outcome_owner(policy, failure_requirements)?;
 
     let outcome = owner.plan_and_activate_scoped(move |mut planning| {
-        let semantic_work_units = execution.semantic_work_units();
+        let execution_ref = execution
+            .as_ref()
+            .expect("the Scene execution plan transfers only after semantic completion");
+        let semantic_work_units = execution_ref.semantic_work_units();
         let mut semantic_valid = true;
         let semantic_result = {
             let start = planning.begin_semantic_work();
@@ -831,7 +836,7 @@ fn drive_fresh_two_node_activation(
                     for index in 0..semantic_work_units.get() {
                         match semantic.run_unit(|| {
                             authored_activation_matrix_scalar_is_valid(
-                                &execution.materialization.authored,
+                                &execution_ref.authored,
                                 index,
                             )
                         }) {
@@ -859,7 +864,9 @@ fn drive_fresh_two_node_activation(
         if !semantic_valid {
             return planning.reject((), SEMANTIC_REJECTION_CODE);
         }
-        let (execution, success_requirements) = execution.into_seal_parts();
+        let execution = execution
+            .take()
+            .expect("the Scene execution plan activates exactly once");
         let permit = match planning.seal_activation(success_requirements, semantic_completion) {
             CanonicalActivationSeal::Sealed(permit) => permit,
             CanonicalActivationSeal::Unsealed(failure) => {
@@ -916,20 +923,25 @@ fn drive_fresh_two_node_activation(
                 };
             lane.complete(evidence)
         },
-        |session, directory, evidence, output| {
-            let identity_valid = directory.identifies(output.draft.directory.into_store())
-                && output.draft.brand == brand
-                && output.refs.directory == output.draft.directory;
-            let valid = if identity_valid {
-                validate_scene_graph_metered(session, directory, evidence)?
-            } else {
-                false
-            };
-            Ok(if valid {
-                CanonicalValidationDecision::accept(TracerSceneValidationProof { brand })
-            } else {
-                CanonicalValidationDecision::reject((), SEMANTIC_REJECTION_CODE)
-            })
+        |planning, output| {
+            planning.validate_with(
+                |_| Ok(()),
+                |session, directory, evidence, ()| {
+                    let identity_valid = directory.identifies(output.draft.directory.into_store())
+                        && output.draft.brand == brand
+                        && output.refs.directory == output.draft.directory;
+                    let valid = if identity_valid {
+                        validate_scene_graph_metered(session, directory, evidence)?
+                    } else {
+                        false
+                    };
+                    Ok(if valid {
+                        CanonicalValidationDecision::accept(TracerSceneValidationProof { brand })
+                    } else {
+                        CanonicalValidationDecision::reject((), SEMANTIC_REJECTION_CODE)
+                    })
+                },
+            )
         },
     )?;
     match outcome {

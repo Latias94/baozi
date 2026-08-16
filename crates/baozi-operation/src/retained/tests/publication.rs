@@ -502,7 +502,7 @@ fn assert_unresolved_validation_permit_cannot_validate_success(forget: bool) {
         .unwrap_or_else(|_| panic!("abandoned-validation publication must open"));
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
 
-    let fallback = match assembly.validate_success_controlled(
+    let validation = assembly.validate_success_controlled(
         TestDimension::Work,
         canonical_root,
         evidence_root,
@@ -521,15 +521,15 @@ fn assert_unresolved_validation_permit_cannot_validate_success(forget: bool) {
             session.canonical(canonical) == Some(&11)
                 && session.outcome_evidence(evidence) == Some(&7)
         },
-    ) {
-        RetainedSuccessValidation::FallbackOnly(fallback) => fallback,
-        RetainedSuccessValidation::Valid(_) | RetainedSuccessValidation::Rejected(_) => {
-            panic!("an abandoned validation permit must not produce a success proof")
-        }
-    };
-    let preparation = fallback.prepare_minimal_fallback();
+    );
     if forget {
-        let containment = match preparation {
+        let fallback = match validation {
+            RetainedSuccessValidation::FallbackOnly(fallback) => fallback,
+            RetainedSuccessValidation::Valid(_) | RetainedSuccessValidation::Rejected(_) => {
+                panic!("a forgotten validation permit must remain unresolvable")
+            }
+        };
+        let containment = match fallback.prepare_minimal_fallback() {
             Ok(_) => panic!("a forgotten validation permit must not prepare any exact owner"),
             Err(RetainedPublicationPrepareError::FinalizationContainment(containment)) => {
                 containment
@@ -546,8 +546,19 @@ fn assert_unresolved_validation_permit_cannot_validate_success(forget: bool) {
         assert!(factory.snapshot().live_accounts() > 0);
         return;
     }
+    let rejected = match validation {
+        RetainedSuccessValidation::Rejected(rejected) => rejected,
+        RetainedSuccessValidation::Valid(_) => {
+            panic!("a dropped validation permit must not produce a success proof")
+        }
+        RetainedSuccessValidation::FallbackOnly(_) => {
+            panic!("a dropped validation permit must release its linear capability")
+        }
+    };
     let published = handoff_for_test(
-        preparation.unwrap_or_else(|_| panic!("dropped validation must prepare fallback")),
+        rejected
+            .prepare_minimal_fallback()
+            .unwrap_or_else(|_| panic!("dropped validation rejection must prepare fallback")),
     );
     let PublishedRetainedPublicationParts::MinimalFallback {
         ledger_evidence, ..
@@ -555,10 +566,13 @@ fn assert_unresolved_validation_permit_cannot_validate_success(forget: bool) {
     else {
         panic!("abandoned validation must publish minimal fallback")
     };
-    assert_eq!(
-        published_failure_cause(ledger_evidence).class(),
-        PreparationFailureClass::ProductGraph
-    );
+    let cause = published_failure_cause(ledger_evidence);
+    assert_eq!(cause.class(), PreparationFailureClass::ProductGraph);
+    assert_eq!(cause.code(), 0x4f57_5041);
+    let work = ledger_evidence
+        .dimension(TestDimension::Work)
+        .unwrap_or_else(|| panic!("dropped validation work evidence"));
+    assert_eq!((work.attempted(), work.consumed()), (1, 1));
     drop(published);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     drop(account);

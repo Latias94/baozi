@@ -66,7 +66,7 @@ impl CanonicalAuthoringControl for RelationWorkControl {
     fn run_unit<R>(
         &mut self,
         work: SceneValidationWork,
-        action: impl FnOnce() -> R,
+        mut action: impl FnMut() -> R,
     ) -> Result<R, Self::Error> {
         let result = action();
         match work {

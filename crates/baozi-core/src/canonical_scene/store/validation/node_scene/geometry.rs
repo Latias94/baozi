@@ -1,5 +1,9 @@
+use baozi_operation::__canonical_activation::{
+    CanonicalValidationMember, CanonicalValidationSession,
+};
 use baozi_operation::{
-    CanonicalRecordRef, CanonicalRecordView, ScalarSequence, StoreValidationSession,
+    CanonicalRecordRef, CanonicalRecordView, OperationOwner, ProgressPhase, ProgressUnit,
+    RecordBlock, ScalarSequence, StoreValidationSession, StoreWorkError,
 };
 
 use crate::canonical_scene::store::production::{
@@ -48,7 +52,25 @@ pub(super) struct GeometryValidatedShape {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct GeometryCanonicalCounts {
+pub(super) struct GeometryValidatedMembers<'session> {
+    pub(super) logical_meshes:
+        Option<CanonicalValidationMember<'session, RecordBlock, GeometryLogicalMeshTableSchema>>,
+    pub(super) primitives:
+        Option<CanonicalValidationMember<'session, RecordBlock, GeometryPrimitiveTableSchema>>,
+    pub(super) attributes:
+        Option<CanonicalValidationMember<'session, RecordBlock, GeometryAttributeTableSchema>>,
+    pub(super) mesh_instances:
+        Option<CanonicalValidationMember<'session, RecordBlock, GeometryMeshInstanceTableSchema>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct GeometryValidatedMemberShape<'session> {
+    pub(super) members: GeometryValidatedMembers<'session>,
+    pub(super) payload_block_count: u32,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct GeometryCanonicalCounts {
     logical_meshes: u32,
     primitives: u32,
     attributes: u32,
@@ -56,7 +78,7 @@ pub(super) struct GeometryCanonicalCounts {
 }
 
 impl GeometryCanonicalCounts {
-    pub(super) const fn new(
+    pub(in crate::canonical_scene::store) const fn new(
         logical_meshes: u32,
         primitives: u32,
         attributes: u32,
@@ -92,6 +114,291 @@ impl GeometryCanonicalDependencies {
             materials,
             material_count,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct GeometryCanonicalValidationDependencies<'session> {
+    nodes: CanonicalValidationMember<'session, RecordBlock, NodeSceneNodeTableSchema>,
+    canonical_node_count: u32,
+    materials:
+        Option<CanonicalValidationMember<'session, RecordBlock, AppearanceMaterialTableSchema>>,
+    material_count: u32,
+}
+
+impl<'session> GeometryCanonicalValidationDependencies<'session> {
+    pub(super) const fn new(
+        nodes: CanonicalValidationMember<'session, RecordBlock, NodeSceneNodeTableSchema>,
+        canonical_node_count: u32,
+        materials: Option<
+            CanonicalValidationMember<'session, RecordBlock, AppearanceMaterialTableSchema>,
+        >,
+        material_count: u32,
+    ) -> Self {
+        Self {
+            nodes,
+            canonical_node_count,
+            materials,
+            material_count,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct GeometryValidationScratchRequirements {
+    attributes: usize,
+    primitives: usize,
+    logical_meshes: usize,
+    mesh_instances: usize,
+}
+
+impl GeometryValidationScratchRequirements {
+    pub(in crate::canonical_scene::store) fn from_counts(
+        counts: GeometryCanonicalCounts,
+    ) -> Option<Self> {
+        Some(Self {
+            attributes: usize::try_from(counts.attributes).ok()?,
+            primitives: usize::try_from(counts.primitives).ok()?,
+            logical_meshes: usize::try_from(counts.logical_meshes).ok()?,
+            mesh_instances: usize::try_from(counts.mesh_instances).ok()?,
+        })
+    }
+
+    pub(in crate::canonical_scene::store) const fn attributes(self) -> usize {
+        self.attributes
+    }
+
+    pub(in crate::canonical_scene::store) const fn primitives(self) -> usize {
+        self.primitives
+    }
+
+    pub(in crate::canonical_scene::store) const fn logical_meshes(self) -> usize {
+        self.logical_meshes
+    }
+
+    pub(in crate::canonical_scene::store) const fn mesh_instances(self) -> usize {
+        self.mesh_instances
+    }
+
+    pub(in crate::canonical_scene::store) fn initialization_work_units(self) -> Option<u64> {
+        [
+            self.attributes,
+            self.primitives,
+            self.logical_meshes,
+            self.primitives,
+            self.mesh_instances,
+        ]
+        .into_iter()
+        .try_fold(0_u64, |total, count| {
+            total.checked_add(u64::try_from(count).ok()?)
+        })
+    }
+
+    pub(in crate::canonical_scene::store) fn semantic_projection_work_units(self) -> Option<u64> {
+        self.attributes
+            .checked_mul(2)?
+            .checked_add(self.primitives.checked_mul(2)?)
+            .and_then(|count| u64::try_from(count).ok())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GeometryAttributeValuesMember<'session> {
+    Absent,
+    F32(CanonicalValidationMember<'session, ScalarSequence<f32>, GeometryF32ValuesSchema>),
+    U32(CanonicalValidationMember<'session, ScalarSequence<u32>, GeometryU32ValuesSchema>),
+}
+
+#[derive(Clone, Copy)]
+enum GeometryAttributeDefaultMember<'session> {
+    Absent,
+    F32(CanonicalValidationMember<'session, ScalarSequence<f32>, GeometrySparseF32DefaultsSchema>),
+    U32(CanonicalValidationMember<'session, ScalarSequence<u32>, GeometrySparseU32DefaultsSchema>),
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct GeometryAttributeValidationScratch<'session> {
+    semantic: u8,
+    semantic_set: u32,
+    domain: u8,
+    scalar_kind: u8,
+    lanes: u8,
+    payload_kind: u8,
+    element_count: u32,
+    explicit_count: u32,
+    canonical_scalar_count: u64,
+    values: GeometryAttributeValuesMember<'session>,
+    sparse_indices: Option<
+        CanonicalValidationMember<'session, ScalarSequence<u32>, GeometrySparseIndicesSchema>,
+    >,
+    sparse_default: GeometryAttributeDefaultMember<'session>,
+    sparse_maximum: Option<u32>,
+}
+
+impl<'session> GeometryAttributeValidationScratch<'session> {
+    pub(in crate::canonical_scene::store) const EMPTY: Self = Self {
+        semantic: 0,
+        semantic_set: 0,
+        domain: 0,
+        scalar_kind: 0,
+        lanes: 0,
+        payload_kind: 0,
+        element_count: 0,
+        explicit_count: 0,
+        canonical_scalar_count: 0,
+        values: GeometryAttributeValuesMember::Absent,
+        sparse_indices: None,
+        sparse_default: GeometryAttributeDefaultMember::Absent,
+        sparse_maximum: None,
+    };
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct GeometryPrimitiveValidationScratch<'session> {
+    topology: u8,
+    vertex_count: u32,
+    corner_count: u32,
+    face_count: u32,
+    polygon_present: bool,
+    polygon_count: u32,
+    polygon_boundaries: Option<
+        CanonicalValidationMember<'session, ScalarSequence<u32>, GeometryPolygonBoundariesSchema>,
+    >,
+    polygon_total: Option<u32>,
+    indices_present: bool,
+    index_count: u32,
+    indices: Option<
+        CanonicalValidationMember<'session, ScalarSequence<u32>, GeometryPrimitiveIndicesSchema>,
+    >,
+    index_maximum: Option<u32>,
+    material: Option<u32>,
+    materials:
+        Option<CanonicalValidationMember<'session, RecordBlock, AppearanceMaterialTableSchema>>,
+    attribute_offset: u32,
+    attribute_count: u32,
+    attributes:
+        Option<CanonicalValidationMember<'session, RecordBlock, GeometryAttributeTableSchema>>,
+}
+
+impl<'session> GeometryPrimitiveValidationScratch<'session> {
+    pub(in crate::canonical_scene::store) const EMPTY: Self = Self {
+        topology: 0,
+        vertex_count: 0,
+        corner_count: 0,
+        face_count: 0,
+        polygon_present: false,
+        polygon_count: 0,
+        polygon_boundaries: None,
+        polygon_total: None,
+        indices_present: false,
+        index_count: 0,
+        indices: None,
+        index_maximum: None,
+        material: None,
+        materials: None,
+        attribute_offset: 0,
+        attribute_count: 0,
+        attributes: None,
+    };
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct GeometryLogicalMeshValidationProjection {
+    pub(super) primitive_offset: u32,
+    pub(super) primitive_count: u32,
+}
+
+impl GeometryLogicalMeshValidationProjection {
+    pub(in crate::canonical_scene::store) const EMPTY: Self = Self {
+        primitive_offset: 0,
+        primitive_count: 0,
+    };
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct GeometryPrimitiveValidationProjection {
+    pub(super) vertex_count: u32,
+}
+
+impl GeometryPrimitiveValidationProjection {
+    pub(in crate::canonical_scene::store) const EMPTY: Self = Self { vertex_count: 0 };
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct GeometryMeshInstanceValidationProjection {
+    pub(super) logical_mesh: u32,
+}
+
+impl GeometryMeshInstanceValidationProjection {
+    pub(in crate::canonical_scene::store) const EMPTY: Self = Self { logical_mesh: 0 };
+}
+
+pub(in crate::canonical_scene::store) struct GeometryValidationScratch<'scratch, 'session> {
+    attributes: &'scratch mut [GeometryAttributeValidationScratch<'session>],
+    primitives: &'scratch mut [GeometryPrimitiveValidationScratch<'session>],
+    logical_meshes: &'scratch mut [GeometryLogicalMeshValidationProjection],
+    primitive_projections: &'scratch mut [GeometryPrimitiveValidationProjection],
+    mesh_instances: &'scratch mut [GeometryMeshInstanceValidationProjection],
+}
+
+type GeometryValidationScratchParts<'scratch, 'session> = (
+    &'scratch mut [GeometryAttributeValidationScratch<'session>],
+    &'scratch mut [GeometryPrimitiveValidationScratch<'session>],
+    &'scratch mut [GeometryLogicalMeshValidationProjection],
+    &'scratch mut [GeometryPrimitiveValidationProjection],
+    &'scratch mut [GeometryMeshInstanceValidationProjection],
+);
+
+impl<'scratch, 'session> GeometryValidationScratch<'scratch, 'session> {
+    pub(in crate::canonical_scene::store) const fn new(
+        attributes: &'scratch mut [GeometryAttributeValidationScratch<'session>],
+        primitives: &'scratch mut [GeometryPrimitiveValidationScratch<'session>],
+        logical_meshes: &'scratch mut [GeometryLogicalMeshValidationProjection],
+        primitive_projections: &'scratch mut [GeometryPrimitiveValidationProjection],
+        mesh_instances: &'scratch mut [GeometryMeshInstanceValidationProjection],
+    ) -> Self {
+        Self {
+            attributes,
+            primitives,
+            logical_meshes,
+            primitive_projections,
+            mesh_instances,
+        }
+    }
+
+    fn parts(
+        &mut self,
+        requirements: GeometryValidationScratchRequirements,
+    ) -> Option<GeometryValidationScratchParts<'_, 'session>> {
+        Some((
+            self.attributes.get_mut(..requirements.attributes)?,
+            self.primitives.get_mut(..requirements.primitives)?,
+            self.logical_meshes.get_mut(..requirements.logical_meshes)?,
+            self.primitive_projections
+                .get_mut(..requirements.primitives)?,
+            self.mesh_instances.get_mut(..requirements.mesh_instances)?,
+        ))
+    }
+
+    pub(in crate::canonical_scene::store) fn logical_mesh_projections(
+        &self,
+        requirements: GeometryValidationScratchRequirements,
+    ) -> Option<&[GeometryLogicalMeshValidationProjection]> {
+        self.logical_meshes.get(..requirements.logical_meshes)
+    }
+
+    pub(in crate::canonical_scene::store) fn primitive_projections(
+        &self,
+        requirements: GeometryValidationScratchRequirements,
+    ) -> Option<&[GeometryPrimitiveValidationProjection]> {
+        self.primitive_projections.get(..requirements.primitives)
+    }
+
+    pub(in crate::canonical_scene::store) fn mesh_instance_projections(
+        &self,
+        requirements: GeometryValidationScratchRequirements,
+    ) -> Option<&[GeometryMeshInstanceValidationProjection]> {
+        self.mesh_instances.get(..requirements.mesh_instances)
     }
 }
 
@@ -387,6 +694,225 @@ pub(super) fn validate_geometry_canonical_structure(
 
 #[allow(
     clippy::too_many_arguments,
+    reason = "typed geometry validation keeps the operation lifetimes and sealed dependencies explicit"
+)]
+pub(super) fn validate_geometry_canonical_structure_metered<
+    'session,
+    'storage,
+    'control,
+    'operation,
+    'scratch,
+    O,
+    PP,
+    U,
+>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    geometry: CanonicalValidationMember<'session, RecordBlock, SceneGeometryDirectorySchema>,
+    dependencies: GeometryCanonicalValidationDependencies<'session>,
+    counts: GeometryCanonicalCounts,
+    scratch: &mut GeometryValidationScratch<'scratch, 'session>,
+) -> Result<Option<GeometryValidatedMemberShape<'session>>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(requirements) = GeometryValidationScratchRequirements::from_counts(counts) else {
+        return Ok(None);
+    };
+    let Some((
+        attributes_scratch,
+        primitives_scratch,
+        logical_mesh_projections,
+        primitive_projections,
+        mesh_instance_projections,
+    )) = scratch.parts(requirements)
+    else {
+        return Ok(None);
+    };
+
+    let mut schema_revision = None;
+    let mut logical_mesh_count = None;
+    let mut logical_meshes = None;
+    let mut logical_meshes_absent = None;
+    let mut primitive_count = None;
+    let mut primitives = None;
+    let mut primitives_absent = None;
+    let mut attribute_count = None;
+    let mut attributes = None;
+    let mut attributes_absent = None;
+    let mut mesh_instance_count = None;
+    let mut mesh_instances = None;
+    let mut mesh_instances_absent = None;
+    let directory_complete = session.visit_canonical_records(
+        geometry,
+        1,
+        SCENE_GEOMETRY_DIRECTORY_FIELD_COUNT,
+        |_row_index, row| {
+            schema_revision = row.scalar(
+                scene_geometry_directory_field::SCHEMA_REVISION,
+                |value: u32| value,
+            )?;
+            logical_mesh_count = row.scalar(
+                scene_geometry_directory_field::LOGICAL_MESH_COUNT,
+                |value: u32| value,
+            )?;
+            if logical_mesh_count.is_some_and(|count| count != 0) {
+                logical_meshes = row.record_ref::<GeometryLogicalMeshTableSchema, _>(
+                    scene_geometry_directory_field::LOGICAL_MESHES,
+                    |value| value,
+                )?;
+            } else {
+                logical_meshes_absent = row.scalar(
+                    scene_geometry_directory_field::LOGICAL_MESHES,
+                    |value: u8| value,
+                )?;
+            }
+            primitive_count = row.scalar(
+                scene_geometry_directory_field::PRIMITIVE_COUNT,
+                |value: u32| value,
+            )?;
+            if primitive_count.is_some_and(|count| count != 0) {
+                primitives = row.record_ref::<GeometryPrimitiveTableSchema, _>(
+                    scene_geometry_directory_field::PRIMITIVES,
+                    |value| value,
+                )?;
+            } else {
+                primitives_absent = row
+                    .scalar(scene_geometry_directory_field::PRIMITIVES, |value: u8| {
+                        value
+                    })?;
+            }
+            attribute_count = row.scalar(
+                scene_geometry_directory_field::ATTRIBUTE_COUNT,
+                |value: u32| value,
+            )?;
+            if attribute_count.is_some_and(|count| count != 0) {
+                attributes = row.record_ref::<GeometryAttributeTableSchema, _>(
+                    scene_geometry_directory_field::ATTRIBUTES,
+                    |value| value,
+                )?;
+            } else {
+                attributes_absent = row
+                    .scalar(scene_geometry_directory_field::ATTRIBUTES, |value: u8| {
+                        value
+                    })?;
+            }
+            mesh_instance_count = row.scalar(
+                scene_geometry_directory_field::MESH_INSTANCE_COUNT,
+                |value: u32| value,
+            )?;
+            if mesh_instance_count.is_some_and(|count| count != 0) {
+                mesh_instances = row.record_ref::<GeometryMeshInstanceTableSchema, _>(
+                    scene_geometry_directory_field::MESH_INSTANCES,
+                    |value| value,
+                )?;
+            } else {
+                mesh_instances_absent = row.scalar(
+                    scene_geometry_directory_field::MESH_INSTANCES,
+                    |value: u8| value,
+                )?;
+            }
+            Ok(true)
+        },
+    )?;
+    if !directory_complete
+        || require_scalar(schema_revision, SCENE_GEOMETRY_SCHEMA_REVISION).is_none()
+        || !metered_directory_collection_is_valid(
+            logical_mesh_count,
+            counts.logical_meshes,
+            logical_meshes,
+            logical_meshes_absent,
+        )
+        || !metered_directory_collection_is_valid(
+            primitive_count,
+            counts.primitives,
+            primitives,
+            primitives_absent,
+        )
+        || !metered_directory_collection_is_valid(
+            attribute_count,
+            counts.attributes,
+            attributes,
+            attributes_absent,
+        )
+        || !metered_directory_collection_is_valid(
+            mesh_instance_count,
+            counts.mesh_instances,
+            mesh_instances,
+            mesh_instances_absent,
+        )
+    {
+        return Ok(None);
+    }
+
+    let Some(attribute_payload_block_count) =
+        validate_attribute_table_metered(session, attributes, attributes_scratch)?
+    else {
+        return Ok(None);
+    };
+    let Some(primitive_payload_block_count) = validate_primitive_table_metered(
+        session,
+        primitives,
+        dependencies.materials,
+        dependencies.material_count,
+        attributes,
+        attributes_scratch,
+        primitives_scratch,
+        primitive_projections,
+    )?
+    else {
+        return Ok(None);
+    };
+    if !validate_logical_mesh_table_metered(
+        session,
+        logical_meshes,
+        primitives,
+        counts.primitives,
+        logical_mesh_projections,
+    )? || !validate_mesh_instance_table_metered(
+        session,
+        mesh_instances,
+        dependencies.nodes,
+        dependencies.canonical_node_count,
+        logical_meshes,
+        counts.logical_meshes,
+        mesh_instance_projections,
+    )? {
+        return Ok(None);
+    }
+    let Some(payload_block_count) =
+        attribute_payload_block_count.checked_add(primitive_payload_block_count)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(GeometryValidatedMemberShape {
+        members: GeometryValidatedMembers {
+            logical_meshes,
+            primitives,
+            attributes,
+            mesh_instances,
+        },
+        payload_block_count,
+    }))
+}
+
+fn metered_directory_collection_is_valid<T>(
+    actual_count: Option<u32>,
+    expected_count: u32,
+    member: Option<T>,
+    absent: Option<u8>,
+) -> bool {
+    actual_count == Some(expected_count)
+        && if expected_count == 0 {
+            member.is_none() && absent == Some(0)
+        } else {
+            member.is_some()
+        }
+}
+
+#[allow(
+    clippy::too_many_arguments,
     reason = "fresh geometry validation keeps canonical dependencies and both source proof batches explicit"
 )]
 pub(super) fn validate_geometry_graph<NR, GR>(
@@ -543,6 +1069,1154 @@ where
         }
         Some(Some(reference))
     }
+}
+
+#[derive(Clone, Copy)]
+enum GeometryAttributeLeafShape {
+    DenseF32 {
+        values: usize,
+    },
+    DenseU32 {
+        values: usize,
+    },
+    SparseF32 {
+        values: usize,
+        indices: usize,
+        default: usize,
+    },
+    SparseU32 {
+        values: usize,
+        indices: usize,
+        default: usize,
+    },
+}
+
+fn geometry_attribute_leaf_shape(
+    scalar_kind: u8,
+    payload_kind: u8,
+    lanes: u8,
+    element_count: u32,
+    explicit_count: u32,
+    canonical_scalar_count: u64,
+) -> Option<GeometryAttributeLeafShape> {
+    let lane_count = usize::from(lanes);
+    if lane_count == 0 {
+        return None;
+    }
+    let element_count = usize::try_from(element_count).ok()?;
+    let explicit_count_usize = usize::try_from(explicit_count).ok()?;
+    let dense_scalar_count = element_count.checked_mul(lane_count)?;
+    let explicit_scalar_count = explicit_count_usize.checked_mul(lane_count)?;
+    match (payload_kind, scalar_kind) {
+        (GEOMETRY_PAYLOAD_DENSE, GEOMETRY_SCALAR_F32) => (explicit_count_usize == element_count
+            && canonical_scalar_count == u64::try_from(dense_scalar_count).ok()?)
+        .then_some(GeometryAttributeLeafShape::DenseF32 {
+            values: dense_scalar_count,
+        }),
+        (GEOMETRY_PAYLOAD_DENSE, GEOMETRY_SCALAR_U32) => (explicit_count_usize == element_count
+            && canonical_scalar_count == u64::try_from(dense_scalar_count).ok()?)
+        .then_some(GeometryAttributeLeafShape::DenseU32 {
+            values: dense_scalar_count,
+        }),
+        (GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_SCALAR_F32) => (explicit_count_usize <= element_count
+            && canonical_scalar_count
+                == u64::try_from(explicit_scalar_count.checked_add(lane_count)?).ok()?)
+        .then_some(GeometryAttributeLeafShape::SparseF32 {
+            values: explicit_scalar_count,
+            indices: explicit_count_usize,
+            default: lane_count,
+        }),
+        (GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_SCALAR_U32) => (explicit_count_usize <= element_count
+            && canonical_scalar_count
+                == u64::try_from(explicit_scalar_count.checked_add(lane_count)?).ok()?)
+        .then_some(GeometryAttributeLeafShape::SparseU32 {
+            values: explicit_scalar_count,
+            indices: explicit_count_usize,
+            default: lane_count,
+        }),
+        _ => None,
+    }
+}
+
+fn validate_attribute_table_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    member: Option<CanonicalValidationMember<'session, RecordBlock, GeometryAttributeTableSchema>>,
+    scratch: &mut [GeometryAttributeValidationScratch<'session>],
+) -> Result<Option<u32>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    if scratch.is_empty() {
+        return Ok(member.is_none().then_some(0));
+    }
+    let Some(member) = member else {
+        return Ok(None);
+    };
+    let table_complete = session.visit_canonical_records(
+        member,
+        scratch.len(),
+        GEOMETRY_ATTRIBUTE_FIELD_COUNT,
+        |row_index, row| {
+            let attribute = row.scalar(geometry_attribute_field::ATTRIBUTE, |value: u32| value)?;
+            let semantic =
+                row.scalar(geometry_attribute_field::SEMANTIC_KIND, |value: u8| value)?;
+            let semantic_set =
+                row.scalar(geometry_attribute_field::SEMANTIC_SET, |value: u32| value)?;
+            let domain = row.scalar(geometry_attribute_field::DOMAIN, |value: u8| value)?;
+            let scalar_kind =
+                row.scalar(geometry_attribute_field::SCALAR_KIND, |value: u8| value)?;
+            let lanes = row.scalar(geometry_attribute_field::LANE_COUNT, |value: u8| value)?;
+            let normalization =
+                row.scalar(geometry_attribute_field::NORMALIZATION, |value: u8| value)?;
+            let payload_kind =
+                row.scalar(geometry_attribute_field::PAYLOAD_KIND, |value: u8| value)?;
+            let element_count =
+                row.scalar(geometry_attribute_field::ELEMENT_COUNT, |value: u32| value)?;
+            let explicit_count =
+                row.scalar(geometry_attribute_field::EXPLICIT_COUNT, |value: u32| value)?;
+            let canonical_scalar_count = row.scalar(
+                geometry_attribute_field::CANONICAL_SCALAR_COUNT,
+                |value: u64| value,
+            )?;
+            let leaf_shape = match (
+                scalar_kind,
+                payload_kind,
+                lanes,
+                element_count,
+                explicit_count,
+                canonical_scalar_count,
+            ) {
+                (
+                    Some(scalar_kind),
+                    Some(payload_kind),
+                    Some(lanes),
+                    Some(element_count),
+                    Some(explicit_count),
+                    Some(canonical_scalar_count),
+                ) => geometry_attribute_leaf_shape(
+                    scalar_kind,
+                    payload_kind,
+                    lanes,
+                    element_count,
+                    explicit_count,
+                    canonical_scalar_count,
+                ),
+                _ => None,
+            };
+
+            let (values, values_cell_valid) = match leaf_shape {
+                Some(GeometryAttributeLeafShape::DenseF32 { values })
+                | Some(GeometryAttributeLeafShape::SparseF32 { values, .. })
+                    if values != 0 =>
+                {
+                    let value = row.sequence_ref::<f32, GeometryF32ValuesSchema, _>(
+                        geometry_attribute_field::VALUES,
+                        |value| value,
+                    )?;
+                    let valid = value.is_some();
+                    (
+                        value.map_or(
+                            GeometryAttributeValuesMember::Absent,
+                            GeometryAttributeValuesMember::F32,
+                        ),
+                        valid,
+                    )
+                }
+                Some(GeometryAttributeLeafShape::DenseU32 { values })
+                | Some(GeometryAttributeLeafShape::SparseU32 { values, .. })
+                    if values != 0 =>
+                {
+                    let value = row.sequence_ref::<u32, GeometryU32ValuesSchema, _>(
+                        geometry_attribute_field::VALUES,
+                        |value| value,
+                    )?;
+                    let valid = value.is_some();
+                    (
+                        value.map_or(
+                            GeometryAttributeValuesMember::Absent,
+                            GeometryAttributeValuesMember::U32,
+                        ),
+                        valid,
+                    )
+                }
+                _ => {
+                    let absent = row.scalar(geometry_attribute_field::VALUES, |value: u8| value)?;
+                    (GeometryAttributeValuesMember::Absent, absent == Some(0))
+                }
+            };
+
+            let (sparse_indices, sparse_indices_cell_valid) = match leaf_shape {
+                Some(GeometryAttributeLeafShape::SparseF32 { indices, .. })
+                | Some(GeometryAttributeLeafShape::SparseU32 { indices, .. })
+                    if indices != 0 =>
+                {
+                    let value = row.sequence_ref::<u32, GeometrySparseIndicesSchema, _>(
+                        geometry_attribute_field::SPARSE_INDICES,
+                        |value| value,
+                    )?;
+                    let valid = value.is_some();
+                    (value, valid)
+                }
+                _ => {
+                    let absent =
+                        row.scalar(geometry_attribute_field::SPARSE_INDICES, |value: u8| value)?;
+                    (None, absent == Some(0))
+                }
+            };
+
+            let (sparse_default, sparse_default_cell_valid) = match leaf_shape {
+                Some(GeometryAttributeLeafShape::SparseF32 { default, .. }) if default != 0 => {
+                    let value = row.sequence_ref::<f32, GeometrySparseF32DefaultsSchema, _>(
+                        geometry_attribute_field::SPARSE_DEFAULT,
+                        |value| value,
+                    )?;
+                    let valid = value.is_some();
+                    (
+                        value.map_or(
+                            GeometryAttributeDefaultMember::Absent,
+                            GeometryAttributeDefaultMember::F32,
+                        ),
+                        valid,
+                    )
+                }
+                Some(GeometryAttributeLeafShape::SparseU32 { default, .. }) if default != 0 => {
+                    let value = row.sequence_ref::<u32, GeometrySparseU32DefaultsSchema, _>(
+                        geometry_attribute_field::SPARSE_DEFAULT,
+                        |value| value,
+                    )?;
+                    let valid = value.is_some();
+                    (
+                        value.map_or(
+                            GeometryAttributeDefaultMember::Absent,
+                            GeometryAttributeDefaultMember::U32,
+                        ),
+                        valid,
+                    )
+                }
+                _ => {
+                    let absent =
+                        row.scalar(geometry_attribute_field::SPARSE_DEFAULT, |value: u8| value)?;
+                    (GeometryAttributeDefaultMember::Absent, absent == Some(0))
+                }
+            };
+
+            let Some(expected_attribute) = u32::try_from(row_index).ok() else {
+                return Ok(false);
+            };
+            let (
+                Some(semantic),
+                Some(semantic_set),
+                Some(domain),
+                Some(scalar_kind),
+                Some(lanes),
+                Some(payload_kind),
+                Some(element_count),
+                Some(explicit_count),
+                Some(canonical_scalar_count),
+            ) = (
+                semantic,
+                semantic_set,
+                domain,
+                scalar_kind,
+                lanes,
+                payload_kind,
+                element_count,
+                explicit_count,
+                canonical_scalar_count,
+            )
+            else {
+                return Ok(false);
+            };
+            let valid = require_scalar(attribute, expected_attribute).is_some()
+                && require_scalar(normalization, GEOMETRY_NORMALIZATION_NONE).is_some()
+                && validate_attribute_schema(semantic, semantic_set, domain, scalar_kind, lanes)
+                    .is_some()
+                && leaf_shape.is_some()
+                && values_cell_valid
+                && sparse_indices_cell_valid
+                && sparse_default_cell_valid;
+            if valid {
+                let Some(destination) = scratch.get_mut(row_index) else {
+                    return Ok(false);
+                };
+                *destination = GeometryAttributeValidationScratch {
+                    semantic,
+                    semantic_set,
+                    domain,
+                    scalar_kind,
+                    lanes,
+                    payload_kind,
+                    element_count,
+                    explicit_count,
+                    canonical_scalar_count,
+                    values,
+                    sparse_indices,
+                    sparse_default,
+                    sparse_maximum: None,
+                };
+            }
+            Ok(valid)
+        },
+    )?;
+    if !table_complete {
+        return Ok(None);
+    }
+
+    let mut payload_block_count = 0_u32;
+    for row_index in 0..scratch.len() {
+        let Some(block_count) = validate_attribute_payload_metered(session, scratch, row_index)?
+        else {
+            return Ok(None);
+        };
+        let Some(next) = payload_block_count.checked_add(block_count) else {
+            return Ok(None);
+        };
+        payload_block_count = next;
+    }
+    Ok(Some(payload_block_count))
+}
+
+fn validate_attribute_payload_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    scratch: &mut [GeometryAttributeValidationScratch<'session>],
+    row_index: usize,
+) -> Result<Option<u32>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(current) = scratch.get(row_index).copied() else {
+        return Ok(None);
+    };
+    let Some(leaf_shape) = geometry_attribute_leaf_shape(
+        current.scalar_kind,
+        current.payload_kind,
+        current.lanes,
+        current.element_count,
+        current.explicit_count,
+        current.canonical_scalar_count,
+    ) else {
+        return Ok(None);
+    };
+    let Some(cached_sparse_maximum) = session.run_validation_unit(|| {
+        current.sparse_indices.and_then(|member| {
+            scratch[..row_index]
+                .iter()
+                .find(|candidate| candidate.sparse_indices == Some(member))
+                .map(|candidate| candidate.sparse_maximum)
+        })
+    })?
+    else {
+        return Ok(None);
+    };
+
+    let block_count = match leaf_shape {
+        GeometryAttributeLeafShape::DenseF32 { values } => {
+            if !validate_f32_values_metered(session, current.values, values)?
+                || !matches!(
+                    current.sparse_default,
+                    GeometryAttributeDefaultMember::Absent
+                )
+                || current.sparse_indices.is_some()
+            {
+                return Ok(None);
+            }
+            u32::from(values != 0)
+        }
+        GeometryAttributeLeafShape::DenseU32 { values } => {
+            if !validate_u32_values_metered(session, current.values, values)?
+                || !matches!(
+                    current.sparse_default,
+                    GeometryAttributeDefaultMember::Absent
+                )
+                || current.sparse_indices.is_some()
+            {
+                return Ok(None);
+            }
+            u32::from(values != 0)
+        }
+        GeometryAttributeLeafShape::SparseF32 {
+            values,
+            indices,
+            default,
+        } => {
+            if !validate_f32_values_metered(session, current.values, values)?
+                || !validate_f32_default_metered(session, current.sparse_default, default)?
+            {
+                return Ok(None);
+            }
+            let Some(maximum) = validate_sparse_indices_metered(
+                session,
+                current.sparse_indices,
+                indices,
+                current.element_count,
+                cached_sparse_maximum,
+            )?
+            else {
+                return Ok(None);
+            };
+            if let Some(destination) = scratch.get_mut(row_index) {
+                destination.sparse_maximum = maximum;
+            } else {
+                return Ok(None);
+            }
+            u32::from(values != 0) + u32::from(indices != 0) + u32::from(default != 0)
+        }
+        GeometryAttributeLeafShape::SparseU32 {
+            values,
+            indices,
+            default,
+        } => {
+            if !validate_u32_values_metered(session, current.values, values)?
+                || !validate_u32_default_metered(session, current.sparse_default, default)?
+            {
+                return Ok(None);
+            }
+            let Some(maximum) = validate_sparse_indices_metered(
+                session,
+                current.sparse_indices,
+                indices,
+                current.element_count,
+                cached_sparse_maximum,
+            )?
+            else {
+                return Ok(None);
+            };
+            if let Some(destination) = scratch.get_mut(row_index) {
+                destination.sparse_maximum = maximum;
+            } else {
+                return Ok(None);
+            }
+            u32::from(values != 0) + u32::from(indices != 0) + u32::from(default != 0)
+        }
+    };
+    Ok(Some(block_count))
+}
+
+fn validate_f32_values_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    member: GeometryAttributeValuesMember<'session>,
+    expected_len: usize,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    match (member, expected_len) {
+        (GeometryAttributeValuesMember::Absent, 0) => Ok(true),
+        (GeometryAttributeValuesMember::F32(member), expected_len) if expected_len != 0 => session
+            .visit_canonical_sequence(member, expected_len, |_index, value| value.is_finite()),
+        _ => Ok(false),
+    }
+}
+
+fn validate_u32_values_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    member: GeometryAttributeValuesMember<'session>,
+    expected_len: usize,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    match (member, expected_len) {
+        (GeometryAttributeValuesMember::Absent, 0) => Ok(true),
+        (GeometryAttributeValuesMember::U32(member), expected_len) if expected_len != 0 => {
+            session.visit_canonical_sequence(member, expected_len, |_index, _value| true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn validate_f32_default_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    member: GeometryAttributeDefaultMember<'session>,
+    expected_len: usize,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    match (member, expected_len) {
+        (GeometryAttributeDefaultMember::Absent, 0) => Ok(true),
+        (GeometryAttributeDefaultMember::F32(member), expected_len) if expected_len != 0 => session
+            .visit_canonical_sequence(member, expected_len, |_index, value| value.is_finite()),
+        _ => Ok(false),
+    }
+}
+
+fn validate_u32_default_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    member: GeometryAttributeDefaultMember<'session>,
+    expected_len: usize,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    match (member, expected_len) {
+        (GeometryAttributeDefaultMember::Absent, 0) => Ok(true),
+        (GeometryAttributeDefaultMember::U32(member), expected_len) if expected_len != 0 => {
+            session.visit_canonical_sequence(member, expected_len, |_index, _value| true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn validate_sparse_indices_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    member: Option<
+        CanonicalValidationMember<'session, ScalarSequence<u32>, GeometrySparseIndicesSchema>,
+    >,
+    expected_len: usize,
+    element_count: u32,
+    cached_maximum: Option<Option<u32>>,
+) -> Result<Option<Option<u32>>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    if expected_len == 0 {
+        return Ok((member.is_none() && cached_maximum.is_none()).then_some(None));
+    }
+    let Some(member) = member else {
+        return Ok(None);
+    };
+    if let Some(cached_maximum) = cached_maximum {
+        let Some(cached_maximum) = cached_maximum else {
+            return Ok(None);
+        };
+        let complete =
+            session.visit_canonical_sequence(member, expected_len, |_index, _value| true)?;
+        return Ok((complete && cached_maximum < element_count).then_some(Some(cached_maximum)));
+    }
+    let mut previous = None;
+    let mut maximum = None;
+    let complete = session.visit_canonical_sequence(member, expected_len, |_index, value| {
+        let accepted = value < element_count && previous.is_none_or(|previous| value > previous);
+        previous = Some(value);
+        maximum = Some(value);
+        accepted
+    })?;
+    Ok((complete && maximum.is_some()).then_some(maximum))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "typed primitive validation keeps every dependency, projection, and bounded scratch slice explicit"
+)]
+fn validate_primitive_table_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    member: Option<CanonicalValidationMember<'session, RecordBlock, GeometryPrimitiveTableSchema>>,
+    materials: Option<
+        CanonicalValidationMember<'session, RecordBlock, AppearanceMaterialTableSchema>,
+    >,
+    material_count: u32,
+    attributes: Option<
+        CanonicalValidationMember<'session, RecordBlock, GeometryAttributeTableSchema>,
+    >,
+    attribute_scratch: &[GeometryAttributeValidationScratch<'session>],
+    primitive_scratch: &mut [GeometryPrimitiveValidationScratch<'session>],
+    primitive_projections: &mut [GeometryPrimitiveValidationProjection],
+) -> Result<Option<u32>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    if primitive_scratch.is_empty() {
+        return Ok((member.is_none() && attributes.is_none()).then_some(0));
+    }
+    let Some(member) = member else {
+        return Ok(None);
+    };
+    if primitive_scratch.len() != primitive_projections.len() {
+        return Ok(None);
+    }
+    let table_complete = session.visit_canonical_records(
+        member,
+        primitive_scratch.len(),
+        GEOMETRY_PRIMITIVE_FIELD_COUNT,
+        |row_index, row| {
+            let primitive = row.scalar(geometry_primitive_field::PRIMITIVE, |value: u32| value)?;
+            let topology = row.scalar(geometry_primitive_field::TOPOLOGY, |value: u8| value)?;
+            let vertex_count =
+                row.scalar(geometry_primitive_field::VERTEX_COUNT, |value: u32| value)?;
+            let corner_count =
+                row.scalar(geometry_primitive_field::CORNER_COUNT, |value: u32| value)?;
+            let face_count =
+                row.scalar(geometry_primitive_field::FACE_COUNT, |value: u32| value)?;
+            let polygon_presence = row.scalar(
+                geometry_primitive_field::POLYGON_BOUNDARIES_PRESENCE,
+                |value: u8| value,
+            )?;
+            let polygon_count = row.scalar(
+                geometry_primitive_field::POLYGON_BOUNDARIES_COUNT,
+                |value: u32| value,
+            )?;
+            let (polygon_boundaries, polygon_cell_valid) =
+                if polygon_presence == Some(PRESENCE_PRESENT) && polygon_count != Some(0) {
+                    let value = row.sequence_ref::<u32, GeometryPolygonBoundariesSchema, _>(
+                        geometry_primitive_field::POLYGON_BOUNDARIES,
+                        |value| value,
+                    )?;
+                    let valid = value.is_some();
+                    (value, valid)
+                } else {
+                    let absent = row
+                        .scalar(geometry_primitive_field::POLYGON_BOUNDARIES, |value: u8| {
+                            value
+                        })?;
+                    (None, absent == Some(0))
+                };
+            let index_presence =
+                row.scalar(geometry_primitive_field::INDEX_PRESENCE, |value: u8| value)?;
+            let index_count =
+                row.scalar(geometry_primitive_field::INDEX_COUNT, |value: u32| value)?;
+            let (indices, indices_cell_valid) = if index_presence == Some(PRESENCE_PRESENT)
+                && index_count != Some(0)
+            {
+                let value = row.sequence_ref::<u32, GeometryPrimitiveIndicesSchema, _>(
+                    geometry_primitive_field::INDICES,
+                    |value| value,
+                )?;
+                let valid = value.is_some();
+                (value, valid)
+            } else {
+                let absent = row.scalar(geometry_primitive_field::INDICES, |value: u8| value)?;
+                (None, absent == Some(0))
+            };
+            let material_presence = row
+                .scalar(geometry_primitive_field::MATERIAL_PRESENCE, |value: u8| {
+                    value
+                })?;
+            let material = row.scalar(geometry_primitive_field::MATERIAL, |value: u32| value)?;
+            let (material_member, materials_cell_valid) = if material_presence
+                == Some(PRESENCE_PRESENT)
+            {
+                let value = row.record_ref::<AppearanceMaterialTableSchema, _>(
+                    geometry_primitive_field::MATERIALS,
+                    |value| value,
+                )?;
+                let valid = value.is_some();
+                (value, valid)
+            } else {
+                let absent = row.scalar(geometry_primitive_field::MATERIALS, |value: u8| value)?;
+                (None, absent == Some(0))
+            };
+            let attribute_offset = row
+                .scalar(geometry_primitive_field::ATTRIBUTE_OFFSET, |value: u32| {
+                    value
+                })?;
+            let attribute_count = row
+                .scalar(geometry_primitive_field::ATTRIBUTE_COUNT, |value: u32| {
+                    value
+                })?;
+            let (attribute_member, attributes_cell_valid) = if attribute_count != Some(0) {
+                let value = row.record_ref::<GeometryAttributeTableSchema, _>(
+                    geometry_primitive_field::ATTRIBUTES,
+                    |value| value,
+                )?;
+                let valid = value.is_some();
+                (value, valid)
+            } else {
+                let absent = row.scalar(geometry_primitive_field::ATTRIBUTES, |value: u8| value)?;
+                (None, absent == Some(0))
+            };
+
+            let Some(expected_primitive) = u32::try_from(row_index).ok() else {
+                return Ok(false);
+            };
+            let (
+                Some(topology),
+                Some(vertex_count),
+                Some(corner_count),
+                Some(face_count),
+                Some(polygon_presence),
+                Some(polygon_count),
+                Some(index_presence),
+                Some(index_count),
+                Some(material_presence),
+                Some(material),
+                Some(attribute_offset),
+                Some(attribute_count),
+            ) = (
+                topology,
+                vertex_count,
+                corner_count,
+                face_count,
+                polygon_presence,
+                polygon_count,
+                index_presence,
+                index_count,
+                material_presence,
+                material,
+                attribute_offset,
+                attribute_count,
+            )
+            else {
+                return Ok(false);
+            };
+            let material = match material_presence {
+                PRESENCE_ABSENT if material == 0 && materials_cell_valid => None,
+                PRESENCE_PRESENT if materials_cell_valid => Some(material),
+                _ => return Ok(false),
+            };
+            let valid = require_scalar(primitive, expected_primitive).is_some()
+                && matches!(polygon_presence, PRESENCE_ABSENT | PRESENCE_PRESENT)
+                && matches!(index_presence, PRESENCE_ABSENT | PRESENCE_PRESENT)
+                && polygon_cell_valid
+                && indices_cell_valid
+                && attributes_cell_valid;
+            if valid {
+                let Some(destination) = primitive_scratch.get_mut(row_index) else {
+                    return Ok(false);
+                };
+                *destination = GeometryPrimitiveValidationScratch {
+                    topology,
+                    vertex_count,
+                    corner_count,
+                    face_count,
+                    polygon_present: polygon_presence == PRESENCE_PRESENT,
+                    polygon_count,
+                    polygon_boundaries,
+                    polygon_total: None,
+                    indices_present: index_presence == PRESENCE_PRESENT,
+                    index_count,
+                    indices,
+                    index_maximum: None,
+                    material,
+                    materials: material_member,
+                    attribute_offset,
+                    attribute_count,
+                    attributes: attribute_member,
+                };
+            }
+            Ok(valid)
+        },
+    )?;
+    if !table_complete {
+        return Ok(None);
+    }
+
+    let mut attribute_cursor = 0_usize;
+    let mut payload_block_count = 0_u32;
+    for row_index in 0..primitive_scratch.len() {
+        let current = primitive_scratch[row_index];
+        let Some(cached_polygon_total) = session.run_validation_unit(|| {
+            current.polygon_boundaries.and_then(|member| {
+                primitive_scratch[..row_index]
+                    .iter()
+                    .find(|candidate| candidate.polygon_boundaries == Some(member))
+                    .map(|candidate| candidate.polygon_total)
+            })
+        })?
+        else {
+            return Ok(None);
+        };
+        let Some(cached_index_maximum) = session.run_validation_unit(|| {
+            current.indices.and_then(|member| {
+                primitive_scratch[..row_index]
+                    .iter()
+                    .find(|candidate| candidate.indices == Some(member))
+                    .map(|candidate| candidate.index_maximum)
+            })
+        })?
+        else {
+            return Ok(None);
+        };
+        let Some(polygon_total) =
+            validate_polygon_boundaries_metered(session, current, cached_polygon_total)?
+        else {
+            return Ok(None);
+        };
+        let Some(index_maximum) =
+            validate_primitive_indices_metered(session, current, cached_index_maximum)?
+        else {
+            return Ok(None);
+        };
+        if !validate_topology_shape_metered(current, polygon_total)
+            || !validate_primitive_material_metered(current, materials, material_count)
+        {
+            return Ok(None);
+        }
+        let Some(attribute_range) = checked_range(
+            current.attribute_offset,
+            current.attribute_count,
+            attribute_scratch.len(),
+        ) else {
+            return Ok(None);
+        };
+        if attribute_range.start != attribute_cursor
+            || (current.attribute_count == 0
+                && (current.attributes.is_some() || current.vertex_count != 0))
+            || (current.attribute_count != 0 && current.attributes != attributes)
+            || !validate_primitive_attribute_range_metered(
+                session,
+                attribute_scratch,
+                attribute_range.clone(),
+                current.vertex_count,
+                current.corner_count,
+                current.face_count,
+            )?
+        {
+            return Ok(None);
+        }
+        attribute_cursor = attribute_range.end;
+        primitive_scratch[row_index].polygon_total = polygon_total;
+        primitive_scratch[row_index].index_maximum = index_maximum;
+        primitive_projections[row_index] = GeometryPrimitiveValidationProjection {
+            vertex_count: current.vertex_count,
+        };
+        let Some(next) = payload_block_count
+            .checked_add(u32::from(current.polygon_boundaries.is_some()))
+            .and_then(|count| count.checked_add(u32::from(current.indices.is_some())))
+        else {
+            return Ok(None);
+        };
+        payload_block_count = next;
+    }
+    Ok((attribute_cursor == attribute_scratch.len()).then_some(payload_block_count))
+}
+
+fn validate_polygon_boundaries_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    primitive: GeometryPrimitiveValidationScratch<'session>,
+    cached_total: Option<Option<u32>>,
+) -> Result<Option<Option<u32>>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    if !primitive.polygon_present {
+        return Ok(
+            (primitive.polygon_count == 0 && primitive.polygon_boundaries.is_none())
+                .then_some(None),
+        );
+    }
+    if primitive.topology != GEOMETRY_TOPOLOGY_POLYGONS
+        || primitive.polygon_count != primitive.face_count
+    {
+        return Ok(None);
+    }
+    if primitive.polygon_count == 0 {
+        return Ok((primitive.polygon_boundaries.is_none()).then_some(Some(0)));
+    }
+    let Some(member) = primitive.polygon_boundaries else {
+        return Ok(None);
+    };
+    let Some(expected_len) = usize::try_from(primitive.polygon_count).ok() else {
+        return Ok(None);
+    };
+    if let Some(cached_total) = cached_total {
+        let Some(cached_total) = cached_total else {
+            return Ok(None);
+        };
+        let complete =
+            session.visit_canonical_sequence(member, expected_len, |_index, _value| true)?;
+        return Ok(complete.then_some(Some(cached_total)));
+    }
+    let mut total = Some(0_u32);
+    let complete = session.visit_canonical_sequence(member, expected_len, |_index, boundary| {
+        if boundary < 3 {
+            return false;
+        }
+        total = total.and_then(|total| total.checked_add(boundary));
+        total.is_some()
+    })?;
+    Ok((complete && total.is_some()).then_some(total))
+}
+
+fn validate_primitive_indices_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    primitive: GeometryPrimitiveValidationScratch<'session>,
+    cached_maximum: Option<Option<u32>>,
+) -> Result<Option<Option<u32>>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    if !primitive.indices_present {
+        return Ok((primitive.index_count == 0
+            && primitive.indices.is_none()
+            && primitive.corner_count == primitive.vertex_count)
+            .then_some(None));
+    }
+    if primitive.index_count != primitive.corner_count {
+        return Ok(None);
+    }
+    if primitive.index_count == 0 {
+        return Ok((primitive.indices.is_none()).then_some(Some(0)));
+    }
+    let Some(member) = primitive.indices else {
+        return Ok(None);
+    };
+    let Some(expected_len) = usize::try_from(primitive.index_count).ok() else {
+        return Ok(None);
+    };
+    if let Some(cached_maximum) = cached_maximum {
+        let Some(cached_maximum) = cached_maximum else {
+            return Ok(None);
+        };
+        let complete =
+            session.visit_canonical_sequence(member, expected_len, |_index, _value| true)?;
+        return Ok(
+            (complete && cached_maximum < primitive.vertex_count).then_some(Some(cached_maximum))
+        );
+    }
+    let mut maximum = None;
+    let complete = session.visit_canonical_sequence(member, expected_len, |_position, index| {
+        maximum = Some(maximum.map_or(index, |maximum: u32| maximum.max(index)));
+        index < primitive.vertex_count
+    })?;
+    Ok((complete && maximum.is_some()).then_some(maximum))
+}
+
+fn validate_topology_shape_metered(
+    primitive: GeometryPrimitiveValidationScratch<'_>,
+    polygon_total: Option<u32>,
+) -> bool {
+    let expected_face_count = match primitive.topology {
+        GEOMETRY_TOPOLOGY_POINTS => primitive.corner_count,
+        GEOMETRY_TOPOLOGY_LINE_LIST if primitive.corner_count.is_multiple_of(2) => {
+            primitive.corner_count / 2
+        }
+        GEOMETRY_TOPOLOGY_LINE_STRIP => primitive.corner_count.saturating_sub(1),
+        GEOMETRY_TOPOLOGY_LINE_LOOP => {
+            if primitive.corner_count < 2 {
+                0
+            } else {
+                primitive.corner_count
+            }
+        }
+        GEOMETRY_TOPOLOGY_TRIANGLE_LIST if primitive.corner_count.is_multiple_of(3) => {
+            primitive.corner_count / 3
+        }
+        GEOMETRY_TOPOLOGY_TRIANGLE_STRIP | GEOMETRY_TOPOLOGY_TRIANGLE_FAN => {
+            primitive.corner_count.saturating_sub(2)
+        }
+        GEOMETRY_TOPOLOGY_POLYGONS if polygon_total == Some(primitive.corner_count) => {
+            primitive.polygon_count
+        }
+        _ => return false,
+    };
+    primitive.face_count == expected_face_count
+        && (primitive.topology == GEOMETRY_TOPOLOGY_POLYGONS) == primitive.polygon_present
+}
+
+fn validate_primitive_material_metered(
+    primitive: GeometryPrimitiveValidationScratch<'_>,
+    materials: Option<CanonicalValidationMember<'_, RecordBlock, AppearanceMaterialTableSchema>>,
+    material_count: u32,
+) -> bool {
+    match primitive.material {
+        None => primitive.materials.is_none(),
+        Some(material) => material < material_count && primitive.materials == materials,
+    }
+}
+
+fn validate_primitive_attribute_range_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    attributes: &[GeometryAttributeValidationScratch<'session>],
+    range: std::ops::Range<usize>,
+    vertex_count: u32,
+    corner_count: u32,
+    face_count: u32,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let mut previous_key = None;
+    let mut has_position = false;
+    for row_index in range {
+        let Some(valid) = session.run_validation_unit(|| {
+            let Some(attribute) = attributes.get(row_index) else {
+                return false;
+            };
+            let key = (attribute.semantic, attribute.semantic_set, attribute.domain);
+            if previous_key.is_some_and(|previous| previous >= key) {
+                return false;
+            }
+            previous_key = Some(key);
+            let expected_element_count = match attribute.domain {
+                GEOMETRY_DOMAIN_VERTEX => vertex_count,
+                GEOMETRY_DOMAIN_CORNER => corner_count,
+                GEOMETRY_DOMAIN_FACE => face_count,
+                _ => return false,
+            };
+            has_position |= attribute.semantic == GEOMETRY_SEMANTIC_POSITION;
+            attribute.element_count == expected_element_count
+        })?
+        else {
+            return Ok(false);
+        };
+        if !valid {
+            return Ok(false);
+        }
+    }
+    Ok(vertex_count == 0 || has_position)
+}
+
+fn validate_logical_mesh_table_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    member: Option<
+        CanonicalValidationMember<'session, RecordBlock, GeometryLogicalMeshTableSchema>,
+    >,
+    primitives: Option<
+        CanonicalValidationMember<'session, RecordBlock, GeometryPrimitiveTableSchema>,
+    >,
+    primitive_count: u32,
+    projections: &mut [GeometryLogicalMeshValidationProjection],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    if projections.is_empty() {
+        return Ok(member.is_none() && primitive_count == 0);
+    }
+    let (Some(member), Some(primitives)) = (member, primitives) else {
+        return Ok(false);
+    };
+    let mut primitive_cursor = 0_u32;
+    let complete = session.visit_canonical_records(
+        member,
+        projections.len(),
+        GEOMETRY_LOGICAL_MESH_FIELD_COUNT,
+        |row_index, row| {
+            let logical_mesh = row
+                .scalar(geometry_logical_mesh_field::LOGICAL_MESH, |value: u32| {
+                    value
+                })?;
+            let primitive_offset = row.scalar(
+                geometry_logical_mesh_field::PRIMITIVE_OFFSET,
+                |value: u32| value,
+            )?;
+            let row_primitive_count = row.scalar(
+                geometry_logical_mesh_field::PRIMITIVE_COUNT,
+                |value: u32| value,
+            )?;
+            let primitive_member = row.record_ref::<GeometryPrimitiveTableSchema, _>(
+                geometry_logical_mesh_field::PRIMITIVES,
+                |value| value,
+            )?;
+            let Some(expected_logical_mesh) = u32::try_from(row_index).ok() else {
+                return Ok(false);
+            };
+            let (Some(primitive_offset), Some(row_primitive_count)) =
+                (primitive_offset, row_primitive_count)
+            else {
+                return Ok(false);
+            };
+            let Some(next_cursor) = primitive_offset.checked_add(row_primitive_count) else {
+                return Ok(false);
+            };
+            let valid = require_scalar(logical_mesh, expected_logical_mesh).is_some()
+                && primitive_offset == primitive_cursor
+                && row_primitive_count != 0
+                && next_cursor <= primitive_count
+                && primitive_member == Some(primitives);
+            if valid {
+                let Some(destination) = projections.get_mut(row_index) else {
+                    return Ok(false);
+                };
+                *destination = GeometryLogicalMeshValidationProjection {
+                    primitive_offset,
+                    primitive_count: row_primitive_count,
+                };
+                primitive_cursor = next_cursor;
+            }
+            Ok(valid)
+        },
+    )?;
+    Ok(complete && primitive_cursor == primitive_count)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "typed mesh-instance validation keeps node and logical-mesh dependencies explicit"
+)]
+fn validate_mesh_instance_table_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    member: Option<
+        CanonicalValidationMember<'session, RecordBlock, GeometryMeshInstanceTableSchema>,
+    >,
+    nodes: CanonicalValidationMember<'session, RecordBlock, NodeSceneNodeTableSchema>,
+    canonical_node_count: u32,
+    logical_meshes: Option<
+        CanonicalValidationMember<'session, RecordBlock, GeometryLogicalMeshTableSchema>,
+    >,
+    logical_mesh_count: u32,
+    projections: &mut [GeometryMeshInstanceValidationProjection],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    if projections.is_empty() {
+        return Ok(member.is_none());
+    }
+    let (Some(member), Some(logical_meshes)) = (member, logical_meshes) else {
+        return Ok(false);
+    };
+    session.visit_canonical_records(
+        member,
+        projections.len(),
+        GEOMETRY_MESH_INSTANCE_FIELD_COUNT,
+        |row_index, row| {
+            let mesh_instance = row
+                .scalar(geometry_mesh_instance_field::MESH_INSTANCE, |value: u32| {
+                    value
+                })?;
+            let owner_node =
+                row.scalar(geometry_mesh_instance_field::OWNER_NODE, |value: u32| value)?;
+            let nodes_member = row.record_ref::<NodeSceneNodeTableSchema, _>(
+                geometry_mesh_instance_field::NODES,
+                |value| value,
+            )?;
+            let logical_mesh = row
+                .scalar(geometry_mesh_instance_field::LOGICAL_MESH, |value: u32| {
+                    value
+                })?;
+            let logical_meshes_member = row.record_ref::<GeometryLogicalMeshTableSchema, _>(
+                geometry_mesh_instance_field::LOGICAL_MESHES,
+                |value| value,
+            )?;
+            let Some(expected_mesh_instance) = u32::try_from(row_index).ok() else {
+                return Ok(false);
+            };
+            let (Some(owner_node), Some(logical_mesh)) = (owner_node, logical_mesh) else {
+                return Ok(false);
+            };
+            let valid = require_scalar(mesh_instance, expected_mesh_instance).is_some()
+                && owner_node != 0
+                && owner_node < canonical_node_count
+                && nodes_member == Some(nodes)
+                && logical_mesh < logical_mesh_count
+                && logical_meshes_member == Some(logical_meshes);
+            if valid {
+                let Some(destination) = projections.get_mut(row_index) else {
+                    return Ok(false);
+                };
+                *destination = GeometryMeshInstanceValidationProjection { logical_mesh };
+            }
+            Ok(valid)
+        },
+    )
 }
 
 fn validate_logical_mesh_table(

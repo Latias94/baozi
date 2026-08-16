@@ -265,7 +265,7 @@ impl CanonicalAuthoringControl for TestControl {
     fn run_unit<R>(
         &mut self,
         work: SceneValidationWork,
-        action: impl FnOnce() -> R,
+        mut action: impl FnMut() -> R,
     ) -> Result<R, Self::Error> {
         let final_work = self.work.saturating_add(1);
         if self

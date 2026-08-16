@@ -1,6 +1,10 @@
+use baozi_operation::__canonical_activation::{
+    CanonicalBuildControl, CanonicalLane, CanonicalRecordBuildRow,
+};
 use baozi_operation::{
-    ByteBlock, CanonicalRecordRowWriter, RecordBlock, ScalarSequence, SequenceWriter,
-    StoreBuildError, StoreControlledError, StoreRuntimeError, StoredScalar, Utf8Block, Utf8Writer,
+    ByteBlock, OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, ScalarSequence,
+    SequenceWriter, StoreBuildError, StoreControlledError, StoreRuntimeError, StoredScalar,
+    Utf8Block,
 };
 
 use crate::canonical_scene::store::production::ValidatedProfileBatch;
@@ -21,14 +25,12 @@ use crate::canonical_scene::store::schema::{CanonicalBlockRef, CanonicalSchema};
 use crate::extension::{ExtensionArrayRef, ExtensionValueRef};
 
 use super::{MetadataLeafRefs, ProfileBuildFault, ProfileMaterializationPlans, encode_owner};
-use crate::canonical_scene::store::construction::node_scene::{
-    NodeSceneWorkMeter, process_slice_in_work_chunks, process_str_in_work_chunks,
-};
-use crate::canonical_scene::store::construction::{SceneStoreAssembly, SceneStoreKeys};
 
 #[derive(Clone, Copy)]
-pub(super) struct RetainedMetadataRefs {
-    pub(super) directory: CanonicalBlockRef<ProfileMetadataDirectorySchema>,
+pub(in crate::canonical_scene::store) struct RetainedMetadataRefs {
+    pub(in crate::canonical_scene::store) directory:
+        CanonicalBlockRef<ProfileMetadataDirectorySchema>,
+    pub(in crate::canonical_scene::store) leaves: MetadataLeafRefs,
 }
 
 #[derive(Clone, Copy)]
@@ -63,41 +65,44 @@ struct MetadataCursors {
     f32s: u32,
 }
 
-pub(super) fn retain_metadata<R>(
-    assembly: &mut SceneStoreAssembly,
+pub(super) fn retain_metadata<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
-) -> Result<RetainedMetadataRefs, StoreRuntimeError> {
+) -> Result<RetainedMetadataRefs, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let text = match plans.metadata_text {
-        Some(plan) => Some(retain_text(assembly, plan, batch, keys, work, failure)?),
+        Some(plan) => Some(retain_text(lane, plan, batch, failure)?),
         None => None,
     };
     let bytes = match plans.metadata_bytes {
-        Some(plan) => Some(retain_bytes(assembly, plan, batch, keys, work, failure)?),
+        Some(plan) => Some(retain_bytes(lane, plan, batch, failure)?),
         None => None,
     };
     let bools = match plans.metadata_bool {
-        Some(plan) => Some(retain_bools(assembly, plan, batch, keys, work, failure)?),
+        Some(plan) => Some(retain_bools(lane, plan, batch, failure)?),
         None => None,
     };
     let i64s = match plans.metadata_i64 {
-        Some(plan) => Some(retain_i64s(assembly, plan, batch, keys, work, failure)?),
+        Some(plan) => Some(retain_i64s(lane, plan, batch, failure)?),
         None => None,
     };
     let u64s = match plans.metadata_u64 {
-        Some(plan) => Some(retain_u64s(assembly, plan, batch, keys, work, failure)?),
+        Some(plan) => Some(retain_u64s(lane, plan, batch, failure)?),
         None => None,
     };
     let f64s = match plans.metadata_f64 {
-        Some(plan) => Some(retain_f64s(assembly, plan, batch, keys, work, failure)?),
+        Some(plan) => Some(retain_f64s(lane, plan, batch, failure)?),
         None => None,
     };
     let f32s = match plans.metadata_f32 {
-        Some(plan) => Some(retain_f32s(assembly, plan, batch, keys, work, failure)?),
+        Some(plan) => Some(retain_f32s(lane, plan, batch, failure)?),
         None => None,
     };
     let mut refs = MetadataLeafRefs {
@@ -111,330 +116,247 @@ pub(super) fn retain_metadata<R>(
         f32s,
     };
     refs.entries = match plans.metadata_entries {
-        Some(plan) => Some(retain_entries(
-            assembly, plan, batch, refs, keys, work, faults, failure,
-        )?),
+        Some(plan) => Some(retain_entries(lane, plan, batch, refs, faults, failure)?),
         None => None,
     };
-    let directory = retain_directory(assembly, plans, batch, refs, keys, work, faults, failure)?;
-    Ok(RetainedMetadataRefs { directory })
-}
-
-fn retain_text<R>(
-    assembly: &mut SceneStoreAssembly,
-    plan: baozi_operation::Utf8Plan,
-    batch: &ValidatedProfileBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
-    failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<ProfileMetadataTextSchema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_utf8_controlled(
-            plan,
-            keys.dimension,
-            ProfileMetadataTextSchema,
-            |writer, control| {
-                for index in 0..batch.metadata_entry_count() {
-                    work.observe(control, 1)?;
-                    let entry = batch
-                        .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
-                        .ok_or(failure)?;
-                    write_text(writer, control, work, entry.key().as_str(), failure)?;
-                    match entry.value() {
-                        ExtensionValueRef::String(value) => {
-                            write_text(writer, control, work, value, failure)?;
-                        }
-                        ExtensionValueRef::Bytes { media_type, .. } => {
-                            write_text(writer, control, work, media_type.as_str(), failure)?;
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
-}
-
-fn write_text(
-    writer: &mut Utf8Writer,
-    control: &mut baozi_operation::RetainedStoreWorkControl<
-        '_,
-        crate::canonical_scene::store::construction::SceneConstructionOwner,
-        crate::canonical_scene::store::construction::SceneConstructionPhase,
-        crate::canonical_scene::store::construction::SceneConstructionUnit,
-    >,
-    work: &mut NodeSceneWorkMeter,
-    value: &str,
-    failure: StoreBuildError,
-) -> Result<(), baozi_operation::StoreControlledError> {
-    process_str_in_work_chunks(value, control, work, failure, |chunk| {
-        writer.write_str(chunk)?;
-        Ok(())
+    let directory = retain_directory(lane, plans, batch, refs, faults, failure)?;
+    Ok(RetainedMetadataRefs {
+        directory,
+        leaves: refs,
     })
 }
 
-fn retain_bytes<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_text<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
+    plan: baozi_operation::Utf8Plan,
+    batch: &ValidatedProfileBatch<'_, R>,
+    failure: StoreBuildError,
+) -> Result<CanonicalBlockRef<ProfileMetadataTextSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_utf8(plan, ProfileMetadataTextSchema, |control| {
+        for index in 0..batch.metadata_entry_count() {
+            let entry = batch
+                .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
+                .ok_or(failure)?;
+            control.write_str(entry.key().as_str())?;
+            match entry.value() {
+                ExtensionValueRef::String(value) => {
+                    control.write_str(value)?;
+                }
+                ExtensionValueRef::Bytes { media_type, .. } => {
+                    control.write_str(media_type.as_str())?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
+}
+
+fn retain_bytes<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: baozi_operation::BytesPlan,
     batch: &ValidatedProfileBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<ProfileMetadataBytesSchema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_bytes_controlled(
-            plan,
-            keys.dimension,
-            ProfileMetadataBytesSchema,
-            |writer, control| {
-                for index in 0..batch.metadata_entry_count() {
-                    work.observe(control, 1)?;
-                    let entry = batch
-                        .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
-                        .ok_or(failure)?;
-                    if let ExtensionValueRef::Bytes { payload, .. } = entry.value() {
-                        process_slice_in_work_chunks(payload, control, work, failure, |chunk| {
-                            writer.write_bytes(chunk)
-                        })?;
-                    }
-                }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+) -> Result<CanonicalBlockRef<ProfileMetadataBytesSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_bytes(plan, ProfileMetadataBytesSchema, |control| {
+        for index in 0..batch.metadata_entry_count() {
+            let entry = batch
+                .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
+                .ok_or(failure)?;
+            if let ExtensionValueRef::Bytes { payload, .. } = entry.value() {
+                control.write_bytes(payload)?;
+            }
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_bools<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_bools<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: baozi_operation::SequencePlan<u8>,
     batch: &ValidatedProfileBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<ProfileMetadataBoolSchema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_sequence_controlled(
-            plan,
-            keys.dimension,
-            ProfileMetadataBoolSchema,
-            |writer, control| {
-                for index in 0..batch.metadata_entry_count() {
-                    work.observe(control, 1)?;
-                    let value = batch
-                        .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
-                        .ok_or(failure)?
-                        .value();
-                    match value {
-                        ExtensionValueRef::Bool(value) => {
-                            work.observe(control, 1)?;
-                            writer.extend_from_slice(&[u8::from(value)])?;
-                        }
-                        ExtensionValueRef::DenseArray(ExtensionArrayRef::Bool(values)) => {
-                            process_slice_in_work_chunks(
-                                values,
-                                control,
-                                work,
-                                failure,
-                                |chunk| {
-                                    for value in chunk {
-                                        writer.push(u8::from(*value))?;
-                                    }
-                                    Ok(())
-                                },
-                            )?;
-                        }
-                        _ => {}
+) -> Result<CanonicalBlockRef<ProfileMetadataBoolSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_sequence(plan, ProfileMetadataBoolSchema, |control| {
+        for index in 0..batch.metadata_entry_count() {
+            let value = batch
+                .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
+                .ok_or(failure)?
+                .value();
+            match value {
+                ExtensionValueRef::Bool(value) => {
+                    control.push(u8::from(value))?;
+                }
+                ExtensionValueRef::DenseArray(ExtensionArrayRef::Bool(values)) => {
+                    for value in values {
+                        control.push(u8::from(*value))?;
                     }
                 }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+                _ => {}
+            }
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_i64s<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_i64s<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: baozi_operation::SequencePlan<i64>,
     batch: &ValidatedProfileBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<ProfileMetadataI64Schema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_sequence_controlled(
-            plan,
-            keys.dimension,
-            ProfileMetadataI64Schema,
-            |writer, control| {
-                for index in 0..batch.metadata_entry_count() {
-                    work.observe(control, 1)?;
-                    let value = batch
-                        .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
-                        .ok_or(failure)?
-                        .value();
-                    match value {
-                        ExtensionValueRef::I64(value) => {
-                            work.observe(control, 1)?;
-                            writer.push(value)?;
-                        }
-                        ExtensionValueRef::DenseArray(ExtensionArrayRef::I64(values)) => {
-                            process_slice_in_work_chunks(
-                                values,
-                                control,
-                                work,
-                                failure,
-                                |chunk| writer.extend_from_slice(chunk),
-                            )?;
-                        }
-                        _ => {}
-                    }
+) -> Result<CanonicalBlockRef<ProfileMetadataI64Schema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_sequence(plan, ProfileMetadataI64Schema, |control| {
+        for index in 0..batch.metadata_entry_count() {
+            let value = batch
+                .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
+                .ok_or(failure)?
+                .value();
+            match value {
+                ExtensionValueRef::I64(value) => {
+                    control.push(value)?;
                 }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+                ExtensionValueRef::DenseArray(ExtensionArrayRef::I64(values)) => {
+                    control.extend_from_slice(values)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_u64s<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_u64s<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: baozi_operation::SequencePlan<u64>,
     batch: &ValidatedProfileBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<ProfileMetadataU64Schema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_sequence_controlled(
-            plan,
-            keys.dimension,
-            ProfileMetadataU64Schema,
-            |writer, control| {
-                for index in 0..batch.metadata_entry_count() {
-                    work.observe(control, 1)?;
-                    let value = batch
-                        .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
-                        .ok_or(failure)?
-                        .value();
-                    match value {
-                        ExtensionValueRef::U64(value) => {
-                            work.observe(control, 1)?;
-                            writer.push(value)?;
-                        }
-                        ExtensionValueRef::DenseArray(ExtensionArrayRef::U64(values)) => {
-                            process_slice_in_work_chunks(
-                                values,
-                                control,
-                                work,
-                                failure,
-                                |chunk| writer.extend_from_slice(chunk),
-                            )?;
-                        }
-                        _ => {}
-                    }
+) -> Result<CanonicalBlockRef<ProfileMetadataU64Schema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_sequence(plan, ProfileMetadataU64Schema, |control| {
+        for index in 0..batch.metadata_entry_count() {
+            let value = batch
+                .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
+                .ok_or(failure)?
+                .value();
+            match value {
+                ExtensionValueRef::U64(value) => {
+                    control.push(value)?;
                 }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+                ExtensionValueRef::DenseArray(ExtensionArrayRef::U64(values)) => {
+                    control.extend_from_slice(values)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_f64s<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_f64s<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: baozi_operation::SequencePlan<f64>,
     batch: &ValidatedProfileBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<ProfileMetadataF64Schema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_sequence_controlled(
-            plan,
-            keys.dimension,
-            ProfileMetadataF64Schema,
-            |writer, control| {
-                for index in 0..batch.metadata_entry_count() {
-                    work.observe(control, 1)?;
-                    let value = batch
-                        .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
-                        .ok_or(failure)?
-                        .value();
-                    match value {
-                        ExtensionValueRef::F64(value) => {
-                            work.observe(control, 1)?;
-                            writer.push(value)?;
-                        }
-                        ExtensionValueRef::DenseArray(ExtensionArrayRef::F64(values)) => {
-                            process_slice_in_work_chunks(
-                                values,
-                                control,
-                                work,
-                                failure,
-                                |chunk| writer.extend_from_slice(chunk),
-                            )?;
-                        }
-                        _ => {}
-                    }
+) -> Result<CanonicalBlockRef<ProfileMetadataF64Schema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_sequence(plan, ProfileMetadataF64Schema, |control| {
+        for index in 0..batch.metadata_entry_count() {
+            let value = batch
+                .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
+                .ok_or(failure)?
+                .value();
+            match value {
+                ExtensionValueRef::F64(value) => {
+                    control.push(value)?;
                 }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+                ExtensionValueRef::DenseArray(ExtensionArrayRef::F64(values)) => {
+                    control.extend_from_slice(values)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_f32s<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_f32s<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: baozi_operation::SequencePlan<f32>,
     batch: &ValidatedProfileBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<ProfileMetadataF32Schema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_sequence_controlled(
-            plan,
-            keys.dimension,
-            ProfileMetadataF32Schema,
-            |writer, control| {
-                for index in 0..batch.metadata_entry_count() {
-                    work.observe(control, 1)?;
-                    let value = batch
-                        .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
-                        .ok_or(failure)?
-                        .value();
-                    write_f32_value(writer, control, work, value, failure)?;
-                }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+) -> Result<CanonicalBlockRef<ProfileMetadataF32Schema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_sequence(plan, ProfileMetadataF32Schema, |control| {
+        for index in 0..batch.metadata_entry_count() {
+            let value = batch
+                .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
+                .ok_or(failure)?
+                .value();
+            write_f32_value(control, value)?;
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
-fn write_f32_value(
-    writer: &mut SequenceWriter<f32>,
-    control: &mut baozi_operation::RetainedStoreWorkControl<
-        '_,
-        crate::canonical_scene::store::construction::SceneConstructionOwner,
-        crate::canonical_scene::store::construction::SceneConstructionPhase,
-        crate::canonical_scene::store::construction::SceneConstructionUnit,
-    >,
-    work: &mut NodeSceneWorkMeter,
+fn write_f32_value<O, PP, U>(
+    control: &mut CanonicalBuildControl<'_, '_, '_, O, PP, U, SequenceWriter<f32>>,
     value: ExtensionValueRef<'_>,
-    failure: StoreBuildError,
-) -> Result<(), StoreControlledError> {
+) -> Result<(), StoreControlledError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     macro_rules! write_values {
         ($values:expr) => {{
             let values = $values;
-            work.observe(control, u64::try_from(values.len()).map_err(|_| failure)?)?;
-            writer.extend_from_slice(&values)?;
+            control.extend_from_slice(&values)?;
         }};
     }
     macro_rules! write_matrix {
         ($value:expr) => {{
             let value = $value;
-            work.observe(control, 16)?;
             for column in &value.cols {
-                writer.extend_from_slice(column)?;
+                control.extend_from_slice(column)?;
             }
         }};
     }
@@ -477,206 +399,153 @@ fn write_f32_value(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn retain_entries<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_entries<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: baozi_operation::RecordPlan,
     batch: &ValidatedProfileBatch<'_, R>,
     refs: MetadataLeafRefs,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<ProfileMetadataEntryTableSchema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_records_controlled(
-            plan,
-            keys.dimension,
-            ProfileMetadataEntryTableSchema,
-            |writer, control| {
-                let mut cursors = MetadataCursors::default();
-                for index in 0..batch.metadata_entry_count() {
-                    work.observe(control, 1)?;
-                    let entry = batch
-                        .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
-                        .ok_or(failure)?;
-                    let encoding = metadata_encoding(entry.value(), failure)?;
-                    let key_offset = cursors.text;
-                    let key_count =
-                        u32::try_from(entry.key().as_str().len()).map_err(|_| failure)?;
-                    cursors.text = cursors.text.checked_add(key_count).ok_or(failure)?;
-                    let auxiliary_text_offset = cursors.text;
-                    cursors.text = cursors
-                        .text
-                        .checked_add(encoding.auxiliary_text_count)
-                        .ok_or(failure)?;
-                    let byte_offset = cursors.bytes;
-                    cursors.bytes = cursors
-                        .bytes
-                        .checked_add(encoding.byte_count)
-                        .ok_or(failure)?;
-                    let scalar_offset = scalar_cursor(&cursors, encoding.lane);
-                    advance_scalar_cursor(
-                        &mut cursors,
-                        encoding.lane,
-                        encoding.scalar_count,
-                        failure,
-                    )?;
-                    let (owner_kind, owner_index) = encode_owner(entry.owner());
-                    let stored_scalar_count = faults.metadata_scalar_count(encoding.scalar_count);
-                    let omit_bool_lane_reference = matches!(encoding.lane, ScalarLane::Bool)
-                        && faults.omit_metadata_bool_lane_reference();
-                    work.observe(control, 1)?;
-                    writer.write_row(|row| {
-                        row.write_scalar(owner_kind)?;
-                        row.write_scalar(owner_index)?;
-                        row.write_scalar(key_offset)?;
-                        row.write_scalar(key_count)?;
-                        row.write_scalar(encoding.value_kind)?;
-                        row.write_scalar(encoding.array_kind)?;
-                        row.write_scalar(encoding.logical_count)?;
-                        row.write_scalar(auxiliary_text_offset)?;
-                        row.write_scalar(encoding.auxiliary_text_count)?;
-                        row.write_scalar(byte_offset)?;
-                        row.write_scalar(encoding.byte_count)?;
-                        row.write_scalar(scalar_offset)?;
-                        row.write_scalar(stored_scalar_count)?;
-                        write_utf8_lane(row, true, refs.text, failure)?;
-                        write_bytes_lane(row, encoding.byte_count != 0, refs.bytes, failure)?;
-                        write_sequence_lane(
-                            row,
-                            matches!(encoding.lane, ScalarLane::Bool)
-                                && encoding.scalar_count != 0
-                                && !omit_bool_lane_reference,
-                            refs.bools,
-                            failure,
-                        )?;
-                        write_sequence_lane(
-                            row,
-                            matches!(encoding.lane, ScalarLane::I64) && encoding.scalar_count != 0,
-                            refs.i64s,
-                            failure,
-                        )?;
-                        write_sequence_lane(
-                            row,
-                            matches!(encoding.lane, ScalarLane::U64) && encoding.scalar_count != 0,
-                            refs.u64s,
-                            failure,
-                        )?;
-                        write_sequence_lane(
-                            row,
-                            matches!(encoding.lane, ScalarLane::F64) && encoding.scalar_count != 0,
-                            refs.f64s,
-                            failure,
-                        )?;
-                        write_sequence_lane(
-                            row,
-                            matches!(encoding.lane, ScalarLane::F32) && encoding.scalar_count != 0,
-                            refs.f32s,
-                            failure,
-                        )
-                    })?;
-                }
-                let shape = batch.retention_shape();
-                if cursors.text != shape.metadata_text_bytes()
-                    || cursors.bytes != shape.metadata_payload_bytes()
-                    || cursors.bools != shape.metadata_bool_count()
-                    || cursors.i64s != shape.metadata_i64_count()
-                    || cursors.u64s != shape.metadata_u64_count()
-                    || cursors.f64s != shape.metadata_f64_count()
-                    || cursors.f32s != shape.metadata_f32_count()
-                {
-                    return Err(failure.into());
-                }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+) -> Result<CanonicalBlockRef<ProfileMetadataEntryTableSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_records(plan, ProfileMetadataEntryTableSchema, |control| {
+        let mut cursors = MetadataCursors::default();
+        for index in 0..batch.metadata_entry_count() {
+            let entry = batch
+                .metadata_entry(usize::try_from(index).map_err(|_| failure)?)
+                .ok_or(failure)?;
+            let encoding = metadata_encoding(entry.value(), failure)?;
+            let key_offset = cursors.text;
+            let key_count = u32::try_from(entry.key().as_str().len()).map_err(|_| failure)?;
+            cursors.text = cursors.text.checked_add(key_count).ok_or(failure)?;
+            let auxiliary_text_offset = cursors.text;
+            cursors.text = cursors
+                .text
+                .checked_add(encoding.auxiliary_text_count)
+                .ok_or(failure)?;
+            let byte_offset = cursors.bytes;
+            cursors.bytes = cursors
+                .bytes
+                .checked_add(encoding.byte_count)
+                .ok_or(failure)?;
+            let scalar_offset = scalar_cursor(&cursors, encoding.lane);
+            advance_scalar_cursor(&mut cursors, encoding.lane, encoding.scalar_count, failure)?;
+            let (owner_kind, owner_index) = encode_owner(entry.owner());
+            let stored_scalar_count = faults.metadata_scalar_count(encoding.scalar_count);
+            let omit_bool_lane_reference = matches!(encoding.lane, ScalarLane::Bool)
+                && faults.omit_metadata_bool_lane_reference();
+            control.write_row(|row| {
+                row.write_scalar(owner_kind)?;
+                row.write_scalar(owner_index)?;
+                row.write_scalar(key_offset)?;
+                row.write_scalar(key_count)?;
+                row.write_scalar(encoding.value_kind)?;
+                row.write_scalar(encoding.array_kind)?;
+                row.write_scalar(encoding.logical_count)?;
+                row.write_scalar(auxiliary_text_offset)?;
+                row.write_scalar(encoding.auxiliary_text_count)?;
+                row.write_scalar(byte_offset)?;
+                row.write_scalar(encoding.byte_count)?;
+                row.write_scalar(scalar_offset)?;
+                row.write_scalar(stored_scalar_count)?;
+                write_utf8_lane(row, true, refs.text, failure)?;
+                write_bytes_lane(row, encoding.byte_count != 0, refs.bytes, failure)?;
+                write_sequence_lane(
+                    row,
+                    matches!(encoding.lane, ScalarLane::Bool)
+                        && encoding.scalar_count != 0
+                        && !omit_bool_lane_reference,
+                    refs.bools,
+                    failure,
+                )?;
+                write_sequence_lane(
+                    row,
+                    matches!(encoding.lane, ScalarLane::I64) && encoding.scalar_count != 0,
+                    refs.i64s,
+                    failure,
+                )?;
+                write_sequence_lane(
+                    row,
+                    matches!(encoding.lane, ScalarLane::U64) && encoding.scalar_count != 0,
+                    refs.u64s,
+                    failure,
+                )?;
+                write_sequence_lane(
+                    row,
+                    matches!(encoding.lane, ScalarLane::F64) && encoding.scalar_count != 0,
+                    refs.f64s,
+                    failure,
+                )?;
+                write_sequence_lane(
+                    row,
+                    matches!(encoding.lane, ScalarLane::F32) && encoding.scalar_count != 0,
+                    refs.f32s,
+                    failure,
+                )
+            })?;
+        }
+        let shape = batch.retention_shape();
+        if cursors.text != shape.metadata_text_bytes()
+            || cursors.bytes != shape.metadata_payload_bytes()
+            || cursors.bools != shape.metadata_bool_count()
+            || cursors.i64s != shape.metadata_i64_count()
+            || cursors.u64s != shape.metadata_u64_count()
+            || cursors.f64s != shape.metadata_f64_count()
+            || cursors.f32s != shape.metadata_f32_count()
+        {
+            return Err(failure.into());
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the admitted writer boundary keeps storage, work, fault, and failure authority explicit"
-)]
-fn retain_directory<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_directory<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
     refs: MetadataLeafRefs,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<ProfileMetadataDirectorySchema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_records_controlled(
-            plans.metadata_directory,
-            keys.dimension,
-            ProfileMetadataDirectorySchema,
-            |writer, control| {
-                work.observe(control, 1)?;
-                writer
-                    .write_row(|row| {
-                        row.write_scalar(PROFILE_METADATA_SCHEMA_REVISION)?;
-                        let shape = batch.retention_shape();
-                        if faults.omit_metadata_entries_reference() {
-                            row.write_scalar(batch.metadata_entry_count())?;
-                            row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
-                        } else {
-                            write_optional_record_ref(
-                                row,
-                                batch.metadata_entry_count(),
-                                refs.entries,
-                                failure,
-                            )?;
-                        }
-                        write_optional_utf8_ref(
-                            row,
-                            shape.metadata_text_bytes(),
-                            refs.text,
-                            failure,
-                        )?;
-                        write_optional_bytes_ref(
-                            row,
-                            shape.metadata_payload_bytes(),
-                            refs.bytes,
-                            failure,
-                        )?;
-                        write_optional_sequence_ref(
-                            row,
-                            shape.metadata_bool_count(),
-                            refs.bools,
-                            failure,
-                        )?;
-                        write_optional_sequence_ref(
-                            row,
-                            shape.metadata_i64_count(),
-                            refs.i64s,
-                            failure,
-                        )?;
-                        write_optional_sequence_ref(
-                            row,
-                            shape.metadata_u64_count(),
-                            refs.u64s,
-                            failure,
-                        )?;
-                        write_optional_sequence_ref(
-                            row,
-                            shape.metadata_f64_count(),
-                            refs.f64s,
-                            failure,
-                        )?;
-                        write_optional_sequence_ref(
-                            row,
-                            shape.metadata_f32_count(),
-                            refs.f32s,
-                            failure,
-                        )
-                    })
-                    .map_err(StoreControlledError::from)
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+) -> Result<CanonicalBlockRef<ProfileMetadataDirectorySchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_records(
+        plans.metadata_directory,
+        ProfileMetadataDirectorySchema,
+        |control| {
+            control.write_row(|row| {
+                row.write_scalar(PROFILE_METADATA_SCHEMA_REVISION)?;
+                let shape = batch.retention_shape();
+                if faults.omit_metadata_entries_reference() {
+                    row.write_scalar(batch.metadata_entry_count())?;
+                    row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
+                } else {
+                    write_optional_record_ref(
+                        row,
+                        batch.metadata_entry_count(),
+                        refs.entries,
+                        failure,
+                    )?;
+                }
+                write_optional_utf8_ref(row, shape.metadata_text_bytes(), refs.text, failure)?;
+                write_optional_bytes_ref(row, shape.metadata_payload_bytes(), refs.bytes, failure)?;
+                write_optional_sequence_ref(row, shape.metadata_bool_count(), refs.bools, failure)?;
+                write_optional_sequence_ref(row, shape.metadata_i64_count(), refs.i64s, failure)?;
+                write_optional_sequence_ref(row, shape.metadata_u64_count(), refs.u64s, failure)?;
+                write_optional_sequence_ref(row, shape.metadata_f64_count(), refs.f64s, failure)?;
+                write_optional_sequence_ref(row, shape.metadata_f32_count(), refs.f32s, failure)
+            })
+        },
+    )
+    .map(CanonicalBlockRef::from_store)
 }
 
 fn metadata_encoding(
@@ -780,41 +649,41 @@ fn advance_scalar_cursor(
 }
 
 fn write_utf8_lane<Tag>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     used: bool,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = Utf8Block>,
 {
     match (used, reference) {
         (true, Some(reference)) => row.write_utf8_ref(reference.into_store()),
         (false, _) => row.write_scalar(PROFILE_ABSENT_REFERENCE),
-        (true, None) => Err(failure),
+        (true, None) => Err(failure.into()),
     }
 }
 fn write_bytes_lane<Tag>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     used: bool,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = ByteBlock>,
 {
     match (used, reference) {
         (true, Some(reference)) => row.write_bytes_ref(reference.into_store()),
         (false, _) => row.write_scalar(PROFILE_ABSENT_REFERENCE),
-        (true, None) => Err(failure),
+        (true, None) => Err(failure.into()),
     }
 }
 fn write_sequence_lane<Tag, T>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     used: bool,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = ScalarSequence<T>>,
     T: StoredScalar,
@@ -822,32 +691,32 @@ where
     match (used, reference) {
         (true, Some(reference)) => row.write_sequence_ref(reference.into_store()),
         (false, _) => row.write_scalar(PROFILE_ABSENT_REFERENCE),
-        (true, None) => Err(failure),
+        (true, None) => Err(failure.into()),
     }
 }
 
 fn write_optional_record_ref<Tag>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     count: u32,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = RecordBlock>,
 {
     row.write_scalar(count)?;
     match (count, reference) {
         (0, None) => row.write_scalar(PROFILE_ABSENT_REFERENCE),
-        (0, Some(_)) | (1.., None) => Err(failure),
+        (0, Some(_)) | (1.., None) => Err(failure.into()),
         (1.., Some(reference)) => row.write_record_ref(reference.into_store()),
     }
 }
 fn write_optional_utf8_ref<Tag>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     count: u32,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = Utf8Block>,
 {
@@ -855,11 +724,11 @@ where
     write_utf8_lane(row, count != 0, reference, failure)
 }
 fn write_optional_bytes_ref<Tag>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     count: u32,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = ByteBlock>,
 {
@@ -867,11 +736,11 @@ where
     write_bytes_lane(row, count != 0, reference, failure)
 }
 fn write_optional_sequence_ref<Tag, T>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     count: u32,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = ScalarSequence<T>>,
     T: StoredScalar,

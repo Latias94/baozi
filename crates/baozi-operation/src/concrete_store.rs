@@ -188,8 +188,6 @@ pub use batch::{
     CanonicalStoreRange, CanonicalUtf8Range, SequenceBatchItem, SequenceBatchPlan,
     StoreBatchRuntimeError, Utf8BatchItem, Utf8BatchPlan,
 };
-#[cfg(feature = "_u4-activation")]
-use vocabulary::StoreActivationBrand;
 pub use vocabulary::{
     RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStoreFailureTerminalWorkPlan,
     RetainedStoreFailureTerminalWorkRequirement, RetainedStorePublicationPlan,
@@ -1988,7 +1986,60 @@ where
         self.preserve(result)
     }
 
-    fn preserve(&mut self, result: Result<(), StoreWorkError>) -> Result<(), StoreWorkError> {
+    #[cfg(feature = "_u4-activation")]
+    fn record_product_graph_failure(&mut self, code: u32) {
+        self.raw.record_product_graph_failure(code);
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn reserve(
+        &mut self,
+        phase: StorePhaseKey,
+        bytes: u64,
+    ) -> Result<RetainedStoreReservation<O>, StoreWorkError> {
+        if let Some(cause) = self.sticky.clone() {
+            return Err(cause);
+        }
+        let result = self
+            .raw
+            .reserve(phase, bytes)
+            .map(|raw| RetainedStoreReservation { raw })
+            .map_err(StoreWorkError::ledger);
+        self.preserve(result)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn resize(
+        &mut self,
+        reservation: &mut RetainedStoreReservation<O>,
+        bytes: u64,
+    ) -> Result<(), StoreWorkError> {
+        if let Some(cause) = self.sticky.clone() {
+            return Err(cause);
+        }
+        let result = self
+            .raw
+            .resize(&mut reservation.raw, bytes)
+            .map_err(StoreWorkError::ledger);
+        self.preserve(result)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn validate_live_owner(
+        &mut self,
+        reservation: &RetainedStoreReservation<O>,
+    ) -> Result<(), StoreWorkError> {
+        if let Some(cause) = self.sticky.clone() {
+            return Err(cause);
+        }
+        let result = self
+            .raw
+            .validate_live_owner(&reservation.raw)
+            .map_err(StoreWorkError::ledger);
+        self.preserve(result)
+    }
+
+    fn preserve<T>(&mut self, result: Result<T, StoreWorkError>) -> Result<T, StoreWorkError> {
         if let Err(cause) = &result {
             self.sticky.get_or_insert_with(|| cause.clone());
         }

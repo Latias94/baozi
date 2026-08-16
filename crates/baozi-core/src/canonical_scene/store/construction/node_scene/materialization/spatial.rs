@@ -1,6 +1,7 @@
+use baozi_operation::__canonical_activation::{CanonicalLane, CanonicalRecordBuildRow};
 use baozi_operation::{
-    CanonicalRecordRowWriter, RecordBlock, RecordPlan, StoreBuildError, StoreControlledError,
-    StorePlanError, StoreRuntimeError, Utf8Block, Utf8Plan,
+    OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, RecordPlan, StoreBuildError,
+    StoreControlledError, StorePlanError, StoreRuntimeError, Utf8Block, Utf8Plan,
 };
 
 use crate::canonical_scene::store::production::ValidatedSpatialBatch;
@@ -15,8 +16,10 @@ use crate::canonical_scene::store::schema::spatial::{
 use crate::canonical_scene::store::schema::{CanonicalBlockRef, CanonicalSchema};
 use crate::entity::{CameraProjectionKind, LightKindCategory};
 
-use super::super::super::{SceneStoreAssembly, SceneStoreKeys};
-use super::super::NodeSceneWorkMeter;
+use super::super::{
+    checked_validation_work_sum, optional_record_validation_work, optional_utf8_validation_work,
+    record_validation_work,
+};
 
 pub(super) struct SpatialMaterializationPlans {
     tangent_basis_schema_name: Option<Utf8Plan>,
@@ -88,13 +91,29 @@ impl SpatialMaterializationPlans {
     pub(super) const fn light_count(&self) -> u32 {
         self.light_count
     }
+
+    pub(super) fn validation_work_units(&self) -> Result<u64, StorePlanError> {
+        checked_validation_work_sum([
+            optional_utf8_validation_work(self.tangent_basis_schema_name)?,
+            optional_utf8_validation_work(self.tangent_encoding_schema_name)?,
+            optional_record_validation_work(self.cameras)?,
+            optional_record_validation_work(self.lights)?,
+            record_validation_work(self.directory)?,
+        ])
+    }
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct RetainedSpatialRefs {
-    directory: CanonicalBlockRef<SpatialDirectorySchema>,
-    cameras: Option<CanonicalBlockRef<SpatialCameraTableSchema>>,
-    lights: Option<CanonicalBlockRef<SpatialLightTableSchema>>,
+pub(in crate::canonical_scene::store) struct RetainedSpatialRefs {
+    pub(in crate::canonical_scene::store) directory: CanonicalBlockRef<SpatialDirectorySchema>,
+    pub(in crate::canonical_scene::store) cameras:
+        Option<CanonicalBlockRef<SpatialCameraTableSchema>>,
+    pub(in crate::canonical_scene::store) lights:
+        Option<CanonicalBlockRef<SpatialLightTableSchema>>,
+    pub(in crate::canonical_scene::store) tangent_basis_schema_name:
+        Option<CanonicalBlockRef<SpatialTangentBasisSchemaNameSchema>>,
+    pub(in crate::canonical_scene::store) tangent_encoding_schema_name:
+        Option<CanonicalBlockRef<SpatialTangentEncodingSchemaNameSchema>>,
 }
 
 impl RetainedSpatialRefs {
@@ -111,17 +130,20 @@ impl RetainedSpatialRefs {
     }
 }
 
-pub(super) fn retain_spatial<R>(
-    assembly: &mut SceneStoreAssembly,
+pub(super) fn retain_spatial<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plans: &SpatialMaterializationPlans,
     batch: &ValidatedSpatialBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
-) -> Result<RetainedSpatialRefs, StoreRuntimeError> {
+) -> Result<RetainedSpatialRefs, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let tangent_basis_schema_name = match plans.tangent_basis_schema_name {
-        Some(plan) => Some(retain_schema_name::<SpatialTangentBasisSchemaNameSchema>(
-            assembly,
+        Some(plan) => Some(retain_schema_name(
+            lane,
             plan,
             batch
                 .scene_space()
@@ -131,244 +153,215 @@ pub(super) fn retain_spatial<R>(
                 .name()
                 .as_str(),
             SpatialTangentBasisSchemaNameSchema,
-            keys,
-            work,
-            failure,
         )?),
         None => None,
     };
     let tangent_encoding_schema_name = match plans.tangent_encoding_schema_name {
-        Some(plan) => Some(
-            retain_schema_name::<SpatialTangentEncodingSchemaNameSchema>(
-                assembly,
-                plan,
-                batch
-                    .scene_space()
-                    .tangent_handedness_encoding
-                    .schema_id()
-                    .ok_or(StoreRuntimeError::Build(failure))?
-                    .name()
-                    .as_str(),
-                SpatialTangentEncodingSchemaNameSchema,
-                keys,
-                work,
-                failure,
-            )?,
-        ),
+        Some(plan) => Some(retain_schema_name(
+            lane,
+            plan,
+            batch
+                .scene_space()
+                .tangent_handedness_encoding
+                .schema_id()
+                .ok_or(StoreRuntimeError::Build(failure))?
+                .name()
+                .as_str(),
+            SpatialTangentEncodingSchemaNameSchema,
+        )?),
         None => None,
     };
     let cameras = match plans.cameras {
-        Some(plan) => Some(retain_cameras(assembly, plan, batch, keys, work, failure)?),
+        Some(plan) => Some(retain_cameras(lane, plan, batch, failure)?),
         None => None,
     };
     let lights = match plans.lights {
-        Some(plan) => Some(retain_lights(assembly, plan, batch, keys, work, failure)?),
+        Some(plan) => Some(retain_lights(lane, plan, batch, failure)?),
         None => None,
     };
     let directory = retain_spatial_directory(
-        assembly,
+        lane,
         plans,
         batch,
         tangent_basis_schema_name,
         tangent_encoding_schema_name,
         cameras,
         lights,
-        keys,
-        work,
         failure,
     )?;
     Ok(RetainedSpatialRefs {
         directory,
         cameras,
         lights,
+        tangent_basis_schema_name,
+        tangent_encoding_schema_name,
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn retain_schema_name<Tag>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_schema_name<'lane, O, PP, U, L, Tag>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: Utf8Plan,
     value: &str,
     marker: Tag,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
-    failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<Tag>, StoreRuntimeError>
 where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
     Tag: CanonicalSchema<StoreKind = Utf8Block>,
 {
-    assembly
-        .try_retain_canonical_utf8_controlled(plan, keys.dimension, marker, |writer, control| {
-            work.observe(control, u64::try_from(value.len()).map_err(|_| failure)?)?;
-            writer.write_str(value).map_err(StoreControlledError::from)
-        })
+    lane.try_retain_utf8(plan, marker, |control| control.write_str(value))
         .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_cameras<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_cameras<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: RecordPlan,
     batch: &ValidatedSpatialBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<SpatialCameraTableSchema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_records_controlled(
-            plan,
-            keys.dimension,
-            SpatialCameraTableSchema,
-            |writer, control| {
-                for (camera, authored) in batch.cameras().enumerate() {
-                    work.observe(control, 1)?;
-                    let projection = authored.projection();
-                    writer.write_row(|row| {
-                        row.write_scalar(u32::try_from(camera).map_err(|_| failure)?)?;
-                        row.write_scalar(encode_camera_projection(projection))?;
-                        match projection.kind() {
-                            CameraProjectionKind::Perspective => {
-                                let (primary, secondary, near, far) =
-                                    projection.perspective_parameters().ok_or(failure)?;
-                                row.write_scalar(primary)?;
-                                write_optional_f32(row, secondary)?;
-                                row.write_scalar(near)?;
-                                write_optional_f32(row, far)
-                            }
-                            CameraProjectionKind::Orthographic => {
-                                let (primary, secondary, near, far) =
-                                    projection.orthographic_parameters().ok_or(failure)?;
-                                row.write_scalar(primary)?;
-                                write_optional_f32(row, Some(secondary))?;
-                                row.write_scalar(near)?;
-                                write_optional_f32(row, Some(far))
-                            }
-                        }
-                    })?;
+) -> Result<CanonicalBlockRef<SpatialCameraTableSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_records(plan, SpatialCameraTableSchema, |control| {
+        for (camera, authored) in batch.cameras().enumerate() {
+            let projection = authored.projection();
+            control.write_row(|row| {
+                row.write_scalar(u32::try_from(camera).map_err(|_| failure)?)?;
+                row.write_scalar(encode_camera_projection(projection))?;
+                match projection.kind() {
+                    CameraProjectionKind::Perspective => {
+                        let (primary, secondary, near, far) =
+                            projection.perspective_parameters().ok_or(failure)?;
+                        row.write_scalar(primary)?;
+                        write_optional_f32(row, secondary)?;
+                        row.write_scalar(near)?;
+                        write_optional_f32(row, far)
+                    }
+                    CameraProjectionKind::Orthographic => {
+                        let (primary, secondary, near, far) =
+                            projection.orthographic_parameters().ok_or(failure)?;
+                        row.write_scalar(primary)?;
+                        write_optional_f32(row, Some(secondary))?;
+                        row.write_scalar(near)?;
+                        write_optional_f32(row, Some(far))
+                    }
                 }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+            })?;
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
-fn retain_lights<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_lights<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: RecordPlan,
     batch: &ValidatedSpatialBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<SpatialLightTableSchema>, StoreRuntimeError> {
-    assembly
-        .try_retain_canonical_records_controlled(
-            plan,
-            keys.dimension,
-            SpatialLightTableSchema,
-            |writer, control| {
-                for (light, authored) in batch.lights().enumerate() {
-                    work.observe(control, 1)?;
-                    let kind = authored.kind();
-                    let (range, inner, outer) = match kind.category() {
-                        LightKindCategory::Directional => (None, None, None),
-                        LightKindCategory::Point => (kind.range(), None, None),
-                        LightKindCategory::Spot => (
-                            kind.range(),
-                            kind.inner_cone_radians(),
-                            kind.outer_cone_radians(),
-                        ),
-                    };
-                    let emission = authored.emission();
-                    let tint = emission.tint();
-                    writer.write_row(|row| {
-                        row.write_scalar(u32::try_from(light).map_err(|_| failure)?)?;
-                        row.write_scalar(encode_light_kind(kind))?;
-                        write_optional_f32(row, range)?;
-                        write_optional_f32(row, inner)?;
-                        write_optional_f32(row, outer)?;
-                        row.write_scalar(tint.x)?;
-                        row.write_scalar(tint.y)?;
-                        row.write_scalar(tint.z)?;
-                        row.write_scalar(emission.intensity())
-                    })?;
-                }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+) -> Result<CanonicalBlockRef<SpatialLightTableSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_records(plan, SpatialLightTableSchema, |control| {
+        for (light, authored) in batch.lights().enumerate() {
+            let kind = authored.kind();
+            let (range, inner, outer) = match kind.category() {
+                LightKindCategory::Directional => (None, None, None),
+                LightKindCategory::Point => (kind.range(), None, None),
+                LightKindCategory::Spot => (
+                    kind.range(),
+                    kind.inner_cone_radians(),
+                    kind.outer_cone_radians(),
+                ),
+            };
+            let emission = authored.emission();
+            let tint = emission.tint();
+            control.write_row(|row| {
+                row.write_scalar(u32::try_from(light).map_err(|_| failure)?)?;
+                row.write_scalar(encode_light_kind(kind))?;
+                write_optional_f32(row, range)?;
+                write_optional_f32(row, inner)?;
+                write_optional_f32(row, outer)?;
+                row.write_scalar(tint.x)?;
+                row.write_scalar(tint.y)?;
+                row.write_scalar(tint.z)?;
+                row.write_scalar(emission.intensity())
+            })?;
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn retain_spatial_directory<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_spatial_directory<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plans: &SpatialMaterializationPlans,
     batch: &ValidatedSpatialBatch<'_, R>,
     tangent_basis_schema_name: Option<CanonicalBlockRef<SpatialTangentBasisSchemaNameSchema>>,
     tangent_encoding_schema_name: Option<CanonicalBlockRef<SpatialTangentEncodingSchemaNameSchema>>,
     cameras: Option<CanonicalBlockRef<SpatialCameraTableSchema>>,
     lights: Option<CanonicalBlockRef<SpatialLightTableSchema>>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<SpatialDirectorySchema>, StoreRuntimeError> {
+) -> Result<CanonicalBlockRef<SpatialDirectorySchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let space = batch.scene_space();
-    assembly
-        .try_retain_canonical_records_controlled(
-            plans.directory,
-            keys.dimension,
-            SpatialDirectorySchema,
-            |writer, control| {
-                work.observe(control, 1)?;
-                writer
-                    .write_row(|row| {
-                        row.write_scalar(SPATIAL_SCHEMA_REVISION)?;
-                        row.write_scalar(encode_handedness(space.handedness))?;
-                        row.write_scalar(encode_axis(space.up_axis))?;
-                        row.write_scalar(encode_axis(space.front_axis))?;
-                        write_optional_f64(row, space.unit_scale_to_meters)?;
-                        row.write_scalar(encode_winding(space.front_face_winding))?;
-                        row.write_scalar(encode_uv_origin(space.uv_origin))?;
-                        row.write_scalar(encode_transform_convention(space.transform_convention))?;
-                        row.write_scalar(encode_tangent_basis(&space.tangent_basis))?;
-                        write_optional_utf8_ref(
-                            row,
-                            plans.tangent_basis_schema_name_bytes,
-                            tangent_basis_schema_name,
-                            failure,
-                        )?;
-                        row.write_scalar(
-                            space
-                                .tangent_basis
-                                .schema_id()
-                                .map_or(0, |schema| schema.version().get()),
-                        )?;
-                        row.write_scalar(encode_tangent_encoding(
-                            &space.tangent_handedness_encoding,
-                        ))?;
-                        write_optional_utf8_ref(
-                            row,
-                            plans.tangent_encoding_schema_name_bytes,
-                            tangent_encoding_schema_name,
-                            failure,
-                        )?;
-                        row.write_scalar(
-                            space
-                                .tangent_handedness_encoding
-                                .schema_id()
-                                .map_or(0, |schema| schema.version().get()),
-                        )?;
-                        write_optional_record_ref(row, plans.camera_count, cameras, failure)?;
-                        write_optional_record_ref(row, plans.light_count, lights, failure)
-                    })
-                    .map_err(StoreControlledError::from)
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+    lane.try_retain_records(plans.directory, SpatialDirectorySchema, |control| {
+        control.write_row(|row| {
+            row.write_scalar(SPATIAL_SCHEMA_REVISION)?;
+            row.write_scalar(encode_handedness(space.handedness))?;
+            row.write_scalar(encode_axis(space.up_axis))?;
+            row.write_scalar(encode_axis(space.front_axis))?;
+            write_optional_f64(row, space.unit_scale_to_meters)?;
+            row.write_scalar(encode_winding(space.front_face_winding))?;
+            row.write_scalar(encode_uv_origin(space.uv_origin))?;
+            row.write_scalar(encode_transform_convention(space.transform_convention))?;
+            row.write_scalar(encode_tangent_basis(&space.tangent_basis))?;
+            write_optional_utf8_ref(
+                row,
+                plans.tangent_basis_schema_name_bytes,
+                tangent_basis_schema_name,
+                failure,
+            )?;
+            row.write_scalar(
+                space
+                    .tangent_basis
+                    .schema_id()
+                    .map_or(0, |schema| schema.version().get()),
+            )?;
+            row.write_scalar(encode_tangent_encoding(&space.tangent_handedness_encoding))?;
+            write_optional_utf8_ref(
+                row,
+                plans.tangent_encoding_schema_name_bytes,
+                tangent_encoding_schema_name,
+                failure,
+            )?;
+            row.write_scalar(
+                space
+                    .tangent_handedness_encoding
+                    .schema_id()
+                    .map_or(0, |schema| schema.version().get()),
+            )?;
+            write_optional_record_ref(row, plans.camera_count, cameras, failure)?;
+            write_optional_record_ref(row, plans.light_count, lights, failure)
+        })
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
 fn write_optional_f32(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     value: Option<f32>,
-) -> Result<(), StoreBuildError> {
+) -> Result<(), StoreControlledError> {
     match value {
         Some(value) => {
             row.write_scalar(super::super::super::super::schema::PRESENCE_PRESENT)?;
@@ -382,9 +375,9 @@ fn write_optional_f32(
 }
 
 fn write_optional_f64(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     value: Option<f64>,
-) -> Result<(), StoreBuildError> {
+) -> Result<(), StoreControlledError> {
     match value {
         Some(value) => {
             row.write_scalar(super::super::super::super::schema::PRESENCE_PRESENT)?;
@@ -398,18 +391,18 @@ fn write_optional_f64(
 }
 
 fn write_optional_record_ref<Tag>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     count: u32,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = RecordBlock>,
 {
     row.write_scalar(count)?;
     if count == 0 {
         if reference.is_some() {
-            return Err(failure);
+            return Err(failure.into());
         }
         row.write_scalar(super::super::super::super::schema::PRESENCE_ABSENT)?;
         row.write_scalar(0_u8)
@@ -420,18 +413,18 @@ where
 }
 
 fn write_optional_utf8_ref<Tag>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     count: u32,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = Utf8Block>,
 {
     row.write_scalar(count)?;
     if count == 0 {
         if reference.is_some() {
-            return Err(failure);
+            return Err(failure.into());
         }
         row.write_scalar(0_u8)
     } else {

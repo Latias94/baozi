@@ -2,7 +2,9 @@ use std::sync::atomic::AtomicU64;
 
 use sha2::{Digest, Sha256};
 
-use baozi_operation::{CancellationToken, PhysicalStorageAccount, StorePreparationFailureClass};
+use baozi_operation::{
+    CancellationToken, PhysicalStorageAccount, StorePreparationFailureClass, StoreRuntimeError,
+};
 
 use crate::SceneValidationLimits;
 use crate::appearance::{
@@ -24,7 +26,8 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
     NodeSceneSnapshot, NodeSceneSnapshotLimits,
 };
 use crate::canonical_scene::store::construction::node_scene::{
-    NodeSceneConstructionTerminal, NodeSceneSuccessParts, ValidatedNodeScene,
+    NodeSceneConstructionTerminal, NodeSceneDraftBuild, NodeSceneSuccessParts,
+    PreparedNodeSceneConstruction, ValidatedNodeScene,
 };
 use crate::canonical_scene::store::construction::{STORE_DIMENSION, SceneConstructionOperation};
 use crate::canonical_scene::store::production::{
@@ -1724,9 +1727,9 @@ fn build_gltf_scene_input_with_generation_source(
         SceneValidationLimits::default(),
     )
     .expect("selected normalized glTF shape admission")
-    .try_validate()
-    .unwrap_or_else(|_| panic!("selected normalized glTF shape must pass central validation"))
-    .prepare_with_generation_source(reserve_generation)
+    .finish_draft()
+    .expect("selected normalized glTF shape activation")
+    .prepare_with_generation_source_for_test(reserve_generation)
     .expect("selected normalized glTF shape publication");
     match prepared.handoff() {
         NodeSceneConstructionTerminal::Success(parts) => parts,
@@ -3339,27 +3342,35 @@ fn gltf_mixed_image_media_preserves_cumulative_offsets() {
 fn reject_gltf_mutation(
     account: &PhysicalStorageAccount,
     mutation: GltfCapabilityMutation,
-    inspect: impl FnOnce(&NodeSceneConstructionRejection),
+    inspect: impl FnOnce(&NodeSceneConstructionRejection<StoreRuntimeError>),
 ) {
-    let rejected = with_gltf_scene_input(GltfCapabilityScope::All, mutation, |input| {
-        match SceneConstructionOperation::with_account_for_scene_input(
-            account,
-            test_limits(),
-            input,
-            SceneValidationLimits::default(),
-        )
-        .expect("invalid glTF shape operation admission")
-        .try_validate()
-        {
-            Ok(_) => panic!("invalid glTF shape must not validate"),
-            Err(rejected) => rejected,
-        }
-    });
-    let (prepared, rejection) = rejected
-        .prepare_rich_failure()
-        .expect("invalid glTF shape rich failure");
+    let (prepared, rejection) =
+        with_gltf_scene_input(GltfCapabilityScope::All, mutation, |input| {
+            match SceneConstructionOperation::with_account_for_scene_input(
+                account,
+                test_limits(),
+                input,
+                SceneValidationLimits::default(),
+            )
+            .expect("invalid glTF shape operation admission")
+            .finish_draft()
+            .expect("invalid glTF shape rejection publication")
+            {
+                NodeSceneDraftBuild::Draft { .. } => {
+                    panic!("invalid glTF shape must not produce a canonical draft")
+                }
+                NodeSceneDraftBuild::Failure {
+                    authoring_rejection: Some(rejection),
+                    prepared,
+                } => (prepared, rejection),
+                NodeSceneDraftBuild::Failure {
+                    authoring_rejection: None,
+                    ..
+                } => panic!("invalid glTF shape must preserve its authoring rejection"),
+            }
+        });
     inspect(&rejection);
-    let terminal = prepared.handoff();
+    let terminal = PreparedNodeSceneConstruction::from(prepared).handoff();
     assert!(matches!(
         &terminal,
         NodeSceneConstructionTerminal::RichFailure(_)
@@ -3453,19 +3464,19 @@ fn gltf_construction_one_short_work_limit_publishes_only_rich_failure() {
         GltfCapabilityScope::All,
         GltfCapabilityMutation::Baseline,
         |input| {
-            let validated = SceneConstructionOperation::with_account_for_scene_input(
+            let build = SceneConstructionOperation::with_account_for_scene_input(
                 &account,
                 test_limits_with_work(work_limit),
                 input,
                 SceneValidationLimits::default(),
             )
             .expect("work-bounded glTF Scene input admission")
-            .try_validate()
-            .unwrap_or_else(|_| panic!("one-short total work must still admit glTF validation"));
+            .finish_draft()
+            .expect("one-short glTF construction must publish a terminal outcome");
 
             let failure = rich_failure(
-                validated
-                    .prepare()
+                build
+                    .prepare_for_test()
                     .expect("one-short glTF work limit must prepare rich failure"),
             );
             let work = failure
@@ -3473,7 +3484,10 @@ fn gltf_construction_one_short_work_limit_publishes_only_rich_failure() {
                 .dimension_by_semantic(STORE_DIMENSION)
                 .expect("failed glTF work evidence");
             assert_eq!(work.attempted(), successful_work);
-            assert_eq!(work.consumed(), work_limit);
+            assert!(
+                work.consumed() < work_limit,
+                "the unexecuted canonical-validation suffix must remain unconsumed"
+            );
             assert_eq!(
                 terminal_failure_class(failure.ledger_evidence()),
                 StorePreparationFailureClass::Ledger,
@@ -3493,7 +3507,7 @@ fn gltf_cancellation_after_validation_publishes_only_rich_failure() {
         GltfCapabilityScope::All,
         GltfCapabilityMutation::Baseline,
         |input| {
-            let validated =
+            let build =
                 SceneConstructionOperation::with_account_and_cancellation_for_scene_input_for_test(
                     &account,
                     test_limits(),
@@ -3502,13 +3516,19 @@ fn gltf_cancellation_after_validation_publishes_only_rich_failure() {
                     cancellation.clone(),
                 )
                 .expect("cancellable glTF Scene input admission")
-                .try_validate()
-                .unwrap_or_else(|_| panic!("glTF input must validate before cancellation"));
+                .finish_draft()
+                .expect("glTF input must activate before cancellation");
+            let (draft, owner) = match build {
+                NodeSceneDraftBuild::Draft { draft, owner } => (draft, owner),
+                NodeSceneDraftBuild::Failure { .. } => {
+                    panic!("glTF input must reach central validation before cancellation")
+                }
+            };
 
             cancellation.cancel();
             let failure = rich_failure(
-                validated
-                    .prepare()
+                owner
+                    .prepare_with_generation_source(draft, SceneGenerationId::reserve)
                     .expect("cancelled glTF construction must prepare rich failure"),
             );
             assert_eq!(

@@ -1147,7 +1147,7 @@ impl<'control, C: CanonicalAuthoringControl> DeformationValidationContext<'contr
     fn run_unit<R>(
         &mut self,
         kind: SceneValidationWork,
-        action: impl FnOnce() -> R,
+        action: impl FnMut() -> R,
     ) -> DeformationValidationResult<R, C> {
         let final_work = self.work.checked_add(1).ok_or(
             DeformationAuthoringSemanticError::AccountingOverflow {

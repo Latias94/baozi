@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
 use std::num::NonZeroU64;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use super::super::validation::{
     StoreCanonicalMemberCompletion, StoreCanonicalMemberVisit,
@@ -8,13 +10,14 @@ use super::super::validation::{
 use super::super::{
     ByteBlock, CanonicalRecordView, CanonicalStoreRef, OutcomeEvidenceRecordView,
     OutcomeEvidenceStoreRef, RecordBlock, RetainedStoreWorkControl, ScalarSequence,
-    StoreValidationSession, StoreWorkError, StoredScalar, Utf8Block,
+    StoreRuntimeError, StoreValidationSession, StoreWorkError, StoredScalar, Utf8Block,
 };
 use super::work_batch::CompletionPrefixBatch;
 use super::{
-    CANONICAL_VALIDATION_CONTRACT_FAILURE_CODE, CanonicalWorkPermit, try_begin_canonical_work,
+    CANONICAL_VALIDATION_CONTRACT_FAILURE_CODE, CanonicalReservation, CanonicalValidationDecision,
+    CanonicalWorkPermit, drop_scoped_value, drop_validation_decision, try_begin_canonical_work,
 };
-use crate::{OperationOwner, ProgressPhase, ProgressUnit};
+use crate::{OperationOwner, ProgressPhase, ProgressUnit, StorePhaseKey};
 
 /// Session-scoped canonical member that can only be inspected through metered validation.
 pub struct CanonicalValidationMember<'session, Kind, Tag> {
@@ -86,6 +89,81 @@ pub(super) enum CanonicalValidationFirstFault {
     Runtime(StoreWorkError),
 }
 
+pub(super) enum CanonicalValidationAttempt<Proof, E> {
+    Decision(CanonicalValidationDecision<Proof, E>),
+    Runtime {
+        cause: StoreRuntimeError,
+        stable_code: u32,
+    },
+}
+
+/// Failure while preparing bounded central-validation scratch before validation work starts.
+pub enum CanonicalValidationPreparationError {
+    Work(StoreWorkError),
+    Runtime {
+        cause: StoreRuntimeError,
+        stable_code: u32,
+    },
+}
+
+impl CanonicalValidationPreparationError {
+    /// Creates one trusted local-runtime rejection with its bounded domain code.
+    pub const fn runtime(cause: StoreRuntimeError, stable_code: u32) -> Self {
+        Self::Runtime { cause, stable_code }
+    }
+}
+
+impl From<StoreWorkError> for CanonicalValidationPreparationError {
+    fn from(cause: StoreWorkError) -> Self {
+        Self::Work(cause)
+    }
+}
+
+/// Role-bound scratch checkpoint available before central validation work admission.
+pub struct CanonicalValidationCheckpoint<'borrow, 'scope, 'operation, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    control: &'borrow mut RetainedStoreWorkControl<'operation, O, PP, U>,
+    phase: StorePhaseKey,
+    first_fault: &'borrow mut Option<CanonicalValidationFirstFault>,
+    scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
+}
+
+/// One-shot central-validation planning stage that owns scratch preparation and permit admission.
+pub struct CanonicalValidationPlanning<
+    'session,
+    'storage,
+    'scope,
+    'operation,
+    O,
+    PP,
+    U,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+    Proof,
+    E,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    raw: Option<StoreValidationSession<'session, 'storage>>,
+    control: Option<&'scope mut RetainedStoreWorkControl<'operation, O, PP, U>>,
+    phase: StorePhaseKey,
+    validation_work: NonZeroU64,
+    canonical: CanonicalValidationMember<'session, CanonicalKind, CanonicalTag>,
+    evidence: OutcomeEvidenceValidationMember<'session, EvidenceKind, EvidenceTag>,
+    first_fault: &'scope mut Option<CanonicalValidationFirstFault>,
+    attempt: &'scope mut Option<CanonicalValidationAttempt<Proof, E>>,
+    exact: &'scope mut Option<bool>,
+    resolved: bool,
+}
+
 /// Metered row inspector for one canonical fixed-width record.
 pub struct CanonicalValidationRecordRow<'row, 'session, 'storage, 'control, 'operation, O, PP, U>
 where
@@ -149,6 +227,303 @@ impl<'session, Kind, Tag> OutcomeEvidenceValidationMember<'session, Kind, Tag> {
     /// Tests whether this validation-scoped member identifies the supplied typed store slot.
     pub fn identifies(&self, slot: OutcomeEvidenceStoreRef<Kind, Tag>) -> bool {
         self.raw == slot
+    }
+}
+
+fn preserve_planning_fault<T>(
+    first_fault: &mut Option<CanonicalValidationFirstFault>,
+    result: Result<T, StoreWorkError>,
+) -> Result<T, StoreWorkError> {
+    if let Err(cause) = &result {
+        first_fault.get_or_insert_with(|| CanonicalValidationFirstFault::Runtime(cause.clone()));
+    }
+    result
+}
+
+impl<'borrow, 'scope, 'operation, O, PP, U>
+    CanonicalValidationCheckpoint<'borrow, 'scope, 'operation, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Polls control before a validation-scratch allocation or ownership action.
+    pub fn poll(&mut self) -> Result<(), StoreWorkError> {
+        preserve_planning_fault(self.first_fault, self.control.poll())
+    }
+
+    /// Reserves validation scratch in the operation-bound validation role.
+    pub fn reserve(
+        &mut self,
+        bytes: u64,
+    ) -> Result<CanonicalReservation<'scope, O>, StoreWorkError> {
+        self.poll()?;
+        let result = self
+            .control
+            .reserve(self.phase, bytes)
+            .map(|raw| CanonicalReservation {
+                raw,
+                scope: PhantomData,
+            });
+        preserve_planning_fault(self.first_fault, result)
+    }
+
+    /// Resizes one validation-scratch reservation without exposing ledger keys.
+    pub fn resize(
+        &mut self,
+        reservation: &mut CanonicalReservation<'scope, O>,
+        bytes: u64,
+    ) -> Result<(), StoreWorkError> {
+        self.poll()?;
+        preserve_planning_fault(
+            self.first_fault,
+            self.control.resize(&mut reservation.raw, bytes),
+        )
+    }
+
+    /// Proves that one validation-scratch reservation belongs to this operation.
+    pub fn validate_live_owner(
+        &mut self,
+        reservation: &CanonicalReservation<'scope, O>,
+    ) -> Result<(), StoreWorkError> {
+        self.poll()?;
+        preserve_planning_fault(
+            self.first_fault,
+            self.control.validate_live_owner(&reservation.raw),
+        )
+    }
+}
+
+impl<
+    'session,
+    'storage,
+    'scope,
+    'operation,
+    O,
+    PP,
+    U,
+    CanonicalKind,
+    CanonicalTag,
+    EvidenceKind,
+    EvidenceTag,
+    Proof,
+    E,
+>
+    CanonicalValidationPlanning<
+        'session,
+        'storage,
+        'scope,
+        'operation,
+        O,
+        PP,
+        U,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+        Proof,
+        E,
+    >
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        raw: StoreValidationSession<'session, 'storage>,
+        control: &'scope mut RetainedStoreWorkControl<'operation, O, PP, U>,
+        phase: StorePhaseKey,
+        validation_work: NonZeroU64,
+        canonical: CanonicalValidationMember<'session, CanonicalKind, CanonicalTag>,
+        evidence: OutcomeEvidenceValidationMember<'session, EvidenceKind, EvidenceTag>,
+        first_fault: &'scope mut Option<CanonicalValidationFirstFault>,
+        attempt: &'scope mut Option<CanonicalValidationAttempt<Proof, E>>,
+        exact: &'scope mut Option<bool>,
+    ) -> Self {
+        Self {
+            raw: Some(raw),
+            control: Some(control),
+            phase,
+            validation_work,
+            canonical,
+            evidence,
+            first_fault,
+            attempt,
+            exact,
+            resolved: false,
+        }
+    }
+
+    /// Prepares bounded scratch, then starts and fully resolves one exact validation session.
+    ///
+    /// Scratch preparation runs before validation work admission. Scratch is destroyed before the
+    /// validation permit resolves and before the typed attempt becomes visible to the outer state
+    /// machine.
+    pub fn validate_with<S>(
+        mut self,
+        build_scratch: impl FnOnce(
+            &mut CanonicalValidationCheckpoint<'_, 'scope, 'operation, O, PP, U>,
+        ) -> Result<S, CanonicalValidationPreparationError>,
+        validate: impl for<'permit> FnOnce(
+            &mut CanonicalValidationSession<'session, 'storage, 'permit, 'operation, O, PP, U>,
+            CanonicalValidationMember<'session, CanonicalKind, CanonicalTag>,
+            OutcomeEvidenceValidationMember<'session, EvidenceKind, EvidenceTag>,
+            &mut S,
+        ) -> Result<
+            CanonicalValidationDecision<Proof, E>,
+            StoreWorkError,
+        >,
+    ) -> Result<(), StoreWorkError> {
+        let scratch = {
+            let control = self
+                .control
+                .as_deref_mut()
+                .expect("unresolved validation planning retains its control");
+            let mut checkpoint = CanonicalValidationCheckpoint {
+                control,
+                phase: self.phase,
+                first_fault: self.first_fault,
+                scope: PhantomData,
+            };
+            build_scratch(&mut checkpoint)
+        };
+        let scratch = match scratch {
+            Ok(scratch) => scratch,
+            Err(CanonicalValidationPreparationError::Work(cause)) => {
+                self.resolved = true;
+                return Err(cause);
+            }
+            Err(CanonicalValidationPreparationError::Runtime { cause, stable_code }) => {
+                if matches!(
+                    cause,
+                    StoreRuntimeError::Control(_) | StoreRuntimeError::Ledger(_)
+                ) {
+                    self.first_fault
+                        .get_or_insert(CanonicalValidationFirstFault::Contract);
+                    if let Some(control) = self.control.as_deref_mut() {
+                        control.record_product_graph_failure(
+                            CANONICAL_VALIDATION_CONTRACT_FAILURE_CODE,
+                        );
+                    }
+                    if let Some(raw) = self.raw.as_mut() {
+                        raw.invalidate();
+                    }
+                    *self.exact = Some(false);
+                    self.resolved = true;
+                    return Ok(());
+                }
+                *self.attempt = Some(CanonicalValidationAttempt::Runtime { cause, stable_code });
+                *self.exact = Some(false);
+                self.resolved = true;
+                return Ok(());
+            }
+        };
+
+        let raw = self
+            .raw
+            .take()
+            .expect("validation planning starts its session at most once");
+        let control = self
+            .control
+            .take()
+            .expect("validation planning starts its work permit at most once");
+        let mut session = match CanonicalValidationSession::try_start(
+            raw,
+            control,
+            self.validation_work,
+            self.first_fault,
+        ) {
+            Ok(session) => session,
+            Err(cause) => {
+                drop(scratch);
+                self.resolved = true;
+                return Err(cause);
+            }
+        };
+
+        let mut scratch = ManuallyDrop::new(scratch);
+        let result = match catch_unwind(AssertUnwindSafe(|| {
+            validate(&mut session, self.canonical, self.evidence, &mut *scratch)
+        })) {
+            Ok(result) => result,
+            Err(payload) => {
+                let _ = drop_scoped_value(ManuallyDrop::into_inner(scratch));
+                self.resolved = true;
+                resume_unwind(payload)
+            }
+        };
+        let decision = match result {
+            Ok(decision) => ManuallyDrop::new(decision),
+            Err(cause) => {
+                if drop_scoped_value(ManuallyDrop::into_inner(scratch)).is_err() {
+                    self.resolved = true;
+                    panic!("canonical validation scratch destructor panicked");
+                }
+                let _ = session.finish(false);
+                self.resolved = true;
+                return Err(cause);
+            }
+        };
+        if drop_scoped_value(ManuallyDrop::into_inner(scratch)).is_err() {
+            let _ = drop_validation_decision(Some(ManuallyDrop::into_inner(decision)));
+            self.resolved = true;
+            panic!("canonical validation scratch destructor panicked");
+        }
+        let accepted = matches!(&*decision, CanonicalValidationDecision::Accept(_));
+        let exact = match session.finish(accepted) {
+            Ok(exact) => exact,
+            Err(cause) => {
+                drop(ManuallyDrop::into_inner(decision));
+                self.resolved = true;
+                return Err(cause);
+            }
+        };
+        *self.attempt = Some(CanonicalValidationAttempt::Decision(
+            ManuallyDrop::into_inner(decision),
+        ));
+        *self.exact = Some(exact);
+        self.resolved = true;
+        Ok(())
+    }
+}
+
+impl<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag, Proof, E> Drop
+    for CanonicalValidationPlanning<
+        '_,
+        '_,
+        '_,
+        '_,
+        O,
+        PP,
+        U,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+        Proof,
+        E,
+    >
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        if self.resolved {
+            return;
+        }
+        if std::thread::panicking() {
+            return;
+        }
+        self.first_fault
+            .get_or_insert(CanonicalValidationFirstFault::Contract);
+        if let Some(control) = self.control.as_deref_mut() {
+            control.record_product_graph_failure(CANONICAL_VALIDATION_CONTRACT_FAILURE_CODE);
+        }
+        if let Some(raw) = self.raw.as_mut() {
+            raw.invalidate();
+        }
     }
 }
 
@@ -268,6 +643,18 @@ where
             return Ok(None);
         }
         Ok(Some(value))
+    }
+
+    /// Runs one non-read validation action under the exact central-validation work envelope.
+    ///
+    /// The action is not executed when cancellation, budget admission, or the sealed work envelope
+    /// rejects it. A normally returned action advances the same bounded completed prefix used by
+    /// typed canonical-member visits.
+    pub fn run_validation_unit<R>(
+        &mut self,
+        action: impl FnOnce() -> R,
+    ) -> Result<Option<R>, StoreWorkError> {
+        self.run_unit(|_| Some(action()))
     }
 
     fn complete_canonical<Tag>(
@@ -752,13 +1139,13 @@ where
         }
         let view = self.view;
         let row = self.row;
-        let value = self.session.run_unit(|raw| {
-            let value = read(view, row, field)?;
-            inspect(raw, value)
-        })?;
-        if value.is_some() {
-            self.visited |= 1_u64 << field;
-        }
+        let inspected = self
+            .session
+            .run_unit(|raw| Some(read(view, row, field).and_then(|value| inspect(raw, value))))?;
+        let Some(value) = inspected else {
+            return Ok(None);
+        };
+        self.visited |= 1_u64 << field;
         Ok(value)
     }
 
@@ -868,13 +1255,13 @@ where
         }
         let view = self.view;
         let row = self.row;
-        let value = self.session.run_unit(|raw| {
-            let value = read(view, row, field)?;
-            inspect(raw, value)
-        })?;
-        if value.is_some() {
-            self.visited |= 1_u64 << field;
-        }
+        let inspected = self
+            .session
+            .run_unit(|raw| Some(read(view, row, field).and_then(|value| inspect(raw, value))))?;
+        let Some(value) = inspected else {
+            return Ok(None);
+        };
+        self.visited |= 1_u64 << field;
         Ok(value)
     }
 

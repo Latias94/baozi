@@ -5,10 +5,11 @@
 //! generation-local record blocks. A future edit can therefore retain prior segment leaves while
 //! rebuilding only its relationship records.
 
+use baozi_operation::__canonical_activation::{CanonicalLane, CanonicalRecordBuildRow};
 use baozi_operation::{
-    ByteBlock, BytesPlan, CanonicalRecordRowWriter, RecordPlan, ScalarSequence, SequencePlan,
-    StoreBuildError, StoreControlledError, StorePlanError, StoreRuntimeError, StoredScalar,
-    Utf8Block, Utf8Plan,
+    ByteBlock, BytesPlan, OperationOwner, ProgressPhase, ProgressUnit, RecordPlan, ScalarSequence,
+    SequencePlan, StoreBuildError, StoreControlledError, StorePlanError, StoreRuntimeError,
+    StoredScalar, Utf8Block, Utf8Plan,
 };
 
 use crate::canonical_scene::store::production::{CanonicalProfileOwner, ValidatedProfileBatch};
@@ -30,9 +31,12 @@ use crate::canonical_scene::store::schema::profile::{
     ProfileOwnerTableSchema, ProfileSegmentTableSchema,
 };
 use crate::canonical_scene::store::schema::{CanonicalBlockRef, CanonicalSchema};
+use crate::canonical_scene::store::validation::ProfileMeteredCounts;
 
-use super::NodeSceneWorkMeter;
-use crate::canonical_scene::store::construction::{SceneStoreAssembly, SceneStoreKeys};
+use super::{
+    checked_validation_work_sum, optional_bytes_validation_work, optional_record_validation_work,
+    optional_sequence_validation_work, optional_utf8_validation_work, record_validation_work,
+};
 
 mod lineage;
 mod metadata;
@@ -326,11 +330,102 @@ impl ProfileMaterializationPlans {
     pub(super) const fn evidence_counts(&self) -> ProfileEvidenceCounts {
         self.evidence_counts
     }
+
+    pub(super) fn metered_counts(&self) -> Result<ProfileMeteredCounts, StorePlanError> {
+        Ok(ProfileMeteredCounts {
+            resource_count: self.evidence_counts.resources,
+            source_count: self.evidence_counts.sources,
+            provenance_count: self.evidence_counts.provenance,
+            operation_count: self.evidence_counts.operations,
+            evidence_count: optional_sequence_row_count(
+                self.evidence,
+                PROFILE_EVIDENCE_SCALAR_COUNT,
+            )?,
+            parent_count: self.evidence_counts.parents,
+            wide_count: optional_sequence_count(self.wide)?,
+            lineage_text_bytes: optional_utf8_byte_count(self.lineage_text)?,
+            lineage_digest_bytes: optional_bytes_count(self.lineage_digests)?,
+            owner_count: self.evidence_counts.owners,
+            attachment_count: self.evidence_counts.attachments,
+            metadata_entry_count: self.evidence_counts.metadata_entries,
+            metadata_text_bytes: optional_utf8_byte_count(self.metadata_text)?,
+            metadata_payload_bytes: optional_bytes_count(self.metadata_bytes)?,
+            metadata_bool_count: optional_sequence_count(self.metadata_bool)?,
+            metadata_i64_count: optional_sequence_count(self.metadata_i64)?,
+            metadata_u64_count: optional_sequence_count(self.metadata_u64)?,
+            metadata_f64_count: optional_sequence_count(self.metadata_f64)?,
+            metadata_f32_count: optional_sequence_count(self.metadata_f32)?,
+            canonical_block_count: u32::try_from(self.canonical_block_count)
+                .map_err(|_| StorePlanError::SizeOverflow)?,
+            payload_leaf_count: self.payload_block_count,
+            shareable_leaf_count: self.shareable_leaf_block_count,
+        })
+    }
+
+    pub(super) fn validation_work_units(&self) -> Result<u64, StorePlanError> {
+        checked_validation_work_sum([
+            record_validation_work(self.directory)?,
+            record_validation_work(self.segments)?,
+            record_validation_work(self.owners)?,
+            record_validation_work(self.metadata_directory)?,
+            optional_sequence_validation_work(self.resources)?,
+            optional_sequence_validation_work(self.sources)?,
+            optional_sequence_validation_work(self.provenance)?,
+            optional_sequence_validation_work(self.operations)?,
+            optional_sequence_validation_work(self.evidence)?,
+            optional_sequence_validation_work(self.parents)?,
+            optional_sequence_validation_work(self.wide)?,
+            optional_utf8_validation_work(self.lineage_text)?,
+            optional_bytes_validation_work(self.lineage_digests)?,
+            optional_sequence_validation_work(self.attachments)?,
+            optional_record_validation_work(self.metadata_entries)?,
+            optional_utf8_validation_work(self.metadata_text)?,
+            optional_bytes_validation_work(self.metadata_bytes)?,
+            optional_sequence_validation_work(self.metadata_bool)?,
+            optional_sequence_validation_work(self.metadata_i64)?,
+            optional_sequence_validation_work(self.metadata_u64)?,
+            optional_sequence_validation_work(self.metadata_f64)?,
+            optional_sequence_validation_work(self.metadata_f32)?,
+        ])
+    }
+}
+
+fn optional_sequence_count<T: StoredScalar>(
+    plan: Option<SequencePlan<T>>,
+) -> Result<u32, StorePlanError> {
+    u32::try_from(plan.map_or(0, SequencePlan::element_count))
+        .map_err(|_| StorePlanError::SizeOverflow)
+}
+
+fn optional_sequence_row_count<T: StoredScalar>(
+    plan: Option<SequencePlan<T>>,
+    width: usize,
+) -> Result<u32, StorePlanError> {
+    if width == 0 {
+        return Err(StorePlanError::InvalidBlockTable);
+    }
+    let elements = plan.map_or(0, SequencePlan::element_count);
+    if !elements.is_multiple_of(width) {
+        return Err(StorePlanError::InvalidBlockTable);
+    }
+    u32::try_from(elements / width).map_err(|_| StorePlanError::SizeOverflow)
+}
+
+fn optional_utf8_byte_count(plan: Option<Utf8Plan>) -> Result<u32, StorePlanError> {
+    u32::try_from(plan.map_or(0, Utf8Plan::bytes)).map_err(|_| StorePlanError::SizeOverflow)
+}
+
+fn optional_bytes_count(plan: Option<BytesPlan>) -> Result<u32, StorePlanError> {
+    u32::try_from(plan.map_or(0, BytesPlan::bytes)).map_err(|_| StorePlanError::SizeOverflow)
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct RetainedProfileRefs {
-    directory: CanonicalBlockRef<ProfileDirectorySchema>,
+pub(in crate::canonical_scene::store) struct RetainedProfileRefs {
+    pub(in crate::canonical_scene::store) directory: CanonicalBlockRef<ProfileDirectorySchema>,
+    pub(in crate::canonical_scene::store) segments: CanonicalBlockRef<ProfileSegmentTableSchema>,
+    pub(in crate::canonical_scene::store) owners: CanonicalBlockRef<ProfileOwnerTableSchema>,
+    pub(in crate::canonical_scene::store) lineage: ProfileLeafRefs,
+    pub(in crate::canonical_scene::store) metadata: metadata::RetainedMetadataRefs,
 }
 
 impl RetainedProfileRefs {
@@ -339,217 +434,171 @@ impl RetainedProfileRefs {
     }
 }
 
-pub(super) fn retain_profile<R>(
-    assembly: &mut SceneStoreAssembly,
+pub(super) fn retain_profile<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
-) -> Result<RetainedProfileRefs, StoreRuntimeError> {
-    // The assembly proves operation admission. Issuing here keeps pure authoring
+) -> Result<RetainedProfileRefs, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    // The canonical lane proves operation admission. Issuing here keeps pure authoring
     // preflight and operation-start rejection free of invisible nonce gaps.
     let segment_nonce =
         issue_profile_segment_nonce().map_err(|_| StoreRuntimeError::MembershipExhausted)?;
-    let lineage =
-        lineage::retain_lineage(assembly, plans, batch, segment_nonce, keys, work, failure)?;
-    let metadata = metadata::retain_metadata(assembly, plans, batch, keys, work, faults, failure)?;
-    let segments = retain_segments(
-        assembly,
-        plans,
-        batch,
-        lineage,
-        segment_nonce,
-        keys,
-        work,
-        faults,
-        failure,
-    )?;
-    let owners = retain_owners(assembly, plans, batch, lineage, keys, work, faults, failure)?;
-    let directory = assembly
-        .try_retain_canonical_records_controlled(
-            plans.directory,
-            keys.dimension,
-            ProfileDirectorySchema,
-            |writer, control| {
-                work.observe(control, 1)?;
-                writer
-                    .write_row(|row| {
-                        row.write_scalar(PROFILE_SCHEMA_REVISION)?;
-                        row.write_scalar(1_u32)?;
-                        row.write_record_ref(segments.into_store())?;
-                        row.write_scalar(u32::try_from(batch.owner_count()).map_err(|_| failure)?)?;
-                        row.write_record_ref(owners.into_store())?;
-                        row.write_record_ref(metadata.directory.into_store())
-                    })
-                    .map_err(StoreControlledError::from)
-            },
-        )
+    let lineage = lineage::retain_lineage(lane, plans, batch, segment_nonce, failure)?;
+    let metadata = metadata::retain_metadata(lane, plans, batch, faults, failure)?;
+    let segments = retain_segments(lane, plans, batch, lineage, segment_nonce, faults, failure)?;
+    let owners = retain_owners(lane, plans, batch, lineage, faults, failure)?;
+    let directory = lane
+        .try_retain_records(plans.directory, ProfileDirectorySchema, |control| {
+            control.write_row(|row| {
+                row.write_scalar(PROFILE_SCHEMA_REVISION)?;
+                row.write_scalar(1_u32)?;
+                row.write_record_ref(segments.into_store())?;
+                row.write_scalar(u32::try_from(batch.owner_count()).map_err(|_| failure)?)?;
+                row.write_record_ref(owners.into_store())?;
+                row.write_record_ref(metadata.directory.into_store())
+            })
+        })
         .map(CanonicalBlockRef::from_store)?;
-    Ok(RetainedProfileRefs { directory })
+    Ok(RetainedProfileRefs {
+        directory,
+        segments,
+        owners,
+        lineage,
+        metadata,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn retain_segments<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_segments<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
     refs: ProfileLeafRefs,
     segment_nonce: ProfileSegmentNonce,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<ProfileSegmentTableSchema>, StoreRuntimeError> {
+) -> Result<CanonicalBlockRef<ProfileSegmentTableSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let shape = batch.retention_shape();
-    assembly
-        .try_retain_canonical_records_controlled(
-            plans.segments,
-            keys.dimension,
-            ProfileSegmentTableSchema,
-            |writer, control| {
-                work.observe(control, 1)?;
-                writer
-                    .write_row(|row| {
-                        row.write_scalar(faults.segment_ordinal(0))?;
-                        if faults.omit_segment_resource_reference() {
-                            row.write_scalar(batch.resource_count())?;
-                            row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
-                        } else {
-                            write_optional_sequence_ref(
-                                row,
-                                batch.resource_count(),
-                                refs.resources,
-                                failure,
-                            )?;
-                        }
-                        write_optional_sequence_ref(
-                            row,
-                            batch.source_count(),
-                            refs.sources,
-                            failure,
-                        )?;
-                        write_optional_sequence_ref(
-                            row,
-                            batch.provenance_node_count(),
-                            refs.provenance,
-                            failure,
-                        )?;
-                        write_optional_sequence_ref(
-                            row,
-                            batch.operation_count(),
-                            refs.operations,
-                            failure,
-                        )?;
-                        write_optional_sequence_ref(
-                            row,
-                            shape.evidence_count(),
-                            refs.evidence,
-                            failure,
-                        )?;
-                        write_optional_sequence_ref(
-                            row,
-                            shape.parent_count(),
-                            refs.parents,
-                            failure,
-                        )?;
-                        write_optional_sequence_ref(row, shape.wide_count(), refs.wide, failure)?;
-                        write_optional_utf8_ref(
-                            row,
-                            shape.lineage_text_bytes(),
-                            refs.text,
-                            failure,
-                        )?;
-                        write_optional_bytes_ref(
-                            row,
-                            shape.lineage_digest_bytes(),
-                            refs.digests,
-                            failure,
-                        )?;
-                        row.write_scalar(faults.segment_nonce(segment_nonce.get()))?;
-                        row.write_scalar(faults.segment_provenance_base(0))
-                    })
-                    .map_err(StoreControlledError::from)
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+    lane.try_retain_records(plans.segments, ProfileSegmentTableSchema, |control| {
+        control.write_row(|row| {
+            row.write_scalar(faults.segment_ordinal(0))?;
+            if faults.omit_segment_resource_reference() {
+                row.write_scalar(batch.resource_count())?;
+                row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
+            } else {
+                write_optional_sequence_ref(row, batch.resource_count(), refs.resources, failure)?;
+            }
+            write_optional_sequence_ref(row, batch.source_count(), refs.sources, failure)?;
+            write_optional_sequence_ref(
+                row,
+                batch.provenance_node_count(),
+                refs.provenance,
+                failure,
+            )?;
+            write_optional_sequence_ref(row, batch.operation_count(), refs.operations, failure)?;
+            write_optional_sequence_ref(row, shape.evidence_count(), refs.evidence, failure)?;
+            write_optional_sequence_ref(row, shape.parent_count(), refs.parents, failure)?;
+            write_optional_sequence_ref(row, shape.wide_count(), refs.wide, failure)?;
+            write_optional_utf8_ref(row, shape.lineage_text_bytes(), refs.text, failure)?;
+            write_optional_bytes_ref(row, shape.lineage_digest_bytes(), refs.digests, failure)?;
+            row.write_scalar(faults.segment_nonce(segment_nonce.get()))?;
+            row.write_scalar(faults.segment_provenance_base(0))
+        })
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn retain_owners<R>(
-    assembly: &mut SceneStoreAssembly,
+fn retain_owners<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
     refs: ProfileLeafRefs,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
     faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
-) -> Result<CanonicalBlockRef<ProfileOwnerTableSchema>, StoreRuntimeError> {
+) -> Result<CanonicalBlockRef<ProfileOwnerTableSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let attachments = refs.attachments;
-    assembly
-        .try_retain_canonical_records_controlled(
-            plans.owners,
-            keys.dimension,
-            ProfileOwnerTableSchema,
-            |writer, control| {
-                let mut attachment_offset = 0_u32;
-                for ordinal in 0..batch.owner_count() {
-                    work.observe(control, 1)?;
-                    let (owner, provenance) = batch.owner_provenance_at(ordinal).ok_or(failure)?;
-                    let attachment_count = u32::try_from(provenance.len()).map_err(|_| failure)?;
-                    if attachment_count == 0 {
-                        return Err(failure.into());
-                    }
-                    let (owner_kind, owner_index) = encode_owner(owner);
-                    let owner_kind = faults.owner_kind(owner_kind);
-                    let stored_attachment_offset =
-                        faults.owner_attachment_offset(attachment_offset);
-                    writer.write_row(|row| {
-                        row.write_scalar(owner_kind)?;
-                        row.write_scalar(owner_index)?;
-                        row.write_scalar(stored_attachment_offset)?;
-                        row.write_scalar(attachment_count)?;
-                        row.write_sequence_ref(attachments.ok_or(failure)?.into_store())
-                    })?;
-                    attachment_offset = attachment_offset
-                        .checked_add(attachment_count)
-                        .ok_or(failure)?;
-                }
-                if attachment_offset != batch.retention_shape().attachment_count() {
-                    return Err(failure.into());
-                }
-                Ok(())
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+    lane.try_retain_records(plans.owners, ProfileOwnerTableSchema, |control| {
+        let mut attachment_offset = 0_u32;
+        for ordinal in 0..batch.owner_count() {
+            let (owner, provenance) = batch.owner_provenance_at(ordinal).ok_or(failure)?;
+            let attachment_count = u32::try_from(provenance.len()).map_err(|_| failure)?;
+            if attachment_count == 0 {
+                return Err(failure.into());
+            }
+            let (owner_kind, owner_index) = encode_owner(owner);
+            let owner_kind = faults.owner_kind(owner_kind);
+            let stored_attachment_offset = faults.owner_attachment_offset(attachment_offset);
+            control.write_row(|row| {
+                row.write_scalar(owner_kind)?;
+                row.write_scalar(owner_index)?;
+                row.write_scalar(stored_attachment_offset)?;
+                row.write_scalar(attachment_count)?;
+                row.write_sequence_ref(attachments.ok_or(failure)?.into_store())
+            })?;
+            attachment_offset = attachment_offset
+                .checked_add(attachment_count)
+                .ok_or(failure)?;
+        }
+        if attachment_offset != batch.retention_shape().attachment_count() {
+            return Err(failure.into());
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
 #[derive(Clone, Copy)]
-struct ProfileLeafRefs {
-    resources: Option<CanonicalBlockRef<ProfileLineageResourceSchema>>,
-    sources: Option<CanonicalBlockRef<ProfileLineageSourceSchema>>,
-    provenance: Option<CanonicalBlockRef<ProfileLineageProvenanceSchema>>,
-    operations: Option<CanonicalBlockRef<ProfileLineageOperationSchema>>,
-    evidence: Option<CanonicalBlockRef<ProfileLineageEvidenceSchema>>,
-    parents: Option<CanonicalBlockRef<ProfileLineageParentSchema>>,
-    wide: Option<CanonicalBlockRef<ProfileLineageWideSchema>>,
-    text: Option<CanonicalBlockRef<ProfileLineageTextSchema>>,
-    digests: Option<CanonicalBlockRef<ProfileLineageDigestSchema>>,
-    attachments: Option<CanonicalBlockRef<ProfileLineageAttachmentSchema>>,
+pub(in crate::canonical_scene::store) struct ProfileLeafRefs {
+    pub(in crate::canonical_scene::store) resources:
+        Option<CanonicalBlockRef<ProfileLineageResourceSchema>>,
+    pub(in crate::canonical_scene::store) sources:
+        Option<CanonicalBlockRef<ProfileLineageSourceSchema>>,
+    pub(in crate::canonical_scene::store) provenance:
+        Option<CanonicalBlockRef<ProfileLineageProvenanceSchema>>,
+    pub(in crate::canonical_scene::store) operations:
+        Option<CanonicalBlockRef<ProfileLineageOperationSchema>>,
+    pub(in crate::canonical_scene::store) evidence:
+        Option<CanonicalBlockRef<ProfileLineageEvidenceSchema>>,
+    pub(in crate::canonical_scene::store) parents:
+        Option<CanonicalBlockRef<ProfileLineageParentSchema>>,
+    pub(in crate::canonical_scene::store) wide: Option<CanonicalBlockRef<ProfileLineageWideSchema>>,
+    pub(in crate::canonical_scene::store) text: Option<CanonicalBlockRef<ProfileLineageTextSchema>>,
+    pub(in crate::canonical_scene::store) digests:
+        Option<CanonicalBlockRef<ProfileLineageDigestSchema>>,
+    pub(in crate::canonical_scene::store) attachments:
+        Option<CanonicalBlockRef<ProfileLineageAttachmentSchema>>,
 }
 
 #[derive(Clone, Copy)]
-struct MetadataLeafRefs {
-    entries: Option<CanonicalBlockRef<ProfileMetadataEntryTableSchema>>,
-    text: Option<CanonicalBlockRef<ProfileMetadataTextSchema>>,
-    bytes: Option<CanonicalBlockRef<ProfileMetadataBytesSchema>>,
-    bools: Option<CanonicalBlockRef<ProfileMetadataBoolSchema>>,
-    i64s: Option<CanonicalBlockRef<ProfileMetadataI64Schema>>,
-    u64s: Option<CanonicalBlockRef<ProfileMetadataU64Schema>>,
-    f64s: Option<CanonicalBlockRef<ProfileMetadataF64Schema>>,
-    f32s: Option<CanonicalBlockRef<ProfileMetadataF32Schema>>,
+pub(in crate::canonical_scene::store) struct MetadataLeafRefs {
+    pub(in crate::canonical_scene::store) entries:
+        Option<CanonicalBlockRef<ProfileMetadataEntryTableSchema>>,
+    pub(in crate::canonical_scene::store) text:
+        Option<CanonicalBlockRef<ProfileMetadataTextSchema>>,
+    pub(in crate::canonical_scene::store) bytes:
+        Option<CanonicalBlockRef<ProfileMetadataBytesSchema>>,
+    pub(in crate::canonical_scene::store) bools:
+        Option<CanonicalBlockRef<ProfileMetadataBoolSchema>>,
+    pub(in crate::canonical_scene::store) i64s: Option<CanonicalBlockRef<ProfileMetadataI64Schema>>,
+    pub(in crate::canonical_scene::store) u64s: Option<CanonicalBlockRef<ProfileMetadataU64Schema>>,
+    pub(in crate::canonical_scene::store) f64s: Option<CanonicalBlockRef<ProfileMetadataF64Schema>>,
+    pub(in crate::canonical_scene::store) f32s: Option<CanonicalBlockRef<ProfileMetadataF32Schema>>,
 }
 
 fn encode_owner(owner: CanonicalProfileOwner) -> (u8, u32) {
@@ -579,11 +628,11 @@ fn encode_owner(owner: CanonicalProfileOwner) -> (u8, u32) {
 }
 
 fn write_optional_sequence_ref<Tag, T>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     count: u32,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = ScalarSequence<T>>,
     T: StoredScalar,
@@ -591,41 +640,41 @@ where
     row.write_scalar(count)?;
     match (count, reference) {
         (0, None) => row.write_scalar(PROFILE_ABSENT_REFERENCE),
-        (0, Some(_)) | (1.., None) => Err(failure),
+        (0, Some(_)) | (1.., None) => Err(failure.into()),
         (1.., Some(reference)) => row.write_sequence_ref(reference.into_store()),
     }
 }
 
 fn write_optional_utf8_ref<Tag>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     count: u32,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = Utf8Block>,
 {
     row.write_scalar(count)?;
     match (count, reference) {
         (0, None) => row.write_scalar(PROFILE_ABSENT_REFERENCE),
-        (0, Some(_)) | (1.., None) => Err(failure),
+        (0, Some(_)) | (1.., None) => Err(failure.into()),
         (1.., Some(reference)) => row.write_utf8_ref(reference.into_store()),
     }
 }
 
 fn write_optional_bytes_ref<Tag>(
-    row: &mut CanonicalRecordRowWriter<'_>,
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
     count: u32,
     reference: Option<CanonicalBlockRef<Tag>>,
     failure: StoreBuildError,
-) -> Result<(), StoreBuildError>
+) -> Result<(), StoreControlledError>
 where
     Tag: CanonicalSchema<StoreKind = ByteBlock>,
 {
     row.write_scalar(count)?;
     match (count, reference) {
         (0, None) => row.write_scalar(PROFILE_ABSENT_REFERENCE),
-        (0, Some(_)) | (1.., None) => Err(failure),
+        (0, Some(_)) | (1.., None) => Err(failure.into()),
         (1.., Some(reference)) => row.write_bytes_ref(reference.into_store()),
     }
 }

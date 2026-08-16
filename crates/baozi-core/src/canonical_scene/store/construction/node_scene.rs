@@ -1,8 +1,12 @@
+use baozi_operation::__canonical_activation::{
+    CanonicalCandidateStoreSession, CanonicalJointCommit,
+};
 use baozi_operation::{
-    OutcomeEvidenceRecordRef, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
-    PublishedRichFailureStore, RecordBlock, RetainedStoreWorkControl, StoreBuildError,
+    BytesPlan, PublishedCanonicalStore, PublishedOutcomeEvidenceStore, PublishedRichFailureStore,
+    RecordBlock, RecordPlan, RetainedStoreWorkControl, SequencePlan, StoreBuildError,
     StoreControlledError, StoreFailureAssembly, StoreFailureValidation, StoreLedgerEvidence,
-    StorePlanError, StoreRuntimeError, StoreWorkError, ValidatedStoreSuccess,
+    StorePlanError, StoreRuntimeError, StoreWorkError, StoredScalar, Utf8Plan,
+    ValidatedStoreSuccess,
 };
 use thiserror::Error;
 
@@ -20,9 +24,9 @@ use super::super::schema::{
 };
 use super::super::validation::NodeSceneValidationProof;
 use super::{
-    ConstructionBrand, PreparedTracerSceneFallback, SceneConstructionOperation,
-    SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit, SceneStoreAssembly,
-    SceneStoreControlCheckpoint, SceneStoreKeys, SceneStoreOperation, TracerSceneFallback,
+    ConstructionBrand, PreparedTracerSceneFallback, SceneConstructionOwner, SceneConstructionPhase,
+    SceneConstructionUnit, SceneStoreAssembly, SceneStoreControlCheckpoint, SceneStoreKeys,
+    SceneStoreOperation, TracerSceneFallback,
 };
 
 mod animation;
@@ -31,11 +35,15 @@ mod deformation;
 pub(crate) mod edit;
 mod geometry;
 mod materialization;
+pub(in crate::canonical_scene::store) use materialization::NodeSceneMaterializedRefs;
 #[cfg(test)]
 pub(in crate::canonical_scene::store) use materialization::validate_node_scene_batches_for_test;
 mod profile;
 mod publication;
 mod scratch;
+pub(in crate::canonical_scene::store) use scratch::{
+    NodeSceneMeteredValidationScratch, NodeSceneValidationScratchPlan,
+};
 pub(in crate::canonical_scene::store) mod semantic;
 pub(in crate::canonical_scene::store) mod snapshot;
 mod view;
@@ -50,7 +58,7 @@ pub(in crate::canonical_scene::store) use tests::{
     OBJ_SOURCE_VECTOR_SCHEMA_ID, ObjCapabilityCanonicalShapeObservation,
     ObjCapabilitySourceShapeObservation, ProfileClosureCanonicalShapeObservation,
     ProfileClosureNegativeCaseObservation, ProfileClosurePreflightStorageObservation,
-    build_evidence_publication_limit_terminal_for_probe, build_gltf_capability_scene_for_probe,
+    build_gltf_capability_scene_for_probe, build_minimal_fallback_terminal_for_probe,
     build_obj_capability_scene_for_probe, build_profile_closure_scene_for_probe,
     build_protected_terminal_activation_for_probe, capture_gltf_capability_snapshots_for_probe,
     capture_obj_capability_snapshots_for_probe, capture_profile_closure_snapshots_for_probe,
@@ -78,12 +86,56 @@ const NODE_SCENE_PROFILE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1108;
 const NODE_SCENE_PROFILE_OWNER_CATALOG_REJECTION_CODE: u32 = 0x5343_1109;
 const NODE_SCENE_PLANNING_REJECTION_CODE: u32 = 0x5343_110a;
 
+fn checked_validation_work_sum<const N: usize>(values: [u64; N]) -> Result<u64, StorePlanError> {
+    values
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or(StorePlanError::SizeOverflow)
+}
+
+fn record_validation_work(plan: RecordPlan) -> Result<u64, StorePlanError> {
+    let cells = plan
+        .rows()
+        .checked_mul(plan.fields())
+        .ok_or(StorePlanError::SizeOverflow)?;
+    u64::try_from(cells).map_err(|_| StorePlanError::SizeOverflow)
+}
+
+fn optional_record_validation_work(plan: Option<RecordPlan>) -> Result<u64, StorePlanError> {
+    plan.map_or(Ok(0), record_validation_work)
+}
+
+fn sequence_validation_work<T: StoredScalar>(plan: SequencePlan<T>) -> Result<u64, StorePlanError> {
+    u64::try_from(plan.element_count()).map_err(|_| StorePlanError::SizeOverflow)
+}
+
+fn optional_sequence_validation_work<T: StoredScalar>(
+    plan: Option<SequencePlan<T>>,
+) -> Result<u64, StorePlanError> {
+    plan.map_or(Ok(0), sequence_validation_work)
+}
+
+fn optional_bytes_validation_work(plan: Option<BytesPlan>) -> Result<u64, StorePlanError> {
+    plan.map_or(Ok(0), |plan| {
+        u64::try_from(plan.bytes()).map_err(|_| StorePlanError::SizeOverflow)
+    })
+}
+
+fn optional_utf8_validation_work(plan: Option<Utf8Plan>) -> Result<u64, StorePlanError> {
+    plan.map_or(Ok(0), |plan| {
+        u64::try_from(plan.bytes()).map_err(|_| StorePlanError::SizeOverflow)
+    })
+}
+
 #[derive(Clone, Copy)]
 struct NodeSceneBuildFaults {
     alter_first_authored_transform: bool,
     alter_first_geometry_f32: bool,
-    outcome_evidence_commitment: u64,
     profile: profile::ProfileBuildFault,
+    #[cfg(test)]
+    planning: Option<materialization::NodeScenePlanningFault>,
+    #[cfg(test)]
+    panic_central_validator: bool,
 }
 
 impl NodeSceneBuildFaults {
@@ -91,8 +143,11 @@ impl NodeSceneBuildFaults {
         Self {
             alter_first_authored_transform: false,
             alter_first_geometry_f32: false,
-            outcome_evidence_commitment: 1,
             profile: profile::ProfileBuildFault::none(),
+            #[cfg(test)]
+            planning: None,
+            #[cfg(test)]
+            panic_central_validator: false,
         }
     }
 
@@ -100,14 +155,6 @@ impl NodeSceneBuildFaults {
     const fn altered_authored_transform() -> Self {
         Self {
             alter_first_authored_transform: true,
-            ..Self::none()
-        }
-    }
-
-    #[cfg(test)]
-    const fn excess_outcome_evidence_commitment() -> Self {
-        Self {
-            outcome_evidence_commitment: 2,
             ..Self::none()
         }
     }
@@ -124,6 +171,14 @@ impl NodeSceneBuildFaults {
     const fn altered_profile(fault: profile::ProfileBuildFault) -> Self {
         Self {
             profile: fault,
+            ..Self::none()
+        }
+    }
+
+    #[cfg(test)]
+    const fn minimal_fallback() -> Self {
+        Self {
+            panic_central_validator: true,
             ..Self::none()
         }
     }
@@ -377,18 +432,27 @@ type NodeSceneStoreFailureValidation = StoreFailureValidation<
 >;
 type PreparedNodeStoreFailure =
     baozi_operation::PreparedStoreFailure<RecordBlock, NodeSceneOutcomeEvidenceSchema>;
-
-struct FreshNodeSceneOwner {
-    raw: SceneStoreOperation,
-    brand: ConstructionBrand,
-    keys: SceneStoreKeys,
-}
-
-/// A validated canonical Scene input coupled to the exact fresh operation that paid for it.
-#[must_use = "the validated node Scene construction must be prepared or deliberately dropped"]
-pub(in crate::canonical_scene::store) struct ValidatedNodeSceneConstruction<'input> {
-    bound: materialization::BoundNodeScenePlan<'input>,
-}
+type ActivatedNodeSceneCandidate = CanonicalCandidateStoreSession<
+    SceneConstructionOwner,
+    SceneConstructionPhase,
+    SceneConstructionUnit,
+    materialization::NodeSceneActivationOutput,
+    NodeSceneValidationProof,
+    RecordBlock,
+    SceneDirectorySchema,
+    RecordBlock,
+    NodeSceneOutcomeEvidenceSchema,
+>;
+type NodeSceneCanonicalJointCommit<'joint> = CanonicalJointCommit<
+    'joint,
+    SceneConstructionOwner,
+    SceneConstructionPhase,
+    SceneConstructionUnit,
+    RecordBlock,
+    SceneDirectorySchema,
+    RecordBlock,
+    NodeSceneOutcomeEvidenceSchema,
+>;
 
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection<
@@ -416,6 +480,8 @@ pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection<
     Aggregate(#[source] SceneAuthoringAggregateError),
     #[error("canonical Scene physical planning rejected the validated batch")]
     Planning(#[source] StorePlanError),
+    #[error("canonical Scene materialization rejected the sealed construction plan")]
+    Materialization(#[source] StoreRuntimeError),
 }
 
 impl<E> NodeSceneConstructionRejection<E>
@@ -434,17 +500,12 @@ where
             Self::ProfileAuthoring(_) => NODE_SCENE_PROFILE_AUTHORING_REJECTION_CODE,
             Self::Aggregate(_) => NODE_SCENE_AGGREGATE_AUTHORING_REJECTION_CODE,
             Self::Planning(_) => NODE_SCENE_PLANNING_REJECTION_CODE,
+            Self::Materialization(_) => NODE_SCENE_STORAGE_REJECTION_CODE,
         }
     }
 }
 
-/// A consumed validation attempt which still owns its exact operation and rejection.
-#[must_use = "a rejected node Scene construction must preserve its rich failure or be dropped"]
-pub(in crate::canonical_scene::store) struct RejectedNodeSceneConstruction {
-    operation: SceneConstructionOperation,
-    failure: NodeSceneConstructionRejection,
-}
-
+#[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneDraft {
     brand: ConstructionBrand,
     directory: CanonicalBlockRef<SceneDirectorySchema>,
@@ -456,14 +517,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneDraft {
 /// descriptor from another construction before registering commitments or allocating scratch.
 #[must_use = "a pending node Scene draft owner must be centrally prepared or deliberately dropped"]
 pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft {
-    assembly: SceneStoreAssembly,
-    brand: ConstructionBrand,
-    keys: SceneStoreKeys,
-    expected_directory: CanonicalBlockRef<SceneDirectorySchema>,
-    evidence: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-    evidence_counts: SceneEvidenceCounts,
-    work: NodeSceneWorkMeter,
-    deformation_uniqueness_capacity: usize,
+    candidate: ActivatedNodeSceneCandidate,
 }
 
 /// The exact outcome of source-backed materialization before central graph validation.
@@ -477,7 +531,12 @@ pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild {
         draft: NodeSceneDraft,
         owner: PendingNodeSceneDraft,
     },
-    Failure(PreparedNodeSceneFailure),
+    Failure {
+        authoring_rejection: Option<NodeSceneConstructionRejection<StoreRuntimeError>>,
+        // Keep the prepared physical publication last so a future rejection payload destructor
+        // cannot unwind after its containment owner has already been released.
+        prepared: PreparedNodeSceneFailure,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -555,19 +614,12 @@ impl SceneEvidenceCounts {
     }
 }
 
-struct PendingNodeSceneCommitments;
-
-struct ValidatedNodeSceneCandidate {
-    store: ValidatedNodeStoreSuccess,
-    evidence_counts: SceneEvidenceCounts,
-    proof: NodeSceneValidationProof,
-    pending_commitments: PendingNodeSceneCommitments,
-}
-
 pub(in crate::canonical_scene::store) struct PreparedNodeSceneSuccess {
     generation: ReservedSceneGeneration,
-    store: PreparedNodeStoreSuccess,
     proof: NodeSceneValidationProof,
+    // The physical publication owner must drop last so an earlier field destructor cannot escape
+    // fail-closed containment before the terminal store has been prepared.
+    store: PreparedNodeStoreSuccess,
 }
 
 pub(in crate::canonical_scene::store) struct PreparedNodeSceneRichFailure {

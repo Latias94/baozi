@@ -7,161 +7,12 @@ fn canonical_build_work(units: Option<usize>) -> Result<NonZeroU64, StoreRuntime
     NonZeroU64::new(units).ok_or(StoreRuntimeError::Plan(StorePlanError::EmptyPayload))
 }
 
-/// Owns the semantic-preflight permit while completed units accumulate in bounded chunks.
-///
-/// The guard is deliberately local to preflight. It keeps the raw permit alive until the exact
-/// completion prefix has been flushed, including when an inspector unwinds or the caller drops
-/// the preflight callback. No producer-provided work amount crosses this boundary.
-struct SemanticWorkBatch<'borrow, 'operation, O, PP, U>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    permit: Option<CanonicalWorkPermit<'borrow, 'operation, O, PP, U>>,
-    work_batch: work_batch::CompletionPrefixBatch,
-}
-
-impl<'borrow, 'operation, O, PP, U> SemanticWorkBatch<'borrow, 'operation, O, PP, U>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn new(permit: CanonicalWorkPermit<'borrow, 'operation, O, PP, U>) -> Self {
-        Self {
-            permit: Some(permit),
-            work_batch: work_batch::CompletionPrefixBatch::new(),
-        }
-    }
-
-    fn fail(&mut self) -> StoreRuntimeError {
-        if let Some(permit) = self.permit.as_mut() {
-            permit.record_product_graph_failure(ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE);
-        }
-        if let Some(mut permit) = self.permit.take() {
-            permit.resolve_partial();
-        }
-        StoreRuntimeError::ConstructionInvariantUnverified
-    }
-
-    fn flush(&mut self) -> Result<(), StoreRuntimeError> {
-        let pending = self.work_batch.unflushed_completed();
-        if pending == 0 {
-            return Ok(());
-        }
-        let remaining = self
-            .permit
-            .as_ref()
-            .expect("a live semantic batch retains its permit")
-            .remaining_units();
-        if pending > remaining {
-            let _ = self.work_batch.take_completed();
-            return Err(self.fail());
-        }
-        let completed = self
-            .work_batch
-            .take_completed()
-            .expect("a nonzero semantic completion prefix remains flushable");
-        self.permit
-            .as_mut()
-            .expect("a live semantic batch retains its permit")
-            .complete_units(completed)
-            .map_err(StoreWorkError::into_runtime)
-    }
-
-    fn poll_now(&mut self) -> Result<(), StoreRuntimeError> {
-        self.flush()?;
-        let permit = self
-            .permit
-            .as_mut()
-            .expect("a live semantic batch retains its permit");
-        permit.poll().map_err(StoreWorkError::into_runtime)?;
-        self.work_batch.note_poll();
-        Ok(())
-    }
-
-    fn complete_unit(&mut self) -> Result<(), StoreRuntimeError> {
-        self.work_batch
-            .note_completed_unit()
-            .map_err(|_| self.fail())
-    }
-
-    fn finish_exact(mut self) -> Result<(), StoreRuntimeError> {
-        self.poll_now()?;
-        let remaining = self
-            .permit
-            .as_ref()
-            .expect("a live semantic batch retains its permit")
-            .remaining_units();
-        if remaining != 0 {
-            return Err(self.fail());
-        }
-        let permit = self
-            .permit
-            .take()
-            .expect("a successful semantic batch retains its permit");
-        if permit.finish_exact() {
-            Ok(())
-        } else {
-            Err(StoreRuntimeError::ConstructionInvariantUnverified)
-        }
-    }
-}
-
-impl<O, PP, U> Drop for SemanticWorkBatch<'_, '_, O, PP, U>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn drop(&mut self) {
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let _ = self.flush();
-            if let Some(mut permit) = self.permit.take() {
-                permit.resolve_partial();
-            }
-        }));
-        if let Err(payload) = result {
-            discard_untrusted_panic_payload(payload);
-        }
-    }
-}
-
 impl<O, PP, U> RetainedStoreOperation<O, PP, U, FreshStoreLineage>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Moves the operation into the session-owned dormant activation seam.
-    pub fn into_session_outcome_owner(
-        self,
-        policy: CanonicalActivationPolicy,
-    ) -> (
-        RetainedStoreSessionOutcomeOwner<O, PP, U, FreshStoreLineage>,
-        CanonicalActivationRequestSealer,
-    ) {
-        let brand = self.domain.activation_brand();
-        let (max_evidence_members, construction_work_limit, validation_work_limit) = self
-            .raw
-            .failure_terminal_work_limits()
-            .expect("every concrete retained-store operation owns terminal failure work");
-        let failure_work = FailureEvidenceWorkEnvelope {
-            max_evidence_members,
-            construction_work_limit,
-            validation_work_limit,
-        };
-        (
-            RetainedStoreSessionOutcomeOwner {
-                operation: Some(self),
-                roles: Some(BoundActivationRoles { policy, brand }),
-                failure_work: FailureEvidenceWorkBudget::new(failure_work),
-            },
-            CanonicalActivationRequestSealer { brand },
-        )
-    }
-
     /// Moves the operation into the single scoped planning-and-activation transaction.
     pub fn into_scoped_session_outcome_owner(
         self,
@@ -171,7 +22,6 @@ where
         ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, FreshStoreLineage>,
         StoreActivationContainment,
     > {
-        let brand = self.domain.activation_brand();
         let (canonical_phase, canonical_dimensions) =
             policy.canonical_writer.keys_for_publication_validation();
         let (evidence_phase, evidence_dimensions) = policy
@@ -214,7 +64,7 @@ where
                 containment_anchor,
                 armed: true,
             },
-            roles: BoundActivationRoles { policy, brand },
+            roles: BoundActivationRoles { policy },
             scoped_failure: failure,
             planning_baseline,
             failure_work: FailureEvidenceWorkBudget::new(failure_work),
@@ -236,7 +86,7 @@ where
     )]
     pub fn plan_and_activate_scoped<T, E, CanonicalKind, CanonicalTag>(
         self,
-        transaction: impl for<'scope> FnOnce(
+        transaction: impl for<'scope> FnMut(
             CanonicalPlanning<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         ) -> CanonicalScopedDisposition<'scope>,
     ) -> Result<
@@ -265,8 +115,8 @@ where
         };
         let result = catch_unwind(AssertUnwindSafe(|| {
             let transaction = transaction
-                .take()
-                .expect("the scoped activation transaction executes at most once");
+                .as_mut()
+                .expect("the scoped activation transaction remains owned until controlled drop");
             let receipt = transaction(CanonicalPlanning {
                 driver: &mut driver,
                 receipt_brand: &receipt_brand,
@@ -285,323 +135,6 @@ where
     }
 }
 
-impl<O, PP, U, L> RetainedStoreSessionOutcomeOwner<O, PP, U, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    /// Runs authority-free preflight and, only after it seals a plan, opens one scoped lane.
-    ///
-    /// An explicit preflight rejection is `NeverActivated`. A rollback-proved physical-open
-    /// failure is also `NeverActivated`, with its exact store cause. Once the lane is exposed, a
-    /// typed rejection eagerly destroys canonical storage before returning `Rejected`. Contract
-    /// faults, ignored first failures, panics, and uncertain cleanup return containment instead of
-    /// a publishable disposition.
-    #[allow(
-        clippy::result_large_err,
-        clippy::type_complexity,
-        reason = "the scoped transition preserves every linear owner and exact typed cause"
-    )]
-    // U4e migration: remove this two-callback rail in the same commit that switches the core
-    // tracer to `plan_and_activate_scoped`.
-    pub fn plan_and_activate<T, E, CanonicalKind, CanonicalTag>(
-        mut self,
-        request: SealedCanonicalActivationRequest,
-        preflight: impl for<'scope> FnMut(
-            CanonicalPreflight<'scope, O, PP, U, L>,
-        ) -> CanonicalPreflightDecision<'scope, E>,
-        materialize: impl for<'lane> FnMut(
-            CanonicalLane<'lane, O, PP, U, L>,
-        ) -> CanonicalMaterialization<
-            'lane,
-            T,
-            E,
-            CanonicalKind,
-            CanonicalTag,
-        >,
-    ) -> Result<
-        CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
-        StoreActivationContainment,
-    > {
-        let mut preflight = ManuallyDrop::new(Some(preflight));
-        let mut materialize = ManuallyDrop::new(Some(materialize));
-        let mut operation = self
-            .operation
-            .take()
-            .expect("the session outcome owner begins activation at most once");
-        let roles = self
-            .roles
-            .take()
-            .expect("the session outcome owner consumes its activation roles at most once");
-        let request = match roles.bind(request) {
-            Ok(request) => request,
-            Err(_) => {
-                let _ = drop_optional_callback(preflight);
-                let _ = drop_optional_callback(materialize);
-                return Err(contain_operation(operation));
-            }
-        };
-        let failure_work = self.failure_work;
-        let mut first_fault = None;
-        let mut semantic_work_complete = request.semantic_preflight_work == 0;
-        let preflight_result = catch_unwind(AssertUnwindSafe(|| {
-            let preflight = preflight
-                .as_mut()
-                .expect("the preflight callback is executed at most once");
-            preflight(CanonicalPreflight {
-                operation: &mut operation,
-                request: &request,
-                first_fault: &mut first_fault,
-                semantic_work_complete: &mut semantic_work_complete,
-            })
-            .into_state()
-        }));
-        let preflight_drop_failed = drop_optional_callback(preflight).is_err();
-        let preflight = match preflight_result {
-            Ok(preflight) if !preflight_drop_failed => preflight,
-            Ok(preflight) => {
-                let _ = drop_scoped_value(preflight);
-                let _ = drop_optional_callback(materialize);
-                return Err(contain_operation(operation));
-            }
-            Err(payload) => {
-                discard_untrusted_panic_payload(payload);
-                let materialize_drop_failed = drop_optional_callback(materialize).is_err();
-                if preflight_drop_failed || materialize_drop_failed {
-                    return Err(contain_operation(operation));
-                }
-                let (cause, failure_code) = match first_fault {
-                    Some(fault) if fault.contract_seen => return Err(contain_operation(operation)),
-                    Some(fault) => {
-                        let Some(failure_code) = fault.recoverable_code() else {
-                            return Err(contain_operation(operation));
-                        };
-                        (fault.cause, failure_code)
-                    }
-                    None => (
-                        activation_product_graph_cause(),
-                        PreparationFailureCode::product_graph(
-                            ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE,
-                        ),
-                    ),
-                };
-                return prepare_operation_minimal(operation, failure_code, cause)
-                    .map(CanonicalActivationOutcome::Fallback);
-            }
-        };
-
-        match preflight {
-            CanonicalPreflightState::Rejected(rejection) => {
-                let outcome_evidence_plan = request.outcome_evidence_plan;
-                if drop_optional_callback(materialize).is_err() {
-                    let _ = drop_verified_rejection(rejection);
-                    return Err(contain_operation(operation));
-                }
-                if let Some(fault) = first_fault {
-                    if fault.contract_seen {
-                        let _ = drop_verified_rejection(rejection);
-                        return Err(contain_operation(operation));
-                    }
-                    let Some(failure_code) = fault.recoverable_code() else {
-                        let _ = drop_verified_rejection(rejection);
-                        return Err(contain_operation(operation));
-                    };
-                    if drop_verified_rejection(rejection).is_err() {
-                        return Err(contain_operation(operation));
-                    }
-                    return Ok(CanonicalActivationOutcome::NeverActivated(
-                        NeverActivatedStoreSession::runtime(
-                            operation,
-                            outcome_evidence_plan,
-                            failure_work,
-                            request.outcome_evidence_destination_dimension,
-                            fault.cause,
-                            failure_code,
-                            false,
-                        ),
-                    ));
-                }
-                Ok(CanonicalActivationOutcome::NeverActivated(
-                    NeverActivatedStoreSession::requested(
-                        operation,
-                        outcome_evidence_plan,
-                        failure_work,
-                        request.outcome_evidence_destination_dimension,
-                        rejection,
-                    ),
-                ))
-            }
-            CanonicalPreflightState::Activate => {
-                let BoundActivationRequest {
-                    canonical_plan,
-                    outcome_evidence_plan,
-                    materialization_work_dimension,
-                    validation_work_dimension,
-                    canonical_destination_dimension,
-                    outcome_evidence_destination_dimension,
-                    semantic_preflight_work: _,
-                    validation_work,
-                    expected_materialized_blocks,
-                } = request;
-                if first_fault.is_some() {
-                    let _ = drop_optional_callback(materialize);
-                    return Err(contain_operation(operation));
-                }
-                let publication_plan =
-                    RetainedStorePublicationPlan::success(canonical_plan, outcome_evidence_plan);
-                let mut assembly = match try_open_activation(operation, publication_plan) {
-                    Ok(assembly) => assembly,
-                    Err(ActivationOpenFailure::DeferredContainment { operation }) => {
-                        let _ = drop_optional_callback(materialize);
-                        return Err(contain_operation(operation));
-                    }
-                    Err(ActivationOpenFailure::Recoverable {
-                        operation,
-                        cause,
-                        failure_code,
-                        fallback_only,
-                    }) => {
-                        if drop_optional_callback(materialize).is_err() {
-                            return Err(contain_operation(operation));
-                        }
-                        return Ok(CanonicalActivationOutcome::NeverActivated(
-                            NeverActivatedStoreSession::runtime(
-                                operation,
-                                outcome_evidence_plan,
-                                failure_work,
-                                outcome_evidence_destination_dimension,
-                                cause,
-                                failure_code,
-                                fallback_only,
-                            ),
-                        ));
-                    }
-                };
-
-                let mut first_fault = None;
-                let materialized = catch_unwind(AssertUnwindSafe(|| {
-                    let lane = CanonicalLane {
-                        assembly: &mut assembly,
-                        first_fault: &mut first_fault,
-                        materialization_work_dimension,
-                    };
-                    let materialize = materialize
-                        .as_mut()
-                        .expect("the materialization callback is executed at most once");
-                    materialize(lane).into_state()
-                }));
-                let materialize_drop_failed = drop_optional_callback(materialize).is_err();
-                let materialized = match materialized {
-                    Ok(materialized) if !materialize_drop_failed => materialized,
-                    Ok(materialized) => {
-                        let _ = drop_materialization(materialized);
-                        return Err(StoreActivationContainment {
-                            cause: assembly.contain_activation_fault(),
-                        });
-                    }
-                    Err(payload) => {
-                        discard_untrusted_panic_payload(payload);
-                        return Err(StoreActivationContainment {
-                            cause: assembly.contain_activation_fault(),
-                        });
-                    }
-                };
-
-                if assembly.is_fallback_only() {
-                    match materialized {
-                        CanonicalMaterializationState::Activated { root: _, output } => {
-                            let _ = drop_scoped_value(output);
-                        }
-                        CanonicalMaterializationState::Rejected(rejection) => {
-                            let _ = drop_verified_rejection(rejection);
-                        }
-                    }
-                    return Err(StoreActivationContainment {
-                        cause: assembly.contain_activation_fault(),
-                    });
-                }
-
-                match (first_fault, materialized) {
-                    (Some(fault), CanonicalMaterializationState::Activated { root: _, output }) => {
-                        let _ = drop_scoped_value(output);
-                        let _fault = fault;
-                        Err(StoreActivationContainment {
-                            cause: assembly.contain_activation_fault(),
-                        })
-                    }
-                    (Some(fault), CanonicalMaterializationState::Rejected(rejection)) => {
-                        if fault.contract_seen {
-                            let _ = drop_verified_rejection(rejection);
-                            return Err(StoreActivationContainment {
-                                cause: assembly.contain_activation_fault(),
-                            });
-                        }
-                        let Some(failure_code) = fault.recoverable_code() else {
-                            let _ = drop_verified_rejection(rejection);
-                            return Err(StoreActivationContainment {
-                                cause: assembly.contain_activation_fault(),
-                            });
-                        };
-                        if drop_verified_rejection(rejection).is_err() {
-                            return Err(StoreActivationContainment {
-                                cause: assembly.contain_activation_fault(),
-                            });
-                        }
-                        finish_rejected(
-                            assembly,
-                            failure_work,
-                            outcome_evidence_destination_dimension,
-                            StoreCanonicalRejection::Runtime(fault.cause),
-                            failure_code,
-                        )
-                    }
-                    (None, CanonicalMaterializationState::Activated { root, output }) => {
-                        if assembly.canonical_len() != expected_materialized_blocks {
-                            let _ = drop_scoped_value(output);
-                            return Err(StoreActivationContainment {
-                                cause: assembly.contain_activation_fault(),
-                            });
-                        }
-                        Ok(CanonicalActivationOutcome::Activated(
-                            ActivatedCanonicalStoreSession {
-                                assembly,
-                                canonical_root: root,
-                                output,
-                                failure_work,
-                                validation_work_dimension,
-                                canonical_destination_dimension,
-                                outcome_evidence_destination_dimension,
-                                validation_work,
-                            },
-                        ))
-                    }
-                    (None, CanonicalMaterializationState::Rejected(rejection)) => finish_rejected(
-                        assembly,
-                        failure_work,
-                        outcome_evidence_destination_dimension,
-                        StoreCanonicalRejection::Requested(rejection.cause),
-                        rejection.failure_code,
-                    ),
-                }
-            }
-        }
-    }
-}
-
-impl<O, PP, U, L> Drop for RetainedStoreSessionOutcomeOwner<O, PP, U, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn drop(&mut self) {
-        if let Some(operation) = self.operation.take() {
-            let _ = contain_operation(operation);
-        }
-    }
-}
-
 fn contain_scoped_pending<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
     pending: ScopedPendingActivation<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
 ) -> StoreActivationContainment
@@ -616,6 +149,7 @@ where
                 canonical_root: _,
                 output,
                 failure_work: _,
+                validation_phase: _,
                 validation_work_dimension: _,
                 canonical_destination_dimension: _,
                 outcome_evidence_destination_dimension: _,
@@ -1058,16 +592,15 @@ impl<P, M> ScopedActivationInputs<P, M> {
         }
     }
 
-    fn take_plan(&mut self) -> P {
-        self.plan
-            .take()
-            .expect("the activation inputs move their core plan at most once")
-    }
-
-    fn take_materializer(&mut self) -> M {
-        self.materialize
-            .take()
-            .expect("the scoped materializer executes at most once")
+    fn plan_and_materializer_mut(&mut self) -> (&P, &mut M) {
+        let Self { plan, materialize } = self;
+        (
+            plan.as_ref()
+                .expect("the activation inputs retain their core plan until controlled drop"),
+            materialize
+                .as_mut()
+                .expect("the scoped materializer remains owned until controlled drop"),
+        )
     }
 
     fn drop_remaining(&mut self) -> Result<(), ()> {
@@ -1294,7 +827,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Moves one core-owned execution plan behind the owner-consuming activation transition.
+    /// Retains one core-owned execution plan behind the owner-consuming activation transition.
     #[allow(
         clippy::result_large_err,
         clippy::type_complexity,
@@ -1303,9 +836,9 @@ where
     pub fn activate<P>(
         mut self,
         plan: P,
-        materialize: impl for<'lane> FnOnce(
+        materialize: impl for<'lane> FnMut(
             CanonicalLane<'lane, O, PP, U, L>,
-            P,
+            &P,
         ) -> CanonicalMaterialization<
             'lane,
             T,
@@ -1342,6 +875,7 @@ where
             validation_work,
             expected_materialized_blocks,
         } = request;
+        let (materialization_phase, _) = canonical_plan.keys_for_publication_validation();
         let outcome_evidence_destination_dimension = failure.outcome_evidence_destination_dimension;
         let publication_plan =
             RetainedStorePublicationPlan::success(canonical_plan, failure.outcome_evidence_plan);
@@ -1424,10 +958,10 @@ where
             let lane = CanonicalLane {
                 assembly,
                 first_fault: &mut driver.first_fault,
+                materialization_phase,
                 materialization_work_dimension,
             };
-            let plan = inputs.take_plan();
-            let materialize = inputs.take_materializer();
+            let (plan, materialize) = inputs.plan_and_materializer_mut();
             materialize(lane, plan).into_state()
         }));
         let inputs_drop_failed = inputs.drop_remaining().is_err();
@@ -1573,6 +1107,7 @@ where
                             canonical_root: root,
                             output,
                             failure_work,
+                            validation_phase: materialization_phase,
                             validation_work_dimension,
                             canonical_destination_dimension,
                             outcome_evidence_destination_dimension,
@@ -1621,145 +1156,6 @@ where
         // transaction callback destroy its private plan and metered scratch before the outer
         // `plan_and_activate_scoped` boundary performs fail-closed containment.
         self.driver.take();
-    }
-}
-
-impl<O, PP, U, L> RetainedStoreOperation<O, PP, U, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    fn activation_work_control(
-        &mut self,
-        dimension: StoreDimensionKey,
-    ) -> Result<RetainedStoreWorkControl<'_, O, PP, U>, StoreRuntimeError> {
-        self.validate_activation_dimensions([dimension; 4])?;
-        let (raw, _) = self.raw.split_work_control(dimension);
-        Ok(RetainedStoreWorkControl { raw, sticky: None })
-    }
-}
-
-impl<'activation, O, PP, U, L> CanonicalPreflight<'activation, O, PP, U, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    /// Borrows the pre-activation control and work capability with first-fault preservation.
-    pub fn control_checkpoint<'borrow>(
-        &'borrow mut self,
-    ) -> CanonicalControlCheckpoint<'borrow, 'activation, O, PP, U> {
-        CanonicalControlCheckpoint {
-            raw: self.operation.control_checkpoint(),
-            first_fault: self.first_fault,
-            activation: PhantomData,
-        }
-    }
-
-    /// Runs every unit in the sealed semantic-preflight envelope exactly once.
-    ///
-    /// The full attempted envelope is admitted before the first inspector call. Each unit becomes
-    /// consumed only after its inspector returns normally, and control is polled at bounded
-    /// completion checkpoints. Returning `false` rejects the semantics but does not short-circuit
-    /// the remaining evidence.
-    pub fn inspect_semantic_work(
-        &mut self,
-        mut inspect: impl FnMut(u64) -> bool,
-    ) -> Result<bool, StoreRuntimeError> {
-        if let Some(cause) = preserved_fault(self.first_fault) {
-            return Err(cause);
-        }
-        if *self.semantic_work_complete || self.request.semantic_preflight_work == 0 {
-            return preserve_first_fault(
-                self.first_fault,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified),
-            );
-        }
-        let amount = NonZeroU64::new(self.request.semantic_preflight_work)
-            .expect("zero semantic work is handled before admission");
-        let dimension = self.request.materialization_work_dimension;
-        let control = self.operation.activation_work_control(dimension);
-        let mut control = preserve_first_fault(self.first_fault, control)?;
-        let permit = try_begin_canonical_work(&mut control, amount);
-        let permit = match permit {
-            Ok(permit) => permit,
-            Err(cause) => {
-                return preserve_first_fault(self.first_fault, Err(cause.into_runtime()));
-            }
-        };
-        let mut work = SemanticWorkBatch::new(permit);
-        let mut accepted = true;
-        for index in 0..amount.get() {
-            if work.work_batch.poll_due()
-                && let Err(cause) = work.poll_now()
-            {
-                return preserve_first_fault(self.first_fault, Err(cause));
-            }
-            accepted &= inspect(index);
-            if let Err(cause) = work.complete_unit() {
-                return preserve_first_fault(self.first_fault, Err(cause));
-            }
-        }
-        if let Err(cause) = work.finish_exact() {
-            return preserve_first_fault(self.first_fault, Err(cause));
-        }
-        *self.semantic_work_complete = true;
-        Ok(accepted)
-    }
-
-    /// Accepts the session-owned activation shape after complete authority-free core preflight.
-    pub fn seal<E>(self) -> CanonicalPreflightDecision<'activation, E> {
-        if !*self.semantic_work_complete {
-            let _ = preserve_first_fault::<()>(
-                self.first_fault,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified),
-            );
-        }
-        if self.first_fault.is_none() {
-            let (phase, dimensions) = self
-                .request
-                .canonical_plan
-                .keys_for_publication_validation();
-            let result = self.operation.validate_writer_keys(phase, dimensions);
-            let _ = preserve_first_fault(self.first_fault, result);
-        }
-        if self.first_fault.is_none() {
-            let (phase, dimensions) = self
-                .request
-                .outcome_evidence_plan
-                .keys_for_publication_validation();
-            let result = self.operation.validate_writer_keys(phase, dimensions);
-            let _ = preserve_first_fault(self.first_fault, result);
-        }
-        if self.first_fault.is_none() {
-            let result = self.operation.validate_activation_dimensions([
-                self.request.materialization_work_dimension,
-                self.request.validation_work_dimension,
-                self.request.canonical_destination_dimension,
-                self.request.outcome_evidence_destination_dimension,
-            ]);
-            let _ = preserve_first_fault(self.first_fault, result);
-        }
-        CanonicalPreflightDecision {
-            state: CanonicalPreflightState::Activate,
-            scope: PhantomData,
-        }
-    }
-
-    /// Records one explicit, verified pre-activation rejection and its terminal classification.
-    pub fn reject<E>(
-        self,
-        cause: E,
-        stable_code: u32,
-    ) -> CanonicalPreflightDecision<'activation, E> {
-        CanonicalPreflightDecision {
-            state: CanonicalPreflightState::Rejected(VerifiedRejection {
-                cause,
-                failure_code: PreparationFailureCode::domain(stable_code),
-            }),
-            scope: PhantomData,
-        }
     }
 }
 
@@ -1861,7 +1257,7 @@ where
     }
 
     /// Runs one semantic action after bounded control polling and records it only on normal return.
-    pub fn run_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, StoreRuntimeError> {
+    pub fn run_unit<R>(&mut self, action: impl FnMut() -> R) -> Result<R, StoreRuntimeError> {
         if let Some(cause) = preserved_fault(self.first_fault) {
             return Err(cause);
         }
@@ -1873,7 +1269,20 @@ where
         let mut host = self.operation.producer_host();
         let start = host.try_begin_observed_work([(self.dimension, 1)]);
         let mut observed = preserve_first_fault(self.first_fault, start)?;
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
+        let mut action = ManuallyDrop::new(Some(action));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            action
+                .as_mut()
+                .expect("the semantic action remains owned until controlled drop")()
+        }));
+        let action_drop_failed = drop_optional_callback(action).is_err();
+        if action_drop_failed && self.first_fault.is_none() {
+            let _ = preserve_first_fault::<()>(
+                self.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+        }
+        let result = match result {
             Ok(result) => result,
             Err(payload) => {
                 observed.finish_partial();
@@ -1883,14 +1292,19 @@ where
         };
         if let Err(cause) = observed.complete([1]) {
             observed.finish_partial();
-            return preserve_first_fault(self.first_fault, Err(cause));
+            return preserve_runtime_fault_then_drop_result(self.first_fault, cause, result);
         }
         if let Err(cause) = observed.finish() {
-            return preserve_first_fault(self.first_fault, Err(cause));
+            return preserve_runtime_fault_then_drop_result(self.first_fault, cause, result);
         }
         self.completed_any = true;
         if self.work_batch.note_observed_unit().is_err() {
             self.note_contract_if_untrusted();
+            let _ = drop_scoped_value(result);
+            return Err(StoreRuntimeError::ConstructionInvariantUnverified);
+        }
+        if action_drop_failed {
+            let _ = drop_scoped_value(result);
             return Err(StoreRuntimeError::ConstructionInvariantUnverified);
         }
         Ok(result)
@@ -2005,11 +1419,9 @@ where
 
     pub fn reserve(
         &mut self,
-        phase: StorePhaseKey,
-        dimension: StoreDimensionKey,
         bytes: u64,
     ) -> Result<CanonicalReservation<'activation, O>, StoreRuntimeError> {
-        self.inner.reserve(phase, dimension, bytes)
+        self.inner.reserve(self.phase, self.dimension, bytes)
     }
 
     pub fn resize(
@@ -2063,6 +1475,8 @@ where
                     first_fault: self.first_fault,
                     activation: PhantomData,
                 },
+                phase: self.materialization_phase,
+                dimension: self.materialization_work_dimension,
             }),
             Err(cause) => preserve_first_fault(self.first_fault, Err(cause)),
         }

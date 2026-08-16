@@ -988,7 +988,7 @@ where
     fn run_unit<R>(
         &mut self,
         category: SceneValidationWork,
-        action: impl FnOnce() -> R,
+        action: impl FnMut() -> R,
     ) -> ProfileValidationResult<R, C> {
         let final_work =
             self.work
@@ -1016,7 +1016,7 @@ where
     fn run_semantic_unit<T>(
         &mut self,
         category: SceneValidationWork,
-        action: impl FnOnce() -> Result<T, ProfileAuthoringSemanticError>,
+        action: impl FnMut() -> Result<T, ProfileAuthoringSemanticError>,
     ) -> ProfileValidationResult<T, C> {
         self.run_unit(category, action)?
             .map_err(ProfileAuthoringFailure::Semantic)

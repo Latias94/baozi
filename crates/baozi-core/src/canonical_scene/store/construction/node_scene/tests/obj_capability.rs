@@ -4,10 +4,6 @@ use baozi_operation::{CancellationToken, PhysicalStorageAccount, StorePreparatio
 
 use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
-use crate::canonical_scene::store::api::{
-    SceneConstructionTerminal as OpaqueSceneConstructionTerminal, SceneSuccessParts,
-    ValidatedScene, handoff_validated_node_scene_with_generation_source_for_test,
-};
 use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic,
     NodeSceneGeometryF32Cursor, NodeSceneGeometryU32Cursor,
@@ -16,7 +12,8 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
     NodeSceneSnapshot, NodeSceneSnapshotLimits,
 };
 use crate::canonical_scene::store::construction::node_scene::{
-    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneSuccessParts,
+    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
+    NodeSceneSuccessParts, PreparedNodeSceneConstruction, ValidatedNodeScene,
 };
 use crate::canonical_scene::store::construction::{STORE_DIMENSION, SceneConstructionOperation};
 use crate::canonical_scene::store::production::{
@@ -359,17 +356,21 @@ fn build_obj_scene_with_generation_source(
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> NodeSceneSuccessParts {
     projection.with_scene_input(|input| {
-        let prepared = SceneConstructionOperation::with_account_for_scene_input(
+        let build = SceneConstructionOperation::with_account_for_scene_input(
             account,
             test_limits(),
             input,
             SceneValidationLimits::default(),
         )
         .expect("normalized OBJ Scene input admission")
-        .try_validate()
-        .unwrap_or_else(|_| panic!("normalized OBJ Scene input must pass central validation"))
-        .prepare_with_generation_source(reserve_generation)
-        .expect("normalized OBJ Scene publication");
+        .finish_draft()
+        .expect("normalized OBJ Scene draft construction");
+        let NodeSceneDraftBuild::Draft { draft, owner } = build else {
+            panic!("normalized OBJ Scene input must produce a retained draft");
+        };
+        let prepared = owner
+            .prepare_with_generation_source(draft, reserve_generation)
+            .expect("normalized OBJ Scene publication");
         successful_parts(prepared)
     })
 }
@@ -377,7 +378,7 @@ fn build_obj_scene_with_generation_source(
 fn build_published_obj_scene(
     account: &PhysicalStorageAccount,
     projection: &ObjCanonicalProjection<'_>,
-) -> SceneSuccessParts {
+) -> NodeSceneSuccessParts {
     build_published_obj_scene_with_generation_source(
         account,
         projection,
@@ -389,38 +390,14 @@ fn build_published_obj_scene_with_generation_source(
     account: &PhysicalStorageAccount,
     projection: &ObjCanonicalProjection<'_>,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-) -> SceneSuccessParts {
-    projection.with_scene_input(|input| {
-        let validated = SceneConstructionOperation::with_account_for_scene_input(
-            account,
-            test_limits(),
-            input,
-            SceneValidationLimits::default(),
-        )
-        .expect("normalized OBJ Scene input admission")
-        .try_validate()
-        .unwrap_or_else(|_| panic!("normalized OBJ Scene input must pass central validation"));
-        match handoff_validated_node_scene_with_generation_source_for_test(
-            validated,
-            reserve_generation,
-        )
-        .expect("normalized OBJ opaque Scene publication")
-        {
-            OpaqueSceneConstructionTerminal::Success(parts) => parts,
-            OpaqueSceneConstructionTerminal::RichFailure(_) => {
-                panic!("valid OBJ Scene must not publish rich failure")
-            }
-            OpaqueSceneConstructionTerminal::MinimalFallback(_) => {
-                panic!("valid OBJ Scene must not publish minimal fallback")
-            }
-        }
-    })
+) -> NodeSceneSuccessParts {
+    build_obj_scene_with_generation_source(account, projection, reserve_generation)
 }
 
 pub(in crate::canonical_scene::store) fn build_obj_capability_scene_for_probe(
     account: &PhysicalStorageAccount,
     generation_source: &AtomicU64,
-) -> SceneSuccessParts {
+) -> NodeSceneSuccessParts {
     let projection = project_obj_source(obj_source(&OBJ_TEXCOORDS, &OBJ_NORMALS, &OBJ_FACES));
     build_published_obj_scene_with_generation_source(account, &projection, || {
         SceneGenerationId::reserve_from(generation_source)
@@ -583,10 +560,9 @@ fn assert_u32_values(mut values: NodeSceneGeometryU32Cursor<'_>, expected: &[u32
 }
 
 pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_probe(
-    scene: &ValidatedScene,
+    scene: &ValidatedNodeScene,
 ) -> ObjCapabilityCanonicalShapeObservation {
     let view = scene
-        .as_node_scene()
         .semantic_view()
         .expect("published OBJ Scene semantic view");
     assert_eq!(view.node_count(), 1);
@@ -893,16 +869,14 @@ pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_pr
 }
 
 pub(in crate::canonical_scene::store) fn capture_obj_capability_snapshots_for_probe(
-    parts: &SceneSuccessParts,
+    parts: &NodeSceneSuccessParts,
 ) -> (NodeSceneSnapshot, NodeSceneSnapshot) {
     let full = parts
         .scene
-        .as_node_scene()
         .capture_snapshot(snapshot_limits(8_192, 64), None)
         .expect("complete OBJ snapshot with review preview");
     let bounded = parts
         .scene
-        .as_node_scene()
         .capture_snapshot(snapshot_limits(96, 1), None)
         .expect("complete OBJ snapshot with bounded preview");
     (full, bounded)
@@ -957,7 +931,7 @@ fn obj_scene_and_report_can_release_in_either_order_without_losing_the_survivor(
     let projection = project_obj_source(obj_source(&OBJ_TEXCOORDS, &OBJ_NORMALS, &OBJ_FACES));
     let generation_source = AtomicU64::new(0);
 
-    let SceneSuccessParts {
+    let NodeSceneSuccessParts {
         scene: report_first_scene,
         report: report_first_report,
     } = build_published_obj_scene_with_generation_source(&account, &projection, || {
@@ -1002,7 +976,7 @@ fn obj_scene_and_report_can_release_in_either_order_without_losing_the_survivor(
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 
-    let SceneSuccessParts {
+    let NodeSceneSuccessParts {
         scene: scene_first_scene,
         report: scene_first_report,
     } = build_published_obj_scene_with_generation_source(&account, &projection, || {
@@ -1084,20 +1058,32 @@ fn incomplete_obj_corner_projection_is_rejected_by_central_validation() {
     assert_eq!(projection.texcoord_indices.pop(), Some(1));
 
     projection.with_scene_input(|input| {
-        let rejected = match SceneConstructionOperation::with_account_for_scene_input(
+        let build = SceneConstructionOperation::with_account_for_scene_input(
             &account,
             test_limits(),
             input,
             SceneValidationLimits::default(),
         )
         .expect("invalid OBJ projection operation admission")
-        .try_validate()
-        {
-            Ok(_) => panic!("incomplete OBJ corner projection must not validate"),
-            Err(rejected) => rejected,
+        .finish_draft()
+        .expect("invalid OBJ projection must prepare an exact draft outcome");
+        let (prepared, rejection) = match build {
+            NodeSceneDraftBuild::Draft { .. } => {
+                panic!("incomplete OBJ corner projection must not produce a draft")
+            }
+            NodeSceneDraftBuild::Failure {
+                authoring_rejection: Some(rejection),
+                prepared,
+            } => (prepared, rejection),
+            NodeSceneDraftBuild::Failure {
+                authoring_rejection: None,
+                ..
+            } => {
+                panic!("incomplete OBJ corner projection must retain its authoring rejection")
+            }
         };
 
-        match rejected.failure() {
+        match &rejection {
             NodeSceneConstructionRejection::GeometryAuthoring(
                 GeometryAuthoringFailure::Semantic(
                     GeometryAuthoringSemanticError::SourceProjectionCardinality {
@@ -1110,20 +1096,7 @@ fn incomplete_obj_corner_projection_is_rejected_by_central_validation() {
             other => panic!("unexpected incomplete OBJ projection rejection: {other:?}"),
         }
 
-        let (prepared, rejection) = rejected
-            .prepare_rich_failure()
-            .expect("invalid OBJ projection rich failure");
-        assert!(matches!(
-            rejection,
-            NodeSceneConstructionRejection::GeometryAuthoring(GeometryAuthoringFailure::Semantic(
-                GeometryAuthoringSemanticError::SourceProjectionCardinality {
-                    attribute: 2,
-                    expected: 6,
-                    actual: 5,
-                },
-            ))
-        ));
-        let terminal = prepared.handoff();
+        let terminal = PreparedNodeSceneConstruction::from(prepared).handoff();
         assert!(matches!(
             &terminal,
             NodeSceneConstructionTerminal::RichFailure(_)
@@ -1163,19 +1136,19 @@ fn obj_construction_one_short_work_limit_publishes_only_rich_failure() {
         .checked_sub(1)
         .expect("OBJ construction must consume work");
     projection.with_scene_input(|input| {
-        let validated = SceneConstructionOperation::with_account_for_scene_input(
+        let build = SceneConstructionOperation::with_account_for_scene_input(
             &account,
             test_limits_with_work(work_limit),
             input,
             SceneValidationLimits::default(),
         )
         .expect("work-bounded OBJ Scene input admission")
-        .try_validate()
-        .unwrap_or_else(|_| panic!("one-short total work must still admit OBJ validation"));
+        .finish_draft()
+        .expect("one-short OBJ work limit must prepare an exact draft outcome");
 
         let failure = rich_failure(
-            validated
-                .prepare()
+            build
+                .prepare_for_test()
                 .expect("one-short OBJ work limit must prepare rich failure"),
         );
         let work = failure
@@ -1183,7 +1156,10 @@ fn obj_construction_one_short_work_limit_publishes_only_rich_failure() {
             .dimension_by_semantic(STORE_DIMENSION)
             .expect("failed OBJ work evidence");
         assert_eq!(work.attempted(), successful_work);
-        assert_eq!(work.consumed(), work_limit);
+        assert!(
+            work.consumed() < work_limit,
+            "the unexecuted canonical-validation suffix must remain unconsumed"
+        );
         assert_eq!(
             terminal_failure_class(failure.ledger_evidence()),
             StorePreparationFailureClass::Ledger,
@@ -1200,7 +1176,7 @@ fn obj_cancellation_after_validation_publishes_only_rich_failure() {
     let cancellation = CancellationToken::new();
 
     projection.with_scene_input(|input| {
-        let validated =
+        let build =
             SceneConstructionOperation::with_account_and_cancellation_for_scene_input_for_test(
                 &account,
                 test_limits(),
@@ -1209,13 +1185,16 @@ fn obj_cancellation_after_validation_publishes_only_rich_failure() {
                 cancellation.clone(),
             )
             .expect("cancellable OBJ Scene input admission")
-            .try_validate()
-            .unwrap_or_else(|_| panic!("OBJ input must validate before cancellation"));
+            .finish_draft()
+            .expect("OBJ input must materialize and validate before cancellation");
+        let NodeSceneDraftBuild::Draft { draft, owner } = build else {
+            panic!("valid OBJ input must retain its draft before cancellation");
+        };
 
         cancellation.cancel();
         let failure = rich_failure(
-            validated
-                .prepare()
+            owner
+                .prepare_with_generation_source(draft, SceneGenerationId::reserve)
                 .expect("cancelled OBJ construction must prepare rich failure"),
         );
         assert_eq!(

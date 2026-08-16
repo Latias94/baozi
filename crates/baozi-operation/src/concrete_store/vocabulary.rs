@@ -178,10 +178,6 @@ pub struct StoreKeyDomain {
     catalog: StoreSemanticCatalogId,
 }
 
-#[cfg(feature = "_u4-activation")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct StoreActivationBrand(NonZeroU64);
-
 impl StoreKeyDomain {
     /// Issues one unique process-local key authority.
     pub fn try_new(catalog: StoreSemanticCatalogId) -> Result<Self, StoreKeyDomainCreateError> {
@@ -197,11 +193,6 @@ impl StoreKeyDomain {
     /// Returns this authority's frozen semantic-catalog identity.
     pub const fn catalog(&self) -> StoreSemanticCatalogId {
         self.catalog
-    }
-
-    #[cfg(feature = "_u4-activation")]
-    pub(super) const fn activation_brand(&self) -> StoreActivationBrand {
-        StoreActivationBrand(self.id)
     }
 
     /// Uses host authority to admit one phase identity into this runtime domain.

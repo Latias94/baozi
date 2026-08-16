@@ -1194,6 +1194,11 @@ where
         } else if self.mode != RetainedOutcomeMode::SuccessCapable {
             Err(RetainedClosureValidationError::WrongOutcomeMode)
         } else {
+            #[cfg(feature = "_u4-activation")]
+            let validation_storage_baseline = self
+                .operation
+                .as_ref()
+                .map(RetainedOperation::planning_baseline);
             let epoch = match self.try_next_validation_epoch() {
                 Ok(epoch) => epoch,
                 Err(cause) => {
@@ -1259,6 +1264,14 @@ where
                             }
                         };
                         let operation = self.operation.as_ref();
+                        #[cfg(feature = "_u4-activation")]
+                        let storage_exact = validation_storage_baseline.is_some_and(|baseline| {
+                            operation.is_some_and(|operation| {
+                                operation.planning_matches_baseline(baseline)
+                            })
+                        });
+                        #[cfg(not(feature = "_u4-activation"))]
+                        let storage_exact = true;
                         let permit_outstanding = operation
                             .is_none_or(|operation| operation.has_outstanding_work_permit());
                         let work_partially_resolved = operation.is_some_and(|operation| {
@@ -1271,7 +1284,10 @@ where
                             && session.valid
                             && session.canonical_seen == canonical.member_count()
                             && session.evidence_seen == evidence.member_count();
-                        if permit_outstanding {
+                        if !storage_exact {
+                            self.containment = AssemblyContainmentProvenance::NewFaultPending;
+                            Err(RetainedClosureValidationError::Poisoned)
+                        } else if permit_outstanding {
                             Err(RetainedClosureValidationError::Poisoned)
                         } else if work_partially_resolved || terminal_cause_recorded {
                             Err(RetainedClosureValidationError::Rejected)

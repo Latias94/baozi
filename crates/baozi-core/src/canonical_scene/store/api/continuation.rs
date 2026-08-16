@@ -1,16 +1,13 @@
 use baozi_operation::{
     OperationControl, PhysicalStorageAccount, PhysicalStorageAccountFactory,
-    PhysicalStorageAccountLimits,
+    PhysicalStorageAccountLimits, StoreRuntimeError,
 };
 use thiserror::Error;
 
 use crate::SceneValidationLimits;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 
-use super::{
-    PendingSceneDraftOwner, PreparedSceneConstruction, SceneDraft, SceneDraftBuild,
-    ValidatedSceneConstruction,
-};
+use super::{PendingSceneDraftOwner, PreparedSceneConstruction, SceneDraft, SceneDraftBuild};
 use crate::canonical_scene::store::construction::node_scene::NodeSceneConstructionRejection;
 use crate::canonical_scene::store::construction::{
     SceneConstructionError, SceneConstructionLimits, SceneConstructionOperation,
@@ -82,11 +79,11 @@ pub(crate) enum SceneConstructionFinishError {
 #[derive(Debug)]
 pub(crate) struct SceneAuthoringRejection {
     domain: SceneAuthoringDomain,
-    source: NodeSceneConstructionRejection,
+    source: NodeSceneConstructionRejection<StoreRuntimeError>,
 }
 
 impl SceneAuthoringRejection {
-    fn from_node_scene(source: NodeSceneConstructionRejection) -> Self {
+    fn from_node_scene(source: NodeSceneConstructionRejection<StoreRuntimeError>) -> Self {
         let domain = match &source {
             NodeSceneConstructionRejection::SpatialAuthoring(_) => SceneAuthoringDomain::Spatial,
             NodeSceneConstructionRejection::NodeAuthoring(_) => SceneAuthoringDomain::Node,
@@ -104,6 +101,9 @@ impl SceneAuthoringRejection {
             | NodeSceneConstructionRejection::ProfileAuthoring(_) => SceneAuthoringDomain::Profile,
             NodeSceneConstructionRejection::Aggregate(_) => SceneAuthoringDomain::Aggregate,
             NodeSceneConstructionRejection::Planning(_) => SceneAuthoringDomain::Planning,
+            NodeSceneConstructionRejection::Materialization(_) => {
+                SceneAuthoringDomain::Materialization
+            }
         };
         Self { domain, source }
     }
@@ -136,6 +136,7 @@ pub(crate) enum SceneAuthoringDomain {
     Profile,
     Aggregate,
     Planning,
+    Materialization,
 }
 
 /// Invalid pairing between a completed continuation and the parser result presented to it.
@@ -220,29 +221,26 @@ impl<'account> SceneConstruction<'account> {
             validation_limits,
         )
         .map_err(SceneConstructionFinishError::Start)?;
-        let validated = match operation.try_validate() {
-            Ok(validated) => ValidatedSceneConstruction::from_node_scene(validated),
-            Err(rejected) => {
-                let (prepared, rejection) = rejected
-                    .prepare_rich_failure()
-                    .map_err(SceneConstructionFinishError::Construction)?;
-                self.state = SceneConstructionState::Failure(PreparedSceneConstruction(prepared));
-                return Err(SceneConstructionFinishError::AuthoringRejected(
-                    SceneAuthoringRejection::from_node_scene(rejection),
-                ));
-            }
-        };
-        match validated
-            .finish_draft()
-            .map_err(SceneConstructionFinishError::Construction)?
-        {
+        match SceneDraftBuild::from_node_scene(
+            operation
+                .finish_draft()
+                .map_err(SceneConstructionFinishError::Construction)?,
+        ) {
             SceneDraftBuild::Draft { draft, owner } => {
                 self.state = SceneConstructionState::Draft(owner);
                 Ok(draft)
             }
-            SceneDraftBuild::Failure(failure) => {
-                self.state = SceneConstructionState::Failure(failure.into());
-                Err(SceneConstructionFinishError::MaterializationFailed)
+            SceneDraftBuild::Failure {
+                prepared,
+                authoring_rejection,
+            } => {
+                self.state = SceneConstructionState::Failure(prepared.into());
+                match authoring_rejection {
+                    Some(rejection) => Err(SceneConstructionFinishError::AuthoringRejected(
+                        SceneAuthoringRejection::from_node_scene(rejection),
+                    )),
+                    None => Err(SceneConstructionFinishError::MaterializationFailed),
+                }
             }
         }
     }

@@ -2,8 +2,9 @@ use super::*;
 
 #[cfg(feature = "_u4-activation")]
 use super::activation::{
-    CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationRequirements,
-    CanonicalMaterialization, CanonicalTableShape, FailureEvidenceDecision, FailureEvidenceOutcome,
+    CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationSeal,
+    CanonicalFailureRequirements, CanonicalSuccessRequirements, CanonicalTableShape,
+    FailureEvidenceDecision, FailureEvidenceOutcome,
 };
 
 use std::num::{NonZeroU32, NonZeroU64};
@@ -150,14 +151,9 @@ fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
     let factory = test_factory();
     let account = test_account(&factory);
     let (operation, keys) = test_operation(&account, u64::MAX);
-    let requirements = CanonicalActivationRequirements::new(
-        CanonicalTableShape::new(1, 1).expect("activation canonical shape"),
+    let failure = CanonicalFailureRequirements::new(
         CanonicalTableShape::new(1, 1).expect("activation evidence shape"),
-        1,
-        0,
-        NonZeroU64::MIN,
-    )
-    .expect("activation requirements");
+    );
     let policy = CanonicalActivationPolicy::new(
         test_writer_plan(keys, 2, 2),
         test_writer_plan(keys, 2, 2),
@@ -166,16 +162,19 @@ fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
         keys.dimension,
         keys.dimension,
     );
-    let (outcome_owner, sealer) = operation.into_session_outcome_owner(policy);
-    let request = sealer.seal(requirements);
-    let outcome = outcome_owner
-        .plan_and_activate(
-            request,
-            |preflight| preflight.reject((), 77),
-            |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, TestTag> {
-                unreachable!("preflight rejection cannot materialize canonical storage")
-            },
-        )
+    let outcome_owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .expect("scoped activation owner");
+    let outcome: CanonicalActivationOutcome<
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        (),
+        (),
+        ScalarSequence<u8>,
+        TestTag,
+    > = outcome_owner
+        .plan_and_activate_scoped(|planning| planning.reject((), 77))
         .expect("preflight rejection remains a recoverable activation outcome");
     let rejected = match outcome {
         CanonicalActivationOutcome::NeverActivated(rejected) => rejected,
@@ -217,14 +216,15 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
     let factory = test_factory();
     let account = test_account(&factory);
     let (operation, keys) = test_operation(&account, u64::MAX);
-    let requirements = CanonicalActivationRequirements::new(
-        CanonicalTableShape::new(1, 1).expect("activation canonical shape"),
+    let failure = CanonicalFailureRequirements::new(
         CanonicalTableShape::new(1, 1).expect("activation evidence shape"),
+    );
+    let success = CanonicalSuccessRequirements::new(
+        CanonicalTableShape::new(1, 1).expect("activation canonical shape"),
         1,
-        0,
         NonZeroU64::MIN,
     )
-    .expect("activation requirements");
+    .expect("activation success requirements");
     let policy = CanonicalActivationPolicy::new(
         test_writer_plan(keys, 2, 2),
         test_writer_plan(keys, 2, 2),
@@ -233,14 +233,22 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
         keys.dimension,
         keys.dimension,
     );
-    let (outcome_owner, sealer) = operation.into_session_outcome_owner(policy);
-    let request = sealer.seal(requirements);
+    let outcome_owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .expect("scoped activation owner");
     let mut ledger = None;
 
-    let result = outcome_owner.plan_and_activate(
-        request,
-        |preflight| preflight.seal(),
-        |mut lane| {
+    let result = outcome_owner.plan_and_activate_scoped(|mut planning| {
+        let mut semantic = planning
+            .begin_semantic_work()
+            .expect("semantic work session");
+        semantic.run_unit(|| ()).expect("semantic work completion");
+        let completion = semantic.finish_exact().expect("semantic completion");
+        let permit = match planning.seal_activation(success, completion) {
+            CanonicalActivationSeal::Sealed(permit) => permit,
+            CanonicalActivationSeal::Unsealed(failure) => return failure.finish_after_plan_drop(),
+        };
+        permit.activate((), |mut lane, _plan| {
             ledger = Some(lane.test_ledger_probe());
             let cause = lane
                 .try_retain_sequence(
@@ -256,8 +264,8 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
                 .expect_err("builder panic must enter activation containment");
             assert!(matches!(cause, StoreRuntimeError::BuilderPanicked));
             lane.reject::<(), (), ScalarSequence<u8>, TestTag>((), 74)
-        },
-    );
+        })
+    });
     let containment = match result {
         Err(containment) => containment,
         Ok(_) => panic!("builder panic must not produce an activation outcome"),
@@ -274,8 +282,8 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
     assert_eq!(
         (work.attempted(), work.consumed()),
         (
-            u64::try_from(COMPLETED + 1).expect("planned work fits u64"),
-            u64::try_from(COMPLETED).expect("completed work fits u64"),
+            u64::try_from(COMPLETED + 2).expect("planned work fits u64"),
+            u64::try_from(COMPLETED + 1).expect("completed work fits u64"),
         )
     );
     assert!(account.snapshot().poisoned());

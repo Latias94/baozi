@@ -849,6 +849,57 @@ where
         Ok(work)
     }
 
+    pub(crate) fn record_product_graph_failure(&mut self, code: u32) {
+        record_terminal_cause_with_precedence(
+            self.sticky_terminal_cause,
+            PreparationFailureCode::product_graph(code),
+        );
+    }
+
+    pub(crate) fn reserve(
+        &mut self,
+        phase: P,
+        bytes: u64,
+    ) -> Result<LiveReservation<O, P, D>, LedgerCause<D>> {
+        let result = self.ledger.reserve(phase, self.dimension, bytes);
+        if result.is_err() {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+        }
+        result
+    }
+
+    pub(crate) fn resize(
+        &mut self,
+        reservation: &mut LiveReservation<O, P, D>,
+        bytes: u64,
+    ) -> Result<(), LedgerCause<D>> {
+        let result = self.ledger.resize_reservation(reservation, bytes);
+        if result.is_err() {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+        }
+        result
+    }
+
+    pub(crate) fn validate_live_owner(
+        &mut self,
+        reservation: &LiveReservation<O, P, D>,
+    ) -> Result<(), LedgerCause<D>> {
+        let result = self.ledger.validate_live_reservation(reservation);
+        if result.is_err() {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::ledger(),
+            );
+        }
+        result
+    }
+
     pub(crate) fn try_begin(
         mut self,
         amount: NonZeroU64,
@@ -961,6 +1012,11 @@ where
             self.control.sticky_terminal_cause,
             PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
         );
+        // A fully consumed permit can release its capability during Drop while still rejecting the
+        // missing explicit finish. An incomplete or forgotten permit remains fail-closed.
+        if self.remaining == 0 {
+            *self.control.ordinary_work_permit_outstanding = false;
+        }
     }
 }
 
@@ -1132,6 +1188,11 @@ where
             control.sticky_terminal_cause,
             PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
         );
+        // A fully consumed permit can release its capability during Drop while still rejecting the
+        // missing explicit finish. An incomplete or forgotten permit remains fail-closed.
+        if self.remaining == 0 {
+            *control.ordinary_work_permit_outstanding = false;
+        }
     }
 }
 

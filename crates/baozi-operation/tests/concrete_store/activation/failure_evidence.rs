@@ -17,19 +17,25 @@ fn rejected_session_with_panicking_cause(
     FailureCausePanicOnDrop,
 > {
     let (operation, keys) = operation(account);
-    let outcome = plan_activation!(
-        operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.reject(FailureCausePanicOnDrop, 11),
-        |_lane| -> CanonicalMaterialization<
-            '_,
-            (),
-            FailureCausePanicOnDrop,
-            ScalarSequence<u8>,
-            SequenceTag,
-        > { unreachable!("preflight rejection cannot materialize") },
-    )
-    .unwrap();
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+    let outcome: CanonicalActivationOutcome<
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        (),
+        FailureCausePanicOnDrop,
+        ScalarSequence<u8>,
+        SequenceTag,
+    > = owner
+        .plan_and_activate_scoped(|planning| planning.reject(FailureCausePanicOnDrop, 11))
+        .unwrap();
     match outcome {
         CanonicalActivationOutcome::NeverActivated(state) => state,
         CanonicalActivationOutcome::Activated(_)
@@ -98,10 +104,9 @@ fn rejected_canonical_cause_drop_panic_poison_contains_the_physical_owner() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal::<FailureCausePanicOnDrop>(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             let _ = lane
                 .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
@@ -561,10 +566,9 @@ fn central_evidence_builder_error_preserves_domain_cause_before_partial_resoluti
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal::<()>(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             let root = lane
                 .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
@@ -582,32 +586,36 @@ fn central_evidence_builder_error_preserves_domain_cause_before_partial_resoluti
         | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
     };
     let expected = StoreBuildError::domain(DOMAIN_CODE).unwrap();
-    let outcome =
-        activated
-            .validate_centrally(
-                |lane, _output| {
-                    let cause = lane
-                        .try_retain_sequence(
-                            SequencePlan::<u8>::new(PLANNED_WORK).unwrap(),
-                            EvidenceLeafTag,
-                            |_writer| Err(expected),
-                        )
-                        .unwrap_err();
-                    assert_eq!(cause, StoreRuntimeError::Build(expected));
-                    lane.abort::<ScalarSequence<u8>, EvidenceLeafTag>()
-                },
-                |_session,
-                 _canonical,
-                 _evidence,
-                 _output|
-                 -> Result<
-                    CanonicalValidationDecision<(), ValidationRejection>,
-                    StoreWorkError,
-                > {
-                    unreachable!("failed evidence construction cannot enter central validation")
-                },
-            )
-            .unwrap();
+    let outcome = activated
+        .validate_centrally(
+            |lane, _output| {
+                let cause = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(PLANNED_WORK).unwrap(),
+                        EvidenceLeafTag,
+                        |_writer| Err(expected),
+                    )
+                    .unwrap_err();
+                assert_eq!(cause, StoreRuntimeError::Build(expected));
+                lane.abort::<ScalarSequence<u8>, EvidenceLeafTag>()
+            },
+            |planning, _output| {
+                planning.validate_with(
+                    |_| Ok(()),
+                    |_session,
+                     _canonical,
+                     _evidence,
+                     &mut ()|
+                     -> Result<
+                        CanonicalValidationDecision<(), ValidationRejection>,
+                        StoreWorkError,
+                    > {
+                        unreachable!("failed evidence construction cannot enter central validation")
+                    },
+                )
+            },
+        )
+        .unwrap();
     let fallback = match outcome {
         CanonicalCentralValidationOutcome::Fallback(fallback) => fallback,
         CanonicalCentralValidationOutcome::Candidate(_)

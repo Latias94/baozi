@@ -727,7 +727,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
     fn run_unit<R>(
         &mut self,
         kind: SceneValidationWork,
-        action: impl FnOnce() -> R,
+        action: impl FnMut() -> R,
     ) -> GeometryValidationResult<R, C> {
         let final_work =
             self.work

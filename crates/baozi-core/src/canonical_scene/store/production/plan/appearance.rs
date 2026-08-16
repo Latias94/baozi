@@ -751,7 +751,7 @@ impl<'control, C: CanonicalAuthoringControl> AppearanceValidationContext<'contro
     fn run_unit<R>(
         &mut self,
         kind: SceneValidationWork,
-        action: impl FnOnce() -> R,
+        action: impl FnMut() -> R,
     ) -> AppearanceValidationResult<R, C> {
         let final_work = self.work.checked_add(1).ok_or(
             AppearanceAuthoringSemanticError::AccountingOverflow {

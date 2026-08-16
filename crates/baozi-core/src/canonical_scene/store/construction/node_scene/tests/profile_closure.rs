@@ -1,6 +1,6 @@
 use std::sync::atomic::AtomicU64;
 
-use baozi_operation::{PhysicalStorageAccount, PhysicalStorageAccountSnapshot};
+use baozi_operation::{PhysicalStorageAccount, PhysicalStorageAccountSnapshot, StoreRuntimeError};
 
 use crate::SceneValidationLimits;
 use crate::canonical_scene::store::construction::node_scene::semantic::{
@@ -12,10 +12,13 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
     NodeSceneSnapshot, NodeSceneSnapshotLimits,
 };
 use crate::canonical_scene::store::construction::node_scene::{
-    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneSuccessParts,
-    RejectedNodeSceneConstruction, ValidatedNodeScene,
+    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
+    NodeSceneSuccessParts, PreparedNodeSceneConstruction, PreparedNodeSceneFailure,
+    ValidatedNodeScene,
 };
-use crate::canonical_scene::store::construction::{STORE_DIMENSION, SceneConstructionOperation};
+use crate::canonical_scene::store::construction::{
+    STORE_DIMENSION, SceneConstructionError, SceneConstructionOperation,
+};
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, CameraAuthoring, CameraLocalId,
     CanonicalProfileOwner, DeformationAuthoringBatch, GeometryAuthoringBatch, LightAuthoring,
@@ -127,37 +130,69 @@ pub(in crate::canonical_scene::store) struct ProfileClosurePreflightStorageObser
 }
 
 enum ProfileClosureAuthoringPreflightDisposition {
-    Rejected(RejectedNodeSceneConstruction),
+    Rejected {
+        rejection: NodeSceneConstructionRejection<StoreRuntimeError>,
+        // Keep the physical failure owner last so it remains the final containment boundary.
+        prepared: PreparedNodeSceneFailure,
+    },
 }
 
 impl ProfileClosureAuthoringPreflightDisposition {
-    fn from_validation_result<T>(
+    fn from_build_result(
         scenario_id: &'static str,
-        result: Result<T, RejectedNodeSceneConstruction>,
+        result: Result<NodeSceneDraftBuild, SceneConstructionError>,
     ) -> Self {
-        match result {
-            Err(rejected) => Self::Rejected(rejected),
-            Ok(_) => panic!(
-                "profile-closure negative case {scenario_id} unexpectedly reached activation eligibility"
-            ),
+        match result.unwrap_or_else(|error| {
+            panic!("profile-closure negative case {scenario_id} failed to finish: {error:?}")
+        }) {
+            NodeSceneDraftBuild::Failure {
+                authoring_rejection: Some(rejection),
+                prepared,
+            } => Self::Rejected {
+                rejection,
+                prepared,
+            },
+            NodeSceneDraftBuild::Failure {
+                authoring_rejection: None,
+                prepared,
+            } => {
+                drop(PreparedNodeSceneConstruction::from(prepared).handoff());
+                panic!(
+                    "profile-closure negative case {scenario_id} lost its typed authoring rejection"
+                )
+            }
+            NodeSceneDraftBuild::Draft { owner, .. } => {
+                drop(owner);
+                panic!(
+                    "profile-closure negative case {scenario_id} unexpectedly reached activation eligibility"
+                )
+            }
         }
     }
 
     const fn report_name(&self) -> &'static str {
         match self {
-            Self::Rejected(_) => "rejected",
+            Self::Rejected { .. } => "rejected",
         }
     }
 
     const fn activation_eligibility_reached(&self) -> bool {
         match self {
-            Self::Rejected(_) => false,
+            Self::Rejected { .. } => false,
         }
     }
 
-    fn rejection(&self) -> &NodeSceneConstructionRejection {
+    fn rejection(&self) -> &NodeSceneConstructionRejection<StoreRuntimeError> {
         match self {
-            Self::Rejected(rejected) => rejected.failure(),
+            Self::Rejected { rejection, .. } => rejection,
+        }
+    }
+
+    fn handoff(self) -> NodeSceneConstructionTerminal {
+        match self {
+            Self::Rejected { prepared, .. } => {
+                PreparedNodeSceneConstruction::from(prepared).handoff()
+            }
         }
     }
 }
@@ -207,17 +242,6 @@ fn freeze_preflight_storage(
         final_live_retained_bytes: after_rejection_drop.live_retained_bytes(),
         final_live_retained_allocations: after_rejection_drop.live_retained_allocations(),
     }
-}
-
-fn assert_zero_preflight_storage(storage: ProfileClosurePreflightStorageObservation) {
-    assert_eq!(storage.peak_retained_bytes_delta, 0);
-    assert_eq!(storage.peak_retained_allocations_delta, 0);
-    assert_eq!(storage.total_admitted_retained_bytes_delta, 0);
-    assert_eq!(storage.total_admitted_retained_allocations_delta, 0);
-    assert_eq!(storage.live_retained_bytes_delta, 0);
-    assert_eq!(storage.live_retained_allocations_delta, 0);
-    assert_eq!(storage.final_live_retained_bytes, 0);
-    assert_eq!(storage.final_live_retained_allocations, 0);
 }
 
 fn extension_schema(name: &str, version: u32) -> ExtensionSchemaId {
@@ -386,22 +410,44 @@ fn build_profile_closure_scene_variant(
     variant: ProfileClosureInputVariant,
 ) -> NodeSceneSuccessParts {
     with_profile_closure_input_variant(variant, |input| {
-        let prepared = SceneConstructionOperation::with_account_for_scene_input(
+        let build = SceneConstructionOperation::with_account_for_scene_input(
             account,
             test_limits(),
             input,
             SceneValidationLimits::default(),
         )
         .expect("profile-closure Scene admission")
-        .try_validate()
-        .unwrap_or_else(|rejected| {
-            panic!(
-                "profile-closure input must pass central validation: {:?}",
-                rejected.failure()
-            )
-        })
-        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(generation_source))
-        .expect("profile-closure Scene publication");
+        .finish_draft()
+        .expect("profile-closure Scene draft build");
+        let prepared = match build {
+            NodeSceneDraftBuild::Draft { draft, owner } => owner
+                .prepare_with_generation_source(draft, || {
+                    SceneGenerationId::reserve_from(generation_source)
+                })
+                .expect("profile-closure Scene publication"),
+            NodeSceneDraftBuild::Failure {
+                authoring_rejection,
+                prepared,
+            } => match PreparedNodeSceneConstruction::from(prepared).handoff() {
+                NodeSceneConstructionTerminal::RichFailure(failure) => {
+                    panic!(
+                        "profile-closure Scene published rich failure: rejection={authoring_rejection:?}, class={:?}, code={}",
+                        terminal_failure_class(failure.ledger_evidence()),
+                        terminal_failure_code(failure.ledger_evidence()),
+                    )
+                }
+                NodeSceneConstructionTerminal::MinimalFallback(fallback) => {
+                    panic!(
+                        "profile-closure Scene published minimal fallback: rejection={authoring_rejection:?}, class={:?}, code={}",
+                        terminal_failure_class(fallback.ledger_evidence()),
+                        terminal_failure_code(fallback.ledger_evidence()),
+                    )
+                }
+                NodeSceneConstructionTerminal::Success(_) => {
+                    unreachable!("a prepared failure cannot hand off a successful Scene")
+                }
+            },
+        };
 
         match prepared.handoff() {
             NodeSceneConstructionTerminal::Success(parts) => parts,
@@ -917,9 +963,9 @@ fn observe_profile_closure_negative_case(
             });
             let before_preflight = account.snapshot();
             (
-                ProfileClosureAuthoringPreflightDisposition::from_validation_result(
+                ProfileClosureAuthoringPreflightDisposition::from_build_result(
                     case.scenario_id(),
-                    operation.try_validate(),
+                    operation.finish_draft(),
                 ),
                 before_preflight,
             )
@@ -932,11 +978,49 @@ fn observe_profile_closure_negative_case(
     let failure_code = disposition.rejection().stable_code();
     let preflight_disposition = disposition.report_name();
     let activation_eligibility_reached = disposition.activation_eligibility_reached();
-    drop(disposition);
+    match disposition.handoff() {
+        NodeSceneConstructionTerminal::RichFailure(failure) => {
+            assert_eq!(
+                terminal_failure_code(failure.ledger_evidence()),
+                failure_code,
+                "profile-closure rich failure must preserve the typed authoring rejection code"
+            );
+            assert_eq!(
+                failure
+                    .ledger_evidence()
+                    .dimension_by_semantic(STORE_DIMENSION)
+                    .expect("profile-closure rejection ordinary dimension")
+                    .committed_canonical_output(),
+                0,
+                "authoring rejection must not commit canonical output"
+            );
+            drop(failure);
+        }
+        NodeSceneConstructionTerminal::MinimalFallback(fallback) => {
+            assert_eq!(
+                fallback
+                    .ledger_evidence()
+                    .dimension_by_semantic(STORE_DIMENSION)
+                    .expect("profile-closure fallback ordinary dimension")
+                    .committed_canonical_output(),
+                0,
+                "authoring fallback must not commit canonical output"
+            );
+            drop(fallback);
+        }
+        NodeSceneConstructionTerminal::Success(parts) => {
+            drop(parts);
+            panic!(
+                "profile-closure negative case {} unexpectedly published a Scene",
+                case.scenario_id()
+            );
+        }
+    }
 
     let preflight_storage =
         freeze_preflight_storage(before_preflight, while_rejected, account.snapshot());
-    assert_zero_preflight_storage(preflight_storage);
+    assert_eq!(preflight_storage.final_live_retained_bytes, 0);
+    assert_eq!(preflight_storage.final_live_retained_allocations, 0);
     let observation = ProfileClosureNegativeCaseObservation {
         scenario_id: case.scenario_id(),
         preflight_disposition,
@@ -953,7 +1037,7 @@ fn observe_profile_closure_negative_case(
 
 fn classify_profile_closure_rejection(
     case: ProfileClosureNegativeCase,
-    rejection: &NodeSceneConstructionRejection,
+    rejection: &NodeSceneConstructionRejection<StoreRuntimeError>,
 ) -> (&'static str, &'static str) {
     match (case, rejection) {
         (
@@ -1167,13 +1251,19 @@ fn preflight_storage_observation_detects_nonzero_admission_deltas() {
 }
 
 #[test]
-fn profile_closure_negative_cases_reject_before_activation_and_never_admit_storage() {
+fn profile_closure_negative_cases_reject_before_activation_and_release_failure_publication() {
     let observations = collect_profile_closure_negative_cases_for_probe();
     assert_eq!(observations.len(), ProfileClosureNegativeCase::ALL.len());
     for observation in observations {
         assert_eq!(observation.preflight_disposition, "rejected");
         assert!(!observation.activation_eligibility_reached);
-        assert_zero_preflight_storage(observation.preflight_storage);
+        assert_eq!(observation.preflight_storage.final_live_retained_bytes, 0);
+        assert_eq!(
+            observation
+                .preflight_storage
+                .final_live_retained_allocations,
+            0
+        );
         assert!(matches!(
             observation.failure_class,
             "spatial-authoring" | "profile-authoring"

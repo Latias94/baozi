@@ -70,13 +70,22 @@ fn operation_with_scoped_semantic_limit(
 
 struct ScratchPlan<'scope> {
     values: Vec<u8>,
-    scratch: CanonicalReservation<'scope, TestOwner>,
+    _scratch: CanonicalReservation<'scope, TestOwner>,
 }
 
 struct DropMarker<'a> {
     dropped: &'a Cell<bool>,
     account: &'a PhysicalStorageAccount,
     poison_seen_while_dropping: &'a Cell<bool>,
+}
+
+struct PanicDropProbe<'a>(&'a Cell<bool>);
+
+impl Drop for PanicDropProbe<'_> {
+    fn drop(&mut self) {
+        self.0.set(true);
+        panic!("injected scoped owner drop panic");
+    }
 }
 
 impl Drop for DropMarker<'_> {
@@ -93,7 +102,7 @@ struct TrackedScratchPlan<'scope, 'probe> {
 }
 
 #[test]
-fn scoped_activation_permit_moves_the_core_plan_only_at_activation() {
+fn scoped_activation_permit_retains_the_core_plan_through_activation() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
@@ -106,8 +115,8 @@ fn scoped_activation_permit_moves_the_core_plan_only_at_activation() {
         .into_scoped_session_outcome_owner(policy, failure)
         .unwrap();
 
-    // Operation verifies the semantic completion and physical shape without interpreting the
-    // core-owned execution plan. The plan moves behind the owner-consuming transition only here.
+    // Operation verifies semantic completion and physical shape without interpreting the
+    // core-owned execution plan. Activation retains it until the materializer returns or panics.
     let outcome = owner
         .plan_and_activate_scoped(|mut planning| {
             let mut semantic = planning.begin_semantic_work().unwrap();
@@ -127,12 +136,10 @@ fn scoped_activation_permit_moves_the_core_plan_only_at_activation() {
             permit.activate(
                 ScratchPlan {
                     values: vec![3, 5, 8],
-                    scratch,
+                    _scratch: scratch,
                 },
                 |lane, plan| {
                     assert_eq!(plan.values, [3, 5, 8]);
-                    let ScratchPlan { values: _, scratch } = plan;
-                    drop(scratch);
                     lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
                         MaterializationRejection::Semantic,
                         21,
@@ -257,6 +264,25 @@ fn scoped_activation_permit_and_semantic_completion_are_linear() {
     let _ = <SealFailure as AmbiguousIfClone<_>>::assert_not_clone;
     let _ = <Receipt as AmbiguousIfCopy<_>>::assert_not_copy;
     let _ = <Receipt as AmbiguousIfClone<_>>::assert_not_clone;
+}
+
+#[test]
+fn dropping_an_unconsumed_scoped_outcome_owner_fails_closed() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+
+    drop(owner);
+
+    assert_fail_closed_containment(&account);
 }
 
 #[test]
@@ -523,7 +549,7 @@ fn panic_after_pending_rejected_is_fail_closed() {
                     return failure.finish_after_plan_drop();
                 }
             };
-            let _receipt = permit.activate((), |lane, ()| {
+            let _receipt = permit.activate((), |lane, _plan| {
                 lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
                     MaterializationRejection::Semantic,
                     32,
@@ -561,7 +587,7 @@ fn panic_after_pending_activated_is_fail_closed() {
                     return failure.finish_after_plan_drop();
                 }
             };
-            let _receipt = permit.activate((), |mut lane, ()| {
+            let _receipt = permit.activate((), |mut lane, _plan| {
                 let root = lane
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(1).unwrap(),
@@ -795,7 +821,7 @@ fn assert_forgotten_reservation_is_contained(terminal: ForgottenReservationTermi
                     return failure.finish_after_plan_drop();
                 }
             };
-            permit.activate((), |mut lane, ()| match terminal {
+            permit.activate((), |mut lane, _plan| match terminal {
                 ForgottenReservationTerminal::Activated => {
                     let root = lane
                         .try_retain_sequence(
@@ -1658,4 +1684,406 @@ fn semantic_action_panics_are_contained_after_the_exact_completed_prefix() {
         assert_eq!(completed.get(), completed_prefix);
         assert_fail_closed_containment(&account);
     }
+}
+
+#[test]
+fn semantic_action_body_and_capture_drop_panics_are_isolated() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+    let capture_dropped = Cell::new(false);
+    let capture = PanicDropProbe(&capture_dropped);
+    let mut action = Some(move || -> () {
+        let _capture = &capture;
+        panic!("contained semantic action panic")
+    });
+
+    let result: Result<ScopedOutcome<PreflightRejection>, _> =
+        owner.plan_and_activate_scoped(move |mut planning| {
+            let mut semantic = planning.begin_semantic_work().unwrap();
+            let action = action
+                .take()
+                .expect("the semantic action is transferred exactly once");
+            let _ = semantic.run_unit(action);
+            unreachable!("the panicking semantic action cannot return a disposition")
+        });
+
+    assert!(result.is_err());
+    assert!(capture_dropped.get());
+    assert_fail_closed_containment(&account);
+}
+
+#[test]
+fn scoped_materialization_callback_capture_is_dropped_before_the_outcome_escapes() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let dropped = Cell::new(false);
+    let capture = DropProbe(&dropped);
+
+    let outcome = plan_scoped_activation!(
+        operation,
+        scoped_activation_shape(keys, 1, 1),
+        move |mut lane| {
+            let _capture = &capture;
+            let root = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(7)?;
+                    Ok(())
+                })
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, root)
+        },
+    )
+    .unwrap();
+
+    assert!(dropped.get());
+    drop(outcome);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn scoped_materialization_callback_drop_panic_is_contained() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let capture = PanicOnDrop;
+
+    let result = plan_scoped_activation!(
+        operation,
+        scoped_activation_shape(keys, 1, 1),
+        move |mut lane| {
+            let _capture = &capture;
+            let root = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(7)?;
+                    Ok(())
+                })
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, root)
+        },
+    );
+
+    assert!(result.is_err());
+    assert_fail_closed_containment(&account);
+}
+
+#[test]
+fn scoped_transaction_body_and_capture_drop_panics_are_isolated() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+    let capture_dropped = Cell::new(false);
+    let capture = PanicDropProbe(&capture_dropped);
+
+    let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(move |_planning| {
+        let _capture = &capture;
+        panic!("contained scoped transaction panic")
+    });
+
+    assert!(result.is_err());
+    assert!(capture_dropped.get());
+    assert_fail_closed_containment(&account);
+}
+
+#[test]
+fn scoped_materialization_body_and_capture_drop_panics_are_isolated() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let capture = PanicOnDrop;
+
+    let result = plan_scoped_activation!(
+        operation,
+        scoped_activation_shape(keys, 1, 1),
+        move |_lane| -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, SequenceTag> {
+            let _capture = &capture;
+            panic!("contained scoped materialization callback panic")
+        },
+    );
+
+    assert!(result.is_err());
+    assert_fail_closed_containment(&account);
+}
+
+#[test]
+fn scoped_materialization_body_and_plan_drop_panics_are_isolated() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+    let plan_dropped = Cell::new(false);
+
+    let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
+        let mut semantic = planning.begin_semantic_work().unwrap();
+        semantic.run_unit(|| ()).unwrap();
+        let completion = semantic.finish_exact().unwrap();
+        let permit = match planning.seal_activation(success, completion) {
+            CanonicalActivationSeal::Sealed(permit) => permit,
+            CanonicalActivationSeal::Unsealed(failure) => {
+                return failure.finish_after_plan_drop();
+            }
+        };
+        permit.activate(
+            PanicDropProbe(&plan_dropped),
+            |_lane,
+             _plan|
+             -> CanonicalMaterialization<'_, (), (), ScalarSequence<u8>, SequenceTag> {
+                panic!("contained scoped materialization panic")
+            },
+        )
+    });
+
+    assert!(result.is_err());
+    assert!(plan_dropped.get());
+    assert_fail_closed_containment(&account);
+}
+
+#[test]
+fn scoped_materialization_rejection_eagerly_cleans_canonical_storage() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+
+    let outcome = plan_scoped_activation!(
+        operation,
+        scoped_activation_shape(keys, 1, 1),
+        |mut lane| {
+            let _ = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(9)?;
+                    Ok(())
+                })
+                .unwrap();
+            lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                MaterializationRejection::Semantic,
+                41,
+            )
+        },
+    )
+    .unwrap();
+    let rejected = match outcome {
+        CanonicalActivationOutcome::Rejected(state) => state,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("post-activation semantic rejection must remain Rejected")
+        }
+    };
+    assert_eq!(
+        rejected.cause(),
+        &StoreCanonicalRejection::Requested(MaterializationRejection::Semantic)
+    );
+    assert_eq!(rejected.canonical_len(), 0);
+
+    let evidence = rejected
+        .build_failure_evidence(|lane| {
+            let root = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(1).unwrap(),
+                    EvidenceLeafTag,
+                    |writer| writer.push(1),
+                )
+                .unwrap();
+            lane.complete(root)
+        })
+        .unwrap();
+    let rooted = match evidence {
+        FailureEvidenceOutcome::Rooted(rooted) => rooted,
+        FailureEvidenceOutcome::MinimalFallback(_) => {
+            panic!("valid failure evidence must remain rooted")
+        }
+    };
+    let (prepared, cause) = rooted.prepare_minimal_fallback().unwrap().into_parts();
+    assert_eq!(
+        cause,
+        StoreCanonicalRejection::Requested(MaterializationRejection::Semantic)
+    );
+    let published = prepared.handoff();
+    assert_eq!(
+        published
+            .ledger_evidence
+            .dimension(keys.dimension)
+            .unwrap()
+            .committed_canonical_output(),
+        0
+    );
+    drop(published);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn scoped_materialization_first_fault_is_sticky_through_rejection() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+
+    let outcome = plan_scoped_activation!(
+        operation,
+        scoped_activation_shape(keys, 1, 1),
+        |mut lane| {
+            let _ = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(9)?;
+                    Ok(())
+                })
+                .unwrap();
+            let cause = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(10)?;
+                    Ok(())
+                })
+                .unwrap_err();
+            assert!(matches!(
+                cause,
+                StoreRuntimeError::SlotLimit {
+                    destination: StoreDestination::Canonical
+                }
+            ));
+            assert!(matches!(
+                lane.control_checkpoint(),
+                Err(StoreRuntimeError::SlotLimit {
+                    destination: StoreDestination::Canonical
+                })
+            ));
+            lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                MaterializationRejection::Semantic,
+                42,
+            )
+        },
+    )
+    .unwrap();
+
+    let rejected = match outcome {
+        CanonicalActivationOutcome::Rejected(rejected) => rejected,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("a handled materialization fault must remain an ordinary rejection")
+        }
+    };
+    assert!(matches!(
+        rejected.cause(),
+        StoreCanonicalRejection::Runtime(StoreRuntimeError::SlotLimit {
+            destination: StoreDestination::Canonical
+        })
+    ));
+    assert_eq!(rejected.canonical_len(), 0);
+
+    let (prepared, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    let published = prepared.handoff();
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::ProductGraph
+    );
+    drop(published);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn scoped_materialization_build_fault_preserves_its_exact_product_graph_code() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+
+    let outcome = plan_scoped_activation!(
+        operation,
+        scoped_activation_shape(keys, 1, 1),
+        |mut lane| {
+            let expected = StoreBuildError::domain(73).unwrap();
+            let cause = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(1).unwrap(),
+                    SequenceTag,
+                    |_writer| Err(expected.into()),
+                )
+                .unwrap_err();
+            assert_eq!(cause, StoreRuntimeError::Build(expected));
+            lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>(
+                MaterializationRejection::Semantic,
+                43,
+            )
+        },
+    )
+    .unwrap();
+    let rejected = match outcome {
+        CanonicalActivationOutcome::Rejected(rejected) => rejected,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("the handled build fault must remain an ordinary rejection")
+        }
+    };
+    let (prepared, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    let published = prepared.handoff();
+    let terminal = store_failure_cause(&published.ledger_evidence);
+    assert_eq!(terminal.class(), StorePreparationFailureClass::ProductGraph);
+    assert_eq!(terminal.code(), 73);
+    drop(published);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn scoped_invalid_failure_shape_is_contained_before_materialization() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success,
+    } = scoped_activation_shape(keys, 1, TEST_MAX_FAILURE_EVIDENCE_MEMBERS + 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+    let materialized = Cell::new(false);
+
+    let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
+        let mut semantic = planning.begin_semantic_work().unwrap();
+        semantic.run_unit(|| ()).unwrap();
+        let completion = semantic.finish_exact().unwrap();
+        match planning.seal_activation(success, completion) {
+            CanonicalActivationSeal::Sealed(permit) => permit.activate(
+                (),
+                |_lane, _plan| -> CanonicalMaterialization<
+                    '_,
+                    (),
+                    (),
+                    ScalarSequence<u8>,
+                    SequenceTag,
+                > {
+                    materialized.set(true);
+                    unreachable!("an invalid failure shape cannot expose canonical storage")
+                },
+            ),
+            CanonicalActivationSeal::Unsealed(failure) => failure.finish_after_plan_drop(),
+        }
+    });
+
+    assert!(result.is_err());
+    assert!(!materialized.get());
+    assert_fail_closed_containment(&account);
 }

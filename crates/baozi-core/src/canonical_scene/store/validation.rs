@@ -17,7 +17,21 @@ use super::schema::{
 };
 
 pub(in crate::canonical_scene::store) use node_scene::{
-    NodeSceneValidationProof, NodeSceneValidationScratch, validate_node_scene_canonical_graph,
+    AnimationChannelValidationDescriptor, AnimationClipValidationDescriptor,
+    AnimationMeteredCounts, AnimationValidationScratch, AnimationValidationScratchRequirements,
+    AppearanceBindingValidationScratch, AppearanceCanonicalCounts,
+    AppearanceMaterialValidationScratch, AppearanceValidationScratch,
+    AppearanceValidationScratchRequirements, DeformationLogicalMorphValidationProjection,
+    DeformationMeshInstanceValidationProjection, DeformationMorphDefinitionValidationProjection,
+    DeformationMorphDeltaValidationProjection, DeformationMorphTargetValidationProjection,
+    DeformationPrimitiveValidationProjection, DeformationSkinValidationProjection,
+    DeformationValidationScratch, DeformationValidationScratchRequirements,
+    GeometryAttributeValidationScratch, GeometryCanonicalCounts,
+    GeometryLogicalMeshValidationProjection, GeometryMeshInstanceValidationProjection,
+    GeometryPrimitiveValidationProjection, GeometryPrimitiveValidationScratch,
+    GeometryValidationScratch, GeometryValidationScratchRequirements, NodeSceneValidationProof,
+    NodeSceneValidationScratch, ProfileMeteredCounts, ProfileMeteredScratch,
+    validate_node_scene_canonical_graph, validate_node_scene_canonical_graph_metered,
     validate_node_scene_evidence_graph,
 };
 

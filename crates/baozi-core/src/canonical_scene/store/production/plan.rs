@@ -484,7 +484,7 @@ impl<'control, C: CanonicalAuthoringControl> ValidationContext<'control, C> {
     fn run_unit<R>(
         &mut self,
         kind: SceneValidationWork,
-        action: impl FnOnce() -> R,
+        action: impl FnMut() -> R,
     ) -> ValidationResult<R, C> {
         let final_work = self.ensure_work_capacity(1)?;
         let outcome = self
@@ -506,7 +506,7 @@ impl<'control, C: CanonicalAuthoringControl> ValidationContext<'control, C> {
     fn run_semantic_unit<R>(
         &mut self,
         kind: SceneValidationWork,
-        action: impl FnOnce() -> Result<R, NodeAuthoringSemanticError>,
+        action: impl FnMut() -> Result<R, NodeAuthoringSemanticError>,
     ) -> ValidationResult<R, C> {
         self.run_unit(kind, action)?
             .map_err(NodeAuthoringFailure::Semantic)

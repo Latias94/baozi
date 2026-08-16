@@ -9,7 +9,7 @@ mod scene;
 mod tests;
 
 pub(super) use control::{
-    CanonicalAuthoringControl, OperationAuthoringControl, OperationAuthoringControlError,
+    CanonicalAuthoringControl, OperationAuthoringControlError, ScopedAuthoringControl,
 };
 #[cfg(test)]
 pub(super) use input::NodeAuthoringBatch;

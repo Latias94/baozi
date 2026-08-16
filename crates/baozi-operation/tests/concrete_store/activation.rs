@@ -1,30 +1,24 @@
+#![allow(
+    clippy::result_large_err,
+    reason = "central-validation errors keep bounded fail-closed evidence inline without failure-path allocation"
+)]
+
 use std::cell::Cell;
 
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationPolicy,
-    CanonicalActivationRequestSealer, CanonicalActivationRequirements, CanonicalActivationSeal,
-    CanonicalActivationSealFailure, CanonicalCentralValidationOutcome,
+    CanonicalActivationSeal, CanonicalActivationSealFailure, CanonicalCentralValidationOutcome,
     CanonicalFailureRequirements, CanonicalFreezePermit, CanonicalJointCommit, CanonicalJointSeal,
-    CanonicalMaterialization, CanonicalPreflightDecision, CanonicalReservation,
-    CanonicalScopedDisposition, CanonicalSemanticCompletion, CanonicalSuccessRequirements,
-    CanonicalTableShape, CanonicalValidationDecision, CanonicalValidationMember,
-    CanonicalValidationSession, FailureEvidenceDecision, FailureEvidenceMember,
-    FailureEvidenceOutcome, OutcomeEvidenceDecision, OutcomeEvidenceValidationMember,
-    RootedFailureValidation, SealedCanonicalActivationRequest, StoreCanonicalRejection,
-    StoreNeverActivatedCause,
+    CanonicalLane, CanonicalMaterialization, CanonicalReservation, CanonicalScopedDisposition,
+    CanonicalSemanticCompletion, CanonicalSuccessRequirements, CanonicalTableShape,
+    CanonicalValidationDecision, CanonicalValidationMember, CanonicalValidationSession,
+    FailureEvidenceDecision, FailureEvidenceMember, FailureEvidenceOutcome,
+    OutcomeEvidenceDecision, OutcomeEvidenceValidationMember, RootedFailureValidation,
+    StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
 };
 use baozi_operation::{ScalarSequence, StoreDestination, StorePlanError, StoreWorkError};
 
 use super::*;
-
-/// Test-only pair of operation-owned role policy and keyless core requirements.
-///
-/// Keeping this pair in the parent module lets the child integration-test modules exercise the
-/// same sealing path without reconstructing ledger roles or commitment amounts locally.
-struct TestActivation {
-    policy: CanonicalActivationPolicy,
-    requirements: CanonicalActivationRequirements,
-}
 
 struct TestScopedActivation {
     policy: CanonicalActivationPolicy,
@@ -32,15 +26,80 @@ struct TestScopedActivation {
     success: CanonicalSuccessRequirements,
 }
 
-macro_rules! plan_activation {
-    ($operation:expr, $activation:expr, $preflight:expr, $materialize:expr $(,)?) => {{
-        let TestActivation {
-            policy,
-            requirements,
-        } = $activation;
-        let (owner, sealer) = $operation.into_session_outcome_owner(policy);
-        owner.plan_and_activate(sealer.seal(requirements), $preflight, $materialize)
-    }};
+type TestActivationOutcome<T, E, CanonicalKind, CanonicalTag> = CanonicalActivationOutcome<
+    TestOwner,
+    TestProgress,
+    TestUnit,
+    T,
+    E,
+    CanonicalKind,
+    CanonicalTag,
+>;
+
+fn activate_scoped<'scope, T, E, CanonicalKind, CanonicalTag>(
+    permit: CanonicalActivationPermit<
+        'scope,
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        T,
+        E,
+        CanonicalKind,
+        CanonicalTag,
+    >,
+    mut materialize: impl for<'lane> FnMut(
+        CanonicalLane<'lane, TestOwner, TestProgress, TestUnit>,
+    ) -> CanonicalMaterialization<
+        'lane,
+        T,
+        E,
+        CanonicalKind,
+        CanonicalTag,
+    >,
+) -> CanonicalScopedDisposition<'scope> {
+    permit.activate((), |lane, _plan| materialize(lane))
+}
+
+fn run_scoped_activation<T, E, CanonicalKind, CanonicalTag>(
+    operation: TestOperation,
+    activation: TestScopedActivation,
+    materialize: impl for<'lane> FnMut(
+        CanonicalLane<'lane, TestOwner, TestProgress, TestUnit>,
+    ) -> CanonicalMaterialization<
+        'lane,
+        T,
+        E,
+        CanonicalKind,
+        CanonicalTag,
+    >,
+) -> Result<TestActivationOutcome<T, E, CanonicalKind, CanonicalTag>, StoreActivationContainment> {
+    let TestScopedActivation {
+        policy,
+        failure,
+        success,
+    } = activation;
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+    let mut materialize = Some(materialize);
+    owner.plan_and_activate_scoped(move |mut planning| {
+        let mut semantic = planning.begin_semantic_work().unwrap();
+        semantic.run_unit(|| ()).unwrap();
+        let completion = semantic.finish_exact().unwrap();
+        match planning.seal_activation(success, completion) {
+            CanonicalActivationSeal::Sealed(permit) => activate_scoped(
+                permit,
+                materialize
+                    .take()
+                    .expect("the scoped materializer is transferred exactly once"),
+            ),
+            CanonicalActivationSeal::Unsealed(failure) => failure.finish_after_plan_drop(),
+        }
+    })
+}
+
+macro_rules! plan_scoped_activation {
+    ($operation:expr, $activation:expr, $materialize:expr $(,)?) => {{ run_scoped_activation($operation, $activation, $materialize) }};
 }
 
 #[path = "activation/central_validation.rs"]
@@ -51,8 +110,6 @@ mod controlled_writers;
 mod failure_evidence;
 #[path = "activation/joint_commit.rs"]
 mod joint_commit;
-#[path = "activation/preflight_materialization.rs"]
-mod preflight_materialization;
 #[path = "activation/scoped_plan.rs"]
 mod scoped_plan;
 
@@ -94,12 +151,33 @@ fn canonical_activation_authorities_remain_linear() {
     struct CloneMarker;
     impl<T: Clone> AmbiguousIfClone<CloneMarker> for T {}
 
-    let _ = <CanonicalActivationRequirements as AmbiguousIfCopy<_>>::assert_not_copy;
-    let _ = <CanonicalActivationRequirements as AmbiguousIfClone<_>>::assert_not_clone;
-    let _ = <CanonicalActivationRequestSealer as AmbiguousIfCopy<_>>::assert_not_copy;
-    let _ = <CanonicalActivationRequestSealer as AmbiguousIfClone<_>>::assert_not_clone;
-    let _ = <SealedCanonicalActivationRequest as AmbiguousIfCopy<_>>::assert_not_copy;
-    let _ = <SealedCanonicalActivationRequest as AmbiguousIfClone<_>>::assert_not_clone;
+    type Completion = CanonicalSemanticCompletion<'static>;
+    type ActivationPermit = CanonicalActivationPermit<
+        'static,
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        (),
+        (),
+        ScalarSequence<u8>,
+        SequenceTag,
+    >;
+    type ActivationFailure = CanonicalActivationSealFailure<
+        'static,
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        (),
+        (),
+        ScalarSequence<u8>,
+        SequenceTag,
+    >;
+    let _ = <Completion as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <Completion as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <ActivationPermit as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <ActivationPermit as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <ActivationFailure as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <ActivationFailure as AmbiguousIfClone<_>>::assert_not_clone;
 
     type Permit = CanonicalFreezePermit<
         TestOwner,
@@ -131,158 +209,31 @@ fn canonical_activation_authorities_remain_linear() {
     let _ = <Seal as AmbiguousIfClone<_>>::assert_not_clone;
 }
 
-fn activation_shape_with_validation_work(
-    keys: TestKeys,
-    canonical_blocks: usize,
-    evidence_blocks: usize,
-    validation_work: NonZeroU64,
-) -> TestActivation {
-    activation_shape_with_capacity_and_validation_work(
-        keys,
-        canonical_blocks,
-        canonical_blocks,
-        keys,
-        evidence_blocks,
-        validation_work,
-    )
-}
-
-fn activation_shape_with_semantic_preflight_work(
-    keys: TestKeys,
-    canonical_blocks: usize,
-    evidence_blocks: usize,
-    semantic_preflight_work: u64,
-) -> TestActivation {
-    activation_shape_with_capacity_and_preflight_and_validation_work(
-        keys,
-        canonical_blocks,
-        canonical_blocks,
-        keys,
-        evidence_blocks,
-        semantic_preflight_work,
-        NonZeroU64::MIN,
-    )
-}
-
-fn activation_shape(
-    keys: TestKeys,
-    canonical_blocks: usize,
-    evidence_blocks: usize,
-) -> TestActivation {
-    activation_shape_with_validation_work(keys, canonical_blocks, evidence_blocks, NonZeroU64::MIN)
-}
-
-fn activation_shape_with_capacity(
-    canonical_keys: TestKeys,
-    canonical_capacity: usize,
-    expected_materialized_blocks: usize,
-    evidence_keys: TestKeys,
-    evidence_blocks: usize,
-) -> TestActivation {
-    activation_shape_with_capacity_and_validation_work(
-        canonical_keys,
-        canonical_capacity,
-        expected_materialized_blocks,
-        evidence_keys,
-        evidence_blocks,
-        NonZeroU64::MIN,
-    )
-}
-
-fn activation_shape_with_capacity_and_validation_work(
-    canonical_keys: TestKeys,
-    canonical_capacity: usize,
-    expected_materialized_blocks: usize,
-    evidence_keys: TestKeys,
-    evidence_blocks: usize,
-    validation_work: NonZeroU64,
-) -> TestActivation {
-    activation_shape_with_capacity_and_preflight_and_validation_work(
-        canonical_keys,
-        canonical_capacity,
-        expected_materialized_blocks,
-        evidence_keys,
-        evidence_blocks,
-        0,
-        validation_work,
-    )
-}
-
-fn activation_shape_with_capacity_and_preflight_and_validation_work(
-    canonical_keys: TestKeys,
-    canonical_capacity: usize,
-    expected_materialized_blocks: usize,
-    evidence_keys: TestKeys,
-    evidence_blocks: usize,
-    semantic_preflight_work: u64,
-    validation_work: NonZeroU64,
-) -> TestActivation {
-    let canonical = CanonicalTableShape::new(canonical_capacity, canonical_capacity).unwrap();
-    let evidence = CanonicalTableShape::new(evidence_blocks, evidence_blocks).unwrap();
-    let requirements = CanonicalActivationRequirements::new(
-        canonical,
-        evidence,
-        expected_materialized_blocks,
-        semantic_preflight_work,
-        validation_work,
-    )
-    .unwrap();
-    let policy = CanonicalActivationPolicy::new(
-        writer_plan(canonical_keys, canonical_capacity + 1, 2),
-        writer_plan(evidence_keys, evidence_blocks + 1, 2),
-        canonical_keys.dimension,
-        canonical_keys.dimension,
-        canonical_keys.dimension,
-        evidence_keys.dimension,
-    );
-    TestActivation {
-        policy,
-        requirements,
-    }
-}
-
-fn activation_shape_with_dimensions(
-    keys: TestKeys,
-    materialization_work_dimension: StoreDimensionKey,
-    validation_work_dimension: StoreDimensionKey,
-    canonical_destination_dimension: StoreDimensionKey,
-    outcome_evidence_destination_dimension: StoreDimensionKey,
-) -> TestActivation {
-    let requirements = CanonicalActivationRequirements::new(
-        CanonicalTableShape::new(1, 1).unwrap(),
-        CanonicalTableShape::new(1, 1).unwrap(),
-        1,
-        0,
-        NonZeroU64::MIN,
-    )
-    .unwrap();
-    let policy = CanonicalActivationPolicy::new(
-        writer_plan(keys, 2, 2),
-        writer_plan(keys, 2, 2),
-        materialization_work_dimension,
-        validation_work_dimension,
-        canonical_destination_dimension,
-        outcome_evidence_destination_dimension,
-    );
-    TestActivation {
-        policy,
-        requirements,
-    }
-}
-
 fn scoped_activation_shape(
     keys: TestKeys,
     canonical_blocks: usize,
     evidence_blocks: usize,
 ) -> TestScopedActivation {
-    scoped_activation_shape_with_dimensions(
+    scoped_activation_shape_with_validation_work(
         keys,
         canonical_blocks,
         evidence_blocks,
-        keys.dimension,
-        keys.dimension,
-        keys.dimension,
-        keys.dimension,
+        NonZeroU64::MIN,
+    )
+}
+
+fn scoped_activation_shape_with_validation_work(
+    keys: TestKeys,
+    canonical_blocks: usize,
+    evidence_blocks: usize,
+    validation_work: NonZeroU64,
+) -> TestScopedActivation {
+    scoped_activation_shape_with_dimensions_and_validation_work(
+        keys,
+        canonical_blocks,
+        evidence_blocks,
+        [keys.dimension; 4],
+        validation_work,
     )
 }
 
@@ -295,6 +246,33 @@ fn scoped_activation_shape_with_dimensions(
     canonical_destination_dimension: StoreDimensionKey,
     outcome_evidence_destination_dimension: StoreDimensionKey,
 ) -> TestScopedActivation {
+    scoped_activation_shape_with_dimensions_and_validation_work(
+        keys,
+        canonical_blocks,
+        evidence_blocks,
+        [
+            materialization_work_dimension,
+            validation_work_dimension,
+            canonical_destination_dimension,
+            outcome_evidence_destination_dimension,
+        ],
+        NonZeroU64::MIN,
+    )
+}
+
+fn scoped_activation_shape_with_dimensions_and_validation_work(
+    keys: TestKeys,
+    canonical_blocks: usize,
+    evidence_blocks: usize,
+    dimensions: [StoreDimensionKey; 4],
+    validation_work: NonZeroU64,
+) -> TestScopedActivation {
+    let [
+        materialization_work_dimension,
+        validation_work_dimension,
+        canonical_destination_dimension,
+        outcome_evidence_destination_dimension,
+    ] = dimensions;
     let policy = CanonicalActivationPolicy::new(
         writer_plan(keys, canonical_blocks + 1, 2),
         writer_plan(keys, evidence_blocks + 1, 2),
@@ -311,7 +289,7 @@ fn scoped_activation_shape_with_dimensions(
         success: CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(canonical_blocks, canonical_blocks).unwrap(),
             canonical_blocks,
-            NonZeroU64::MIN,
+            validation_work,
         )
         .unwrap(),
     }
@@ -319,36 +297,26 @@ fn scoped_activation_shape_with_dimensions(
 
 #[test]
 fn activation_requirements_reject_impossible_exact_shapes() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let (_operation, _keys) = operation(&account);
-
     assert!(matches!(
-        CanonicalActivationRequirements::new(
+        CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(1, 1).unwrap(),
-            CanonicalTableShape::new(1, 1).unwrap(),
-            0,
             0,
             NonZeroU64::MIN,
         ),
         Err(StorePlanError::InvalidBlockTable)
     ));
     assert!(matches!(
-        CanonicalActivationRequirements::new(
-            CanonicalTableShape::new(1, 1).unwrap(),
+        CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(1, 1).unwrap(),
             2,
-            0,
             NonZeroU64::MIN,
         ),
         Err(StorePlanError::InvalidBlockTable)
     ));
     assert!(matches!(
-        CanonicalActivationRequirements::new(
+        CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(1, 0).unwrap(),
-            CanonicalTableShape::new(1, 1).unwrap(),
             1,
-            0,
             NonZeroU64::MIN,
         ),
         Err(StorePlanError::InvalidBlockTable)
@@ -360,18 +328,9 @@ fn structural_work_requirement_counts_operation_owned_share_actions() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
-    let legacy = activation_shape(keys, 4, 1).requirements;
     let scoped = scoped_activation_shape(keys, 4, 1);
     let expanded_canonical = scoped_activation_shape(keys, 5, 1);
     let expanded_evidence = scoped_activation_shape(keys, 4, 2);
-    let work = legacy.structural_work_requirement();
-    let legacy_expanded_canonical_work = activation_shape_with_capacity(keys, 5, 5, keys, 1)
-        .requirements
-        .structural_work_requirement();
-    let legacy_expanded_evidence_work = activation_shape(keys, 4, 2)
-        .requirements
-        .structural_work_requirement();
-    let pre_activation_work = legacy.pre_activation_structural_work_requirement();
     let scoped_pre_activation_work = scoped
         .failure
         .pre_activation_structural_work_requirement()
@@ -389,14 +348,10 @@ fn structural_work_requirement_counts_operation_owned_share_actions() {
         .structural_work_requirement(&expanded_evidence.failure)
         .unwrap();
 
-    assert_eq!(work, 24);
-    assert_eq!(scoped_work, work);
+    assert_eq!(scoped_work, 24);
     assert_eq!(expanded_canonical_work, 26);
-    assert_eq!(expanded_canonical_work, legacy_expanded_canonical_work);
     assert_eq!(expanded_evidence_work, 26);
-    assert_eq!(expanded_evidence_work, legacy_expanded_evidence_work);
-    assert_eq!(pre_activation_work, 8);
-    assert_eq!(scoped_pre_activation_work, pre_activation_work);
+    assert_eq!(scoped_pre_activation_work, 8);
     drop(operation);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -414,10 +369,6 @@ fn structural_work_requirement_rejects_extreme_shape_overflow() {
         success.structural_work_requirement(&failure),
         Err(StorePlanError::SizeOverflow)
     );
-    assert!(matches!(
-        CanonicalActivationRequirements::new(canonical, evidence, usize::MAX, 0, NonZeroU64::MIN,),
-        Err(StorePlanError::SizeOverflow)
-    ));
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -464,10 +415,9 @@ fn assert_ignored_controlled_writer_fault_is_contained(kind: ControlledWriterKin
     let account = account(&factory);
     let (operation, keys) = operation(&account);
 
-    let result = plan_activation!(
+    let result = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal::<()>(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             let root = lane
                 .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
@@ -543,10 +493,9 @@ fn assert_controlled_writer_body_and_drop_panics_are_isolated(kind: ControlledWr
     let account = account(&factory);
     let (operation, keys) = operation(&account);
 
-    let result = plan_activation!(
+    let result = plan_scoped_activation!(
         operation,
-        activation_shape(keys, 1, 1),
-        |preflight| preflight.seal::<()>(),
+        scoped_activation_shape(keys, 1, 1),
         |mut lane| {
             match kind {
                 ControlledWriterKind::Sequence => {
@@ -664,19 +613,25 @@ fn rejected_session_from_operation(
     >,
     TestKeys,
 ) {
-    let outcome = plan_activation!(
-        operation,
-        activation_shape(keys, 1, evidence_blocks),
-        |preflight| preflight.reject(PreflightRejection::Unsupported, 11),
-        |_lane| -> CanonicalMaterialization<
-            '_,
-            (),
-            PreflightRejection,
-            ScalarSequence<u8>,
-            SequenceTag,
-        > { unreachable!("preflight rejection cannot materialize") },
-    )
-    .unwrap();
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, evidence_blocks);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+    let outcome: CanonicalActivationOutcome<
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        (),
+        PreflightRejection,
+        ScalarSequence<u8>,
+        SequenceTag,
+    > = owner
+        .plan_and_activate_scoped(|planning| planning.reject(PreflightRejection::Unsupported, 11))
+        .unwrap();
     let state = match outcome {
         CanonicalActivationOutcome::NeverActivated(state) => state,
         CanonicalActivationOutcome::Activated(_)

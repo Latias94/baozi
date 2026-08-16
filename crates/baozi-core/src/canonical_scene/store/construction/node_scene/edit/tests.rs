@@ -32,11 +32,11 @@ use crate::provenance::OptionsDigest;
 use crate::remap::RemapChange;
 use crate::scene_space::SceneSpace;
 
-use super::super::NodeSceneSuccessParts;
 use super::super::tests::{
     build_gltf_capability_scene_for_probe, profile_fixture, single_trs_batch, test_account,
     test_factory, test_limits,
 };
+use super::super::{NodeSceneDraftBuild, NodeSceneSuccessParts};
 use super::CanonicalRemapSet;
 use super::execution::NodeTransformEditPrepareError;
 use super::source::{
@@ -58,13 +58,49 @@ fn try_build_single_trs_scene(
     account: &PhysicalStorageAccount,
     generation_source: &AtomicU64,
 ) -> Option<NodeSceneSuccessParts> {
-    let operation = SceneConstructionOperation::with_account(account, test_limits()).ok()?;
-    let validated = operation
-        .try_validate_node_batch(single_trs_batch(), SceneValidationLimits::default())
-        .ok()?;
-    let prepared = validated
-        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(generation_source))
-        .ok()?;
+    let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+    let nodes = single_trs_batch();
+    let appearance = AppearanceAuthoringBatch::empty();
+    let geometry = GeometryAuthoringBatch::empty();
+    let deformation = DeformationAuthoringBatch::empty();
+    let animations = AnimationAuthoringBatch::empty();
+    let profile = profile_fixture(
+        spatial,
+        nodes,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+    );
+    let input = SceneAuthoringBatch::new(
+        spatial,
+        nodes,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+        profile.batch(),
+    );
+    let build = SceneConstructionOperation::with_account_for_scene_input(
+        account,
+        test_limits(),
+        input,
+        SceneValidationLimits::default(),
+    )
+    .ok()?
+    .finish_draft()
+    .ok()?;
+    let prepared = match build {
+        NodeSceneDraftBuild::Draft { draft, owner } => owner
+            .prepare_with_generation_source(draft, || {
+                SceneGenerationId::reserve_from(generation_source)
+            })
+            .ok()?,
+        NodeSceneDraftBuild::Failure { prepared, .. } => {
+            drop(prepared);
+            return None;
+        }
+    };
     match prepared.handoff() {
         super::super::NodeSceneConstructionTerminal::Success(parts) => Some(parts),
         terminal => {
@@ -114,23 +150,29 @@ fn build_spatial_scene(
         animations,
         profile.batch(),
     );
-    let validated = SceneConstructionOperation::with_account_for_scene_input(
+    let build = SceneConstructionOperation::with_account_for_scene_input(
         account,
         test_limits(),
         input,
         SceneValidationLimits::default(),
     )
     .expect("spatial edit fixture admission")
-    .try_validate()
-    .unwrap_or_else(|rejected| {
-        panic!(
-            "spatial edit fixture authoring validation failed: {:?}",
-            rejected.failure(),
-        )
-    });
-    let prepared = validated
-        .prepare_with_generation_source(|| SceneGenerationId::reserve_from(generation_source))
-        .expect("spatial edit fixture preparation");
+    .finish_draft()
+    .expect("spatial edit fixture construction");
+    let prepared = match build {
+        NodeSceneDraftBuild::Draft { draft, owner } => owner
+            .prepare_with_generation_source(draft, || {
+                SceneGenerationId::reserve_from(generation_source)
+            })
+            .expect("spatial edit fixture preparation"),
+        NodeSceneDraftBuild::Failure {
+            authoring_rejection,
+            prepared,
+        } => {
+            drop(prepared);
+            panic!("spatial edit fixture construction failed: {authoring_rejection:?}");
+        }
+    };
     match prepared.handoff() {
         super::super::NodeSceneConstructionTerminal::Success(parts) => parts,
         _ => panic!("spatial edit fixture must publish success"),

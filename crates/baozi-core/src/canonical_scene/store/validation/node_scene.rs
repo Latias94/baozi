@@ -1,6 +1,10 @@
+use baozi_operation::__canonical_activation::{
+    CanonicalValidationMember, CanonicalValidationSession, OutcomeEvidenceValidationMember,
+};
 use baozi_operation::{
-    CanonicalRecordRef, CanonicalSequenceRef, OutcomeEvidenceRecordRef,
-    StoreEvidenceValidationSession, StoreValidationSession,
+    CanonicalRecordRef, CanonicalSequenceRef, OperationOwner, OutcomeEvidenceRecordRef,
+    ProgressPhase, ProgressUnit, RecordBlock, ScalarSequence, StoreEvidenceValidationSession,
+    StoreValidationSession, StoreWorkError,
 };
 
 use crate::entity::AuthoredTransform;
@@ -13,6 +17,9 @@ mod profile;
 mod spatial;
 
 use super::super::construction::node_scene::SceneEvidenceCounts;
+use super::super::construction::node_scene::{
+    NodeSceneMaterializedRefs, NodeSceneMeteredValidationScratch, NodeSceneValidationScratchPlan,
+};
 use super::super::node_scene::{authored_transform_scalar_count, decode_authored_transform};
 use super::super::production::{
     Presence, ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
@@ -64,27 +71,56 @@ use super::super::schema::{
 };
 use super::{require_optional_collection, require_scalar};
 use animation::{
-    AnimationCanonicalDependencies, AnimationValidatedRefs, AnimationValidatedShape,
-    required_animation_target_marks as required_animation_marks, validate_animation_graph,
-    validate_animation_graph_structure,
+    AnimationCanonicalDependencies, AnimationMeteredDependencies, AnimationValidatedRefs,
+    AnimationValidatedShape, required_animation_target_marks as required_animation_marks,
+    validate_animation_graph, validate_animation_graph_metered, validate_animation_graph_structure,
+};
+pub(in crate::canonical_scene::store) use animation::{
+    AnimationChannelValidationDescriptor, AnimationClipValidationDescriptor,
+    AnimationMeteredCounts, AnimationValidationScratch, AnimationValidationScratchRequirements,
+};
+pub(in crate::canonical_scene::store) use appearance::{
+    AppearanceBindingValidationScratch, AppearanceCanonicalCounts,
+    AppearanceMaterialValidationScratch, AppearanceValidationScratch,
+    AppearanceValidationScratchRequirements,
 };
 use appearance::{
-    AppearanceCanonicalCounts, AppearanceValidatedRefs, validate_appearance_canonical_structure,
-    validate_appearance_graph,
+    AppearanceValidatedRefs, validate_appearance_canonical_structure,
+    validate_appearance_canonical_structure_metered, validate_appearance_graph,
 };
 use deformation::{
-    DeformationValidatedRefs, DeformationValidatedShape, DeformationValidationDependencies,
+    DeformationGeometryValidationProjection, DeformationValidatedRefs, DeformationValidatedShape,
+    DeformationValidationDependencies, DeformationValidationDependenciesMetered,
     validate_deformation_graph, validate_deformation_graph_canonical,
+    validate_deformation_graph_canonical_metered,
+};
+pub(in crate::canonical_scene::store) use deformation::{
+    DeformationLogicalMorphValidationProjection, DeformationMeshInstanceValidationProjection,
+    DeformationMorphDefinitionValidationProjection, DeformationMorphDeltaValidationProjection,
+    DeformationMorphTargetValidationProjection, DeformationPrimitiveValidationProjection,
+    DeformationSkinValidationProjection, DeformationValidationScratch,
+    DeformationValidationScratchRequirements,
+};
+pub(in crate::canonical_scene::store) use geometry::{
+    GeometryAttributeValidationScratch, GeometryCanonicalCounts,
+    GeometryLogicalMeshValidationProjection, GeometryMeshInstanceValidationProjection,
+    GeometryPrimitiveValidationProjection, GeometryPrimitiveValidationScratch,
+    GeometryValidationScratch, GeometryValidationScratchRequirements,
 };
 use geometry::{
-    GeometryCanonicalCounts, GeometryCanonicalDependencies, GeometryValidatedRefs,
-    GeometryValidatedShape, validate_geometry_canonical_structure, validate_geometry_graph,
+    GeometryCanonicalDependencies, GeometryCanonicalValidationDependencies, GeometryValidatedRefs,
+    GeometryValidatedShape, validate_geometry_canonical_structure,
+    validate_geometry_canonical_structure_metered, validate_geometry_graph,
 };
+pub(in crate::canonical_scene::store) use profile::{ProfileMeteredCounts, ProfileMeteredScratch};
 use profile::{
     ProfileValidatedRefs, ProfileValidationScratch, validate_profile_canonical_structure,
-    validate_profile_graph,
+    validate_profile_graph, validate_profile_graph_metered,
 };
-use spatial::{SpatialValidatedRefs, validate_spatial_canonical_structure, validate_spatial_graph};
+use spatial::{
+    SpatialValidatedMembers, SpatialValidatedRefs, validate_spatial_canonical_structure,
+    validate_spatial_canonical_structure_metered, validate_spatial_graph,
+};
 
 trait NodeEquivalence {
     fn validate_counts(&mut self, node_count: usize, source_node_count: usize) -> Option<()>;
@@ -248,6 +284,30 @@ struct NodeCanonicalStructure {
     deformation_directory: CanonicalRecordRef<DeformationDirectorySchema>,
     animation_directory: CanonicalRecordRef<AnimationDirectorySchema>,
     profile_directory: CanonicalRecordRef<ProfileDirectorySchema>,
+    source_node_count: usize,
+    source_root_count: usize,
+    source_edge_count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct NodeMeteredStructure<'session> {
+    directory: CanonicalValidationMember<'session, RecordBlock, SceneDirectorySchema>,
+    nodes: CanonicalValidationMember<'session, RecordBlock, NodeSceneNodeTableSchema>,
+    references: Option<
+        CanonicalValidationMember<'session, RecordBlock, NodeSceneChildReferenceTableSchema>,
+    >,
+    transforms: Option<
+        CanonicalValidationMember<'session, ScalarSequence<f32>, NodeSceneAuthoredTransformSchema>,
+    >,
+    spatial: SpatialValidatedMembers<'session>,
+    appearance_directory:
+        CanonicalValidationMember<'session, RecordBlock, AppearanceDirectorySchema>,
+    geometry_directory:
+        CanonicalValidationMember<'session, RecordBlock, SceneGeometryDirectorySchema>,
+    deformation_directory:
+        CanonicalValidationMember<'session, RecordBlock, DeformationDirectorySchema>,
+    animation_directory: CanonicalValidationMember<'session, RecordBlock, AnimationDirectorySchema>,
+    profile_directory: CanonicalValidationMember<'session, RecordBlock, ProfileDirectorySchema>,
     source_node_count: usize,
     source_root_count: usize,
     source_edge_count: usize,
@@ -1328,6 +1388,1359 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_graph<
         Some(cause) => Err(cause),
         None => Ok(proof),
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the canonical boundary keeps root references, immutable proof counts, scratch, and work authority explicit"
+)]
+fn validate_node_canonical_structure_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: CanonicalValidationMember<'session, RecordBlock, SceneDirectorySchema>,
+    expected_counts: SceneEvidenceCounts,
+    scratch: &mut NodeSceneMeteredValidationScratch<'_, 'session>,
+) -> Result<Option<NodeMeteredStructure<'session>>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let mut root_node = None;
+    let mut node_count = None;
+    let mut nodes = None;
+    let mut reference_presence = None;
+    let mut reference_count = None;
+    let mut references = None;
+    let mut transform_presence = None;
+    let mut transform_scalar_count = None;
+    let mut transforms = None;
+    let mut source_root_count = None;
+    let mut spatial = None;
+    let mut appearance = None;
+    let mut geometry = None;
+    let mut deformation = None;
+    let mut animation = None;
+    let mut profile = None;
+    let directory_valid = session.visit_canonical_records(
+        directory,
+        1,
+        SCENE_DIRECTORY_FIELD_COUNT,
+        |_row_index, row| {
+            let Some(schema_revision) =
+                row.scalar(scene_directory_field::SCHEMA_REVISION, |value: u32| value)?
+            else {
+                return Ok(false);
+            };
+            root_node = row.scalar(scene_directory_field::ROOT_NODE, |value: u32| value)?;
+            node_count = row.scalar(scene_directory_field::NODE_COUNT, |value: u32| value)?;
+            nodes = row.record_ref::<NodeSceneNodeTableSchema, _>(
+                scene_directory_field::NODES,
+                |value| value,
+            )?;
+            reference_presence =
+                row.scalar(scene_directory_field::REFERENCE_PRESENCE, |value: u8| value)?;
+            reference_count =
+                row.scalar(scene_directory_field::REFERENCE_COUNT, |value: u32| value)?;
+            references = match reference_presence {
+                Some(PRESENCE_PRESENT) => row.record_ref::<NodeSceneChildReferenceTableSchema, _>(
+                    scene_directory_field::REFERENCES,
+                    |value| value,
+                )?,
+                Some(PRESENCE_ABSENT) => {
+                    let Some(absent) =
+                        row.scalar(scene_directory_field::REFERENCES, |value: u8| value)?
+                    else {
+                        return Ok(false);
+                    };
+                    if absent != 0 {
+                        return Ok(false);
+                    }
+                    None
+                }
+                _ => return Ok(false),
+            };
+            transform_presence =
+                row.scalar(scene_directory_field::TRANSFORM_PRESENCE, |value: u8| value)?;
+            transform_scalar_count = row.scalar(
+                scene_directory_field::TRANSFORM_SCALAR_COUNT,
+                |value: u32| value,
+            )?;
+            transforms = match transform_presence {
+                Some(PRESENCE_PRESENT) => row
+                    .sequence_ref::<f32, NodeSceneAuthoredTransformSchema, _>(
+                        scene_directory_field::TRANSFORMS,
+                        |value| value,
+                    )?,
+                Some(PRESENCE_ABSENT) => {
+                    let Some(absent) =
+                        row.scalar(scene_directory_field::TRANSFORMS, |value: u8| value)?
+                    else {
+                        return Ok(false);
+                    };
+                    if absent != 0 {
+                        return Ok(false);
+                    }
+                    None
+                }
+                _ => return Ok(false),
+            };
+            source_root_count =
+                row.scalar(scene_directory_field::SOURCE_ROOT_COUNT, |value: u32| value)?;
+            spatial = row.record_ref::<SpatialDirectorySchema, _>(
+                scene_directory_field::SPATIAL,
+                |value| value,
+            )?;
+            appearance = row.record_ref::<AppearanceDirectorySchema, _>(
+                scene_directory_field::APPEARANCE,
+                |value| value,
+            )?;
+            geometry = row.record_ref::<SceneGeometryDirectorySchema, _>(
+                scene_directory_field::GEOMETRY,
+                |value| value,
+            )?;
+            deformation = row.record_ref::<DeformationDirectorySchema, _>(
+                scene_directory_field::DEFORMATION,
+                |value| value,
+            )?;
+            animation = row.record_ref::<AnimationDirectorySchema, _>(
+                scene_directory_field::ANIMATION,
+                |value| value,
+            )?;
+            profile = row.record_ref::<ProfileDirectorySchema, _>(
+                scene_directory_field::PROFILE,
+                |value| value,
+            )?;
+            Ok(schema_revision == SCENE_SCHEMA_REVISION)
+        },
+    )?;
+    let (
+        Some(root_node),
+        Some(node_count),
+        Some(nodes),
+        Some(reference_presence),
+        Some(reference_count),
+        Some(transform_presence),
+        Some(transform_scalar_count),
+        Some(source_root_count),
+        Some(spatial),
+        Some(appearance_directory),
+        Some(geometry_directory),
+        Some(deformation_directory),
+        Some(animation_directory),
+        Some(profile_directory),
+    ) = (
+        root_node,
+        node_count,
+        nodes,
+        reference_presence,
+        reference_count,
+        transform_presence,
+        transform_scalar_count,
+        source_root_count,
+        spatial,
+        appearance,
+        geometry,
+        deformation,
+        animation,
+        profile,
+    )
+    else {
+        return Ok(None);
+    };
+    let source_node_count = node_count.checked_sub(1);
+    let Some(source_node_count) = source_node_count else {
+        return Ok(None);
+    };
+    let has_source_nodes = source_node_count != 0;
+    let expected_presence = if has_source_nodes {
+        PRESENCE_PRESENT
+    } else {
+        PRESENCE_ABSENT
+    };
+    if !directory_valid
+        || root_node != 0
+        || node_count != expected_counts.node_count
+        || reference_presence != expected_presence
+        || transform_presence != expected_presence
+        || reference_count != source_node_count
+        || references.is_some() != has_source_nodes
+        || transforms.is_some() != has_source_nodes
+        || source_root_count > source_node_count
+    {
+        return Ok(None);
+    }
+    let source_node_count_usize = match usize::try_from(source_node_count) {
+        Ok(count) => count,
+        Err(_) => return Ok(None),
+    };
+    let source_root_count_usize = match usize::try_from(source_root_count) {
+        Ok(count) => count,
+        Err(_) => return Ok(None),
+    };
+    if scratch.node_transform_kinds.len()
+        != match usize::try_from(node_count) {
+            Ok(count) => count,
+            Err(_) => return Ok(None),
+        }
+    {
+        return Ok(None);
+    }
+
+    let Some(spatial) = validate_spatial_canonical_structure_metered(
+        session,
+        spatial,
+        expected_counts.camera_count,
+        expected_counts.light_count,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    if let Some(references) = references {
+        let references_valid =
+            session.visit_canonical_records(
+                references,
+                source_node_count_usize,
+                NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT,
+                |row_index, row| {
+                    let Some(reference) = row
+                        .scalar(node_scene_child_reference_field::REFERENCE, |value: u32| {
+                            value
+                        })?
+                    else {
+                        return Ok(false);
+                    };
+                    let Some(child) =
+                        row.scalar(node_scene_child_reference_field::CHILD, |value: u32| value)?
+                    else {
+                        return Ok(false);
+                    };
+                    let Ok(reference_expected) = u32::try_from(row_index) else {
+                        return Ok(false);
+                    };
+                    Ok(reference == reference_expected
+                        && child == reference_expected.saturating_add(1))
+                },
+            )?;
+        if !references_valid {
+            return Ok(None);
+        }
+    }
+
+    let mut child_reference_offset = source_root_count;
+    let mut transform_offset = 0_u32;
+    let nodes_valid = session.visit_canonical_records(
+        nodes,
+        usize::try_from(node_count).unwrap_or(usize::MAX),
+        NODE_SCENE_NODE_FIELD_COUNT,
+        |row_index, row| {
+            let Some(node) = row.scalar(node_scene_node_field::NODE, |value: u32| value)? else {
+                return Ok(false);
+            };
+            let Some(children_presence) =
+                row.scalar(node_scene_node_field::CHILDREN_PRESENCE, |value: u8| value)?
+            else {
+                return Ok(false);
+            };
+            let Some(child_offset) = row.scalar(
+                node_scene_node_field::CHILD_REFERENCE_OFFSET,
+                |value: u32| value,
+            )?
+            else {
+                return Ok(false);
+            };
+            let Some(child_count) = row.scalar(
+                node_scene_node_field::CHILD_REFERENCE_COUNT,
+                |value: u32| value,
+            )?
+            else {
+                return Ok(false);
+            };
+            let Some(transform_kind) =
+                row.scalar(node_scene_node_field::TRANSFORM_KIND, |value: u8| value)?
+            else {
+                return Ok(false);
+            };
+            let Some(stored_transform_offset) =
+                row.scalar(node_scene_node_field::TRANSFORM_OFFSET, |value: u32| value)?
+            else {
+                return Ok(false);
+            };
+            let Some(stored_transform_length) =
+                row.scalar(node_scene_node_field::TRANSFORM_LENGTH, |value: u32| value)?
+            else {
+                return Ok(false);
+            };
+            let transforms_match = if row_index == 0 {
+                row.scalar(node_scene_node_field::TRANSFORMS, |value: u8| value)? == Some(0)
+            } else {
+                row.sequence_ref::<f32, NodeSceneAuthoredTransformSchema, _>(
+                    node_scene_node_field::TRANSFORMS,
+                    |member| Some(member) == transforms,
+                )? == Some(true)
+            };
+            let Some(camera_presence) =
+                row.scalar(node_scene_node_field::CAMERA_PRESENCE, |value: u8| value)?
+            else {
+                return Ok(false);
+            };
+            let (camera, camera_cell_valid, cameras_match) = match camera_presence {
+                PRESENCE_ABSENT => (
+                    0,
+                    row.scalar(node_scene_node_field::CAMERA, |value: u8| value)? == Some(0),
+                    row.scalar(node_scene_node_field::CAMERAS, |value: u8| value)? == Some(0),
+                ),
+                PRESENCE_PRESENT => {
+                    let camera = row.scalar(node_scene_node_field::CAMERA, |value: u32| value)?;
+                    let cameras_match = row.record_ref::<SpatialCameraTableSchema, _>(
+                        node_scene_node_field::CAMERAS,
+                        |member| Some(member) == spatial.cameras,
+                    )? == Some(true);
+                    (camera.unwrap_or(0), camera.is_some(), cameras_match)
+                }
+                _ => (
+                    0,
+                    row.scalar(node_scene_node_field::CAMERA, |_: u8| false)? == Some(true),
+                    row.scalar(node_scene_node_field::CAMERAS, |_: u8| false)? == Some(true),
+                ),
+            };
+            let Some(light_presence) =
+                row.scalar(node_scene_node_field::LIGHT_PRESENCE, |value: u8| value)?
+            else {
+                return Ok(false);
+            };
+            let (light, light_cell_valid, lights_match) = match light_presence {
+                PRESENCE_ABSENT => (
+                    0,
+                    row.scalar(node_scene_node_field::LIGHT, |value: u8| value)? == Some(0),
+                    row.scalar(node_scene_node_field::LIGHTS, |value: u8| value)? == Some(0),
+                ),
+                PRESENCE_PRESENT => {
+                    let light = row.scalar(node_scene_node_field::LIGHT, |value: u32| value)?;
+                    let lights_match = row.record_ref::<SpatialLightTableSchema, _>(
+                        node_scene_node_field::LIGHTS,
+                        |member| Some(member) == spatial.lights,
+                    )? == Some(true);
+                    (light.unwrap_or(0), light.is_some(), lights_match)
+                }
+                _ => (
+                    0,
+                    row.scalar(node_scene_node_field::LIGHT, |_: u8| false)? == Some(true),
+                    row.scalar(node_scene_node_field::LIGHTS, |_: u8| false)? == Some(true),
+                ),
+            };
+            let Ok(row_u32) = u32::try_from(row_index) else {
+                return Ok(false);
+            };
+            let Some(kind_slot) = scratch.node_transform_kinds.get_mut(row_index) else {
+                return Ok(false);
+            };
+            *kind_slot = transform_kind;
+            if row_index == 0 {
+                return Ok(node == 0
+                    && children_presence == PRESENCE_PRESENT
+                    && child_offset == 0
+                    && child_count == source_root_count
+                    && transform_kind == NODE_SCENE_TRANSFORM_SYNTHETIC
+                    && stored_transform_offset == 0
+                    && stored_transform_length == 0
+                    && transforms_match
+                    && camera_presence == PRESENCE_ABSENT
+                    && camera_cell_valid
+                    && cameras_match
+                    && light_presence == PRESENCE_ABSENT
+                    && light_cell_valid
+                    && lights_match);
+            }
+            let Some(width) = authored_transform_scalar_count(transform_kind) else {
+                return Ok(false);
+            };
+            let Ok(width) = u32::try_from(width) else {
+                return Ok(false);
+            };
+            let topology_valid = node == row_u32
+                && children_presence == PRESENCE_PRESENT
+                && child_offset == child_reference_offset
+                && (child_count == 0 || child_reference_offset.saturating_add(1) > row_u32)
+                && stored_transform_offset == transform_offset
+                && stored_transform_length == width
+                && transforms_match;
+            child_reference_offset = match child_reference_offset.checked_add(child_count) {
+                Some(next) => next,
+                None => return Ok(false),
+            };
+            transform_offset = match transform_offset.checked_add(width) {
+                Some(next) => next,
+                None => return Ok(false),
+            };
+            let camera_valid = match camera_presence {
+                PRESENCE_ABSENT => camera_cell_valid && cameras_match,
+                PRESENCE_PRESENT => {
+                    let Ok(index) = usize::try_from(camera) else {
+                        return Ok(false);
+                    };
+                    let Some(count) = scratch.camera_placement_counts.get_mut(index) else {
+                        return Ok(false);
+                    };
+                    *count = match count.checked_add(1) {
+                        Some(count) => count,
+                        None => return Ok(false),
+                    };
+                    camera_cell_valid && camera < expected_counts.camera_count && cameras_match
+                }
+                _ => false,
+            };
+            let light_valid = match light_presence {
+                PRESENCE_ABSENT => light_cell_valid && lights_match,
+                PRESENCE_PRESENT => {
+                    let Ok(index) = usize::try_from(light) else {
+                        return Ok(false);
+                    };
+                    let Some(count) = scratch.light_placement_counts.get_mut(index) else {
+                        return Ok(false);
+                    };
+                    *count = match count.checked_add(1) {
+                        Some(count) => count,
+                        None => return Ok(false),
+                    };
+                    light_cell_valid && light < expected_counts.light_count && lights_match
+                }
+                _ => false,
+            };
+            Ok(topology_valid && camera_valid && light_valid)
+        },
+    )?;
+    if !nodes_valid
+        || child_reference_offset != source_node_count
+        || transform_offset != transform_scalar_count
+    {
+        return Ok(None);
+    }
+
+    if let Some(transforms) = transforms {
+        let transform_len = match usize::try_from(transform_scalar_count) {
+            Ok(count) => count,
+            Err(_) => return Ok(None),
+        };
+        let mut node_index = 1_usize;
+        let mut local_index = 0_usize;
+        let mut values = [0.0_f32; 16];
+        let transforms_valid =
+            session.visit_canonical_sequence(transforms, transform_len, |_index, value| {
+                let Some(&kind) = scratch.node_transform_kinds.get(node_index) else {
+                    return false;
+                };
+                let Some(width) = authored_transform_scalar_count(kind) else {
+                    return false;
+                };
+                let Some(slot) = values.get_mut(local_index) else {
+                    return false;
+                };
+                *slot = value;
+                local_index += 1;
+                if local_index == width {
+                    if decode_authored_transform(kind, &values[..width]).is_none() {
+                        return false;
+                    }
+                    node_index += 1;
+                    local_index = 0;
+                }
+                true
+            })?;
+        if !transforms_valid
+            || node_index != usize::try_from(node_count).unwrap_or(usize::MAX)
+            || local_index != 0
+        {
+            return Ok(None);
+        }
+    } else if transform_scalar_count != 0 {
+        return Ok(None);
+    }
+
+    for &placements in scratch.camera_placement_counts.iter() {
+        let Some(valid) = session.run_validation_unit(|| placements != 0)? else {
+            return Ok(None);
+        };
+        if !valid {
+            return Ok(None);
+        }
+    }
+    for &placements in scratch.light_placement_counts.iter() {
+        let Some(valid) = session.run_validation_unit(|| placements != 0)? else {
+            return Ok(None);
+        };
+        if !valid {
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(NodeMeteredStructure {
+        directory,
+        nodes,
+        references,
+        transforms,
+        spatial,
+        appearance_directory,
+        geometry_directory,
+        deformation_directory,
+        animation_directory,
+        profile_directory,
+        source_node_count: source_node_count_usize,
+        source_root_count: source_root_count_usize,
+        source_edge_count: source_node_count_usize.saturating_sub(source_root_count_usize),
+    }))
+}
+
+fn validate_node_scene_success_evidence_metered<
+    'session,
+    'storage,
+    'control,
+    'operation,
+    O,
+    PP,
+    U,
+>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    evidence: OutcomeEvidenceValidationMember<
+        'session,
+        RecordBlock,
+        NodeSceneOutcomeEvidenceSchema,
+    >,
+    counts: SceneEvidenceCounts,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let expected = [
+        SCENE_SCHEMA_REVISION,
+        NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
+        counts.canonical_block_count,
+        counts.node_count,
+        counts.camera_count,
+        counts.light_count,
+        counts.image_count,
+        counts.sampler_count,
+        counts.texture_count,
+        counts.material_count,
+        counts.material_binding_count,
+        counts.logical_mesh_count,
+        counts.primitive_count,
+        counts.attribute_count,
+        counts.mesh_instance_count,
+        counts.skin_count,
+        counts.logical_morph_count,
+        counts.morph_definition_count,
+        counts.primitive_deformation_count,
+        counts.morph_target_count,
+        counts.morph_delta_count,
+        counts.animation_clip_count,
+        counts.animation_channel_count,
+        counts.payload_block_count,
+        counts.profile_segment_count,
+        counts.profile_resource_count,
+        counts.profile_source_count,
+        counts.profile_provenance_count,
+        counts.profile_operation_count,
+        counts.profile_parent_count,
+        counts.profile_owner_count,
+        counts.profile_attachment_count,
+        counts.profile_metadata_entry_count,
+        counts.shareable_leaf_block_count,
+    ];
+    session.visit_outcome_evidence_records(
+        evidence,
+        1,
+        NODE_SCENE_EVIDENCE_FIELD_COUNT,
+        |_row_index, row| {
+            for (field, expected) in expected.into_iter().enumerate() {
+                let Some(actual) = row.scalar(field, |value: u32| value)? else {
+                    return Ok(false);
+                };
+                if actual != expected {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        },
+    )
+}
+
+fn optional_member_identifies<Kind, Tag>(
+    member: Option<CanonicalValidationMember<'_, Kind, Tag>>,
+    slot: Option<CanonicalBlockRef<Tag>>,
+) -> bool
+where
+    Tag: CanonicalSchema<StoreKind = Kind>,
+{
+    match (member, slot) {
+        (Some(member), Some(slot)) => member.identifies(slot.into_store()),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the fresh canonical proof binds the complete typed graph, exact sealed counts, and independently retained slots"
+)]
+pub(in crate::canonical_scene::store) fn validate_node_scene_canonical_graph_metered<
+    'session,
+    'storage,
+    'control,
+    'operation,
+    O,
+    PP,
+    U,
+>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    directory: CanonicalValidationMember<'session, RecordBlock, SceneDirectorySchema>,
+    evidence: OutcomeEvidenceValidationMember<
+        'session,
+        RecordBlock,
+        NodeSceneOutcomeEvidenceSchema,
+    >,
+    expected_counts: SceneEvidenceCounts,
+    expected_refs: NodeSceneMaterializedRefs,
+    validation_plan: NodeSceneValidationScratchPlan,
+    scratch: &mut NodeSceneMeteredValidationScratch<'_, 'session>,
+) -> Result<Option<NodeSceneValidationProof>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(node) =
+        validate_node_canonical_structure_metered(session, directory, expected_counts, scratch)?
+    else {
+        return Ok(None);
+    };
+    let appearance_counts = AppearanceCanonicalCounts::new(
+        expected_counts.image_count,
+        expected_counts.sampler_count,
+        expected_counts.texture_count,
+        expected_counts.material_count,
+        expected_counts.material_binding_count,
+    );
+    let Some(appearance) = validate_appearance_canonical_structure_metered(
+        session,
+        node.appearance_directory,
+        appearance_counts,
+        &mut scratch.appearance,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let geometry_requirements = validation_plan.geometry_requirements();
+    let geometry_counts = GeometryCanonicalCounts::new(
+        expected_counts.logical_mesh_count,
+        expected_counts.primitive_count,
+        expected_counts.attribute_count,
+        expected_counts.mesh_instance_count,
+    );
+    let Some(geometry) = validate_geometry_canonical_structure_metered(
+        session,
+        node.geometry_directory,
+        GeometryCanonicalValidationDependencies::new(
+            node.nodes,
+            expected_counts.node_count,
+            appearance.materials,
+            expected_counts.material_count,
+        ),
+        geometry_counts,
+        &mut scratch.geometry,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(geometry_logical_meshes) = scratch
+        .geometry
+        .logical_mesh_projections(geometry_requirements)
+    else {
+        return Ok(None);
+    };
+    let Some(geometry_primitives) = scratch
+        .geometry
+        .primitive_projections(geometry_requirements)
+    else {
+        return Ok(None);
+    };
+    let Some(geometry_mesh_instances) = scratch
+        .geometry
+        .mesh_instance_projections(geometry_requirements)
+    else {
+        return Ok(None);
+    };
+
+    let deformation_requirements = validation_plan.deformation_requirements();
+    let Some(deformation) = validate_deformation_graph_canonical_metered(
+        session,
+        node.deformation_directory,
+        DeformationValidationDependenciesMetered {
+            nodes: node.nodes,
+            node_count: expected_counts.node_count,
+            logical_meshes: geometry.members.logical_meshes,
+            primitives: geometry.members.primitives,
+            mesh_instances: geometry.members.mesh_instances,
+            geometry: DeformationGeometryValidationProjection {
+                logical_meshes: geometry_logical_meshes,
+                primitives: geometry_primitives,
+                mesh_instances: geometry_mesh_instances,
+            },
+        },
+        &mut scratch.deformation,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(logical_morph_projections) = scratch
+        .deformation
+        .logical_morph_projections(deformation_requirements)
+    else {
+        return Ok(None);
+    };
+
+    let animation_counts = validation_plan.animation_counts();
+    let Some(animation) = validate_animation_graph_metered(
+        session,
+        node.animation_directory,
+        AnimationMeteredDependencies::new(
+            node.nodes,
+            expected_counts.node_count,
+            scratch.node_transform_kinds,
+            deformation.members.mesh_instances,
+            deformation.mesh_instance_count,
+            geometry.members.mesh_instances,
+            expected_counts.mesh_instance_count,
+            deformation.members.logical_morphs,
+            deformation.logical_morph_count,
+            geometry_mesh_instances,
+            logical_morph_projections,
+        ),
+        animation_counts,
+        &mut scratch.animation,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let profile_counts = validation_plan.profile_counts();
+    let Some(profile) = validate_profile_graph_metered(
+        session,
+        node.profile_directory,
+        profile_counts,
+        &mut scratch.profile,
+    )?
+    else {
+        return Ok(None);
+    };
+    if !validate_node_scene_success_evidence_metered(session, evidence, expected_counts)? {
+        return Ok(None);
+    }
+
+    let source_node_count = expected_counts.node_count.checked_sub(1);
+    let Some(source_node_count) = source_node_count else {
+        return Ok(None);
+    };
+    for (actual, expected) in [
+        (node.spatial.camera_count, expected_counts.camera_count),
+        (node.spatial.light_count, expected_counts.light_count),
+        (deformation.skin_count, expected_counts.skin_count),
+        (
+            deformation.logical_morph_count,
+            expected_counts.logical_morph_count,
+        ),
+        (
+            deformation.morph_definition_count,
+            expected_counts.morph_definition_count,
+        ),
+        (
+            deformation.primitive_count,
+            expected_counts.primitive_deformation_count,
+        ),
+        (
+            deformation.morph_target_count,
+            expected_counts.morph_target_count,
+        ),
+        (
+            deformation.morph_delta_count,
+            expected_counts.morph_delta_count,
+        ),
+        (
+            deformation.mesh_instance_count,
+            expected_counts.mesh_instance_count,
+        ),
+        (animation.clip_count, expected_counts.animation_clip_count),
+        (
+            animation.channel_count,
+            expected_counts.animation_channel_count,
+        ),
+        (profile.segment_count, expected_counts.profile_segment_count),
+        (
+            profile.resource_count,
+            expected_counts.profile_resource_count,
+        ),
+        (profile.source_count, expected_counts.profile_source_count),
+        (
+            profile.provenance_count,
+            expected_counts.profile_provenance_count,
+        ),
+        (
+            profile.operation_count,
+            expected_counts.profile_operation_count,
+        ),
+        (profile.parent_count, expected_counts.profile_parent_count),
+        (profile.owner_count, expected_counts.profile_owner_count),
+        (
+            profile.attachment_count,
+            expected_counts.profile_attachment_count,
+        ),
+        (
+            profile.metadata_entry_count,
+            expected_counts.profile_metadata_entry_count,
+        ),
+    ] {
+        if actual != expected {
+            return Ok(None);
+        }
+    }
+    for (actual, expected) in [
+        (profile.owner_classes.nodes, source_node_count),
+        (profile.owner_classes.cameras, expected_counts.camera_count),
+        (profile.owner_classes.lights, expected_counts.light_count),
+        (profile.owner_classes.images, expected_counts.image_count),
+        (
+            profile.owner_classes.samplers,
+            expected_counts.sampler_count,
+        ),
+        (
+            profile.owner_classes.textures,
+            expected_counts.texture_count,
+        ),
+        (
+            profile.owner_classes.texture_bindings,
+            expected_counts.material_binding_count,
+        ),
+        (
+            profile.owner_classes.materials,
+            expected_counts.material_count,
+        ),
+        (
+            profile.owner_classes.logical_meshes,
+            expected_counts.logical_mesh_count,
+        ),
+        (
+            profile.owner_classes.primitives,
+            expected_counts.primitive_count,
+        ),
+        (
+            profile.owner_classes.attributes,
+            expected_counts.attribute_count,
+        ),
+        (
+            profile.owner_classes.mesh_instances,
+            expected_counts.mesh_instance_count,
+        ),
+        (profile.owner_classes.skins, expected_counts.skin_count),
+        (
+            profile.owner_classes.morph_definitions,
+            expected_counts.morph_definition_count,
+        ),
+        (
+            profile.owner_classes.morph_deltas,
+            expected_counts.morph_delta_count,
+        ),
+        (
+            profile.owner_classes.animation_clips,
+            expected_counts.animation_clip_count,
+        ),
+        (
+            profile.owner_classes.animation_channels,
+            expected_counts.animation_channel_count,
+        ),
+    ] {
+        if actual != expected {
+            return Ok(None);
+        }
+    }
+
+    let spatial_payload_count = [
+        node.spatial.tangent_basis_schema_name.is_some(),
+        node.spatial.tangent_encoding_schema_name.is_some(),
+    ]
+    .into_iter()
+    .map(u32::from)
+    .sum::<u32>();
+    let appearance_payload_count = [
+        appearance.image_payloads.is_some(),
+        appearance.media_types.is_some(),
+        appearance.source_keys.is_some(),
+        appearance.binding_semantic_scalars.is_some(),
+        appearance.material_factor_scalars.is_some(),
+    ]
+    .into_iter()
+    .map(u32::from)
+    .sum::<u32>();
+    let domain_payload_count = spatial_payload_count
+        .checked_add(appearance_payload_count)
+        .and_then(|count| count.checked_add(geometry.payload_block_count))
+        .and_then(|count| count.checked_add(deformation.payload_block_count))
+        .and_then(|count| count.checked_add(animation.payload_block_count));
+    let Some(domain_payload_count) = domain_payload_count else {
+        return Ok(None);
+    };
+    if domain_payload_count.checked_add(profile.payload_leaf_count)
+        != Some(expected_counts.payload_block_count)
+        || domain_payload_count.checked_add(profile.shareable_leaf_count)
+            != Some(expected_counts.shareable_leaf_block_count)
+    {
+        return Ok(None);
+    }
+    let canonical_block_count = 2_u32
+        .checked_add(u32::from(node.references.is_some()))
+        .and_then(|count| count.checked_add(u32::from(node.transforms.is_some())))
+        .and_then(|count| {
+            count.checked_add(
+                1 + [
+                    node.spatial.cameras.is_some(),
+                    node.spatial.lights.is_some(),
+                    node.spatial.tangent_basis_schema_name.is_some(),
+                    node.spatial.tangent_encoding_schema_name.is_some(),
+                ]
+                .into_iter()
+                .map(u32::from)
+                .sum::<u32>(),
+            )
+        })
+        .and_then(|count| {
+            count.checked_add(
+                1 + [
+                    appearance.images.is_some(),
+                    appearance.samplers.is_some(),
+                    appearance.textures.is_some(),
+                    appearance.materials.is_some(),
+                    appearance.bindings.is_some(),
+                    appearance.image_payloads.is_some(),
+                    appearance.media_types.is_some(),
+                    appearance.source_keys.is_some(),
+                    appearance.binding_semantic_scalars.is_some(),
+                    appearance.material_factor_scalars.is_some(),
+                ]
+                .into_iter()
+                .map(u32::from)
+                .sum::<u32>(),
+            )
+        })
+        .and_then(|count| {
+            count.checked_add(
+                1 + [
+                    geometry.members.logical_meshes.is_some(),
+                    geometry.members.primitives.is_some(),
+                    geometry.members.attributes.is_some(),
+                    geometry.members.mesh_instances.is_some(),
+                ]
+                .into_iter()
+                .map(u32::from)
+                .sum::<u32>()
+                    + geometry.payload_block_count,
+            )
+        })
+        .and_then(|count| {
+            count.checked_add(
+                1 + [
+                    deformation.members.skins.is_some(),
+                    deformation.members.logical_morphs.is_some(),
+                    deformation.members.morph_definitions.is_some(),
+                    deformation.members.primitives.is_some(),
+                    deformation.members.morph_targets.is_some(),
+                    deformation.members.morph_deltas.is_some(),
+                    deformation.members.mesh_instances.is_some(),
+                ]
+                .into_iter()
+                .map(u32::from)
+                .sum::<u32>()
+                    + deformation.payload_block_count,
+            )
+        })
+        .and_then(|count| {
+            count.checked_add(
+                1 + [
+                    animation.members.clips.is_some(),
+                    animation.members.channels.is_some(),
+                ]
+                .into_iter()
+                .map(u32::from)
+                .sum::<u32>()
+                    + animation.payload_block_count,
+            )
+        })
+        .and_then(|count| count.checked_add(profile.canonical_block_count));
+    if canonical_block_count != Some(expected_counts.canonical_block_count) {
+        return Ok(None);
+    }
+
+    let identities_match = node
+        .directory
+        .identifies(expected_refs.directory.into_store())
+        && node.nodes.identifies(expected_refs.nodes.into_store())
+        && optional_member_identifies(node.references, expected_refs.references)
+        && optional_member_identifies(node.transforms, expected_refs.transforms)
+        && node
+            .spatial
+            .directory
+            .identifies(expected_refs.spatial.directory.into_store())
+        && optional_member_identifies(node.spatial.cameras, expected_refs.spatial.cameras)
+        && optional_member_identifies(node.spatial.lights, expected_refs.spatial.lights)
+        && optional_member_identifies(
+            node.spatial.tangent_basis_schema_name,
+            expected_refs.spatial.tangent_basis_schema_name,
+        )
+        && optional_member_identifies(
+            node.spatial.tangent_encoding_schema_name,
+            expected_refs.spatial.tangent_encoding_schema_name,
+        )
+        && optional_member_identifies(appearance.images, expected_refs.appearance.tables.images)
+        && optional_member_identifies(
+            appearance.samplers,
+            expected_refs.appearance.tables.samplers,
+        )
+        && optional_member_identifies(
+            appearance.textures,
+            expected_refs.appearance.tables.textures,
+        )
+        && optional_member_identifies(
+            appearance.materials,
+            expected_refs.appearance.tables.materials,
+        )
+        && optional_member_identifies(
+            appearance.bindings,
+            expected_refs.appearance.tables.bindings,
+        )
+        && optional_member_identifies(
+            appearance.image_payloads,
+            expected_refs.appearance.payloads.image_payloads,
+        )
+        && optional_member_identifies(
+            appearance.media_types,
+            expected_refs.appearance.payloads.media_types,
+        )
+        && optional_member_identifies(
+            appearance.source_keys,
+            expected_refs.appearance.payloads.source_keys,
+        )
+        && optional_member_identifies(
+            appearance.binding_semantic_scalars,
+            expected_refs.appearance.payloads.binding_semantic_scalars,
+        )
+        && optional_member_identifies(
+            appearance.material_factor_scalars,
+            expected_refs.appearance.payloads.material_factor_scalars,
+        )
+        && optional_member_identifies(
+            geometry.members.logical_meshes,
+            expected_refs.geometry.tables.logical_meshes,
+        )
+        && optional_member_identifies(
+            geometry.members.primitives,
+            expected_refs.geometry.tables.primitives,
+        )
+        && optional_member_identifies(
+            geometry.members.attributes,
+            expected_refs.geometry.tables.attributes,
+        )
+        && optional_member_identifies(
+            geometry.members.mesh_instances,
+            expected_refs.geometry.tables.mesh_instances,
+        )
+        && node
+            .geometry_directory
+            .identifies(expected_refs.geometry.directory.into_store())
+        && node
+            .deformation_directory
+            .identifies(expected_refs.deformation.directory.into_store())
+        && optional_member_identifies(
+            deformation.members.skins,
+            expected_refs.deformation.tables.skins,
+        )
+        && optional_member_identifies(
+            deformation.members.logical_morphs,
+            expected_refs.deformation.tables.logical_morphs,
+        )
+        && optional_member_identifies(
+            deformation.members.morph_definitions,
+            expected_refs.deformation.tables.morph_definitions,
+        )
+        && optional_member_identifies(
+            deformation.members.primitives,
+            expected_refs.deformation.tables.primitives,
+        )
+        && optional_member_identifies(
+            deformation.members.morph_targets,
+            expected_refs.deformation.tables.morph_targets,
+        )
+        && optional_member_identifies(
+            deformation.members.morph_deltas,
+            expected_refs.deformation.tables.morph_deltas,
+        )
+        && optional_member_identifies(
+            deformation.members.mesh_instances,
+            expected_refs.deformation.tables.mesh_instances,
+        )
+        && optional_member_identifies(
+            deformation.members.joint_nodes,
+            expected_refs.deformation.payloads.joint_nodes,
+        )
+        && optional_member_identifies(
+            deformation.members.inverse_bind_matrices,
+            expected_refs.deformation.payloads.inverse_bind_matrices,
+        )
+        && optional_member_identifies(
+            deformation.members.skin_correction_matrices,
+            expected_refs.deformation.payloads.skin_correction_matrices,
+        )
+        && optional_member_identifies(
+            deformation.members.skin_names,
+            expected_refs.deformation.payloads.skin_names,
+        )
+        && optional_member_identifies(
+            deformation.members.influence_row_offsets,
+            expected_refs.deformation.payloads.influence_row_offsets,
+        )
+        && optional_member_identifies(
+            deformation.members.influence_joints,
+            expected_refs.deformation.payloads.influence_joints,
+        )
+        && optional_member_identifies(
+            deformation.members.influence_weights,
+            expected_refs.deformation.payloads.influence_weights,
+        )
+        && optional_member_identifies(
+            deformation.members.influence_source_orders,
+            expected_refs.deformation.payloads.influence_source_orders,
+        )
+        && optional_member_identifies(
+            deformation.members.morph_defaults,
+            expected_refs.deformation.payloads.morph_defaults,
+        )
+        && optional_member_identifies(
+            deformation.members.morph_names,
+            expected_refs.deformation.payloads.morph_names,
+        )
+        && optional_member_identifies(
+            deformation.members.morph_values,
+            expected_refs.deformation.payloads.morph_values,
+        )
+        && optional_member_identifies(
+            deformation.members.morph_sparse_indices,
+            expected_refs.deformation.payloads.morph_sparse_indices,
+        )
+        && optional_member_identifies(
+            deformation.members.instance_morph_weights,
+            expected_refs.deformation.payloads.instance_morph_weights,
+        )
+        && node
+            .animation_directory
+            .identifies(expected_refs.animation.directory.into_store())
+        && optional_member_identifies(animation.members.clips, expected_refs.animation.clips)
+        && optional_member_identifies(animation.members.channels, expected_refs.animation.channels)
+        && optional_member_identifies(
+            animation.members.times,
+            expected_refs.animation.payloads.times,
+        )
+        && optional_member_identifies(
+            animation.members.values,
+            expected_refs.animation.payloads.values,
+        )
+        && optional_member_identifies(
+            animation.members.in_tangents,
+            expected_refs.animation.payloads.in_tangents,
+        )
+        && optional_member_identifies(
+            animation.members.out_tangents,
+            expected_refs.animation.payloads.out_tangents,
+        )
+        && profile
+            .directory
+            .identifies(expected_refs.profile.directory.into_store())
+        && profile
+            .segments
+            .identifies(expected_refs.profile.segments.into_store())
+        && profile
+            .owners
+            .identifies(expected_refs.profile.owners.into_store())
+        && optional_member_identifies(profile.resources, expected_refs.profile.lineage.resources)
+        && optional_member_identifies(profile.sources, expected_refs.profile.lineage.sources)
+        && optional_member_identifies(profile.provenance, expected_refs.profile.lineage.provenance)
+        && optional_member_identifies(profile.operations, expected_refs.profile.lineage.operations)
+        && optional_member_identifies(profile.evidence, expected_refs.profile.lineage.evidence)
+        && optional_member_identifies(profile.parents, expected_refs.profile.lineage.parents)
+        && optional_member_identifies(profile.wide, expected_refs.profile.lineage.wide)
+        && optional_member_identifies(profile.lineage_text, expected_refs.profile.lineage.text)
+        && optional_member_identifies(
+            profile.lineage_digests,
+            expected_refs.profile.lineage.digests,
+        )
+        && expected_refs
+            .profile
+            .lineage
+            .attachments
+            .is_some_and(|slot| profile.attachments.identifies(slot.into_store()))
+        && profile
+            .metadata_directory
+            .identifies(expected_refs.profile.metadata.directory.into_store())
+        && optional_member_identifies(
+            profile.metadata_entries,
+            expected_refs.profile.metadata.leaves.entries,
+        )
+        && optional_member_identifies(
+            profile.metadata_text,
+            expected_refs.profile.metadata.leaves.text,
+        )
+        && optional_member_identifies(
+            profile.metadata_bytes,
+            expected_refs.profile.metadata.leaves.bytes,
+        )
+        && optional_member_identifies(
+            profile.metadata_bools,
+            expected_refs.profile.metadata.leaves.bools,
+        )
+        && optional_member_identifies(
+            profile.metadata_i64s,
+            expected_refs.profile.metadata.leaves.i64s,
+        )
+        && optional_member_identifies(
+            profile.metadata_u64s,
+            expected_refs.profile.metadata.leaves.u64s,
+        )
+        && optional_member_identifies(
+            profile.metadata_f64s,
+            expected_refs.profile.metadata.leaves.f64s,
+        )
+        && optional_member_identifies(
+            profile.metadata_f32s,
+            expected_refs.profile.metadata.leaves.f32s,
+        );
+    if !identities_match {
+        return Ok(None);
+    }
+    let Some(profile_attachments) = expected_refs.profile.lineage.attachments else {
+        return Ok(None);
+    };
+
+    Ok(Some(NodeSceneValidationProof {
+        directory: expected_refs.directory,
+        spatial: SpatialValidatedRefs {
+            directory: expected_refs.spatial.directory,
+            cameras: expected_refs.spatial.cameras,
+            lights: expected_refs.spatial.lights,
+            tangent_basis_schema_name: expected_refs.spatial.tangent_basis_schema_name,
+            tangent_encoding_schema_name: expected_refs.spatial.tangent_encoding_schema_name,
+            camera_count: node.spatial.camera_count,
+            light_count: node.spatial.light_count,
+        },
+        appearance_directory: expected_refs.appearance.directory,
+        geometry_directory: expected_refs.geometry.directory,
+        deformation_directory: expected_refs.deformation.directory,
+        animation_directory: expected_refs.animation.directory,
+        nodes: expected_refs.nodes,
+        references: expected_refs.references,
+        transforms: expected_refs.transforms,
+        appearance: AppearanceValidatedRefs {
+            images: expected_refs.appearance.tables.images,
+            samplers: expected_refs.appearance.tables.samplers,
+            textures: expected_refs.appearance.tables.textures,
+            materials: expected_refs.appearance.tables.materials,
+            bindings: expected_refs.appearance.tables.bindings,
+            image_payloads: expected_refs.appearance.payloads.image_payloads,
+            media_types: expected_refs.appearance.payloads.media_types,
+            source_keys: expected_refs.appearance.payloads.source_keys,
+            binding_semantic_scalars: expected_refs.appearance.payloads.binding_semantic_scalars,
+            material_factor_scalars: expected_refs.appearance.payloads.material_factor_scalars,
+        },
+        geometry: GeometryValidatedRefs {
+            logical_meshes: expected_refs.geometry.tables.logical_meshes,
+            primitives: expected_refs.geometry.tables.primitives,
+            attributes: expected_refs.geometry.tables.attributes,
+            mesh_instances: expected_refs.geometry.tables.mesh_instances,
+        },
+        deformation: DeformationValidatedRefs {
+            skins: expected_refs.deformation.tables.skins,
+            logical_morphs: expected_refs.deformation.tables.logical_morphs,
+            morph_definitions: expected_refs.deformation.tables.morph_definitions,
+            primitives: expected_refs.deformation.tables.primitives,
+            morph_targets: expected_refs.deformation.tables.morph_targets,
+            morph_deltas: expected_refs.deformation.tables.morph_deltas,
+            mesh_instances: expected_refs.deformation.tables.mesh_instances,
+            joint_nodes: expected_refs.deformation.payloads.joint_nodes,
+            inverse_bind_matrices: expected_refs.deformation.payloads.inverse_bind_matrices,
+            skin_correction_matrices: expected_refs.deformation.payloads.skin_correction_matrices,
+            skin_names: expected_refs.deformation.payloads.skin_names,
+            influence_row_offsets: expected_refs.deformation.payloads.influence_row_offsets,
+            influence_joints: expected_refs.deformation.payloads.influence_joints,
+            influence_weights: expected_refs.deformation.payloads.influence_weights,
+            influence_source_orders: expected_refs.deformation.payloads.influence_source_orders,
+            morph_defaults: expected_refs.deformation.payloads.morph_defaults,
+            morph_names: expected_refs.deformation.payloads.morph_names,
+            morph_values: expected_refs.deformation.payloads.morph_values,
+            morph_sparse_indices: expected_refs.deformation.payloads.morph_sparse_indices,
+            instance_morph_weights: expected_refs.deformation.payloads.instance_morph_weights,
+        },
+        animation: AnimationValidatedRefs {
+            clips: expected_refs.animation.clips,
+            channels: expected_refs.animation.channels,
+            times: expected_refs.animation.payloads.times,
+            values: expected_refs.animation.payloads.values,
+            in_tangents: expected_refs.animation.payloads.in_tangents,
+            out_tangents: expected_refs.animation.payloads.out_tangents,
+        },
+        profile: ProfileValidatedRefs {
+            directory: expected_refs.profile.directory,
+            segments: expected_refs.profile.segments,
+            owners: expected_refs.profile.owners,
+            attachments: profile_attachments,
+            metadata_directory: expected_refs.profile.metadata.directory,
+            metadata_entries: expected_refs.profile.metadata.leaves.entries,
+            metadata_text: expected_refs.profile.metadata.leaves.text,
+            metadata_bytes: expected_refs.profile.metadata.leaves.bytes,
+            metadata_bools: expected_refs.profile.metadata.leaves.bools,
+            metadata_i64s: expected_refs.profile.metadata.leaves.i64s,
+            metadata_u64s: expected_refs.profile.metadata.leaves.u64s,
+            metadata_f64s: expected_refs.profile.metadata.leaves.f64s,
+            metadata_f32s: expected_refs.profile.metadata.leaves.f32s,
+            segment_count: profile.segment_count,
+            resource_count: profile.resource_count,
+            source_count: profile.source_count,
+            provenance_count: profile.provenance_count,
+            operation_count: profile.operation_count,
+            evidence_count: profile.evidence_count,
+            parent_count: profile.parent_count,
+            wide_count: profile.wide_count,
+            lineage_text_bytes: profile.lineage_text_bytes,
+            lineage_digest_bytes: profile.lineage_digest_bytes,
+            attachment_count: profile.attachment_count,
+            owner_count: profile.owner_count,
+            metadata_entry_count: profile.metadata_entry_count,
+            metadata_text_bytes: profile.metadata_text_bytes,
+            metadata_payload_bytes: profile.metadata_payload_bytes,
+            metadata_bool_count: profile.metadata_bool_count,
+            metadata_i64_count: profile.metadata_i64_count,
+            metadata_u64_count: profile.metadata_u64_count,
+            metadata_f64_count: profile.metadata_f64_count,
+            metadata_f32_count: profile.metadata_f32_count,
+            canonical_block_count: profile.canonical_block_count,
+            payload_leaf_count: profile.payload_leaf_count,
+            shareable_leaf_count: profile.shareable_leaf_count,
+            maximum_provenance_depth: profile.maximum_provenance_depth,
+            owner_classes: profile.owner_classes,
+        },
+        source_node_count: node.source_node_count,
+        source_root_count: node.source_root_count,
+        source_edge_count: node.source_edge_count,
+        deformation_uniqueness_mark_count: deformation.maximum_uniqueness_count,
+        counts: expected_counts,
+    }))
 }
 
 #[allow(

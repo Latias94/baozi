@@ -35,17 +35,16 @@ fn candidate_with_control(
 fn candidate_with_operation(
     (operation, keys): (TestOperation, TestKeys),
 ) -> (TestCanonicalCandidate, TestKeys) {
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape_with_validation_work(keys, 1, 1, NonZeroU64::new(2).unwrap()),
-        |preflight| preflight.seal::<()>(),
+        scoped_activation_shape_with_validation_work(keys, 1, 1, NonZeroU64::new(2).unwrap()),
         |mut lane| {
             let root = lane
                 .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
                     writer.push(7)
                 })
                 .unwrap();
-            lane.complete(root, ())
+            lane.complete::<_, (), _, _>(root, ())
         },
     )
     .unwrap();
@@ -67,26 +66,33 @@ fn candidate_with_operation(
                     .unwrap();
                 lane.complete(evidence)
             },
-            |session, canonical, evidence, _output| {
-                let mut canonical_value = None;
-                let mut evidence_value = None;
-                assert!(
-                    session.visit_canonical_sequence(canonical, 1, |_index, value| {
-                        canonical_value = Some(value);
-                        true
-                    })?
-                );
-                assert!(session.visit_outcome_evidence_sequence(
-                    evidence,
-                    1,
-                    |_index, value| {
-                        evidence_value = Some(value);
-                        true
-                    }
-                )?);
-                assert_eq!(canonical_value, Some(7));
-                assert_eq!(evidence_value, Some(9));
-                Ok(CanonicalValidationDecision::<(), ValidationRejection>::accept(()))
+            |planning, _output| {
+                planning.validate_with(
+                    |_| Ok(()),
+                    |session, canonical, evidence, &mut ()| {
+                        let mut canonical_value = None;
+                        let mut evidence_value = None;
+                        assert!(session.visit_canonical_sequence(
+                            canonical,
+                            1,
+                            |_index, value| {
+                                canonical_value = Some(value);
+                                true
+                            }
+                        )?);
+                        assert!(session.visit_outcome_evidence_sequence(
+                            evidence,
+                            1,
+                            |_index, value| {
+                                evidence_value = Some(value);
+                                true
+                            }
+                        )?);
+                        assert_eq!(canonical_value, Some(7));
+                        assert_eq!(evidence_value, Some(9));
+                        Ok(CanonicalValidationDecision::<(), ValidationRejection>::accept(()))
+                    },
+                )
             },
         )
         .unwrap();
@@ -306,17 +312,16 @@ fn non_copy_output_remains_contained_before_the_success_binder() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape_with_validation_work(keys, 1, 1, NonZeroU64::new(2).unwrap()),
-        |preflight| preflight.seal::<()>(),
+        scoped_activation_shape_with_validation_work(keys, 1, 1, NonZeroU64::new(2).unwrap()),
         |mut lane| {
             let root = lane
                 .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
                     writer.push(7)
                 })
                 .unwrap();
-            lane.complete(root, PanicOnDrop)
+            lane.complete::<_, (), _, _>(root, PanicOnDrop)
         },
     )
     .unwrap();
@@ -338,16 +343,23 @@ fn non_copy_output_remains_contained_before_the_success_binder() {
                     .unwrap();
                 lane.complete(evidence)
             },
-            |session, canonical, evidence, _output| {
-                assert!(
-                    session.visit_canonical_sequence(canonical, 1, |_index, value| value == 7)?
-                );
-                assert!(session.visit_outcome_evidence_sequence(
-                    evidence,
-                    1,
-                    |_index, value| value == 9
-                )?);
-                Ok(CanonicalValidationDecision::<(), ValidationRejection>::accept(()))
+            |planning, _output| {
+                planning.validate_with(
+                    |_| Ok(()),
+                    |session, canonical, evidence, &mut ()| {
+                        assert!(session.visit_canonical_sequence(
+                            canonical,
+                            1,
+                            |_index, value| value == 7
+                        )?);
+                        assert!(session.visit_outcome_evidence_sequence(
+                            evidence,
+                            1,
+                            |_index, value| value == 9
+                        )?);
+                        Ok(CanonicalValidationDecision::<(), ValidationRejection>::accept(()))
+                    },
+                )
             },
         )
         .unwrap();
@@ -391,17 +403,16 @@ fn non_copy_proof_remains_contained_before_the_success_binder() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
-    let outcome = plan_activation!(
+    let outcome = plan_scoped_activation!(
         operation,
-        activation_shape_with_validation_work(keys, 1, 1, NonZeroU64::new(2).unwrap()),
-        |preflight| preflight.seal::<()>(),
+        scoped_activation_shape_with_validation_work(keys, 1, 1, NonZeroU64::new(2).unwrap()),
         |mut lane| {
             let root = lane
                 .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
                     writer.push(7)
                 })
                 .unwrap();
-            lane.complete(root, ())
+            lane.complete::<_, (), _, _>(root, ())
         },
     )
     .unwrap();
@@ -423,19 +434,26 @@ fn non_copy_proof_remains_contained_before_the_success_binder() {
                     .unwrap();
                 lane.complete(evidence)
             },
-            |session, canonical, evidence, _output| {
-                assert!(
-                    session.visit_canonical_sequence(canonical, 1, |_index, value| value == 7)?
-                );
-                assert!(session.visit_outcome_evidence_sequence(
-                    evidence,
-                    1,
-                    |_index, value| value == 9
-                )?);
-                Ok(CanonicalValidationDecision::<
-                    PanicOnDrop,
-                    ValidationRejection,
-                >::accept(PanicOnDrop))
+            |planning, _output| {
+                planning.validate_with(
+                    |_| Ok(()),
+                    |session, canonical, evidence, &mut ()| {
+                        assert!(session.visit_canonical_sequence(
+                            canonical,
+                            1,
+                            |_index, value| value == 7
+                        )?);
+                        assert!(session.visit_outcome_evidence_sequence(
+                            evidence,
+                            1,
+                            |_index, value| value == 9
+                        )?);
+                        Ok(CanonicalValidationDecision::<
+                            PanicOnDrop,
+                            ValidationRejection,
+                        >::accept(PanicOnDrop))
+                    },
+                )
             },
         )
         .unwrap();

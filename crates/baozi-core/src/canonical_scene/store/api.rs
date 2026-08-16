@@ -9,17 +9,17 @@
 //! [`PendingSceneDraftOwner`]. The descriptor carries no retained ownership, while the owner
 //! structurally keeps every materialized block alive until central preparation consumes both.
 
-use baozi_operation::{PhysicalStorageAccount, StoreLedgerEvidence};
+use baozi_operation::{PhysicalStorageAccount, StoreLedgerEvidence, StoreRuntimeError};
 
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 
 pub(crate) use super::construction::SceneConstructionError;
 use super::construction::TracerSceneFallback;
 use super::construction::node_scene::{
-    NodeSceneConstructionTerminal, NodeSceneDraft, NodeSceneDraftBuild, NodeSceneRichFailure,
-    NodeSceneSuccessParts, NodeSceneSuccessReport, PendingNodeSceneDraft,
-    PreparedNodeSceneConstruction, PreparedNodeSceneFailure, ValidatedNodeScene,
-    ValidatedNodeSceneConstruction,
+    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
+    NodeSceneDraftBuild, NodeSceneRichFailure, NodeSceneSuccessParts, NodeSceneSuccessReport,
+    PendingNodeSceneDraft, PreparedNodeSceneConstruction, PreparedNodeSceneFailure,
+    ValidatedNodeScene,
 };
 
 pub(crate) mod continuation;
@@ -49,7 +49,10 @@ enum SceneDraftBuild {
         draft: SceneDraft,
         owner: PendingSceneDraftOwner,
     },
-    Failure(PreparedSceneFailure),
+    Failure {
+        prepared: PreparedSceneFailure,
+        authoring_rejection: Option<NodeSceneConstructionRejection<StoreRuntimeError>>,
+    },
 }
 
 impl SceneDraftBuild {
@@ -59,7 +62,13 @@ impl SceneDraftBuild {
                 draft: SceneDraft(draft),
                 owner: PendingSceneDraftOwner(owner),
             },
-            NodeSceneDraftBuild::Failure(failure) => Self::Failure(PreparedSceneFailure(failure)),
+            NodeSceneDraftBuild::Failure {
+                prepared,
+                authoring_rejection,
+            } => Self::Failure {
+                prepared: PreparedSceneFailure(prepared),
+                authoring_rejection,
+            },
         }
     }
 
@@ -71,7 +80,7 @@ impl SceneDraftBuild {
             Self::Draft { draft, owner } => {
                 owner.prepare_with_generation_source(draft, reserve_generation)
             }
-            Self::Failure(failure) => Ok(failure.into()),
+            Self::Failure { prepared, .. } => Ok(prepared.into()),
         }
     }
 }
@@ -92,46 +101,6 @@ impl PendingSceneDraftOwner {
             .prepare_missing_draft()
             .map(PreparedSceneConstruction)
     }
-}
-
-/// A validated source batch coupled to the exact operation that admitted its work.
-#[must_use = "the validated Scene construction must be materialized or deliberately dropped"]
-struct ValidatedSceneConstruction<'input>(ValidatedNodeSceneConstruction<'input>);
-
-impl<'input> ValidatedSceneConstruction<'input> {
-    pub(in crate::canonical_scene::store) fn from_node_scene(
-        construction: ValidatedNodeSceneConstruction<'input>,
-    ) -> Self {
-        Self(construction)
-    }
-
-    /// Materializes the source-backed input into a descriptor and its independent retained owner.
-    fn finish_draft(self) -> Result<SceneDraftBuild, SceneConstructionError> {
-        self.0.finish_draft().map(SceneDraftBuild::from_node_scene)
-    }
-
-    /// Exercises the final opaque handoff with a deterministic generation source.
-    ///
-    /// This is test-only so production callers can neither select nor observe the private
-    /// generation reservation step.
-    #[cfg(test)]
-    pub(in crate::canonical_scene::store) fn prepare_with_generation_source(
-        self,
-        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-    ) -> Result<PreparedSceneConstruction, SceneConstructionError> {
-        self.finish_draft()?
-            .prepare_with_generation_source(reserve_generation)
-    }
-}
-
-#[cfg(test)]
-pub(in crate::canonical_scene::store) fn handoff_validated_node_scene_with_generation_source_for_test(
-    construction: ValidatedNodeSceneConstruction<'_>,
-    reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-) -> Result<SceneConstructionTerminal, SceneConstructionError> {
-    ValidatedSceneConstruction::from_node_scene(construction)
-        .prepare_with_generation_source(reserve_generation)
-        .map(PreparedSceneConstruction::handoff)
 }
 
 /// A frozen failure publication which can only be forwarded to terminal handoff.
