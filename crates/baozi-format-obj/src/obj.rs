@@ -77,9 +77,11 @@ pub(crate) fn parse<'scope>(
     };
 
     parser::scan_lines(scope, text, |line, line_number| {
-        let record = scope.begin_work(ImportWorkClass::Records, 1)?;
-        parser.parse_line(&line, line_number)?;
-        record.complete()
+        let line = scope.with_work(ImportWorkClass::Records, 1, |work| -> ParseResult<_> {
+            work.complete_all()?;
+            Ok(line)
+        })?;
+        parser.parse_line(&line, line_number)
     })?;
 
     Ok(parser.parsed)
@@ -171,13 +173,7 @@ impl<'scope> ObjParser<'scope, '_> {
                 )?;
                 Ok(())
             }
-            "mtllib" => {
-                for token in &token_values[1..] {
-                    let mtllib = checked_string(self.scope, token.text)?;
-                    self.parsed.mtllibs.try_push(mtllib)?;
-                }
-                Ok(())
-            }
+            "mtllib" => self.parse_material_library_references(&token_values[1..]),
             keyword if is_unsupported_statement(keyword) => mtl::push_warning(
                 self.scope,
                 Some((line_number, first.column)),
@@ -195,34 +191,49 @@ impl<'scope> ObjParser<'scope, '_> {
 
     fn parse_position(&mut self, tokens: &[Token<'_>], line_number: u32) -> ParseResult<()> {
         require_components(self.scope, tokens, 4, "position", line_number)?;
-        let vertex = self.scope.begin_work(ImportWorkClass::Vertices, 1)?;
-        self.parsed.positions.try_push(Vec3::new(
-            parse_f32(self.scope, "position", tokens[1], line_number)?,
-            parse_f32(self.scope, "position", tokens[2], line_number)?,
-            parse_f32(self.scope, "position", tokens[3], line_number)?,
-        ))?;
-        vertex.complete()
+        self.scope
+            .with_work(ImportWorkClass::Vertices, 1, |work| -> ParseResult<()> {
+                work.run_all(|| {
+                    self.parsed.positions.try_push(Vec3::new(
+                        parse_f32(self.scope, "position", tokens[1], line_number)?,
+                        parse_f32(self.scope, "position", tokens[2], line_number)?,
+                        parse_f32(self.scope, "position", tokens[3], line_number)?,
+                    ))
+                })
+            })
     }
 
     fn parse_texcoord(&mut self, tokens: &[Token<'_>], line_number: u32) -> ParseResult<()> {
         require_components(self.scope, tokens, 3, "texcoord", line_number)?;
-        let attribute = self.scope.begin_work(ImportWorkClass::AttributeCells, 1)?;
-        self.parsed.texcoords.try_push(Vec2::new(
-            parse_f32(self.scope, "texcoord", tokens[1], line_number)?,
-            parse_f32(self.scope, "texcoord", tokens[2], line_number)?,
-        ))?;
-        attribute.complete()
+        self.scope.with_work(
+            ImportWorkClass::AttributeCells,
+            1,
+            |work| -> ParseResult<()> {
+                work.run_all(|| {
+                    self.parsed.texcoords.try_push(Vec2::new(
+                        parse_f32(self.scope, "texcoord", tokens[1], line_number)?,
+                        parse_f32(self.scope, "texcoord", tokens[2], line_number)?,
+                    ))
+                })
+            },
+        )
     }
 
     fn parse_normal(&mut self, tokens: &[Token<'_>], line_number: u32) -> ParseResult<()> {
         require_components(self.scope, tokens, 4, "normal", line_number)?;
-        let attribute = self.scope.begin_work(ImportWorkClass::AttributeCells, 1)?;
-        self.parsed.normals.try_push(Vec3::new(
-            parse_f32(self.scope, "normal", tokens[1], line_number)?,
-            parse_f32(self.scope, "normal", tokens[2], line_number)?,
-            parse_f32(self.scope, "normal", tokens[3], line_number)?,
-        ))?;
-        attribute.complete()
+        self.scope.with_work(
+            ImportWorkClass::AttributeCells,
+            1,
+            |work| -> ParseResult<()> {
+                work.run_all(|| {
+                    self.parsed.normals.try_push(Vec3::new(
+                        parse_f32(self.scope, "normal", tokens[1], line_number)?,
+                        parse_f32(self.scope, "normal", tokens[2], line_number)?,
+                        parse_f32(self.scope, "normal", tokens[3], line_number)?,
+                    ))
+                })
+            },
+        )
     }
 
     fn parse_face(&mut self, tokens: &[Token<'_>], line_number: u32) -> ParseResult<()> {
@@ -235,37 +246,47 @@ impl<'scope> ObjParser<'scope, '_> {
             )));
         }
 
-        let face_permit = self.scope.begin_work(ImportWorkClass::Faces, 1)?;
         let face_vertex_count = tokens.len() - 1;
-        let topology_permit = self.scope.begin_work(
-            ImportWorkClass::TopologyCells,
-            usize_amount(self.scope, face_vertex_count, "obj-face-topology-cells")?,
-        )?;
+        self.scope.with_work_group(
+            [
+                (ImportWorkClass::Faces, 1),
+                (
+                    ImportWorkClass::TopologyCells,
+                    usize_amount(self.scope, face_vertex_count, "obj-face-topology-cells")?,
+                ),
+            ],
+            |work| -> ParseResult<()> {
+                let mut vertices = self
+                    .scope
+                    .metered_vec(ImportStorageClass::FormatNormalization, "obj-face-vertices");
+                vertices.try_reserve(face_vertex_count)?;
+                for chunk in tokens[1..].chunks(64) {
+                    work.poll()?;
+                    for token in chunk {
+                        let vertex =
+                            parse_face_vertex(self.scope, *token, &self.parsed, line_number)?;
+                        work.run([0, 1], || vertices.try_push_reserved(vertex))?;
+                    }
+                }
+                work.run([1, 0], || {
+                    self.parsed.faces.try_push(Face {
+                        vertices,
+                        object: self.object,
+                        group: self.group,
+                        material: self.material,
+                        smoothing: self.smoothing,
+                    })
+                })
+            },
+        )
+    }
 
-        let mut vertices = self
-            .scope
-            .metered_vec(ImportStorageClass::FormatNormalization, "obj-face-vertices");
-        vertices.try_reserve(face_vertex_count)?;
-        for chunk in tokens[1..].chunks(64) {
-            self.scope.poll()?;
-            for token in chunk {
-                vertices.try_push_reserved(parse_face_vertex(
-                    self.scope,
-                    *token,
-                    &self.parsed,
-                    line_number,
-                )?)?;
-            }
+    fn parse_material_library_references(&mut self, tokens: &[Token<'_>]) -> ParseResult<()> {
+        for token in tokens {
+            let mtllib = checked_string(self.scope, token.text)?;
+            self.parsed.mtllibs.try_push(mtllib)?;
         }
-        self.parsed.faces.try_push(Face {
-            vertices,
-            object: self.object,
-            group: self.group,
-            material: self.material,
-            smoothing: self.smoothing,
-        })?;
-        topology_permit.complete()?;
-        face_permit.complete()
+        Ok(())
     }
 }
 
@@ -279,10 +300,7 @@ fn parse_state_name<'scope>(
         return Ok(None);
     };
     parser::enforce_text_value_limit(scope, text.len(), "obj-state-name-bytes")?;
-    let string_permit = scope.begin_work(
-        ImportWorkClass::StringBytes,
-        usize_amount(scope, text.len(), "obj-state-name-bytes")?,
-    )?;
+    let string_bytes = usize_amount(scope, text.len(), "obj-state-name-bytes")?;
     if let Some(current) = current {
         let current_name = state_names.as_slice().get(current.0).ok_or_else(|| {
             scope.format_failure(ObjFailure::internal("state-name-id-out-of-range"))
@@ -294,17 +312,34 @@ fn parse_state_name<'scope>(
             "obj-state-name-comparison",
         )?;
         if matches_current {
-            string_permit.complete()?;
-            return Ok(Some(current));
+            return scope.with_work(
+                ImportWorkClass::StringBytes,
+                string_bytes,
+                |work| -> ParseResult<_> {
+                    work.complete_all()?;
+                    Ok(Some(current))
+                },
+            );
         }
     }
 
     let mut name = scope.metered_string(ImportStorageClass::FormatNormalization, "obj-state-name");
-    name.try_push_str(text)?;
-    let id = StateNameId(state_names.len());
-    state_names.try_push(name)?;
-    string_permit.complete()?;
-    Ok(Some(id))
+    scope.with_work(
+        ImportWorkClass::StringBytes,
+        string_bytes,
+        |work| -> ParseResult<_> {
+            name.try_reserve(text.len())?;
+            for_string_chunks(text, |chunk| {
+                work.run(
+                    [usize_amount(scope, chunk.len(), "obj-state-name-bytes")?],
+                    || name.try_push_str_reserved(chunk),
+                )
+            })?;
+            let id = StateNameId(state_names.len());
+            state_names.try_push(name)?;
+            Ok(Some(id))
+        },
+    )
 }
 
 fn tokenize<'scope, 'line>(
@@ -349,23 +384,29 @@ fn push_token<'scope, 'line>(
     end: usize,
 ) -> ParseResult<()> {
     let text = &line[start..end];
-    let token = scope.begin_work(ImportWorkClass::Tokens, 1)?;
-    let token_bytes = scope.begin_work(
-        ImportWorkClass::TokenBytes,
-        usize_amount(scope, text.len(), "obj-token-bytes")?,
-    )?;
-    let column = start
-        .checked_add(1)
-        .and_then(|column| u32::try_from(column).ok())
-        .ok_or_else(|| scope.resource_limit_exceeded("line-columns", u64::MAX))?;
-    tokens.values.try_push(Token {
-        text,
-        column,
-        start,
-        end,
-    })?;
-    token_bytes.complete()?;
-    token.complete()
+    scope.with_work_group(
+        [
+            (ImportWorkClass::Tokens, 1),
+            (
+                ImportWorkClass::TokenBytes,
+                usize_amount(scope, text.len(), "obj-token-bytes")?,
+            ),
+        ],
+        |work| -> ParseResult<()> {
+            work.run_all(|| {
+                let column = start
+                    .checked_add(1)
+                    .and_then(|column| u32::try_from(column).ok())
+                    .ok_or_else(|| scope.resource_limit_exceeded("line-columns", u64::MAX))?;
+                tokens.values.try_push(Token {
+                    text,
+                    column,
+                    start,
+                    end,
+                })
+            })
+        },
+    )
 }
 
 fn parse_face_vertex(
@@ -515,17 +556,42 @@ fn checked_string<'scope>(
     text: &str,
 ) -> ParseResult<MeteredString<'scope>> {
     parser::enforce_text_value_limit(scope, text.len(), "obj-material-library-reference")?;
-    let string_permit = scope.begin_work(
-        ImportWorkClass::StringBytes,
-        usize_amount(scope, text.len(), "obj-string-bytes")?,
-    )?;
     let mut owned = scope.metered_string(
         ImportStorageClass::FormatNormalization,
         "obj-material-library-reference",
     );
-    owned.try_push_str(text)?;
-    string_permit.complete()?;
-    Ok(owned)
+    scope.with_work(
+        ImportWorkClass::StringBytes,
+        usize_amount(scope, text.len(), "obj-string-bytes")?,
+        |work| -> ParseResult<_> {
+            owned.try_reserve(text.len())?;
+            for_string_chunks(text, |chunk| {
+                work.run(
+                    [usize_amount(scope, chunk.len(), "obj-string-bytes")?],
+                    || owned.try_push_str_reserved(chunk),
+                )
+            })?;
+            Ok(owned)
+        },
+    )
+}
+
+fn for_string_chunks(
+    value: &str,
+    mut visit: impl FnMut(&str) -> ParseResult<()>,
+) -> ParseResult<()> {
+    let mut start = 0usize;
+    while start < value.len() {
+        let mut end = start
+            .checked_add(parser::SCAN_CHUNK_BYTES)
+            .map_or(value.len(), |end| end.min(value.len()));
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        visit(&value[start..end])?;
+        start = end;
+    }
+    Ok(())
 }
 
 fn enforce_numeric_literal(scope: &ParseScope<'_>, text: &str) -> ParseResult<()> {

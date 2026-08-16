@@ -667,7 +667,10 @@ impl fmt::Display for FailingFormatValue {
 impl FormatFailureEvidenceProducer for ReentrantFormatFailureProducer<'_, '_> {
     fn code(&self) -> &str {
         if matches!(self.phase, ReentrantFormatFailurePhase::Code) {
-            drop(self.scope.begin_work(ImportWorkClass::WorkUnits, 1));
+            drop(
+                self.scope
+                    .with_work(ImportWorkClass::WorkUnits, 1, |work| work.complete_all()),
+            );
         }
         "test.reentrant_format_failure"
     }
@@ -731,7 +734,10 @@ impl FormatFailureEvidenceProducer for ReentrantFormatFailureProducer<'_, '_> {
 impl Drop for ReentrantFormatFailureProducer<'_, '_> {
     fn drop(&mut self) {
         if matches!(self.phase, ReentrantFormatFailurePhase::Drop) {
-            drop(self.scope.begin_work(ImportWorkClass::WorkUnits, 1));
+            drop(
+                self.scope
+                    .with_work(ImportWorkClass::WorkUnits, 1, |work| work.complete_all()),
+            );
         }
     }
 }
@@ -1006,7 +1012,6 @@ impl FormatImporter for TerminalLatchImporter {
         resize_storage.try_push(0)?;
         let resize_capacity = resize_storage.capacity();
         let mut builder = scope.scene_builder()?;
-        let pending_work = scope.begin_work(ImportWorkClass::WorkUnits, 1)?;
         let first_failure = match self.trigger {
             TerminalLatchTrigger::MissingRequiredDependency => {
                 match scope.required_dependency(&self.required_role, "missing.bin") {
@@ -1041,8 +1046,11 @@ impl FormatImporter for TerminalLatchImporter {
                 .required_dependency(&self.required_role, "late-required.bin")
                 .is_ok(),
         );
-        record_late_success(scope.begin_work(ImportWorkClass::WorkUnits, 1).is_ok());
-        record_late_success(pending_work.complete().is_ok());
+        record_late_success(
+            scope
+                .with_work(ImportWorkClass::WorkUnits, 1, |work| work.complete_all())
+                .is_ok(),
+        );
         record_late_success(
             scope
                 .metered_opaque_allowance(ImportStorageClass::BackendDecode, 1)
@@ -1762,7 +1770,7 @@ fn terminal_latch_rejects_every_late_capability_without_side_effects() {
             .ledger()
             .dimension(ImportDimension::WorkUnits)
             .unwrap();
-        assert_eq!(work.attempted(), 1, "{trigger:?}");
+        assert_eq!(work.attempted(), 0, "{trigger:?}");
         assert_eq!(work.consumed(), 0, "{trigger:?}");
         let expected_opens = if expected_references == 0 { 1 } else { 2 };
         assert_eq!(io.open_count(), expected_opens, "{trigger:?}");

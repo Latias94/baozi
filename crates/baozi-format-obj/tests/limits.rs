@@ -232,8 +232,10 @@ fn primary_ascii_decode_adds_only_chunk_bounded_polls() -> TestResult<()> {
         "long ASCII decode added {actual_extra_polls} polls, expected at least {} chunk-boundary polls",
         extra_chunks * 2
     );
+    // Each extra chunk crosses the planning and decode callback boundaries plus the bounded
+    // line-index scan; the constant absorbs phase-level polls shared by short and long inputs.
     assert!(
-        actual_extra_polls <= extra_chunks * 4 + 4,
+        actual_extra_polls <= extra_chunks * 5 + 4,
         "long ASCII decode added {actual_extra_polls} polls for {extra_chunks} extra chunks"
     );
 

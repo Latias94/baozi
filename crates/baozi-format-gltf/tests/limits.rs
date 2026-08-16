@@ -11,7 +11,7 @@ use baozi_operation::{
 use base64::Engine as _;
 use common::{
     GltfTestOptions, TestResult, assert_gltf_failure, expected_error,
-    import_assets_result_with_control, triangle_gltf_with_buffer_uri,
+    import_assets_result_with_control, sidecar_options, triangle_gltf_with_buffer_uri,
 };
 use std::sync::{
     Arc,
@@ -189,7 +189,10 @@ fn whole_json_utf8_preflight_cancellation_is_bounded_by_scan_chunks() -> TestRes
     assert!(diagnostics.is_empty());
     assert_cancelled(&failure);
     assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
-    assert_eq!(dimension_consumed(&failure, ImportDimension::DecodeWork), 0);
+    assert_eq!(
+        dimension_consumed(&failure, ImportDimension::DecodeWork),
+        invalid_offset as u64
+    );
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     Ok(())
 }
@@ -229,7 +232,7 @@ fn data_uri_base64_scan_cancellation_is_bounded_by_scan_chunks() -> TestResult<(
     );
     assert_eq!(
         dimension_consumed(&calibration_failure, ImportDimension::DecodeWork),
-        document.len() as u64
+        (document.len() * 2) as u64
     );
     let post_failure_poll = calibration_polls.load(Ordering::SeqCst);
     assert!(post_failure_poll > 0);
@@ -259,7 +262,7 @@ fn data_uri_base64_scan_cancellation_is_bounded_by_scan_chunks() -> TestResult<(
     );
     assert_eq!(
         dimension_consumed(&failure, ImportDimension::DecodeWork),
-        document.len() as u64
+        (document.len() * 2) as u64
     );
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     Ok(())
@@ -317,12 +320,129 @@ fn data_uri_base64_decode_cancellation_is_bounded_by_decode_chunks() -> TestResu
     );
     assert_eq!(
         dimension_consumed(&failure, ImportDimension::DataUriBytes),
-        0
+        (SCAN_CHUNK_BYTES / 4 * 3) as u64
     );
     assert_eq!(
         dimension_consumed(&failure, ImportDimension::DecodeWork),
-        document.len() as u64
+        (document.len() * 2 + SCAN_CHUNK_BYTES) as u64
     );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    Ok(())
+}
+
+#[test]
+fn data_uri_work_admission_precedes_decode_buffer_allocation() -> TestResult<()> {
+    let encoded = encoded_payload();
+    let uri = data_uri(&encoded);
+    let document = triangle_gltf_with_buffer_uri(&uri, DECODED_BYTES);
+    let decode_limit = (document.len() * 2) as u64;
+
+    let mut calibration_options = GltfTestOptions::memory();
+    calibration_options.limits.max_decode_work = decode_limit;
+    let (calibration_result, calibration_diagnostics) = import_assets_result_with_control(
+        "data-uri-admission-calibration.gltf",
+        [("data-uri-admission-calibration.gltf", document.clone())],
+        calibration_options,
+        ImportOperationControl::default(),
+    )?;
+    let calibration_failure = expected_error(calibration_result)?;
+    assert!(calibration_diagnostics.is_empty());
+    assert_ledger_limit(
+        &calibration_failure,
+        ImportDimension::DecodeWork,
+        decode_limit,
+    );
+    let pre_buffer_peak = calibration_failure.ledger().peak_live_bytes();
+    assert!(pre_buffer_peak > 0);
+
+    let mut options = GltfTestOptions::memory();
+    options.limits.max_decode_work = decode_limit;
+    options.limits.max_live_bytes = pre_buffer_peak;
+    let (result, diagnostics) = import_assets_result_with_control(
+        "data-uri-admission.gltf",
+        [("data-uri-admission.gltf", document.clone())],
+        options,
+        ImportOperationControl::default(),
+    )?;
+    let failure = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_ledger_limit(&failure, ImportDimension::DecodeWork, decode_limit);
+    assert_eq!(
+        dimension_attempted(&failure, ImportDimension::DataUriBytes),
+        DECODED_BYTES as u64
+    );
+    assert_eq!(
+        dimension_consumed(&failure, ImportDimension::DataUriBytes),
+        0
+    );
+    assert_eq!(
+        dimension_attempted(&failure, ImportDimension::DecodeWork),
+        (document.len() * 2 + encoded.len()) as u64
+    );
+    assert_eq!(
+        dimension_consumed(&failure, ImportDimension::DecodeWork),
+        (document.len() * 2) as u64
+    );
+    assert_eq!(failure.ledger().peak_live_bytes(), pre_buffer_peak);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    Ok(())
+}
+
+#[test]
+fn external_buffer_work_admission_precedes_copy_allocation() -> TestResult<()> {
+    const BUFFER_BYTES: usize = 128 * 1024;
+
+    let document = triangle_gltf_with_buffer_uri("payload.bin", BUFFER_BYTES);
+    let payload = vec![0_u8; BUFFER_BYTES];
+    let decode_limit = (document.len() * 2) as u64;
+
+    let mut calibration_options = sidecar_options();
+    calibration_options.limits.max_decode_work = decode_limit;
+    let (calibration_result, calibration_diagnostics) = import_assets_result_with_control(
+        "external-admission-calibration.gltf",
+        [
+            ("external-admission-calibration.gltf", document.clone()),
+            ("payload.bin", payload.clone()),
+        ],
+        calibration_options,
+        ImportOperationControl::default(),
+    )?;
+    let calibration_failure = expected_error(calibration_result)?;
+    assert!(calibration_diagnostics.is_empty());
+    assert_ledger_limit(
+        &calibration_failure,
+        ImportDimension::DecodeWork,
+        decode_limit,
+    );
+    let pre_copy_peak = calibration_failure.ledger().peak_live_bytes();
+    assert!(pre_copy_peak > 0);
+
+    let mut options = sidecar_options();
+    options.limits.max_decode_work = decode_limit;
+    options.limits.max_live_bytes = pre_copy_peak;
+    let (result, diagnostics) = import_assets_result_with_control(
+        "external-admission.gltf",
+        [
+            ("external-admission.gltf", document.clone()),
+            ("payload.bin", payload),
+        ],
+        options,
+        ImportOperationControl::default(),
+    )?;
+    let failure = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_ledger_limit(&failure, ImportDimension::DecodeWork, decode_limit);
+    assert_eq!(
+        dimension_attempted(&failure, ImportDimension::DecodeWork),
+        (document.len() * 2 + BUFFER_BYTES) as u64
+    );
+    assert_eq!(
+        dimension_consumed(&failure, ImportDimension::DecodeWork),
+        (document.len() * 2) as u64
+    );
+    assert_eq!(failure.ledger().peak_live_bytes(), pre_copy_peak);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     Ok(())
 }

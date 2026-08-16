@@ -52,6 +52,12 @@ pub(crate) enum TextDecodeFailure {
     InvalidUtf8 { source: Utf8Error, base_offset: u64 },
 }
 
+impl From<ParseFailure> for TextDecodeFailure {
+    fn from(failure: ParseFailure) -> Self {
+        Self::Scope(failure)
+    }
+}
+
 pub(crate) fn decode_utf8<'scope>(
     scope: &'scope ParseScope<'_>,
     bytes: &[u8],
@@ -81,65 +87,67 @@ pub(crate) fn decode_utf8<'scope>(
 
     while offset < bytes.len() {
         let end = utf8_chunk_end(bytes, offset);
-        let permit = scope
-            .begin_work(
-                ImportWorkClass::DecodeWork,
-                usize_amount(scope, end - offset, resource).map_err(TextDecodeFailure::Scope)?,
-            )
-            .map_err(TextDecodeFailure::Scope)?;
-
-        while offset < end {
-            match classify_utf8_unit(bytes, offset, end) {
-                Utf8Unit::Valid(length) => {
-                    let unit_end = offset.checked_add(length).ok_or_else(|| {
-                        TextDecodeFailure::Scope(scope.allocation_failure(resource))
-                    })?;
-                    let unit = bytes.get(offset..unit_end).ok_or_else(|| {
-                        TextDecodeFailure::Scope(scope.allocation_failure(resource))
-                    })?;
-                    let decoded = std::str::from_utf8(unit)
-                        .map_err(|_| invalid_utf8_error(scope, bytes, offset, resource))?;
-                    append_preallocated_text(&mut text, decoded)
-                        .map_err(TextDecodeFailure::Scope)?;
-                    offset = unit_end;
-                }
-                Utf8Unit::Invalid(length) => {
-                    let raw_end = offset.checked_add(length).ok_or_else(|| {
-                        TextDecodeFailure::Scope(scope.allocation_failure(resource))
-                    })?;
-                    let raw_start =
-                        usize_amount(scope, offset, resource).map_err(TextDecodeFailure::Scope)?;
-                    let raw_end =
-                        usize_amount(scope, raw_end, resource).map_err(TextDecodeFailure::Scope)?;
-                    let raw_range =
-                        DiagnosticByteRange::new(raw_start, raw_end).map_err(|_| {
-                            TextDecodeFailure::Scope(scope.format_failure(ObjFailure::internal(
-                                "invalid-replacement-raw-range",
-                            )))
-                        })?;
-                    let decoded_start = text.len();
-                    append_preallocated_text(&mut text, "\u{fffd}")
-                        .map_err(TextDecodeFailure::Scope)?;
-                    let decoded_end = text.len();
-                    if replacements.len() >= replacements.capacity() {
-                        return Err(TextDecodeFailure::Scope(scope.format_failure(
-                            ObjFailure::internal("replacement-plan-capacity-exhausted"),
-                        )));
+        let amount =
+            usize_amount(scope, end - offset, resource).map_err(TextDecodeFailure::Scope)?;
+        scope.with_work(
+            ImportWorkClass::DecodeWork,
+            amount,
+            |work| -> Result<(), TextDecodeFailure> {
+                while offset < end {
+                    match classify_utf8_unit(bytes, offset, end) {
+                        Utf8Unit::Valid(length) => {
+                            let unit_end = offset.checked_add(length).ok_or_else(|| {
+                                TextDecodeFailure::Scope(scope.allocation_failure(resource))
+                            })?;
+                            let unit = bytes.get(offset..unit_end).ok_or_else(|| {
+                                TextDecodeFailure::Scope(scope.allocation_failure(resource))
+                            })?;
+                            let decoded = std::str::from_utf8(unit)
+                                .map_err(|_| invalid_utf8_error(scope, bytes, offset, resource))?;
+                            append_preallocated_text(&mut text, decoded)
+                                .map_err(TextDecodeFailure::Scope)?;
+                            offset = unit_end;
+                        }
+                        Utf8Unit::Invalid(length) => {
+                            let raw_end = offset.checked_add(length).ok_or_else(|| {
+                                TextDecodeFailure::Scope(scope.allocation_failure(resource))
+                            })?;
+                            let raw_start = usize_amount(scope, offset, resource)
+                                .map_err(TextDecodeFailure::Scope)?;
+                            let raw_end = usize_amount(scope, raw_end, resource)
+                                .map_err(TextDecodeFailure::Scope)?;
+                            let raw_range =
+                                DiagnosticByteRange::new(raw_start, raw_end).map_err(|_| {
+                                    TextDecodeFailure::Scope(scope.format_failure(
+                                        ObjFailure::internal("invalid-replacement-raw-range"),
+                                    ))
+                                })?;
+                            let decoded_start = text.len();
+                            append_preallocated_text(&mut text, "\u{fffd}")
+                                .map_err(TextDecodeFailure::Scope)?;
+                            let decoded_end = text.len();
+                            if replacements.len() >= replacements.capacity() {
+                                return Err(TextDecodeFailure::Scope(scope.format_failure(
+                                    ObjFailure::internal("replacement-plan-capacity-exhausted"),
+                                )));
+                            }
+                            replacements
+                                .try_push_reserved(TextReplacement {
+                                    raw_range,
+                                    decoded_start,
+                                    decoded_end,
+                                })
+                                .map_err(TextDecodeFailure::Scope)?;
+                            offset = usize::try_from(raw_end).map_err(|_| {
+                                TextDecodeFailure::Scope(scope.allocation_failure(resource))
+                            })?;
+                        }
                     }
-                    replacements
-                        .try_push_reserved(TextReplacement {
-                            raw_range,
-                            decoded_start,
-                            decoded_end,
-                        })
-                        .map_err(TextDecodeFailure::Scope)?;
-                    offset = usize::try_from(raw_end).map_err(|_| {
-                        TextDecodeFailure::Scope(scope.allocation_failure(resource))
-                    })?;
                 }
-            }
-        }
-        permit.complete().map_err(TextDecodeFailure::Scope)?;
+                work.complete_all()?;
+                Ok(())
+            },
+        )?;
     }
 
     if text.len() != plan.decoded_bytes || replacements.len() != plan.replacement_count {
@@ -345,22 +353,49 @@ pub(crate) fn scan_token_ranges(
 ) -> ParseResult<()> {
     let mut token_start = None;
     let mut chunk_start = 0usize;
+    let mut scanned_offsets = [0_u16; SCAN_CHUNK_BYTES];
+    let mut scanned_characters = ['\0'; SCAN_CHUNK_BYTES];
 
     while chunk_start < line.len() {
         let chunk_end = str_chunk_end(line, chunk_start);
-        let permit = scope.begin_work(
+        let mut scanned_len = 0usize;
+        scope.with_work(
             ImportWorkClass::DecodeWork,
             usize_amount(scope, chunk_end - chunk_start, resource)?,
+            |work| -> ParseResult<()> {
+                for (relative, character) in line[chunk_start..chunk_end].char_indices() {
+                    let offset =
+                        u16::try_from(relative).map_err(|_| scope.allocation_failure(resource))?;
+                    let stored_offset = scanned_offsets
+                        .get_mut(scanned_len)
+                        .ok_or_else(|| scope.allocation_failure(resource))?;
+                    let stored_character = scanned_characters
+                        .get_mut(scanned_len)
+                        .ok_or_else(|| scope.allocation_failure(resource))?;
+                    *stored_offset = offset;
+                    *stored_character = character;
+                    scanned_len = scanned_len
+                        .checked_add(1)
+                        .ok_or_else(|| scope.allocation_failure(resource))?;
+                }
+                work.complete_all()
+            },
         )?;
-        for (relative, character) in line[chunk_start..chunk_end].char_indices() {
+
+        // Token visitors can meter their own work, so semantic callbacks run only after the
+        // bounded scan capability has closed. The fixed buffer avoids an unmetered allocation or
+        // a second UTF-8 decode pass while preserving callback order.
+        for (&relative, &character) in scanned_offsets[..scanned_len]
+            .iter()
+            .zip(&scanned_characters[..scanned_len])
+        {
             let index = chunk_start
-                .checked_add(relative)
+                .checked_add(usize::from(relative))
                 .ok_or_else(|| scope.allocation_failure(resource))?;
             if character == '#' {
                 if let Some(start) = token_start.take() {
                     visit(start, index)?;
                 }
-                permit.complete()?;
                 return Ok(());
             }
             inspect(index, character)?;
@@ -372,7 +407,6 @@ pub(crate) fn scan_token_ranges(
                 token_start = Some(index);
             }
         }
-        permit.complete()?;
         chunk_start = chunk_end;
     }
 
@@ -425,56 +459,65 @@ fn plan_decode(
 
     while offset < bytes.len() {
         let end = utf8_chunk_end(bytes, offset);
-        let permit = scope
-            .begin_work(
-                ImportWorkClass::DecodeWork,
-                usize_amount(scope, end - offset, resource).map_err(TextDecodeFailure::Scope)?,
-            )
-            .map_err(TextDecodeFailure::Scope)?;
-        while offset < end {
-            let unit = classify_utf8_unit(bytes, offset, end);
-            if let Utf8Unit::Valid(length) = unit {
-                validate_text_unit(scope, bytes, offset, length, resource)?;
-            }
-            let (raw_length, decoded_length) = match unit {
-                Utf8Unit::Valid(length) => (length, length),
-                Utf8Unit::Invalid(length) if replace_invalid => {
-                    replacement_count = replacement_count.checked_add(1).ok_or_else(|| {
+        let amount =
+            usize_amount(scope, end - offset, resource).map_err(TextDecodeFailure::Scope)?;
+        scope.with_work(
+            ImportWorkClass::DecodeWork,
+            amount,
+            |work| -> Result<(), TextDecodeFailure> {
+                while offset < end {
+                    let unit = classify_utf8_unit(bytes, offset, end);
+                    if let Utf8Unit::Valid(length) = unit {
+                        validate_text_unit(scope, bytes, offset, length, resource)?;
+                    }
+                    let (raw_length, decoded_length) = match unit {
+                        Utf8Unit::Valid(length) => (length, length),
+                        Utf8Unit::Invalid(length) if replace_invalid => {
+                            replacement_count =
+                                replacement_count.checked_add(1).ok_or_else(|| {
+                                    TextDecodeFailure::Scope(scope.allocation_failure(resource))
+                                })?;
+                            (length, '\u{fffd}'.len_utf8())
+                        }
+                        Utf8Unit::Invalid(_) => {
+                            return Err(invalid_utf8_error(scope, bytes, offset, resource));
+                        }
+                    };
+
+                    if matches!(unit, Utf8Unit::Valid(1)) && bytes.get(offset) == Some(&b'\n') {
+                        let has_cr = offset > line_raw_start
+                            && offset.checked_sub(1).and_then(|index| bytes.get(index))
+                                == Some(&b'\r');
+                        let logical_line_bytes = line_bytes.saturating_sub(usize::from(has_cr));
+                        enforce_line_limit(
+                            scope,
+                            logical_line_bytes,
+                            scope.limits().max_line_bytes,
+                        )
+                        .map_err(TextDecodeFailure::Scope)?;
+                        line_count = line_count.checked_add(1).ok_or_else(|| {
+                            TextDecodeFailure::Scope(scope.allocation_failure("obj-line-count"))
+                        })?;
+                        line_bytes = 0;
+                        line_raw_start = offset.checked_add(1).ok_or_else(|| {
+                            TextDecodeFailure::Scope(scope.allocation_failure("obj-line-offset"))
+                        })?;
+                    } else {
+                        line_bytes = line_bytes.checked_add(decoded_length).ok_or_else(|| {
+                            TextDecodeFailure::Scope(scope.allocation_failure(resource))
+                        })?;
+                    }
+                    decoded_bytes = decoded_bytes.checked_add(decoded_length).ok_or_else(|| {
                         TextDecodeFailure::Scope(scope.allocation_failure(resource))
                     })?;
-                    (length, '\u{fffd}'.len_utf8())
+                    offset = offset.checked_add(raw_length).ok_or_else(|| {
+                        TextDecodeFailure::Scope(scope.allocation_failure(resource))
+                    })?;
                 }
-                Utf8Unit::Invalid(_) => {
-                    return Err(invalid_utf8_error(scope, bytes, offset, resource));
-                }
-            };
-
-            if matches!(unit, Utf8Unit::Valid(1)) && bytes.get(offset) == Some(&b'\n') {
-                let has_cr = offset > line_raw_start
-                    && offset.checked_sub(1).and_then(|index| bytes.get(index)) == Some(&b'\r');
-                let logical_line_bytes = line_bytes.saturating_sub(usize::from(has_cr));
-                enforce_line_limit(scope, logical_line_bytes, scope.limits().max_line_bytes)
-                    .map_err(TextDecodeFailure::Scope)?;
-                line_count = line_count.checked_add(1).ok_or_else(|| {
-                    TextDecodeFailure::Scope(scope.allocation_failure("obj-line-count"))
-                })?;
-                line_bytes = 0;
-                line_raw_start = offset.checked_add(1).ok_or_else(|| {
-                    TextDecodeFailure::Scope(scope.allocation_failure("obj-line-offset"))
-                })?;
-            } else {
-                line_bytes = line_bytes
-                    .checked_add(decoded_length)
-                    .ok_or_else(|| TextDecodeFailure::Scope(scope.allocation_failure(resource)))?;
-            }
-            decoded_bytes = decoded_bytes
-                .checked_add(decoded_length)
-                .ok_or_else(|| TextDecodeFailure::Scope(scope.allocation_failure(resource)))?;
-            offset = offset
-                .checked_add(raw_length)
-                .ok_or_else(|| TextDecodeFailure::Scope(scope.allocation_failure(resource)))?;
-        }
-        permit.complete().map_err(TextDecodeFailure::Scope)?;
+                work.complete_all()?;
+                Ok(())
+            },
+        )?;
     }
 
     if line_raw_start < bytes.len() {

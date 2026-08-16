@@ -138,7 +138,6 @@ fn checked_add_with_limit(
 fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
     let bytes = ctx.primary_bytes();
     let primary_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    let decode_work = ctx.begin_work(ImportWorkClass::DecodeWork, primary_len)?;
     let glb_candidate = bytes.get(..4) == Some(b"glTF");
     if glb_candidate {
         if let Some(json) = glb_json_surface(bytes) {
@@ -147,11 +146,18 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
     } else {
         preflight_json_utf8(ctx, bytes, 0)?;
     }
-    let backend_allowance = gltf_backend_allocation_allowance(ctx, bytes)?;
-    let _document_allowance =
-        ctx.metered_opaque_allowance(ImportStorageClass::BackendDecode, backend_allowance)?;
-    let parsed = safe_gltf(ctx, "glTF document parse", || gltf::Gltf::from_slice(bytes))?;
-    decode_work.complete()?;
+    let (parsed, _document_allowance) = ctx.with_work(
+        ImportWorkClass::DecodeWork,
+        primary_len,
+        |work| -> Result<_> {
+            let backend_allowance = gltf_backend_allocation_allowance(ctx, bytes)?;
+            let document_allowance =
+                ctx.metered_opaque_allowance(ImportStorageClass::BackendDecode, backend_allowance)?;
+            let parsed = safe_gltf(ctx, "glTF document parse", || gltf::Gltf::from_slice(bytes))?;
+            work.complete_all()?;
+            Ok((parsed, document_allowance))
+        },
+    )?;
     let gltf = parsed
         .map_err(|error| GltfFailure::invalid_document(format_args!("invalid glTF: {error}")))?;
     let node_graph = preflight_node_graph(ctx, &gltf)?;
@@ -167,42 +173,53 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
 }
 
 fn preflight_json_utf8(ctx: &ParseScope<'_>, bytes: &[u8], raw_base: u64) -> Result<()> {
-    if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
-        return Err(GltfFailure::forbidden_bom(raw_base).into());
-    }
-
-    let mut window_start = 0usize;
-    while window_start < bytes.len() {
-        ctx.poll()?;
-        let window_end = window_start
-            .saturating_add(PARSER_POLL_INTERVAL)
-            .min(bytes.len());
-        let Err(source) = std::str::from_utf8(&bytes[window_start..window_end]) else {
-            window_start = window_end;
-            continue;
-        };
-        let invalid_start = window_start
-            .checked_add(source.valid_up_to())
-            .ok_or_else(|| ctx.allocation_failure("gltf-json-byte-offset"))?;
-        if source.error_len().is_none() && window_end != bytes.len() {
-            debug_assert!(window_end.saturating_sub(invalid_start) <= 3);
-            window_start = invalid_start;
-            continue;
-        }
-        let relative_offset = u64::try_from(invalid_start)
-            .map_err(|_| ctx.allocation_failure("gltf-json-byte-offset"))?;
-        let byte_offset = raw_base
-            .checked_add(relative_offset)
-            .ok_or_else(|| ctx.allocation_failure("gltf-json-byte-offset"))?;
-        return Err(GltfFailure::invalid_utf8(source, byte_offset).into());
-    }
-
     ctx.enforce_resource_limit(
         "gltf-decoded-utf8-bytes",
         to_u64(bytes.len()),
         ctx.limits().max_decoded_utf8_bytes,
     )?;
-    Ok(())
+    ctx.with_work(
+        ImportWorkClass::DecodeWork,
+        to_u64(bytes.len()),
+        |work| -> Result<()> {
+            if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+                work.complete([3])?;
+                return Err(GltfFailure::forbidden_bom(raw_base).into());
+            }
+
+            let mut window_start = 0usize;
+            while window_start < bytes.len() {
+                work.poll()?;
+                let window_end = window_start
+                    .saturating_add(PARSER_POLL_INTERVAL)
+                    .min(bytes.len());
+                let Err(source) = std::str::from_utf8(&bytes[window_start..window_end]) else {
+                    work.complete([to_u64(window_end - window_start)])?;
+                    window_start = window_end;
+                    continue;
+                };
+                let valid_prefix = source.valid_up_to();
+                if valid_prefix != 0 {
+                    work.complete([to_u64(valid_prefix)])?;
+                }
+                let invalid_start = window_start
+                    .checked_add(valid_prefix)
+                    .ok_or_else(|| ctx.allocation_failure("gltf-json-byte-offset"))?;
+                if source.error_len().is_none() && window_end != bytes.len() {
+                    debug_assert!(window_end.saturating_sub(invalid_start) <= 3);
+                    window_start = invalid_start;
+                    continue;
+                }
+                let relative_offset = u64::try_from(invalid_start)
+                    .map_err(|_| ctx.allocation_failure("gltf-json-byte-offset"))?;
+                let byte_offset = raw_base
+                    .checked_add(relative_offset)
+                    .ok_or_else(|| ctx.allocation_failure("gltf-json-byte-offset"))?;
+                return Err(GltfFailure::invalid_utf8(source, byte_offset).into());
+            }
+            Ok(())
+        },
+    )
 }
 
 fn glb_json_surface(bytes: &[u8]) -> Option<&[u8]> {
@@ -470,9 +487,6 @@ fn preflight_texture_strings<'scope>(
             }
         }
 
-        let canonical_strings =
-            ctx.begin_work(ImportWorkClass::CanonicalStringBytes, to_u64(bytes))?;
-        canonical_strings.complete()?;
         Ok(ResolvedTextureUris {
             values: resolved_uris,
         })
@@ -517,15 +531,17 @@ fn preflight_texture_reference<'scope>(
         let resolution_bytes = texture_path_resolution_allowance(ctx, uri)?;
         let _resolution_allowance = ctx
             .metered_opaque_allowance(ImportStorageClass::FormatNormalization, resolution_bytes)?;
-        let resolution_work = ctx.begin_work(
+        let resolved = ctx.with_work(
             ImportWorkClass::WorkUnits,
             to_u64(ctx.source().as_str().len().saturating_add(uri.len())),
+            |work| -> Result<_> {
+                let resolved = ctx.source().resolve_from_file(uri).map_err(|error| {
+                    GltfFailure::invalid_reference("texture-uri", Some(image_index), error)
+                })?;
+                work.complete_all()?;
+                Ok(resolved)
+            },
         )?;
-        let resolved = ctx.source().resolve_from_file(uri).map_err(|error| {
-            GltfFailure::invalid_reference("texture-uri", Some(image_index), error)
-        })?;
-        resolution_work.complete()?;
-        ctx.poll()?;
         let mut resolved_uri = ctx.metered_string(
             ImportStorageClass::FormatNormalization,
             "gltf-resolved-texture-uri",
@@ -690,49 +706,56 @@ fn load_data_uri_buffer<'scope>(
     }
 
     let decoded_len = base64_decoded_len(ctx, encoded, buffer_index)?;
-    let data_uri_work = ctx.begin_work(ImportWorkClass::DataUriBytes, decoded_len)?;
-    let decode_work = ctx.begin_work(
-        ImportWorkClass::DecodeWork,
-        u64::try_from(encoded.len()).unwrap_or(u64::MAX),
-    )?;
     let decoded_capacity = base64::decoded_len_estimate(encoded.len());
-    let mut decoded = ctx.metered_vec(ImportStorageClass::BackendDecode, "gltf-data-uri-buffer");
-    decoded.try_reserve(decoded_capacity)?;
-    let mut written = 0usize;
-    for (chunk_index, chunk) in encoded.as_bytes().chunks(PARSER_POLL_INTERVAL).enumerate() {
-        ctx.poll()?;
-        let chunk_start = chunk_index * PARSER_POLL_INTERVAL;
-        let chunk_capacity = base64::decoded_len_estimate(chunk.len());
-        let chunk_end = written
-            .checked_add(chunk_capacity)
-            .ok_or_else(|| ctx.allocation_failure("gltf-data-uri-buffer"))?;
-        decoded.try_resize(chunk_end, 0_u8)?;
-        let outcome = catch_unwind(AssertUnwindSafe(|| {
-            BASE64_STANDARD.decode_slice(chunk, &mut decoded.as_mut_slice()[written..chunk_end])
-        }));
-        let chunk_written =
-            finish_gltf_operation("glTF base64 buffer decode", outcome)?.map_err(|error| {
-                match error {
-                    DecodeSliceError::DecodeError(error) => {
-                        let error = offset_base64_decode_error(error, chunk_start);
-                        GltfFailure::invalid_reference(
-                            "data-uri-buffer",
-                            Some(buffer_index),
-                            format_args!("invalid base64: {error}"),
-                        )
-                    }
-                    DecodeSliceError::OutputSliceTooSmall => {
-                        GltfFailure::internal("base64 decoder exceeded its preflight capacity")
-                    }
-                }
-            })?;
-        written = written
-            .checked_add(chunk_written)
-            .ok_or_else(|| ctx.allocation_failure("gltf-data-uri-buffer"))?;
-        decoded.truncate(written);
-    }
-    data_uri_work.complete()?;
-    decode_work.complete()?;
+    let decoded = ctx.with_work_group(
+        [
+            (ImportWorkClass::DataUriBytes, decoded_len),
+            (
+                ImportWorkClass::DecodeWork,
+                u64::try_from(encoded.len()).unwrap_or(u64::MAX),
+            ),
+        ],
+        |work| -> Result<_> {
+            let mut decoded =
+                ctx.metered_vec(ImportStorageClass::BackendDecode, "gltf-data-uri-buffer");
+            decoded.try_reserve(decoded_capacity)?;
+            let mut written = 0usize;
+            for (chunk_index, chunk) in encoded.as_bytes().chunks(PARSER_POLL_INTERVAL).enumerate()
+            {
+                work.poll()?;
+                let chunk_start = chunk_index * PARSER_POLL_INTERVAL;
+                let chunk_capacity = base64::decoded_len_estimate(chunk.len());
+                let chunk_end = written
+                    .checked_add(chunk_capacity)
+                    .ok_or_else(|| ctx.allocation_failure("gltf-data-uri-buffer"))?;
+                decoded.try_resize(chunk_end, 0_u8)?;
+                let outcome = catch_unwind(AssertUnwindSafe(|| {
+                    BASE64_STANDARD
+                        .decode_slice(chunk, &mut decoded.as_mut_slice()[written..chunk_end])
+                }));
+                let chunk_written = finish_gltf_operation("glTF base64 buffer decode", outcome)?
+                    .map_err(|error| match error {
+                        DecodeSliceError::DecodeError(error) => {
+                            let error = offset_base64_decode_error(error, chunk_start);
+                            GltfFailure::invalid_reference(
+                                "data-uri-buffer",
+                                Some(buffer_index),
+                                format_args!("invalid base64: {error}"),
+                            )
+                        }
+                        DecodeSliceError::OutputSliceTooSmall => {
+                            GltfFailure::internal("base64 decoder exceeded its preflight capacity")
+                        }
+                    })?;
+                written = written
+                    .checked_add(chunk_written)
+                    .ok_or_else(|| ctx.allocation_failure("gltf-data-uri-buffer"))?;
+                decoded.truncate(written);
+                work.complete([to_u64(chunk_written), to_u64(chunk.len())])?;
+            }
+            Ok(decoded)
+        },
+    )?;
     Ok(BufferData { bytes: decoded })
 }
 
@@ -816,14 +839,20 @@ fn copy_buffer<'scope>(
     source: &[u8],
     allocation: &'static str,
 ) -> Result<BufferData<'scope>> {
-    let copy_work = ctx.begin_work(ImportWorkClass::DecodeWork, to_u64(source.len()))?;
-    let mut copied = ctx.metered_vec(ImportStorageClass::BackendDecode, allocation);
-    copied.try_reserve(source.len())?;
-    for (chunk_index, chunk) in source.chunks(PARSER_POLL_INTERVAL).enumerate() {
-        poll_parser_loop(ctx, chunk_index * PARSER_POLL_INTERVAL)?;
-        copied.try_extend_from_slice(chunk)?;
-    }
-    copy_work.complete()?;
+    let copied = ctx.with_work(
+        ImportWorkClass::DecodeWork,
+        to_u64(source.len()),
+        |work| -> Result<_> {
+            let mut copied = ctx.metered_vec(ImportStorageClass::BackendDecode, allocation);
+            copied.try_reserve(source.len())?;
+            for chunk in source.chunks(PARSER_POLL_INTERVAL) {
+                work.poll()?;
+                copied.try_extend_from_slice(chunk)?;
+                work.complete([to_u64(chunk.len())])?;
+            }
+            Ok(copied)
+        },
+    )?;
     Ok(BufferData { bytes: copied })
 }
 
@@ -1067,7 +1096,15 @@ fn add_texture_slot<'scope>(
                 ImportStorageClass::SceneConstruction,
                 "gltf-texture-source-uri",
             );
-            uri.try_push_str(resolved)?;
+            ctx.with_work(
+                ImportWorkClass::CanonicalStringBytes,
+                to_u64(resolved.len()),
+                |work| -> Result<()> {
+                    uri.try_push_str(resolved)?;
+                    work.complete_all()?;
+                    Ok(())
+                },
+            )?;
             uri.try_into_scene_parts()?.into_external_texture_source()
         }
         ImageSource::View { mime_type, .. } => {
@@ -1093,7 +1130,15 @@ fn add_texture_slot<'scope>(
         ImportStorageClass::SceneConstruction,
         "gltf-texture-slot-source-key",
     );
-    source_key_value.try_push_str(source_key)?;
+    ctx.with_work(
+        ImportWorkClass::CanonicalStringBytes,
+        to_u64(source_key.len()),
+        |work| -> Result<()> {
+            source_key_value.try_push_str(source_key)?;
+            work.complete_all()?;
+            Ok(())
+        },
+    )?;
     let slot = source_key_value
         .try_into_scene_parts()?
         .into_some()
@@ -1804,211 +1849,246 @@ fn add_primitive_mesh(
         }
     };
 
-    let mesh_work = ctx.begin_work(ImportWorkClass::Meshes, 1)?;
-    let primitive_work = ctx.begin_work(ImportWorkClass::Primitives, 1)?;
-    let vertex_work = ctx.begin_work(ImportWorkClass::Vertices, to_u64(contract.position_count))?;
-    let face_work = ctx.begin_work(ImportWorkClass::Faces, to_u64(contract.face_count))?;
-    let topology_work =
-        ctx.begin_work(ImportWorkClass::TopologyCells, to_u64(contract.index_count))?;
-    let attribute_stream_work = ctx.begin_work(
-        ImportWorkClass::AttributeStreams,
-        to_u64(contract.attribute_stream_count),
-    )?;
     let attribute_cell_count = contract
         .position_count
         .checked_mul(contract.attribute_stream_count)
         .ok_or_else(|| ctx.allocation_failure("gltf-attribute-cell-counter"))?;
-    let attribute_cell_work = ctx.begin_work(
-        ImportWorkClass::AttributeCells,
-        to_u64(attribute_cell_count),
-    )?;
-    let reader = safe_gltf(ctx, "glTF primitive reader construction", || {
-        primitive.reader(|buffer| buffers.get(buffer.index()).map(BufferData::as_slice))
-    })?;
-    let positions = safe_gltf(ctx, "glTF POSITION reader", || {
-        reader.read_positions().map(|positions| {
-            collect_exact(
-                ctx,
-                ImportStorageClass::SceneConstruction,
-                contract.position_count,
-                "gltf-position-values",
-                positions.map(vec3),
-            )
-        })
-    })?
-    .transpose()?
-    .ok_or_else(|| {
-        ContentError::parse(
-            ctx.source().to_string(),
-            None,
-            format!(
-                "glTF mesh {} primitive {} POSITION accessor could not be read",
-                mesh.index(),
-                primitive.index()
-            ),
-        )
-    })?;
-    let bounds = compute_bounds(ctx, positions.as_slice())?;
-    let normals = safe_gltf(ctx, "glTF NORMAL reader", || {
-        reader.read_normals().map(|values| {
-            collect_exact(
-                ctx,
-                ImportStorageClass::SceneConstruction,
-                contract.position_count,
-                "gltf-normal-values",
-                values.map(vec3),
-            )
-        })
-    })?
-    .transpose()?
-    .unwrap_or_else(|| {
-        ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-normal-values")
-    });
-    let tangents = safe_gltf(ctx, "glTF TANGENT reader", || {
-        reader.read_tangents().map(|values| {
-            collect_exact(
-                ctx,
-                ImportStorageClass::SceneConstruction,
-                contract.position_count,
-                "gltf-tangent-values",
-                values.map(vec4),
-            )
-        })
-    })?
-    .transpose()?
-    .unwrap_or_else(|| {
-        ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-tangent-values")
-    });
-    let indices = safe_gltf(ctx, "glTF indices reader", || {
-        reader.read_indices().map(|indices| {
-            collect_exact(
-                ctx,
-                ImportStorageClass::SceneConstruction,
-                contract.index_count,
-                "gltf-index-values",
-                indices.into_u32(),
-            )
-        })
-    })?
-    .transpose()?
-    .unwrap_or_else(|| ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-index-values"));
-
-    let mut texcoords = ctx.metered_scene_vec("gltf-texcoord-streams");
-    for set in 0..8 {
-        let Some(values) = safe_gltf(ctx, "glTF TEXCOORD reader", || {
-            reader.read_tex_coords(set).map(|values| {
-                collect_exact(
-                    ctx,
-                    ImportStorageClass::SceneConstruction,
-                    contract.position_count,
-                    "gltf-texcoord-values",
-                    values.into_f32().map(vec2),
-                )
-            })
-        })?
+    let mesh_name = mesh.name();
+    let primitive_name_bytes = mesh_name
+        .map(|name| primitive_name_len(ctx, name, primitive.index()))
         .transpose()?
-        else {
-            break;
-        };
-        texcoords.try_push_parts(values.try_into_scene_parts()?)?;
-    }
-    let mut colors = ctx.metered_scene_vec("gltf-color-streams");
-    for set in 0..8 {
-        let Some(values) = safe_gltf(ctx, "glTF COLOR reader", || {
-            reader.read_colors(set).map(|values| {
-                collect_exact(
-                    ctx,
-                    ImportStorageClass::SceneConstruction,
-                    contract.position_count,
-                    "gltf-color-values",
-                    values.into_rgba_f32().map(color),
-                )
-            })
-        })?
-        .transpose()?
-        else {
-            break;
-        };
-        colors.try_push_parts(values.try_into_scene_parts()?)?;
-    }
-    let joint_indices = safe_gltf(ctx, "glTF JOINTS reader", || {
-        reader.read_joints(0).map(|values| {
-            collect_exact(
-                ctx,
-                ImportStorageClass::SceneConstruction,
-                contract.position_count,
-                "gltf-joint-index-values",
-                values.into_u16(),
-            )
-        })
-    })?
-    .transpose()?
-    .unwrap_or_else(|| {
-        ctx.metered_vec(
-            ImportStorageClass::SceneConstruction,
-            "gltf-joint-index-values",
-        )
-    });
-    let joint_weights = safe_gltf(ctx, "glTF WEIGHTS reader", || {
-        reader.read_weights(0).map(|values| {
-            collect_exact(
-                ctx,
-                ImportStorageClass::SceneConstruction,
-                contract.position_count,
-                "gltf-joint-weight-values",
-                values.into_f32(),
-            )
-        })
-    })?
-    .transpose()?
-    .unwrap_or_else(|| {
-        ctx.metered_vec(
-            ImportStorageClass::SceneConstruction,
-            "gltf-joint-weight-values",
-        )
-    });
-
-    if safe_gltf(ctx, "glTF morph target iterator", || {
-        primitive.morph_targets().next().is_some()
-    })? {
-        push_warning(
-            ctx,
-            "gltf.morph_targets_ignored",
-            format_args!(
-                "glTF mesh {} primitive {} morph targets were ignored",
-                mesh.index(),
-                primitive.index()
+        .unwrap_or(0);
+    ctx.with_work_group(
+        [
+            (ImportWorkClass::Meshes, 1),
+            (ImportWorkClass::Primitives, 1),
+            (ImportWorkClass::Vertices, to_u64(contract.position_count)),
+            (ImportWorkClass::Faces, to_u64(contract.face_count)),
+            (ImportWorkClass::TopologyCells, to_u64(contract.index_count)),
+            (
+                ImportWorkClass::AttributeStreams,
+                to_u64(contract.attribute_stream_count),
             ),
-        )?;
-    }
+            (
+                ImportWorkClass::AttributeCells,
+                to_u64(attribute_cell_count),
+            ),
+            (
+                ImportWorkClass::CanonicalStringBytes,
+                to_u64(primitive_name_bytes),
+            ),
+        ],
+        |work| -> Result<baozi_core::MeshId> {
+            let reader = safe_gltf(ctx, "glTF primitive reader construction", || {
+                primitive.reader(|buffer| buffers.get(buffer.index()).map(BufferData::as_slice))
+            })?;
+            let positions = safe_gltf(ctx, "glTF POSITION reader", || {
+                reader.read_positions().map(|positions| {
+                    collect_exact(
+                        ctx,
+                        ImportStorageClass::SceneConstruction,
+                        contract.position_count,
+                        "gltf-position-values",
+                        positions.map(vec3),
+                    )
+                })
+            })?
+            .transpose()?
+            .ok_or_else(|| {
+                ContentError::parse(
+                    ctx.source().to_string(),
+                    None,
+                    format!(
+                        "glTF mesh {} primitive {} POSITION accessor could not be read",
+                        mesh.index(),
+                        primitive.index()
+                    ),
+                )
+            })?;
+            let bounds = compute_bounds(ctx, positions.as_slice())?;
+            let normals = safe_gltf(ctx, "glTF NORMAL reader", || {
+                reader.read_normals().map(|values| {
+                    collect_exact(
+                        ctx,
+                        ImportStorageClass::SceneConstruction,
+                        contract.position_count,
+                        "gltf-normal-values",
+                        values.map(vec3),
+                    )
+                })
+            })?
+            .transpose()?
+            .unwrap_or_else(|| {
+                ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-normal-values")
+            });
+            let tangents = safe_gltf(ctx, "glTF TANGENT reader", || {
+                reader.read_tangents().map(|values| {
+                    collect_exact(
+                        ctx,
+                        ImportStorageClass::SceneConstruction,
+                        contract.position_count,
+                        "gltf-tangent-values",
+                        values.map(vec4),
+                    )
+                })
+            })?
+            .transpose()?
+            .unwrap_or_else(|| {
+                ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-tangent-values")
+            });
+            let indices = safe_gltf(ctx, "glTF indices reader", || {
+                reader.read_indices().map(|indices| {
+                    collect_exact(
+                        ctx,
+                        ImportStorageClass::SceneConstruction,
+                        contract.index_count,
+                        "gltf-index-values",
+                        indices.into_u32(),
+                    )
+                })
+            })?
+            .transpose()?
+            .unwrap_or_else(|| {
+                ctx.metered_vec(ImportStorageClass::SceneConstruction, "gltf-index-values")
+            });
 
-    let material = contract
-        .material_index
-        .and_then(|index| material_ids.get(index).copied());
-    let mesh_name = primitive_name_parts(ctx, mesh.name(), primitive.index())?;
-    let mesh_parts = mesh_name
-        .into_mesh(MeshBuildConfig {
-            topology,
-            material,
-            bounds,
-        })
-        .with_positions(positions.try_into_scene_parts()?)?
-        .with_normals(normals.try_into_scene_parts()?)?
-        .with_tangents(tangents.try_into_scene_parts()?)?
-        .with_texcoords(texcoords.try_into_scene_parts()?)?
-        .with_colors(colors.try_into_scene_parts()?)?
-        .with_indices(indices.try_into_scene_parts()?)?
-        .with_joint_indices(joint_indices.try_into_scene_parts()?)?
-        .with_joint_weights(joint_weights.try_into_scene_parts()?)?;
-    let mesh_id = builder.add_prepared_mesh(mesh_parts.finish()?)?;
-    attribute_cell_work.complete()?;
-    attribute_stream_work.complete()?;
-    topology_work.complete()?;
-    face_work.complete()?;
-    vertex_work.complete()?;
-    primitive_work.complete()?;
-    mesh_work.complete()?;
-    Ok(mesh_id)
+            let mut texcoords = ctx.metered_scene_vec("gltf-texcoord-streams");
+            for set in 0..8 {
+                let Some(values) = safe_gltf(ctx, "glTF TEXCOORD reader", || {
+                    reader.read_tex_coords(set).map(|values| {
+                        collect_exact(
+                            ctx,
+                            ImportStorageClass::SceneConstruction,
+                            contract.position_count,
+                            "gltf-texcoord-values",
+                            values.into_f32().map(vec2),
+                        )
+                    })
+                })?
+                .transpose()?
+                else {
+                    break;
+                };
+                texcoords.try_push_parts(values.try_into_scene_parts()?)?;
+            }
+            let mut colors = ctx.metered_scene_vec("gltf-color-streams");
+            for set in 0..8 {
+                let Some(values) = safe_gltf(ctx, "glTF COLOR reader", || {
+                    reader.read_colors(set).map(|values| {
+                        collect_exact(
+                            ctx,
+                            ImportStorageClass::SceneConstruction,
+                            contract.position_count,
+                            "gltf-color-values",
+                            values.into_rgba_f32().map(color),
+                        )
+                    })
+                })?
+                .transpose()?
+                else {
+                    break;
+                };
+                colors.try_push_parts(values.try_into_scene_parts()?)?;
+            }
+            let joint_indices = safe_gltf(ctx, "glTF JOINTS reader", || {
+                reader.read_joints(0).map(|values| {
+                    collect_exact(
+                        ctx,
+                        ImportStorageClass::SceneConstruction,
+                        contract.position_count,
+                        "gltf-joint-index-values",
+                        values.into_u16(),
+                    )
+                })
+            })?
+            .transpose()?
+            .unwrap_or_else(|| {
+                ctx.metered_vec(
+                    ImportStorageClass::SceneConstruction,
+                    "gltf-joint-index-values",
+                )
+            });
+            let joint_weights = safe_gltf(ctx, "glTF WEIGHTS reader", || {
+                reader.read_weights(0).map(|values| {
+                    collect_exact(
+                        ctx,
+                        ImportStorageClass::SceneConstruction,
+                        contract.position_count,
+                        "gltf-joint-weight-values",
+                        values.into_f32(),
+                    )
+                })
+            })?
+            .transpose()?
+            .unwrap_or_else(|| {
+                ctx.metered_vec(
+                    ImportStorageClass::SceneConstruction,
+                    "gltf-joint-weight-values",
+                )
+            });
+
+            if safe_gltf(ctx, "glTF morph target iterator", || {
+                primitive.morph_targets().next().is_some()
+            })? {
+                push_warning(
+                    ctx,
+                    "gltf.morph_targets_ignored",
+                    format_args!(
+                        "glTF mesh {} primitive {} morph targets were ignored",
+                        mesh.index(),
+                        primitive.index()
+                    ),
+                )?;
+            }
+
+            let material = contract
+                .material_index
+                .and_then(|index| material_ids.get(index).copied());
+            let mut name =
+                ctx.metered_string(ImportStorageClass::SceneConstruction, "gltf-primitive-name");
+            let mesh_name = if let Some(mesh_name) = mesh_name {
+                name.try_reserve(primitive_name_bytes)?;
+                name.try_push_str(mesh_name)?;
+                work.complete([0, 0, 0, 0, 0, 0, 0, to_u64(mesh_name.len())])?;
+                if primitive.index() != 0 {
+                    name.try_push_char('#')?;
+                    work.complete([0, 0, 0, 0, 0, 0, 0, 1])?;
+                    name.try_push_usize(primitive.index())?;
+                    work.complete([
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        to_u64(decimal_digits(primitive.index())),
+                    ])?;
+                }
+                debug_assert_eq!(name.len(), primitive_name_bytes);
+                name.try_into_scene_parts()?.into_some()
+            } else {
+                name.try_into_scene_parts()?.discard_into_none()
+            };
+            let mesh_parts = mesh_name
+                .into_mesh(MeshBuildConfig {
+                    topology,
+                    material,
+                    bounds,
+                })
+                .with_positions(positions.try_into_scene_parts()?)?
+                .with_normals(normals.try_into_scene_parts()?)?
+                .with_tangents(tangents.try_into_scene_parts()?)?
+                .with_texcoords(texcoords.try_into_scene_parts()?)?
+                .with_colors(colors.try_into_scene_parts()?)?
+                .with_indices(indices.try_into_scene_parts()?)?
+                .with_joint_indices(joint_indices.try_into_scene_parts()?)?
+                .with_joint_weights(joint_weights.try_into_scene_parts()?)?;
+            let mesh_id = builder.add_prepared_mesh(mesh_parts.finish()?)?;
+            work.complete_all()?;
+            Ok(mesh_id)
+        },
+    )
 }
 
 fn add_scene_nodes<'scope>(
@@ -2087,24 +2167,25 @@ fn preflight_node_graph<'document, 'scope>(
     gltf: &'document gltf::Gltf,
 ) -> Result<NodeGraph<'document, 'scope>> {
     let node_count = safe_gltf(ctx, "glTF node count", || gltf.nodes().len())?;
-    enforce_usize_limit(
-        ctx,
-        "max_graph_nodes",
-        node_count,
-        ctx.limits().max_graph_nodes,
+    let nodes = ctx.with_work_group(
+        [
+            (ImportWorkClass::GraphNodes, to_u64(node_count)),
+            (ImportWorkClass::GraphWork, to_u64(node_count)),
+        ],
+        |work| -> Result<_> {
+            let nodes = safe_gltf(ctx, "glTF nodes", || {
+                collect_exact(
+                    ctx,
+                    ImportStorageClass::FormatNormalization,
+                    node_count,
+                    "gltf-node-list",
+                    gltf.nodes(),
+                )
+            })??;
+            work.complete_all()?;
+            Ok(nodes)
+        },
     )?;
-
-    let mut graph_work = 0usize;
-    charge_graph_work(ctx, &mut graph_work, node_count)?;
-    let nodes = safe_gltf(ctx, "glTF nodes", || {
-        collect_exact(
-            ctx,
-            ImportStorageClass::FormatNormalization,
-            node_count,
-            "gltf-node-list",
-            gltf.nodes(),
-        )
-    })??;
     let mut children = try_vec_capacity(
         ctx,
         ImportStorageClass::FormatNormalization,
@@ -2118,60 +2199,61 @@ fn preflight_node_graph<'document, 'scope>(
         None,
         "gltf-node-parents",
     )?;
-    let mut edge_count = 0usize;
-
     for (parent_index, node) in nodes.as_slice().iter().enumerate() {
         poll_parser_loop(ctx, parent_index)?;
         let child_count = safe_gltf(ctx, "glTF node child count", || node.children().len())?;
-        edge_count = checked_add_with_limit(
-            ctx,
-            "max_graph_edges",
-            edge_count,
-            child_count,
-            ctx.limits().max_graph_edges,
+        let child_indices = ctx.with_work_group(
+            [
+                (ImportWorkClass::GraphEdges, to_u64(child_count)),
+                (ImportWorkClass::GraphWork, to_u64(child_count)),
+            ],
+            |work| -> Result<_> {
+                let child_indices = safe_gltf(ctx, "glTF node children", || {
+                    collect_exact(
+                        ctx,
+                        ImportStorageClass::FormatNormalization,
+                        child_count,
+                        "gltf-node-child-list",
+                        node.children().map(|child| child.index()),
+                    )
+                })??;
+                for &child_index in child_indices.as_slice() {
+                    work.poll()?;
+                    if child_index >= node_count {
+                        return Err(gltf_parse_error(
+                            ctx,
+                            format!(
+                                "glTF node {parent_index} references missing child {child_index}"
+                            ),
+                        ));
+                    }
+                    if child_index == parent_index {
+                        return Err(gltf_parse_error(
+                            ctx,
+                            format!("glTF node graph contains a cycle at node {parent_index}"),
+                        ));
+                    }
+                    if let Some(existing_parent) = parents.as_slice()[child_index] {
+                        return Err(gltf_parse_error(
+                            ctx,
+                            format!(
+                                "glTF node {child_index} has multiple parents ({existing_parent} and {parent_index})"
+                            ),
+                        ));
+                    }
+                    parents.as_mut_slice()[child_index] = Some(parent_index);
+                    work.complete([1, 1])?;
+                }
+                Ok(child_indices)
+            },
         )?;
-        charge_graph_work(ctx, &mut graph_work, child_count)?;
-
-        let child_indices = safe_gltf(ctx, "glTF node children", || {
-            collect_exact(
-                ctx,
-                ImportStorageClass::FormatNormalization,
-                child_count,
-                "gltf-node-child-list",
-                node.children().map(|child| child.index()),
-            )
-        })??;
-        for (child_ordinal, &child_index) in child_indices.as_slice().iter().enumerate() {
-            poll_parser_loop(ctx, child_ordinal)?;
-            if child_index >= node_count {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format!("glTF node {parent_index} references missing child {child_index}"),
-                ));
-            }
-            if child_index == parent_index {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format!("glTF node graph contains a cycle at node {parent_index}"),
-                ));
-            }
-            if let Some(existing_parent) = parents.as_slice()[child_index] {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format!(
-                        "glTF node {child_index} has multiple parents ({existing_parent} and {parent_index})"
-                    ),
-                ));
-            }
-            parents.as_mut_slice()[child_index] = Some(parent_index);
-        }
         children.try_push_reserved(child_indices)?;
     }
 
     validate_graph_depth_and_cycles(ctx, children.as_slice(), parents.as_slice())?;
-    let roots = select_and_validate_scene_roots(ctx, gltf, parents.as_slice(), &mut graph_work)?;
-    let usage = validate_canonical_graph_limits(ctx, children.as_slice(), roots.as_slice())?;
-    charge_canonical_graph(ctx, usage)?;
+    let roots = select_and_validate_scene_roots(ctx, gltf, parents.as_slice())?;
+    charge_canonical_graph_shape(ctx, roots.len())?;
+    validate_canonical_graph_limits(ctx, children.as_slice(), roots.as_slice())?;
 
     Ok(NodeGraph {
         nodes,
@@ -2180,42 +2262,13 @@ fn preflight_node_graph<'document, 'scope>(
     })
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CanonicalGraphUsage {
-    nodes: usize,
-    edges: usize,
-    depth: usize,
-    work: usize,
-}
-
 fn validate_canonical_graph_limits(
     ctx: &ParseScope<'_>,
     children: &[MeteredVec<'_, usize>],
     roots: &[usize],
-) -> Result<CanonicalGraphUsage> {
-    let mut node_count = 1usize;
-    enforce_usize_limit(
-        ctx,
-        "max_graph_nodes",
-        node_count,
-        ctx.limits().max_graph_nodes,
-    )?;
-    let mut max_depth = 1usize;
-    enforce_usize_limit(
-        ctx,
-        "max_graph_depth",
-        max_depth,
-        ctx.limits().max_graph_depth,
-    )?;
-
-    let mut edge_count = roots.len();
-    enforce_usize_limit(
-        ctx,
-        "max_graph_edges",
-        edge_count,
-        ctx.limits().max_graph_edges,
-    )?;
-    validate_canonical_graph_work(ctx, node_count, edge_count)?;
+) -> Result<()> {
+    let mut max_depth = 0usize;
+    observe_graph_depth(ctx, &mut max_depth, 1)?;
 
     let mut pending = try_vec_capacity(
         ctx,
@@ -2228,17 +2281,11 @@ fn validate_canonical_graph_limits(
         pending.try_push_reserved((root, 2usize))?;
     }
 
+    let mut visited = 0usize;
     while let Some((node_index, depth)) = pending.pop() {
-        poll_parser_loop(ctx, node_count)?;
-        node_count = checked_add_with_limit(
-            ctx,
-            "max_graph_nodes",
-            node_count,
-            1,
-            ctx.limits().max_graph_nodes,
-        )?;
-        enforce_usize_limit(ctx, "max_graph_depth", depth, ctx.limits().max_graph_depth)?;
-        max_depth = max_depth.max(depth);
+        poll_parser_loop(ctx, visited)?;
+        visited = visited.saturating_add(1);
+        observe_graph_depth(ctx, &mut max_depth, depth)?;
 
         let node_children = children.get(node_index).ok_or_else(|| {
             gltf_parse_error(
@@ -2246,15 +2293,6 @@ fn validate_canonical_graph_limits(
                 format!("glTF node graph references missing node {node_index}"),
             )
         })?;
-        edge_count = checked_add_with_limit(
-            ctx,
-            "max_graph_edges",
-            edge_count,
-            node_children.len(),
-            ctx.limits().max_graph_edges,
-        )?;
-        validate_canonical_graph_work(ctx, node_count, edge_count)?;
-
         let child_depth = depth
             .checked_add(1)
             .ok_or_else(|| ctx.allocation_failure("gltf-graph-depth-counter"))?;
@@ -2265,49 +2303,28 @@ fn validate_canonical_graph_limits(
         }
     }
 
-    let work = node_count
-        .checked_add(edge_count)
-        .ok_or_else(|| ctx.allocation_failure("gltf-canonical-graph-work-counter"))?;
-    Ok(CanonicalGraphUsage {
-        nodes: node_count,
-        edges: edge_count,
-        depth: max_depth,
-        work,
-    })
-}
-
-fn validate_canonical_graph_work(
-    ctx: &ParseScope<'_>,
-    node_count: usize,
-    edge_count: usize,
-) -> Result<()> {
-    let work = node_count
-        .checked_add(edge_count)
-        .ok_or_else(|| ctx.allocation_failure("gltf-canonical-graph-work-counter"))?;
-    enforce_usize_limit(ctx, "max_graph_work", work, ctx.limits().max_graph_work)?;
     Ok(())
 }
 
-fn charge_canonical_graph(ctx: &ParseScope<'_>, usage: CanonicalGraphUsage) -> Result<()> {
-    let nodes = ctx.begin_work(ImportWorkClass::GraphNodes, to_u64(usage.nodes))?;
-    let edges = ctx.begin_work(ImportWorkClass::GraphEdges, to_u64(usage.edges))?;
-    let depth = ctx.begin_work(ImportWorkClass::GraphDepth, to_u64(usage.depth))?;
-    let work = ctx.begin_work(ImportWorkClass::GraphWork, to_u64(usage.work))?;
-    work.complete()?;
-    depth.complete()?;
-    edges.complete()?;
-    nodes.complete()?;
-    Ok(())
+fn charge_canonical_graph_shape(ctx: &ParseScope<'_>, root_count: usize) -> Result<()> {
+    Ok(ctx.with_work_group(
+        [
+            (ImportWorkClass::GraphNodes, 1),
+            (ImportWorkClass::GraphEdges, to_u64(root_count)),
+        ],
+        |work| work.complete_all(),
+    )?)
 }
 
-fn charge_graph_work(ctx: &ParseScope<'_>, graph_work: &mut usize, amount: usize) -> Result<()> {
-    *graph_work = checked_add_with_limit(
-        ctx,
-        "max_graph_work",
-        *graph_work,
-        amount,
-        ctx.limits().max_graph_work,
-    )?;
+fn observe_graph_depth(ctx: &ParseScope<'_>, maximum: &mut usize, depth: usize) -> Result<()> {
+    let additional = depth.saturating_sub(*maximum);
+    if additional == 0 {
+        return Ok(());
+    }
+    ctx.with_work(ImportWorkClass::GraphDepth, to_u64(additional), |work| {
+        work.complete_all()
+    })?;
+    *maximum = depth;
     Ok(())
 }
 
@@ -2342,7 +2359,6 @@ fn validate_graph_depth_and_cycles(
         let node_index = queue.as_slice()[cursor];
         cursor += 1;
         let depth = depths.as_slice()[node_index];
-        enforce_usize_limit(ctx, "max_graph_depth", depth, ctx.limits().max_graph_depth)?;
         for (child_ordinal, &child_index) in children[node_index].as_slice().iter().enumerate() {
             poll_parser_loop(ctx, child_ordinal)?;
             let child_depth = depth
@@ -2363,10 +2379,8 @@ fn select_and_validate_scene_roots<'scope>(
     ctx: &'scope ParseScope<'_>,
     gltf: &gltf::Gltf,
     parents: &[Option<usize>],
-    graph_work: &mut usize,
 ) -> Result<MeteredVec<'scope, usize>> {
     let scene_count = safe_gltf(ctx, "glTF scene count", || gltf.scenes().len())?;
-    charge_graph_work(ctx, graph_work, scene_count)?;
     let mut scene_roots = try_vec_capacity(
         ctx,
         ImportStorageClass::FormatNormalization,
@@ -2376,17 +2390,22 @@ fn select_and_validate_scene_roots<'scope>(
 
     for (scene_index, scene) in gltf.scenes().enumerate() {
         poll_parser_loop(ctx, scene_index)?;
-        let root_count = safe_gltf(ctx, "glTF scene root count", || scene.nodes().len())?;
-        charge_graph_work(ctx, graph_work, root_count)?;
-        let roots = safe_gltf(ctx, "glTF scene roots", || {
-            collect_exact(
-                ctx,
-                ImportStorageClass::FormatNormalization,
-                root_count,
-                "gltf-scene-roots",
-                scene.nodes().map(|node| node.index()),
-            )
-        })??;
+        let roots = ctx.with_work(ImportWorkClass::GraphWork, 1, |work| -> Result<_> {
+            let root_count = safe_gltf(ctx, "glTF scene root count", || scene.nodes().len())?;
+            work.complete_all()?;
+            work.replenish(to_u64(root_count))?;
+            let roots = safe_gltf(ctx, "glTF scene roots", || {
+                collect_exact(
+                    ctx,
+                    ImportStorageClass::FormatNormalization,
+                    root_count,
+                    "gltf-scene-roots",
+                    scene.nodes().map(|node| node.index()),
+                )
+            })??;
+            work.complete_all()?;
+            Ok(roots)
+        })?;
         scene_roots.try_push_reserved(roots)?;
     }
 
@@ -2459,6 +2478,13 @@ fn select_and_validate_scene_roots<'scope>(
                     roots.try_push_reserved(node_index)?;
                 }
             }
+            let synthetic_work = roots
+                .len()
+                .checked_add(1)
+                .ok_or_else(|| ctx.allocation_failure("gltf-derived-root-work"))?;
+            ctx.with_work(ImportWorkClass::GraphWork, to_u64(synthetic_work), |work| {
+                work.complete_all()
+            })?;
             Ok(roots)
         }
     }
@@ -2898,26 +2924,6 @@ fn map_wrap(wrap: WrappingMode) -> TextureWrapMode {
     }
 }
 
-fn primitive_name_parts<'scope>(
-    ctx: &'scope ParseScope<'_>,
-    mesh_name: Option<&str>,
-    primitive_index: usize,
-) -> Result<SceneValueParts<'scope, Option<String>>> {
-    let mut name = ctx.metered_string(ImportStorageClass::SceneConstruction, "gltf-primitive-name");
-    let Some(mesh_name) = mesh_name else {
-        return Ok(name.try_into_scene_parts()?.discard_into_none());
-    };
-    let name_len = primitive_name_len(ctx, mesh_name, primitive_index)?;
-    name.try_reserve(name_len)?;
-    name.try_push_str(mesh_name)?;
-    if primitive_index != 0 {
-        name.try_push_char('#')?;
-        name.try_push_usize(primitive_index)?;
-    }
-    debug_assert_eq!(name.len(), name_len);
-    Ok(name.try_into_scene_parts()?.into_some())
-}
-
 fn primitive_name_len(
     ctx: &ParseScope<'_>,
     mesh_name: &str,
@@ -2960,7 +2966,15 @@ fn optional_name_parts<'scope>(
         value.len(),
         ctx.limits().max_string_bytes,
     )?;
-    name.try_push_str(value)?;
+    ctx.with_work(
+        ImportWorkClass::CanonicalStringBytes,
+        to_u64(value.len()),
+        |work| -> Result<()> {
+            name.try_push_str(value)?;
+            work.complete_all()?;
+            Ok(())
+        },
+    )?;
     Ok(name.try_into_scene_parts()?.into_some())
 }
 

@@ -163,7 +163,7 @@ fn ascii_profile_cancellation_is_bounded_by_scan_chunks() {
     bytes.resize(invalid_offset, b' ');
     bytes.push(0);
 
-    let limit = bytes.len() as u64 - 1;
+    let limit = SCAN_CHUNK_BYTES as u64 - 1;
     let mut calibration_limits = ResourceLimits::default();
     calibration_limits.max_decode_work = limit;
     let (calibration_control, calibration_polls) = controlled_import(None);
@@ -182,7 +182,7 @@ fn ascii_profile_cancellation_is_bounded_by_scan_chunks() {
     let profile_entry_poll = calibration_polls.load(Ordering::SeqCst);
     assert!(profile_entry_poll > 0);
 
-    let cancel_on = profile_entry_poll + PREFIX_CHUNKS;
+    let cancel_on = profile_entry_poll + PREFIX_CHUNKS * 2 - 1;
     let (control, _) = controlled_import(Some(cancel_on));
     let failure = import_bytes_forced_with_limits_and_control(
         "profile-cancel.stl",
@@ -193,7 +193,10 @@ fn ascii_profile_cancellation_is_bounded_by_scan_chunks() {
     .expect_err("ASCII profile scanning must observe cancellation before the distant NUL");
 
     assert_cancelled(&failure);
-    assert_eq!(consumed(&failure, ImportDimension::DecodeWork), 0);
+    let completed = consumed(&failure, ImportDimension::DecodeWork);
+    assert!(completed > 0);
+    assert!(completed < invalid_offset as u64);
+    assert_eq!(completed % SCAN_CHUNK_BYTES as u64, 0);
 }
 
 #[test]
@@ -347,5 +350,8 @@ fn binary_color_expansion_cancellation_is_bounded_by_scan_chunks() {
         .expect("work-unit dimension is configured");
     assert_eq!(expansion.attempted(), FACET_COUNT as u64);
     assert_eq!(expansion.consumed(), 0);
-    assert_eq!(consumed(&failure, ImportDimension::Records), 0);
+    assert_eq!(
+        consumed(&failure, ImportDimension::Records),
+        FACET_COUNT as u64
+    );
 }

@@ -5,7 +5,7 @@ use baozi_core::{
     TextureSource, TextureWrapMode, Vec2, Vec3,
 };
 use baozi_format_gltf::GltfFailureCode;
-use baozi_import::{ImportCause, ScopeAbortCause};
+use baozi_import::{ImportCause, ImportDimension, ScopeAbortCause};
 use baozi_test_support::SceneSnapshot;
 use common::{
     GltfTestOptions, TestResult, assert_gltf_failure, assert_resource_limit, data_uri_gltf,
@@ -540,6 +540,37 @@ fn invalid_index_accessor_type_is_parse_error_not_panic() -> TestResult<()> {
 }
 
 #[test]
+fn rejected_primitive_does_not_consume_its_preflighted_name() -> TestResult<()> {
+    let document = br#"{
+  "asset": { "version": "2.0" },
+  "buffers": [{ "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAA", "byteLength": 12 }],
+  "bufferViews": [{ "buffer": 0, "byteOffset": 0, "byteLength": 12 }],
+  "accessors": [{ "bufferView": 0, "componentType": 5123, "count": 1, "type": "VEC3" }],
+  "meshes": [{
+    "name": "NeverBuilt",
+    "primitives": [{ "attributes": { "POSITION": 0 } }]
+  }]
+}"#
+    .to_vec();
+    let (result, diagnostics) = import_assets_result(
+        "rejected-name.gltf",
+        [("rejected-name.gltf", document)],
+        GltfTestOptions::memory(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_gltf_failure(&error, GltfFailureCode::InvalidDocument, None)?;
+    let strings = error
+        .ledger()
+        .dimension(ImportDimension::CanonicalStringBytes)
+        .expect("canonical string dimension is configured");
+    assert_eq!(strings.attempted(), 0);
+    assert_eq!(strings.consumed(), 0);
+    Ok(())
+}
+
+#[test]
 fn mismatched_attribute_count_is_parse_error_before_reader() -> TestResult<()> {
     let gltf = String::from_utf8(triangle_gltf())
         .expect("fixture is valid utf-8")
@@ -748,7 +779,7 @@ fn opaque_backend_allocation_respects_live_memory_limit() -> TestResult<()> {
 fn data_uri_decode_work_is_budgeted() -> TestResult<()> {
     let document = data_uri_gltf();
     let mut options = GltfTestOptions::memory();
-    options.limits.max_decode_work = document.len() as u64;
+    options.limits.max_decode_work = (document.len() * 2) as u64;
     let (result, diagnostics) =
         import_assets_result("scene.gltf", [("scene.gltf", document)], options)?;
     let error = expected_error(result)?;

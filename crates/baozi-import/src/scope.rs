@@ -242,24 +242,179 @@ impl ImportWorkClass {
     }
 }
 
-/// A linear attempted-work permit. Dropping it retains attempted evidence without consumed work.
-#[must_use = "complete the permit after the work is consumed"]
-pub struct ImportWorkPermit<'scope, 'session> {
-    scope: &'scope ParseScope<'session>,
-    dimension: ImportDimension,
-    amount: u64,
+/// Callback-scoped completion capability for one admitted parser work group.
+///
+/// The scope has no public constructor and cannot outlive [`ParseScope::with_work`] or
+/// [`ParseScope::with_work_group`]. Each completion records one exact physical prefix across the
+/// complete dimension group.
+///
+/// ```compile_fail
+/// use baozi_import::{ImportWorkClass, ParseResult, ParseScope};
+///
+/// fn escape(scope: &ParseScope<'_>) {
+///     let _escaped = scope.with_work(ImportWorkClass::WorkUnits, 1, |work| {
+///         Ok::<_, baozi_import::ParseFailure>(work)
+///     });
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use baozi_import::{ImportWorkClass, ParseScope};
+///
+/// fn legacy_permit(scope: &ParseScope<'_>) {
+///     let _permit = scope.begin_work(ImportWorkClass::WorkUnits, 1);
+/// }
+/// ```
+pub struct ImportWorkScope<'work, 'session, const N: usize> {
+    scope: &'work ParseScope<'session>,
+    dimensions: [ImportDimension; N],
+    item_limits: [Option<(&'static str, u64)>; N],
+    admitted: [u64; N],
+    completed: [u64; N],
+    active: bool,
+    finished: bool,
 }
 
-impl ImportWorkPermit<'_, '_> {
-    pub fn complete(self) -> ParseResult<()> {
+impl ImportWorkScope<'_, '_, 1> {
+    /// Admits the next chunk after the current chunk has completed.
+    ///
+    /// This keeps runtime-sized parser loops inside one callback-scoped capability without
+    /// exposing an escaping permit or acquiring one ledger lock per physical unit.
+    pub fn replenish(&mut self, amount: u64) -> ParseResult<()> {
         self.scope.preflight_active()?;
+        if self.item_limits[0].is_some() {
+            return Err(self.scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "parse-work-item-limit-replenish-unsupported",
+            }));
+        }
+        if self.remaining()[0] != 0 {
+            return Err(self.scope.abort(ScopeAbortCause::DescriptorContract {
+                code: "parse-work-replenish-before-completion",
+            }));
+        }
+        self.scope.poll_active()?;
+
+        let dimension = self.dimensions[0];
         self.scope
             .coordinator
             .try_borrow_mut()
             .map_err(|_| self.scope.reentrant_capability_failure())?
             .checkpoint()
-            .charge_consumed(self.dimension, self.amount)
-            .map_err(|cause| self.scope.abort(ScopeAbortCause::Ledger(cause)))
+            .charge_attempted(dimension, amount)
+            .map_err(|cause| self.scope.abort(ScopeAbortCause::Ledger(cause)))?;
+        if let Some((resource, limit)) = self.item_limits[0]
+            && amount > limit
+        {
+            return Err(self
+                .scope
+                .abort(ScopeAbortCause::ResourceLimit { resource, limit }));
+        }
+
+        self.admitted[0] = amount;
+        self.completed[0] = 0;
+        Ok(())
+    }
+}
+
+impl<const N: usize> ImportWorkScope<'_, '_, N> {
+    /// Returns the unfinished admitted suffix for every work entry.
+    pub fn remaining(&self) -> [u64; N] {
+        std::array::from_fn(|index| self.admitted[index] - self.completed[index])
+    }
+
+    /// Records one physically completed prefix across the complete work group.
+    pub fn complete(&mut self, amounts: [u64; N]) -> ParseResult<()> {
+        self.scope.preflight_active()?;
+        for (index, amount) in amounts.into_iter().enumerate() {
+            if amount > self.admitted[index] - self.completed[index] {
+                return Err(self.scope.abort(ScopeAbortCause::DescriptorContract {
+                    code: "parse-work-completion-exceeds-admitted",
+                }));
+            }
+        }
+        if amounts.into_iter().all(|amount| amount == 0) {
+            return Ok(());
+        }
+
+        let mut charges: [(ImportDimension, u64); N] =
+            std::array::from_fn(|index| (self.dimensions[index], amounts[index]));
+        charges.sort_unstable_by_key(|(dimension, _)| *dimension);
+        self.scope
+            .coordinator
+            .try_borrow_mut()
+            .map_err(|_| self.scope.reentrant_capability_failure())?
+            .checkpoint()
+            .charge_consumed_batch(&charges)
+            .map_err(|cause| self.scope.abort(ScopeAbortCause::Ledger(cause)))?;
+        for (completed, amount) in self.completed.iter_mut().zip(amounts) {
+            *completed = completed.checked_add(amount).ok_or_else(|| {
+                self.scope.abort(ScopeAbortCause::DescriptorContract {
+                    code: "parse-work-completion-overflow",
+                })
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Records the complete unfinished suffix.
+    pub fn complete_all(&mut self) -> ParseResult<()> {
+        self.complete(self.remaining())
+    }
+
+    /// Runs one fallible physical action and records its prefix only after normal completion.
+    pub fn run<T, E>(
+        &mut self,
+        amounts: [u64; N],
+        action: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<ParseFailure>,
+    {
+        let value = action()?;
+        self.complete(amounts).map_err(E::from)?;
+        Ok(value)
+    }
+
+    /// Runs one fallible physical action and records the complete unfinished suffix.
+    pub fn run_all<T, E>(&mut self, action: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<ParseFailure>,
+    {
+        let remaining = self.remaining();
+        self.run(remaining, action)
+    }
+
+    /// Polls cancellation and deadline state while this work group remains active.
+    pub fn poll(&mut self) -> ParseResult<()> {
+        self.scope.poll_active()
+    }
+
+    fn finish_exact(&mut self) -> ParseResult<()> {
+        self.release();
+        self.scope.poll_active()
+    }
+
+    fn finish_partial(&mut self) {
+        self.release();
+    }
+
+    fn release(&mut self) {
+        if self.active {
+            self.scope.work_outstanding.set(false);
+            self.active = false;
+        }
+        self.finished = true;
+    }
+}
+
+impl<const N: usize> Drop for ImportWorkScope<'_, '_, N> {
+    fn drop(&mut self) {
+        if !self.finished && self.active && self.scope.work_outstanding.replace(false) {
+            debug_assert!(
+                std::thread::panicking(),
+                "the private parser work scope may only be abandoned by unwinding"
+            );
+        }
     }
 }
 
@@ -320,6 +475,7 @@ pub struct ParseScope<'session> {
     format_failure_storage: &'session RefCell<Option<ImportReservation>>,
     dependency_failure: RefCell<Option<DependencyResolutionContext>>,
     callback_active: Cell<bool>,
+    work_outstanding: Cell<bool>,
     terminal: &'session RefCell<Option<ScopeAbortCause>>,
     not_send_or_sync: PhantomData<Rc<()>>,
 }
@@ -438,6 +594,7 @@ impl<'session> ParseScope<'session> {
             format_failure_storage: parts.format_failure_storage,
             dependency_failure: RefCell::new(None),
             callback_active: Cell::new(false),
+            work_outstanding: Cell::new(false),
             terminal: parts.terminal,
             not_send_or_sync: PhantomData,
         }
@@ -683,40 +840,104 @@ impl<'session> ParseScope<'session> {
     }
 
     pub fn charge_work(&self, amount: u64) -> ParseResult<()> {
-        self.preflight_active()?;
-        self.begin_work(ImportWorkClass::WorkUnits, amount)?
-            .complete()
+        self.with_work(ImportWorkClass::WorkUnits, amount, |work| {
+            work.complete_all()
+        })
     }
 
-    pub fn begin_work(
+    /// Runs one callback-scoped parser work action.
+    pub fn with_work<T, E>(
         &self,
         class: ImportWorkClass,
         amount: u64,
-    ) -> ParseResult<ImportWorkPermit<'_, 'session>> {
-        self.preflight_active()?;
-        let mut coordinator = self
-            .coordinator
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?;
-        coordinator
-            .poll()
-            .map_err(|cause| self.abort(ScopeAbortCause::Control(cause)))?;
-        let (dimension, item_limit) = class.accounting(self.limits);
-        let mut checkpoint = coordinator.checkpoint();
-        checkpoint
-            .charge_attempted(dimension, amount)
-            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
-        drop(coordinator);
+        action: impl FnOnce(&mut ImportWorkScope<'_, 'session, 1>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<ParseFailure>,
+    {
+        self.with_work_group([(class, amount)], action)
+    }
 
-        if let Some((resource, limit)) = item_limit
-            && amount > limit
-        {
+    /// Runs one callback-scoped parser action across an exact fixed work group.
+    pub fn with_work_group<const N: usize, T, E>(
+        &self,
+        charges: [(ImportWorkClass, u64); N],
+        action: impl FnOnce(&mut ImportWorkScope<'_, 'session, N>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<ParseFailure>,
+    {
+        let mut work = self.begin_work_group(charges).map_err(E::from)?;
+        match action(&mut work) {
+            Ok(value) => {
+                if work.remaining().into_iter().any(|amount| amount != 0) {
+                    work.finish_partial();
+                    self.poll_active().map_err(E::from)?;
+                    return Err(E::from(self.abort(ScopeAbortCause::DescriptorContract {
+                        code: "parse-work-callback-incomplete",
+                    })));
+                }
+                work.finish_exact().map_err(E::from)?;
+                Ok(value)
+            }
+            Err(cause) => {
+                work.finish_partial();
+                let _ = self.poll_active();
+                Err(cause)
+            }
+        }
+    }
+
+    fn begin_work_group<const N: usize>(
+        &self,
+        charges: [(ImportWorkClass, u64); N],
+    ) -> ParseResult<ImportWorkScope<'_, 'session, N>> {
+        self.preflight_active()?;
+        if self.work_outstanding.get() {
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "parse-work-already-in-progress",
+            }));
+        }
+        self.poll_active()?;
+
+        let accounted = charges.map(|(class, amount)| {
+            let (dimension, item_limit) = class.accounting(self.limits);
+            (dimension, item_limit, amount)
+        });
+        let item_limit_failure = {
+            let mut coordinator = self
+                .coordinator
+                .try_borrow_mut()
+                .map_err(|_| self.reentrant_capability_failure())?;
+            let mut checkpoint = coordinator.checkpoint();
+            let mut failure = None;
+            for (dimension, item_limit, amount) in accounted {
+                checkpoint
+                    .charge_attempted(dimension, amount)
+                    .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
+                if let Some((resource, limit)) = item_limit
+                    && amount > limit
+                {
+                    failure = Some((resource, limit));
+                    break;
+                }
+            }
+            failure
+        };
+        if let Some((resource, limit)) = item_limit_failure {
             return Err(self.abort(ScopeAbortCause::ResourceLimit { resource, limit }));
         }
-        Ok(ImportWorkPermit {
+
+        let admitted = accounted.map(|(_, _, amount)| amount);
+        self.work_outstanding.set(true);
+        Ok(ImportWorkScope {
             scope: self,
-            dimension,
-            amount,
+            dimensions: accounted.map(|(dimension, _, _)| dimension),
+            item_limits: accounted.map(|(_, item_limit, _)| item_limit),
+            admitted,
+            completed: [0; N],
+            active: true,
+            finished: false,
         })
     }
 
@@ -1568,25 +1789,30 @@ impl<'session> ParseScope<'session> {
                 .map_err(|cause| self.abort(ScopeAbortCause::Diagnostic(cause)));
         }
 
-        let work = source_len
-            .checked_mul(2)
-            .ok_or_else(|| self.resource_limit_exceeded("diagnostic-line-index-work", u64::MAX))?;
-        let permit = self.begin_work(ImportWorkClass::DecodeWork, work)?;
         let mut line_count = 1_usize;
         for chunk in bytes.chunks(4096) {
-            self.poll()?;
-            line_count = chunk
-                .iter()
-                .try_fold(line_count, |count, byte| {
-                    if *byte == b'\n' {
-                        count.checked_add(1)
-                    } else {
-                        Some(count)
-                    }
-                })
-                .ok_or_else(|| {
-                    self.resource_limit_exceeded("diagnostic-line-index-entries", u64::MAX)
-                })?;
+            line_count = self.with_work(
+                ImportWorkClass::DecodeWork,
+                u64::try_from(chunk.len()).map_err(|_| {
+                    self.resource_limit_exceeded("diagnostic-line-index-work", u64::MAX)
+                })?,
+                |work| {
+                    let next = chunk
+                        .iter()
+                        .try_fold(line_count, |count, byte| {
+                            if *byte == b'\n' {
+                                count.checked_add(1)
+                            } else {
+                                Some(count)
+                            }
+                        })
+                        .ok_or_else(|| {
+                            self.resource_limit_exceeded("diagnostic-line-index-entries", u64::MAX)
+                        })?;
+                    work.complete_all()?;
+                    Ok(next)
+                },
+            )?;
         }
         let source_plan = CapacityPlan::for_type::<u8>(0, 0, source.path().as_str().len())
             .map_err(|cause| self.capacity_plan_error("diagnostic-line-index-source", cause))?;
@@ -1611,28 +1837,39 @@ impl<'session> ParseScope<'session> {
         })?;
         let mut offset = 0_usize;
         for chunk in bytes.chunks(4096) {
-            self.poll()?;
-            for (chunk_offset, byte) in chunk.iter().enumerate() {
-                if *byte == b'\n' {
-                    let start = offset
-                        .checked_add(chunk_offset)
-                        .and_then(|value| value.checked_add(1))
-                        .and_then(|value| u64::try_from(value).ok())
-                        .ok_or_else(|| {
-                            self.resource_limit_exceeded("diagnostic-line-index-offset", u64::MAX)
-                        })?;
-                    line_starts.try_push_reserved(start).map_err(|_| {
-                        self.abort(ScopeAbortCause::DescriptorContract {
-                            code: "diagnostic-line-index-slots-not-admitted",
-                        })
+            offset = self.with_work(
+                ImportWorkClass::DecodeWork,
+                u64::try_from(chunk.len()).map_err(|_| {
+                    self.resource_limit_exceeded("diagnostic-line-index-work", u64::MAX)
+                })?,
+                |work| {
+                    for (chunk_offset, byte) in chunk.iter().enumerate() {
+                        if *byte == b'\n' {
+                            let start = offset
+                                .checked_add(chunk_offset)
+                                .and_then(|value| value.checked_add(1))
+                                .and_then(|value| u64::try_from(value).ok())
+                                .ok_or_else(|| {
+                                    self.resource_limit_exceeded(
+                                        "diagnostic-line-index-offset",
+                                        u64::MAX,
+                                    )
+                                })?;
+                            line_starts.try_push_reserved(start).map_err(|_| {
+                                self.abort(ScopeAbortCause::DescriptorContract {
+                                    code: "diagnostic-line-index-slots-not-admitted",
+                                })
+                            })?;
+                        }
+                    }
+                    let next = offset.checked_add(chunk.len()).ok_or_else(|| {
+                        self.resource_limit_exceeded("diagnostic-line-index-offset", u64::MAX)
                     })?;
-                }
-            }
-            offset = offset.checked_add(chunk.len()).ok_or_else(|| {
-                self.resource_limit_exceeded("diagnostic-line-index-offset", u64::MAX)
-            })?;
+                    work.complete_all()?;
+                    Ok(next)
+                },
+            )?;
         }
-        permit.complete()?;
 
         let source_path = source
             .path()

@@ -3,7 +3,7 @@ use crate::parser::{self, TextDecodeFailure};
 use baozi_core::{AlphaMode, Color};
 use baozi_import::{
     DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
-    ImportStorageClass, ImportWorkClass, ImportWorkPermit, MeteredOrderedMap, MeteredString,
+    ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredOrderedMap, MeteredString,
     MeteredVec, ParseFailure, ParseResult, ParseScope,
 };
 use baozi_io::AssetPath;
@@ -15,27 +15,28 @@ use parser::usize_amount;
 const INTERRUPTIBLE_WORK_CHUNK: u64 = 64;
 const MAX_NUMERIC_LITERAL_BYTES: usize = 128;
 
-pub(crate) struct ComparisonWork<'scope, 'session> {
-    scope: &'scope ParseScope<'session>,
-    permit: Option<ImportWorkPermit<'scope, 'session>>,
+pub(crate) struct ComparisonWork<'meter, 'work, 'session> {
+    work: &'meter mut ImportWorkScope<'work, 'session, 1>,
+    admitted: bool,
     remaining: u64,
 }
 
-impl<'scope, 'session> ComparisonWork<'scope, 'session> {
-    fn new(scope: &'scope ParseScope<'session>) -> Self {
+impl<'meter, 'work, 'session> ComparisonWork<'meter, 'work, 'session> {
+    fn new(work: &'meter mut ImportWorkScope<'work, 'session, 1>) -> Self {
         Self {
-            scope,
-            permit: None,
+            work,
+            admitted: false,
             remaining: 0,
         }
     }
 
     fn step(&mut self) -> ParseResult<()> {
         if self.remaining == 0 {
-            if let Some(permit) = self.permit.take() {
-                permit.complete()?;
+            if self.admitted {
+                self.work.complete_all()?;
             }
-            self.permit = Some(begin_comparison_work(self.scope)?);
+            self.work.replenish(INTERRUPTIBLE_WORK_CHUNK)?;
+            self.admitted = true;
             self.remaining = INTERRUPTIBLE_WORK_CHUNK;
         }
         self.remaining -= 1;
@@ -54,9 +55,9 @@ impl<'scope, 'session> ComparisonWork<'scope, 'session> {
         Ok(left.len().cmp(&right.len()))
     }
 
-    fn finish(mut self) -> ParseResult<()> {
-        if let Some(permit) = self.permit.take() {
-            permit.complete()?;
+    fn finish(self) -> ParseResult<()> {
+        if self.admitted {
+            self.work.complete_all()?;
         }
         Ok(())
     }
@@ -65,38 +66,52 @@ impl<'scope, 'session> ComparisonWork<'scope, 'session> {
 pub(crate) fn interruptible_sort_by<'scope, 'session, T>(
     scope: &'scope ParseScope<'session>,
     values: &mut MeteredVec<'_, T>,
-    mut compare: impl FnMut(&mut ComparisonWork<'scope, 'session>, &T, &T) -> ParseResult<Ordering>,
+    mut compare: impl for<'meter, 'work> FnMut(
+        &mut ComparisonWork<'meter, 'work, 'session>,
+        &T,
+        &T,
+    ) -> ParseResult<Ordering>,
 ) -> ParseResult<()> {
     if values.len() <= 1 {
         return Ok(());
     }
 
-    let mut work = ComparisonWork::new(scope);
-    let result: Result<(), ParseFailure> = values.try_sort_unstable_by(|left, right| {
-        work.step()?;
-        compare(&mut work, left, right)
-    });
-    result?;
-    work.finish()
+    scope.with_work(ImportWorkClass::WorkUnits, 0, |ledger_work| {
+        let mut work = ComparisonWork::new(ledger_work);
+        let result: Result<(), ParseFailure> = values.try_sort_unstable_by(|left, right| {
+            work.step()?;
+            compare(&mut work, left, right)
+        });
+        result?;
+        work.finish()
+    })
 }
 
 pub(crate) fn interruptible_dedup_by<'scope, 'session, T>(
     scope: &'scope ParseScope<'session>,
     values: &mut MeteredVec<'_, T>,
-    mut equivalent: impl FnMut(&mut ComparisonWork<'scope, 'session>, &T, &T) -> ParseResult<bool>,
+    mut equivalent: impl for<'meter, 'work> FnMut(
+        &mut ComparisonWork<'meter, 'work, 'session>,
+        &T,
+        &T,
+    ) -> ParseResult<bool>,
 ) -> ParseResult<()> {
     if values.len() <= 1 {
         return Ok(());
     }
 
     let previous_len = values.len();
-    let mut work = ComparisonWork::new(scope);
-    let result: Result<usize, ParseFailure> = values.try_partition_dedup_by(|previous, current| {
-        work.step()?;
-        equivalent(&mut work, previous, current)
-    });
-    let retained_len = result?;
-    work.finish()?;
+    let retained_len = scope.with_work(ImportWorkClass::WorkUnits, 0, |ledger_work| {
+        let mut work = ComparisonWork::new(ledger_work);
+        let result: Result<usize, ParseFailure> =
+            values.try_partition_dedup_by(|previous, current| {
+                work.step()?;
+                equivalent(&mut work, previous, current)
+            });
+        let retained_len = result?;
+        work.finish()?;
+        Ok(retained_len)
+    })?;
     for_work_chunks(
         scope,
         previous_len - retained_len,
@@ -111,26 +126,35 @@ pub(crate) fn interruptible_dedup_by<'scope, 'session, T>(
 pub(crate) fn interruptible_binary_search_by<'scope, 'session, T>(
     scope: &'scope ParseScope<'session>,
     values: &[T],
-    mut compare: impl FnMut(&mut ComparisonWork<'scope, 'session>, &T) -> ParseResult<Ordering>,
+    mut compare: impl for<'meter, 'work> FnMut(
+        &mut ComparisonWork<'meter, 'work, 'session>,
+        &T,
+    ) -> ParseResult<Ordering>,
 ) -> ParseResult<Option<usize>> {
-    let mut work = ComparisonWork::new(scope);
-    let mut left = 0usize;
-    let mut right = values.len();
-    let mut found = None;
-    while left < right {
-        let middle = left + (right - left) / 2;
-        work.step()?;
-        match compare(&mut work, &values[middle])? {
-            Ordering::Less => left = middle + 1,
-            Ordering::Greater => right = middle,
-            Ordering::Equal => {
-                found = Some(middle);
-                break;
+    if values.is_empty() {
+        return Ok(None);
+    }
+
+    scope.with_work(ImportWorkClass::WorkUnits, 0, |ledger_work| {
+        let mut work = ComparisonWork::new(ledger_work);
+        let mut left = 0usize;
+        let mut right = values.len();
+        let mut found = None;
+        while left < right {
+            let middle = left + (right - left) / 2;
+            work.step()?;
+            match compare(&mut work, &values[middle])? {
+                Ordering::Less => left = middle + 1,
+                Ordering::Greater => right = middle,
+                Ordering::Equal => {
+                    found = Some(middle);
+                    break;
+                }
             }
         }
-    }
-    work.finish()?;
-    Ok(found)
+        work.finish()?;
+        Ok(found)
+    })
 }
 
 pub(crate) fn for_work_chunks(
@@ -144,12 +168,14 @@ pub(crate) fn for_work_chunks(
         let end = start
             .checked_add(INTERRUPTIBLE_WORK_CHUNK as usize)
             .map_or(len, |end| end.min(len));
-        let permit = scope.begin_work(
+        scope.with_work(
             ImportWorkClass::WorkUnits,
             usize_amount(scope, end - start, resource)?,
+            |work| {
+                visit(start..end)?;
+                work.complete_all()
+            },
         )?;
-        visit(start..end)?;
-        permit.complete()?;
         start = end;
     }
     Ok(())
@@ -174,12 +200,6 @@ pub(crate) fn interruptible_str_eq(
         Ok(())
     })?;
     Ok(equal)
-}
-
-fn begin_comparison_work<'scope, 'session>(
-    scope: &'scope ParseScope<'session>,
-) -> ParseResult<ImportWorkPermit<'scope, 'session>> {
-    scope.begin_work(ImportWorkClass::WorkUnits, INTERRUPTIBLE_WORK_CHUNK)
 }
 
 pub(crate) struct MaterialLibrary<'scope> {
@@ -254,10 +274,6 @@ impl<'scope> ParsedMaterial<'scope> {
 }
 
 impl ParsedMetadata<'_> {
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
-    }
-
     pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = (&str, &ParsedMetadataValue<'_>)> {
         self.entries
             .iter()
@@ -341,9 +357,13 @@ fn parse_mtl<'scope>(
     let mut current = None;
 
     parser::scan_lines(scope, text, |decoded_line, line_number| {
-        let record_permit = scope.begin_work(ImportWorkClass::Records, 1)?;
-
-        let raw_line = decoded_line.text();
+        // A decoded line becomes a consumed record as soon as this parser admits it for
+        // processing. Child token, string, and resolution work starts only after that admission.
+        let raw_line = scope.with_work(ImportWorkClass::Records, 1, |work| {
+            let raw_line = decoded_line.text();
+            work.complete_all()?;
+            Ok(raw_line)
+        })?;
         let tokens = tokenize_mtl(scope, &decoded_line)?;
         let keyword = tokens.first().map(|token| token.text);
         let allowed_value = match keyword {
@@ -359,7 +379,7 @@ fn parse_mtl<'scope>(
             || snapshot.diagnostic_source(),
         )?;
         let Some(keyword) = keyword else {
-            return record_permit.complete();
+            return Ok(());
         };
 
         match keyword {
@@ -481,20 +501,27 @@ fn parse_mtl<'scope>(
                                 .ok_or_else(|| {
                                     scope.allocation_failure("obj-mtl-texture-path-work")
                                 })?;
-                            let resolution_work = scope.begin_work(
+                            let (resolved, resolution_allowance) = scope.with_work(
                                 ImportWorkClass::WorkUnits,
                                 usize_amount(scope, path_work, "obj-mtl-texture-path-work")?,
+                                |work| {
+                                    let resolution_allowance = scope.metered_opaque_allowance(
+                                        ImportStorageClass::FormatNormalization,
+                                        usize_amount(
+                                            scope,
+                                            path_resolution_allowance(
+                                                scope,
+                                                path,
+                                                texture_path.as_str(),
+                                            )?,
+                                            "obj-mtl-texture-path-resolution",
+                                        )?,
+                                    )?;
+                                    let resolved = path.resolve_from_file(texture_path.as_str());
+                                    work.complete_all()?;
+                                    Ok((resolved, resolution_allowance))
+                                },
                             )?;
-                            let resolution_allowance = scope.metered_opaque_allowance(
-                                ImportStorageClass::FormatNormalization,
-                                usize_amount(
-                                    scope,
-                                    path_resolution_allowance(scope, path, texture_path.as_str())?,
-                                    "obj-mtl-texture-path-resolution",
-                                )?,
-                            )?;
-                            let resolved = path.resolve_from_file(texture_path.as_str());
-                            resolution_work.complete()?;
                             match resolved {
                                 Ok(resolved) => {
                                     if resolved.as_str().len() > parser::max_text_value_bytes(scope)
@@ -558,7 +585,7 @@ fn parse_mtl<'scope>(
                 format_args!("MTL statement '{keyword}' is not recognized"),
             )?,
         }
-        record_permit.complete()
+        Ok(())
     })?;
 
     flush_material(scope, library, current)
@@ -650,18 +677,23 @@ fn tokenize_mtl<'scope, 'line>(
         "obj-mtl-token-scan-work",
         |_, _| Ok(()),
         |start, end| {
-            let token_permit = scope.begin_work(ImportWorkClass::Tokens, 1)?;
-            let token_bytes = scope.begin_work(
-                ImportWorkClass::TokenBytes,
-                usize_amount(scope, end - start, "obj-mtl-token-bytes")?,
-            )?;
-            tokens.values.try_push(MtlToken {
-                text: &line[start..end],
-                start,
-                end,
-            })?;
-            token_bytes.complete()?;
-            token_permit.complete()
+            scope.with_work_group(
+                [
+                    (ImportWorkClass::Tokens, 1),
+                    (
+                        ImportWorkClass::TokenBytes,
+                        usize_amount(scope, end - start, "obj-mtl-token-bytes")?,
+                    ),
+                ],
+                |work| {
+                    tokens.values.try_push(MtlToken {
+                        text: &line[start..end],
+                        start,
+                        end,
+                    })?;
+                    work.complete_all()
+                },
+            )
         },
     )?;
     Ok(tokens)
@@ -850,32 +882,34 @@ fn texture_path_from_map<'scope>(
             if length > parser::max_text_value_bytes(scope) {
                 return Ok(TexturePathOutcome::TooLong);
             }
-            let string_permit = scope.begin_work(
+            return scope.with_work(
                 ImportWorkClass::StringBytes,
                 usize_amount(scope, length, "obj-mtl-texture-path-bytes")?,
-            )?;
-            let mut path = scope.metered_string(
-                ImportStorageClass::FormatNormalization,
-                "obj-mtl-texture-path",
+                |work| {
+                    let mut path = scope.metered_string(
+                        ImportStorageClass::FormatNormalization,
+                        "obj-mtl-texture-path",
+                    );
+                    path.try_reserve(length)?;
+                    let mut first = true;
+                    for chunk in tokens[index..].chunks(64) {
+                        work.poll()?;
+                        for token in chunk {
+                            if !first {
+                                path.try_push_char_reserved(' ')?;
+                            }
+                            if token.text.len() <= parser::SCAN_CHUNK_BYTES {
+                                path.try_push_str_reserved(token.text)?;
+                            } else {
+                                path.try_push_str(token.text)?;
+                            }
+                            first = false;
+                        }
+                    }
+                    work.complete_all()?;
+                    Ok(TexturePathOutcome::Value(path))
+                },
             );
-            path.try_reserve(length)?;
-            let mut first = true;
-            for chunk in tokens[index..].chunks(64) {
-                scope.poll()?;
-                for token in chunk {
-                    if !first {
-                        path.try_push_char_reserved(' ')?;
-                    }
-                    if token.text.len() <= parser::SCAN_CHUNK_BYTES {
-                        path.try_push_str_reserved(token.text)?;
-                    } else {
-                        path.try_push_str(token.text)?;
-                    }
-                    first = false;
-                }
-            }
-            string_permit.complete()?;
-            return Ok(TexturePathOutcome::Value(path));
         }
     }
     Ok(TexturePathOutcome::Missing)
@@ -926,14 +960,17 @@ fn owned_string<'scope>(
     resource: &'static str,
 ) -> ParseResult<MeteredString<'scope>> {
     parser::enforce_text_value_limit(scope, value.len(), resource)?;
-    let string_permit = scope.begin_work(
+    scope.with_work(
         ImportWorkClass::StringBytes,
         usize_amount(scope, value.len(), resource)?,
-    )?;
-    let mut output = scope.metered_string(ImportStorageClass::FormatNormalization, resource);
-    output.try_push_str(value)?;
-    string_permit.complete()?;
-    Ok(output)
+        |work| {
+            let mut output =
+                scope.metered_string(ImportStorageClass::FormatNormalization, resource);
+            output.try_push_str(value)?;
+            work.complete_all()?;
+            Ok(output)
+        },
+    )
 }
 
 fn owned_format<'scope>(
@@ -947,18 +984,20 @@ fn owned_format<'scope>(
         .write_fmt(arguments)
         .map_err(|_| scope.allocation_failure("obj-mtl-formatted-string-length"))?;
     parser::enforce_text_value_limit(scope, counter.bytes, "obj-mtl-formatted-string-bytes")?;
-    let string_permit = scope.begin_work(
+    scope.with_work(
         ImportWorkClass::StringBytes,
         usize_amount(scope, counter.bytes, "obj-mtl-formatted-string-bytes")?,
-    )?;
-    let mut output = scope.metered_string(
-        ImportStorageClass::FormatNormalization,
-        "obj-mtl-formatted-string",
-    );
-    output.try_reserve(counter.bytes)?;
-    output.try_write_fmt(arguments)?;
-    string_permit.complete()?;
-    Ok(output)
+        |work| {
+            let mut output = scope.metered_string(
+                ImportStorageClass::FormatNormalization,
+                "obj-mtl-formatted-string",
+            );
+            output.try_reserve(counter.bytes)?;
+            output.try_write_fmt(arguments)?;
+            work.complete_all()?;
+            Ok(output)
+        },
+    )
 }
 
 #[derive(Default)]

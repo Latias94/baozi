@@ -95,7 +95,7 @@ pub use request_wire::{
     RequestWireError, RequestWireLimits, RequestWireScope, SerializedImportRequest,
 };
 pub use scope::{
-    CameraBuildConfig, ImportStorageClass, ImportWorkClass, ImportWorkPermit, MaterialBuildConfig,
+    CameraBuildConfig, ImportStorageClass, ImportWorkClass, ImportWorkScope, MaterialBuildConfig,
     MeshBuildConfig, NodeBuildConfig, ParseFailure, ParseResult, ParseScope, ScopedSceneBuilder,
     SkinBuildConfig, TextureBuildConfig, TextureSlotBuildConfig,
 };

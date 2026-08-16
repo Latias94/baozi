@@ -23,15 +23,10 @@ pub(crate) struct ParsedMesh<'scope> {
 
 pub(crate) fn read_stl(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
     let bytes = scope.primary_bytes();
-    let decode = scope.begin_work(
-        ImportWorkClass::DecodeWork,
-        usize_amount(scope, bytes.len(), "stl-decode-work")?,
-    )?;
     let parsed = match exact_binary_facets(bytes) {
         Some(facets) => binary::parse(scope, bytes, facets)?,
         None => ascii::parse(scope, bytes)?,
     };
-    decode.complete()?;
     scene_from_parsed(scope, parsed)
 }
 
@@ -47,113 +42,149 @@ fn scene_from_parsed<'scope>(
         )));
     }
 
-    let mut topology_cells = 0usize;
+    let mut remaining_topology_cells = 0usize;
     for (index, mesh) in parsed.meshes.as_slice().iter().enumerate() {
         if index % 4096 == 0 {
             scope.poll()?;
         }
-        topology_cells = topology_cells
+        remaining_topology_cells = remaining_topology_cells
             .checked_add(mesh.positions.len())
             .ok_or_else(|| scope.allocation_failure("stl-topology-cell-counter"))?;
     }
-    let topology = scope.begin_work(
-        ImportWorkClass::TopologyCells,
-        usize_amount(scope, topology_cells, "stl-topology-cells")?,
-    )?;
-    let canonical_strings = canonical_string_bytes(scope, &parsed)?;
-    let strings = scope.begin_work(
-        ImportWorkClass::CanonicalStringBytes,
-        usize_amount(scope, canonical_strings, "stl-canonical-string-bytes")?,
-    )?;
+    let mut remaining_canonical_string_bytes = canonical_string_bytes(scope, &parsed)?;
 
     let ParsedStl {
         meshes,
         material_color,
     } = parsed;
     let mut builder = scope.scene_builder()?;
-    let material_name = metered_string(
-        scope,
-        ImportStorageClass::SceneConstruction,
-        "STL Default Material",
-        "stl-material-name",
-    )?;
-    let material = builder.add_prepared_material(
-        material_name
-            .try_into_scene_parts()?
-            .into_some()
-            .into_material(MaterialBuildConfig {
-                shading_model: ShadingModel::Unknown,
-                base_color: material_color.unwrap_or(Color::WHITE),
-                metallic: 0.0,
-                roughness: 1.0,
-                emissive: Color::linear_rgba(0.0, 0.0, 0.0, 1.0),
-                alpha_mode: AlphaMode::Opaque,
-                alpha_cutoff: 0.5,
-                double_sided: false,
-            })
-            .finish()?,
-    )?;
-
-    meshes.try_for_each_owned(|parsed_mesh| {
-        let primitive = scope.begin_work(ImportWorkClass::Primitives, 1)?;
-        let attribute_stream_count = 2 + u64::from(parsed_mesh.colors.is_some());
-        let attribute_streams =
-            scope.begin_work(ImportWorkClass::AttributeStreams, attribute_stream_count)?;
-        let graph_node = scope.begin_work(ImportWorkClass::GraphNodes, 1)?;
-        let graph_edge = scope.begin_work(ImportWorkClass::GraphEdges, 1)?;
-        let ParsedMesh {
-            name,
-            positions,
-            normals,
-            colors,
-        } = parsed_mesh;
-        let bounds = compute_bounds(scope, positions.as_slice())?;
-        let indices = sequential_indices(scope, positions.len())?;
-        let node_name = name
-            .as_ref()
-            .map(|name| {
+    let material_name_value = "STL Default Material";
+    let material_name_bytes = material_name_value.len();
+    remaining_canonical_string_bytes = remaining_canonical_string_bytes
+        .checked_sub(material_name_bytes)
+        .ok_or_else(|| scope.allocation_failure("stl-canonical-string-counter"))?;
+    let material = scope.with_work(
+        ImportWorkClass::CanonicalStringBytes,
+        usize_amount(scope, material_name_bytes, "stl-material-name")?,
+        |work| -> ParseResult<_> {
+            let material_name = work.run_all(|| {
                 metered_string(
                     scope,
                     ImportStorageClass::SceneConstruction,
-                    name.as_str(),
-                    "stl-node-name",
+                    material_name_value,
+                    "stl-material-name",
                 )
-            })
-            .transpose()?;
-        let mut color_channels = scope.metered_scene_vec("stl-color-channels");
-        if let Some(colors) = colors {
-            color_channels.try_push_parts(colors.try_into_scene_parts()?)?;
-        }
-        let name = optional_string_parts(scope, name, "stl-mesh-name")?;
-        let mesh = name
-            .into_mesh(MeshBuildConfig {
-                topology: PrimitiveTopology::Triangles,
-                material: Some(material),
-                bounds,
-            })
-            .with_indices(indices.try_into_scene_parts()?)?
-            .with_positions(positions.try_into_scene_parts()?)?
-            .with_normals(normals.try_into_scene_parts()?)?
-            .with_colors(color_channels.try_into_scene_parts()?)?
-            .finish()?;
-        let mesh_id = builder.add_prepared_mesh(mesh)?;
-        let node = optional_string_parts(scope, node_name, "stl-node-name")?
-            .into_node(NodeBuildConfig {
-                transform: Mat4::IDENTITY,
-                camera: None,
-                light: None,
-            })
-            .finish()?;
-        let node_id = builder.add_prepared_node(node)?;
-        builder.add_node_mesh_binding(node_id, MeshBinding::new(mesh_id))?;
-        graph_edge.complete()?;
-        graph_node.complete()?;
-        attribute_streams.complete()?;
-        primitive.complete()
+            })?;
+            builder.add_prepared_material(
+                material_name
+                    .try_into_scene_parts()?
+                    .into_some()
+                    .into_material(MaterialBuildConfig {
+                        shading_model: ShadingModel::Unknown,
+                        base_color: material_color.unwrap_or(Color::WHITE),
+                        metallic: 0.0,
+                        roughness: 1.0,
+                        emissive: Color::linear_rgba(0.0, 0.0, 0.0, 1.0),
+                        alpha_mode: AlphaMode::Opaque,
+                        alpha_cutoff: 0.5,
+                        double_sided: false,
+                    })
+                    .finish()?,
+            )
+        },
+    )?;
+
+    meshes.try_for_each_owned(|parsed_mesh| {
+        let topology_cells = parsed_mesh.positions.len();
+        remaining_topology_cells = remaining_topology_cells
+            .checked_sub(topology_cells)
+            .ok_or_else(|| scope.allocation_failure("stl-topology-cell-counter"))?;
+        let mesh_name_bytes = parsed_mesh.name.as_ref().map_or(0, MeteredString::len);
+        let canonical_name_bytes = mesh_name_bytes
+            .checked_mul(2)
+            .ok_or_else(|| scope.allocation_failure("stl-string-byte-counter"))?;
+        remaining_canonical_string_bytes = remaining_canonical_string_bytes
+            .checked_sub(canonical_name_bytes)
+            .ok_or_else(|| scope.allocation_failure("stl-canonical-string-counter"))?;
+        let topology_cells = usize_amount(scope, topology_cells, "stl-topology-cells")?;
+        let mesh_name_bytes = usize_amount(scope, mesh_name_bytes, "stl-mesh-name")?;
+        let canonical_name_bytes =
+            usize_amount(scope, canonical_name_bytes, "stl-canonical-string-bytes")?;
+        let attribute_stream_count = 2 + u64::from(parsed_mesh.colors.is_some());
+        scope.with_work_group(
+            [
+                (ImportWorkClass::TopologyCells, topology_cells),
+                (ImportWorkClass::CanonicalStringBytes, canonical_name_bytes),
+                (ImportWorkClass::Primitives, 1),
+                (ImportWorkClass::AttributeStreams, attribute_stream_count),
+                (ImportWorkClass::GraphNodes, 1),
+                (ImportWorkClass::GraphEdges, 1),
+            ],
+            |work| -> ParseResult<()> {
+                let ParsedMesh {
+                    name,
+                    positions,
+                    normals,
+                    colors,
+                } = parsed_mesh;
+                let bounds = compute_bounds(scope, positions.as_slice())?;
+                let indices = work.run([topology_cells, 0, 0, 0, 0, 0], || {
+                    sequential_indices(scope, positions.len())
+                })?;
+                let node_name = name
+                    .as_ref()
+                    .map(|name| {
+                        work.run([0, mesh_name_bytes, 0, 0, 0, 0], || {
+                            metered_string(
+                                scope,
+                                ImportStorageClass::SceneConstruction,
+                                name.as_str(),
+                                "stl-node-name",
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let mut color_channels = scope.metered_scene_vec("stl-color-channels");
+                if let Some(colors) = colors {
+                    color_channels.try_push_parts(colors.try_into_scene_parts()?)?;
+                }
+                let mesh_id = work.run(
+                    [0, mesh_name_bytes, 1, attribute_stream_count, 0, 0],
+                    || -> ParseResult<_> {
+                        let name = optional_string_parts(scope, name, "stl-mesh-name")?;
+                        let mesh = name
+                            .into_mesh(MeshBuildConfig {
+                                topology: PrimitiveTopology::Triangles,
+                                material: Some(material),
+                                bounds,
+                            })
+                            .with_indices(indices.try_into_scene_parts()?)?
+                            .with_positions(positions.try_into_scene_parts()?)?
+                            .with_normals(normals.try_into_scene_parts()?)?
+                            .with_colors(color_channels.try_into_scene_parts()?)?
+                            .finish()?;
+                        builder.add_prepared_mesh(mesh)
+                    },
+                )?;
+                let node_id = work.run([0, 0, 0, 0, 1, 0], || -> ParseResult<_> {
+                    let node = optional_string_parts(scope, node_name, "stl-node-name")?
+                        .into_node(NodeBuildConfig {
+                            transform: Mat4::IDENTITY,
+                            camera: None,
+                            light: None,
+                        })
+                        .finish()?;
+                    builder.add_prepared_node(node)
+                })?;
+                work.run([0, 0, 0, 0, 0, 1], || {
+                    builder.add_node_mesh_binding(node_id, MeshBinding::new(mesh_id))
+                })
+            },
+        )
     })?;
 
-    strings.complete()?;
-    topology.complete()?;
+    debug_assert_eq!(remaining_topology_cells, 0);
+    debug_assert_eq!(remaining_canonical_string_bytes, 0);
     builder.finish_draft()
 }
 

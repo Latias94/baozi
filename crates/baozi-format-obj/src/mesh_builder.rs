@@ -75,49 +75,6 @@ fn state_name<'parsed>(
     })
 }
 
-fn charge_segment_strings(
-    scope: &ParseScope<'_>,
-    parsed: &ParsedObj<'_>,
-    key: &SegmentKey,
-) -> ParseResult<()> {
-    let mut bytes = 0usize;
-    if let Some(id) = key.display_name() {
-        let name = state_name(scope, parsed, id)?;
-        checked_add_string_bytes(scope, &mut bytes, name.len())?;
-        checked_add_string_bytes(scope, &mut bytes, name.len())?;
-    }
-    for (metadata_key, id) in [
-        ("obj:object", key.object),
-        ("obj:group", key.group),
-        ("obj:material", key.material),
-        ("obj:smoothing", key.smoothing),
-    ] {
-        if let Some(id) = id {
-            let value = state_name(scope, parsed, id)?;
-            checked_add_string_bytes(scope, &mut bytes, metadata_key.len())?;
-            checked_add_string_bytes(scope, &mut bytes, value.len())?;
-        }
-    }
-
-    scope
-        .begin_work(
-            ImportWorkClass::CanonicalStringBytes,
-            usize_amount(scope, bytes, "obj-canonical-string-bytes")?,
-        )?
-        .complete()
-}
-
-fn checked_add_string_bytes(
-    scope: &ParseScope<'_>,
-    total: &mut usize,
-    bytes: usize,
-) -> ParseResult<()> {
-    *total = total
-        .checked_add(bytes)
-        .ok_or_else(|| scope.allocation_failure("obj-canonical-string-counter"))?;
-    Ok(())
-}
-
 fn owned_canonical_string<'scope>(
     scope: &'scope ParseScope<'_>,
     value: &str,
@@ -126,8 +83,24 @@ fn owned_canonical_string<'scope>(
         ImportStorageClass::SceneConstruction,
         "obj-canonical-string",
     );
-    output.try_push_str(value)?;
-    Ok(output)
+    scope.with_work(
+        ImportWorkClass::CanonicalStringBytes,
+        usize_amount(scope, value.len(), "obj-canonical-string-bytes")?,
+        |work| -> ParseResult<_> {
+            output.try_reserve(value.len())?;
+            for_string_chunks(value, |chunk| {
+                work.run(
+                    [usize_amount(
+                        scope,
+                        chunk.len(),
+                        "obj-canonical-string-bytes",
+                    )?],
+                    || output.try_push_str_reserved(chunk),
+                )
+            })?;
+            Ok(output)
+        },
+    )
 }
 
 fn canonical_string_parts<'scope>(
@@ -141,20 +114,36 @@ fn optional_canonical_string_parts<'scope>(
     scope: &'scope ParseScope<'_>,
     value: Option<&str>,
 ) -> ParseResult<SceneValueParts<'scope, Option<String>>> {
-    let has_value = value.is_some();
-    let mut output = scope.metered_string(
-        ImportStorageClass::SceneConstruction,
-        "obj-canonical-string",
-    );
-    if let Some(value) = value {
-        output.try_push_str(value)?;
+    match value {
+        Some(value) => Ok(owned_canonical_string(scope, value)?
+            .try_into_scene_parts()?
+            .into_some()),
+        None => Ok(scope
+            .metered_string(
+                ImportStorageClass::SceneConstruction,
+                "obj-canonical-string",
+            )
+            .try_into_scene_parts()?
+            .discard_into_none()),
     }
-    let output = output.try_into_scene_parts()?;
-    Ok(if has_value {
-        output.into_some()
-    } else {
-        output.discard_into_none()
-    })
+}
+
+fn for_string_chunks(
+    value: &str,
+    mut visit: impl FnMut(&str) -> ParseResult<()>,
+) -> ParseResult<()> {
+    let mut start = 0usize;
+    while start < value.len() {
+        let mut end = start
+            .checked_add(crate::parser::SCAN_CHUNK_BYTES)
+            .map_or(value.len(), |end| end.min(value.len()));
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        visit(&value[start..end])?;
+        start = end;
+    }
+    Ok(())
 }
 
 fn warn_partial_attributes(
@@ -235,31 +224,37 @@ impl<'scope> SegmentBuilder<'scope> {
         let canonical_topology_cells = face_vertex_count
             .checked_add(face_count_cells)
             .ok_or_else(|| scope.allocation_failure("obj-canonical-topology-counter"))?;
-        let topology_permit = scope.begin_work(
+        let canonical_topology_cells = usize_amount(
+            scope,
+            canonical_topology_cells,
+            "obj-canonical-topology-cells",
+        )?;
+        let face_count_cells =
+            usize_amount(scope, face_count_cells, "obj-canonical-face-count-cells")?;
+
+        scope.with_work(
             ImportWorkClass::TopologyCells,
-            usize_amount(
-                scope,
-                canonical_topology_cells,
-                "obj-canonical-topology-cells",
-            )?,
-        )?;
+            canonical_topology_cells,
+            |work| -> ParseResult<()> {
+                if face_vertex_count > 3 {
+                    self.has_polygon = true;
+                }
+                let face_vertex_count = u32::try_from(face_vertex_count)
+                    .map_err(|_| scope.allocation_failure("obj-face-vertex-count"))?;
+                work.run([face_count_cells], || {
+                    self.face_vertex_counts.try_push(face_vertex_count)
+                })?;
+                self.vertex_keys.try_reserve(face.vertices.len())?;
 
-        if face_vertex_count > 3 {
-            self.has_polygon = true;
-        }
-        self.face_vertex_counts.try_push(
-            u32::try_from(face_vertex_count)
-                .map_err(|_| scope.allocation_failure("obj-face-vertex-count"))?,
-        )?;
-        self.vertex_keys.try_reserve(face_vertex_count)?;
-
-        for chunk in face.vertices.as_slice().chunks(64) {
-            scope.poll()?;
-            for vertex in chunk {
-                self.vertex_keys.try_push_reserved((*vertex).into())?;
-            }
-        }
-        topology_permit.complete()
+                for chunk in face.vertices.as_slice().chunks(64) {
+                    work.poll()?;
+                    for vertex in chunk {
+                        work.run([1], || self.vertex_keys.try_push_reserved((*vertex).into()))?;
+                    }
+                }
+                Ok(())
+            },
+        )
     }
 
     fn materialize_vertices(
@@ -348,18 +343,9 @@ impl<'scope> SegmentBuilder<'scope> {
         let keep_texcoords = has_texcoords && !missing_texcoords;
         let keep_normals = has_normals && !missing_normals;
 
-        let vertex_permit = scope.begin_work(
-            ImportWorkClass::Vertices,
-            usize_amount(scope, unique_count, "obj-canonical-vertices")?,
-        )?;
         let channel_count = usize::from(keep_texcoords) + usize::from(keep_normals);
-        let attribute_cells = unique_count
-            .checked_mul(channel_count)
-            .ok_or_else(|| scope.allocation_failure("obj-canonical-attribute-cells"))?;
-        let attribute_permit = scope.begin_work(
-            ImportWorkClass::AttributeCells,
-            usize_amount(scope, attribute_cells, "obj-canonical-attribute-cells")?,
-        )?;
+        let channel_count_amount =
+            usize_amount(scope, channel_count, "obj-canonical-attribute-stream-count")?;
         let mut positions = scope.metered_vec(
             ImportStorageClass::SceneConstruction,
             "obj-segment-positions",
@@ -390,40 +376,82 @@ impl<'scope> SegmentBuilder<'scope> {
             },
         )?;
 
-        mtl::for_work_chunks(
-            scope,
-            self.vertex_keys.len(),
-            "obj-vertex-materialization-work",
-            |range| {
-                for occurrence in range {
-                    let key = &self.vertex_keys.as_slice()[occurrence];
-                    if !first_occurrences.as_slice()[occurrence] {
-                        continue;
-                    }
-                    let canonical_index = u32::try_from(positions.len())
-                        .map_err(|_| scope.allocation_failure("obj-vertex-index-space"))?;
-                    indices.as_mut_slice()[occurrence] = canonical_index;
-                    positions.try_push_reserved(parsed.positions.as_slice()[key.position])?;
-                    if keep_texcoords {
-                        let Some(index) = key.texcoord else {
-                            return Err(scope.format_failure(ObjFailure::internal(
-                                "complete-texcoord-channel-has-missing-index",
-                            )));
+        for (chunk_index, first_flags) in first_occurrences.as_slice().chunks(64).enumerate() {
+            let start = chunk_index
+                .checked_mul(64)
+                .ok_or_else(|| scope.allocation_failure("obj-vertex-materialization-offset"))?;
+            let end = start
+                .checked_add(first_flags.len())
+                .ok_or_else(|| scope.allocation_failure("obj-vertex-materialization-offset"))?;
+            let chunk_vertices = first_flags.iter().filter(|is_first| **is_first).count();
+            let chunk_attribute_cells = chunk_vertices
+                .checked_mul(channel_count)
+                .ok_or_else(|| scope.allocation_failure("obj-canonical-attribute-cells"))?;
+            scope.with_work_group(
+                [
+                    (
+                        ImportWorkClass::WorkUnits,
+                        usize_amount(scope, first_flags.len(), "obj-vertex-materialization-work")?,
+                    ),
+                    (
+                        ImportWorkClass::Vertices,
+                        usize_amount(scope, chunk_vertices, "obj-canonical-vertices")?,
+                    ),
+                    (
+                        ImportWorkClass::AttributeCells,
+                        usize_amount(
+                            scope,
+                            chunk_attribute_cells,
+                            "obj-canonical-attribute-cells",
+                        )?,
+                    ),
+                ],
+                |work| -> ParseResult<()> {
+                    for occurrence in start..end {
+                        let key = &self.vertex_keys.as_slice()[occurrence];
+                        if !first_occurrences.as_slice()[occurrence] {
+                            work.complete([1, 0, 0])?;
+                            continue;
+                        }
+                        let canonical_index = u32::try_from(positions.len())
+                            .map_err(|_| scope.allocation_failure("obj-vertex-index-space"))?;
+                        let position = parsed.positions.as_slice()[key.position];
+                        let texcoord = if keep_texcoords {
+                            let Some(index) = key.texcoord else {
+                                return Err(scope.format_failure(ObjFailure::internal(
+                                    "complete-texcoord-channel-has-missing-index",
+                                )));
+                            };
+                            Some(parsed.texcoords.as_slice()[index])
+                        } else {
+                            None
                         };
-                        texcoords.try_push_reserved(parsed.texcoords.as_slice()[index])?;
-                    }
-                    if keep_normals {
-                        let Some(index) = key.normal else {
-                            return Err(scope.format_failure(ObjFailure::internal(
-                                "complete-normal-channel-has-missing-index",
-                            )));
+                        let normal = if keep_normals {
+                            let Some(index) = key.normal else {
+                                return Err(scope.format_failure(ObjFailure::internal(
+                                    "complete-normal-channel-has-missing-index",
+                                )));
+                            };
+                            Some(parsed.normals.as_slice()[index])
+                        } else {
+                            None
                         };
-                        normals.try_push_reserved(parsed.normals.as_slice()[index])?;
+                        work.run([1, 1, channel_count_amount], || {
+                            indices.as_mut_slice()[occurrence] = canonical_index;
+                            positions.try_push_reserved(position)?;
+                            if let Some(texcoord) = texcoord {
+                                texcoords.try_push_reserved(texcoord)?;
+                            }
+                            if let Some(normal) = normal {
+                                normals.try_push_reserved(normal)?;
+                            }
+                            Ok(())
+                        })?;
                     }
-                }
-                Ok(())
-            },
-        )?;
+                    Ok(())
+                },
+            )?;
+        }
         let mut current_key = None;
         let mut canonical_index = 0u32;
         mtl::for_work_chunks(scope, sorted_keys.len(), "obj-vertex-remap-work", |range| {
@@ -439,8 +467,6 @@ impl<'scope> SegmentBuilder<'scope> {
             Ok(())
         })?;
 
-        attribute_permit.complete()?;
-        vertex_permit.complete()?;
         drop(first_occurrences);
         drop(sorted_keys);
         Ok(BuiltVertexStreams {
@@ -596,9 +622,6 @@ fn flush_segment<'scope>(
     parsed: &ParsedObj<'_>,
     segment: SegmentBuilder<'scope>,
 ) -> ParseResult<()> {
-    let mesh_permit = scope.begin_work(ImportWorkClass::Meshes, 1)?;
-    charge_segment_strings(scope, parsed, &segment.key)?;
-
     let material = if let Some(id) = segment.key.material {
         let name = state_name(scope, parsed, id)?;
         Some(material_bindings.find(scope, name)?.ok_or_else(|| {
@@ -615,7 +638,9 @@ fn flush_segment<'scope>(
         .map(|id| state_name(scope, parsed, id))
         .transpose()?;
     let prepared_mesh = segment.finish(scope, parsed, material)?;
-    let mesh_id = builder.add_prepared_mesh(prepared_mesh)?;
+    let mesh_id = scope.with_work(ImportWorkClass::Meshes, 1, |work| -> ParseResult<_> {
+        work.run_all(|| builder.add_prepared_mesh(prepared_mesh))
+    })?;
     let prepared_node = optional_canonical_string_parts(scope, node_name)?
         .into_node(NodeBuildConfig {
             transform: Mat4::IDENTITY,
@@ -626,7 +651,6 @@ fn flush_segment<'scope>(
     let root = builder.root();
     let node_id = builder.add_prepared_child_node(root, prepared_node)?;
     builder.add_node_mesh_binding(node_id, MeshBinding::new(mesh_id))?;
-    mesh_permit.complete()?;
     Ok(())
 }
 
@@ -693,19 +717,34 @@ fn prepare_material_bindings<'scope, 'parsed>(
         Ok(left.first_use.cmp(&right.first_use))
     })?;
 
-    mtl::for_work_chunks(
-        scope,
-        values.len(),
-        "obj-material-binding-build-work",
-        |range| {
-            for index in range {
-                let name = values.as_slice()[index].name;
-                let id = build_material(scope, builder, library, name)?;
-                values.as_mut_slice()[index].id = Some(id);
-            }
-            Ok(())
-        },
-    )?;
+    let mut start = 0usize;
+    while start < values.len() {
+        let end = start.saturating_add(64).min(values.len());
+        let mut built_ids: [Option<MaterialId>; 64] = std::array::from_fn(|_| None);
+        for (offset, index) in (start..end).enumerate() {
+            let name = values.as_slice()[index].name;
+            built_ids[offset] = Some(build_material(scope, builder, library, name)?);
+        }
+        scope.with_work(
+            ImportWorkClass::WorkUnits,
+            usize_amount(scope, end - start, "obj-material-binding-build-work")?,
+            |work| -> ParseResult<()> {
+                for (offset, index) in (start..end).enumerate() {
+                    let id = built_ids[offset].take().ok_or_else(|| {
+                        scope.format_failure(ObjFailure::internal(
+                            "material-binding-build-result-missing",
+                        ))
+                    })?;
+                    work.run([1], || {
+                        values.as_mut_slice()[index].id = Some(id);
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            },
+        )?;
+        start = end;
+    }
     mtl::interruptible_sort_by(scope, &mut values, |work, left, right| {
         work.compare_str(left.name, right.name)
     })?;
@@ -727,7 +766,6 @@ fn build_material<'scope>(
             "obj.material_missing",
             format_args!("OBJ material '{name}' was referenced but not defined"),
         )?;
-        charge_canonical_string_bytes(scope, name.len())?;
         let texture_slots = scope
             .metered_scene_vec::<TextureSlot>("obj-material-texture-slots")
             .try_into_scene_parts()?;
@@ -752,7 +790,6 @@ fn material_from_parsed(
     builder: &mut ScopedSceneBuilder<'_, '_>,
     parsed: &ParsedMaterial<'_>,
 ) -> ParseResult<PreparedSceneValue<Material>> {
-    charge_material_strings(scope, parsed)?;
     let mut texture_slots = scope.metered_scene_vec("obj-material-texture-slots");
 
     if let Some(texture) = &parsed.diffuse_texture {
@@ -816,45 +853,6 @@ fn finish_material<'scope>(
     .with_texture_slots(texture_slots)?
     .with_metadata(metadata)?
     .finish()
-}
-
-fn charge_canonical_string_bytes(scope: &ParseScope<'_>, bytes: usize) -> ParseResult<()> {
-    scope
-        .begin_work(
-            ImportWorkClass::CanonicalStringBytes,
-            usize_amount(scope, bytes, "obj-canonical-string-bytes")?,
-        )?
-        .complete()
-}
-
-fn charge_material_strings(scope: &ParseScope<'_>, parsed: &ParsedMaterial<'_>) -> ParseResult<()> {
-    let mut bytes = parsed.name.len();
-    let mut metadata = parsed.metadata.iter();
-    mtl::for_work_chunks(
-        scope,
-        parsed.metadata.len(),
-        "obj-material-string-scan-work",
-        |range| {
-            for _ in range {
-                let (key, value) = metadata.next().ok_or_else(|| {
-                    scope.format_failure(ObjFailure::internal("material-metadata-scan-ended-early"))
-                })?;
-                checked_add_string_bytes(scope, &mut bytes, key.len())?;
-                if let ParsedMetadataValue::String(value) = value {
-                    checked_add_string_bytes(scope, &mut bytes, value.len())?;
-                }
-            }
-            Ok(())
-        },
-    )?;
-    if let Some(texture) = &parsed.diffuse_texture {
-        let scan_permit = scope.begin_work(ImportWorkClass::WorkUnits, 1)?;
-        checked_add_string_bytes(scope, &mut bytes, texture.uri.len())?;
-        checked_add_string_bytes(scope, &mut bytes, texture.uri.len())?;
-        checked_add_string_bytes(scope, &mut bytes, texture.source_key.len())?;
-        scan_permit.complete()?;
-    }
-    charge_canonical_string_bytes(scope, bytes)
 }
 
 fn clone_metadata<'scope>(

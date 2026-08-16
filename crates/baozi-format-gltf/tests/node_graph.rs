@@ -1,7 +1,7 @@
 mod common;
 
 use baozi_format_gltf::GltfFailureCode;
-use baozi_import::{ImportReport, ImportResult};
+use baozi_import::{ImportDimension, ImportFailure, ImportReport, ImportResult};
 use common::{
     GltfTestOptions, TestResult, assert_gltf_failure, assert_resource_limit, expected_error,
     import_assets, import_assets_result,
@@ -52,6 +52,14 @@ fn assert_limit_failure(
     let error = expected_error(import_graph_result(document, options)?)?;
     assert_resource_limit(&error, expected_limit);
     Ok(())
+}
+
+fn dimension_counts(error: &ImportFailure, dimension: ImportDimension) -> (u64, u64) {
+    let snapshot = error
+        .ledger()
+        .dimension(dimension)
+        .expect("tested graph dimension is configured");
+    (snapshot.attempted(), snapshot.consumed())
 }
 
 #[test]
@@ -174,6 +182,37 @@ fn rejects_a_shared_child() -> TestResult<()> {
         ),
         "multiple parents",
     )
+}
+
+#[test]
+fn shared_child_failure_preserves_the_validated_graph_prefix() -> TestResult<()> {
+    let document = scene_with_roots(
+        "0, 1",
+        r#"{ "name": "A", "children": [2] },
+           { "name": "B", "children": [2] },
+           { "name": "Shared" }"#,
+    );
+    let error = expected_error(import_graph_result(document, GltfTestOptions::memory())?)?;
+
+    assert_gltf_failure(
+        &error,
+        GltfFailureCode::InvalidDocument,
+        Some("multiple parents"),
+    )?;
+    assert_eq!(
+        dimension_counts(&error, ImportDimension::GraphNodes),
+        (3, 3)
+    );
+    assert_eq!(
+        dimension_counts(&error, ImportDimension::GraphEdges),
+        (2, 1)
+    );
+    assert_eq!(dimension_counts(&error, ImportDimension::GraphWork), (5, 4));
+    assert_eq!(
+        dimension_counts(&error, ImportDimension::GraphDepth),
+        (0, 0)
+    );
+    Ok(())
 }
 
 #[test]
