@@ -1941,7 +1941,7 @@ impl CanonicalSuccessRequirements {
         validation_work: NonZeroU64,
     ) -> Result<Self, StorePlanError> {
         if expected_materialized_blocks == 0
-            || expected_materialized_blocks > canonical.max_new_blocks
+            || expected_materialized_blocks > canonical.total_blocks
         {
             return Err(StorePlanError::InvalidBlockTable);
         }

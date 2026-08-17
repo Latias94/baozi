@@ -309,6 +309,134 @@ fn derived_scoped_activation_shares_only_from_its_exact_source() {
 }
 
 #[test]
+fn derived_scoped_activation_accepts_destination_total_larger_than_new_capacity() {
+    const DESTINATION_BLOCKS: usize = 2;
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let source = publish_sequence_source(&account);
+    let source_baseline = account.snapshot();
+    let (operation, keys) = derived_operation_for_scoped_activation(&source.canonical);
+    let activation = TestScopedActivation {
+        policy: CanonicalActivationPolicy::new(
+            writer_plan(keys, DESTINATION_BLOCKS + 1, 2),
+            writer_plan(keys, 2, 2),
+            CanonicalMaterializationRole::new(keys.dimension, keys.dimension),
+            CanonicalValidationRole::new(keys.phase, keys.dimension, keys.dimension),
+            keys.dimension,
+            keys.dimension,
+        ),
+        failure: CanonicalFailureRequirements::new(CanonicalTableShape::new(1, 1).unwrap()),
+        success: CanonicalSuccessRequirements::new(
+            CanonicalTableShape::new(DESTINATION_BLOCKS, 1).unwrap(),
+            DESTINATION_BLOCKS,
+            NonZeroU64::MIN,
+        )
+        .unwrap(),
+    };
+    let owner = operation
+        .into_scoped_session_outcome_owner(activation.policy, activation.failure)
+        .unwrap();
+
+    let outcome: DerivedScopedOutcome<MaterializationRejection> = owner
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work().unwrap();
+            semantic.run_unit(|| ()).unwrap();
+            let completion = semantic.finish_exact().unwrap();
+            let permit = match planning.seal_activation(activation.success, completion) {
+                CanonicalActivationSeal::Sealed(permit) => permit,
+                CanonicalActivationSeal::Unsealed(failure) => {
+                    return failure.finish_after_plan_drop();
+                }
+            };
+            permit.activate((), |mut lane, _plan| {
+                lane.try_bind_canonical_source(&source.canonical).unwrap();
+                let _shared = lane
+                    .try_share_canonical(&source.canonical, source.canonical_sequence)
+                    .unwrap();
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u32>::new(1).unwrap(),
+                        SequenceTag,
+                        |writer| writer.push(29),
+                    )
+                    .unwrap();
+                assert_eq!(lane.len(), DESTINATION_BLOCKS);
+                lane.complete::<_, MaterializationRejection, _, _>(root, ())
+            })
+        })
+        .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(activated) => activated,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("the derived destination must admit inherited and new canonical blocks")
+        }
+    };
+    assert_eq!(activated.canonical_len(), DESTINATION_BLOCKS);
+
+    let validation = activated
+        .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
+            |lane, _output| {
+                let evidence = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.push(1),
+                    )
+                    .unwrap();
+                lane.complete(evidence)
+            },
+            |planning, _output| {
+                planning.validate_with(
+                    |_| Ok(()),
+                    |_session, _canonical, _evidence, &mut ()| {
+                        Ok(CanonicalValidationDecision::<(), _>::reject(
+                            ValidationRejection::Semantic,
+                            74,
+                        ))
+                    },
+                )
+            },
+        )
+        .unwrap();
+    let rejected = match validation {
+        CanonicalCentralValidationOutcome::Rejected(rejected) => rejected,
+        CanonicalCentralValidationOutcome::Candidate(_)
+        | CanonicalCentralValidationOutcome::Fallback(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("the requested central rejection must retain the derived assembly")
+        }
+    };
+    let (prepared, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    let published = prepared.handoff();
+    assert_eq!(
+        published
+            .ledger_evidence
+            .dimension(keys.dimension)
+            .unwrap()
+            .committed_canonical_output(),
+        0
+    );
+    drop(published);
+    let after_rejection = account.snapshot();
+    assert_eq!(
+        after_rejection.live_retained_bytes(),
+        source_baseline.live_retained_bytes()
+    );
+    assert_eq!(
+        after_rejection.live_retained_allocations(),
+        source_baseline.live_retained_allocations()
+    );
+    assert!(!after_rejection.poisoned());
+    drop(source);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn derived_scoped_sequence_rewrite_admits_exact_plan_work() {
     let factory = factory(1);
     let account = account(&factory);

@@ -323,12 +323,20 @@ fn activation_requirements_reject_impossible_exact_shapes() {
     ));
     assert!(matches!(
         CanonicalSuccessRequirements::new(
-            CanonicalTableShape::new(1, 0).unwrap(),
-            1,
+            CanonicalTableShape::new(3, 1).unwrap(),
+            4,
             NonZeroU64::MIN,
         ),
         Err(StorePlanError::InvalidBlockTable)
     ));
+    assert!(
+        CanonicalSuccessRequirements::new(
+            CanonicalTableShape::new(3, 1).unwrap(),
+            3,
+            NonZeroU64::MIN,
+        )
+        .is_ok()
+    );
 }
 
 #[test]
