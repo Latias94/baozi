@@ -363,14 +363,11 @@ impl<'input> NodeSceneActivationRequest<'input> {
         activate_node_scene_scoped_deferred(activation, validation_progress, final_progress)
     }
 
-    fn bind_operation<O, PP, U>(
+    fn bind_operation<O, PP, U, L>(
         self,
-        operation: RetainedStoreOperation<O, PP, U>,
+        operation: RetainedStoreOperation<O, PP, U, L>,
         roles: NodeSceneActivationRoles,
-    ) -> Result<
-        BoundNodeSceneActivation<'input, O, PP, U, baozi_operation::FreshStoreLineage>,
-        StoreActivationContainment,
-    >
+    ) -> Result<BoundNodeSceneActivation<'input, O, PP, U, L>, StoreActivationContainment>
     where
         O: OperationOwner,
         PP: ProgressPhase,
@@ -990,7 +987,7 @@ fn optional_utf8_validation_work(plan: Option<Utf8Plan>) -> Result<u64, StorePla
         .map(|work| work.unwrap_or(0))
 }
 
-fn node_scene_activation_roles(keys: SceneStoreKeys) -> NodeSceneActivationRoles {
+pub(super) fn node_scene_activation_roles(keys: SceneStoreKeys) -> NodeSceneActivationRoles {
     NodeSceneActivationRoles::new(
         NodeSceneWriterRoles::new(keys.phase, keys.dimension, keys.dimension),
         NodeSceneWriterRoles::new(keys.phase, keys.dimension, keys.dimension),

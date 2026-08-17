@@ -934,6 +934,28 @@ impl PendingNodeSceneEdit {
     }
 }
 
+impl<'scene> BoundPendingNodeSceneEdit<'scene> {
+    pub(super) const fn input(&self) -> &'scene ValidatedNodeScene {
+        self.input
+    }
+
+    pub(super) const fn program(&self) -> &NodeSceneEditProgram {
+        &self.program
+    }
+
+    pub(super) const fn operation(&self) -> &OperationIdentity {
+        &self.operation
+    }
+
+    pub(super) const fn counts(&self) -> NodeSceneEditFixedCounts {
+        self.counts
+    }
+
+    pub(super) const fn invalidations(&self) -> CanonicalInvalidations {
+        self.invalidations
+    }
+}
+
 fn checked_add_u32(
     left: u32,
     right: u32,
