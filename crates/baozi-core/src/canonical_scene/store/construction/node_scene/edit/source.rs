@@ -17,7 +17,7 @@ pub(in crate::canonical_scene::store) enum NodeTransformEditStart<'scene> {
     /// The requested authored bits already exist; this is the exact input Scene.
     Unchanged(&'scene ValidatedNodeScene),
     /// The request changes authored bits and is ready for operation admission.
-    Changed(PendingNodeSceneEdit<'scene>),
+    Changed(PendingNodeSceneEdit),
 }
 
 /// A rejected transform-edit request before any operation or generation reservation starts.
@@ -121,6 +121,9 @@ fn semantic_read_error(error: NodeSceneSemanticError) -> NodeTransformEditStartE
 impl From<NodeSceneEditPlanError> for NodeTransformEditStartError {
     fn from(error: NodeSceneEditPlanError) -> Self {
         match error {
+            NodeSceneEditPlanError::InputSourceMismatch { .. } => Self::InvalidSource {
+                reason: "sealed edit planning observed a foreign input publication",
+            },
             NodeSceneEditPlanError::InvalidSource { reason } => Self::InvalidSource { reason },
             NodeSceneEditPlanError::SizeOverflow { quantity } => Self::SizeOverflow { quantity },
         }

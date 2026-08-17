@@ -29,7 +29,7 @@ use super::super::super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneWorkMeter, SceneStoreAssembly, SceneStoreKeys,
     process_slice_in_work_chunks,
 };
-use super::super::plan::PendingNodeSceneEdit;
+use super::super::plan::BoundPendingNodeSceneEdit;
 
 #[derive(Clone, Copy)]
 pub(super) struct RewrittenProfileLineageLeaves {
@@ -43,7 +43,7 @@ pub(super) struct RewrittenProfileLineageLeaves {
 
 pub(super) fn rewrite_lineage_leaves<'scene>(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
-    pending: &PendingNodeSceneEdit<'scene>,
+    pending: &BoundPendingNodeSceneEdit<'scene>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
 ) -> Result<RewrittenProfileLineageLeaves, StoreRuntimeError> {
@@ -223,7 +223,7 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
 
 pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
-    pending: &PendingNodeSceneEdit<'scene>,
+    pending: &BoundPendingNodeSceneEdit<'scene>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
 ) -> Result<(usize, usize), StoreRuntimeError> {
@@ -418,7 +418,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
 
 pub(super) fn rewrite_profile_records<'scene>(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
-    pending: &PendingNodeSceneEdit<'scene>,
+    pending: &BoundPendingNodeSceneEdit<'scene>,
     segments: CanonicalBlockRef<ProfileSegmentTableSchema>,
     leaves: RewrittenProfileLineageLeaves,
     keys: SceneStoreKeys,
@@ -545,7 +545,7 @@ pub(super) fn rewrite_profile_records<'scene>(
 
 pub(super) fn rewrite_segments<'scene>(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
-    pending: &PendingNodeSceneEdit<'scene>,
+    pending: &BoundPendingNodeSceneEdit<'scene>,
     leaves: RewrittenProfileLineageLeaves,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
@@ -598,7 +598,7 @@ pub(super) fn rewrite_segments<'scene>(
 }
 
 fn required_segment_view<'scene>(
-    pending: &'scene PendingNodeSceneEdit<'_>,
+    pending: &'scene BoundPendingNodeSceneEdit<'_>,
 ) -> Result<CanonicalRecordView<'scene>, StoreRuntimeError> {
     let segments = pending
         .input
@@ -614,7 +614,7 @@ fn required_segment_view<'scene>(
 }
 
 fn resolve_qualified_depth(
-    pending: &PendingNodeSceneEdit<'_>,
+    pending: &BoundPendingNodeSceneEdit<'_>,
     segments: &CanonicalRecordView<'_>,
     address: QualifiedProvenanceAddress,
     control: &mut baozi_operation::RetainedStoreWorkControl<

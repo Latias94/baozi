@@ -9,8 +9,10 @@ use crate::canonical_scene::store::schema::profile::{
 };
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_TRS_SCALAR_COUNT,
+    SceneDirectorySchema,
 };
 use crate::entity::{AuthoredTransform, AuthoredTransformKind};
+use crate::identity::SceneGenerationId;
 use crate::provenance::{DIGEST_LEN, OperationIdentity, OperationKind};
 
 use super::super::{SceneEvidenceCounts, ValidatedNodeScene};
@@ -802,9 +804,25 @@ impl NodeSceneEditProfilePlan {
     }
 }
 
-/// A changed edit whose source and sealed execution program remain borrowed.
+/// A changed edit sealed against one exact input publication.
+///
+/// The plan deliberately does not borrow its source Scene. A post-process run can therefore own
+/// the input Scene and this plan side by side without self-reference. Execution must bind the plan
+/// back to that exact retained root before an operation, allocation, or provenance nonce is
+/// created. The generation remains diagnostic identity; the destination-qualified root is the
+/// storage identity.
 #[must_use = "a changed node Scene edit must be materialized or deliberately dropped"]
-pub(in crate::canonical_scene::store) struct PendingNodeSceneEdit<'scene> {
+pub(in crate::canonical_scene::store) struct PendingNodeSceneEdit {
+    input_generation: SceneGenerationId,
+    input_root: CanonicalBlockRef<SceneDirectorySchema>,
+    pub(super) program: NodeSceneEditProgram,
+    pub(super) operation: OperationIdentity,
+    pub(super) counts: NodeSceneEditFixedCounts,
+    pub(super) invalidations: CanonicalInvalidations,
+}
+
+/// Execution-local pairing of a sealed edit plan with its exact retained source.
+pub(super) struct BoundPendingNodeSceneEdit<'scene> {
     pub(super) input: &'scene ValidatedNodeScene,
     pub(super) program: NodeSceneEditProgram,
     pub(super) operation: OperationIdentity,
@@ -812,10 +830,10 @@ pub(in crate::canonical_scene::store) struct PendingNodeSceneEdit<'scene> {
     pub(super) invalidations: CanonicalInvalidations,
 }
 
-impl<'scene> PendingNodeSceneEdit<'scene> {
+impl PendingNodeSceneEdit {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_new_node_transform(
-        input: &'scene ValidatedNodeScene,
+        input: &ValidatedNodeScene,
         target_source_index: usize,
         target_canonical_row: usize,
         target_transform_offset: usize,
@@ -874,7 +892,8 @@ impl<'scene> PendingNodeSceneEdit<'scene> {
         )?;
 
         Ok(Self {
-            input,
+            input_generation: input.generation(),
+            input_root: input.proof.directory(),
             program,
             operation,
             counts,
@@ -882,12 +901,32 @@ impl<'scene> PendingNodeSceneEdit<'scene> {
         })
     }
 
-    pub(in crate::canonical_scene::store) const fn input(&self) -> &'scene ValidatedNodeScene {
-        self.input
+    pub(in crate::canonical_scene::store) const fn input_generation(&self) -> SceneGenerationId {
+        self.input_generation
     }
 
     pub(in crate::canonical_scene::store) const fn invalidations(&self) -> CanonicalInvalidations {
         self.invalidations
+    }
+
+    pub(super) fn bind(
+        self,
+        input: &ValidatedNodeScene,
+    ) -> Result<BoundPendingNodeSceneEdit<'_>, NodeSceneEditPlanError> {
+        if input.generation() != self.input_generation || input.proof.directory() != self.input_root
+        {
+            return Err(NodeSceneEditPlanError::InputSourceMismatch {
+                expected: self.input_generation,
+                actual: input.generation(),
+            });
+        }
+        Ok(BoundPendingNodeSceneEdit {
+            input,
+            program: self.program,
+            operation: self.operation,
+            counts: self.counts,
+            invalidations: self.invalidations,
+        })
     }
 }
 
@@ -901,7 +940,14 @@ fn checked_add_u32(
 }
 
 #[derive(Debug, Error)]
-pub(super) enum NodeSceneEditPlanError {
+pub(in crate::canonical_scene::store) enum NodeSceneEditPlanError {
+    #[error(
+        "node Scene edit plan targets source generation {expected:?}, but execution received a different retained source at generation {actual:?}"
+    )]
+    InputSourceMismatch {
+        expected: SceneGenerationId,
+        actual: SceneGenerationId,
+    },
     #[error("validated node Scene cannot support the requested edit: {reason}")]
     InvalidSource { reason: &'static str },
     #[error("node Scene edit size overflowed while computing {quantity}")]

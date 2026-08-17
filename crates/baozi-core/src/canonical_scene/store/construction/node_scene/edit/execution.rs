@@ -15,7 +15,7 @@ use super::super::publication::node_scene_failure_code;
 use super::super::scratch::NodeSceneValidationScratchOwner;
 use super::super::{SceneStoreKeys, SceneStoreOperation};
 use super::graph::{NodeSceneRewriteError, try_rewrite_node_scene};
-use super::plan::PendingNodeSceneEdit;
+use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditPlanError, PendingNodeSceneEdit};
 use super::publication::{
     PreparedNodeSceneEdit, prepare_edit_candidate, prepare_edit_minimal_from_assembly,
     prepare_edit_minimal_from_open_recovery, prepare_edit_post_evidence_failure,
@@ -24,28 +24,38 @@ use super::publication::{
 
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum NodeSceneEditPrepareError {
+    #[error("node Scene edit could not bind its exact source")]
+    Plan(#[from] NodeSceneEditPlanError),
     #[error("node Scene edit operation could not start")]
     Start(#[from] SceneConstructionStartError),
     #[error("node Scene edit construction failed closed")]
     Construction(#[from] SceneConstructionError),
 }
 
-impl PendingNodeSceneEdit<'_> {
+impl PendingNodeSceneEdit {
     pub(in crate::canonical_scene::store) fn prepare(
         self,
+        input: &super::super::ValidatedNodeScene,
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
     ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
-        self.prepare_with_control_and_generation_source(limits, control, SceneGenerationId::reserve)
+        self.prepare_with_control_and_generation_source(
+            input,
+            limits,
+            control,
+            SceneGenerationId::reserve,
+        )
     }
 
     #[cfg(test)]
     pub(in crate::canonical_scene::store) fn prepare_with_generation_source(
         self,
+        input: &super::super::ValidatedNodeScene,
         limits: SceneConstructionLimits,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
         self.prepare_with_control_and_generation_source(
+            input,
             limits,
             OperationControl::default(),
             reserve_generation,
@@ -54,15 +64,17 @@ impl PendingNodeSceneEdit<'_> {
 
     fn prepare_with_control_and_generation_source(
         self,
+        input: &super::super::ValidatedNodeScene,
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
-        let terminal_attribution_slots = self
+        let pending = self.bind(input)?;
+        let terminal_attribution_slots = pending
             .counts
             .canonical_attribution_slots
             .as_usize()
-            .max(self.counts.outcome_evidence_attribution_slots.as_usize());
+            .max(pending.counts.outcome_evidence_attribution_slots.as_usize());
         let start = try_plan_scene_operation(
             limits,
             control,
@@ -70,11 +82,11 @@ impl PendingNodeSceneEdit<'_> {
             SceneFailureEvidenceWork::legacy(),
         )?;
         let publication =
-            edit_publication_plan(start.keys, &self).map_err(SceneConstructionError::from)?;
+            edit_publication_plan(start.keys, &pending).map_err(SceneConstructionError::from)?;
         let raw = SceneStoreOperation::try_start_derived(
             start.control,
             start.ledger_plan,
-            &self.input.canonical,
+            &pending.input.canonical,
             start.start_plan,
         )
         .map_err(SceneConstructionStartError::from)?;
@@ -88,7 +100,7 @@ impl PendingNodeSceneEdit<'_> {
             }
         };
 
-        let graph = match try_rewrite_node_scene(&mut assembly, &self, start.keys) {
+        let graph = match try_rewrite_node_scene(&mut assembly, &pending, start.keys) {
             Ok(graph) => graph,
             Err(NodeSceneRewriteError::BeforeEvidence(cause)) => {
                 return prepare_edit_minimal_from_assembly(
@@ -101,30 +113,30 @@ impl PendingNodeSceneEdit<'_> {
                 return prepare_edit_post_evidence_failure(
                     assembly,
                     evidence,
-                    self.counts.evidence,
+                    pending.counts.evidence,
                     cause,
                 )
                 .map_err(Into::into);
             }
         };
-        if assembly.canonical_len() != self.counts.canonical_blocks.as_usize()
-            || assembly.outcome_evidence_len() != self.counts.outcome_evidence_blocks.as_usize()
+        if assembly.canonical_len() != pending.counts.canonical_blocks.as_usize()
+            || assembly.outcome_evidence_len() != pending.counts.outcome_evidence_blocks.as_usize()
         {
             return prepare_edit_post_evidence_invariant(
                 assembly,
                 graph.evidence,
-                self.counts.evidence,
+                pending.counts.evidence,
             )
             .map_err(Into::into);
         }
         if let Err(cause) = assembly.try_commit_canonical(
             start.keys.dimension,
-            u64::from(self.counts.canonical_blocks.as_u32()),
+            u64::from(pending.counts.canonical_blocks.as_u32()),
         ) {
             return prepare_edit_post_evidence_failure(
                 assembly,
                 graph.evidence,
-                self.counts.evidence,
+                pending.counts.evidence,
                 cause,
             )
             .map_err(Into::into);
@@ -132,15 +144,15 @@ impl PendingNodeSceneEdit<'_> {
         let scratch = match NodeSceneValidationScratchOwner::try_new(
             &mut assembly,
             start.keys,
-            self.counts.evidence,
-            self.input.proof.deformation_uniqueness_mark_count(),
+            pending.counts.evidence,
+            pending.input.proof.deformation_uniqueness_mark_count(),
         ) {
             Ok(scratch) => scratch,
             Err(cause) => {
                 return prepare_edit_post_evidence_failure(
                     assembly,
                     graph.evidence,
-                    self.counts.evidence,
+                    pending.counts.evidence,
                     cause,
                 )
                 .map_err(Into::into);
@@ -152,11 +164,11 @@ impl PendingNodeSceneEdit<'_> {
             graph,
             scratch,
             start.keys,
-            self.input.generation(),
-            self.counts.evidence,
-            self.counts.canonical_blocks.as_u32(),
-            self.input.proof.deformation_uniqueness_mark_count(),
-            self.invalidations,
+            pending.input.generation(),
+            pending.counts.evidence,
+            pending.counts.canonical_blocks.as_u32(),
+            pending.input.proof.deformation_uniqueness_mark_count(),
+            pending.invalidations,
             reserve_generation,
         )
         .map_err(Into::into)
@@ -165,17 +177,18 @@ impl PendingNodeSceneEdit<'_> {
     #[cfg(test)]
     pub(super) fn prepare_with_control_and_generation_source_for_test(
         self,
+        input: &super::super::ValidatedNodeScene,
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
-        self.prepare_with_control_and_generation_source(limits, control, reserve_generation)
+        self.prepare_with_control_and_generation_source(input, limits, control, reserve_generation)
     }
 }
 
 fn edit_publication_plan(
     keys: SceneStoreKeys,
-    pending: &PendingNodeSceneEdit<'_>,
+    pending: &BoundPendingNodeSceneEdit<'_>,
 ) -> Result<RetainedStorePublicationPlan, StorePlanError> {
     let shape = pending.program.shape();
     let source_partition = pending

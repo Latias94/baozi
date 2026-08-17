@@ -39,6 +39,7 @@ use super::super::tests::{
 use super::super::{NodeSceneDraftBuild, NodeSceneSuccessParts};
 use super::CanonicalRemapSet;
 use super::execution::NodeSceneEditPrepareError;
+use super::plan::NodeSceneEditPlanError;
 use super::source::{
     NodeTransformEditStart, NodeTransformEditStartError, try_begin_node_transform_edit,
 };
@@ -518,7 +519,7 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     let physical_before = account.snapshot();
 
     let prepared = pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(source, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("valid exact-input transform edit must prepare");
@@ -585,7 +586,7 @@ fn chained_transform_edits_parent_each_new_segment_to_the_previous_attachment() 
     };
     let first_owner_row = first_pending.counts.profile.target_owner_row.as_usize();
     let first_prepared = first_pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(&original.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("first chained transform edit preparation");
@@ -604,7 +605,7 @@ fn chained_transform_edits_parent_each_new_segment_to_the_previous_attachment() 
     };
     let second_owner_row = second_pending.counts.profile.target_owner_row.as_usize();
     let second_prepared = second_pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(&first.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("second chained transform edit preparation");
@@ -638,7 +639,7 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
         panic!("left sibling transform must be changed");
     };
     let left_prepared = left_pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(&original.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("left sibling edit preparation");
@@ -656,7 +657,7 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
         panic!("right sibling transform must be changed");
     };
     let right_prepared = right_pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(&original.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("right sibling edit preparation");
@@ -692,7 +693,7 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
     };
     corrupt_profile_address_for_test(0, 1, left_nonce);
     let substituted_prepared = substituted_pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(&original.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("substituted sibling address must prepare rich failure");
@@ -737,7 +738,7 @@ fn central_validation_rejects_each_corrupted_parent_address_component() {
         corrupt_profile_address_for_test(1, component, replacement);
 
         let prepared = pending
-            .prepare_with_generation_source(test_limits(), || {
+            .prepare_with_generation_source(&original.scene, test_limits(), || {
                 SceneGenerationId::reserve_from(&generation_source)
             })
             .expect("corrupted parent address must prepare rich failure");
@@ -775,7 +776,7 @@ fn trs_to_matrix_rewrites_node_offsets_and_directory_shape_before_publication() 
     };
 
     let prepared = pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(source, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("shape-changing exact-input transform edit must prepare");
@@ -832,7 +833,7 @@ fn shape_changing_edit_preserves_spatial_values_and_attachment_closure() {
     };
 
     let prepared = pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(source, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("shape-changing spatial edit preparation");
@@ -936,6 +937,57 @@ fn generation_mismatch_rejects_before_operation_or_allocation() {
 }
 
 #[test]
+fn sealed_plan_rejects_same_generation_sibling_before_operation_or_allocation() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let first_generation_source = AtomicU64::new(0);
+    let second_generation_source = AtomicU64::new(0);
+    let first = build_single_trs_scene(&account, &first_generation_source);
+    let second = build_single_trs_scene(&account, &second_generation_source);
+    assert_eq!(
+        first.scene.generation(),
+        second.scene.generation(),
+        "independent test generation sources must create the same numeric generation",
+    );
+
+    let node = NodeId::new(first.scene.generation(), 0);
+    let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
+        &first.scene,
+        node,
+        changed_trs(4.0),
+        edit_options_digest(44),
+    )
+    .expect("same-generation sibling test edit plan") else {
+        panic!("different authored transform must produce a sealed edit plan");
+    };
+    assert_eq!(pending.input_generation(), first.scene.generation());
+    let account_before = account.snapshot();
+    let nonce_count_before = issued_profile_segment_nonce_count_for_test();
+
+    let rejected = pending.prepare_with_generation_source(&second.scene, test_limits(), || {
+        panic!("source binding must fail before generation reservation")
+    });
+
+    assert!(matches!(
+        rejected,
+        Err(NodeSceneEditPrepareError::Plan(
+            NodeSceneEditPlanError::InputSourceMismatch { expected, actual }
+        )) if expected == first.scene.generation() && actual == second.scene.generation()
+    ));
+    assert_eq!(
+        issued_profile_segment_nonce_count_for_test(),
+        nonce_count_before,
+        "source binding must fail before provenance nonce issuance",
+    );
+    assert_no_physical_change(account_before, &account);
+
+    drop(second);
+    drop(first);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
 fn operation_start_rejection_does_not_consume_a_profile_segment_nonce() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
@@ -957,7 +1009,7 @@ fn operation_start_rejection_does_not_consume_a_profile_segment_nonce() {
         ..test_limits()
     };
 
-    let rejected = pending.prepare_with_generation_source(rejecting_limits, || {
+    let rejected = pending.prepare_with_generation_source(source, rejecting_limits, || {
         SceneGenerationId::reserve_from(&generation_source)
     });
 
@@ -1089,6 +1141,7 @@ fn cancellation_after_evidence_commit_preserves_rich_failure_and_the_input() {
 
     let prepared = pending
         .prepare_with_control_and_generation_source_for_test(
+            source,
             test_limits(),
             OperationControl::default().with_cancellation(cancellation),
             || SceneGenerationId::reserve_from(&generation_source),
@@ -1138,7 +1191,9 @@ fn generation_exhaustion_after_admission_leaves_one_invisible_nonce_gap() {
     );
 
     let prepared = pending
-        .prepare_with_generation_source(test_limits(), || Err(SceneGenerationError::Exhausted))
+        .prepare_with_generation_source(source, test_limits(), || {
+            Err(SceneGenerationError::Exhausted)
+        })
         .expect("generation exhaustion must prepare rich failure");
     let super::NodeSceneEditTerminal::RichFailure(failure) = prepared.handoff() else {
         panic!("generation exhaustion must preserve rich evidence");
@@ -1185,7 +1240,7 @@ fn central_validation_rejection_preserves_rich_evidence_and_the_input() {
         .expect("test evidence count remains representable");
 
     let prepared = pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(source, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("central validation rejection must prepare rich failure");
@@ -1229,7 +1284,7 @@ fn dropping_prepared_success_burns_one_gap_and_releases_only_unpublished_output(
     let nonce_count_before = issued_profile_segment_nonce_count_for_test();
 
     let prepared = pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(source, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("valid transform edit must prepare success");
@@ -1282,7 +1337,7 @@ fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
         panic!("changed transform must enter edit planning");
     };
     let prepared = pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(&parts.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("input-first release transform edit must prepare");
@@ -1329,7 +1384,7 @@ fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
         panic!("changed transform must enter edit planning");
     };
     let prepared = pending
-        .prepare_with_generation_source(test_limits(), || {
+        .prepare_with_generation_source(&parts.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("output-first release transform edit must prepare");
@@ -1383,7 +1438,7 @@ fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
         };
         let nonce_count_before = issued_profile_segment_nonce_count_for_test();
 
-        if let Ok(prepared) = pending.prepare_with_generation_source(test_limits(), || {
+        if let Ok(prepared) = pending.prepare_with_generation_source(source, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
         }) {
             match prepared.handoff() {

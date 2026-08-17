@@ -1621,7 +1621,7 @@ pub(in crate::canonical_scene::store) fn collect_segment_partition_snapshot_obse
         panic!("different authored transform must require a SceneEdit");
     };
     let prepared = pending
-        .prepare(operation_limits(), OperationControl::default())
+        .prepare(&base.scene, operation_limits(), OperationControl::default())
         .expect("segment-partitioning transform edit must prepare");
     let NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
         panic!("segment-partitioning transform edit must publish");
@@ -1809,7 +1809,7 @@ fn profile_steps_bound_empty_segments_without_replaying_prior_domains() {
             panic!("each transform edit must append one profile segment");
         };
         let prepared = pending
-            .prepare(operation_limits(), OperationControl::default())
+            .prepare(&scene, operation_limits(), OperationControl::default())
             .expect("bounded profile edit preparation");
         let NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
             panic!("bounded profile edit must publish");
@@ -2009,7 +2009,11 @@ fn changed_scene_edit_appends_snapshot_visible_profile_lineage() {
         panic!("changed transform must append profile lineage");
     };
     let prepared = pending
-        .prepare(operation_limits(), OperationControl::default())
+        .prepare(
+            &source.scene,
+            operation_limits(),
+            OperationControl::default(),
+        )
         .expect("changed transform profile preparation");
     let NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
         panic!("valid changed transform must publish an edited Scene");

@@ -910,7 +910,7 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
             panic!("changed glTF authored bits cannot classify as unchanged");
         };
         let prepared = pending
-            .prepare_with_generation_source(test_limits(), || {
+            .prepare_with_generation_source(&parts.scene, test_limits(), || {
                 SceneGenerationId::reserve_from(&generation_source)
             })
             .expect("exact-source glTF node transform edit must prepare");
