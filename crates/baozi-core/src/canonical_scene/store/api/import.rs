@@ -22,7 +22,7 @@ use super::super::construction::node_scene::{
     DeferredNodeSceneDraftBuild, NodeSceneActivationRequest, NodeSceneActivationRoles,
     NodeSceneConstructionTerminal, NodeSceneDraft, NodeSceneRichFailure, NodeSceneSuccessParts,
     NodeSceneSuccessReport, NodeSceneWriterRoles, PendingNodeSceneDraft, PendingNodeSceneFailure,
-    PreparedNodeSceneConstruction, ValidatedNodeScene, prepare_unactivated_node_scene,
+    PreparedNodeSceneConstruction, prepare_unactivated_node_scene,
 };
 use super::super::construction::{
     FAILURE_TERMINAL_EVIDENCE_MEMBERS, SceneConstructionError, SceneConstructionStartError,
@@ -30,6 +30,8 @@ use super::super::construction::{
 };
 use super::super::production::SceneInputEnvelope;
 use super::super::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT;
+
+pub use super::scene::ValidatedScene;
 
 pub use super::super::production::input::animation::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
@@ -396,7 +398,7 @@ impl SceneConstructionTerminal {
         match self.0 {
             NodeSceneConstructionTerminal::Success(NodeSceneSuccessParts { scene, report }) => {
                 SceneConstructionTerminalParts::Success {
-                    scene: ValidatedScene(scene),
+                    scene: ValidatedScene::from_node_scene(scene),
                     report: SceneSuccessReport(report),
                 }
             }
@@ -430,27 +432,13 @@ pub enum SceneConstructionTerminalParts {
     MinimalFallback(SceneMinimalFallback),
 }
 
-/// Opaque owner of one centrally validated canonical Scene.
-#[must_use = "the validated Scene owns retained canonical storage"]
-pub struct ValidatedScene(ValidatedNodeScene);
-
 impl ValidatedScene {
-    /// Returns the generation reserved for this successfully published Scene.
-    pub const fn generation(&self) -> SceneGenerationId {
-        self.0.generation()
-    }
-
-    /// Returns the number of retained canonical blocks owned by this Scene.
-    pub fn canonical_block_count(&self) -> usize {
-        self.0.canonical_block_count()
-    }
-
     /// Captures a bounded semantic snapshot without exposing retained storage or validation proof.
     pub fn capture_snapshot(
         &self,
         limits: SceneSnapshotLimits,
     ) -> Result<SceneSnapshot, SceneSnapshotError> {
-        self.0
+        self.as_node_scene()
             .capture_snapshot(limits.0, None)
             .map(SceneSnapshot)
             .map_err(SceneSnapshotError)
@@ -718,6 +706,9 @@ mod tests {
 
     #[test]
     fn terminal_projection_requires_ownership_and_exposes_only_safe_views() {
+        fn accepts_internal_scene(_: &super::super::ValidatedScene) {}
+
+        let _: fn(&ValidatedScene) = accepts_internal_scene;
         let _: fn(SceneConstructionTerminal) -> SceneConstructionTerminalParts =
             SceneConstructionTerminal::into_parts;
         let _: fn(&ValidatedScene) -> SceneGenerationId = ValidatedScene::generation;

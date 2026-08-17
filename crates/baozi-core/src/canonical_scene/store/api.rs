@@ -11,7 +11,7 @@
 
 use baozi_operation::{PhysicalStorageAccount, StoreLedgerEvidence, StoreRuntimeError};
 
-use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
+use crate::identity::{ReservedSceneGeneration, SceneGenerationError};
 
 pub(crate) use super::construction::SceneConstructionError;
 use super::construction::TracerSceneFallback;
@@ -19,12 +19,14 @@ use super::construction::node_scene::{
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
     NodeSceneDraftBuild, NodeSceneRichFailure, NodeSceneSuccessParts, NodeSceneSuccessReport,
     PendingNodeSceneDraft, PreparedNodeSceneConstruction, PreparedNodeSceneFailure,
-    ValidatedNodeScene,
 };
 
 pub(crate) mod continuation;
 #[cfg(feature = "_u4-import")]
 pub(crate) mod import;
+mod scene;
+
+pub(crate) use scene::ValidatedScene;
 
 /// A non-owning descriptor for one materialized canonical Scene directory.
 ///
@@ -128,30 +130,6 @@ impl PreparedSceneConstruction {
     }
 }
 
-/// The centrally validated canonical Scene owner.
-#[must_use = "a validated Scene owns retained canonical storage"]
-pub(crate) struct ValidatedScene(ValidatedNodeScene);
-
-impl ValidatedScene {
-    pub(crate) const fn generation(&self) -> SceneGenerationId {
-        self.0.generation()
-    }
-
-    pub(crate) fn account(&self) -> &PhysicalStorageAccount {
-        self.0.account()
-    }
-
-    pub(crate) fn canonical_block_count(&self) -> usize {
-        self.0.canonical_block_count()
-    }
-
-    /// Restricts access to the sealed retained rail so later semantic views and SceneEdit can
-    /// project domain data without exposing the raw canonical store.
-    pub(in crate::canonical_scene::store) const fn as_node_scene(&self) -> &ValidatedNodeScene {
-        &self.0
-    }
-}
-
 /// Outcome evidence published alongside a successful Scene.
 #[must_use = "the Scene success report owns published outcome evidence"]
 pub(crate) struct SceneSuccessReport(NodeSceneSuccessReport);
@@ -222,7 +200,7 @@ impl SceneConstructionTerminal {
         match terminal {
             NodeSceneConstructionTerminal::Success(NodeSceneSuccessParts { scene, report }) => {
                 Self::Success(SceneSuccessParts {
-                    scene: ValidatedScene(scene),
+                    scene: ValidatedScene::from_node_scene(scene),
                     report: SceneSuccessReport(report),
                 })
             }
