@@ -1026,16 +1026,16 @@ fn physical_plan_rebuilds_every_record_and_inherits_each_unchanged_shareable_lea
     );
     assert_eq!(
         same_layout
-            .counts
-            .operation_specific_rewrite_blocks
-            .as_usize(),
+            .program
+            .shape()
+            .operation_specific_rewrite_blocks(),
         1,
     );
     assert_eq!(
         shape_change
-            .counts
-            .operation_specific_rewrite_blocks
-            .as_usize(),
+            .program
+            .shape()
+            .operation_specific_rewrite_blocks(),
         3,
     );
     assert_eq!(

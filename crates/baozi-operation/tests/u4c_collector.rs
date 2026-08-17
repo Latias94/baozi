@@ -476,8 +476,8 @@ struct SharedCanonicalTag;
 struct SharedOutcomeEvidenceTag;
 
 type TestOperation = RetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
-type DerivedTestOperation<'source> =
-    baozi_operation::DerivedRetainedStoreOperation<'source, TestOwner, TestProgress, TestUnit>;
+type DerivedTestOperation =
+    baozi_operation::DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
 type SharedCanonical = PublishedCanonicalStore<ScalarSequence<u8>, SharedCanonicalTag>;
 type SharedOutcomeEvidence =
     PublishedOutcomeEvidenceStore<ScalarSequence<u8>, SharedOutcomeEvidenceTag>;
@@ -587,9 +587,7 @@ fn operation(account: &PhysicalStorageAccount) -> (TestOperation, TestKeys) {
     )
 }
 
-fn derived_operation<'source>(
-    source: &'source SharedCanonical,
-) -> (DerivedTestOperation<'source>, TestKeys) {
+fn derived_operation(source: &SharedCanonical) -> (DerivedTestOperation, TestKeys) {
     let (domain, keys) = keys();
     let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
         keys.failure_terminal_dimension,
@@ -958,10 +956,10 @@ fn inherited_shares_emit_lifecycles_without_copying_or_hot_leaf_lookup() {
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .expect("shared publication assembly");
     assembly
-        .try_bind_canonical_source(keys.dimension)
+        .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("canonical source map");
     let canonical_root = assembly
-        .try_share_canonical(source.canonical_root)
+        .try_share_canonical(&source.canonical, source.canonical_root)
         .expect("shared canonical root");
     let outcome_evidence_root = assembly
         .try_share_outcome_evidence(&source.outcome_evidence, source.outcome_evidence_root)
@@ -1035,10 +1033,11 @@ fn canonical_rewrite_preflight_completes_the_typed_lookup_taxonomy() {
         .try_publication_assembly(publication_plan(keys, 1, 1))
         .expect("rewrite publication assembly");
     assembly
-        .try_bind_canonical_source(keys.dimension)
+        .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("canonical source map");
     let canonical_root = assembly
         .try_rewrite_canonical_sequence(
+            &source.canonical,
             source.canonical_root,
             SequencePlan::<u8>::new(1).expect("replacement sequence plan"),
             SharedCanonicalTag,

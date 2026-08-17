@@ -3941,11 +3941,14 @@ fn prepared_store_surfaces_expose_only_consuming_classification_or_handoff() {
 #[test]
 fn canonical_share_api_requires_derived_lineage_and_the_sealed_shareable_kind() {
     let source = include_str!("../concrete_store.rs");
-    let method = public_method_block(source, "pub fn try_share_canonical<SlotKind, SlotTag>");
-    assert!(source.contains(
-        "RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource<'source>>"
-    ));
-    assert!(!method.contains("PublishedCanonicalStore"));
+    let method = public_method_block(
+        source,
+        "pub fn try_share_canonical<SourceRootKind, SourceRootTag, SlotKind, SlotTag>",
+    );
+    assert!(
+        source.contains("RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource>")
+    );
+    assert!(method.contains("PublishedCanonicalStore<SourceRootKind, SourceRootTag>"));
     assert!(method.contains("source_ref: CanonicalStoreRef<SlotKind, SlotTag>"));
     assert!(method.contains("SlotKind: ShareableStoreKind"));
 }

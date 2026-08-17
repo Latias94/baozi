@@ -181,8 +181,7 @@ type SceneStoreOpenRecovery<L = FreshStoreLineage> = RetainedStoreOpenRecovery<
     SceneConstructionUnit,
     L,
 >;
-type DerivedSceneStoreOperation<'scene> = DerivedRetainedStoreOperation<
-    'scene,
+type DerivedSceneStoreOperation = DerivedRetainedStoreOperation<
     SceneConstructionOwner,
     SceneConstructionPhase,
     SceneConstructionUnit,
@@ -718,7 +717,7 @@ pub(crate) struct SceneConstructionOperation {
 
 #[must_use = "the derived Scene construction operation must be prepared or deliberately dropped"]
 pub(crate) struct DerivedSceneConstructionOperation<'scene> {
-    raw: DerivedSceneStoreOperation<'scene>,
+    raw: DerivedSceneStoreOperation,
     brand: ConstructionBrand,
     keys: SceneStoreKeys,
     source: TracerInheritanceSource<'scene>,
@@ -1106,10 +1105,10 @@ impl DerivedSceneConstructionOperation<'_> {
                     return Err(MatrixConstructionFailure::Semantic);
                 }
                 assembly
-                    .try_bind_canonical_source(keys.dimension)
+                    .try_bind_canonical_source(&requested_scene.canonical, keys.dimension)
                     .map_err(|_| MatrixConstructionFailure::Storage)?;
                 let target_matrix = assembly
-                    .try_share_canonical(requested_matrix.into_store())
+                    .try_share_canonical(&requested_scene.canonical, requested_matrix.into_store())
                     .map(CanonicalBlockRef::from_store)
                     .map_err(|_| MatrixConstructionFailure::Storage)?;
                 let directory_matrix = if faults.source_slot_in_directory() {
@@ -1240,7 +1239,7 @@ impl ScenePublicationLineage for FreshStoreLineage {
     const INHERITS_CANONICAL_STORAGE: bool = false;
 }
 
-impl ScenePublicationLineage for CanonicalInheritanceSource<'_> {
+impl ScenePublicationLineage for CanonicalInheritanceSource {
     const INHERITS_CANONICAL_STORAGE: bool = true;
 }
 

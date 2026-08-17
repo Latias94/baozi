@@ -88,8 +88,8 @@ pub(in crate::canonical_scene::store) enum NodeSceneEditTerminal {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn prepare_edit_candidate<'scene>(
-    assembly: SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
+pub(super) fn prepare_edit_candidate(
+    assembly: SceneStoreAssembly<CanonicalInheritanceSource>,
     graph: RewrittenNodeSceneGraph,
     mut scratch: NodeSceneValidationScratchOwner,
     keys: SceneStoreKeys,

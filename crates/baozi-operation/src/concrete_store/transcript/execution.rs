@@ -4,9 +4,9 @@ use super::super::{
     CanonicalStoreRef, CanonicalUtf8Range, CanonicalUtf8Ref, FreshStoreLineage,
     OutcomeEvidenceBytesRef, OutcomeEvidenceRecordRef, OutcomeEvidenceRecordWriter,
     OutcomeEvidenceSequenceRef, OutcomeEvidenceStoreRef, OutcomeEvidenceUtf8Ref,
-    PreparedStoreFallback, RetainedStorePublicationAssembly, ScalarSequence, SequenceWriter,
-    StoreBatchRuntimeError, StoreBuildError, StoreDestination, StoreDimensionKey,
-    StorePrepareError, StoreRuntimeError, StoredScalar, Utf8Writer,
+    PreparedStoreFallback, PublishedCanonicalStore, RetainedStorePublicationAssembly,
+    ScalarSequence, SequenceWriter, StoreBatchRuntimeError, StoreBuildError, StoreDestination,
+    StoreDimensionKey, StorePrepareError, StoreRuntimeError, StoredScalar, Utf8Writer,
 };
 use super::{
     CounterDelta, DestinationCounters, PlannedCanonicalBytes, PlannedCanonicalBytesBatch,
@@ -529,14 +529,15 @@ where
     }
 }
 
-impl<'source, O, PP, U> RetainedStoreExecution<O, PP, U, CanonicalInheritanceSource<'source>>
+impl<O, PP, U> RetainedStoreExecution<O, PP, U, CanonicalInheritanceSource>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    fn execute_canonical_share<Kind, Tag>(
+    fn execute_canonical_share<SourceRootKind, SourceRootTag, Kind, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         ticket: &PlannedCanonicalShare<Kind, Tag>,
     ) -> Result<CanonicalStoreRef<Kind, Tag>, StoreExecutionError>
     where
@@ -546,6 +547,7 @@ where
         let Some(source_binding_dimension) = self.canonical_source_binding_dimension else {
             return self.abandon_invariant();
         };
+        let source = source.share_source();
         let instruction = ticket.inner();
         let source_ref = instruction.plan.source_ref;
         self.run(
@@ -553,8 +555,9 @@ where
             CounterDelta::shared_block(StoreDestination::Canonical),
             |assembly| {
                 let members_before = assembly.canonical_len();
-                assembly.try_bind_canonical_source(source_binding_dimension)?;
-                let shared = assembly.try_share_canonical(source_ref)?;
+                assembly.require_canonical_source_from(source)?;
+                assembly.try_bind_canonical_source_from(source, source_binding_dimension)?;
+                let shared = assembly.try_share_canonical_from(source, source_ref)?;
                 if assembly.canonical_len() == members_before {
                     return Err(StoreRuntimeError::InvalidSourceSlot);
                 }
@@ -563,34 +566,37 @@ where
         )
     }
 
-    pub fn try_execute_canonical_sequence_share<T, Tag>(
+    pub fn try_execute_canonical_sequence_share<SourceRootKind, SourceRootTag, T, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         ticket: &PlannedCanonicalShare<ScalarSequence<T>, Tag>,
     ) -> Result<CanonicalSequenceRef<T, Tag>, StoreExecutionError>
     where
         T: StoredScalar,
         Tag: Copy + Send + Sync + 'static,
     {
-        self.execute_canonical_share(ticket)
+        self.execute_canonical_share(source, ticket)
     }
 
-    pub fn try_execute_canonical_bytes_share<Tag>(
+    pub fn try_execute_canonical_bytes_share<SourceRootKind, SourceRootTag, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         ticket: &PlannedCanonicalShare<ByteBlock, Tag>,
     ) -> Result<CanonicalBytesRef<Tag>, StoreExecutionError>
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.execute_canonical_share(ticket)
+        self.execute_canonical_share(source, ticket)
     }
 
-    pub fn try_execute_canonical_utf8_share<Tag>(
+    pub fn try_execute_canonical_utf8_share<SourceRootKind, SourceRootTag, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         ticket: &PlannedCanonicalShare<super::super::Utf8Block, Tag>,
     ) -> Result<CanonicalUtf8Ref<Tag>, StoreExecutionError>
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        self.execute_canonical_share(ticket)
+        self.execute_canonical_share(source, ticket)
     }
 }

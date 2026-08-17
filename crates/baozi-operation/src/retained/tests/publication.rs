@@ -3148,6 +3148,7 @@ fn canonical_source_binding_checks_account_health_before_mapping_work() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
     let (source_canonical, _, source_evidence, _) = publish_scalar_source(&account);
+    let (wrong_canonical, _, wrong_evidence, _) = publish_scalar_source(&account);
     let operation = test_derived_operation_on_account_with_control(
         &account,
         &source_canonical,
@@ -3161,7 +3162,7 @@ fn canonical_source_binding_checks_account_health_before_mapping_work() {
     let first_poison = account.test_record_poison(AccountPoisonReason::OwnershipGraphUnverified);
 
     assert!(matches!(
-        assembly.try_bind_canonical_source(source_canonical.aggregate(), TestDimension::Bytes),
+        assembly.try_bind_canonical_source(wrong_canonical.aggregate(), TestDimension::Bytes),
         Err(CanonicalSourceBindError::Publication(
             RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(cause))
         )) if cause == first_poison
@@ -3172,11 +3173,104 @@ fn canonical_source_binding_checks_account_health_before_mapping_work() {
     drop(assembly);
     drop(source_canonical);
     drop(source_evidence);
+    drop(wrong_canonical);
+    drop(wrong_evidence);
     drop(account);
     assert_eq!(
         factory.snapshot().live_accounts(),
         1,
         "an explicitly poisoned account remains quarantined after all handles are dropped"
+    );
+}
+
+#[test]
+fn poisoned_derived_start_precedes_foreign_source_validation() {
+    let factory = account_factory(2);
+    let target_account = account(&factory, u64::MAX, 128);
+    let foreign_account = account(&factory, u64::MAX, 128);
+    let (foreign_canonical, _, foreign_evidence, _) = publish_scalar_source(&foreign_account);
+    let first_poison =
+        target_account.test_record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+    let target_before = target_account.snapshot();
+    let foreign_before = foreign_account.snapshot();
+    let fallback_called = StdArc::new(AtomicBool::new(false));
+    let fallback_observer = StdArc::clone(&fallback_called);
+    let (limits, plan) = startup_limits_and_plan();
+
+    let result = RetainedOperation::<
+        TestOwner,
+        TestPhase,
+        TestProgress,
+        TestUnit,
+        TestDimension,
+        u32,
+    >::try_start_derived_with_phase_catalog(
+        OperationControl::default(),
+        limits,
+        &[TestPhase::Build],
+        &target_account,
+        foreign_canonical.aggregate(),
+        plan,
+        move || {
+            fallback_observer.store(true, Ordering::Relaxed);
+            Ok(7)
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(RetainedOperationStartError::Writer(
+            RetainedWriterError::AccountPoisoned(cause)
+        )) if cause == first_poison
+    ));
+    assert!(!fallback_called.load(Ordering::Relaxed));
+    assert_eq!(target_account.snapshot(), target_before);
+    assert_eq!(foreign_account.snapshot(), foreign_before);
+
+    drop(foreign_canonical);
+    drop(foreign_evidence);
+    drop(target_account);
+    drop(foreign_account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn canonical_source_length_corruption_poisons_the_exact_source_account() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let (source_canonical, _, source_evidence, _) = publish_scalar_source(&account);
+    let aggregate = source_canonical.aggregate();
+    let corrupt_length = aggregate
+        .len()
+        .checked_add(1)
+        .expect("test source length must have a larger representable value");
+    let authority = CanonicalLineageAuthority::Derived {
+        source_set: aggregate.set_id(),
+        source_len: corrupt_length,
+    };
+
+    let error = authority
+        .require_source::<TestDimension, _>(&account, aggregate)
+        .expect_err("same-set length corruption must fail closed");
+    assert!(matches!(
+        error,
+        RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(_))
+    ));
+    assert_eq!(
+        account
+            .snapshot()
+            .first_poison_evidence()
+            .map(AccountPoisonEvidence::reason),
+        Some(AccountPoisonReason::OwnershipGraphUnverified)
+    );
+
+    drop(source_canonical);
+    drop(source_evidence);
+    drop(account);
+    assert_eq!(
+        factory.snapshot().live_accounts(),
+        0,
+        "without a live publication owner, the poisoned account can release its factory lease"
     );
 }
 

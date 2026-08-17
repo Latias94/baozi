@@ -45,7 +45,7 @@ use super::super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneWorkMeter, SceneStoreAssembly, SceneStoreKeys,
     ValidatedNodeScene, process_slice_in_work_chunks,
 };
-use super::plan::PendingNodeSceneEdit;
+use super::plan::{NodeSceneEditProgram, NodeTransformRewrite, PendingNodeSceneEdit};
 
 pub(super) struct RewrittenNodeSceneGraph {
     pub(super) directory: CanonicalBlockRef<SceneDirectorySchema>,
@@ -62,7 +62,7 @@ pub(super) enum NodeSceneRewriteError {
 }
 
 pub(super) fn try_rewrite_node_scene<'scene>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'scene>,
     keys: SceneStoreKeys,
 ) -> Result<RewrittenNodeSceneGraph, NodeSceneRewriteError> {
@@ -73,12 +73,14 @@ pub(super) fn try_rewrite_node_scene<'scene>(
         .map_err(NodeSceneRewriteError::BeforeEvidence)?;
     let rewritten =
         (|| -> Result<(CanonicalBlockRef<SceneDirectorySchema>, NodeSceneWorkMeter), StoreRuntimeError> {
-            assembly.try_bind_canonical_source(keys.dimension)?;
+            assembly.try_bind_canonical_source(&pending.input.canonical, keys.dimension)?;
 
-            let build_failure = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)
-                .map_err(StoreRuntimeError::Plan)?;
             let mut work = NodeSceneWorkMeter::new();
-            let transforms = rewrite_transforms(assembly, pending, keys, &mut work)?;
+            let node_transform = match &pending.program {
+                NodeSceneEditProgram::NodeTransform(rewrite) => *rewrite,
+            };
+            let transforms =
+                rewrite_transforms(assembly, pending, node_transform, keys, &mut work)?;
             let profile_leaves =
                 profile::rewrite_lineage_leaves(assembly, pending, keys, &mut work)?;
             inherit_unchanged_evidence_leaves(assembly, pending, keys, &mut work)?;
@@ -93,15 +95,16 @@ pub(super) fn try_rewrite_node_scene<'scene>(
                 crate::canonical_scene::store::schema::NodeSceneChildReferenceTableSchema,
                 keys,
             )?;
-            let nodes = if pending.program.requires_node_shape_rewrite() {
+            let shape = pending.program.shape();
+            let nodes = if shape.rewrites_node_table() {
                 rewrite_nodes_with_shape(
                     assembly,
                     pending,
+                    node_transform,
                     transforms,
                     spatial,
                     keys,
                     &mut work,
-                    build_failure,
                 )?
             } else {
                 rewrite_required_record(
@@ -161,7 +164,7 @@ pub(super) fn try_rewrite_node_scene<'scene>(
                 &mut work,
             )?;
 
-            let directory = if pending.program.requires_node_shape_rewrite() {
+            let directory = if shape.rewrites_scene_directory() {
                 let references = references.ok_or(StoreRuntimeError::InvalidSourceSlot)?;
                 rewrite_directory_with_shape(
                     assembly,
@@ -204,7 +207,7 @@ pub(super) fn try_rewrite_node_scene<'scene>(
 }
 
 fn retain_edit_evidence(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'_>,
 ) -> Result<OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>, StoreRuntimeError> {
     let counts = pending.counts.evidence;
@@ -253,12 +256,12 @@ fn retain_edit_evidence(
 }
 
 fn rewrite_transforms(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'_>,
+    transform: NodeTransformRewrite,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
 ) -> Result<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>, StoreRuntimeError> {
-    let transform = pending.program.node_transform_rewrite();
     let target = transform.target();
     let source_ref = pending
         .input
@@ -291,6 +294,7 @@ fn rewrite_transforms(
         .map_err(StoreRuntimeError::Plan)?;
     assembly
         .try_rewrite_canonical_sequence_controlled(
+            &pending.input.canonical,
             source_ref.into_store(),
             plan,
             keys.dimension,
@@ -369,15 +373,16 @@ fn write_authored_transform(
 }
 
 fn rewrite_nodes_with_shape(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'_>,
+    transform: NodeTransformRewrite,
     transforms: CanonicalBlockRef<NodeSceneAuthoredTransformSchema>,
     spatial: RewrittenSpatialRefs,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
-    failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<NodeSceneNodeTableSchema>, StoreRuntimeError> {
-    let transform = pending.program.node_transform_rewrite();
+    let failure = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)
+        .map_err(StoreRuntimeError::Plan)?;
     let target = transform.target();
     let source_ref = pending.input.proof.nodes();
     let source = required_record_view(pending.input, source_ref)?;
@@ -393,6 +398,7 @@ fn rewrite_nodes_with_shape(
     let plan = RecordPlan::new(source.rows(), source.fields()).map_err(StoreRuntimeError::Plan)?;
     assembly
         .try_rewrite_canonical_records_with_controlled(
+            &pending.input.canonical,
             source_ref.into_store(),
             plan,
             keys.dimension,
@@ -548,7 +554,7 @@ struct NodeSceneDirectoryRefs {
 }
 
 fn rewrite_directory_with_shape(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'_>,
     refs: NodeSceneDirectoryRefs,
     keys: SceneStoreKeys,
@@ -562,6 +568,7 @@ fn rewrite_directory_with_shape(
     let plan = RecordPlan::new(1, SCENE_DIRECTORY_FIELD_COUNT).map_err(StoreRuntimeError::Plan)?;
     assembly
         .try_rewrite_canonical_records_with_controlled(
+            &pending.input.canonical,
             source_ref.into_store(),
             plan,
             keys.dimension,
@@ -595,7 +602,7 @@ fn rewrite_directory_with_shape(
 }
 
 fn inherit_unchanged_evidence_leaves<'scene>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'scene>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
@@ -604,28 +611,56 @@ fn inherit_unchanged_evidence_leaves<'scene>(
     let mut inherited = 0_usize;
     let mut inspected = 0_usize;
 
-    inherit_optional_leaf(assembly, proof.node_names(), &mut inherited)?;
-    inherit_optional_leaf(assembly, proof.tangent_basis_schema_name(), &mut inherited)?;
+    inherit_optional_leaf(assembly, pending.input, proof.node_names(), &mut inherited)?;
     inherit_optional_leaf(
         assembly,
+        pending.input,
+        proof.tangent_basis_schema_name(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
         proof.tangent_encoding_schema_name(),
         &mut inherited,
     )?;
 
-    inherit_optional_leaf(assembly, proof.appearance_image_payloads(), &mut inherited)?;
-    inherit_optional_leaf(assembly, proof.appearance_media_types(), &mut inherited)?;
-    inherit_optional_leaf(assembly, proof.appearance_source_keys(), &mut inherited)?;
     inherit_optional_leaf(
         assembly,
+        pending.input,
+        proof.appearance_image_payloads(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
+        proof.appearance_media_types(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
+        proof.appearance_source_keys(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
         proof.appearance_binding_semantic_scalars(),
         &mut inherited,
     )?;
     inherit_optional_leaf(
         assembly,
+        pending.input,
         proof.appearance_material_factor_scalars(),
         &mut inherited,
     )?;
-    inherit_optional_leaf(assembly, proof.appearance_material_names(), &mut inherited)?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
+        proof.appearance_material_names(),
+        &mut inherited,
+    )?;
 
     inherit_geometry_leaves(
         assembly,
@@ -636,56 +671,109 @@ fn inherit_unchanged_evidence_leaves<'scene>(
         &mut inspected,
     )?;
 
-    inherit_optional_leaf(assembly, proof.deformation_joint_nodes(), &mut inherited)?;
     inherit_optional_leaf(
         assembly,
+        pending.input,
+        proof.deformation_joint_nodes(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
         proof.deformation_inverse_bind_matrices(),
         &mut inherited,
     )?;
     inherit_optional_leaf(
         assembly,
+        pending.input,
         proof.deformation_skin_correction_matrices(),
         &mut inherited,
     )?;
-    inherit_optional_leaf(assembly, proof.deformation_skin_names(), &mut inherited)?;
     inherit_optional_leaf(
         assembly,
+        pending.input,
+        proof.deformation_skin_names(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
         proof.deformation_influence_row_offsets(),
         &mut inherited,
     )?;
     inherit_optional_leaf(
         assembly,
+        pending.input,
         proof.deformation_influence_joints(),
         &mut inherited,
     )?;
     inherit_optional_leaf(
         assembly,
+        pending.input,
         proof.deformation_influence_weights(),
         &mut inherited,
     )?;
     inherit_optional_leaf(
         assembly,
+        pending.input,
         proof.deformation_influence_source_orders(),
         &mut inherited,
     )?;
-    inherit_optional_leaf(assembly, proof.deformation_morph_defaults(), &mut inherited)?;
-    inherit_optional_leaf(assembly, proof.deformation_morph_names(), &mut inherited)?;
-    inherit_optional_leaf(assembly, proof.deformation_morph_values(), &mut inherited)?;
     inherit_optional_leaf(
         assembly,
+        pending.input,
+        proof.deformation_morph_defaults(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
+        proof.deformation_morph_names(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
+        proof.deformation_morph_values(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
         proof.deformation_morph_sparse_indices(),
         &mut inherited,
     )?;
     inherit_optional_leaf(
         assembly,
+        pending.input,
         proof.deformation_instance_morph_weights(),
         &mut inherited,
     )?;
 
-    inherit_optional_leaf(assembly, proof.animation_times(), &mut inherited)?;
-    inherit_optional_leaf(assembly, proof.animation_values(), &mut inherited)?;
-    inherit_optional_leaf(assembly, proof.animation_in_tangents(), &mut inherited)?;
-    inherit_optional_leaf(assembly, proof.animation_out_tangents(), &mut inherited)?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
+        proof.animation_times(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
+        proof.animation_values(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
+        proof.animation_in_tangents(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
+        proof.animation_out_tangents(),
+        &mut inherited,
+    )?;
 
     let (profile_inherited, profile_inspected) =
         profile::inherit_unchanged_lineage_leaves(assembly, pending, keys, work)?;
@@ -704,7 +792,7 @@ fn inherit_unchanged_evidence_leaves<'scene>(
 }
 
 fn inherit_geometry_leaves<'scene>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'scene>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
@@ -712,8 +800,18 @@ fn inherit_geometry_leaves<'scene>(
     inspected: &mut usize,
 ) -> Result<(), StoreRuntimeError> {
     let proof = pending.input.proof;
-    inherit_optional_leaf(assembly, proof.logical_mesh_names(), inherited)?;
-    inherit_optional_leaf(assembly, proof.attribute_semantic_names(), inherited)?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
+        proof.logical_mesh_names(),
+        inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        pending.input,
+        proof.attribute_semantic_names(),
+        inherited,
+    )?;
 
     match proof.primitives() {
         None if pending.counts.primitives.as_usize() == 0 => {}
@@ -728,6 +826,7 @@ fn inherit_geometry_leaves<'scene>(
                 observe_leaf_inspection(assembly, keys, work, inspected)?;
                 inherit_optional_leaf(
                     assembly,
+                    pending.input,
                     primitives
                         .sequence_ref::<u32, GeometryPolygonBoundariesSchema>(
                             row,
@@ -738,6 +837,7 @@ fn inherit_geometry_leaves<'scene>(
                 )?;
                 inherit_optional_leaf(
                     assembly,
+                    pending.input,
                     primitives
                         .sequence_ref::<u32, GeometryPrimitiveIndicesSchema>(
                             row,
@@ -764,6 +864,7 @@ fn inherit_geometry_leaves<'scene>(
                 observe_leaf_inspection(assembly, keys, work, inspected)?;
                 inherit_optional_leaf(
                     assembly,
+                    pending.input,
                     attributes
                         .sequence_ref::<f32, GeometryF32ValuesSchema>(
                             row,
@@ -774,6 +875,7 @@ fn inherit_geometry_leaves<'scene>(
                 )?;
                 inherit_optional_leaf(
                     assembly,
+                    pending.input,
                     attributes
                         .sequence_ref::<u32, GeometryU32ValuesSchema>(
                             row,
@@ -784,6 +886,7 @@ fn inherit_geometry_leaves<'scene>(
                 )?;
                 inherit_optional_leaf(
                     assembly,
+                    pending.input,
                     attributes
                         .sequence_ref::<i32, GeometryI32ValuesSchema>(
                             row,
@@ -794,6 +897,7 @@ fn inherit_geometry_leaves<'scene>(
                 )?;
                 inherit_optional_leaf(
                     assembly,
+                    pending.input,
                     attributes
                         .sequence_ref::<u32, GeometrySparseIndicesSchema>(
                             row,
@@ -804,6 +908,7 @@ fn inherit_geometry_leaves<'scene>(
                 )?;
                 inherit_optional_leaf(
                     assembly,
+                    pending.input,
                     attributes
                         .sequence_ref::<f32, GeometrySparseF32DefaultsSchema>(
                             row,
@@ -814,6 +919,7 @@ fn inherit_geometry_leaves<'scene>(
                 )?;
                 inherit_optional_leaf(
                     assembly,
+                    pending.input,
                     attributes
                         .sequence_ref::<u32, GeometrySparseU32DefaultsSchema>(
                             row,
@@ -824,6 +930,7 @@ fn inherit_geometry_leaves<'scene>(
                 )?;
                 inherit_optional_leaf(
                     assembly,
+                    pending.input,
                     attributes
                         .sequence_ref::<i32, GeometrySparseI32DefaultsSchema>(
                             row,
@@ -840,7 +947,7 @@ fn inherit_geometry_leaves<'scene>(
 }
 
 fn observe_leaf_inspection(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
     inspected: &mut usize,
@@ -854,7 +961,8 @@ fn observe_leaf_inspection(
 }
 
 fn inherit_optional_leaf<Schema>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
+    input: &ValidatedNodeScene,
     source: Option<CanonicalBlockRef<Schema>>,
     inherited: &mut usize,
 ) -> Result<(), StoreRuntimeError>
@@ -865,7 +973,7 @@ where
     let Some(source) = source else {
         return Ok(());
     };
-    let _ = assembly.try_share_canonical(source.into_store())?;
+    let _ = assembly.try_share_canonical(&input.canonical, source.into_store())?;
     *inherited = inherited
         .checked_add(1)
         .ok_or(StoreRuntimeError::AccountingOverflow)?;
@@ -880,7 +988,7 @@ struct RewrittenSpatialRefs {
 }
 
 fn rewrite_spatial(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'_>,
     keys: SceneStoreKeys,
 ) -> Result<RewrittenSpatialRefs, StoreRuntimeError> {
@@ -918,7 +1026,7 @@ fn rewrite_spatial(
 }
 
 fn rewrite_appearance(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'_>,
     keys: SceneStoreKeys,
 ) -> Result<(), StoreRuntimeError> {
@@ -968,7 +1076,7 @@ fn rewrite_appearance(
 }
 
 fn rewrite_geometry(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'_>,
     keys: SceneStoreKeys,
 ) -> Result<(), StoreRuntimeError> {
@@ -1010,7 +1118,7 @@ fn rewrite_geometry(
 }
 
 fn rewrite_deformation(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'_>,
     keys: SceneStoreKeys,
 ) -> Result<(), StoreRuntimeError> {
@@ -1076,7 +1184,7 @@ fn rewrite_deformation(
 }
 
 fn rewrite_animation(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'_>,
     keys: SceneStoreKeys,
 ) -> Result<(), StoreRuntimeError> {
@@ -1102,7 +1210,7 @@ fn rewrite_animation(
 }
 
 fn rewrite_optional_record<Schema>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     input: &ValidatedNodeScene,
     source: Option<CanonicalBlockRef<Schema>>,
     expected_rows: usize,
@@ -1122,7 +1230,7 @@ where
 }
 
 fn rewrite_required_record<Schema>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     input: &ValidatedNodeScene,
     source: CanonicalBlockRef<Schema>,
     expected_rows: usize,
@@ -1138,7 +1246,13 @@ where
     }
     let plan = RecordPlan::new(view.rows(), view.fields()).map_err(StoreRuntimeError::Plan)?;
     assembly
-        .try_rewrite_canonical_records_controlled(source.into_store(), plan, keys.dimension, tag)
+        .try_rewrite_canonical_records_controlled(
+            &input.canonical,
+            source.into_store(),
+            plan,
+            keys.dimension,
+            tag,
+        )
         .map(CanonicalBlockRef::from_store)
 }
 

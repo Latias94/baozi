@@ -11,18 +11,17 @@ use crate::canonical_scene::store::schema::CanonicalBlockRef;
 use crate::canonical_scene::store::schema::profile::{
     PROFILE_ABSENT_REFERENCE, PROFILE_DIGEST_BLAKE3, PROFILE_DIGEST_SHA256,
     PROFILE_DIRECTORY_FIELD_COUNT, PROFILE_METADATA_DIRECTORY_FIELD_COUNT,
-    PROFILE_OPERATION_SCALAR_COUNT, PROFILE_OPERATION_TRANSFORM, PROFILE_OWNER_FIELD_COUNT,
-    PROFILE_PROVENANCE_OPERATION, PROFILE_PROVENANCE_SCALAR_COUNT, PROFILE_SCHEMA_REVISION,
-    PROFILE_SEGMENT_FIELD_COUNT, ProfileDirectorySchema, ProfileLineageAttachmentSchema,
-    ProfileLineageDigestSchema, ProfileLineageEvidenceSchema, ProfileLineageOperationSchema,
-    ProfileLineageParentSchema, ProfileLineageProvenanceSchema, ProfileLineageResourceSchema,
-    ProfileLineageSourceSchema, ProfileLineageTextSchema, ProfileLineageWideSchema,
-    ProfileMetadataBoolSchema, ProfileMetadataBytesSchema, ProfileMetadataDirectorySchema,
-    ProfileMetadataEntryTableSchema, ProfileMetadataF32Schema, ProfileMetadataF64Schema,
-    ProfileMetadataI64Schema, ProfileMetadataTextSchema, ProfileMetadataU64Schema,
-    ProfileOwnerTableSchema, ProfileSegmentTableSchema, profile_directory_field,
-    profile_metadata_directory_field, profile_owner_field, profile_provenance_scalar,
-    profile_segment_field,
+    PROFILE_OPERATION_SCALAR_COUNT, PROFILE_OWNER_FIELD_COUNT, PROFILE_PROVENANCE_OPERATION,
+    PROFILE_PROVENANCE_SCALAR_COUNT, PROFILE_SCHEMA_REVISION, PROFILE_SEGMENT_FIELD_COUNT,
+    ProfileDirectorySchema, ProfileLineageAttachmentSchema, ProfileLineageDigestSchema,
+    ProfileLineageEvidenceSchema, ProfileLineageOperationSchema, ProfileLineageParentSchema,
+    ProfileLineageProvenanceSchema, ProfileLineageResourceSchema, ProfileLineageSourceSchema,
+    ProfileLineageTextSchema, ProfileLineageWideSchema, ProfileMetadataBoolSchema,
+    ProfileMetadataBytesSchema, ProfileMetadataDirectorySchema, ProfileMetadataEntryTableSchema,
+    ProfileMetadataF32Schema, ProfileMetadataF64Schema, ProfileMetadataI64Schema,
+    ProfileMetadataTextSchema, ProfileMetadataU64Schema, ProfileOwnerTableSchema,
+    ProfileSegmentTableSchema, profile_directory_field, profile_metadata_directory_field,
+    profile_owner_field, profile_provenance_scalar, profile_segment_field,
 };
 use crate::provenance::{DIGEST_LEN, DigestAlgorithm};
 
@@ -43,7 +42,7 @@ pub(super) struct RewrittenProfileLineageLeaves {
 }
 
 pub(super) fn rewrite_lineage_leaves<'scene>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'scene>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
@@ -88,6 +87,7 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
     // old attachment storage is not retained into the edited generation.
     let attachments = assembly
         .try_rewrite_canonical_sequence_controlled(
+            &pending.input.canonical,
             plan.source_attachments.into_store(),
             plan.attachments,
             keys.dimension,
@@ -172,7 +172,7 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
                 )?;
                 writer
                     .extend_from_slice(&[
-                        u32::from(PROFILE_OPERATION_TRANSFORM),
+                        u32::from(pending.program.shape().profile_operation_code()),
                         0,
                         0,
                         u32::from(encode_digest_algorithm(
@@ -222,7 +222,7 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
 }
 
 pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'scene>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
@@ -234,6 +234,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
         super::observe_leaf_inspection(assembly, keys, work, &mut inspected)?;
         super::inherit_optional_leaf(
             assembly,
+            pending.input,
             segments
                 .sequence_ref::<u32, ProfileLineageResourceSchema>(
                     row,
@@ -244,6 +245,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
         )?;
         super::inherit_optional_leaf(
             assembly,
+            pending.input,
             segments
                 .sequence_ref::<u32, ProfileLineageSourceSchema>(
                     row,
@@ -254,6 +256,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
         )?;
         super::inherit_optional_leaf(
             assembly,
+            pending.input,
             segments
                 .sequence_ref::<u32, ProfileLineageProvenanceSchema>(
                     row,
@@ -264,6 +267,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
         )?;
         super::inherit_optional_leaf(
             assembly,
+            pending.input,
             segments
                 .sequence_ref::<u32, ProfileLineageOperationSchema>(
                     row,
@@ -274,6 +278,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
         )?;
         super::inherit_optional_leaf(
             assembly,
+            pending.input,
             segments
                 .sequence_ref::<u32, ProfileLineageEvidenceSchema>(
                     row,
@@ -284,6 +289,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
         )?;
         super::inherit_optional_leaf(
             assembly,
+            pending.input,
             segments
                 .sequence_ref::<u64, ProfileLineageParentSchema>(
                     row,
@@ -294,6 +300,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
         )?;
         super::inherit_optional_leaf(
             assembly,
+            pending.input,
             segments
                 .sequence_ref::<u64, ProfileLineageWideSchema>(
                     row,
@@ -304,6 +311,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
         )?;
         super::inherit_optional_leaf(
             assembly,
+            pending.input,
             segments
                 .utf8_ref::<ProfileLineageTextSchema>(row, profile_segment_field::TEXTS)
                 .map(CanonicalBlockRef::from_store),
@@ -311,6 +319,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
         )?;
         super::inherit_optional_leaf(
             assembly,
+            pending.input,
             segments
                 .bytes_ref::<ProfileLineageDigestSchema>(row, profile_segment_field::DIGESTS)
                 .map(CanonicalBlockRef::from_store),
@@ -335,6 +344,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
     super::observe_leaf_inspection(assembly, keys, work, &mut inspected)?;
     super::inherit_optional_leaf(
         assembly,
+        pending.input,
         metadata
             .utf8_ref::<ProfileMetadataTextSchema>(0, profile_metadata_directory_field::TEXTS)
             .map(CanonicalBlockRef::from_store),
@@ -342,6 +352,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
     )?;
     super::inherit_optional_leaf(
         assembly,
+        pending.input,
         metadata
             .bytes_ref::<ProfileMetadataBytesSchema>(0, profile_metadata_directory_field::BYTES)
             .map(CanonicalBlockRef::from_store),
@@ -349,6 +360,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
     )?;
     super::inherit_optional_leaf(
         assembly,
+        pending.input,
         metadata
             .sequence_ref::<u8, ProfileMetadataBoolSchema>(
                 0,
@@ -359,6 +371,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
     )?;
     super::inherit_optional_leaf(
         assembly,
+        pending.input,
         metadata
             .sequence_ref::<i64, ProfileMetadataI64Schema>(
                 0,
@@ -369,6 +382,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
     )?;
     super::inherit_optional_leaf(
         assembly,
+        pending.input,
         metadata
             .sequence_ref::<u64, ProfileMetadataU64Schema>(
                 0,
@@ -379,6 +393,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
     )?;
     super::inherit_optional_leaf(
         assembly,
+        pending.input,
         metadata
             .sequence_ref::<f64, ProfileMetadataF64Schema>(
                 0,
@@ -389,6 +404,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
     )?;
     super::inherit_optional_leaf(
         assembly,
+        pending.input,
         metadata
             .sequence_ref::<f32, ProfileMetadataF32Schema>(
                 0,
@@ -401,7 +417,7 @@ pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
 }
 
 pub(super) fn rewrite_profile_records<'scene>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'scene>,
     segments: CanonicalBlockRef<ProfileSegmentTableSchema>,
     leaves: RewrittenProfileLineageLeaves,
@@ -429,6 +445,7 @@ pub(super) fn rewrite_profile_records<'scene>(
         .ok_or(StoreRuntimeError::AccountingOverflow)?;
     let owners = assembly
         .try_rewrite_canonical_records_with_controlled(
+            &input.canonical,
             input.proof.profile_owners().into_store(),
             pending.counts.profile.owners,
             keys.dimension,
@@ -503,6 +520,7 @@ pub(super) fn rewrite_profile_records<'scene>(
     }
     assembly
         .try_rewrite_canonical_records_with_controlled(
+            &input.canonical,
             input.proof.profile_directory().into_store(),
             baozi_operation::RecordPlan::new(1, PROFILE_DIRECTORY_FIELD_COUNT)
                 .map_err(StoreRuntimeError::Plan)?,
@@ -526,7 +544,7 @@ pub(super) fn rewrite_profile_records<'scene>(
 }
 
 pub(super) fn rewrite_segments<'scene>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
     pending: &PendingNodeSceneEdit<'scene>,
     leaves: RewrittenProfileLineageLeaves,
     keys: SceneStoreKeys,
@@ -541,6 +559,7 @@ pub(super) fn rewrite_segments<'scene>(
     .map_err(StoreRuntimeError::Plan)?;
     assembly
         .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+            &pending.input.canonical,
             pending.input.proof.profile_segments().into_store(),
             source_plan,
             pending.counts.profile.segments,

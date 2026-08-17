@@ -1799,39 +1799,42 @@ type RawStoreFallbackOnly<O, PP, U> = RetainedFallbackOnly<
 /// ```compile_fail,E0599
 /// use baozi_operation::{
 ///     FreshStoreLineage, OperationOwner, ProgressPhase, ProgressUnit,
-///     RetainedStorePublicationAssembly, StoreDimensionKey,
+///     PublishedCanonicalStore, RetainedStorePublicationAssembly, StoreDimensionKey,
 /// };
 ///
-/// fn bind_without_source<O, PP, U>(
+/// fn bind_from_fresh<O, PP, U, SourceRootKind, SourceRootTag>(
 ///     assembly: &mut RetainedStorePublicationAssembly<O, PP, U, FreshStoreLineage>,
+///     source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
 ///     dimension: StoreDimensionKey,
 /// ) where
 ///     O: OperationOwner,
 ///     PP: ProgressPhase,
 ///     U: ProgressUnit,
 /// {
-///     assembly.try_bind_canonical_source(dimension);
+///     assembly.try_bind_canonical_source(source, dimension);
 /// }
 /// ```
 pub struct FreshStoreLineage {
     _private: (),
 }
 
-/// Unforgeable authority to inherit only from one exact published canonical generation.
+/// Unforgeable marker for an operation derived from one exact published canonical generation.
 ///
-/// The authority borrows the source for the complete writable operation lifetime. It has no public
-/// constructor and can only be obtained through [`RetainedStoreOperation::try_start_derived`].
-pub struct CanonicalInheritanceSource<'source> {
-    source: &'source PublishedCanonicalOutput<StoredBlock>,
+/// The raw operation retains only the source generation identity and shape. Source payload access
+/// always requires a fresh, exact-source borrow at the planning or assembly action that needs it.
+/// This marker has no public constructor and can only be obtained through
+/// [`RetainedStoreOperation::try_start_derived`].
+pub struct CanonicalInheritanceSource {
+    _private: (),
 }
 
 /// Store operation statically bound to one exact canonical source generation.
-pub type DerivedRetainedStoreOperation<'source, O, PP, U> =
-    RetainedStoreOperation<O, PP, U, CanonicalInheritanceSource<'source>>;
+pub type DerivedRetainedStoreOperation<O, PP, U> =
+    RetainedStoreOperation<O, PP, U, CanonicalInheritanceSource>;
 
 /// Writable publication assembly statically bound to one exact canonical source generation.
-pub type DerivedRetainedStorePublicationAssembly<'source, O, PP, U> =
-    RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource<'source>>;
+pub type DerivedRetainedStorePublicationAssembly<O, PP, U> =
+    RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource>;
 
 /// Opaque live-storage reservation owned by the concrete retained-store protocol.
 ///
@@ -2508,6 +2511,15 @@ where
         self.validate_writer_keys(phase, dimensions)
     }
 
+    fn require_canonical_source_from(
+        &self,
+        source: &PublishedCanonicalOutput<StoredBlock>,
+    ) -> Result<(), StoreRuntimeError> {
+        self.raw
+            .require_canonical_source(source.aggregate())
+            .map_err(|cause| map_publication_error(&cause))
+    }
+
     #[cfg(feature = "_u4-activation")]
     fn rebind_activation_canonical_assembly(
         &mut self,
@@ -2708,18 +2720,18 @@ where
     /// Starts an operation that may inherit only from `source`'s exact canonical generation.
     ///
     /// The physical account and canonical source-map capacity are derived from `source`.
-    pub fn try_start_derived<'source, SourceRootKind, SourceRootTag>(
+    pub fn try_start_derived<SourceRootKind, SourceRootTag>(
         control: OperationControl<PP, U>,
         ledger_plan: StoreLedgerPlan,
-        source: &'source PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         plan: RetainedStoreStartPlan,
-    ) -> Result<DerivedRetainedStoreOperation<'source, O, PP, U>, RetainedStoreStartError> {
+    ) -> Result<DerivedRetainedStoreOperation<O, PP, U>, RetainedStoreStartError> {
         let source = source.share_source();
         try_start_store_raw(control, ledger_plan, source.account(), Some(source), plan).map(
             |(raw, domain)| RetainedStoreOperation {
                 raw,
                 domain,
-                lineage: CanonicalInheritanceSource { source },
+                lineage: CanonicalInheritanceSource { _private: () },
             },
         )
     }
@@ -3390,6 +3402,15 @@ where
             .raw
             .try_bind_canonical_source(source.aggregate(), work_dimension);
         self.map_source_bind_action(result)
+    }
+
+    fn require_canonical_source_from(
+        &mut self,
+        source: &PublishedCanonicalOutput<StoredBlock>,
+    ) -> Result<(), StoreRuntimeError> {
+        self.ensure_writable()?;
+        let result = self.raw.require_canonical_source(source.aggregate());
+        self.map_pure_preflight(result)
     }
 
     /// Inherits every eligible immutable leaf from the exact bound canonical source.
@@ -4410,34 +4431,38 @@ where
     }
 }
 
-impl<'source, O, PP, U>
-    RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource<'source>>
+impl<O, PP, U> RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     /// Binds the exact canonical source selected when this derived operation started.
-    pub fn try_bind_canonical_source(
+    pub fn try_bind_canonical_source<SourceRootKind, SourceRootTag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         work_dimension: StoreDimensionKey,
     ) -> Result<(), StoreRuntimeError> {
-        let source = self.lineage.source;
+        let source = source.share_source();
+        self.require_canonical_source_from(source)?;
         self.try_bind_canonical_source_from(source, work_dimension)
     }
 
     /// Inherits every eligible immutable leaf from the exact bound canonical source.
-    pub fn try_inherit_all_canonical_leaves(
+    pub fn try_inherit_all_canonical_leaves<SourceRootKind, SourceRootTag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         work_dimension: StoreDimensionKey,
     ) -> Result<(), StoreRuntimeError> {
-        let source = self.lineage.source;
+        let source = source.share_source();
+        self.require_canonical_source_from(source)?;
         self.try_inherit_all_canonical_leaves_from(source, work_dimension)
     }
 
     /// Replaces one exact-source canonical sequence with newly constructed immutable storage.
-    pub fn try_rewrite_canonical_sequence<T, Tag>(
+    pub fn try_rewrite_canonical_sequence<SourceRootKind, SourceRootTag, T, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         source_ref: CanonicalSequenceRef<T, Tag>,
         plan: SequencePlan<T>,
         tag: Tag,
@@ -4447,13 +4472,15 @@ where
         T: StoredScalar,
         Tag: Copy + Send + Sync + 'static,
     {
-        let source = self.lineage.source;
+        let source = source.share_source();
+        self.require_canonical_source_from(source)?;
         self.try_rewrite_canonical_sequence_from(source, source_ref, plan, tag, build)
     }
 
     /// Replaces one exact-source canonical sequence with controlled polling and work charging.
-    pub fn try_rewrite_canonical_sequence_controlled<T, Tag>(
+    pub fn try_rewrite_canonical_sequence_controlled<SourceRootKind, SourceRootTag, T, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         source_ref: CanonicalSequenceRef<T, Tag>,
         plan: SequencePlan<T>,
         work_dimension: StoreDimensionKey,
@@ -4467,7 +4494,8 @@ where
         T: StoredScalar,
         Tag: Copy + Send + Sync + 'static,
     {
-        let source = self.lineage.source;
+        let source = source.share_source();
+        self.require_canonical_source_from(source)?;
         self.try_rewrite_canonical_sequence_controlled_from(
             source,
             source_ref,
@@ -4479,8 +4507,9 @@ where
     }
 
     /// Replaces one exact-source canonical record block through a typed writer.
-    pub fn try_rewrite_canonical_records_with<Tag>(
+    pub fn try_rewrite_canonical_records_with<SourceRootKind, SourceRootTag, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         source_ref: CanonicalRecordRef<Tag>,
         plan: RecordPlan,
         tag: Tag,
@@ -4489,13 +4518,15 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        let source = self.lineage.source;
+        let source = source.share_source();
+        self.require_canonical_source_from(source)?;
         self.try_rewrite_canonical_records_with_from(source, source_ref, plan, tag, build)
     }
 
     /// Rewrites one exact-source canonical record block through the bound source map.
-    pub fn try_rewrite_canonical_records_controlled<Tag>(
+    pub fn try_rewrite_canonical_records_controlled<SourceRootKind, SourceRootTag, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         source_ref: CanonicalRecordRef<Tag>,
         plan: RecordPlan,
         work_dimension: StoreDimensionKey,
@@ -4504,7 +4535,8 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        let source = self.lineage.source;
+        let source = source.share_source();
+        self.require_canonical_source_from(source)?;
         self.try_rewrite_canonical_records_controlled_from(
             source,
             source_ref,
@@ -4521,8 +4553,14 @@ where
     /// field width and have at least as many rows. Historical canonical references are rewritten
     /// through the bound source map before `append` receives the destination writer. Every copied
     /// source cell is polled and charged exactly once.
-    pub fn try_rewrite_canonical_records_with_mapped_prefix_controlled<Tag>(
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_rewrite_canonical_records_with_mapped_prefix_controlled<
+        SourceRootKind,
+        SourceRootTag,
+        Tag,
+    >(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         source_ref: CanonicalRecordRef<Tag>,
         source_plan: RecordPlan,
         destination_plan: RecordPlan,
@@ -4536,7 +4574,8 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        let source = self.lineage.source;
+        let source = source.share_source();
+        self.require_canonical_source_from(source)?;
         self.ensure_writable()?;
         self.validate_dimension(work_dimension)?;
         let source_records = read_canonical_source_records(source, source_ref)
@@ -4611,8 +4650,9 @@ where
     }
 
     /// Replaces one exact-source canonical record block with controlled authored output.
-    pub fn try_rewrite_canonical_records_with_controlled<Tag>(
+    pub fn try_rewrite_canonical_records_with_controlled<SourceRootKind, SourceRootTag, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         source_ref: CanonicalRecordRef<Tag>,
         plan: RecordPlan,
         work_dimension: StoreDimensionKey,
@@ -4625,7 +4665,8 @@ where
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        let source = self.lineage.source;
+        let source = source.share_source();
+        self.require_canonical_source_from(source)?;
         self.try_rewrite_canonical_records_with_controlled_from(
             source,
             source_ref,
@@ -4637,15 +4678,17 @@ where
     }
 
     /// Shares one exact-source canonical immutable leaf into a fresh destination slot.
-    pub fn try_share_canonical<SlotKind, SlotTag>(
+    pub fn try_share_canonical<SourceRootKind, SourceRootTag, SlotKind, SlotTag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         source_ref: CanonicalStoreRef<SlotKind, SlotTag>,
     ) -> Result<CanonicalStoreRef<SlotKind, SlotTag>, StoreRuntimeError>
     where
         SlotKind: ShareableStoreKind,
         SlotTag: Copy + Send + Sync + 'static,
     {
-        let source = self.lineage.source;
+        let source = source.share_source();
+        self.require_canonical_source_from(source)?;
         self.try_share_canonical_from(source, source_ref)
     }
 }

@@ -10,8 +10,8 @@ use baozi_operation::{
 
 type TranscriptCanonicalSource = PublishedCanonicalStore<ScalarSequence<u32>, CanonicalRootTag>;
 type TranscriptEvidenceSource = PublishedOutcomeEvidenceStore<ScalarSequence<u8>, EvidenceRootTag>;
-type DerivedTranscriptOperation<'source> =
-    baozi_operation::DerivedRetainedStoreOperation<'source, TestOwner, TestProgress, TestUnit>;
+type DerivedTranscriptOperation =
+    baozi_operation::DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
 
 const DERIVED_TRANSCRIPT_MAX_FAILURE_EVIDENCE_MEMBERS: usize = 3;
 
@@ -26,9 +26,9 @@ fn transcript_writer(keys: TestKeys) -> RetainedStoreWriterPlan {
     writer_plan(keys, 8, 4)
 }
 
-fn derived_transcript_operation<'source>(
-    source: &'source TranscriptCanonicalSource,
-) -> (DerivedTranscriptOperation<'source>, TestKeys) {
+fn derived_transcript_operation(
+    source: &TranscriptCanonicalSource,
+) -> (DerivedTranscriptOperation, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary();
     let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
         keys.failure_terminal_dimension,
@@ -746,7 +746,7 @@ fn same_account_shares_preserve_physical_storage_across_primary_and_failure_tail
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
     let canonical_ticket = transcript
-        .plan_canonical_sequence_share(primary_source.canonical_root)
+        .plan_canonical_sequence_share(&primary_source.canonical, primary_source.canonical_root)
         .unwrap();
     let evidence_ticket = transcript
         .plan_outcome_evidence_sequence_share(
@@ -768,7 +768,7 @@ fn same_account_shares_preserve_physical_storage_across_primary_and_failure_tail
     let mut execution = transcript.try_open().unwrap();
     let after_open = account.snapshot();
     let canonical_root = execution
-        .try_execute_canonical_sequence_share(&canonical_ticket)
+        .try_execute_canonical_sequence_share(&primary_source.canonical, &canonical_ticket)
         .unwrap();
     let evidence_root = execution
         .try_execute_outcome_evidence_sequence_share(&evidence_ticket)
@@ -845,27 +845,37 @@ fn duplicate_canonical_share_ticket_is_an_ordinary_runtime_rejection() {
     let factory = factory(1);
     let account = account(&factory);
     let source = publish_transcript_source(&account);
+    let sibling = publish_transcript_source(&account);
     let (operation, keys) = derived_transcript_operation(&source.canonical);
     let mut transcript = operation
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
     let first = transcript
-        .plan_canonical_sequence_share(source.canonical_root)
+        .plan_canonical_sequence_share(&source.canonical, source.canonical_root)
         .unwrap();
     let duplicate = transcript
-        .plan_canonical_sequence_share(source.canonical_root)
+        .plan_canonical_sequence_share(&source.canonical, source.canonical_root)
         .unwrap();
     let _evidence = transcript
         .plan_outcome_evidence_sequence::<u8, _>(1, EvidenceRootTag)
         .unwrap();
 
     let mut execution = transcript.try_open().unwrap();
+    let before_wrong_source = account.snapshot();
+    assert!(matches!(
+        execution.try_execute_canonical_sequence_share(&sibling.canonical, &first),
+        Err(StoreExecutionError::Runtime(
+            StoreRuntimeError::InvalidSourceSlot
+        ))
+    ));
+    assert_eq!(execution.primary_cursor(), 0);
+    assert_eq!(account.snapshot(), before_wrong_source);
     let _ = execution
-        .try_execute_canonical_sequence_share(&first)
+        .try_execute_canonical_sequence_share(&source.canonical, &first)
         .unwrap();
     let before_duplicate = account.snapshot();
     assert!(matches!(
-        execution.try_execute_canonical_sequence_share(&duplicate),
+        execution.try_execute_canonical_sequence_share(&source.canonical, &duplicate),
         Err(StoreExecutionError::Runtime(
             StoreRuntimeError::InvalidSourceSlot
         ))
@@ -875,6 +885,8 @@ fn duplicate_canonical_share_ticket_is_an_ordinary_runtime_rejection() {
     drop(execution.prepare_minimal_fallback().unwrap().handoff());
     drop(source.canonical);
     drop(source.evidence);
+    drop(sibling.canonical);
+    drop(sibling.evidence);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
@@ -1148,6 +1160,7 @@ fn share_planning_rejects_foreign_evidence_accounts_and_wrong_canonical_source_s
     let source_account = account(&factory);
     let foreign_account = account(&factory);
     let source = publish_transcript_source(&source_account);
+    let foreign_source = publish_transcript_source(&foreign_account);
 
     let (foreign_operation, foreign_keys) = operation(&foreign_account);
     let mut foreign_transcript = foreign_operation
@@ -1176,17 +1189,31 @@ fn share_planning_rejects_foreign_evidence_accounts_and_wrong_canonical_source_s
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
     assert!(matches!(
-        transcript.plan_canonical_sequence_share(other_source.canonical_root),
+        transcript
+            .plan_canonical_sequence_share(&other_source.canonical, other_source.canonical_root,),
         Err(StoreTranscriptPlanError::Runtime(
             StoreRuntimeError::InvalidSourceSlot
         ))
     ));
+    assert_eq!(transcript.instruction_count(), 0);
+    assert!(matches!(
+        transcript.plan_canonical_sequence_share(
+            &foreign_source.canonical,
+            foreign_source.canonical_root,
+        ),
+        Err(StoreTranscriptPlanError::Runtime(
+            StoreRuntimeError::InvalidSourceSlot
+        ))
+    ));
+    assert_eq!(transcript.instruction_count(), 0);
     drop(transcript.prepare_minimal_fallback(102).unwrap().handoff());
 
     drop(source.canonical);
     drop(source.evidence);
     drop(other_source.canonical);
     drop(other_source.evidence);
+    drop(foreign_source.canonical);
+    drop(foreign_source.evidence);
     assert_eq!(source_account.snapshot().live_retained_bytes(), 0);
     assert_eq!(source_account.snapshot().live_retained_allocations(), 0);
     assert_eq!(foreign_account.snapshot().live_retained_bytes(), 0);
@@ -1204,7 +1231,7 @@ fn incomplete_derived_open_preserves_exact_source_authority_and_existing_tickets
         .try_begin_success_transcript(transcript_writer(keys), transcript_writer(keys))
         .unwrap();
     let canonical_ticket = transcript
-        .plan_canonical_sequence_share(source_a.canonical_root)
+        .plan_canonical_sequence_share(&source_a.canonical, source_a.canonical_root)
         .unwrap();
 
     let open_error = match transcript.try_open() {
@@ -1216,7 +1243,7 @@ fn incomplete_derived_open_preserves_exact_source_authority_and_existing_tickets
         .expect("incomplete derived transcript must preserve retry authority");
     assert!(recovery.is_retryable());
     assert!(matches!(
-        recovery.plan_canonical_sequence_share(source_b.canonical_root),
+        recovery.plan_canonical_sequence_share(&source_b.canonical, source_b.canonical_root),
         Err(StoreTranscriptPlanError::Runtime(
             StoreRuntimeError::InvalidSourceSlot
         ))
@@ -1227,7 +1254,7 @@ fn incomplete_derived_open_preserves_exact_source_authority_and_existing_tickets
 
     let mut execution = recovery.retry_open().unwrap();
     let _shared = execution
-        .try_execute_canonical_sequence_share(&canonical_ticket)
+        .try_execute_canonical_sequence_share(&source_a.canonical, &canonical_ticket)
         .expect("recovered transcript must retain its exact source authority");
     let _evidence = execution
         .try_execute_outcome_evidence_sequence(&evidence_ticket, |writer| writer.push(17))

@@ -1688,6 +1688,14 @@ where
         self.coordinator.retained_ledger().contains_phase(phase)
     }
 
+    pub(crate) fn require_canonical_source<CanonicalBlock>(
+        &self,
+        source: &PublishedCanonicalAggregate<CanonicalBlock>,
+    ) -> Result<(), super::RetainedPublicationError<D>> {
+        self.canonical_lineage
+            .require_source(self.account(), source)
+    }
+
     /// Records semantic completion against the operation's frozen phase catalog.
     pub(crate) fn try_complete_phase(&self, phase: P) -> Result<(), PhaseCompletionError<P>> {
         self.coordinator.retained_ledger().try_complete_phase(phase)
@@ -1740,18 +1748,23 @@ where
         plan: RetainedOperationStartPlan<P, D>,
         build_fallback: impl FnOnce() -> Result<F, RetainedBuildFailureCode>,
     ) -> Result<Self, RetainedOperationStartError<D>> {
+        let preflight = account.try_begin_account_preflight().map_err(|cause| {
+            RetainedOperationStartError::Writer(RetainedWriterError::AccountPoisoned(cause))
+        })?;
         if !source.belongs_to(account) {
             return Err(RetainedOperationStartError::Writer(
                 RetainedWriterError::ForeignAccount,
             ));
         }
+        let canonical_lineage = CanonicalLineageAuthority::derived(source);
+        drop(preflight);
         Self::try_start_inner(
             control,
             ledger_limits,
             phase_catalog,
             account,
             plan,
-            CanonicalLineageAuthority::derived(source),
+            canonical_lineage,
             build_fallback,
         )
     }

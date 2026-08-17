@@ -235,12 +235,27 @@ impl CanonicalLineageAuthority {
         }
     }
 
+    // Linearize account health and exact source identity before work or publication mutation.
     fn require_source<D, Block>(
         self,
+        account: &PhysicalStorageAccount,
         source: &PublishedCanonicalAggregate<Block>,
     ) -> Result<(), RetainedPublicationError<D>> {
+        let preflight = account.try_begin_account_preflight().map_err(|cause| {
+            RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(cause))
+        })?;
         match self {
-            Self::Derived { source_set, .. } if source_set == source.set_id() => Ok(()),
+            Self::Derived {
+                source_set,
+                source_len,
+            } if source.belongs_to(account) && source_set == source.set_id() => {
+                if source_len != source.len() {
+                    return Err(RetainedPublicationError::Writer(
+                        RetainedWriterError::AccountPoisoned(preflight.poison_ownership_graph()),
+                    ));
+                }
+                Ok(())
+            }
             Self::Fresh | Self::Derived { .. } => Err(RetainedPublicationError::InvalidSourceSlot),
         }
     }
@@ -291,6 +306,25 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    pub(crate) fn require_canonical_source<SourceBlock>(
+        &mut self,
+        source: &PublishedCanonicalAggregate<SourceBlock>,
+    ) -> Result<(), RetainedPublicationError<D>> {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        let Some(account) = self.account.as_ref() else {
+            return Err(RetainedPublicationError::Poisoned);
+        };
+        let result = self.canonical_lineage.require_source(account, source);
+        if let Err(cause) = &result
+            && let Some(containment) = retained_publication_error_containment(cause)
+        {
+            self.containment = containment;
+        }
+        result
+    }
+
     #[cfg(feature = "_u4-activation")]
     pub(crate) fn report_progress(&mut self, phase: PP, unit: U, completed: u64, total: Option<u64>)
     where
@@ -1573,8 +1607,7 @@ where
         }
         self.ensure_canonical_work_available()
             .map_err(CanonicalSourceBindError::Publication)?;
-        self.canonical_lineage
-            .require_source(source)
+        self.require_canonical_source(source)
             .map_err(CanonicalSourceBindError::Publication)?;
         if self.mode != RetainedOutcomeMode::SuccessCapable {
             return Err(CanonicalSourceBindError::Publication(
@@ -1624,8 +1657,7 @@ where
         }
         self.ensure_canonical_work_available()
             .map_err(CanonicalLeafInheritanceError::Publication)?;
-        self.canonical_lineage
-            .require_source(source)
+        self.require_canonical_source(source)
             .map_err(CanonicalLeafInheritanceError::Publication)?;
         if self.mode != RetainedOutcomeMode::SuccessCapable {
             return Err(CanonicalLeafInheritanceError::Publication(
@@ -1836,7 +1868,7 @@ where
             return Err(RetainedPublicationError::Poisoned);
         }
         self.ensure_canonical_work_available()?;
-        self.canonical_lineage.require_source(source)?;
+        self.require_canonical_source(source)?;
         let canonical_plan = self
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
@@ -1898,7 +1930,7 @@ where
             return Err(RetainedPublicationError::Poisoned);
         }
         self.ensure_canonical_work_available()?;
-        self.canonical_lineage.require_source(source)?;
+        self.require_canonical_source(source)?;
         let canonical_plan = self
             .canonical_plan
             .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
@@ -2097,7 +2129,7 @@ where
             return Err(RetainedPublicationError::Poisoned);
         }
         self.ensure_canonical_work_available()?;
-        self.canonical_lineage.require_source(source)?;
+        self.require_canonical_source(source)?;
         if self.mode != RetainedOutcomeMode::SuccessCapable {
             return Err(RetainedPublicationError::WrongOutcomeMode);
         }
@@ -2156,7 +2188,7 @@ where
             return Err(RetainedPublicationError::Poisoned);
         }
         self.ensure_canonical_work_available()?;
-        self.canonical_lineage.require_source(source)?;
+        self.require_canonical_source(source)?;
         if self.mode != RetainedOutcomeMode::SuccessCapable {
             return Err(RetainedPublicationError::WrongOutcomeMode);
         }

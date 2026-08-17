@@ -2,8 +2,7 @@ use super::*;
 
 use crate::ledger::LedgerLimits;
 
-type TestDerivedOperation<'source> =
-    DerivedRetainedStoreOperation<'source, TestOwner, TestProgress, TestUnit>;
+type TestDerivedOperation = DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
 
 struct MappedPrefixSource {
     canonical: PublishedCanonicalStore<RecordBlock, TestRootTag>,
@@ -11,11 +10,11 @@ struct MappedPrefixSource {
     bytes: CanonicalBytesRef<TestTag>,
 }
 
-fn test_derived_operation_with_work_limits<'source>(
-    source: &'source PublishedCanonicalStore<RecordBlock, TestRootTag>,
+fn test_derived_operation_with_work_limits(
+    source: &PublishedCanonicalStore<RecordBlock, TestRootTag>,
     attempted_limit: u64,
     consumed_limit: u64,
-) -> (TestDerivedOperation<'source>, TestKeys) {
+) -> (TestDerivedOperation, TestKeys) {
     let (domain, keys) = test_vocabulary();
     let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::new(
         keys.failure_terminal_dimension,
@@ -173,16 +172,17 @@ fn mapped_prefix_retargets_historical_references_and_appends_exact_row() {
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("mapped-prefix assembly");
     assembly
-        .try_bind_canonical_source(keys.dimension)
+        .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let sequence = assembly
-        .try_share_canonical(source.sequence)
+        .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let bytes = assembly
-        .try_share_canonical(source.bytes)
+        .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let root = assembly
         .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+            &source.canonical,
             source.canonical.root_ref(),
             RecordPlan::new(2, 2).expect("source plan"),
             RecordPlan::new(3, 2).expect("destination plan"),
@@ -255,19 +255,20 @@ fn mapped_prefix_rejects_source_shape_and_destination_shape_before_mutation() {
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("shape-rejection assembly");
     assembly
-        .try_bind_canonical_source(keys.dimension)
+        .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let _sequence = assembly
-        .try_share_canonical(source.sequence)
+        .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let _bytes = assembly
-        .try_share_canonical(source.bytes)
+        .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let before = account.snapshot();
 
     assert_eq!(
         assembly
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+                &source.canonical,
                 source.canonical.root_ref(),
                 RecordPlan::new(1, 2).expect("wrong source plan"),
                 RecordPlan::new(2, 2).expect("destination plan"),
@@ -284,6 +285,7 @@ fn mapped_prefix_rejects_source_shape_and_destination_shape_before_mutation() {
     assert_eq!(
         assembly
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+                &source.canonical,
                 source.canonical.root_ref(),
                 RecordPlan::new(2, 2).expect("source plan"),
                 RecordPlan::new(3, 1).expect("wrong destination fields"),
@@ -300,6 +302,7 @@ fn mapped_prefix_rejects_source_shape_and_destination_shape_before_mutation() {
     assert_eq!(
         assembly
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+                &source.canonical,
                 source.canonical.root_ref(),
                 RecordPlan::new(2, 2).expect("source plan"),
                 RecordPlan::new(1, 2).expect("undersized destination plan"),
@@ -335,19 +338,20 @@ fn mapped_prefix_build_failure_rolls_back_and_leaves_source_rewritable() {
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("build-failure assembly");
     assembly
-        .try_bind_canonical_source(keys.dimension)
+        .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let sequence = assembly
-        .try_share_canonical(source.sequence)
+        .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let bytes = assembly
-        .try_share_canonical(source.bytes)
+        .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let before = account.snapshot();
 
     assert_eq!(
         assembly
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+                &source.canonical,
                 source.canonical.root_ref(),
                 RecordPlan::new(2, 2).expect("source plan"),
                 RecordPlan::new(3, 2).expect("destination plan"),
@@ -367,6 +371,7 @@ fn mapped_prefix_build_failure_rolls_back_and_leaves_source_rewritable() {
 
     let root = assembly
         .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+            &source.canonical,
             source.canonical.root_ref(),
             RecordPlan::new(2, 2).expect("source plan"),
             RecordPlan::new(3, 2).expect("destination plan"),
@@ -431,18 +436,19 @@ fn mapped_prefix_ignored_control_failure_is_sticky_and_fails_closed() {
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("sticky-control assembly");
     assembly
-        .try_bind_canonical_source(keys.dimension)
+        .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let _sequence = assembly
-        .try_share_canonical(source.sequence)
+        .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let _bytes = assembly
-        .try_share_canonical(source.bytes)
+        .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let before = account.snapshot();
 
     assert!(matches!(
         assembly.try_rewrite_canonical_records_with_mapped_prefix_controlled(
+            &source.canonical,
             source.canonical.root_ref(),
             RecordPlan::new(2, 2).expect("source plan"),
             RecordPlan::new(3, 2).expect("destination plan"),
@@ -492,18 +498,19 @@ fn mapped_prefix_work_failure_during_copy_rolls_back_and_fails_closed() {
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("mid-prefix failure assembly");
     assembly
-        .try_bind_canonical_source(keys.dimension)
+        .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let _sequence = assembly
-        .try_share_canonical(source.sequence)
+        .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let _bytes = assembly
-        .try_share_canonical(source.bytes)
+        .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let before = account.snapshot();
 
     assert!(matches!(
         assembly.try_rewrite_canonical_records_with_mapped_prefix_controlled(
+            &source.canonical,
             source.canonical.root_ref(),
             RecordPlan::new(2, 2).expect("source plan"),
             RecordPlan::new(3, 2).expect("destination plan"),
@@ -546,16 +553,17 @@ fn mapped_prefix_missing_mapping_and_incomplete_append_roll_back_before_retry() 
         .try_publication_assembly(test_publication_plan(keys, 3, 1))
         .expect("recoverable mapped-prefix assembly");
     assembly
-        .try_bind_canonical_source(keys.dimension)
+        .try_bind_canonical_source(&source.canonical, keys.dimension)
         .expect("bound canonical source");
     let sequence = assembly
-        .try_share_canonical(source.sequence)
+        .try_share_canonical(&source.canonical, source.sequence)
         .expect("mapped sequence");
     let before_missing_mapping = account.snapshot();
 
     assert_eq!(
         assembly
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+                &source.canonical,
                 source.canonical.root_ref(),
                 RecordPlan::new(2, 2).expect("source plan"),
                 RecordPlan::new(3, 2).expect("destination plan"),
@@ -570,12 +578,13 @@ fn mapped_prefix_missing_mapping_and_incomplete_append_roll_back_before_retry() 
     assert_live_storage_unchanged(before_missing_mapping, account.snapshot());
 
     let bytes = assembly
-        .try_share_canonical(source.bytes)
+        .try_share_canonical(&source.canonical, source.bytes)
         .expect("mapped bytes");
     let before_incomplete_append = account.snapshot();
     assert_eq!(
         assembly
             .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+                &source.canonical,
                 source.canonical.root_ref(),
                 RecordPlan::new(2, 2).expect("source plan"),
                 RecordPlan::new(3, 2).expect("destination plan"),
@@ -594,6 +603,7 @@ fn mapped_prefix_missing_mapping_and_incomplete_append_roll_back_before_retry() 
 
     let root = assembly
         .try_rewrite_canonical_records_with_mapped_prefix_controlled(
+            &source.canonical,
             source.canonical.root_ref(),
             RecordPlan::new(2, 2).expect("source plan"),
             RecordPlan::new(3, 2).expect("destination plan"),

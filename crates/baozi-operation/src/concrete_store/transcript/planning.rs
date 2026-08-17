@@ -4,11 +4,11 @@ use super::super::{
     ByteBlock, BytesBatchPlan, BytesPlan, CanonicalBytesRef, CanonicalInheritanceSource,
     CanonicalSequenceRef, CanonicalUtf8Ref, FreshStoreLineage, OutcomeEvidenceBytesRef,
     OutcomeEvidenceSequenceRef, OutcomeEvidenceUtf8Ref, PreparedStoreFallback,
-    PublishedOutcomeEvidenceStore, RecordPlan, RetainedStoreBlockTablePlan,
-    RetainedStoreOpenRecovery, RetainedStoreOperation, RetainedStorePublicationPlan,
-    RetainedStoreWriterPlan, ScalarSequence, SequenceBatchPlan, SequencePlan, StoreDestination,
-    StoreOpenFallbackOnly, StoreOpenRecoveryAuthority, StorePlanError, StorePrepareError,
-    StoreRuntimeError, StoredScalar, Utf8BatchPlan, Utf8Plan,
+    PublishedCanonicalStore, PublishedOutcomeEvidenceStore, RecordPlan,
+    RetainedStoreBlockTablePlan, RetainedStoreOpenRecovery, RetainedStoreOperation,
+    RetainedStorePublicationPlan, RetainedStoreWriterPlan, ScalarSequence, SequenceBatchPlan,
+    SequencePlan, StoreDestination, StoreOpenFallbackOnly, StoreOpenRecoveryAuthority,
+    StorePlanError, StorePrepareError, StoreRuntimeError, StoredScalar, Utf8BatchPlan, Utf8Plan,
 };
 use super::execution::RetainedStoreExecution;
 use super::{
@@ -602,7 +602,7 @@ where
     }
 }
 
-impl<'source, O, PP, U> RetainedStoreTranscript<O, PP, U, CanonicalInheritanceSource<'source>>
+impl<O, PP, U> RetainedStoreTranscript<O, PP, U, CanonicalInheritanceSource>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -623,43 +623,55 @@ where
         .map(PlannedCanonicalShare::new)
     }
 
-    pub fn plan_canonical_sequence_share<T, Tag>(
+    pub fn plan_canonical_sequence_share<SourceRootKind, SourceRootTag, T, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         source_ref: CanonicalSequenceRef<T, Tag>,
     ) -> Result<PlannedCanonicalShare<ScalarSequence<T>, Tag>, StoreTranscriptPlanError>
     where
         T: StoredScalar,
         Tag: Copy + Send + Sync + 'static,
     {
-        let source = self.operation.lineage.source;
+        let source = source.share_source();
+        self.operation
+            .require_canonical_source_from(source)
+            .map_err(StoreTranscriptPlanError::Runtime)?;
         if super::super::read_canonical_source_sequence(source, source_ref).is_none() {
             return Err(invalid_source_slot());
         }
         self.mint_checked_canonical_share(source_ref)
     }
 
-    pub fn plan_canonical_bytes_share<Tag>(
+    pub fn plan_canonical_bytes_share<SourceRootKind, SourceRootTag, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         source_ref: CanonicalBytesRef<Tag>,
     ) -> Result<PlannedCanonicalShare<ByteBlock, Tag>, StoreTranscriptPlanError>
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        let source = self.operation.lineage.source;
+        let source = source.share_source();
+        self.operation
+            .require_canonical_source_from(source)
+            .map_err(StoreTranscriptPlanError::Runtime)?;
         if super::super::read_canonical_source_bytes(source, source_ref).is_none() {
             return Err(invalid_source_slot());
         }
         self.mint_checked_canonical_share(source_ref)
     }
 
-    pub fn plan_canonical_utf8_share<Tag>(
+    pub fn plan_canonical_utf8_share<SourceRootKind, SourceRootTag, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         source_ref: CanonicalUtf8Ref<Tag>,
     ) -> Result<PlannedCanonicalShare<super::super::Utf8Block, Tag>, StoreTranscriptPlanError>
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        let source = self.operation.lineage.source;
+        let source = source.share_source();
+        self.operation
+            .require_canonical_source_from(source)
+            .map_err(StoreTranscriptPlanError::Runtime)?;
         if super::super::read_canonical_source_utf8(source, source_ref).is_none() {
             return Err(invalid_source_slot());
         }
@@ -793,15 +805,16 @@ where
     }
 }
 
-impl<'source, O, PP, U> StoreTranscriptOpenRecovery<O, PP, U, CanonicalInheritanceSource<'source>>
+impl<O, PP, U> StoreTranscriptOpenRecovery<O, PP, U, CanonicalInheritanceSource>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     /// Adds one canonical source share without exposing the recovered transcript owner.
-    pub fn plan_canonical_sequence_share<T, Tag>(
+    pub fn plan_canonical_sequence_share<SourceRootKind, SourceRootTag, T, Tag>(
         &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
         source_ref: CanonicalSequenceRef<T, Tag>,
     ) -> Result<PlannedCanonicalShare<ScalarSequence<T>, Tag>, StoreTranscriptPlanError>
     where
@@ -809,7 +822,7 @@ where
         Tag: Copy + Send + Sync + 'static,
     {
         self.retry_transcript_mut()?
-            .plan_canonical_sequence_share(source_ref)
+            .plan_canonical_sequence_share(source, source_ref)
     }
 }
 

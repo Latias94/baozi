@@ -579,6 +579,11 @@ impl PendingAccountActionAdmission<'_> {
 }
 
 impl<'account> AccountPreflightGuard<'account> {
+    pub(super) fn poison_ownership_graph(mut self) -> AccountPoisoned {
+        self.state
+            .record_poison(AccountPoisonReason::OwnershipGraphUnverified)
+    }
+
     pub(super) fn admit_action(
         self,
     ) -> Result<PendingAccountActionAdmission<'account>, AccountActionAdmissionError> {

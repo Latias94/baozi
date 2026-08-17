@@ -199,9 +199,50 @@ impl NodeTransformEditTarget {
 /// Keeping the program concrete and closed makes every new edit kind update planning,
 /// materialization, validation, remapping, and provenance together. It deliberately does not use
 /// a backend trait or an arbitrary payload.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(super) enum NodeSceneEditProgram {
     NodeTransform(NodeTransformRewrite),
+}
+
+/// Exact structural consequences of one sealed edit program.
+///
+/// Execution consumes this shape instead of rediscovering physical rewrites from operation-
+/// specific booleans. Every future program variant must define its complete shape here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NodeSceneEditShape {
+    rewrite_node_table: bool,
+    rewrite_scene_directory: bool,
+    operation_specific_rewrite_blocks: usize,
+    profile_operation_code: u8,
+}
+
+impl NodeSceneEditShape {
+    const fn node_transform(rewrite: NodeTransformRewrite) -> Self {
+        let rewrite_node_shape = rewrite.requires_node_shape_rewrite();
+        Self {
+            rewrite_node_table: rewrite_node_shape,
+            rewrite_scene_directory: rewrite_node_shape,
+            operation_specific_rewrite_blocks: if rewrite_node_shape { 3 } else { 1 },
+            profile_operation_code:
+                crate::canonical_scene::store::schema::profile::PROFILE_OPERATION_TRANSFORM,
+        }
+    }
+
+    pub(super) const fn rewrites_node_table(self) -> bool {
+        self.rewrite_node_table
+    }
+
+    pub(super) const fn rewrites_scene_directory(self) -> bool {
+        self.rewrite_scene_directory
+    }
+
+    pub(super) const fn operation_specific_rewrite_blocks(self) -> usize {
+        self.operation_specific_rewrite_blocks
+    }
+
+    pub(super) const fn profile_operation_code(self) -> u8 {
+        self.profile_operation_code
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -242,21 +283,15 @@ impl NodeSceneEditProgram {
         Self::NodeTransform(NodeTransformRewrite::new(target, replacement))
     }
 
-    pub(super) const fn operation_kind(self) -> OperationKind {
+    pub(super) const fn shape(&self) -> NodeSceneEditShape {
+        match self {
+            Self::NodeTransform(rewrite) => NodeSceneEditShape::node_transform(*rewrite),
+        }
+    }
+
+    pub(super) const fn operation_kind(&self) -> OperationKind {
         match self {
             Self::NodeTransform(_) => OperationKind::Transform,
-        }
-    }
-
-    pub(super) const fn node_transform_rewrite(self) -> NodeTransformRewrite {
-        match self {
-            Self::NodeTransform(rewrite) => rewrite,
-        }
-    }
-
-    pub(super) const fn requires_node_shape_rewrite(self) -> bool {
-        match self {
-            Self::NodeTransform(rewrite) => rewrite.requires_node_shape_rewrite(),
         }
     }
 }
@@ -269,10 +304,6 @@ impl NodeSceneEditProgram {
 pub(super) struct NodeSceneEditFixedCounts {
     pub(super) evidence: SceneEvidenceCounts,
     pub(super) canonical_blocks: CheckedCount,
-    /// Blocks whose domain values are directly affected by the sealed edit program.
-    ///
-    /// This is a semantic rewrite count, not physical new-allocation authority.
-    pub(super) operation_specific_rewrite_blocks: CheckedCount,
     /// Every target block that must be newly retained for the destination generation.
     pub(super) new_canonical_blocks: CheckedCount,
     pub(super) evidence_leaves: NodeSceneEvidenceLeafPlan,
@@ -358,13 +389,16 @@ impl NodeSceneEditProfileTarget {
 impl NodeSceneEditFixedCounts {
     fn try_new_node_transform(
         input: &ValidatedNodeScene,
-        target: NodeTransformEditTarget,
+        program: &NodeSceneEditProgram,
         source_node_rows: usize,
         source_root_rows: usize,
         source_edge_rows: usize,
         source_transform_scalars: usize,
         output_transform_scalars: usize,
     ) -> Result<Self, NodeSceneEditPlanError> {
+        let target = match program {
+            NodeSceneEditProgram::NodeTransform(rewrite) => rewrite.target(),
+        };
         let source_evidence = input.proof.counts();
         let profile_target = NodeSceneEditProfileTarget::try_for_node_transform(target)?;
         let profile = NodeSceneEditProfilePlan::try_new(input, profile_target, source_evidence)?;
@@ -451,11 +485,8 @@ impl NodeSceneEditFixedCounts {
             "source root and edge counts do not partition the source nodes",
         )?;
 
-        let custom_semantic_rewrite_block_count = if target.requires_node_shape_rewrite() {
-            3
-        } else {
-            1
-        };
+        let custom_semantic_rewrite_block_count =
+            program.shape().operation_specific_rewrite_blocks();
         let primitive_rows = usize::try_from(source_evidence.primitive_count).map_err(|_| {
             NodeSceneEditPlanError::SizeOverflow {
                 quantity: "shareable leaf primitive inspection work",
@@ -492,10 +523,6 @@ impl NodeSceneEditFixedCounts {
                 reason: "canonical source lacks the structural blocks required by a transform edit",
             });
         }
-        let operation_specific_rewrite_blocks = CheckedCount::try_from_usize(
-            custom_semantic_rewrite_block_count,
-            "operation-specific rewrite block count",
-        )?;
         let new_canonical_blocks =
             CheckedCount::try_from_usize(new_canonical_block_count, "new canonical block count")?;
         let canonical_attribution_slots = CheckedCount::try_from_usize(
@@ -510,7 +537,6 @@ impl NodeSceneEditFixedCounts {
         Ok(Self {
             evidence,
             canonical_blocks,
-            operation_specific_rewrite_blocks,
             new_canonical_blocks,
             evidence_leaves,
             canonical_attribution_slots,
@@ -839,7 +865,7 @@ impl<'scene> PendingNodeSceneEdit<'scene> {
             })?;
         let counts = NodeSceneEditFixedCounts::try_new_node_transform(
             input,
-            target,
+            &program,
             source_node_rows,
             source_root_rows,
             source_edge_rows,
@@ -906,7 +932,10 @@ mod tests {
     use crate::entity::AuthoredTransform;
     use crate::math::Mat4;
 
-    use super::{NodeSceneEditPlanError, NodeSceneEvidenceLeafPlan, NodeTransformEditTarget};
+    use super::{
+        NodeSceneEditPlanError, NodeSceneEditProgram, NodeSceneEvidenceLeafPlan,
+        NodeTransformEditTarget,
+    };
 
     #[test]
     fn shareable_leaf_plan_requires_exact_source_and_output_partitions() {
@@ -958,6 +987,35 @@ mod tests {
         .expect("the first source node must map to canonical row one");
 
         assert!(!target.requires_node_shape_rewrite());
+
+        let shape =
+            NodeSceneEditProgram::node_transform(target, AuthoredTransform::identity_trs()).shape();
+        assert!(!shape.rewrites_node_table());
+        assert!(!shape.rewrites_scene_directory());
+        assert_eq!(shape.operation_specific_rewrite_blocks(), 1);
+        assert_eq!(
+            shape.profile_operation_code(),
+            crate::canonical_scene::store::schema::profile::PROFILE_OPERATION_TRANSFORM,
+        );
+    }
+
+    #[test]
+    fn transform_layout_change_seals_all_structural_rewrites() {
+        let replacement = AuthoredTransform::try_matrix(Mat4::IDENTITY)
+            .expect("identity matrix must be a valid authored transform");
+        let target = NodeTransformEditTarget::try_new(
+            0,
+            1,
+            0,
+            AuthoredTransform::identity_trs(),
+            replacement,
+        )
+        .expect("the first source node must map to canonical row one");
+        let shape = NodeSceneEditProgram::node_transform(target, replacement).shape();
+
+        assert!(shape.rewrites_node_table());
+        assert!(shape.rewrites_scene_directory());
+        assert_eq!(shape.operation_specific_rewrite_blocks(), 3);
     }
 
     #[test]

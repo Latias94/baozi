@@ -177,11 +177,7 @@ fn edit_publication_plan(
     keys: SceneStoreKeys,
     pending: &PendingNodeSceneEdit<'_>,
 ) -> Result<RetainedStorePublicationPlan, StorePlanError> {
-    let expected_custom_rewrites = if pending.program.requires_node_shape_rewrite() {
-        3
-    } else {
-        1
-    };
+    let shape = pending.program.shape();
     let source_partition = pending
         .counts
         .source_root_rows
@@ -194,7 +190,7 @@ fn edit_publication_plan(
         .as_usize()
         .checked_add(pending.counts.evidence_leaves.inherited.as_usize())
         .ok_or(StorePlanError::SizeOverflow)?;
-    if pending.counts.operation_specific_rewrite_blocks.as_usize() != expected_custom_rewrites
+    if shape.operation_specific_rewrite_blocks() > pending.counts.new_canonical_blocks.as_usize()
         || !pending.counts.evidence_leaves.is_exact()
         || pending.counts.evidence_leaves.source.as_u32()
             != pending.input.proof.counts().shareable_leaf_block_count
