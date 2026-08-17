@@ -16,7 +16,7 @@ use super::super::super::{
     SceneStoreOpenRecovery, TracerSceneFallback, burn_generation_reservation, final_progress,
 };
 use super::super::publication::node_scene_failure_code;
-use super::super::scratch::{NodeSceneValidationScratchOwner, NodeSceneValidationScratchPlan};
+use super::super::scratch::{NodeSceneCentralValidationPlan, NodeSceneValidationScratchOwner};
 use super::super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_CONTROL_INTERRUPTION_CODE,
     NODE_SCENE_WORK_INTERRUPTION_CODE, NodeSceneRichFailure, NodeSceneStoreFailureValidation,
@@ -97,7 +97,7 @@ pub(super) fn prepare_edit_candidate(
     counts: SceneEvidenceCounts,
     canonical_unique_block_count: u32,
     deformation_uniqueness_mark_count: usize,
-    validation_scratch_plan: NodeSceneValidationScratchPlan,
+    central_validation_plan: NodeSceneCentralValidationPlan,
     invalidations: CanonicalInvalidations,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
@@ -122,7 +122,7 @@ pub(super) fn prepare_edit_candidate(
                     counts,
                     canonical_unique_block_count,
                     deformation_uniqueness_mark_count,
-                    validation_scratch_plan,
+                    central_validation_plan,
                     &mut scratch_view,
                     |amount| work.observe(control, amount),
                 )?;

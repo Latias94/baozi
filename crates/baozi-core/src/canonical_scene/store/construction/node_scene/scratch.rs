@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use baozi_operation::__canonical_activation::{
     CanonicalReservation, CanonicalValidationCheckpoint, CanonicalValidationPreparationError,
     CanonicalValidationSession,
@@ -34,6 +36,74 @@ use super::{
     NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneWorkMeter, SceneEvidenceCounts, SceneStoreAssembly,
     SceneStoreControlCheckpoint, SceneStoreKeys,
 };
+
+/// Complete central-validation authority derived from one sealed Scene construction plan.
+///
+/// Scratch shape and exact work stay coupled so a derived edit can rebind the validated source
+/// without rescanning canonical storage or accepting a caller-supplied work envelope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::canonical_scene::store) struct NodeSceneCentralValidationPlan {
+    scratch: NodeSceneValidationScratchPlan,
+    work: NonZeroU64,
+}
+
+impl NodeSceneCentralValidationPlan {
+    pub(super) fn try_new(
+        scratch: NodeSceneValidationScratchPlan,
+        work: u64,
+    ) -> Result<Self, StorePlanError> {
+        Ok(Self {
+            scratch,
+            work: NonZeroU64::new(work).ok_or(StorePlanError::InvalidBlockTable)?,
+        })
+    }
+
+    pub(in crate::canonical_scene::store) const fn scratch_plan(
+        self,
+    ) -> NodeSceneValidationScratchPlan {
+        self.scratch
+    }
+
+    pub(in crate::canonical_scene::store) const fn work(self) -> NonZeroU64 {
+        self.work
+    }
+
+    pub(super) fn try_rebind_node_transform(
+        self,
+        counts: SceneEvidenceCounts,
+        profile_counts: ProfileMeteredCounts,
+        source_transform_scalars: usize,
+        output_transform_scalars: usize,
+    ) -> Result<Self, StorePlanError> {
+        let scratch = self
+            .scratch
+            .try_rebind_profile_edit(counts, profile_counts)?;
+        let source_profile_work = self
+            .scratch
+            .profile_counts()
+            .validation_work()
+            .ok_or(StorePlanError::SizeOverflow)?;
+        let output_profile_work = scratch
+            .profile_counts()
+            .validation_work()
+            .ok_or(StorePlanError::SizeOverflow)?;
+        let source_transform_work =
+            u64::try_from(source_transform_scalars).map_err(|_| StorePlanError::SizeOverflow)?;
+        let output_transform_work =
+            u64::try_from(output_transform_scalars).map_err(|_| StorePlanError::SizeOverflow)?;
+        let unchanged_work = self
+            .work
+            .get()
+            .checked_sub(source_profile_work)
+            .and_then(|work| work.checked_sub(source_transform_work))
+            .ok_or(StorePlanError::InvalidBlockTable)?;
+        let output_work = unchanged_work
+            .checked_add(output_profile_work)
+            .and_then(|work| work.checked_add(output_transform_work))
+            .ok_or(StorePlanError::SizeOverflow)?;
+        Self::try_new(scratch, output_work)
+    }
+}
 
 /// Exact validation-scratch capacity and initialization work derived from one sealed Scene plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

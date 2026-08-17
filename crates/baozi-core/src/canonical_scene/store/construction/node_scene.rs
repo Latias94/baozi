@@ -51,7 +51,8 @@ mod profile;
 mod publication;
 mod scratch;
 pub(in crate::canonical_scene::store) use scratch::{
-    NodeSceneMeteredValidationScratch, NodeSceneValidationScratchPlan,
+    NodeSceneCentralValidationPlan, NodeSceneMeteredValidationScratch,
+    NodeSceneValidationScratchPlan,
 };
 pub(in crate::canonical_scene::store) mod semantic;
 pub(in crate::canonical_scene::store) mod snapshot;

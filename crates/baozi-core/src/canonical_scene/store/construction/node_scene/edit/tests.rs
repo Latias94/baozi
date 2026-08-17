@@ -518,6 +518,10 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     let target_owner_row = pending.counts.profile.target_owner_row.as_usize();
     let expected_parent_delta = pending.counts.profile.target_attachment_count.as_u32();
     let expected_attachment_count = pending.counts.profile.output_attachment_count.as_u32();
+    let source_transform_work = u64::try_from(pending.counts.source_transform_scalars.as_usize())
+        .expect("source transform validation work");
+    let output_transform_work = u64::try_from(pending.counts.output_transform_scalars.as_usize())
+        .expect("output transform validation work");
     let physical_before = account.snapshot();
 
     let prepared = pending
@@ -533,8 +537,10 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     assert_ne!(output_generation, input_generation);
     assert_eq!(generation_source.load(Ordering::Relaxed), 2);
     assert!(output.scene.account().is_same_account(source.account()));
-    let source_validation = source.proof.validation_scratch_plan();
-    let output_validation = output.scene.proof.validation_scratch_plan();
+    let source_central_validation = source.proof.central_validation_plan();
+    let output_central_validation = output.scene.proof.central_validation_plan();
+    let source_validation = source_central_validation.scratch_plan();
+    let output_validation = output_central_validation.scratch_plan();
     assert_ne!(
         output_validation, source_validation,
         "the appended lineage segment must grow the sealed validation envelope",
@@ -557,6 +563,29 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     );
     let source_profile = source_validation.profile_counts();
     let output_profile = output_validation.profile_counts();
+    let expected_validation_work = source_central_validation
+        .work()
+        .get()
+        .checked_sub(
+            source_profile
+                .validation_work()
+                .expect("source profile validation work"),
+        )
+        .and_then(|work| work.checked_sub(source_transform_work))
+        .and_then(|work| {
+            work.checked_add(
+                output_profile
+                    .validation_work()
+                    .expect("output profile validation work"),
+            )
+        })
+        .and_then(|work| work.checked_add(output_transform_work))
+        .expect("output central validation work");
+    assert_eq!(
+        output_central_validation.work().get(),
+        expected_validation_work,
+        "the published proof must retain the exact plan-derived central-validation envelope",
+    );
     assert_eq!(
         output_profile.provenance_count,
         source_profile.provenance_count + 1

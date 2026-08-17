@@ -18,7 +18,8 @@ mod spatial;
 
 use super::super::construction::node_scene::SceneEvidenceCounts;
 use super::super::construction::node_scene::{
-    NodeSceneMaterializedRefs, NodeSceneMeteredValidationScratch, NodeSceneValidationScratchPlan,
+    NodeSceneCentralValidationPlan, NodeSceneMaterializedRefs, NodeSceneMeteredValidationScratch,
+    NodeSceneValidationScratchPlan,
 };
 use super::super::node_scene::{authored_transform_scalar_count, decode_authored_transform};
 use super::super::production::{
@@ -513,7 +514,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
     source_root_count: usize,
     source_edge_count: usize,
     deformation_uniqueness_mark_count: usize,
-    validation_scratch_plan: NodeSceneValidationScratchPlan,
+    central_validation_plan: NodeSceneCentralValidationPlan,
     counts: SceneEvidenceCounts,
 }
 
@@ -955,7 +956,13 @@ impl NodeSceneValidationProof {
     pub(in crate::canonical_scene::store) const fn validation_scratch_plan(
         self,
     ) -> NodeSceneValidationScratchPlan {
-        self.validation_scratch_plan
+        self.central_validation_plan.scratch_plan()
+    }
+
+    pub(in crate::canonical_scene::store) const fn central_validation_plan(
+        self,
+    ) -> NodeSceneCentralValidationPlan {
+        self.central_validation_plan
     }
 
     pub(in crate::canonical_scene::store) fn material_count(self) -> usize {
@@ -1486,7 +1493,7 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_graph<
     expected_animation: &ValidatedAnimationBatch<'_, ANR>,
     expected_profile: &ValidatedProfileBatch<'_, PR>,
     expected_counts: SceneEvidenceCounts,
-    validation_scratch_plan: NodeSceneValidationScratchPlan,
+    central_validation_plan: NodeSceneCentralValidationPlan,
     profile_scratch: &mut ProfileValidationScratch<'_>,
     mut observe_work: impl FnMut(u64) -> Result<(), E>,
 ) -> Result<Option<NodeSceneValidationProof>, E> {
@@ -1503,7 +1510,7 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_graph<
         expected_animation,
         expected_profile,
         expected_counts,
-        validation_scratch_plan,
+        central_validation_plan,
         profile_scratch,
         &mut |amount| match observe_work(amount) {
             Ok(()) => Some(()),
@@ -2269,7 +2276,7 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_canonical_graph_met
     >,
     expected_counts: SceneEvidenceCounts,
     expected_refs: NodeSceneMaterializedRefs,
-    validation_plan: NodeSceneValidationScratchPlan,
+    validation_plan: NodeSceneCentralValidationPlan,
     scratch: &mut NodeSceneMeteredValidationScratch<'_, 'session>,
 ) -> Result<Option<NodeSceneValidationProof>, StoreWorkError>
 where
@@ -2299,7 +2306,8 @@ where
         return Ok(None);
     };
 
-    let geometry_requirements = validation_plan.geometry_requirements();
+    let scratch_plan = validation_plan.scratch_plan();
+    let geometry_requirements = scratch_plan.geometry_requirements();
     let geometry_counts = GeometryCanonicalCounts::new(
         expected_counts.logical_mesh_count,
         expected_counts.primitive_count,
@@ -2340,7 +2348,7 @@ where
         return Ok(None);
     };
 
-    let deformation_requirements = validation_plan.deformation_requirements();
+    let deformation_requirements = scratch_plan.deformation_requirements();
     let Some(deformation) = validate_deformation_graph_canonical_metered(
         session,
         node.deformation_directory,
@@ -2368,7 +2376,7 @@ where
         return Ok(None);
     };
 
-    let animation_counts = validation_plan.animation_counts();
+    let animation_counts = scratch_plan.animation_counts();
     let Some(animation) = validate_animation_graph_metered(
         session,
         node.animation_directory,
@@ -2392,7 +2400,7 @@ where
         return Ok(None);
     };
 
-    let profile_counts = validation_plan.profile_counts();
+    let profile_counts = scratch_plan.profile_counts();
     let Some(profile) = validate_profile_graph_metered(
         session,
         node.profile_directory,
@@ -3022,7 +3030,7 @@ where
         source_root_count: node.source_root_count,
         source_edge_count: node.source_edge_count,
         deformation_uniqueness_mark_count: deformation.maximum_uniqueness_count,
-        validation_scratch_plan: validation_plan,
+        central_validation_plan: validation_plan,
         counts: expected_counts,
     }))
 }
@@ -3038,7 +3046,7 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_canonical_graph<E>(
     expected_counts: SceneEvidenceCounts,
     canonical_unique_block_count: u32,
     deformation_uniqueness_capacity: usize,
-    validation_scratch_plan: NodeSceneValidationScratchPlan,
+    central_validation_plan: NodeSceneCentralValidationPlan,
     scratch: &mut NodeSceneValidationScratch<'_>,
     mut observe_work: impl FnMut(u64) -> Result<(), E>,
 ) -> Result<Option<NodeSceneValidationProof>, E> {
@@ -3050,7 +3058,7 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_canonical_graph<E>(
         expected_counts,
         canonical_unique_block_count,
         deformation_uniqueness_capacity,
-        validation_scratch_plan,
+        central_validation_plan,
         scratch,
         &mut |amount| match observe_work(amount) {
             Ok(()) => Some(()),
@@ -3077,7 +3085,7 @@ fn validate_node_scene_canonical_graph_inner(
     expected_counts: SceneEvidenceCounts,
     canonical_unique_block_count: u32,
     deformation_uniqueness_capacity: usize,
-    validation_scratch_plan: NodeSceneValidationScratchPlan,
+    central_validation_plan: NodeSceneCentralValidationPlan,
     scratch: &mut NodeSceneValidationScratch<'_>,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
 ) -> Option<NodeSceneValidationProof> {
@@ -3192,7 +3200,7 @@ fn validate_node_scene_canonical_graph_inner(
         deformation,
         animation.refs,
         profile,
-        validation_scratch_plan,
+        central_validation_plan,
         expected_counts,
     ))
 }
@@ -3649,7 +3657,7 @@ fn assemble_node_scene_validation_proof(
     deformation: DeformationValidatedShape,
     animation: AnimationValidatedRefs,
     profile: ProfileValidatedRefs,
-    validation_scratch_plan: NodeSceneValidationScratchPlan,
+    central_validation_plan: NodeSceneCentralValidationPlan,
     counts: SceneEvidenceCounts,
 ) -> NodeSceneValidationProof {
     NodeSceneValidationProof {
@@ -3672,7 +3680,7 @@ fn assemble_node_scene_validation_proof(
         source_root_count: node.source_root_count,
         source_edge_count: node.source_edge_count,
         deformation_uniqueness_mark_count: deformation.maximum_uniqueness_count,
-        validation_scratch_plan,
+        central_validation_plan,
         counts,
     }
 }
@@ -3690,7 +3698,7 @@ fn validate_node_scene_graph_inner<SR, NR, AR, GR, DR, ANR, PR>(
     expected_animation: &ValidatedAnimationBatch<'_, ANR>,
     expected_profile: &ValidatedProfileBatch<'_, PR>,
     expected_counts: SceneEvidenceCounts,
-    validation_scratch_plan: NodeSceneValidationScratchPlan,
+    central_validation_plan: NodeSceneCentralValidationPlan,
     profile_scratch: &mut ProfileValidationScratch<'_>,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
 ) -> Option<NodeSceneValidationProof> {
@@ -3779,7 +3787,7 @@ fn validate_node_scene_graph_inner<SR, NR, AR, GR, DR, ANR, PR>(
         deformation,
         animation_refs,
         profile,
-        validation_scratch_plan,
+        central_validation_plan,
         expected_counts,
     ))
 }

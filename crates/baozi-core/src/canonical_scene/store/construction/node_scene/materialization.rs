@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::num::NonZeroU64;
 
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationSeal,
@@ -73,7 +72,10 @@ use super::geometry::{
 };
 use super::profile::{ProfileMaterializationPlans, retain_profile};
 use super::publication::NodeActivationFailureCause;
-use super::scratch::{NodeSceneValidationScratchPlan, ScopedNodeSceneValidationScratchOwner};
+use super::scratch::{
+    NodeSceneCentralValidationPlan, NodeSceneValidationScratchPlan,
+    ScopedNodeSceneValidationScratchOwner,
+};
 mod spatial;
 use super::{
     DeferredNodeSceneDraftBuild, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneBuildFaults,
@@ -624,7 +626,7 @@ struct NodeSceneExecutionPlan<'input, R> {
     batches: ValidatedNodeSceneBatches<'input, R>,
     materialization: NodeSceneMaterializationPlans,
     geometry_reference_scratch: GeometryReferenceScratchPlan,
-    validation_scratch: NodeSceneValidationScratchPlan,
+    central_validation: NodeSceneCentralValidationPlan,
 }
 
 #[derive(Clone, Copy)]
@@ -673,7 +675,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneActivationOutput {
     pub(in crate::canonical_scene::store) draft: NodeSceneDraft,
     pub(in crate::canonical_scene::store) refs: NodeSceneMaterializedRefs,
     pub(in crate::canonical_scene::store) evidence_counts: SceneEvidenceCounts,
-    pub(in crate::canonical_scene::store) validation_scratch: NodeSceneValidationScratchPlan,
+    pub(in crate::canonical_scene::store) central_validation: NodeSceneCentralValidationPlan,
 }
 
 struct NodeSceneMaterializationPlans {
@@ -715,14 +717,17 @@ impl<'input, R> NodeSceneSealedPlan<'input, R> {
             materialization.animation.metered_counts(),
             materialization.profile.metered_counts()?,
         )?;
-        let success_requirements =
-            materialization.success_requirements(validation_scratch, failure_evidence)?;
+        let central_validation = NodeSceneCentralValidationPlan::try_new(
+            validation_scratch,
+            materialization.validation_work_units(validation_scratch, failure_evidence)?,
+        )?;
+        let success_requirements = materialization.success_requirements(central_validation)?;
         Ok(Self {
             execution: NodeSceneExecutionPlan {
                 batches,
                 materialization,
                 geometry_reference_scratch,
-                validation_scratch,
+                central_validation,
             },
             success_requirements,
         })
@@ -741,18 +746,14 @@ impl<'input, R> NodeSceneSealedPlan<'input, R> {
 impl NodeSceneMaterializationPlans {
     fn success_requirements(
         &self,
-        validation_scratch: NodeSceneValidationScratchPlan,
-        failure_evidence: NodeSceneFailureEvidencePlan,
+        central_validation: NodeSceneCentralValidationPlan,
     ) -> Result<CanonicalSuccessRequirements, StorePlanError> {
         let canonical_block_count = usize::try_from(self.canonical_block_count)
             .map_err(|_| StorePlanError::SizeOverflow)?;
-        let validation_work =
-            NonZeroU64::new(self.validation_work_units(validation_scratch, failure_evidence)?)
-                .ok_or(StorePlanError::InvalidBlockTable)?;
         CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(canonical_block_count, canonical_block_count)?,
             canonical_block_count,
-            validation_work,
+            central_validation.work(),
         )
         .map(|requirements| requirements.with_semantic_bytes(self.canonical_string_bytes))
     }
@@ -1035,7 +1036,7 @@ where
         batches,
         materialization: plans,
         geometry_reference_scratch,
-        validation_scratch,
+        central_validation,
     } = plan;
     let failure = plans.build_invariant;
     let spatial = materialize!(retain_spatial(
@@ -1166,7 +1167,7 @@ where
             profile,
         },
         evidence_counts: plans.evidence_counts(),
-        validation_scratch: *validation_scratch,
+        central_validation: *central_validation,
     };
     lane.complete(directory.into_store(), output)
 }
@@ -1385,15 +1386,14 @@ where
             if panic_central_validator {
                 panic!("injected clean central validator panic");
             }
+            let validation_plan = output.central_validation;
+            let scratch_plan = validation_plan.scratch_plan();
             planning.validate_with(
                 |checkpoint| {
-                    ScopedNodeSceneValidationScratchOwner::try_allocate(
-                        checkpoint,
-                        output.validation_scratch,
-                    )
+                    ScopedNodeSceneValidationScratchOwner::try_allocate(checkpoint, scratch_plan)
                 },
                 |session, directory, evidence, scratch| {
-                    let initialized = scratch.initialize(session, output.validation_scratch)?;
+                    let initialized = scratch.initialize(session, scratch_plan)?;
                     let proof = if initialized && output.draft.brand == brand {
                         let mut scratch = scratch.metered_view();
                         validate_node_scene_canonical_graph_metered(
@@ -1402,7 +1402,7 @@ where
                             evidence,
                             output.evidence_counts,
                             output.refs,
-                            output.validation_scratch,
+                            validation_plan,
                             &mut scratch,
                         )?
                     } else {

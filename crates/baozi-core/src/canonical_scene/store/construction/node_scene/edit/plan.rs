@@ -16,7 +16,7 @@ use crate::entity::{AuthoredTransform, AuthoredTransformKind};
 use crate::identity::SceneGenerationId;
 use crate::provenance::{DIGEST_LEN, OperationIdentity, OperationKind};
 
-use super::super::scratch::NodeSceneValidationScratchPlan;
+use super::super::scratch::NodeSceneCentralValidationPlan;
 use super::super::{SceneEvidenceCounts, ValidatedNodeScene};
 use super::CanonicalInvalidations;
 
@@ -311,7 +311,7 @@ impl NodeSceneEditProgram {
 #[derive(Clone, Copy)]
 pub(super) struct NodeSceneEditFixedCounts {
     pub(super) evidence: SceneEvidenceCounts,
-    pub(super) validation_scratch_plan: NodeSceneValidationScratchPlan,
+    pub(super) central_validation_plan: NodeSceneCentralValidationPlan,
     pub(super) canonical_blocks: CheckedCount,
     /// Every target block that must be newly retained for the destination generation.
     pub(super) new_canonical_blocks: CheckedCount,
@@ -445,15 +445,20 @@ impl NodeSceneEditFixedCounts {
             NODE_TRANSFORM_PROFILE_SHAREABLE_LEAF_DELTA,
             "shareable canonical leaf block count",
         )?;
-        let source_validation_scratch = input.proof.validation_scratch_plan();
+        let source_central_validation = input.proof.central_validation_plan();
+        let source_validation_scratch = source_central_validation.scratch_plan();
         let profile_counts = try_node_transform_profile_counts(
             source_validation_scratch.profile_counts(),
             source_evidence,
             evidence,
             profile,
         )?;
-        let validation_scratch_plan =
-            source_validation_scratch.try_rebind_profile_edit(evidence, profile_counts)?;
+        let central_validation_plan = source_central_validation.try_rebind_node_transform(
+            evidence,
+            profile_counts,
+            source_transform_scalars,
+            output_transform_scalars,
+        )?;
 
         let source_canonical_blocks = CheckedCount::try_from_usize(
             input.canonical_block_count(),
@@ -554,7 +559,7 @@ impl NodeSceneEditFixedCounts {
 
         Ok(Self {
             evidence,
-            validation_scratch_plan,
+            central_validation_plan,
             canonical_blocks,
             new_canonical_blocks,
             evidence_leaves,
