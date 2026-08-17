@@ -409,36 +409,137 @@ impl PostProcessRunError {
     }
 }
 
-/// A durably published post-process generation and its immutable operation evidence.
-#[derive(Debug, PartialEq)]
-pub struct PostProcessSuccess {
-    scene: ValidatedScene,
+/// The successful disposition of one requested post-process run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PostProcessRunDisposition {
+    /// Requests were evaluated but required no canonical write.
+    Unchanged,
+    /// At least one canonical write committed a newly validated Scene.
+    Changed,
+}
+
+/// Immutable evidence for one requested post-process invocation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PostProcessReport {
+    disposition: PostProcessRunDisposition,
     ledger: PostProcessLedgerSnapshot,
 }
 
-impl PostProcessSuccess {
-    pub(crate) const fn new(scene: ValidatedScene, ledger: PostProcessLedgerSnapshot) -> Self {
-        Self { scene, ledger }
+impl PostProcessReport {
+    pub(crate) const fn new(
+        disposition: PostProcessRunDisposition,
+        ledger: PostProcessLedgerSnapshot,
+    ) -> Self {
+        Self {
+            disposition,
+            ledger,
+        }
     }
 
-    /// Returns the durably published validated generation.
-    pub const fn scene(&self) -> &ValidatedScene {
-        &self.scene
+    /// Returns whether the requested run changed the canonical Scene.
+    pub const fn disposition(&self) -> PostProcessRunDisposition {
+        self.disposition
     }
 
     /// Returns immutable operation-ledger evidence.
     pub const fn ledger(&self) -> &PostProcessLedgerSnapshot {
         &self.ledger
     }
+}
 
-    /// Consumes the report and returns the durably published scene.
-    pub fn into_scene(self) -> ValidatedScene {
-        self.scene
+/// The complete successful result of one post-process invocation.
+///
+/// `Unchanged` borrows the already validated input. Only `Changed` owns a new generation. Its
+/// state is intentionally opaque so a Scene cannot be paired with evidence from another
+/// invocation.
+#[derive(Debug, PartialEq)]
+#[must_use = "the post-process outcome carries the preserved or newly published Scene"]
+pub struct PostProcessRunOutcome<'scene> {
+    scene: PostProcessScene<'scene>,
+    report: PostProcessReport,
+}
+
+#[derive(Debug, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing a published Scene would add a fallible allocation after the atomic publication boundary"
+)]
+enum PostProcessScene<'scene> {
+    Unchanged(&'scene ValidatedScene),
+    Changed(ValidatedScene),
+}
+
+impl<'scene> PostProcessRunOutcome<'scene> {
+    pub(crate) const fn unchanged(
+        scene: &'scene ValidatedScene,
+        report: PostProcessReport,
+    ) -> Self {
+        Self {
+            scene: PostProcessScene::Unchanged(scene),
+            report,
+        }
     }
 
-    /// Consumes the report and returns all durable success evidence.
-    pub fn into_parts(self) -> (ValidatedScene, PostProcessLedgerSnapshot) {
-        (self.scene, self.ledger)
+    pub(crate) const fn changed(scene: ValidatedScene, report: PostProcessReport) -> Self {
+        Self {
+            scene: PostProcessScene::Changed(scene),
+            report,
+        }
+    }
+
+    /// Returns the successful invocation disposition.
+    pub const fn disposition(&self) -> PostProcessRunDisposition {
+        self.report.disposition()
+    }
+
+    /// Returns the preserved input or newly published Scene.
+    pub const fn scene(&self) -> &ValidatedScene {
+        match &self.scene {
+            PostProcessScene::Unchanged(scene) => scene,
+            PostProcessScene::Changed(scene) => scene,
+        }
+    }
+
+    /// Returns immutable evidence for the requested invocation.
+    pub const fn report(&self) -> &PostProcessReport {
+        &self.report
+    }
+
+    /// Consumes an unchanged run and returns its owned report.
+    ///
+    /// This releases the borrow of the input Scene so an owning caller can move that Scene into a
+    /// higher-level composed outcome without cloning it.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the mismatch must return the original linear outcome without allocation or information loss"
+    )]
+    pub fn into_unchanged_report(self) -> std::result::Result<PostProcessReport, Self> {
+        match self.scene {
+            PostProcessScene::Unchanged(_) => Ok(self.report),
+            scene => Err(Self {
+                scene,
+                report: self.report,
+            }),
+        }
+    }
+
+    /// Consumes a changed outcome and returns the newly published Scene and report.
+    ///
+    /// Borrowing outcomes are returned unchanged so callers cannot mistake a preserved input for
+    /// a newly owned generation.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the mismatch must return the original linear outcome without allocation or information loss"
+    )]
+    pub fn into_changed(self) -> std::result::Result<(ValidatedScene, PostProcessReport), Self> {
+        match self.scene {
+            PostProcessScene::Changed(scene) => Ok((scene, self.report)),
+            scene => Err(Self {
+                scene,
+                report: self.report,
+            }),
+        }
     }
 }
 

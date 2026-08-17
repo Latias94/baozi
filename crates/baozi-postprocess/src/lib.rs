@@ -9,8 +9,9 @@ pub mod preset;
 
 pub use error::{
     PostProcessError, PostProcessFailure, PostProcessFinalizationError,
-    PostProcessInitializationError, PostProcessPlanError, PostProcessRunError,
-    PostProcessStepIssue, PostProcessSuccess, Result,
+    PostProcessInitializationError, PostProcessPlanError, PostProcessReport,
+    PostProcessRunDisposition, PostProcessRunError, PostProcessRunOutcome, PostProcessStepIssue,
+    Result,
 };
 pub use operation::{
     PostProcessControl, PostProcessDimension, PostProcessLedgerPhase, PostProcessLedgerSnapshot,

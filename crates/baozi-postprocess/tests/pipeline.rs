@@ -2,8 +2,8 @@ use baozi_core::{
     Mesh, MeshBinding, Node, PrimitiveTopology, ValidatedScene, Vec3, validate_scene,
 };
 use baozi_postprocess::{
-    PostProcessError, PostProcessPipeline, PostProcessPlanError, PostProcessStep,
-    PostProcessStepIssue,
+    PostProcessError, PostProcessPipeline, PostProcessPlanError, PostProcessRunDisposition,
+    PostProcessStep, PostProcessStepIssue,
 };
 
 #[test]
@@ -105,7 +105,7 @@ fn generated_bounds_do_not_mutate_the_input() {
 }
 
 #[test]
-fn no_effectful_change_publishes_an_accounted_generation() {
+fn no_effectful_change_preserves_the_input_generation() {
     let scene = scene_with_meshes([Mesh {
         positions: vec![
             Vec3::new(0.0, 0.0, 0.0),
@@ -116,13 +116,15 @@ fn no_effectful_change_publishes_an_accounted_generation() {
         ..Mesh::default()
     }]);
 
-    let output = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+    let outcome = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
         .unwrap()
         .run(&scene)
         .unwrap();
-    let output = output.scene();
+    let output = outcome.scene();
 
-    assert_ne!(output.generation(), scene.generation());
+    assert_eq!(outcome.disposition(), PostProcessRunDisposition::Unchanged);
+    assert!(std::ptr::eq(output, &scene));
+    assert_eq!(output.generation(), scene.generation());
     assert_eq!(output.meshes()[0].normals, scene.meshes()[0].normals);
 }
 

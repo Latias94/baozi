@@ -1,7 +1,7 @@
 #![cfg(feature = "tracing")]
 
 use baozi_core::{SceneBuilder, ValidatedScene, validate_scene};
-use baozi_postprocess::PostProcessPipeline;
+use baozi_postprocess::{PostProcessPipeline, PostProcessRunDisposition};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::span::{Attributes, Id, Record};
@@ -83,19 +83,24 @@ fn tracing_is_fieldless_and_does_not_change_postprocess_results() {
 
     assert_eq!(
         subscriber.captured_spans(),
-        [
-            CapturedSpan {
-                name: "baozi.postprocess",
-                fields: Vec::new(),
-            },
-            CapturedSpan {
-                name: "baozi.validate",
-                fields: Vec::new(),
-            },
-        ]
+        [CapturedSpan {
+            name: "baozi.postprocess",
+            fields: Vec::new(),
+        }]
+    );
+    assert_eq!(
+        without_subscriber.disposition(),
+        PostProcessRunDisposition::Unchanged
+    );
+    assert_eq!(
+        with_subscriber.disposition(),
+        PostProcessRunDisposition::Unchanged
     );
     assert_scene_content_eq(without_subscriber.scene(), with_subscriber.scene());
-    assert_eq!(without_subscriber.ledger(), with_subscriber.ledger());
+    assert_eq!(
+        without_subscriber.report().ledger(),
+        with_subscriber.report().ledger()
+    );
 }
 
 fn root_only_scene() -> ValidatedScene {

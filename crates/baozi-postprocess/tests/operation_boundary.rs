@@ -1,18 +1,42 @@
 use baozi_core::{
-    Mesh, MeshBinding, Node, PrimitiveTopology, ValidatedScene, Vec3, validate_scene,
+    Aabb, Mesh, MeshBinding, Node, PrimitiveTopology, ValidatedScene, Vec3, validate_scene,
 };
 use baozi_operation::{
-    CancellationOrigin, CancellationToken, ControlCause, ProgressDecision, ProgressDeliveryLimits,
-    ProgressEvent,
+    CancellationOrigin, CancellationSignal, CancellationToken, ControlCause, ProgressDecision,
+    ProgressDeliveryLimits, ProgressEvent,
 };
 use baozi_postprocess::{
     PostProcessControl, PostProcessDimension, PostProcessError, PostProcessFailure,
     PostProcessLedgerPhase, PostProcessLedgerSnapshot, PostProcessLimits, PostProcessPipeline,
-    PostProcessProgressPhase, PostProcessProgressUnit, PostProcessRunError, PostProcessStep,
-    PostProcessSuccess,
+    PostProcessProgressPhase, PostProcessProgressUnit, PostProcessReport,
+    PostProcessRunDisposition, PostProcessRunError, PostProcessRunOutcome, PostProcessStep,
 };
 use std::error::Error;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[derive(Clone, Debug)]
+struct CancelOnSecondPoll {
+    polls: Arc<AtomicUsize>,
+}
+
+impl CancelOnSecondPoll {
+    fn new() -> Self {
+        Self {
+            polls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn polls(&self) -> usize {
+        self.polls.load(Ordering::Acquire)
+    }
+}
+
+impl CancellationSignal for CancelOnSecondPoll {
+    fn is_cancelled(&self) -> bool {
+        self.polls.fetch_add(1, Ordering::AcqRel) >= 1
+    }
+}
 
 #[test]
 fn partial_staging_is_rolled_back_on_step_failure() {
@@ -302,9 +326,9 @@ fn progress_is_monotonic_across_distinct_owner_phases() {
         .unwrap()
         .run_with_control(&scene, control)
         .unwrap();
+    let ledger = success.report().ledger();
 
-    let committed = success
-        .ledger()
+    let committed = ledger
         .dimension(PostProcessDimension::CanonicalBytes)
         .expect("canonical dimension should be frozen")
         .committed();
@@ -312,8 +336,8 @@ fn progress_is_monotonic_across_distinct_owner_phases() {
         committed,
         success.scene().footprint().accounted_payload_bytes()
     );
-    assert!(success.ledger().peak_live_bytes() > committed);
-    assert_eq!(success.ledger().current_live_bytes(), 0);
+    assert!(ledger.peak_live_bytes() > committed);
+    assert_eq!(ledger.current_live_bytes(), 0);
 
     let events = events.lock().unwrap();
     assert!(!events.is_empty());
@@ -336,7 +360,7 @@ fn success_snapshot_retains_the_complete_accounting_phase_catalog() {
         .unwrap()
         .run(&scene)
         .unwrap();
-    let ledger = success.ledger();
+    let ledger = success.report().ledger();
 
     assert_eq!(
         ledger.phases().map(|(phase, _)| phase).collect::<Vec<_>>(),
@@ -365,30 +389,114 @@ fn success_snapshot_retains_the_complete_accounting_phase_catalog() {
 }
 
 #[test]
-fn empty_plan_publishes_an_accounted_generation() {
+fn empty_plan_preserves_the_input_generation() {
     let scene = scene_with_meshes([triangle_mesh()]);
 
-    let success = PostProcessPipeline::new([]).unwrap().run(&scene).unwrap();
+    let outcome = PostProcessPipeline::new([]).unwrap().run(&scene).unwrap();
+    let ledger = outcome.report().ledger();
 
-    assert_ne!(success.scene().generation(), scene.generation());
-    assert_eq!(success.ledger().current_live_bytes(), 0);
-    assert!(success.ledger().peak_live_bytes() > 0);
+    assert_eq!(outcome.disposition(), PostProcessRunDisposition::Unchanged);
+    assert_eq!(outcome.report().disposition(), outcome.disposition());
+    assert!(std::ptr::eq(outcome.scene(), &scene));
+    assert_eq!(outcome.scene().generation(), scene.generation());
+    assert_eq!(ledger.current_live_bytes(), 0);
+    assert_eq!(ledger.peak_live_bytes(), 0);
     assert_eq!(
-        success
-            .ledger()
+        ledger
             .dimension(PostProcessDimension::CanonicalBytes)
             .expect("canonical dimension should be frozen")
             .committed(),
-        success.scene().footprint().accounted_payload_bytes()
+        0
+    );
+    assert_eq!(
+        ledger
+            .phase(PostProcessLedgerPhase::TransactionStaging)
+            .expect("transaction-staging phase should be frozen")
+            .peak_live_bytes(),
+        0
+    );
+    assert_eq!(
+        ledger
+            .phase(PostProcessLedgerPhase::ValidationCommit)
+            .expect("validation-commit phase should be frozen")
+            .peak_live_bytes(),
+        0
     );
 }
 
 #[test]
-fn no_op_path_honors_final_observer_cancellation() {
+fn unchanged_outcome_rejects_owned_extraction_without_losing_evidence() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+
+    let outcome = PostProcessPipeline::new([])
+        .unwrap()
+        .run(&scene)
+        .unwrap()
+        .into_changed()
+        .expect_err("an unchanged invocation cannot yield an owned generation");
+
+    assert_eq!(outcome.disposition(), PostProcessRunDisposition::Unchanged);
+    assert_eq!(outcome.report().disposition(), outcome.disposition());
+    assert!(std::ptr::eq(outcome.scene(), &scene));
+    assert_eq!(outcome.report().ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn unchanged_report_can_outlive_the_run_borrow() {
     let scene = scene_with_meshes([triangle_mesh()]);
     let generation = scene.generation();
+
+    let report = PostProcessPipeline::new([])
+        .unwrap()
+        .run(&scene)
+        .unwrap()
+        .into_unchanged_report()
+        .expect("an unchanged run should yield its owned report");
+    let moved_scene = scene;
+
+    assert_eq!(moved_scene.generation(), generation);
+    assert_eq!(report.disposition(), PostProcessRunDisposition::Unchanged);
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn changed_outcome_releases_the_input_borrow_and_retains_evidence() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let input_generation = scene.generation();
+
+    let outcome = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run(&scene)
+        .unwrap();
+    assert_eq!(outcome.disposition(), PostProcessRunDisposition::Changed);
+    let (changed, report) = outcome
+        .into_changed()
+        .expect("a changed invocation should yield its owned generation");
+    drop(scene);
+
+    assert_ne!(changed.generation(), input_generation);
+    assert!(!changed.meshes()[0].normals.is_empty());
+    assert_eq!(report.disposition(), PostProcessRunDisposition::Changed);
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+    assert_eq!(
+        report
+            .ledger()
+            .dimension(PostProcessDimension::CanonicalBytes)
+            .expect("canonical dimension should be frozen")
+            .committed(),
+        changed.footprint().accounted_payload_bytes()
+    );
+}
+
+#[test]
+fn empty_plan_emits_no_progress_and_returns_unchanged() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let generation = scene.generation();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
     let control = PostProcessControl::default().with_progress_observer(
-        |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+        move |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+            observed.lock().unwrap().push(event.phase());
             if event.phase() == PostProcessProgressPhase::Validate && event.completed() == 1 {
                 ProgressDecision::Cancel
             } else {
@@ -396,6 +504,34 @@ fn no_op_path_honors_final_observer_cancellation() {
             }
         },
     );
+
+    let outcome = PostProcessPipeline::new([])
+        .unwrap()
+        .run_with_control(&scene, control)
+        .unwrap();
+    let ledger = outcome.report().ledger();
+
+    assert_eq!(outcome.disposition(), PostProcessRunDisposition::Unchanged);
+    assert_eq!(scene.generation(), generation);
+    assert!(std::ptr::eq(outcome.scene(), &scene));
+    assert!(events.lock().unwrap().is_empty());
+    assert_eq!(ledger.current_live_bytes(), 0);
+    assert_eq!(
+        ledger
+            .dimension(PostProcessDimension::CanonicalBytes)
+            .expect("canonical dimension should be frozen")
+            .committed(),
+        0
+    );
+}
+
+#[test]
+fn empty_plan_honors_the_final_control_poll() {
+    let scene = scene_with_meshes([triangle_mesh()]);
+    let generation = scene.generation();
+    let cancellation = CancelOnSecondPoll::new();
+    let observed = cancellation.clone();
+    let control = PostProcessControl::default().with_cancellation(cancellation);
 
     let failure = PostProcessPipeline::new([])
         .unwrap()
@@ -408,10 +544,11 @@ fn no_op_path_honors_final_observer_cancellation() {
         failure.error(),
         PostProcessError::Control {
             source: ControlCause::Cancelled {
-                origin: CancellationOrigin::Observer
+                origin: CancellationOrigin::Signal
             }
         }
     ));
+    assert_eq!(observed.polls(), 2);
     assert_eq!(scene.generation(), generation);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     assert_eq!(
@@ -425,13 +562,16 @@ fn no_op_path_honors_final_observer_cancellation() {
 }
 
 #[test]
-fn unchanged_transform_path_honors_final_observer_cancellation() {
+fn unchanged_transform_skips_validation_and_returns_unchanged() {
     let mut mesh = triangle_mesh();
     mesh.normals = vec![Vec3::new(0.0, 0.0, 1.0); mesh.positions.len()];
     let scene = scene_with_meshes([mesh]);
     let generation = scene.generation();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
     let control = PostProcessControl::default().with_progress_observer(
-        |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+        move |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+            observed.lock().unwrap().push(event.phase());
             if event.phase() == PostProcessProgressPhase::Validate && event.completed() == 1 {
                 ProgressDecision::Cancel
             } else {
@@ -439,6 +579,97 @@ fn unchanged_transform_path_honors_final_observer_cancellation() {
             }
         },
     );
+
+    let outcome = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
+        .unwrap()
+        .run_with_control(&scene, control)
+        .unwrap();
+    let ledger = outcome.report().ledger();
+
+    assert_eq!(outcome.disposition(), PostProcessRunDisposition::Unchanged);
+    assert_eq!(scene.generation(), generation);
+    assert!(std::ptr::eq(outcome.scene(), &scene));
+    assert!(!events.lock().unwrap().is_empty());
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|phase| *phase == PostProcessProgressPhase::Transform)
+    );
+    assert_eq!(ledger.current_live_bytes(), 0);
+    assert_eq!(
+        ledger
+            .phase(PostProcessLedgerPhase::TransactionStaging)
+            .expect("transaction-staging phase should be frozen")
+            .peak_live_bytes(),
+        0
+    );
+    assert_eq!(
+        ledger
+            .dimension(PostProcessDimension::CanonicalBytes)
+            .expect("canonical dimension should be frozen")
+            .committed(),
+        0
+    );
+}
+
+#[test]
+fn fully_satisfied_plan_skips_edit_staging() {
+    let mut mesh = triangle_mesh();
+    mesh.normals = vec![Vec3::new(0.0, 0.0, 1.0); mesh.positions.len()];
+    mesh.bounds = Some(Aabb {
+        min: Vec3::new(0.0, 0.0, 0.0),
+        max: Vec3::new(1.0, 1.0, 0.0),
+    });
+    let scene = scene_with_meshes([mesh]);
+
+    let outcome = PostProcessPipeline::new([
+        PostProcessStep::Triangulate,
+        PostProcessStep::GenerateNormals,
+        PostProcessStep::GenerateBoundingBoxes,
+    ])
+    .unwrap()
+    .run(&scene)
+    .unwrap();
+    let ledger = outcome.report().ledger();
+
+    assert_eq!(outcome.disposition(), PostProcessRunDisposition::Unchanged);
+    assert!(std::ptr::eq(outcome.scene(), &scene));
+    assert_eq!(
+        ledger
+            .phase(PostProcessLedgerPhase::TransactionStaging)
+            .expect("transaction-staging phase should be frozen")
+            .peak_live_bytes(),
+        0
+    );
+    assert_eq!(
+        ledger
+            .dimension(PostProcessDimension::CanonicalBytes)
+            .expect("canonical dimension should be frozen")
+            .committed(),
+        0
+    );
+}
+
+#[test]
+fn unchanged_transform_honors_signal_cancelled_by_the_last_action() {
+    let mut mesh = triangle_mesh();
+    mesh.normals = vec![Vec3::new(0.0, 0.0, 1.0); mesh.positions.len()];
+    let scene = scene_with_meshes([mesh]);
+    let generation = scene.generation();
+    let cancellation = CancellationToken::new();
+    let observer_cancellation = cancellation.clone();
+    let control = PostProcessControl::default()
+        .with_cancellation(cancellation)
+        .with_progress_observer(
+            move |event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
+                if event.phase() == PostProcessProgressPhase::Transform && event.completed() == 1 {
+                    observer_cancellation.cancel();
+                }
+                ProgressDecision::Continue
+            },
+        );
 
     let failure = PostProcessPipeline::new([PostProcessStep::GenerateNormals])
         .unwrap()
@@ -451,7 +682,7 @@ fn unchanged_transform_path_honors_final_observer_cancellation() {
         failure.error(),
         PostProcessError::Control {
             source: ControlCause::Cancelled {
-                origin: CancellationOrigin::Observer
+                origin: CancellationOrigin::Signal
             }
         }
     ));
@@ -495,9 +726,10 @@ fn public_result_types_are_send_and_sync() {
     assert_send_sync::<PostProcessError>();
     assert_send_sync::<PostProcessFailure>();
     assert_send_sync::<PostProcessLedgerSnapshot>();
+    assert_send_sync::<PostProcessRunOutcome<'static>>();
     assert_send_sync::<PostProcessPipeline>();
+    assert_send_sync::<PostProcessReport>();
     assert_send_sync::<PostProcessRunError>();
-    assert_send_sync::<PostProcessSuccess>();
 }
 
 fn triangle_mesh() -> Mesh {

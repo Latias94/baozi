@@ -1,15 +1,17 @@
 use baozi_core::{
     Mesh, MeshBinding, Node, SceneValidationCode, SceneValidationError, Vec3, validate_scene,
 };
-use baozi_postprocess::PostProcessPipeline;
+use baozi_postprocess::{PostProcessPipeline, PostProcessRunDisposition};
 
 #[test]
-fn empty_pipeline_publishes_a_fresh_validated_generation() {
+fn empty_pipeline_preserves_the_validated_input() {
     let scene = triangle_scene();
 
     let output = PostProcessPipeline::new([]).unwrap().run(&scene).unwrap();
 
-    assert_ne!(output.scene().generation(), scene.generation());
+    assert_eq!(output.disposition(), PostProcessRunDisposition::Unchanged);
+    assert!(std::ptr::eq(output.scene(), &scene));
+    assert_eq!(output.scene().generation(), scene.generation());
     assert_eq!(output.scene().meshes(), scene.meshes());
 }
 

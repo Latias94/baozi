@@ -1,6 +1,7 @@
 use crate::error::{
-    PostProcessError, PostProcessFailure, PostProcessPlanError, PostProcessRunError,
-    PostProcessStepIssue, PostProcessSuccess, Result, StepResult,
+    PostProcessError, PostProcessFailure, PostProcessPlanError, PostProcessReport,
+    PostProcessRunDisposition, PostProcessRunError, PostProcessRunOutcome, PostProcessStepIssue,
+    Result, StepResult,
 };
 use crate::operation::{
     PostProcessControl, PostProcessDimension, PostProcessLedgerPhase, PostProcessLimits,
@@ -142,7 +143,10 @@ impl PostProcessPipeline {
         clippy::result_large_err,
         reason = "terminal post-process failures retain complete bounded evidence without heap indirection"
     )]
-    pub fn run(&self, input: &ValidatedScene) -> Result<PostProcessSuccess> {
+    pub fn run<'scene>(
+        &self,
+        input: &'scene ValidatedScene,
+    ) -> Result<PostProcessRunOutcome<'scene>> {
         self.run_with_control(input, PostProcessControl::default())
     }
 
@@ -154,11 +158,11 @@ impl PostProcessPipeline {
         clippy::result_large_err,
         reason = "terminal post-process failures retain complete bounded evidence without heap indirection"
     )]
-    pub fn run_with_control(
+    pub fn run_with_control<'scene>(
         &self,
-        input: &ValidatedScene,
+        input: &'scene ValidatedScene,
         control: PostProcessControl,
-    ) -> Result<PostProcessSuccess> {
+    ) -> Result<PostProcessRunOutcome<'scene>> {
         self.run_with_control_and_ledger_limits(input, control, self.limits.try_ledger_limits())
     }
 
@@ -166,15 +170,15 @@ impl PostProcessPipeline {
         clippy::result_large_err,
         reason = "terminal post-process failures retain complete bounded evidence without heap indirection"
     )]
-    fn run_with_control_and_ledger_limits(
+    fn run_with_control_and_ledger_limits<'scene>(
         &self,
-        input: &ValidatedScene,
+        input: &'scene ValidatedScene,
         control: PostProcessControl,
         ledger_limits: std::result::Result<
             LedgerLimits<PostProcessDimension>,
             LedgerLimitsError<PostProcessDimension>,
         >,
-    ) -> Result<PostProcessSuccess> {
+    ) -> Result<PostProcessRunOutcome<'scene>> {
         let ledger_limits = ledger_limits.map_err(PostProcessRunError::initialization)?;
         let mut coordinator = try_postprocess_coordinator(control, ledger_limits)
             .map_err(PostProcessRunError::coordinator_initialization)?;
@@ -194,51 +198,104 @@ impl PostProcessPipeline {
         }
     }
 
-    fn execute(
+    fn execute<'scene>(
         &self,
-        input: &ValidatedScene,
+        input: &'scene ValidatedScene,
         coordinator: &mut Coordinator,
-    ) -> StepResult<ValidatedScene> {
+    ) -> StepResult<ExecutionOutcome<'scene>> {
         coordinator.poll().map_err(control_error)?;
+        if self.steps().is_empty() {
+            coordinator.poll().map_err(control_error)?;
+            return Ok(ExecutionOutcome::Unchanged(input));
+        }
 
         let mut state = ExecutionState::new(coordinator);
         state.begin_transform()?;
+        if !requires_edit(self.steps(), input, &mut state)? {
+            state.finish_unchanged()?;
+            return Ok(ExecutionOutcome::Unchanged(input));
+        }
         let validation_limits = ExecutionState::validation_limits();
         let mut edit = input
             .begin_edit_with(validation_limits, &mut state)
             .map_err(validation_failure_error)?;
+        let mut changed = false;
         for step in self.steps() {
-            match step {
-                PostProcessStep::Triangulate => {
-                    triangulate_scene(&mut edit, &mut state)?;
-                }
-                PostProcessStep::GenerateNormals => {
-                    generate_normals(&mut edit, &mut state)?;
-                }
+            changed |= match step {
+                PostProcessStep::Triangulate => triangulate_scene(&mut edit, &mut state)?,
+                PostProcessStep::GenerateNormals => generate_normals(&mut edit, &mut state)?,
                 PostProcessStep::GenerateBoundingBoxes => {
-                    generate_bounding_boxes(&mut edit, &mut state)?;
+                    generate_bounding_boxes(&mut edit, &mut state)?
                 }
-            }
+            };
+        }
+
+        if !changed {
+            drop(edit);
+            state.finish_unchanged()?;
+            return Ok(ExecutionOutcome::Unchanged(input));
         }
 
         state.begin_validation()?;
         let validated = edit
             .commit_with(validation_limits, &mut state)
             .map_err(validation_failure_error)?;
-        state.publish(validated)
+        state.publish(validated).map(ExecutionOutcome::Changed)
     }
+}
+
+fn requires_edit(
+    steps: &[PostProcessStep],
+    input: &ValidatedScene,
+    state: &mut ExecutionState<'_>,
+) -> StepResult<bool> {
+    for step in steps {
+        for mesh in input.meshes() {
+            let requires_edit = state.perform(|| {
+                Ok(match step {
+                    PostProcessStep::Triangulate => mesh.topology == PrimitiveTopology::Polygons,
+                    PostProcessStep::GenerateNormals => mesh.normals.is_empty(),
+                    PostProcessStep::GenerateBoundingBoxes => {
+                        mesh.bounds.is_none() && !mesh.positions.is_empty()
+                    }
+                })
+            })?;
+            if requires_edit {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing a published Scene would add a fallible allocation after the atomic publication boundary"
+)]
+enum ExecutionOutcome<'scene> {
+    Unchanged(&'scene ValidatedScene),
+    Changed(ValidatedScene),
 }
 
 #[allow(
     clippy::result_large_err,
     reason = "terminal post-process failures retain complete bounded evidence without heap indirection"
 )]
-fn finish_success(
+fn finish_success<'scene>(
     coordinator: Coordinator,
-    output: ValidatedScene,
-) -> std::result::Result<PostProcessSuccess, PostProcessFailure> {
+    output: ExecutionOutcome<'scene>,
+) -> std::result::Result<PostProcessRunOutcome<'scene>, PostProcessFailure> {
     match coordinator.finish() {
-        Ok(ledger) => Ok(PostProcessSuccess::new(output, ledger)),
+        Ok(ledger) => Ok(match output {
+            ExecutionOutcome::Unchanged(scene) => PostProcessRunOutcome::unchanged(
+                scene,
+                PostProcessReport::new(PostProcessRunDisposition::Unchanged, ledger),
+            ),
+            ExecutionOutcome::Changed(scene) => PostProcessRunOutcome::changed(
+                scene,
+                PostProcessReport::new(PostProcessRunDisposition::Changed, ledger),
+            ),
+        }),
         Err(finalization_error) => Err(PostProcessFailure::with_finalization_error(
             PostProcessError::LedgerFinalization,
             finalization_error,
@@ -506,6 +563,15 @@ impl<'a> ExecutionState<'a> {
                 Some(1),
             )
             .map_err(control_error)
+    }
+
+    fn finish_unchanged(&mut self) -> StepResult<()> {
+        if !self.retained_output.is_vacant() {
+            return Err(PostProcessError::ValidationControlInvariant {
+                message: "an unchanged post-process retained canonical output storage",
+            });
+        }
+        self.coordinator.poll().map_err(control_error)
     }
 
     fn ensure_output_slot(&mut self, step: PostProcessStep) -> StepResult<()> {
