@@ -10,6 +10,61 @@ type ScopedOutcome<E> = CanonicalActivationOutcome<
     SequenceTag,
 >;
 
+type DerivedScopedOutcome<E> = CanonicalActivationOutcome<
+    TestOwner,
+    TestProgress,
+    TestUnit,
+    (),
+    E,
+    ScalarSequence<u32>,
+    SequenceTag,
+    baozi_operation::CanonicalInheritanceSource,
+>;
+
+fn derived_operation_for_scoped_activation(
+    source: &SourceCanonical,
+) -> (
+    baozi_operation::DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>,
+    TestKeys,
+) {
+    let TestVocabulary { domain, keys } = test_vocabulary();
+    let failure_terminal_work = unbounded_failure_terminal_work(keys);
+    let policy = DimensionPolicy::reservable_bytes(
+        failure_terminal_work.ordinary_attempted_work_limit(),
+        failure_terminal_work.ordinary_consumed_work_limit(),
+        u64::MAX,
+        u64::MAX,
+    )
+    .with_published_outcome_evidence_limit(u64::MAX);
+    let limits = LedgerLimits::new(
+        u64::MAX,
+        [
+            (keys.dimension, policy),
+            (
+                keys.failure_terminal_dimension,
+                failure_terminal_work.requirement().dimension_policy(),
+            ),
+        ],
+    )
+    .unwrap();
+    let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).unwrap();
+    let start = RetainedStoreStartPlan::new(
+        writer_plan(keys, TEST_TERMINAL_ATTRIBUTION_SLOTS, 8),
+        RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
+        StoreFallbackEnvelope::new(91),
+        keys.dimension,
+        TEST_FALLBACK_OUTCOME_EVIDENCE,
+        keys.dimension,
+        TEST_SNAPSHOT_OUTCOME_EVIDENCE,
+        failure_terminal_work,
+    );
+    (
+        TestOperation::try_start_derived(OperationControl::default(), ledger_plan, source, start)
+            .unwrap(),
+        keys,
+    )
+}
+
 fn operation_with_scoped_semantic_limit(
     account: &PhysicalStorageAccount,
     semantic_work_limit: u64,
@@ -99,6 +154,138 @@ impl Drop for DropMarker<'_> {
 struct TrackedScratchPlan<'scope, 'probe> {
     _marker: DropMarker<'probe>,
     _scratch: CanonicalReservation<'scope, TestOwner>,
+}
+
+#[test]
+fn derived_scoped_activation_shares_only_from_its_exact_source() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let source = publish_sequence_source(&account);
+    let source_baseline = account.snapshot();
+    let (operation, keys) = derived_operation_for_scoped_activation(&source.canonical);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+
+    let outcome: DerivedScopedOutcome<MaterializationRejection> = owner
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work().unwrap();
+            semantic.run_unit(|| ()).unwrap();
+            let completion = semantic.finish_exact().unwrap();
+            let permit = match planning.seal_activation(success, completion) {
+                CanonicalActivationSeal::Sealed(permit) => permit,
+                CanonicalActivationSeal::Unsealed(failure) => {
+                    return failure.finish_after_plan_drop();
+                }
+            };
+            permit.activate((), |mut lane, _plan| {
+                lane.try_bind_canonical_source(&source.canonical).unwrap();
+                let _shared = lane
+                    .try_share_canonical(&source.canonical, source.canonical_sequence)
+                    .unwrap();
+                assert_eq!(lane.len(), 1);
+                lane.reject::<(), _, ScalarSequence<u32>, SequenceTag>(
+                    MaterializationRejection::Semantic,
+                    21,
+                )
+            })
+        })
+        .unwrap();
+
+    let rejected = match outcome {
+        CanonicalActivationOutcome::Rejected(rejected) => rejected,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("the requested derived rejection must preserve its scoped owner")
+        }
+    };
+    let (prepared, cause) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    assert_eq!(
+        cause,
+        StoreCanonicalRejection::Requested(MaterializationRejection::Semantic)
+    );
+    let published = prepared.handoff();
+    assert_eq!(
+        published
+            .ledger_evidence
+            .dimension(keys.dimension)
+            .unwrap()
+            .committed_canonical_output(),
+        0
+    );
+    drop(published);
+    let after_rejection = account.snapshot();
+    assert_eq!(
+        after_rejection.live_retained_bytes(),
+        source_baseline.live_retained_bytes()
+    );
+    assert_eq!(
+        after_rejection.live_retained_allocations(),
+        source_baseline.live_retained_allocations()
+    );
+    assert!(!after_rejection.poisoned());
+    drop(source);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn derived_scoped_activation_contains_a_same_shape_sibling_source() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let source = publish_sequence_source(&account);
+    let sibling = publish_sequence_source(&account);
+    assert_eq!(source.canonical.len(), sibling.canonical.len());
+    let (operation, keys) = derived_operation_for_scoped_activation(&source.canonical);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+
+    let result: Result<DerivedScopedOutcome<MaterializationRejection>, _> = owner
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work().unwrap();
+            semantic.run_unit(|| ()).unwrap();
+            let completion = semantic.finish_exact().unwrap();
+            let permit = match planning.seal_activation(success, completion) {
+                CanonicalActivationSeal::Sealed(permit) => permit,
+                CanonicalActivationSeal::Unsealed(failure) => {
+                    return failure.finish_after_plan_drop();
+                }
+            };
+            permit.activate((), |mut lane, _plan| {
+                assert!(matches!(
+                    lane.try_bind_canonical_source(&sibling.canonical),
+                    Err(StoreRuntimeError::InvalidSourceSlot)
+                ));
+                lane.reject::<(), _, ScalarSequence<u32>, SequenceTag>(
+                    MaterializationRejection::Semantic,
+                    21,
+                )
+            })
+        });
+
+    let containment = match result {
+        Err(containment) => containment,
+        Ok(_) => panic!("a foreign source fault must not become a requested result"),
+    };
+    assert_eq!(
+        containment.cause().reason(),
+        AccountPoisonReason::OwnershipGraphUnverified
+    );
+    assert_fail_closed_containment(&account);
+    drop(source);
+    drop(sibling);
 }
 
 #[test]

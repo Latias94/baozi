@@ -7,7 +7,7 @@ fn canonical_build_work(units: Option<usize>) -> Result<NonZeroU64, StoreRuntime
     NonZeroU64::new(units).ok_or(StoreRuntimeError::Plan(StorePlanError::EmptyPayload))
 }
 
-impl<O, PP, U> RetainedStoreOperation<O, PP, U, FreshStoreLineage>
+impl<O, PP, U, L> RetainedStoreOperation<O, PP, U, L>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -18,10 +18,8 @@ where
         self,
         policy: CanonicalActivationPolicy,
         failure_requirements: CanonicalFailureRequirements,
-    ) -> Result<
-        ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, FreshStoreLineage>,
-        StoreActivationContainment,
-    > {
+    ) -> Result<ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, L>, StoreActivationContainment>
+    {
         let (canonical_phase, canonical_dimensions) =
             policy.canonical_writer.keys_for_publication_validation();
         let (evidence_phase, evidence_dimensions) = policy
@@ -1821,5 +1819,46 @@ where
             }),
             lane: PhantomData,
         }
+    }
+}
+
+impl<'activation, O, PP, U> CanonicalLane<'activation, O, PP, U, CanonicalInheritanceSource>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Binds the exact canonical source selected when the derived operation started.
+    pub fn try_bind_canonical_source<SourceRootKind, SourceRootTag>(
+        &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+    ) -> Result<(), StoreRuntimeError> {
+        if let Some(cause) = preserved_fault(self.first_fault) {
+            return Err(cause);
+        }
+        preserve_first_fault(
+            self.first_fault,
+            self.assembly
+                .try_bind_canonical_source(source, self.materialization_work_dimension),
+        )
+    }
+
+    /// Shares one immutable leaf from the exact bound source into the derived candidate.
+    pub fn try_share_canonical<SourceRootKind, SourceRootTag, SlotKind, SlotTag>(
+        &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+        source_ref: CanonicalStoreRef<SlotKind, SlotTag>,
+    ) -> Result<CanonicalStoreRef<SlotKind, SlotTag>, StoreRuntimeError>
+    where
+        SlotKind: ShareableStoreKind,
+        SlotTag: Copy + Send + Sync + 'static,
+    {
+        if let Some(cause) = preserved_fault(self.first_fault) {
+            return Err(cause);
+        }
+        preserve_first_fault(
+            self.first_fault,
+            self.assembly.try_share_canonical(source, source_ref),
+        )
     }
 }
