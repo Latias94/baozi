@@ -37,12 +37,12 @@ use crate::coordinator::FinalProgress;
 use crate::ledger::STARTUP_ACCOUNT_SHARE_STEP_COUNT;
 use crate::owner::OperationOwner;
 use crate::retained::{
-    FinalizationContainmentError, PreparationFailureClass, PreparationFailureCode,
-    RetainedActivationOpenDisposition, RetainedFailureWorkConsumeError, RetainedFailureWorkControl,
-    RetainedFailureWorkFinishError, RetainedFailureWorkPermit, RetainedFailureWorkStartError,
-    RetainedHandleSharePlan, RetainedPlanningBaseline, RetainedPlanningContainmentAnchor,
-    RetainedPublicationPrepareError, RetainedWorkConsumeError, RetainedWorkControl,
-    RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
+    CanonicalRetainedRewriteMap, FinalizationContainmentError, PreparationFailureClass,
+    PreparationFailureCode, RetainedActivationOpenDisposition, RetainedFailureWorkConsumeError,
+    RetainedFailureWorkControl, RetainedFailureWorkFinishError, RetainedFailureWorkPermit,
+    RetainedFailureWorkStartError, RetainedHandleSharePlan, RetainedPlanningBaseline,
+    RetainedPlanningContainmentAnchor, RetainedPublicationPrepareError, RetainedWorkConsumeError,
+    RetainedWorkControl, RetainedWorkFinishError, RetainedWorkPermit, RetainedWorkStartError,
 };
 
 mod canonical;
@@ -593,6 +593,182 @@ where
         })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the private activation helper keeps exact source lineage, one admitted permit, and one writer factory coupled"
+)]
+fn try_rewrite_activation_canonical_writer<O, PP, U, SourceRootKind, SourceRootTag, W, Kind, Tag>(
+    assembly: &mut RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource>,
+    source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+    source_ref: CanonicalStoreRef<Kind, Tag>,
+    allocation: RetainedAllocationPlan,
+    work_dimension: StoreDimensionKey,
+    work: NonZeroU64,
+    tag: Tag,
+    make_writer: impl FnOnce() -> Result<W, StoreBuildError>,
+    build: impl for<'writer, 'permit, 'operation> FnOnce(
+        &mut CanonicalBuildControl<'writer, 'permit, 'operation, O, PP, U, W>,
+    ) -> Result<(), StoreControlledError>,
+    finish_writer: impl FnOnce(W) -> Result<StoredBlock, StoreBuildError>,
+) -> Result<CanonicalStoreRef<Kind, Tag>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    Tag: Copy + Send + Sync + 'static,
+{
+    assembly.ensure_writable()?;
+    assembly.validate_dimension(work_dimension)?;
+    let mut callback_failure = None;
+    let result = assembly.raw.try_retain_rewritten_canonical_controlled(
+        source.share_source().aggregate(),
+        source_ref.raw,
+        work_dimension,
+        allocation,
+        |emplacer, raw| {
+            let mut raw_control = RetainedStoreWorkControl { raw, sticky: None };
+            let mut permit = match try_begin_canonical_work(&mut raw_control, work) {
+                Ok(permit) => permit,
+                Err(cause) => {
+                    callback_failure = Some(StoreBuildCallbackFailure::VerifiedWork(cause));
+                    return Err(RetainedBuildFailureCode::new(super::BUILD_CODE_DOMAIN));
+                }
+            };
+            let mut writer = match make_writer() {
+                Ok(writer) => writer,
+                Err(cause) => {
+                    permit.resolve_partial();
+                    drop(permit);
+                    return finish_activation_writer_callback(
+                        raw_control,
+                        Err(cause.into()),
+                        &mut callback_failure,
+                    );
+                }
+            };
+            let mut control = CanonicalBuildControl::from_admitted(&mut writer, permit);
+            let callback = build(&mut control);
+            let callback = control
+                .finish(callback)
+                .and_then(|()| finish_writer(writer).map_err(StoreControlledError::from));
+            let block =
+                finish_activation_writer_callback(raw_control, callback, &mut callback_failure)?;
+            Ok(emplacer.place(block, tag))
+        },
+    );
+    assembly
+        .map_controlled_action(result, callback_failure)
+        .map(|raw| CanonicalStoreRef {
+            raw,
+            marker: PhantomData,
+        })
+}
+
+fn copy_mapped_record_prefix<O, PP, U>(
+    control: &mut CanonicalBuildControl<'_, '_, '_, O, PP, U, CanonicalRecordWriter>,
+    source: &super::RecordStorage,
+    mapping: &CanonicalRetainedRewriteMap<'_, '_, StoredBlock>,
+) -> Result<(), StoreControlledError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    for source_row in source.cells.chunks(source.fields) {
+        control.write_row(|row| {
+            for source_cell in source_row.iter().copied() {
+                let mapped = super::mapped_canonical_record_cell(source_cell, mapping)
+                    .ok_or_else(StoreBuildError::capacity_envelope_violated)?;
+                row.write_mapped_cell(mapped)?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the private mapped-copy helper binds both exact source and destination record plans to one linear writer"
+)]
+fn try_copy_activation_canonical_records<O, PP, U, SourceRootKind, SourceRootTag, Tag>(
+    assembly: &mut RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource>,
+    source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+    source_ref: CanonicalRecordRef<Tag>,
+    source_plan: RecordPlan,
+    destination_plan: RecordPlan,
+    allocation: RetainedAllocationPlan,
+    work_dimension: StoreDimensionKey,
+    work: NonZeroU64,
+    tag: Tag,
+    append: impl for<'writer, 'permit, 'operation> FnOnce(
+        &mut CanonicalBuildControl<'writer, 'permit, 'operation, O, PP, U, CanonicalRecordWriter>,
+    ) -> Result<(), StoreControlledError>,
+) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    Tag: Copy + Send + Sync + 'static,
+{
+    assembly.ensure_writable()?;
+    assembly.validate_dimension(work_dimension)?;
+    let mut callback_failure = None;
+    let result = assembly.raw.try_rewrite_canonical_controlled(
+        source.share_source().aggregate(),
+        source_ref.raw,
+        work_dimension,
+        allocation,
+        |emplacer, source_block, mapping, raw| {
+            let mut raw_control = RetainedStoreWorkControl { raw, sticky: None };
+            let source_records = match super::checked_source_record(source_block, source_plan) {
+                Some(source_records) => source_records,
+                None => {
+                    return finish_activation_writer_callback(
+                        raw_control,
+                        Err(StoreBuildError::capacity_envelope_violated().into()),
+                        &mut callback_failure,
+                    );
+                }
+            };
+            let mut permit = match try_begin_canonical_work(&mut raw_control, work) {
+                Ok(permit) => permit,
+                Err(cause) => {
+                    callback_failure = Some(StoreBuildCallbackFailure::VerifiedWork(cause));
+                    return Err(RetainedBuildFailureCode::new(super::BUILD_CODE_DOMAIN));
+                }
+            };
+            let mut writer = match CanonicalRecordWriter::new(destination_plan) {
+                Ok(writer) => writer,
+                Err(cause) => {
+                    permit.resolve_partial();
+                    drop(permit);
+                    return finish_activation_writer_callback(
+                        raw_control,
+                        Err(cause.into()),
+                        &mut callback_failure,
+                    );
+                }
+            };
+            let mut control = CanonicalBuildControl::from_admitted(&mut writer, permit);
+            let callback = copy_mapped_record_prefix(&mut control, source_records, &mapping)
+                .and_then(|()| append(&mut control));
+            let callback = control.finish(callback).and_then(|()| {
+                CanonicalRecordWriter::finish(writer).map_err(StoreControlledError::from)
+            });
+            let block =
+                finish_activation_writer_callback(raw_control, callback, &mut callback_failure)?;
+            Ok(emplacer.place(block, tag))
+        },
+    );
+    assembly
+        .map_controlled_action(result, callback_failure)
+        .map(|raw| CanonicalStoreRef {
+            raw,
+            marker: PhantomData,
+        })
+}
+
 impl<O, PP, U, T> CanonicalBuildControl<'_, '_, '_, O, PP, U, SequenceWriter<T>>
 where
     O: OperationOwner,
@@ -696,6 +872,10 @@ fn perform_canonical_record_field(
 }
 
 impl CanonicalRecordBuildRow<'_, '_> {
+    fn write_mapped_cell(&mut self, value: super::RecordCell) -> Result<(), StoreControlledError> {
+        perform_canonical_record_field(self.writer, self.sticky, |writer| writer.push_cell(value))
+    }
+
     pub fn write_scalar<T: StoredScalar>(&mut self, value: T) -> Result<(), StoreControlledError> {
         perform_canonical_record_field(self.writer, self.sticky, |writer| {
             writer.write_scalar(value)

@@ -1871,4 +1871,279 @@ where
             self.assembly.try_share_canonical(source, source_ref),
         )
     }
+
+    /// Replaces one exact-source scalar sequence through destination-plan-derived work control.
+    pub fn try_rewrite_sequence<SourceRootKind, SourceRootTag, T, Tag>(
+        &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+        source_ref: CanonicalSequenceRef<T, Tag>,
+        plan: SequencePlan<T>,
+        tag: Tag,
+        build: impl for<'control> FnMut(
+            &mut CanonicalBuildControl<'_, '_, 'control, O, PP, U, SequenceWriter<T>>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalSequenceRef<T, Tag>, StoreRuntimeError>
+    where
+        T: StoredScalar,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let mut build = ManuallyDrop::new(Some(build));
+        let mut validate_source = || {
+            self.assembly
+                .require_canonical_source_from(source.share_source())?;
+            super::super::read_canonical_source_sequence(source.share_source(), source_ref)
+                .map(|_| ())
+                .ok_or(StoreRuntimeError::InvalidSourceSlot)
+        };
+        if let Some(cause) = preserved_fault(self.first_fault) {
+            note_later_contract(self.first_fault, validate_source());
+            note_later_contract(
+                self.first_fault,
+                plan.allocation_plan()
+                    .map(|_| ())
+                    .map_err(StoreRuntimeError::Plan),
+            );
+            return preserve_first_fault(
+                self.first_fault,
+                finish_scoped_callback(build, Err(cause)),
+            );
+        }
+        if let Err(cause) = validate_source() {
+            return preserve_first_fault(
+                self.first_fault,
+                finish_scoped_callback(build, Err(cause)),
+            );
+        }
+        let work = match canonical_build_work(Some(plan.element_count())) {
+            Ok(work) => work,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(cause)),
+                );
+            }
+        };
+        let allocation = match plan.allocation_plan() {
+            Ok(allocation) => allocation,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(StoreRuntimeError::Plan(cause))),
+                );
+            }
+        };
+        let result = try_rewrite_activation_canonical_writer(
+            self.assembly,
+            source,
+            source_ref,
+            allocation,
+            self.materialization_work_dimension,
+            work,
+            tag,
+            || <T as super::super::sealed::StoredScalar>::new_writer(plan.capacity, plan.len),
+            |control| {
+                build
+                    .as_mut()
+                    .expect("the canonical sequence rewrite is executed at most once")(
+                    control
+                )
+            },
+            SequenceWriter::finish,
+        );
+        preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
+    }
+
+    /// Replaces one exact-source record block with destination-authored rows.
+    pub fn try_rewrite_records<SourceRootKind, SourceRootTag, Tag>(
+        &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+        source_ref: CanonicalRecordRef<Tag>,
+        plan: RecordPlan,
+        tag: Tag,
+        build: impl for<'control> FnMut(
+            &mut CanonicalBuildControl<'_, '_, 'control, O, PP, U, CanonicalRecordWriter>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let mut build = ManuallyDrop::new(Some(build));
+        let mut validate_source = || {
+            self.assembly
+                .require_canonical_source_from(source.share_source())?;
+            super::super::read_canonical_source_records(source.share_source(), source_ref)
+                .map(|_| ())
+                .ok_or(StoreRuntimeError::InvalidSourceSlot)
+        };
+        if let Some(cause) = preserved_fault(self.first_fault) {
+            note_later_contract(self.first_fault, validate_source());
+            note_later_contract(
+                self.first_fault,
+                plan.allocation_plan()
+                    .map(|_| ())
+                    .map_err(StoreRuntimeError::Plan),
+            );
+            return preserve_first_fault(
+                self.first_fault,
+                finish_scoped_callback(build, Err(cause)),
+            );
+        }
+        if let Err(cause) = validate_source() {
+            return preserve_first_fault(
+                self.first_fault,
+                finish_scoped_callback(build, Err(cause)),
+            );
+        }
+        let work = match canonical_build_work(plan.rows().checked_mul(plan.fields())) {
+            Ok(work) => work,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(cause)),
+                );
+            }
+        };
+        let allocation = match plan.allocation_plan() {
+            Ok(allocation) => allocation,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(build, Err(StoreRuntimeError::Plan(cause))),
+                );
+            }
+        };
+        let result = try_rewrite_activation_canonical_writer(
+            self.assembly,
+            source,
+            source_ref,
+            allocation,
+            self.materialization_work_dimension,
+            work,
+            tag,
+            || CanonicalRecordWriter::new(plan),
+            |control| {
+                build
+                    .as_mut()
+                    .expect("the canonical record rewrite is executed at most once")(
+                    control
+                )
+            },
+            CanonicalRecordWriter::finish,
+        );
+        preserve_first_fault(self.first_fault, finish_scoped_callback(build, result))
+    }
+
+    /// Copies one exact-source record block while mapping every canonical reference.
+    pub fn try_copy_mapped_records<SourceRootKind, SourceRootTag, Tag>(
+        &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+        source_ref: CanonicalRecordRef<Tag>,
+        plan: RecordPlan,
+        tag: Tag,
+    ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.try_copy_mapped_records_with_append(source, source_ref, plan, plan, tag, |_writer| {
+            Ok(())
+        })
+    }
+
+    /// Copies a mapped exact-source prefix and appends rows inside one destination-plan permit.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "both exact record plans remain explicit while work is derived only from the destination plan"
+    )]
+    pub fn try_copy_mapped_records_with_append<SourceRootKind, SourceRootTag, Tag>(
+        &mut self,
+        source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
+        source_ref: CanonicalRecordRef<Tag>,
+        source_plan: RecordPlan,
+        destination_plan: RecordPlan,
+        tag: Tag,
+        append: impl for<'control> FnMut(
+            &mut CanonicalBuildControl<'_, '_, 'control, O, PP, U, CanonicalRecordWriter>,
+        ) -> Result<(), StoreControlledError>,
+    ) -> Result<CanonicalRecordRef<Tag>, StoreRuntimeError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        let mut append = ManuallyDrop::new(Some(append));
+        let mut validate_source = || {
+            self.assembly
+                .require_canonical_source_from(source.share_source())?;
+            let source_records =
+                super::super::read_canonical_source_records(source.share_source(), source_ref)
+                    .ok_or(StoreRuntimeError::InvalidSourceSlot)?;
+            if source_records.rows() != source_plan.rows()
+                || source_records.fields() != source_plan.fields()
+                || source_plan.fields() != destination_plan.fields()
+                || source_plan.rows() > destination_plan.rows()
+            {
+                return Err(StoreRuntimeError::InvalidSourceSlot);
+            }
+            Ok(())
+        };
+        if let Some(cause) = preserved_fault(self.first_fault) {
+            note_later_contract(self.first_fault, validate_source());
+            note_later_contract(
+                self.first_fault,
+                destination_plan
+                    .allocation_plan()
+                    .map(|_| ())
+                    .map_err(StoreRuntimeError::Plan),
+            );
+            return preserve_first_fault(
+                self.first_fault,
+                finish_scoped_callback(append, Err(cause)),
+            );
+        }
+        if let Err(cause) = validate_source() {
+            return preserve_first_fault(
+                self.first_fault,
+                finish_scoped_callback(append, Err(cause)),
+            );
+        }
+        let work = match canonical_build_work(
+            destination_plan
+                .rows()
+                .checked_mul(destination_plan.fields()),
+        ) {
+            Ok(work) => work,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(append, Err(cause)),
+                );
+            }
+        };
+        let allocation = match destination_plan.allocation_plan() {
+            Ok(allocation) => allocation,
+            Err(cause) => {
+                return preserve_first_fault(
+                    self.first_fault,
+                    finish_scoped_callback(append, Err(StoreRuntimeError::Plan(cause))),
+                );
+            }
+        };
+        let result = try_copy_activation_canonical_records(
+            self.assembly,
+            source,
+            source_ref,
+            source_plan,
+            destination_plan,
+            allocation,
+            self.materialization_work_dimension,
+            work,
+            tag,
+            |control| {
+                append
+                    .as_mut()
+                    .expect("the mapped record append is executed at most once")(
+                    control
+                )
+            },
+        );
+        preserve_first_fault(self.first_fault, finish_scoped_callback(append, result))
+    }
 }
