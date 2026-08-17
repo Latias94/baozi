@@ -823,12 +823,15 @@ pub(in crate::canonical_scene::store) struct PendingNodeSceneEdit {
 
 /// Execution-local pairing of a sealed edit plan with its exact retained source.
 pub(super) struct BoundPendingNodeSceneEdit<'scene> {
+    _seal: BoundSourceSeal,
     pub(super) input: &'scene ValidatedNodeScene,
     pub(super) program: NodeSceneEditProgram,
     pub(super) operation: OperationIdentity,
     pub(super) counts: NodeSceneEditFixedCounts,
     pub(super) invalidations: CanonicalInvalidations,
 }
+
+struct BoundSourceSeal;
 
 impl PendingNodeSceneEdit {
     #[allow(clippy::too_many_arguments)]
@@ -921,6 +924,7 @@ impl PendingNodeSceneEdit {
             });
         }
         Ok(BoundPendingNodeSceneEdit {
+            _seal: BoundSourceSeal,
             input,
             program: self.program,
             operation: self.operation,
