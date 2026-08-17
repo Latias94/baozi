@@ -7,10 +7,10 @@ use super::geometry::AuthoringRange;
 
 /// Identity of one skin within an authoring batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::canonical_scene::store) struct SkinLocalId(u32);
+pub struct SkinLocalId(u32);
 
 impl SkinLocalId {
-    pub(in crate::canonical_scene::store) const fn new(index: u32) -> Self {
+    pub const fn new(index: u32) -> Self {
         Self(index)
     }
 
@@ -26,10 +26,10 @@ impl SkinLocalId {
 /// A format adapter derives that bounded ordinal from its typed source-object
 /// locator; for glTF the source target ordinal is the stable identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::canonical_scene::store) struct MorphTargetIdentity(u32);
+pub struct MorphTargetIdentity(u32);
 
 impl MorphTargetIdentity {
-    pub(in crate::canonical_scene::store) const fn new(value: u32) -> Self {
+    pub const fn new(value: u32) -> Self {
         Self(value)
     }
 
@@ -40,18 +40,14 @@ impl MorphTargetIdentity {
 
 /// One palette-local influence preserving source tie order.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct InfluenceAuthoring {
+pub struct InfluenceAuthoring {
     joint: u32,
     weight: f32,
     source_order: u32,
 }
 
 impl InfluenceAuthoring {
-    pub(in crate::canonical_scene::store) const fn new(
-        joint: u32,
-        weight: f32,
-        source_order: u32,
-    ) -> Self {
+    pub const fn new(joint: u32, weight: f32, source_order: u32) -> Self {
         Self {
             joint,
             weight,
@@ -74,16 +70,13 @@ impl InfluenceAuthoring {
 
 /// Variable-length compressed influence rows for one primitive.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct InfluenceRowsAuthoring<'a> {
+pub struct InfluenceRowsAuthoring<'a> {
     vertex_offsets: &'a [u32],
     influences: &'a [InfluenceAuthoring],
 }
 
 impl<'a> InfluenceRowsAuthoring<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
-        vertex_offsets: &'a [u32],
-        influences: &'a [InfluenceAuthoring],
-    ) -> Self {
+    pub const fn new(vertex_offsets: &'a [u32], influences: &'a [InfluenceAuthoring]) -> Self {
         Self {
             vertex_offsets,
             influences,
@@ -101,7 +94,7 @@ impl<'a> InfluenceRowsAuthoring<'a> {
 
 /// Dense or sparse relative morph deltas over a primitive vertex domain.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) enum MorphDeltaPayloadAuthoring<'a> {
+pub enum MorphDeltaPayloadAuthoring<'a> {
     /// One tightly packed F32x3 value for every primitive vertex.
     Dense { values: &'a [f32] },
     /// Strictly increasing vertex indices with one tightly packed F32x3 value each.
@@ -114,13 +107,13 @@ pub(in crate::canonical_scene::store) enum MorphDeltaPayloadAuthoring<'a> {
 
 /// One position, normal, or tangent delta stream.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct MorphDeltaAuthoring<'a> {
+pub struct MorphDeltaAuthoring<'a> {
     semantic: MorphDeltaSemantic,
     payload: MorphDeltaPayloadAuthoring<'a>,
 }
 
 impl<'a> MorphDeltaAuthoring<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         semantic: MorphDeltaSemantic,
         payload: MorphDeltaPayloadAuthoring<'a>,
     ) -> Self {
@@ -141,14 +134,12 @@ impl<'a> MorphDeltaAuthoring<'a> {
 /// `deltas` must be in canonical Position, Normal, Tangent order. The target's
 /// logical ordinal is its position in the owning primitive's target slice.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct PrimitiveMorphTargetAuthoring<'a> {
+pub struct PrimitiveMorphTargetAuthoring<'a> {
     deltas: &'a [MorphDeltaAuthoring<'a>],
 }
 
 impl<'a> PrimitiveMorphTargetAuthoring<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
-        deltas: &'a [MorphDeltaAuthoring<'a>],
-    ) -> Self {
+    pub const fn new(deltas: &'a [MorphDeltaAuthoring<'a>]) -> Self {
         Self { deltas }
     }
 
@@ -162,13 +153,13 @@ impl<'a> PrimitiveMorphTargetAuthoring<'a> {
 /// Influence rows preserve palette-local joint indices. A mesh instance supplies
 /// the skin palette used to interpret those indices.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct PrimitiveDeformationAuthoring<'a> {
+pub struct PrimitiveDeformationAuthoring<'a> {
     influences: Presence<InfluenceRowsAuthoring<'a>>,
     morph_targets: &'a [PrimitiveMorphTargetAuthoring<'a>],
 }
 
 impl<'a> PrimitiveDeformationAuthoring<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         influences: Presence<InfluenceRowsAuthoring<'a>>,
         morph_targets: &'a [PrimitiveMorphTargetAuthoring<'a>],
     ) -> Self {
@@ -193,16 +184,13 @@ impl<'a> PrimitiveDeformationAuthoring<'a> {
 
 /// Stable identity and optional name for one logical morph target.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct MorphTargetDefinitionAuthoring<'a> {
+pub struct MorphTargetDefinitionAuthoring<'a> {
     identity: MorphTargetIdentity,
     name: Presence<&'a EntityName>,
 }
 
 impl<'a> MorphTargetDefinitionAuthoring<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
-        identity: MorphTargetIdentity,
-        name: Presence<&'a EntityName>,
-    ) -> Self {
+    pub const fn new(identity: MorphTargetIdentity, name: Presence<&'a EntityName>) -> Self {
         Self { identity, name }
     }
 
@@ -221,16 +209,13 @@ impl<'a> MorphTargetDefinitionAuthoring<'a> {
 /// Its count must equal the default-weight width. Every primitive of the logical
 /// mesh must provide exactly that many target projections.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct LogicalMorphAuthoring<'a> {
+pub struct LogicalMorphAuthoring<'a> {
     definitions: AuthoringRange,
     default_weights: &'a [f32],
 }
 
 impl<'a> LogicalMorphAuthoring<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
-        definitions: AuthoringRange,
-        default_weights: &'a [f32],
-    ) -> Self {
+    pub const fn new(definitions: AuthoringRange, default_weights: &'a [f32]) -> Self {
         Self {
             definitions,
             default_weights,
@@ -248,16 +233,13 @@ impl<'a> LogicalMorphAuthoring<'a> {
 
 /// Skin selection and optional complete morph override for one mesh instance.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct MeshInstanceDeformationAuthoring<'a> {
+pub struct MeshInstanceDeformationAuthoring<'a> {
     skin: Presence<SkinLocalId>,
     morph_weights: Presence<&'a [f32]>,
 }
 
 impl<'a> MeshInstanceDeformationAuthoring<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
-        skin: Presence<SkinLocalId>,
-        morph_weights: Presence<&'a [f32]>,
-    ) -> Self {
+    pub const fn new(skin: Presence<SkinLocalId>, morph_weights: Presence<&'a [f32]>) -> Self {
         Self {
             skin,
             morph_weights,
@@ -275,7 +257,7 @@ impl<'a> MeshInstanceDeformationAuthoring<'a> {
 
 /// One ordered joint palette with explicit canonical matrix spaces.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct SkinAuthoring<'a> {
+pub struct SkinAuthoring<'a> {
     name: Presence<&'a EntityName>,
     joints: &'a [super::NodeLocalId],
     inverse_bind_matrices: &'a [Mat4],
@@ -284,7 +266,7 @@ pub(in crate::canonical_scene::store) struct SkinAuthoring<'a> {
 }
 
 impl<'a> SkinAuthoring<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         name: Presence<&'a EntityName>,
         joints: &'a [super::NodeLocalId],
         inverse_bind_matrices: &'a [Mat4],
@@ -329,7 +311,7 @@ impl<'a> SkinAuthoring<'a> {
 /// cardinality with the corresponding validated geometry tables. Skins are a
 /// separate scene-level table addressed by [`SkinLocalId`].
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct DeformationAuthoringBatch<'a> {
+pub struct DeformationAuthoringBatch<'a> {
     skins: &'a [SkinAuthoring<'a>],
     morph_target_definitions: &'a [MorphTargetDefinitionAuthoring<'a>],
     logical_meshes: &'a [LogicalMorphAuthoring<'a>],
@@ -343,11 +325,11 @@ impl<'a> DeformationAuthoringBatch<'a> {
     /// Geometry with logical meshes, primitives, or mesh instances still requires
     /// one explicit deformation row per corresponding geometry row, even when
     /// every deformation payload is absent.
-    pub(in crate::canonical_scene::store) const fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self::new(&[], &[], &[], &[], &[])
     }
 
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         skins: &'a [SkinAuthoring<'a>],
         morph_target_definitions: &'a [MorphTargetDefinitionAuthoring<'a>],
         logical_meshes: &'a [LogicalMorphAuthoring<'a>],

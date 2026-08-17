@@ -1,22 +1,22 @@
 use crate::entity::AuthoredTransform;
 
-pub(super) mod animation;
-pub(super) mod appearance;
-pub(super) mod deformation;
-pub(super) mod geometry;
-pub(super) mod lineage;
-pub(super) mod metadata;
-pub(super) mod spatial;
+pub(in crate::canonical_scene::store) mod animation;
+pub(in crate::canonical_scene::store) mod appearance;
+pub(in crate::canonical_scene::store) mod deformation;
+pub(in crate::canonical_scene::store) mod geometry;
+pub(in crate::canonical_scene::store) mod lineage;
+pub(in crate::canonical_scene::store) mod metadata;
+pub(in crate::canonical_scene::store) mod spatial;
 
 /// Distinguishes an absent source field from a present value, including an empty slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(in crate::canonical_scene::store) enum Presence<T> {
+pub enum Presence<T> {
     Absent,
     Present(T),
 }
 
 impl<T> Presence<T> {
-    pub(in crate::canonical_scene::store) const fn as_ref(&self) -> Presence<&T> {
+    pub const fn as_ref(&self) -> Presence<&T> {
         match self {
             Self::Absent => Presence::Absent,
             Self::Present(value) => Presence::Present(value),
@@ -26,14 +26,14 @@ impl<T> Presence<T> {
 
 /// Identity of an authored node within one producer batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::canonical_scene::store) struct NodeLocalId(u32);
+pub struct NodeLocalId(u32);
 
 impl NodeLocalId {
-    pub(in crate::canonical_scene::store) const fn new(index: u32) -> Self {
+    pub const fn new(index: u32) -> Self {
         Self(index)
     }
 
-    pub(in crate::canonical_scene::store) const fn index(self) -> u32 {
+    pub const fn index(self) -> u32 {
         self.0
     }
 }
@@ -50,48 +50,47 @@ impl From<u32> for NodeLocalId {
 /// Coupling it to the parent identity keeps ordered-child semantics local instead
 /// of requiring a producer to choose Baozi's canonical traversal order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(in crate::canonical_scene::store) struct NodeParent {
+pub struct NodeParent {
     node: NodeLocalId,
     child_ordinal: u32,
 }
 
 impl NodeParent {
-    pub(in crate::canonical_scene::store) const fn new(
-        node: NodeLocalId,
-        child_ordinal: u32,
-    ) -> Self {
+    pub const fn new(node: NodeLocalId, child_ordinal: u32) -> Self {
         Self {
             node,
             child_ordinal,
         }
     }
 
-    pub(in crate::canonical_scene::store) const fn node(self) -> NodeLocalId {
+    pub const fn node(self) -> NodeLocalId {
         self.node
     }
 
-    pub(in crate::canonical_scene::store) const fn child_ordinal(self) -> u32 {
+    pub const fn child_ordinal(self) -> u32 {
         self.child_ordinal
     }
 }
 
 /// One authored node before its local parent is compiled to canonical order.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct NodeAuthoringNode {
+pub struct NodeAuthoringNode<'a> {
+    name: Presence<&'a str>,
     parent: Presence<NodeParent>,
     authored_transform: AuthoredTransform,
     camera: Presence<spatial::CameraLocalId>,
     light: Presence<spatial::LightLocalId>,
 }
 
-impl NodeAuthoringNode {
-    pub(in crate::canonical_scene::store) const fn new(
+impl<'a> NodeAuthoringNode<'a> {
+    pub const fn new(
         parent: Presence<NodeParent>,
         authored_transform: AuthoredTransform,
         camera: Presence<spatial::CameraLocalId>,
         light: Presence<spatial::LightLocalId>,
     ) -> Self {
         Self {
+            name: Presence::Absent,
             parent,
             authored_transform,
             camera,
@@ -99,21 +98,28 @@ impl NodeAuthoringNode {
         }
     }
 
-    pub(in crate::canonical_scene::store) const fn parent(self) -> Presence<NodeParent> {
+    pub const fn with_name(mut self, name: &'a str) -> Self {
+        self.name = Presence::Present(name);
+        self
+    }
+
+    pub const fn name(self) -> Presence<&'a str> {
+        self.name
+    }
+
+    pub const fn parent(self) -> Presence<NodeParent> {
         self.parent
     }
 
-    pub(in crate::canonical_scene::store) const fn authored_transform(self) -> AuthoredTransform {
+    pub const fn authored_transform(self) -> AuthoredTransform {
         self.authored_transform
     }
 
-    pub(in crate::canonical_scene::store) const fn camera(
-        self,
-    ) -> Presence<spatial::CameraLocalId> {
+    pub const fn camera(self) -> Presence<spatial::CameraLocalId> {
         self.camera
     }
 
-    pub(in crate::canonical_scene::store) const fn light(self) -> Presence<spatial::LightLocalId> {
+    pub const fn light(self) -> Presence<spatial::LightLocalId> {
         self.light
     }
 }
@@ -125,27 +131,48 @@ impl NodeAuthoringNode {
 /// ordered children; each non-root node carries its source child ordinal. Local node
 /// identifiers index `nodes`.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct NodeAuthoringBatch<'a> {
+pub struct NodeAuthoringBatch<'a> {
     roots: Presence<&'a [NodeLocalId]>,
-    nodes: &'a [NodeAuthoringNode],
+    nodes: &'a [NodeAuthoringNode<'a>],
 }
 
-/// Source identity, lineage, and descriptive metadata for one canonical Scene batch.
+/// Source identity, lineage, descriptive metadata, and transient resource snapshots for one
+/// canonical Scene batch.
 ///
 /// Metadata may be empty, but the lineage batch must still cover the Scene, synthetic root, and
-/// every canonical owner admitted by the other authoring domains.
+/// every canonical owner admitted by the other authoring domains. Resource snapshots are
+/// authoring-only input: canonical publication retains owned payload bytes and profile lineage,
+/// not this transient table.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct ProfileAuthoringBatch<'a> {
+pub struct ProfileAuthoringBatch<'a> {
     lineage: lineage::LineageAuthoringBatch<'a>,
     metadata: metadata::MetadataAuthoringBatch<'a>,
+    resource_snapshots: &'a [ResourceSnapshotAuthoring<'a>],
 }
 
 impl<'a> ProfileAuthoringBatch<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         lineage: lineage::LineageAuthoringBatch<'a>,
         metadata: metadata::MetadataAuthoringBatch<'a>,
     ) -> Self {
-        Self { lineage, metadata }
+        Self {
+            lineage,
+            metadata,
+            resource_snapshots: &[],
+        }
+    }
+
+    /// Injects transient bytes captured by the owning import session.
+    ///
+    /// Rows are positionally aligned with the profile resource table. They are consumed only to
+    /// resolve same-session image references during materialization and never enter the retained
+    /// profile or expose resource locators as canonical appearance semantics.
+    pub const fn with_resource_snapshots(
+        mut self,
+        resource_snapshots: &'a [ResourceSnapshotAuthoring<'a>],
+    ) -> Self {
+        self.resource_snapshots = resource_snapshots;
+        self
     }
 
     pub(in crate::canonical_scene::store) const fn lineage(
@@ -159,6 +186,69 @@ impl<'a> ProfileAuthoringBatch<'a> {
     ) -> metadata::MetadataAuthoringBatch<'a> {
         self.metadata
     }
+
+    pub(in crate::canonical_scene::store) const fn resource_snapshots(
+        self,
+    ) -> ResourceSnapshotAuthoringTable<'a> {
+        ResourceSnapshotAuthoringTable::new(self.lineage.resources().len(), self.resource_snapshots)
+    }
+}
+
+/// One transient session-owned byte snapshot aligned with a profile resource identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceSnapshotAuthoring<'a> {
+    bytes: Presence<&'a [u8]>,
+}
+
+impl<'a> ResourceSnapshotAuthoring<'a> {
+    pub const fn absent() -> Self {
+        Self {
+            bytes: Presence::Absent,
+        }
+    }
+
+    pub const fn snapshotted(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes: Presence::Present(bytes),
+        }
+    }
+
+    pub(in crate::canonical_scene::store) const fn bytes(self) -> Presence<&'a [u8]> {
+        self.bytes
+    }
+}
+
+/// Narrow appearance-facing view of the session resource snapshot table.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::canonical_scene::store) struct ResourceSnapshotAuthoringTable<'a> {
+    resource_count: usize,
+    snapshots: &'a [ResourceSnapshotAuthoring<'a>],
+}
+
+impl<'a> ResourceSnapshotAuthoringTable<'a> {
+    pub(in crate::canonical_scene::store) const fn new(
+        resource_count: usize,
+        snapshots: &'a [ResourceSnapshotAuthoring<'a>],
+    ) -> Self {
+        Self {
+            resource_count,
+            snapshots,
+        }
+    }
+
+    pub(in crate::canonical_scene::store) const fn empty() -> Self {
+        Self::new(0, &[])
+    }
+
+    pub(in crate::canonical_scene::store) const fn resource_count(self) -> usize {
+        self.resource_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn snapshots(
+        self,
+    ) -> &'a [ResourceSnapshotAuthoring<'a>] {
+        self.snapshots
+    }
 }
 
 /// One borrowed producer input for every domain of a canonical Scene.
@@ -169,7 +259,7 @@ impl<'a> ProfileAuthoringBatch<'a> {
 /// the same Scene, or without the profile that accounts for every canonical
 /// owner's source identity, lineage, and metadata.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct SceneAuthoringBatch<'a> {
+pub struct SceneAuthoringBatch<'a> {
     spatial: spatial::SpatialAuthoringBatch<'a>,
     nodes: NodeAuthoringBatch<'a>,
     appearance: appearance::AppearanceAuthoringBatch<'a>,
@@ -180,7 +270,7 @@ pub(in crate::canonical_scene::store) struct SceneAuthoringBatch<'a> {
 }
 
 impl<'a> SceneAuthoringBatch<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         spatial: spatial::SpatialAuthoringBatch<'a>,
         nodes: NodeAuthoringBatch<'a>,
         appearance: appearance::AppearanceAuthoringBatch<'a>,
@@ -240,9 +330,9 @@ impl<'a> SceneAuthoringBatch<'a> {
 }
 
 impl<'a> NodeAuthoringBatch<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         roots: Presence<&'a [NodeLocalId]>,
-        nodes: &'a [NodeAuthoringNode],
+        nodes: &'a [NodeAuthoringNode<'a>],
     ) -> Self {
         Self { roots, nodes }
     }
@@ -251,7 +341,7 @@ impl<'a> NodeAuthoringBatch<'a> {
         self.roots
     }
 
-    pub(in crate::canonical_scene::store) const fn nodes(self) -> &'a [NodeAuthoringNode] {
+    pub(in crate::canonical_scene::store) const fn nodes(self) -> &'a [NodeAuthoringNode<'a>] {
         self.nodes
     }
 }

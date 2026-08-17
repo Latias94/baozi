@@ -12,17 +12,18 @@ pub(crate) use error::ObjFailure;
 pub use error::ObjFailureCode;
 pub use options::{ObjImportOptions, ObjTextDecodingMode, obj_import_option_key};
 
-use baozi_core::{FormatId, SceneDraft};
+use baozi_core::FormatId;
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
     FormatDescriptor, FormatEncoding, FormatImporter, OptionRuntimeTypeKey, ParseResult,
-    ParseScope, Probe, ReadHint, RegistryBuilder, RegistryRegistrationError, TextBomPolicy,
-    TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
-    TextSourceEncoding,
+    ParseScope, Probe, ReadHint, RegistryBuilder, RegistryRegistrationError, SceneDraft,
+    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
+    TextProfile, TextSourceEncoding,
 };
 use std::sync::Arc;
 
 pub const FORMAT_ID: &str = "org.baozi.obj";
+const DIFFUSE_TEXTURE_ROLE: &str = "diffuse-texture";
 const MATERIAL_LIBRARY_ROLE: &str = "material-library";
 
 pub struct ObjImporter;
@@ -66,11 +67,17 @@ pub fn format_descriptor() -> FormatDescriptor {
             CapabilityStatus::Supported,
         ),
     ])
-    .dependency_roles([(
-        material_library_role(),
-        baozi_import::DependencyRequirement::Optional,
-    )])
-    .notes("OBJ/MTL importer for static face meshes and external texture URI references")
+    .dependency_roles([
+        (
+            diffuse_texture_role(),
+            baozi_import::DependencyRequirement::Optional,
+        ),
+        (
+            material_library_role(),
+            baozi_import::DependencyRequirement::Optional,
+        ),
+    ])
+    .notes("OBJ/MTL importer for static face meshes and session-snapshotted diffuse textures")
     .docs_path("docs/formats/obj.md")
     .build()
     .expect("static OBJ descriptor must be valid")
@@ -113,6 +120,11 @@ pub(crate) fn material_library_role() -> baozi_import::DependencyRoleId {
         .expect("static OBJ dependency role must be valid")
 }
 
+pub(crate) fn diffuse_texture_role() -> baozi_import::DependencyRoleId {
+    baozi_import::DependencyRoleId::new(DIFFUSE_TEXTURE_ROLE)
+        .expect("static OBJ dependency role must be valid")
+}
+
 impl FormatImporter for ObjImporter {
     fn descriptor(&self) -> FormatDescriptor {
         format_descriptor()
@@ -143,10 +155,15 @@ impl FormatImporter for ObjImporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use baozi_import::{
+        FormatSelection, ImportConfigOverlay, ImportOperationControl, ImportRequest,
+        ImportRequestLayer, OptionCompileLimits, RegistryBuildLimits, import_bytes,
+    };
+    use baozi_io::AssetPath;
     use baozi_test_support::assert_support_matrix_row;
 
     #[test]
-    fn descriptor_uses_qualified_identity_and_optional_material_library() {
+    fn descriptor_uses_qualified_identity_and_optional_dependencies() {
         let descriptor = format_descriptor();
         assert_eq!(descriptor.id().as_str(), FORMAT_ID);
         assert_eq!(
@@ -154,15 +171,47 @@ mod tests {
                 .dependency_roles()
                 .map(|(role, requirement)| (role.as_str(), requirement))
                 .collect::<Vec<_>>(),
-            vec![(
-                MATERIAL_LIBRARY_ROLE,
-                baozi_import::DependencyRequirement::Optional
-            )]
+            vec![
+                (
+                    DIFFUSE_TEXTURE_ROLE,
+                    baozi_import::DependencyRequirement::Optional
+                ),
+                (
+                    MATERIAL_LIBRARY_ROLE,
+                    baozi_import::DependencyRequirement::Optional
+                ),
+            ]
         );
     }
 
     #[test]
     fn support_matrix_matches_format_descriptor() {
         assert_support_matrix_row("baozi-format-obj", &format_descriptor());
+    }
+
+    #[test]
+    fn complete_batch_path_imports_triangle() {
+        let mut registry = RegistryBuilder::new();
+        register(&mut registry).expect("OBJ registration");
+        let registry = registry
+            .freeze(RegistryBuildLimits::default())
+            .expect("OBJ registry freeze");
+        let config = ImportConfigOverlay::default().with_format_selection(FormatSelection::Forced(
+            FormatId::new(FORMAT_ID).expect("static OBJ format id"),
+        ));
+        let request = ImportRequest::new().with_caller_layer(ImportRequestLayer::new(config));
+        let request = registry
+            .compile_request(&request, OptionCompileLimits::default())
+            .expect("OBJ request compilation");
+        let report = import_bytes(
+            &request,
+            AssetPath::new("triangle.obj").expect("test source path"),
+            b"o triangle\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+            ImportOperationControl::default(),
+        )
+        .expect("complete-batch OBJ import");
+
+        assert!(report.diagnostics().is_empty());
+        assert!(report.scene().canonical_block_count() > 0);
     }
 }

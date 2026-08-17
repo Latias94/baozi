@@ -4,10 +4,13 @@
 )]
 #![cfg(feature = "format-stl")]
 
+mod common;
+
 use baozi::{
     Error, FormatFailureDetail, FormatFailureDetailValue, FormatFailureEnvelope, ImportCause,
     Importer, Result,
 };
+use common::scene_snapshot;
 
 fn has_expected_structure_reason(envelope: &FormatFailureEnvelope) -> bool {
     envelope.details().iter().any(is_expected_structure_reason)
@@ -55,7 +58,7 @@ fn facade_reads_ascii_stl_from_bytes() -> Result<()> {
     let report = Importer::new()?.read_bytes("facade.stl", ascii_triangle())?;
 
     assert_eq!(report.format().id().as_str(), "org.baozi.stl");
-    assert_eq!(report.scene().meshes().len(), 1);
+    assert_eq!(scene_snapshot(&report).logical_mesh_count(), 1);
     assert!(report.diagnostics().is_empty());
     Ok(())
 }
@@ -68,8 +71,10 @@ fn same_importer_reads_stl_repeatedly() -> Result<()> {
 
     assert_eq!(first.format().id().as_str(), "org.baozi.stl");
     assert_eq!(second.format().id().as_str(), "org.baozi.stl");
-    assert_eq!(first.scene().meshes().len(), 1);
-    assert_eq!(second.scene().meshes().len(), 1);
+    let first_snapshot = scene_snapshot(&first);
+    let second_snapshot = scene_snapshot(&second);
+    assert_eq!(first_snapshot.logical_mesh_count(), 1);
+    assert_eq!(second_snapshot.logical_mesh_count(), 1);
     Ok(())
 }
 
@@ -81,7 +86,7 @@ fn facade_preserves_successful_stl_diagnostics() -> Result<()> {
 
     let report = Importer::new()?.read_bytes("diagnostic.stl", &bytes)?;
 
-    assert_eq!(report.scene().meshes().len(), 1);
+    assert_eq!(scene_snapshot(&report).logical_mesh_count(), 1);
     assert_eq!(report.diagnostics().len(), 1);
     assert_eq!(report.diagnostics()[0].code().as_str(), "stl.empty_solid");
     Ok(())
@@ -93,7 +98,7 @@ fn facade_content_detection_beats_unknown_extension() -> Result<()> {
     let report = Importer::new()?.read_bytes("facade.bin", &bytes)?;
 
     assert_eq!(report.format().id().as_str(), "org.baozi.stl");
-    assert_eq!(report.scene().meshes().len(), 1);
+    assert_eq!(scene_snapshot(&report).logical_mesh_count(), 1);
     Ok(())
 }
 
@@ -133,5 +138,5 @@ fn facade_reads_stl_from_native_path() {
         .expect("native STL import should succeed");
     fs::remove_file(&path).expect("temporary STL should be removable");
 
-    assert_eq!(report.scene().meshes().len(), 1);
+    assert_eq!(scene_snapshot(&report).logical_mesh_count(), 1);
 }

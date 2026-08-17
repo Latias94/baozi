@@ -427,8 +427,10 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
         Ok(())
     }
 
-    fn push_facet(&mut self, normal: Vec3, vertices: &[Vec3]) -> ParseResult<()> {
+    fn push_facet(&mut self, normal: Vec3, vertices: &[Vec3; 3]) -> ParseResult<()> {
         let scope = self.scope;
+        let positions = vertices.map(vec3_components);
+        let normals = [vec3_components(normal); 3];
         scope.with_work_group(
             [
                 (ImportWorkClass::Faces, 1),
@@ -444,12 +446,10 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
                     )));
                 };
                 work.run([0, 3, 3], || {
-                    current.positions.try_extend_from_slice(vertices)
+                    current.positions.try_extend_from_slice(&positions)
                 })?;
                 work.run([0, 0, 3], || {
-                    current
-                        .normals
-                        .try_extend_from_slice(&[normal, normal, normal])
+                    current.normals.try_extend_from_slice(&normals)
                 })?;
                 work.run([1, 0, 0], || {
                     current.face_count = current
@@ -583,10 +583,14 @@ fn next_line<'text>(
 
 struct SolidBuilder<'scope> {
     name: Option<MeteredString<'scope>>,
-    positions: MeteredVec<'scope, Vec3>,
-    normals: MeteredVec<'scope, Vec3>,
+    positions: MeteredVec<'scope, [f32; 3]>,
+    normals: MeteredVec<'scope, [f32; 3]>,
     face_count: usize,
     start: DiagnosticByteRange,
+}
+
+const fn vec3_components(value: Vec3) -> [f32; 3] {
+    [value.x, value.y, value.z]
 }
 
 impl<'scope> SolidBuilder<'scope> {

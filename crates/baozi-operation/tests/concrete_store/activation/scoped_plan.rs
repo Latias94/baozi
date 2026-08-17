@@ -336,7 +336,10 @@ enum ScopedRoleFault {
     CanonicalWriter,
     EvidenceWriter,
     MaterializationWork,
+    MaterializationScratch,
+    ValidationPhase,
     ValidationWork,
+    ValidationScratch,
     CanonicalDestination,
     EvidenceDestination,
 }
@@ -347,7 +350,10 @@ fn scoped_constructor_validates_every_role_before_authoring_authority_exists() {
         ScopedRoleFault::CanonicalWriter,
         ScopedRoleFault::EvidenceWriter,
         ScopedRoleFault::MaterializationWork,
+        ScopedRoleFault::MaterializationScratch,
+        ScopedRoleFault::ValidationPhase,
         ScopedRoleFault::ValidationWork,
+        ScopedRoleFault::ValidationScratch,
         ScopedRoleFault::CanonicalDestination,
         ScopedRoleFault::EvidenceDestination,
     ] {
@@ -378,16 +384,35 @@ fn scoped_constructor_validates_every_role_before_authoring_authority_exists() {
                 2,
                 2,
             ),
-            if matches!(fault, ScopedRoleFault::MaterializationWork) {
-                foreign_dimension()
-            } else {
-                keys.dimension
-            },
-            if matches!(fault, ScopedRoleFault::ValidationWork) {
-                foreign_dimension()
-            } else {
-                keys.dimension
-            },
+            CanonicalMaterializationRole::new(
+                if matches!(fault, ScopedRoleFault::MaterializationWork) {
+                    foreign_dimension()
+                } else {
+                    keys.dimension
+                },
+                if matches!(fault, ScopedRoleFault::MaterializationScratch) {
+                    foreign_dimension()
+                } else {
+                    keys.dimension
+                },
+            ),
+            CanonicalValidationRole::new(
+                if matches!(fault, ScopedRoleFault::ValidationPhase) {
+                    foreign_phase()
+                } else {
+                    keys.phase
+                },
+                if matches!(fault, ScopedRoleFault::ValidationWork) {
+                    foreign_dimension()
+                } else {
+                    keys.dimension
+                },
+                if matches!(fault, ScopedRoleFault::ValidationScratch) {
+                    foreign_dimension()
+                } else {
+                    keys.dimension
+                },
+            ),
             if matches!(fault, ScopedRoleFault::CanonicalDestination) {
                 foreign_dimension()
             } else {
@@ -713,6 +738,52 @@ fn ledger_interruption_then_reject_preserves_runtime_never_activated() {
         .unwrap()
         .into_parts();
     drop(prepared.handoff());
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn ledger_rejection_before_activation_skips_materialization_and_prepares_failure() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (mut operation, keys) = operation(&account);
+    assert!(
+        operation
+            .producer_host()
+            .charge_attempted(keys.dimension, u64::MAX)
+            .is_err()
+    );
+    let materialized = Cell::new(false);
+
+    let outcome: ScopedOutcome<()> =
+        run_scoped_activation(operation, scoped_activation_shape(keys, 1, 1), |lane| {
+            materialized.set(true);
+            lane.reject::<(), _, ScalarSequence<u8>, SequenceTag>((), 43)
+        })
+        .unwrap();
+
+    assert!(!materialized.get());
+    let never_activated = match outcome {
+        CanonicalActivationOutcome::NeverActivated(state) => state,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("a pre-existing ledger rejection must prevent canonical activation")
+        }
+    };
+    assert!(matches!(
+        never_activated.cause(),
+        StoreNeverActivatedCause::Runtime(StoreRuntimeError::SuccessOutcomeRejected)
+    ));
+    let (prepared, _) = never_activated
+        .prepare_minimal_fallback()
+        .unwrap()
+        .into_parts();
+    let published = prepared.handoff();
+    assert_eq!(
+        store_failure_cause(&published.ledger_evidence).class(),
+        StorePreparationFailureClass::Ledger
+    );
+    drop(published);
     assert!(!account.snapshot().poisoned());
 }
 
@@ -1932,6 +2003,118 @@ fn scoped_materialization_rejection_eagerly_cleans_canonical_storage() {
         0
     );
     drop(published);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn scoped_success_rebinds_minimal_startup_writer_to_exact_canonical_shape() {
+    const CANONICAL_BLOCKS: usize = 4;
+
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation_with_terminal_attribution_slots(&account, 2);
+    let activation = TestScopedActivation {
+        policy: CanonicalActivationPolicy::new(
+            writer_plan(keys, CANONICAL_BLOCKS + 1, 2),
+            writer_plan(keys, 2, 2),
+            CanonicalMaterializationRole::new(keys.dimension, keys.dimension),
+            CanonicalValidationRole::new(keys.phase, keys.dimension, keys.dimension),
+            keys.dimension,
+            keys.dimension,
+        ),
+        failure: CanonicalFailureRequirements::new(CanonicalTableShape::new(1, 1).unwrap()),
+        success: CanonicalSuccessRequirements::new(
+            CanonicalTableShape::new(CANONICAL_BLOCKS, CANONICAL_BLOCKS).unwrap(),
+            CANONICAL_BLOCKS,
+            NonZeroU64::MIN,
+        )
+        .unwrap(),
+    };
+
+    let outcome = plan_scoped_activation!(operation, activation, |mut lane| {
+        let first = lane
+            .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                writer.push(1)
+            })
+            .unwrap();
+        let second = lane
+            .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                writer.push(2)
+            })
+            .unwrap();
+        let third = lane
+            .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                writer.push(3)
+            })
+            .unwrap();
+        let root = lane
+            .try_retain_records(RecordPlan::new(1, 3).unwrap(), CanonicalRootTag, |writer| {
+                writer.write_row(|row| {
+                    row.write_sequence_ref(first)?;
+                    row.write_sequence_ref(second)?;
+                    row.write_sequence_ref(third)
+                })
+            })
+            .unwrap();
+        lane.complete::<_, (), _, _>(root, root)
+    })
+    .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(activated) => activated,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("the exact canonical writer rebind must activate")
+        }
+    };
+    assert_eq!(activated.canonical_len(), CANONICAL_BLOCKS);
+
+    let outcome = activated
+        .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
+            |lane, _output| {
+                let evidence = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.push(1),
+                    )
+                    .unwrap();
+                lane.complete(evidence)
+            },
+            |planning, _output| {
+                planning.validate_with(
+                    |_| Ok(()),
+                    |_session, _canonical, _evidence, &mut ()| {
+                        Ok(CanonicalValidationDecision::<(), _>::reject(
+                            ValidationRejection::Semantic,
+                            74,
+                        ))
+                    },
+                )
+            },
+        )
+        .unwrap();
+    let rejected = match outcome {
+        CanonicalCentralValidationOutcome::Rejected(rejected) => rejected,
+        CanonicalCentralValidationOutcome::Candidate(_)
+        | CanonicalCentralValidationOutcome::Fallback(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("the test rejection must retain the exact canonical assembly")
+        }
+    };
+    let (prepared, _) = rejected.prepare_minimal_fallback().unwrap().into_parts();
+    let published = prepared.handoff();
+    assert_eq!(
+        published
+            .ledger_evidence
+            .dimension(keys.dimension)
+            .unwrap()
+            .committed_canonical_output(),
+        0
+    );
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert!(!account.snapshot().poisoned());
 }
 

@@ -253,7 +253,7 @@ impl<'view, 'input, NR, DR> AnimationTargetCatalog<'view, 'input, NR, DR> {
     pub(in crate::canonical_scene::store) fn authored_node(
         &self,
         node: usize,
-    ) -> Option<super::super::input::NodeAuthoringNode> {
+    ) -> Option<super::super::input::NodeAuthoringNode<'_>> {
         self.nodes.input().nodes().get(node).copied()
     }
 

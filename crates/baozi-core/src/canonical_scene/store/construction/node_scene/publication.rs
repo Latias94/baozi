@@ -4,8 +4,9 @@ use baozi_operation::__canonical_activation::{
     StoreCanonicalRejection, StoreNeverActivatedCause,
 };
 use baozi_operation::{
-    CounterClass, LedgerCause, PreparedStoreFailureOutcome, PreparedStoreFallback,
-    PreparedStoreSuccessOutcome, RecordBlock, StoreBuildFailureClass, StoreRuntimeError,
+    ControlCause, CounterClass, FinalProgress, LedgerCause, OperationOwner,
+    PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccessOutcome, ProgressPhase,
+    ProgressUnit, RecordBlock, StoreBuildFailureClass, StoreRuntimeError,
 };
 
 use crate::canonical_scene::store::schema::{
@@ -18,18 +19,18 @@ use crate::identity::{ReservedSceneGeneration, SceneGenerationError};
 
 use super::super::{
     GENERATION_EXHAUSTED_CODE, PreparedTracerSceneFallback, SceneConstructionError,
-    TracerSceneFallback, burn_generation_reservation, final_progress,
+    TracerSceneFallback, burn_generation_reservation,
 };
-use super::materialization::NodeSceneActivationOutput;
+use super::materialization::{NodeSceneActivationOutput, write_node_scene_evidence_row};
 use super::{
-    NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_CONTROL_INTERRUPTION_CODE,
-    NODE_SCENE_STORAGE_REJECTION_CODE, NODE_SCENE_WORK_INTERRUPTION_CODE,
-    NodeSceneCanonicalJointCommit, NodeSceneConstructionRejection, NodeSceneConstructionTerminal,
-    NodeSceneDraft, NodeSceneDraftBuild, NodeSceneRichFailure, NodeSceneSuccessParts,
-    NodeSceneSuccessReport, PendingNodeSceneDraft, PreparedNodeSceneConstruction,
+    DeferredNodeSceneDraftBuild, NODE_SCENE_BUILD_INVARIANT_CODE,
+    NODE_SCENE_CONTROL_INTERRUPTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
+    NODE_SCENE_WORK_INTERRUPTION_CODE, NodeSceneCanonicalJointCommit,
+    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
+    NodeSceneDraftBuild, NodeSceneRichFailure, NodeSceneSuccessParts, NodeSceneSuccessReport,
+    PendingNodeSceneDraft, PendingNodeSceneFailure, PreparedNodeSceneConstruction,
     PreparedNodeSceneFailure, PreparedNodeSceneRichFailure, PreparedNodeSceneSuccess,
-    SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit, SceneEvidenceCounts,
-    ValidatedNodeScene,
+    SceneEvidenceCounts, ValidatedNodeScene,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,15 +72,25 @@ macro_rules! prepare_frozen_node_failure {
 /// Rust drops fields in declaration order. The generation, proof, descriptor, and seal therefore
 /// disappear before the operation-owned joint contribution observes any unwind.
 #[must_use = "the scoped node Scene joint commit must be prepared or deliberately dropped"]
-struct ScopedNodeSceneJointCommit<'joint> {
+struct ScopedNodeSceneJointCommit<'joint, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     generation: ReservedSceneGeneration,
     proof: super::NodeSceneValidationProof,
     output: NodeSceneActivationOutput,
     seal: CanonicalJointSeal<'joint>,
-    joint: NodeSceneCanonicalJointCommit<'joint>,
+    joint: NodeSceneCanonicalJointCommit<'joint, O, PP, U>,
 }
 
-impl ScopedNodeSceneJointCommit<'_> {
+impl<O, PP, U> ScopedNodeSceneJointCommit<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     fn prepare(self) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
         let Self {
             generation,
@@ -112,21 +123,48 @@ impl ScopedNodeSceneJointCommit<'_> {
     }
 }
 
-impl PendingNodeSceneDraft {
+impl<O, PP, U> PendingNodeSceneDraft<O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     pub(in crate::canonical_scene::store) fn prepare_with_generation_source(
         self,
         draft: NodeSceneDraft,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
         prepare_pending_node_scene_draft(self, Some(draft), Some(reserve_generation))
+            .map(|(prepared, _)| prepared)
+    }
+
+    pub(in crate::canonical_scene::store) fn prepare_import_with_generation_source(
+        self,
+        draft: NodeSceneDraft,
+        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<(PreparedNodeSceneConstruction, Option<ControlCause>), SceneConstructionError> {
+        prepare_pending_node_scene_draft(self, Some(draft), Some(reserve_generation))
     }
 
     pub(in crate::canonical_scene::store) fn prepare_missing_draft(
         self,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        prepare_pending_node_scene_draft::<
-            fn() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-        >(self, None, None)
+        prepare_pending_node_scene_draft(
+            self,
+            None,
+            None::<fn() -> Result<ReservedSceneGeneration, SceneGenerationError>>,
+        )
+        .map(|(prepared, _)| prepared)
+    }
+
+    pub(in crate::canonical_scene::store) fn prepare_import_missing_draft(
+        self,
+    ) -> Result<(PreparedNodeSceneConstruction, Option<ControlCause>), SceneConstructionError> {
+        prepare_pending_node_scene_draft(
+            self,
+            None,
+            None::<fn() -> Result<ReservedSceneGeneration, SceneGenerationError>>,
+        )
     }
 }
 
@@ -151,18 +189,24 @@ impl NodeSceneDraftBuild {
     }
 }
 
-fn prepare_pending_node_scene_draft<ReserveGeneration>(
-    owner: PendingNodeSceneDraft,
+fn prepare_pending_node_scene_draft<O, PP, U, ReserveGeneration>(
+    owner: PendingNodeSceneDraft<O, PP, U>,
     parser_draft: Option<NodeSceneDraft>,
     reserve_generation: Option<ReserveGeneration>,
-) -> Result<PreparedNodeSceneConstruction, SceneConstructionError>
+) -> Result<(PreparedNodeSceneConstruction, Option<ControlCause>), SceneConstructionError>
 where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
     ReserveGeneration: FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 {
-    let PendingNodeSceneDraft { candidate } = owner;
+    let PendingNodeSceneDraft {
+        candidate,
+        final_progress,
+    } = owner;
     let output = *candidate.output();
     let evidence_counts = output.evidence_counts;
-    match candidate.try_issue_freeze_permit(final_progress())? {
+    match candidate.try_issue_freeze_permit(final_progress)? {
         CanonicalFreezePermitIssue::Ready(permit) => {
             let pairing_rejection = match parser_draft {
                 None => Some(NodeSceneGenerationRejection::MissingDraft),
@@ -173,7 +217,8 @@ where
             };
             if let Some(cause) = pairing_rejection {
                 let rejected = permit.reject_generation(cause, NODE_SCENE_BUILD_INVARIANT_CODE)?;
-                return prepare_frozen_node_failure!(rejected, evidence_counts);
+                return prepare_frozen_node_failure!(rejected, evidence_counts)
+                    .map(|prepared| (prepared, None));
             }
 
             let reserve_generation = reserve_generation
@@ -185,28 +230,34 @@ where
                         SceneGenerationError::Exhausted,
                         GENERATION_EXHAUSTED_CODE,
                     )?;
-                    return prepare_frozen_node_failure!(rejected, evidence_counts);
+                    return prepare_frozen_node_failure!(rejected, evidence_counts)
+                        .map(|prepared| (prepared, None));
                 }
             };
-            permit.bind_joint_commit(|output, proof, joint, seal| {
-                ScopedNodeSceneJointCommit {
-                    generation,
-                    proof,
-                    output,
-                    seal,
-                    joint,
-                }
-                .prepare()
-            })
+            permit
+                .bind_joint_commit(|output, proof, joint, seal| {
+                    ScopedNodeSceneJointCommit {
+                        generation,
+                        proof,
+                        output,
+                        seal,
+                        joint,
+                    }
+                    .prepare()
+                })
+                .map(|prepared| (prepared, None))
         }
         CanonicalFreezePermitIssue::Interrupted(interrupted) => {
+            let control_cause = interrupted.cause().control_cause().cloned();
             prepare_frozen_node_failure!(interrupted, evidence_counts)
+                .map(|prepared| (prepared, control_cause))
         }
         CanonicalFreezePermitIssue::DestinationRejected(rejected) => {
             let validation = rejected.validate_rich_failure(|session, root| {
                 validate_node_scene_failure_evidence(session, root, evidence_counts)
             })?;
-            prepare_node_ordinary_construction_failure(validation)
+            prepare_node_ordinary_construction_failure(validation, final_progress)
+                .map(|prepared| (prepared, None))
         }
     }
 }
@@ -216,12 +267,31 @@ fn node_scene_draft_matches(parser: NodeSceneDraft, activated: NodeSceneDraft) -
 }
 
 pub(super) trait NodeActivationFailureCause {
+    fn is_authoring_rejection(&self) -> bool;
+
+    fn control_cause(&self) -> Option<&ControlCause>;
+
     fn into_authoring_rejection(self) -> Option<NodeSceneConstructionRejection<StoreRuntimeError>>;
 }
 
 impl NodeActivationFailureCause
     for StoreNeverActivatedCause<NodeSceneConstructionRejection<StoreRuntimeError>>
 {
+    fn is_authoring_rejection(&self) -> bool {
+        matches!(
+            self,
+            StoreNeverActivatedCause::Requested(rejection)
+                if !matches!(rejection, NodeSceneConstructionRejection::Materialization(_))
+        )
+    }
+
+    fn control_cause(&self) -> Option<&ControlCause> {
+        match self {
+            StoreNeverActivatedCause::Runtime(StoreRuntimeError::Control(cause)) => Some(cause),
+            StoreNeverActivatedCause::Requested(_) | StoreNeverActivatedCause::Runtime(_) => None,
+        }
+    }
+
     fn into_authoring_rejection(self) -> Option<NodeSceneConstructionRejection<StoreRuntimeError>> {
         match self {
             StoreNeverActivatedCause::Requested(rejection) => {
@@ -235,12 +305,175 @@ impl NodeActivationFailureCause
 impl NodeActivationFailureCause
     for StoreCanonicalRejection<NodeSceneConstructionRejection<StoreRuntimeError>>
 {
+    fn is_authoring_rejection(&self) -> bool {
+        matches!(
+            self,
+            StoreCanonicalRejection::Requested(rejection)
+                if !matches!(rejection, NodeSceneConstructionRejection::Materialization(_))
+        )
+    }
+
+    fn control_cause(&self) -> Option<&ControlCause> {
+        match self {
+            StoreCanonicalRejection::Runtime(StoreRuntimeError::Control(cause)) => Some(cause),
+            StoreCanonicalRejection::Requested(_) | StoreCanonicalRejection::Runtime(_) => None,
+        }
+    }
+
     fn into_authoring_rejection(self) -> Option<NodeSceneConstructionRejection<StoreRuntimeError>> {
         match self {
             StoreCanonicalRejection::Requested(rejection) => {
                 retain_node_authoring_rejection(rejection)
             }
             StoreCanonicalRejection::Runtime(_) => None,
+        }
+    }
+}
+
+impl<O, PP, U, L> PendingNodeSceneFailure<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub(in crate::canonical_scene::store) fn prepare(
+        self,
+    ) -> Result<
+        (
+            PreparedNodeSceneConstruction,
+            Option<NodeSceneConstructionRejection<StoreRuntimeError>>,
+            Option<ControlCause>,
+        ),
+        SceneConstructionError,
+    > {
+        let mut control_cause = None;
+        let build = match self {
+            Self::ActivationRejected {
+                owner,
+                evidence_plan,
+                evidence_counts,
+                final_progress,
+            } => {
+                control_cause = owner.cause().control_cause().cloned();
+                prepare_node_activation_failure(
+                    owner.build_failure_evidence(|lane| {
+                        match lane.try_retain_records(
+                            evidence_plan,
+                            NodeSceneOutcomeEvidenceSchema,
+                            |writer| {
+                                writer.write_row(|row| {
+                                    write_node_scene_evidence_row(row, evidence_counts)
+                                })
+                            },
+                        ) {
+                            Ok(evidence) => lane.complete(evidence),
+                            Err(_) => lane.abort(),
+                        }
+                    }),
+                    evidence_counts,
+                    final_progress,
+                )?
+            }
+            Self::NeverActivated {
+                owner,
+                evidence_plan,
+                evidence_counts,
+                final_progress,
+            } => {
+                control_cause = owner.cause().control_cause().cloned();
+                prepare_node_activation_failure(
+                    owner.build_failure_evidence(|lane| {
+                        match lane.try_retain_records(
+                            evidence_plan,
+                            NodeSceneOutcomeEvidenceSchema,
+                            |writer| {
+                                writer.write_row(|row| {
+                                    write_node_scene_evidence_row(row, evidence_counts)
+                                })
+                            },
+                        ) {
+                            Ok(evidence) => lane.complete(evidence),
+                            Err(_) => lane.abort(),
+                        }
+                    }),
+                    evidence_counts,
+                    final_progress,
+                )?
+            }
+            Self::CentralRejected {
+                owner,
+                evidence_counts,
+                final_progress,
+            } => prepare_node_central_failure(
+                owner.validate_rich_failure(|session, root| {
+                    validate_node_scene_failure_evidence(session, root, evidence_counts)
+                }),
+                final_progress,
+            )?,
+            Self::CentralInterrupted {
+                owner,
+                evidence_counts,
+                final_progress,
+            } => {
+                control_cause = owner.cause().control_cause().cloned();
+                prepare_node_central_failure(
+                    owner.validate_rich_failure(|session, root| {
+                        validate_node_scene_failure_evidence(session, root, evidence_counts)
+                    }),
+                    final_progress,
+                )?
+            }
+            Self::PreparedFallback(fallback) => {
+                let (store, _cause) = fallback.into_parts();
+                return Ok((
+                    PreparedNodeSceneConstruction::MinimalFallback(PreparedTracerSceneFallback {
+                        store,
+                    }),
+                    None,
+                    None,
+                ));
+            }
+        };
+        let NodeSceneDraftBuild::Failure {
+            authoring_rejection,
+            prepared,
+        } = build
+        else {
+            unreachable!("a pending failure cannot prepare a successful Scene draft")
+        };
+        Ok((prepared.into(), authoring_rejection, control_cause))
+    }
+}
+
+impl<O, PP, U, L> DeferredNodeSceneDraftBuild<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub(in crate::canonical_scene::store) fn prepare_immediately(
+        self,
+    ) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError> {
+        match self {
+            Self::Draft { draft, owner } => Ok(NodeSceneDraftBuild::Draft { draft, owner }),
+            Self::Failure { owner, .. } => {
+                let (prepared, authoring_rejection, _control_cause) = owner.prepare()?;
+                let prepared = match prepared {
+                    PreparedNodeSceneConstruction::RichFailure(failure) => {
+                        PreparedNodeSceneFailure::RichFailure(failure)
+                    }
+                    PreparedNodeSceneConstruction::MinimalFallback(fallback) => {
+                        PreparedNodeSceneFailure::MinimalFallback(fallback)
+                    }
+                    PreparedNodeSceneConstruction::Success(_) => {
+                        unreachable!("a pending failure cannot prepare canonical success")
+                    }
+                };
+                Ok(NodeSceneDraftBuild::Failure {
+                    authoring_rejection,
+                    prepared,
+                })
+            }
         }
     }
 }
@@ -255,21 +488,18 @@ fn retain_node_authoring_rejection(
 }
 
 /// Prepares a rejected or never-activated scoped outcome after its one-shot evidence lane closes.
-pub(super) fn prepare_node_activation_failure<Cause>(
+pub(super) fn prepare_node_activation_failure<O, PP, U, Cause>(
     outcome: Result<
-        FailureEvidenceOutcome<
-            SceneConstructionOwner,
-            SceneConstructionPhase,
-            SceneConstructionUnit,
-            Cause,
-            RecordBlock,
-            NodeSceneOutcomeEvidenceSchema,
-        >,
+        FailureEvidenceOutcome<O, PP, U, Cause, RecordBlock, NodeSceneOutcomeEvidenceSchema>,
         StoreActivationContainment,
     >,
     evidence_counts: SceneEvidenceCounts,
-) -> Result<NodeSceneDraftBuild, SceneConstructionError>
+    final_progress: FinalProgress<PP, U>,
+) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
 where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
     Cause: NodeActivationFailureCause,
 {
     let (prepared, cause) = match outcome? {
@@ -277,7 +507,7 @@ where
             let validation = rooted.validate_rich_failure(|session, root| {
                 validate_node_scene_failure_evidence(session, root, evidence_counts)
             })?;
-            prepare_node_ordinary_failure_validation(validation)?
+            prepare_node_ordinary_failure_validation(validation, final_progress)?
         }
         FailureEvidenceOutcome::MinimalFallback(fallback) => {
             let (store, cause) = fallback.into_parts();
@@ -296,60 +526,78 @@ where
 /// Prepares an ordinary central-validation failure. The caller retains the concrete rejected or
 /// interrupted owner long enough to invoke its rich-evidence validator, then passes the typed
 /// validation result here without recovering any writable store state.
-pub(super) fn prepare_node_central_failure<Cause>(
+pub(super) fn prepare_node_central_failure<O, PP, U, Cause>(
     validation: Result<
-        RootedFailureValidation<
-            SceneConstructionOwner,
-            SceneConstructionPhase,
-            SceneConstructionUnit,
-            Cause,
-            RecordBlock,
-            NodeSceneOutcomeEvidenceSchema,
-        >,
+        RootedFailureValidation<O, PP, U, Cause, RecordBlock, NodeSceneOutcomeEvidenceSchema>,
         StoreActivationContainment,
     >,
-) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
-    let (prepared, _cause) = prepare_node_ordinary_failure_validation(validation?)?;
+    final_progress: FinalProgress<PP, U>,
+) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let (prepared, _cause) = prepare_node_ordinary_failure_validation(validation?, final_progress)?;
     Ok(NodeSceneDraftBuild::Failure {
         authoring_rejection: None,
         prepared,
     })
 }
 
-pub(super) fn prepare_node_central_fallback(store: PreparedStoreFallback) -> NodeSceneDraftBuild {
+pub(super) fn prepare_node_central_fallback<O, PP, U>(
+    store: PreparedStoreFallback,
+) -> NodeSceneDraftBuild<O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     NodeSceneDraftBuild::Failure {
         authoring_rejection: None,
         prepared: PreparedNodeSceneFailure::MinimalFallback(PreparedTracerSceneFallback { store }),
     }
 }
 
-fn prepare_node_ordinary_construction_failure<Cause>(
+fn prepare_node_ordinary_construction_failure<O, PP, U, Cause>(
     validation: RootedFailureValidation<
-        SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
+        O,
+        PP,
+        U,
         Cause,
         RecordBlock,
         NodeSceneOutcomeEvidenceSchema,
     >,
-) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-    let (prepared, _cause) = prepare_node_ordinary_failure_validation(validation)?;
+    final_progress: FinalProgress<PP, U>,
+) -> Result<PreparedNodeSceneConstruction, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let (prepared, _cause) = prepare_node_ordinary_failure_validation(validation, final_progress)?;
     Ok(prepared.into())
 }
 
-fn prepare_node_ordinary_failure_validation<Cause>(
+fn prepare_node_ordinary_failure_validation<O, PP, U, Cause>(
     validation: RootedFailureValidation<
-        SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
+        O,
+        PP,
+        U,
         Cause,
         RecordBlock,
         NodeSceneOutcomeEvidenceSchema,
     >,
-) -> Result<(PreparedNodeSceneFailure, Option<Cause>), SceneConstructionError> {
+    final_progress: FinalProgress<PP, U>,
+) -> Result<(PreparedNodeSceneFailure, Option<Cause>), SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     match validation {
         RootedFailureValidation::Valid(validated) => {
-            let (prepared, cause) = validated.try_prepare(final_progress())?.into_parts();
+            let (prepared, cause) = validated.try_prepare(final_progress)?.into_parts();
             Ok((map_node_prepared_failure(prepared), Some(cause)))
         }
         RootedFailureValidation::Rejected(rejected) => {
@@ -383,18 +631,16 @@ fn map_node_prepared_failure(
 }
 
 /// Validates all 34 cells of the exact single-record NodeScene failure-evidence contract.
-pub(super) fn validate_node_scene_failure_evidence<'session, 'storage, 'control>(
-    session: &mut FailureEvidenceValidationSession<
-        'session,
-        'storage,
-        'control,
-        SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
-    >,
+pub(super) fn validate_node_scene_failure_evidence<'session, 'storage, 'control, O, PP, U>(
+    session: &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
     root: FailureEvidenceMember<'session, RecordBlock, NodeSceneOutcomeEvidenceSchema>,
     counts: SceneEvidenceCounts,
-) -> bool {
+) -> bool
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let expected = node_scene_evidence_values(counts);
     session
         .visit_records(root, |row_index, row| {

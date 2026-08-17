@@ -413,6 +413,15 @@ fn rewrite_nodes_with_shape(
                     let source_length = source
                         .scalar::<u32>(row_index, node_scene_node_field::TRANSFORM_LENGTH)
                         .ok_or(failure)?;
+                    let name_presence = source
+                        .scalar::<u8>(row_index, node_scene_node_field::NAME_PRESENCE)
+                        .ok_or(failure)?;
+                    let name_offset = source
+                        .scalar::<u32>(row_index, node_scene_node_field::NAME_OFFSET)
+                        .ok_or(failure)?;
+                    let name_count = source
+                        .scalar::<u32>(row_index, node_scene_node_field::NAME_COUNT)
+                        .ok_or(failure)?;
                     let camera_presence = source
                         .scalar::<u8>(row_index, node_scene_node_field::CAMERA_PRESENCE)
                         .ok_or(failure)?;
@@ -469,6 +478,21 @@ fn rewrite_nodes_with_shape(
                             row.write_scalar(0_u8)?;
                         } else {
                             row.write_sequence_ref(transforms.into_store())?;
+                        }
+                        row.write_scalar(name_presence)?;
+                        row.write_scalar(name_offset)?;
+                        row.write_scalar(name_count)?;
+                        if name_count == 0 {
+                            row.write_scalar(0_u8)?;
+                        } else {
+                            row.write_utf8_ref(
+                                pending
+                                    .input
+                                    .proof
+                                    .node_names()
+                                    .ok_or(failure)?
+                                    .into_store(),
+                            )?;
                         }
                         row.write_scalar(camera_presence)?;
                         match camera {

@@ -13,7 +13,7 @@ use super::NodeLocalId;
 
 /// Why an otherwise valid resource identity is not replay-stable across sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::canonical_scene::store) enum SessionOpaqueReason {
+pub enum SessionOpaqueReason {
     CallerLabel,
     Generated,
     UnregisteredResolver,
@@ -101,10 +101,10 @@ pub(in crate::canonical_scene::store) fn classify_stable_resource_identity_fixtu
 
 /// Identity of an observed resource within one profile authoring batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::canonical_scene::store) struct ResourceIdentityLocalId(u32);
+pub struct ResourceIdentityLocalId(u32);
 
 impl ResourceIdentityLocalId {
-    pub(in crate::canonical_scene::store) const fn new(index: u32) -> Self {
+    pub const fn new(index: u32) -> Self {
         Self(index)
     }
 
@@ -115,7 +115,7 @@ impl ResourceIdentityLocalId {
 
 /// One observed resource with an inseparable replay-stability classification.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct ObservedResourceAuthoring<'input> {
+pub struct ObservedResourceAuthoring<'input> {
     identity: &'input ResourceIdentity,
     stability: &'static ResourceIdentityStability,
 }
@@ -130,7 +130,7 @@ impl<'input> ObservedResourceAuthoring<'input> {
         }
     }
 
-    pub(in crate::canonical_scene::store) const fn session_opaque(
+    pub const fn session_opaque(
         identity: &'input ResourceIdentity,
         reason: SessionOpaqueReason,
     ) -> Self {
@@ -153,10 +153,10 @@ impl<'input> ObservedResourceAuthoring<'input> {
 
 /// Identity of a source object within one profile authoring batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::canonical_scene::store) struct SourceIdentityLocalId(u32);
+pub struct SourceIdentityLocalId(u32);
 
 impl SourceIdentityLocalId {
-    pub(in crate::canonical_scene::store) const fn new(index: u32) -> Self {
+    pub const fn new(index: u32) -> Self {
         Self(index)
     }
 
@@ -167,7 +167,7 @@ impl SourceIdentityLocalId {
 
 /// One source object identity before references are compiled to retained rows.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct SourceIdentityAuthoring<'input> {
+pub struct SourceIdentityAuthoring<'input> {
     resource: ResourceIdentityLocalId,
     format: &'input FormatId,
     locator: &'input SourceObjectLocator,
@@ -176,7 +176,7 @@ pub(in crate::canonical_scene::store) struct SourceIdentityAuthoring<'input> {
 }
 
 impl<'input> SourceIdentityAuthoring<'input> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         resource: ResourceIdentityLocalId,
         format: &'input FormatId,
         locator: &'input SourceObjectLocator,
@@ -190,18 +190,12 @@ impl<'input> SourceIdentityAuthoring<'input> {
         }
     }
 
-    pub(in crate::canonical_scene::store) const fn with_display_name(
-        mut self,
-        display_name: &'input SourceDisplayName,
-    ) -> Self {
+    pub const fn with_display_name(mut self, display_name: &'input SourceDisplayName) -> Self {
         self.display_name = Some(display_name);
         self
     }
 
-    pub(in crate::canonical_scene::store) const fn with_content_digest(
-        mut self,
-        content_digest: ContentDigest,
-    ) -> Self {
+    pub const fn with_content_digest(mut self, content_digest: ContentDigest) -> Self {
         self.content_digest = Some(content_digest);
         self
     }
@@ -231,10 +225,10 @@ impl<'input> SourceIdentityAuthoring<'input> {
 
 /// Identity of a provenance node within one topologically ordered authoring batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::canonical_scene::store) struct ProvenanceLocalId(u32);
+pub struct ProvenanceLocalId(u32);
 
 impl ProvenanceLocalId {
-    pub(in crate::canonical_scene::store) const fn new(index: u32) -> Self {
+    pub const fn new(index: u32) -> Self {
         Self(index)
     }
 
@@ -245,7 +239,7 @@ impl ProvenanceLocalId {
 
 /// One operation node with ordered parent references and bounded durable evidence.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct ProvenanceOperationAuthoring<'input> {
+pub struct ProvenanceOperationAuthoring<'input> {
     kind: &'input OperationKind,
     options_digest: OptionsDigest,
     parents: &'input [ProvenanceLocalId],
@@ -253,7 +247,7 @@ pub(in crate::canonical_scene::store) struct ProvenanceOperationAuthoring<'input
 }
 
 impl<'input> ProvenanceOperationAuthoring<'input> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         kind: &'input OperationKind,
         options_digest: OptionsDigest,
         parents: &'input [ProvenanceLocalId],
@@ -288,26 +282,24 @@ impl<'input> ProvenanceOperationAuthoring<'input> {
 
 /// A source leaf or operation node in producer-supplied topological order.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) enum ProvenanceNodeAuthoring<'input> {
+pub enum ProvenanceNodeAuthoring<'input> {
     Source(SourceIdentityLocalId),
     Operation(ProvenanceOperationAuthoring<'input>),
 }
 
 impl<'input> ProvenanceNodeAuthoring<'input> {
-    pub(in crate::canonical_scene::store) const fn source(source: SourceIdentityLocalId) -> Self {
+    pub const fn source(source: SourceIdentityLocalId) -> Self {
         Self::Source(source)
     }
 
-    pub(in crate::canonical_scene::store) const fn operation(
-        operation: ProvenanceOperationAuthoring<'input>,
-    ) -> Self {
+    pub const fn operation(operation: ProvenanceOperationAuthoring<'input>) -> Self {
         Self::Operation(operation)
     }
 }
 
 /// Every canonical owner class that must carry one non-empty provenance row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::canonical_scene::store) enum ProfileOwner {
+pub enum ProfileOwner {
     Scene,
     SyntheticRoot,
     Node(NodeLocalId),
@@ -331,16 +323,13 @@ pub(in crate::canonical_scene::store) enum ProfileOwner {
 
 /// One owner row before source-local nodes are normalized to canonical node indices.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct OwnerProvenanceAuthoring<'input> {
+pub struct OwnerProvenanceAuthoring<'input> {
     owner: ProfileOwner,
     provenance: &'input [ProvenanceLocalId],
 }
 
 impl<'input> OwnerProvenanceAuthoring<'input> {
-    pub(in crate::canonical_scene::store) const fn new(
-        owner: ProfileOwner,
-        provenance: &'input [ProvenanceLocalId],
-    ) -> Self {
+    pub const fn new(owner: ProfileOwner, provenance: &'input [ProvenanceLocalId]) -> Self {
         Self { owner, provenance }
     }
 
@@ -355,7 +344,7 @@ impl<'input> OwnerProvenanceAuthoring<'input> {
 
 /// Borrowed retained-profile input with identity, lineage, and owner tables kept distinct.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct LineageAuthoringBatch<'input> {
+pub struct LineageAuthoringBatch<'input> {
     resources: &'input [ObservedResourceAuthoring<'input>],
     source_identities: &'input [SourceIdentityAuthoring<'input>],
     provenance_nodes: &'input [ProvenanceNodeAuthoring<'input>],
@@ -363,7 +352,7 @@ pub(in crate::canonical_scene::store) struct LineageAuthoringBatch<'input> {
 }
 
 impl<'input> LineageAuthoringBatch<'input> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         resources: &'input [ObservedResourceAuthoring<'input>],
         source_identities: &'input [SourceIdentityAuthoring<'input>],
         provenance_nodes: &'input [ProvenanceNodeAuthoring<'input>],

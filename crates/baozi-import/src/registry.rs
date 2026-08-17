@@ -11,7 +11,8 @@ use crate::options::{
 };
 use crate::scope::{ParseResult, ParseScope};
 use crate::session::ReadHint;
-use baozi_core::{FormatId, SceneDraft};
+use baozi_core::__canonical_import::SceneDraft;
+use baozi_core::FormatId;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -763,16 +764,20 @@ mod tests {
     use crate::descriptor::{CapabilityStatus, FormatCapability, FormatEncoding};
     use crate::error::ScopeAbortCause;
     use crate::format::{DetectionFaultCode, ReadConfidence};
-    use crate::ledger::{
-        ImportDimension, ImportOperationControl, import_ledger_limits, try_import_coordinator,
-    };
+    use crate::ledger::{ImportDimension, ImportOperationControl};
     use crate::limits::ResourceLimits;
     use crate::options::{
         FormatOptionEnvelope, FormatOptionKey, FormatOptionSchemaId, FormatOptionSchemaKey,
         OptionCompileLimits,
     };
+    use crate::store::{
+        ImportStoreBootstrapRequirements, ImportStoreSessionOwner, try_import_store_bootstrap,
+    };
     use baozi_io::AssetPath;
-    use baozi_operation::LedgerCause;
+    use baozi_operation::{
+        LedgerCause, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
+        PhysicalStorageAccountLimits,
+    };
     use std::cell::RefCell;
     use std::num::NonZeroU32;
     use std::sync::Barrier;
@@ -1029,6 +1034,27 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    fn detection_store_owner() -> ImportStoreSessionOwner {
+        let limits = ResourceLimits::default();
+        let requirements = ImportStoreBootstrapRequirements::for_node_scene(&limits)
+            .expect("the detection test retained-store requirements must be valid");
+        let bootstrap = try_import_store_bootstrap(&limits, requirements)
+            .expect("the detection test retained-store bootstrap must be valid");
+        let factory = PhysicalStorageAccountFactory::try_new(
+            PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1)
+                .expect("the detection test factory limits must be valid"),
+        )
+        .expect("the detection test account factory must allocate");
+        let account = factory
+            .try_create_account(
+                PhysicalStorageAccountLimits::new(u64::MAX, u64::MAX)
+                    .expect("the detection test account limits must be valid"),
+            )
+            .expect("the detection test account must allocate");
+        ImportStoreSessionOwner::try_start(ImportOperationControl::default(), &account, bootstrap)
+            .expect("the detection test retained-store owner must start")
+    }
+
     impl FormatImporter for PanickingDetector {
         fn descriptor(&self) -> FormatDescriptor {
             FormatDescriptor::builder(
@@ -1062,12 +1088,9 @@ mod tests {
         probe: &Probe<'_>,
         hint: &ReadHint,
     ) -> Result<DetectionOutcome, LedgerCause<ImportDimension>> {
-        let coordinator = RefCell::new(try_import_coordinator(
-            ImportOperationControl::default(),
-            import_ledger_limits(&ResourceLimits::default()).unwrap(),
-        )?);
+        let owner = detection_store_owner();
         let terminal = RefCell::new(None);
-        let scope = DetectionScope::new(&coordinator, &terminal);
+        let scope = DetectionScope::new(owner.host(), &terminal);
         let outcome = entry
             .detect(probe, hint, &scope)
             .expect("uncontrolled registry detector must not abort");
@@ -1080,12 +1103,9 @@ mod tests {
         probe: &Probe<'_>,
         hint: &ReadHint,
     ) -> Result<&'static str, LedgerCause<ImportDimension>> {
-        let coordinator = RefCell::new(try_import_coordinator(
-            ImportOperationControl::default(),
-            import_ledger_limits(&ResourceLimits::default()).unwrap(),
-        )?);
+        let owner = detection_store_owner();
         let terminal = RefCell::new(None);
-        let scope = DetectionScope::new(&coordinator, &terminal);
+        let scope = DetectionScope::new(owner.host(), &terminal);
         assert!(entry.detect(probe, hint, &scope).is_err());
         let abort = scope
             .into_terminal_abort()

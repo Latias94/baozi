@@ -1,7 +1,8 @@
 use crate::config::MAX_DETECTOR_WORK_BETWEEN_POLLS;
 use crate::error::{ScopeAbort, ScopeAbortCause};
 use crate::format::DetectionOutcome;
-use crate::ledger::{ImportCoordinator, ImportDimension};
+use crate::ledger::ImportDimension;
+use crate::store::{ImportObservedWorkFailure, ImportStoreHost, ImportStoreHostError};
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::marker::PhantomData;
@@ -58,7 +59,7 @@ impl std::error::Error for DetectionAbort {}
 /// }
 /// ```
 pub struct DetectionScope<'session> {
-    coordinator: &'session RefCell<ImportCoordinator>,
+    host: ImportStoreHost<'session>,
     terminal: &'session RefCell<Option<ScopeAbortCause>>,
     work_outstanding: Cell<bool>,
     not_send_or_sync: PhantomData<Rc<()>>,
@@ -74,11 +75,11 @@ impl fmt::Debug for DetectionScope<'_> {
 
 impl<'session> DetectionScope<'session> {
     pub(crate) const fn new(
-        coordinator: &'session RefCell<ImportCoordinator>,
+        host: ImportStoreHost<'session>,
         terminal: &'session RefCell<Option<ScopeAbortCause>>,
     ) -> Self {
         Self {
-            coordinator,
+            host,
             terminal,
             work_outstanding: Cell::new(false),
             not_send_or_sync: PhantomData,
@@ -106,52 +107,52 @@ impl<'session> DetectionScope<'session> {
         amount: u64,
         action: impl FnOnce() -> DetectionResult<T>,
     ) -> DetectionResult<T> {
-        let mut work = self.begin_work(amount)?;
-        match action() {
-            Ok(value) => {
-                work.complete()?;
-                Ok(value)
-            }
-            Err(cause) => {
-                work.finish_partial();
-                let _ = self.poll_active();
-                Err(cause)
-            }
-        }
-    }
-
-    fn begin_work(&self, amount: u64) -> DetectionResult<DetectionWorkGuard<'_, 'session>> {
         self.preflight_active()?;
         if self.work_outstanding.get() {
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "detection-work-already-in-progress",
             }));
         }
-        self.poll_active()?;
         if amount == 0 {
+            self.poll_active()?;
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "detector-work-zero-amount",
             }));
         }
         if amount > MAX_DETECTOR_WORK_BETWEEN_POLLS {
+            self.poll_active()?;
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "detector-work-quantum-exceeded",
             }));
         }
 
-        self.coordinator
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?
-            .checkpoint()
-            .charge_attempted(ImportDimension::DetectionWork, amount)
-            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))?;
+        let callback = DetectionCallbackGuard::begin(&self.work_outstanding);
+        let result =
+            self.host
+                .with_observed_work(
+                    [(ImportDimension::DetectionWork, amount)],
+                    |work| match action() {
+                        Ok(value) => {
+                            work.complete([amount])
+                                .map_err(|cause| self.abort_store(cause))?;
+                            Ok(value)
+                        }
+                        Err(cause) => Err(cause),
+                    },
+                );
+        callback.finish();
 
-        self.work_outstanding.set(true);
-        Ok(DetectionWorkGuard {
-            scope: self,
-            amount,
-            finished: false,
-        })
+        match result {
+            Ok(value) => {
+                self.poll_active()?;
+                Ok(value)
+            }
+            Err(ImportObservedWorkFailure::Action(cause)) => {
+                let _ = self.poll_active();
+                Err(cause)
+            }
+            Err(ImportObservedWorkFailure::Store(cause)) => Err(self.abort_store(cause)),
+        }
     }
 
     pub(crate) fn into_terminal_abort(self) -> Option<ScopeAbort> {
@@ -165,23 +166,7 @@ impl<'session> DetectionScope<'session> {
 
     fn poll_active(&self) -> DetectionResult<()> {
         self.preflight_active()?;
-        let result = {
-            let mut coordinator = self
-                .coordinator
-                .try_borrow_mut()
-                .map_err(|_| self.reentrant_capability_failure())?;
-            coordinator.poll()
-        };
-        result.map_err(|cause| self.abort(ScopeAbortCause::Control(cause)))
-    }
-
-    fn commit_work(&self, amount: u64) -> DetectionResult<()> {
-        self.coordinator
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?
-            .checkpoint()
-            .charge_consumed(ImportDimension::DetectionWork, amount)
-            .map_err(|cause| self.abort(ScopeAbortCause::Ledger(cause)))
+        self.host.poll().map_err(|cause| self.abort_store(cause))
     }
 
     fn abort(&self, cause: ScopeAbortCause) -> DetectionAbort {
@@ -200,40 +185,37 @@ impl<'session> DetectionScope<'session> {
         }
     }
 
-    fn reentrant_capability_failure(&self) -> DetectionAbort {
-        self.abort(ScopeAbortCause::DescriptorContract {
-            code: "detection-capability-reentered",
-        })
+    fn abort_store(&self, cause: ImportStoreHostError) -> DetectionAbort {
+        self.abort(cause.into_scope_abort_cause())
     }
 }
 
-struct DetectionWorkGuard<'scope, 'session> {
-    scope: &'scope DetectionScope<'session>,
-    amount: u64,
+struct DetectionCallbackGuard<'scope> {
+    outstanding: &'scope Cell<bool>,
     finished: bool,
 }
 
-impl DetectionWorkGuard<'_, '_> {
-    fn complete(&mut self) -> DetectionResult<()> {
-        let committed = self.scope.commit_work(self.amount);
-        self.scope.work_outstanding.set(false);
-        self.finished = true;
-        committed?;
-        self.scope.poll_active()
+impl<'scope> DetectionCallbackGuard<'scope> {
+    fn begin(outstanding: &'scope Cell<bool>) -> Self {
+        debug_assert!(!outstanding.replace(true));
+        Self {
+            outstanding,
+            finished: false,
+        }
     }
 
-    fn finish_partial(&mut self) {
-        self.scope.work_outstanding.set(false);
+    fn finish(mut self) {
+        self.outstanding.set(false);
         self.finished = true;
     }
 }
 
-impl Drop for DetectionWorkGuard<'_, '_> {
+impl Drop for DetectionCallbackGuard<'_> {
     fn drop(&mut self) {
-        if !self.finished && self.scope.work_outstanding.replace(false) {
+        if !self.finished && self.outstanding.replace(false) {
             debug_assert!(
                 std::thread::panicking(),
-                "the private detector work guard may only be abandoned by unwinding"
+                "the private detector callback guard may only be abandoned by unwinding"
             );
         }
     }

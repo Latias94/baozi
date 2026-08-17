@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use baozi_operation::{CanonicalStoreRef, RecordBlock, ScalarSequence};
+use baozi_operation::{CanonicalStoreRef, RecordBlock, ScalarSequence, Utf8Block};
 
 pub(super) mod animation;
 pub(super) mod appearance;
@@ -64,11 +64,11 @@ pub(super) const PRESENCE_PRESENT: u8 = 1;
 pub(super) const EVIDENCE_OUTCOME_CANDIDATE: u32 = 1;
 pub(super) const CANONICAL_BLOCK_COUNT: u32 = 4;
 
-pub(super) const SCENE_SCHEMA_REVISION: u32 = 1;
+pub(super) const SCENE_SCHEMA_REVISION: u32 = 2;
 pub(super) const SCENE_DIRECTORY_FIELD_COUNT: usize = 17;
-pub(super) const SCENE_GEOMETRY_SCHEMA_REVISION: u32 = 1;
-pub(super) const SCENE_GEOMETRY_DIRECTORY_FIELD_COUNT: usize = 9;
-pub(super) const NODE_SCENE_NODE_FIELD_COUNT: usize = 14;
+pub(super) const SCENE_GEOMETRY_SCHEMA_REVISION: u32 = 3;
+pub(super) const SCENE_GEOMETRY_DIRECTORY_FIELD_COUNT: usize = 13;
+pub(super) const NODE_SCENE_NODE_FIELD_COUNT: usize = 18;
 pub(super) const NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT: usize = 2;
 pub(super) const NODE_SCENE_EVIDENCE_FIELD_COUNT: usize = 34;
 pub(super) const NODE_SCENE_MATRIX_SCALAR_COUNT: usize = 16;
@@ -108,6 +108,10 @@ pub(super) mod scene_geometry_directory_field {
     pub(crate) const ATTRIBUTES: usize = 6;
     pub(crate) const MESH_INSTANCE_COUNT: usize = 7;
     pub(crate) const MESH_INSTANCES: usize = 8;
+    pub(crate) const LOGICAL_MESH_NAME_BYTE_COUNT: usize = 9;
+    pub(crate) const LOGICAL_MESH_NAMES: usize = 10;
+    pub(crate) const ATTRIBUTE_SEMANTIC_NAME_BYTE_COUNT: usize = 11;
+    pub(crate) const ATTRIBUTE_SEMANTIC_NAMES: usize = 12;
 }
 
 pub(super) mod node_scene_node_field {
@@ -119,12 +123,16 @@ pub(super) mod node_scene_node_field {
     pub(crate) const TRANSFORM_OFFSET: usize = 5;
     pub(crate) const TRANSFORM_LENGTH: usize = 6;
     pub(crate) const TRANSFORMS: usize = 7;
-    pub(crate) const CAMERA_PRESENCE: usize = 8;
-    pub(crate) const CAMERA: usize = 9;
-    pub(crate) const CAMERAS: usize = 10;
-    pub(crate) const LIGHT_PRESENCE: usize = 11;
-    pub(crate) const LIGHT: usize = 12;
-    pub(crate) const LIGHTS: usize = 13;
+    pub(crate) const NAME_PRESENCE: usize = 8;
+    pub(crate) const NAME_OFFSET: usize = 9;
+    pub(crate) const NAME_COUNT: usize = 10;
+    pub(crate) const NAMES: usize = 11;
+    pub(crate) const CAMERA_PRESENCE: usize = 12;
+    pub(crate) const CAMERA: usize = 13;
+    pub(crate) const CAMERAS: usize = 14;
+    pub(crate) const LIGHT_PRESENCE: usize = 15;
+    pub(crate) const LIGHT: usize = 16;
+    pub(crate) const LIGHTS: usize = 17;
 }
 
 pub(super) mod node_scene_child_reference_field {
@@ -208,6 +216,9 @@ pub(super) struct NodeSceneChildReferenceTableSchema;
 pub(super) struct NodeSceneAuthoredTransformSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct NodeSceneNodeNameSchema;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct NodeSceneOutcomeEvidenceSchema;
 
 impl CanonicalSchema for DirectorySchema {
@@ -244,6 +255,10 @@ impl CanonicalSchema for NodeSceneChildReferenceTableSchema {
 
 impl CanonicalSchema for NodeSceneAuthoredTransformSchema {
     type StoreKind = ScalarSequence<f32>;
+}
+
+impl CanonicalSchema for NodeSceneNodeNameSchema {
+    type StoreKind = Utf8Block;
 }
 
 /// Non-owning core projection over one destination-qualified concrete-store slot.

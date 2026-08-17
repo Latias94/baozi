@@ -1,11 +1,13 @@
-use baozi_core::{FormatId, SceneDraft};
+mod support;
+
+use baozi_core::FormatId;
 use baozi_import::{
     CapabilityStatus, CauseOwner, DetectionOutcome, DetectionResult, DetectionScope,
     FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter, ImportCause,
     ImportDimension, ImportFailure, ImportOperationControl, ImportRequest, ImportResult,
     ImportWorkClass, OptionCompileLimits, ParseFailure, ParseResult, ParseScope,
     PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    ScopeAbortCause, TrustedExtensionBoundary, import_bytes,
+    SceneDraft, ScopeAbortCause, TrustedExtensionBoundary, import_bytes,
 };
 use baozi_io::AssetPath;
 use baozi_operation::CancellationToken;
@@ -300,7 +302,7 @@ impl FormatImporter for WorkImporter {
                 })?;
             }
         }
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 

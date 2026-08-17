@@ -29,10 +29,10 @@ pub(in crate::canonical_scene::store) use node_scene::{
     GeometryAttributeValidationScratch, GeometryCanonicalCounts,
     GeometryLogicalMeshValidationProjection, GeometryMeshInstanceValidationProjection,
     GeometryPrimitiveValidationProjection, GeometryPrimitiveValidationScratch,
-    GeometryValidationScratch, GeometryValidationScratchRequirements, NodeSceneValidationProof,
-    NodeSceneValidationScratch, ProfileMeteredCounts, ProfileMeteredScratch,
-    validate_node_scene_canonical_graph, validate_node_scene_canonical_graph_metered,
-    validate_node_scene_evidence_graph,
+    GeometryValidationScratch, GeometryValidationScratchRequirements, NodeNameValidationScratch,
+    NodeSceneValidationProof, NodeSceneValidationScratch, ProfileMeteredCounts,
+    ProfileMeteredScratch, validate_node_scene_canonical_graph,
+    validate_node_scene_canonical_graph_metered, validate_node_scene_evidence_graph,
 };
 
 pub(super) fn authored_matrix_scalar_is_valid(values: &[f32], index: usize) -> bool {

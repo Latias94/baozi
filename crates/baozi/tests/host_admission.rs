@@ -1,10 +1,12 @@
+mod support;
+
 use baozi::{
     CapabilityStatus, FormatCapability, FormatDescriptor, FormatEncoding, FormatId, Importer,
     ReadConfidence,
 };
 use baozi_import::{
     DetectionOutcome, DetectionResult, DetectionScope, FormatImporter, ParseResult, ParseScope,
-    Probe, ReadHint,
+    Probe, ReadHint, SceneDraft,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -159,9 +161,9 @@ impl FormatImporter for AdmissionProbeImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<baozi_core::SceneDraft> {
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         let _permit = self.probe.enter();
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 

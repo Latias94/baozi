@@ -318,6 +318,12 @@ pub fn triangle_bin() -> Vec<u8> {
     bytes
 }
 
+pub fn triangle_png() -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        .expect("fixture PNG is valid base64")
+}
+
 pub fn interleaved_triangle_gltf() -> Vec<u8> {
     br#"{
   "asset": { "version": "2.0", "generator": "baozi-interleaved-test" },
@@ -523,6 +529,23 @@ pub fn data_uri_gltf() -> Vec<u8> {
 
 pub fn triangle_gltf_with_buffer_uri(uri: &str, byte_length: usize) -> Vec<u8> {
     let text = String::from_utf8(triangle_gltf()).expect("fixture is valid utf-8");
+    let text = text
+        .replace(
+            "  \"images\": [{ \"uri\": \"textures/base.png\", \"name\": \"BaseImage\" }],\n",
+            "",
+        )
+        .replace(
+            "  \"samplers\": [{ \"wrapS\": 33071, \"wrapT\": 33648, \"magFilter\": 9729, \"minFilter\": 9987 }],\n",
+            "",
+        )
+        .replace(
+            "  \"textures\": [{ \"source\": 0, \"sampler\": 0, \"name\": \"BaseTex\" }],\n",
+            "",
+        )
+        .replace(
+            "      \"roughnessFactor\": 0.25,\n      \"baseColorTexture\": { \"index\": 0, \"texCoord\": 0 }\n",
+            "      \"roughnessFactor\": 0.25\n",
+        );
     text.replace(
         r#""uri": "triangle.bin", "byteLength": 104"#,
         &format!(r#""uri": "{uri}", "byteLength": {byte_length}"#),

@@ -6,7 +6,10 @@ use crate::format::DetectionOutcome;
 use crate::ledger::{ImportDimension, ImportLedgerSnapshot};
 use crate::loss::ImportLossEvidence;
 use crate::source_scope::SourceScopeRecord;
-use baozi_core::{FormatId, ValidatedScene};
+use baozi_core::__canonical_import::{
+    SceneMinimalFallback, SceneRichFailure, SceneSuccessReport, ValidatedScene,
+};
+use baozi_core::FormatId;
 use baozi_io::AssetPath;
 use baozi_operation::{LedgerCause, LedgerLimitsError};
 use std::fmt;
@@ -27,6 +30,9 @@ pub enum ImportInitializationError {
     Coordinator {
         source: LedgerCause<ImportDimension>,
     },
+
+    /// The retained-store host could not be created before any import IO began.
+    RetainedStore { code: &'static str },
 }
 
 impl ImportInitializationError {
@@ -38,18 +44,22 @@ impl ImportInitializationError {
         Self::Coordinator { source }
     }
 
+    pub(crate) const fn retained_store(code: &'static str) -> Self {
+        Self::RetainedStore { code }
+    }
+
     /// Returns the limits error when policy freezing failed.
     pub const fn ledger_limits_error(&self) -> Option<&LedgerLimitsError<ImportDimension>> {
         match self {
             Self::LedgerLimits { source } => Some(source),
-            Self::Coordinator { .. } => None,
+            Self::Coordinator { .. } | Self::RetainedStore { .. } => None,
         }
     }
 
     /// Returns the coordinator cause when phase-catalog initialization failed.
     pub const fn coordinator_cause(&self) -> Option<&LedgerCause<ImportDimension>> {
         match self {
-            Self::LedgerLimits { .. } => None,
+            Self::LedgerLimits { .. } | Self::RetainedStore { .. } => None,
             Self::Coordinator { source } => Some(source),
         }
     }
@@ -60,6 +70,12 @@ impl fmt::Display for ImportInitializationError {
         match self {
             Self::LedgerLimits { source } => source.fmt(formatter),
             Self::Coordinator { source } => source.fmt(formatter),
+            Self::RetainedStore { code } => {
+                write!(
+                    formatter,
+                    "retained import store initialization failed: {code}"
+                )
+            }
         }
     }
 }
@@ -69,6 +85,7 @@ impl std::error::Error for ImportInitializationError {
         match self {
             Self::LedgerLimits { source } => Some(source),
             Self::Coordinator { source } => Some(source),
+            Self::RetainedStore { .. } => None,
         }
     }
 }
@@ -90,6 +107,9 @@ pub enum ImportRunError {
 
     /// The initialized import operation failed and retained its terminal evidence.
     Operation { failure: ImportFailure },
+
+    /// Fail-closed terminal preparation could not produce auditable import evidence.
+    Finalization { code: &'static str },
 }
 
 impl ImportRunError {
@@ -105,23 +125,33 @@ impl ImportRunError {
         }
     }
 
+    pub(crate) const fn retained_store_initialization(code: &'static str) -> Self {
+        Self::Initialization {
+            source: ImportInitializationError::retained_store(code),
+        }
+    }
+
     pub(crate) const fn operation(failure: ImportFailure) -> Self {
         Self::Operation { failure }
+    }
+
+    pub(crate) const fn finalization(code: &'static str) -> Self {
+        Self::Finalization { code }
     }
 
     /// Returns the complete operation failure when initialization succeeded.
     pub const fn operation_failure(&self) -> Option<&ImportFailure> {
         match self {
-            Self::Initialization { .. } => None,
+            Self::Initialization { .. } | Self::Finalization { .. } => None,
             Self::Operation { failure } => Some(failure),
         }
     }
 
     /// Extracts the complete operation failure without discarding an
     /// initialization error on mismatch.
-    pub fn into_operation_failure(self) -> Result<ImportFailure, ImportInitializationError> {
+    pub fn into_operation_failure(self) -> Result<ImportFailure, Self> {
         match self {
-            Self::Initialization { source } => Err(source),
+            error @ (Self::Initialization { .. } | Self::Finalization { .. }) => Err(error),
             Self::Operation { failure } => Ok(failure),
         }
     }
@@ -137,6 +167,9 @@ impl fmt::Display for ImportRunError {
                 )
             }
             Self::Operation { failure } => write!(formatter, "import operation failed: {failure}"),
+            Self::Finalization { code } => {
+                write!(formatter, "import terminal finalization failed: {code}")
+            }
         }
     }
 }
@@ -146,6 +179,7 @@ impl std::error::Error for ImportRunError {
         match self {
             Self::Initialization { source } => Some(source),
             Self::Operation { failure } => Some(failure),
+            Self::Finalization { .. } => None,
         }
     }
 }
@@ -197,6 +231,7 @@ impl DetectionEvidence {
 
 pub struct ImportReport {
     scene: ValidatedScene,
+    scene_report: SceneSuccessReport,
     source: AssetPath,
     format: Arc<FormatDescriptor>,
     detection: Vec<DetectionEvidence>,
@@ -211,6 +246,7 @@ pub struct ImportReport {
 
 pub(crate) struct ImportReportParts {
     pub scene: ValidatedScene,
+    pub scene_report: SceneSuccessReport,
     pub source: AssetPath,
     pub format: Arc<FormatDescriptor>,
     pub detection: Vec<DetectionEvidence>,
@@ -227,6 +263,7 @@ impl ImportReport {
     pub(crate) fn from_parts(parts: ImportReportParts) -> Self {
         Self {
             scene: parts.scene,
+            scene_report: parts.scene_report,
             source: parts.source,
             format: parts.format,
             detection: parts.detection,
@@ -317,7 +354,7 @@ pub struct ImportFailure {
     loss_evidence: Vec<ImportLossEvidence>,
     source_scope_record: Option<SourceScopeRecord>,
     ledger: ImportLedgerSnapshot,
-    finalization_cause: Option<LedgerCause<ImportDimension>>,
+    store_owner: ImportFailureStoreOwner,
     last_completed: ImportPhaseEvidence,
 }
 
@@ -332,7 +369,7 @@ pub(crate) struct ImportFailureParts {
     pub loss_evidence: Vec<ImportLossEvidence>,
     pub source_scope_record: Option<SourceScopeRecord>,
     pub ledger: ImportLedgerSnapshot,
-    pub finalization_cause: Option<LedgerCause<ImportDimension>>,
+    pub store_owner: ImportFailureStoreOwner,
     pub last_completed: ImportPhaseEvidence,
 }
 
@@ -349,7 +386,7 @@ impl ImportFailure {
             loss_evidence: parts.loss_evidence,
             source_scope_record: parts.source_scope_record,
             ledger: parts.ledger,
-            finalization_cause: parts.finalization_cause,
+            store_owner: parts.store_owner,
             last_completed: parts.last_completed,
         }
     }
@@ -394,11 +431,6 @@ impl ImportFailure {
         &self.ledger
     }
 
-    /// Returns a ledger-finalization invariant without replacing the owning failure cause.
-    pub const fn finalization_cause(&self) -> Option<&LedgerCause<ImportDimension>> {
-        self.finalization_cause.as_ref()
-    }
-
     pub const fn last_completed(&self) -> ImportPhaseEvidence {
         self.last_completed
     }
@@ -421,10 +453,14 @@ impl fmt::Debug for ImportFailure {
             .field("loss_evidence", &self.loss_evidence)
             .field("source_scope_record", &self.source_scope_record)
             .field("ledger", &self.ledger)
-            .field("finalization_cause", &self.finalization_cause)
             .field("last_completed", &self.last_completed)
             .finish()
     }
+}
+
+pub(crate) enum ImportFailureStoreOwner {
+    Rich(SceneRichFailure),
+    Minimal(SceneMinimalFallback),
 }
 
 impl fmt::Display for ImportFailure {
@@ -444,22 +480,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn coordinator_initialization_retains_its_typed_source_on_mismatch() {
-        let cause: LedgerCause<ImportDimension> = LedgerCause::DuplicatePhase;
-        let run_error = ImportRunError::coordinator_initialization(cause.clone());
+    fn retained_store_initialization_preserves_its_typed_error_on_mismatch() {
+        const CODE: &str = "retained-store-start-rejected";
+        let run_error = ImportRunError::retained_store_initialization(CODE);
 
         let initialization_source = std::error::Error::source(&run_error)
             .and_then(|source| source.downcast_ref::<ImportInitializationError>())
             .expect("run error must retain the typed initialization source");
-        assert_eq!(initialization_source.coordinator_cause(), Some(&cause));
-        let coordinator_source = std::error::Error::source(initialization_source)
-            .and_then(|source| source.downcast_ref::<LedgerCause<ImportDimension>>())
-            .expect("initialization error must retain the typed coordinator cause");
-        assert_eq!(coordinator_source, &cause);
+        assert!(matches!(
+            initialization_source,
+            ImportInitializationError::RetainedStore { code } if *code == CODE
+        ));
+        assert!(std::error::Error::source(initialization_source).is_none());
 
-        let initialization = run_error
+        let mismatched_error = run_error
             .into_operation_failure()
-            .expect_err("coordinator initialization cannot be an operation failure");
-        assert_eq!(initialization.coordinator_cause(), Some(&cause));
+            .expect_err("retained-store initialization cannot be an operation failure");
+        assert!(matches!(
+            mismatched_error,
+            ImportRunError::Initialization {
+                source: ImportInitializationError::RetainedStore { code }
+            } if code == CODE
+        ));
     }
 }

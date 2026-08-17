@@ -175,6 +175,7 @@ fn appearance_relation_limit_failures_preserve_the_exact_completed_prefix() {
     let mut edge_control = RelationWorkControl::default();
     let edge_error = expect_appearance_semantic(validate_appearance_batch_with_control(
         input,
+        crate::canonical_scene::store::production::ResourceSnapshotAuthoringTable::empty(),
         SceneValidationLimits::default().with_max_edges(1),
         &mut edge_control,
     ));
@@ -192,6 +193,7 @@ fn appearance_relation_limit_failures_preserve_the_exact_completed_prefix() {
     let mut reference_control = RelationWorkControl::default();
     let reference_error = expect_appearance_semantic(validate_appearance_batch_with_control(
         input,
+        crate::canonical_scene::store::production::ResourceSnapshotAuthoringTable::empty(),
         SceneValidationLimits::default().with_max_references(1),
         &mut reference_control,
     ));
@@ -584,6 +586,7 @@ fn profile_relation_limit_failures_preserve_the_exact_completed_prefix() {
     .expect("the profile fixture node must validate");
     let validated_appearance = validate_appearance_batch_with_control(
         appearance_input,
+        crate::canonical_scene::store::production::ResourceSnapshotAuthoringTable::empty(),
         SceneValidationLimits::default(),
         &mut setup_control,
     )

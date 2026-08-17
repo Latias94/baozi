@@ -52,12 +52,20 @@ impl AdmissionOwner for Arc<FactoryState> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PhysicalStorageAccountFactoryCreateError {
+    AccountingOverflow,
     AllocationFailed,
 }
 
 impl fmt::Display for PhysicalStorageAccountFactoryCreateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("physical storage account factory allocation failed")
+        match self {
+            Self::AccountingOverflow => {
+                formatter.write_str("physical storage account factory accounting overflowed")
+            }
+            Self::AllocationFailed => {
+                formatter.write_str("physical storage account factory allocation failed")
+            }
+        }
     }
 }
 
@@ -103,6 +111,26 @@ pub struct PhysicalStorageAccountFactory {
 }
 
 impl PhysicalStorageAccountFactory {
+    /// Creates a factory with the exact control-storage envelope for a live-account limit.
+    ///
+    /// Hosts specify only the durable concurrency/retention bound. The private account-control
+    /// layout stays owned by this crate and cannot drift into facade configuration.
+    pub fn try_new_for_live_accounts(
+        max_live_accounts: NonZeroU64,
+    ) -> Result<Self, PhysicalStorageAccountFactoryCreateError> {
+        let control_bytes = FinalOwnerAllocation::<AccountControlInner>::checked_layout_bytes()
+            .map_err(|_| PhysicalStorageAccountFactoryCreateError::AccountingOverflow)?;
+        let max_account_control_bytes = control_bytes
+            .checked_mul(max_live_accounts.get())
+            .ok_or(PhysicalStorageAccountFactoryCreateError::AccountingOverflow)?;
+        let limits = PhysicalStorageAccountFactoryLimits::new(
+            max_account_control_bytes,
+            max_live_accounts.get(),
+        )
+        .map_err(|_| PhysicalStorageAccountFactoryCreateError::AccountingOverflow)?;
+        Self::try_new(limits)
+    }
+
     pub fn try_new(
         limits: PhysicalStorageAccountFactoryLimits,
     ) -> Result<Self, PhysicalStorageAccountFactoryCreateError> {

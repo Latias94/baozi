@@ -4,7 +4,8 @@ use baozi_format_ply::PlyFailureCode;
 use baozi_import::{DiagnosticDetailValue, ImportDiagnostic, ImportProgressPhase, ResourceLimits};
 use common::{
     TestResult, ascii_triangle, assert_resource_limit, expected_error, expected_ply_failure,
-    expected_report, import_bytes_result, ply_string_detail, ply_unsigned_detail,
+    expected_report, import_bytes_result, ply_string_detail, ply_unsigned_detail, scene_snapshot,
+    snapshot_line, snapshot_line_containing,
 };
 
 fn memory_limits() -> ResourceLimits {
@@ -194,14 +195,13 @@ end_header
     let scene = import_bytes_result("zero-face.ply", bytes, memory_limits())?;
     let report = expected_report(scene)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(diagnostics.is_empty());
-    assert_eq!(
-        scene.meshes()[0].topology,
-        baozi_core::PrimitiveTopology::Points
-    );
-    assert!(scene.meshes()[0].indices.is_empty());
+    assert_eq!(snapshot.primitive_index_count(), 0);
+    assert_eq!(snapshot.polygon_boundary_count(), 0);
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains("topology=points vertices=1"));
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains("indices(absent,total=0)=[]"));
     Ok(())
 }
 
@@ -255,7 +255,7 @@ end_header
 }
 
 #[test]
-fn custom_attribute_slots_preserve_schema_order_across_many_rows() -> TestResult<()> {
+fn custom_attribute_slots_preserve_values_across_canonical_order() -> TestResult<()> {
     const ROW_COUNT: usize = 64;
 
     let mut document = format!(
@@ -271,34 +271,49 @@ fn custom_attribute_slots_preserve_schema_order_across_many_rows() -> TestResult
     let scene = import_bytes_result("custom-slots.ply", document.as_bytes(), memory_limits())?;
     let report = expected_report(scene)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
-    let attributes = &scene.meshes()[0].custom_attributes;
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(diagnostics.is_empty());
-    assert_eq!(
-        attributes
-            .iter()
-            .map(|attribute| attribute.name.as_str())
-            .collect::<Vec<_>>(),
-        ["ply:temperature", "ply:sample_id", "ply:flags"]
+    assert_eq!(snapshot.attribute_count(), 4);
+    assert_eq!(snapshot.f32_scalar_count(), (ROW_COUNT * 4) as u64);
+    assert_eq!(snapshot.i32_scalar_count(), ROW_COUNT as u64);
+    assert_eq!(snapshot.u32_scalar_count(), ROW_COUNT as u64);
+
+    let temperatures = snapshot_line_containing(&snapshot, "semantic=ply:temperature");
+    assert!(
+        temperatures
+            .contains("semantic=ply:temperature semantic_set=0 domain=vertex scalar=f32 lanes=1")
     );
-    let baozi_core::VertexAttributeData::F32(temperatures) = &attributes[0].data else {
-        panic!("temperature must retain floating-point storage");
-    };
-    let baozi_core::VertexAttributeData::I32(sample_ids) = &attributes[1].data else {
-        panic!("sample_id must retain signed integer storage");
-    };
-    let baozi_core::VertexAttributeData::U32(flags) = &attributes[2].data else {
-        panic!("flags must retain unsigned integer storage");
-    };
-    assert_eq!(temperatures.len(), ROW_COUNT);
-    assert_eq!(sample_ids.len(), ROW_COUNT);
-    assert_eq!(flags.len(), ROW_COUNT);
-    for row in 0..ROW_COUNT {
-        assert_eq!(temperatures[row], row as f32 + 0.5);
-        assert_eq!(sample_ids[row], -(row as i32));
-        assert_eq!(flags[row], row as u32);
-    }
+    let expected_temperatures = (0..ROW_COUNT)
+        .map(|row| format!("0x{:08x}", (row as f32 + 0.5).to_bits()))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(temperatures.contains(&format!(
+        "values(present,total={ROW_COUNT})=[{expected_temperatures}]"
+    )));
+
+    let sample_ids = snapshot_line_containing(&snapshot, "semantic=ply:sample_id");
+    assert!(
+        sample_ids
+            .contains("semantic=ply:sample_id semantic_set=0 domain=vertex scalar=i32 lanes=1")
+    );
+    let expected_sample_ids = (0..ROW_COUNT)
+        .map(|row| (-(row as i32)).to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(sample_ids.contains(&format!(
+        "values(present,total={ROW_COUNT})=[{expected_sample_ids}]"
+    )));
+
+    let flags = snapshot_line_containing(&snapshot, "semantic=ply:flags");
+    assert!(flags.contains("semantic=ply:flags semantic_set=0 domain=vertex scalar=u32 lanes=1"));
+    let expected_flags = (0..ROW_COUNT)
+        .map(|row| row.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(flags.contains(&format!(
+        "values(present,total={ROW_COUNT})=[{expected_flags}]"
+    )));
     Ok(())
 }
 
@@ -324,9 +339,10 @@ end_header
     let result = import_bytes_result("topology-exact.ply", bytes, exact_limits)?;
     let report = expected_report(result)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
     assert!(diagnostics.is_empty());
-    assert_eq!(scene.meshes()[0].indices.len(), 3);
+    assert_eq!(snapshot.primitive_index_count(), 3);
+    assert_eq!(snapshot.polygon_boundary_count(), 0);
 
     let mut excess_limits = memory_limits();
     excess_limits.max_total_topology_cells = 2;
@@ -361,10 +377,14 @@ end_header
     let result = import_bytes_result("polygon-topology-exact.ply", bytes, exact_limits)?;
     let report = expected_report(result)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
     assert!(diagnostics.is_empty());
-    assert_eq!(scene.meshes()[0].indices.len(), 4);
-    assert_eq!(scene.meshes()[0].face_vertex_counts, [4]);
+    assert_eq!(snapshot.primitive_index_count(), 4);
+    assert_eq!(snapshot.polygon_boundary_count(), 1);
+    assert!(
+        snapshot_line(&snapshot, "primitive[0]")
+            .contains("polygon_boundaries(present,total=1)=[4] indices(present,total=4)=[0,1,2,3]")
+    );
 
     let malformed_excess = std::str::from_utf8(bytes)
         .expect("fixture is valid UTF-8")
@@ -395,7 +415,7 @@ fn mixed_topology_limit_is_order_independent() -> TestResult<()> {
             "3 0 1 2",
             "4 0 1 2 3",
             "4 invalid 1 2 3",
-            [3, 4],
+            [3_u32, 4],
         ),
         (
             "quad-triangle",
@@ -415,10 +435,18 @@ fn mixed_topology_limit_is_order_independent() -> TestResult<()> {
         )?;
         let report = expected_report(scene)?;
         let diagnostics = report.diagnostics();
-        let scene = report.scene();
+        let snapshot = scene_snapshot(&report)?;
         assert!(diagnostics.is_empty());
-        assert_eq!(scene.meshes()[0].indices.len(), 7);
-        assert_eq!(scene.meshes()[0].face_vertex_counts, expected_counts);
+        assert_eq!(snapshot.primitive_index_count(), 7);
+        assert_eq!(snapshot.polygon_boundary_count(), 2);
+        let expected_boundaries = expected_counts
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(snapshot_line(&snapshot, "primitive[0]").contains(&format!(
+            "polygon_boundaries(present,total=2)=[{expected_boundaries}]"
+        )));
 
         let malformed_excess = format!("{header}{first}\n{invalid_second}\n");
         let mut excess_limits = memory_limits();
@@ -470,10 +498,14 @@ end_header
     let scene = import_bytes_result("binary-polygon-exact.ply", &exact_bytes, exact_limits)?;
     let report = expected_report(scene)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
     assert!(diagnostics.is_empty());
-    assert_eq!(scene.meshes()[0].indices, [0, 1, 2, 3]);
-    assert_eq!(scene.meshes()[0].face_vertex_counts, [4]);
+    assert_eq!(snapshot.primitive_index_count(), 4);
+    assert_eq!(snapshot.polygon_boundary_count(), 1);
+    assert!(
+        snapshot_line(&snapshot, "primitive[0]")
+            .contains("polygon_boundaries(present,total=1)=[4] indices(present,total=4)=[0,1,2,3]")
+    );
 
     let truncated_excess = &exact_bytes[..topology_start];
     let mut excess_limits = memory_limits();
@@ -617,11 +649,12 @@ end_header
     let scene = import_bytes_result("ascii-record-exact.ply", bytes, limits)?;
     let report = expected_report(scene)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
 
-    assert_eq!(
-        scene.meshes()[0].positions,
-        vec![baozi_core::Vec3::new(1.0, 2.0, 3.0)]
+    assert_eq!(snapshot.attribute_count(), 1);
+    assert!(
+        snapshot_line(&snapshot, "attribute[0]")
+            .contains("values(present,total=3)=[0x3f800000,0x40000000,0x40400000]")
     );
     assert_eq!(
         diagnostics
@@ -674,11 +707,12 @@ end_header
     let scene = import_bytes_result("binary-record-exact.ply", &bytes, limits)?;
     let report = expected_report(scene)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
 
-    assert_eq!(
-        scene.meshes()[0].positions,
-        vec![baozi_core::Vec3::new(1.0, 2.0, 3.0)]
+    assert_eq!(snapshot.attribute_count(), 1);
+    assert!(
+        snapshot_line(&snapshot, "attribute[0]")
+            .contains("values(present,total=3)=[0x3f800000,0x40000000,0x40400000]")
     );
     assert_eq!(
         diagnostics
@@ -691,7 +725,7 @@ end_header
 }
 
 #[test]
-fn aggregate_record_count_overflow_is_reported_as_record_limit() -> TestResult<()> {
+fn unrepresentable_record_envelope_is_rejected_before_session_start() -> TestResult<()> {
     let bytes = format!(
         "ply\nformat ascii 1.0\nelement metadata {}\nproperty uchar value\nelement metadata_extra 1\nproperty uchar value\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n",
         usize::MAX
@@ -700,11 +734,16 @@ fn aggregate_record_count_overflow_is_reported_as_record_limit() -> TestResult<(
     limits.max_records = usize::MAX;
 
     let result = import_bytes_result("record-overflow.ply", bytes.as_bytes(), limits)?;
-    let error = expected_error(result)?;
-    let diagnostics = error.diagnostics();
+    let error = result.expect_err("an unrepresentable retained-store envelope must fail closed");
 
-    assert!(diagnostics.is_empty());
-    assert_resource_limit(&error, "max_records");
+    assert!(matches!(
+        error,
+        baozi_import::ImportRunError::Initialization {
+            source: baozi_import::ImportInitializationError::RetainedStore {
+                code: "retained-store-bootstrap-rejected"
+            }
+        }
+    ));
     Ok(())
 }
 
@@ -714,8 +753,8 @@ fn zero_width_record_fuzz_corpus_terminates_with_expected_outcomes() -> TestResu
     let ascii_result = import_bytes_result("ascii-zero-width.ply", ascii, memory_limits())?;
     let report = expected_report(ascii_result)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
-    assert_eq!(scene.meshes()[0].positions.len(), 1);
+    let snapshot = scene_snapshot(&report)?;
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains("elements=1"));
     assert_eq!(
         diagnostics
             .iter()
@@ -759,9 +798,9 @@ end_header
     let scene = import_bytes_result("bounded-diagnostics.ply", &bytes, memory_limits())?;
     let report = expected_report(scene)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
 
-    assert_eq!(scene.meshes()[0].positions.len(), 1);
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains("elements=1"));
     assert_eq!(
         diagnostics
             .iter()
@@ -792,9 +831,10 @@ end_header
     let scene = import_bytes_result("partial-normal.ply", bytes, memory_limits())?;
     let report = expected_report(scene)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
 
-    assert!(scene.meshes()[0].normals.is_empty());
+    assert_eq!(snapshot.attribute_count(), 1);
+    assert!(!snapshot.preview().contains("semantic=normal"));
     assert_eq!(
         diagnostics
             .iter()
@@ -827,12 +867,13 @@ end_header
     let scene = import_bytes_result("vertex-schema-warnings.ply", bytes, memory_limits())?;
     let report = expected_report(scene)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
 
-    assert_eq!(scene.meshes()[0].positions.len(), 3);
-    assert!(scene.meshes()[0].normals.is_empty());
-    assert!(scene.meshes()[0].texcoords.is_empty());
-    assert!(scene.meshes()[0].colors.is_empty());
+    assert_eq!(snapshot.attribute_count(), 1);
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains("elements=3"));
+    assert!(!snapshot.preview().contains("semantic=normal"));
+    assert!(!snapshot.preview().contains("semantic=texcoord"));
+    assert!(!snapshot.preview().contains("semantic=color"));
     for code in [
         "ply.vertex_list_property_ignored",
         "ply.partial_normals_ignored",
@@ -876,13 +917,14 @@ end_header
     let scene = import_bytes_result("face-schema-warnings.ply", bytes, memory_limits())?;
     let report = expected_report(scene)?;
     let diagnostics = report.diagnostics();
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
 
-    assert_eq!(
-        scene.meshes()[0].topology,
-        baozi_core::PrimitiveTopology::Triangles
+    assert_eq!(snapshot.primitive_index_count(), 6);
+    assert_eq!(snapshot.polygon_boundary_count(), 0);
+    assert!(
+        snapshot_line(&snapshot, "primitive[0]")
+            .contains("topology=triangle_list vertices=4 corners=6 faces=2")
     );
-    assert_eq!(scene.meshes()[0].indices.len(), 6);
     for code in [
         "ply.face_scalar_property_ignored",
         "ply.face_list_property_ignored",

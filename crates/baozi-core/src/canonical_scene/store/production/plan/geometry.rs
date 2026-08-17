@@ -11,6 +11,7 @@ use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
 use crate::attribute::{AttributeDomain, AttributeSemantic, AttributeSemanticKind};
+use crate::entity::validate_entity_name_str;
 use crate::geometry::TopologyKind;
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
@@ -26,14 +27,16 @@ const LOGICAL_U8_BYTES: u64 = 1;
 const LOGICAL_U32_BYTES: u64 = 4;
 const LOGICAL_U64_BYTES: u64 = 8;
 const LOGICAL_F32_BYTES: u64 = 4;
+const LOGICAL_I32_BYTES: u64 = 4;
 const LOGICAL_REFERENCE_BYTES: u64 = 4;
 
-const GEOMETRY_DIRECTORY_FIXED_BYTES: u64 = 5 * LOGICAL_U32_BYTES;
-const LOGICAL_MESH_ROW_BYTES: u64 = 3 * LOGICAL_U32_BYTES + LOGICAL_REFERENCE_BYTES;
+const GEOMETRY_DIRECTORY_FIXED_BYTES: u64 = 7 * LOGICAL_U32_BYTES;
+const LOGICAL_MESH_ROW_BYTES: u64 =
+    5 * LOGICAL_U32_BYTES + LOGICAL_U8_BYTES + LOGICAL_REFERENCE_BYTES;
 const MESH_INSTANCE_ROW_BYTES: u64 = 3 * LOGICAL_U32_BYTES + 2 * LOGICAL_REFERENCE_BYTES;
 const PRIMITIVE_FIXED_BYTES: u64 = 9 * LOGICAL_U32_BYTES + 4 * LOGICAL_U8_BYTES;
 const ATTRIBUTE_FIXED_BYTES: u64 =
-    (4 * LOGICAL_U32_BYTES) + LOGICAL_U64_BYTES + (6 * LOGICAL_U8_BYTES);
+    (6 * LOGICAL_U32_BYTES) + LOGICAL_U64_BYTES + (6 * LOGICAL_U8_BYTES);
 
 pub(in crate::canonical_scene::store) fn geometry_shape_scratch_envelope(
     input: GeometryAuthoringBatch<'_>,
@@ -82,6 +85,12 @@ pub(in crate::canonical_scene::store) enum GeometryAuthoringSemanticError {
     },
     #[error("geometry authoring accounting overflowed for {dimension}")]
     AccountingOverflow { dimension: &'static str },
+    #[error("logical mesh {logical_mesh} has an invalid entity name")]
+    InvalidLogicalMeshName {
+        logical_mesh: usize,
+        #[source]
+        source: crate::entity::EntityNameError,
+    },
     #[error("logical mesh {logical_mesh} owns an empty primitive range")]
     EmptyLogicalMesh { logical_mesh: usize },
     #[error(
@@ -128,8 +137,6 @@ pub(in crate::canonical_scene::store) enum GeometryAuthoringSemanticError {
     AttributeScalarShape { attribute: usize, lanes: u8 },
     #[error("attribute {attribute} uses unsupported built-in domain or scalar format")]
     AttributeSchema { attribute: usize },
-    #[error("attribute {attribute} uses a custom semantic before its schema authority exists")]
-    CustomAttributeUnsupported { attribute: usize },
     #[error("attribute {attribute} has non-finite f32 source value at scalar {scalar}")]
     NonFiniteAttributeValue { attribute: usize, scalar: usize },
     #[error("attribute {attribute} source projection is valid only for the Corner domain")]
@@ -268,6 +275,7 @@ where
 pub(in crate::canonical_scene::store) enum GeometryAttributeScalarKind {
     F32,
     U32,
+    I32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,6 +293,8 @@ pub(in crate::canonical_scene::store) struct ValidatedGeometryAttribute {
     explicit_element_count: u32,
     canonical_scalar_count: u64,
     payload_block_count: u32,
+    semantic_name_offset: u32,
+    semantic_name_count: u32,
 }
 
 impl ValidatedGeometryAttribute {
@@ -322,6 +332,14 @@ impl ValidatedGeometryAttribute {
 
     pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
         self.payload_block_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn semantic_name_offset(&self) -> u32 {
+        self.semantic_name_offset
+    }
+
+    pub(in crate::canonical_scene::store) const fn semantic_name_count(&self) -> u32 {
+        self.semantic_name_count
     }
 }
 
@@ -462,6 +480,14 @@ impl<'input> ValidatedGeometryAttributeView<'_, 'input> {
         self.plan.payload_block_count()
     }
 
+    pub(in crate::canonical_scene::store) const fn semantic_name_offset(&self) -> u32 {
+        self.plan.semantic_name_offset()
+    }
+
+    pub(in crate::canonical_scene::store) const fn semantic_name_count(&self) -> u32 {
+        self.plan.semantic_name_count()
+    }
+
     pub(in crate::canonical_scene::store) const fn authored_payload(
         &self,
     ) -> GeometryAttributePayloadAuthoring<'input> {
@@ -472,8 +498,10 @@ impl<'input> ValidatedGeometryAttributeView<'_, 'input> {
         match self.input.payload() {
             GeometryAttributePayloadAuthoring::DenseF32 { lanes, .. }
             | GeometryAttributePayloadAuthoring::DenseU32 { lanes, .. }
+            | GeometryAttributePayloadAuthoring::DenseI32 { lanes, .. }
             | GeometryAttributePayloadAuthoring::SparseF32 { lanes, .. }
-            | GeometryAttributePayloadAuthoring::SparseU32 { lanes, .. } => lanes,
+            | GeometryAttributePayloadAuthoring::SparseU32 { lanes, .. }
+            | GeometryAttributePayloadAuthoring::SparseI32 { lanes, .. } => lanes,
         }
     }
 }
@@ -486,11 +514,14 @@ pub(in crate::canonical_scene::store) struct ValidatedGeometryBatch<'input, R> {
 
 struct GeometryValidationStorage<R> {
     logical_mesh_count: u32,
+    logical_mesh_name_byte_count: u32,
+    attribute_semantic_name_byte_count: u32,
     primitive_count: u32,
     mesh_instance_count: u32,
     attribute_count: u32,
     f32_scalar_count: u64,
     u32_scalar_count: u64,
+    i32_scalar_count: u64,
     payload_block_count: u32,
     entity_count: u64,
     edge_count: u64,
@@ -523,6 +554,16 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
         self.compiled.logical_mesh_count
     }
 
+    pub(in crate::canonical_scene::store) const fn logical_mesh_name_byte_count(&self) -> u32 {
+        self.compiled.logical_mesh_name_byte_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn attribute_semantic_name_byte_count(
+        &self,
+    ) -> u32 {
+        self.compiled.attribute_semantic_name_byte_count
+    }
+
     pub(in crate::canonical_scene::store) const fn primitive_count(&self) -> u32 {
         self.compiled.primitive_count
     }
@@ -541,6 +582,10 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
 
     pub(in crate::canonical_scene::store) const fn u32_scalar_count(&self) -> u64 {
         self.compiled.u32_scalar_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn i32_scalar_count(&self) -> u64 {
+        self.compiled.i32_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
@@ -639,11 +684,20 @@ impl<R> fmt::Debug for ValidatedGeometryBatch<'_, R> {
         formatter
             .debug_struct("ValidatedGeometryBatch")
             .field("logical_mesh_count", &self.compiled.logical_mesh_count)
+            .field(
+                "logical_mesh_name_byte_count",
+                &self.compiled.logical_mesh_name_byte_count,
+            )
+            .field(
+                "attribute_semantic_name_byte_count",
+                &self.compiled.attribute_semantic_name_byte_count,
+            )
             .field("primitive_count", &self.compiled.primitive_count)
             .field("mesh_instance_count", &self.compiled.mesh_instance_count)
             .field("attribute_count", &self.compiled.attribute_count)
             .field("f32_scalar_count", &self.compiled.f32_scalar_count)
             .field("u32_scalar_count", &self.compiled.u32_scalar_count)
+            .field("i32_scalar_count", &self.compiled.i32_scalar_count)
             .field("payload_block_count", &self.compiled.payload_block_count)
             .field("entity_count", &self.compiled.entity_count)
             .field("edge_count", &self.compiled.edge_count)
@@ -691,6 +745,7 @@ struct GeometryValidationContext<'control, C: CanonicalAuthoringControl> {
     semantic_cells: u64,
     f32_scalars: u64,
     u32_scalars: u64,
+    i32_scalars: u64,
     payload_blocks: u32,
     canonical_bytes: u64,
 }
@@ -707,6 +762,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
             semantic_cells: 0,
             f32_scalars: 0,
             u32_scalars: 0,
+            i32_scalars: 0,
             payload_blocks: 0,
             canonical_bytes: 0,
         }
@@ -798,13 +854,15 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         &mut self,
         f32_scalars: u64,
         u32_scalars: u64,
+        i32_scalars: u64,
         payload_blocks: u32,
     ) -> GeometryValidationResult<(), C> {
-        let added_cells = f32_scalars.checked_add(u32_scalars).ok_or(
-            GeometryAuthoringSemanticError::AccountingOverflow {
+        let added_cells = f32_scalars
+            .checked_add(u32_scalars)
+            .and_then(|count| count.checked_add(i32_scalars))
+            .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
                 dimension: "semantic cells",
-            },
-        )?;
+            })?;
         let final_cells = self.semantic_cells.checked_add(added_cells).ok_or(
             GeometryAuthoringSemanticError::AccountingOverflow {
                 dimension: "semantic cells",
@@ -818,6 +876,11 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         let final_u32 = self.u32_scalars.checked_add(u32_scalars).ok_or(
             GeometryAuthoringSemanticError::AccountingOverflow {
                 dimension: "u32 scalar count",
+            },
+        )?;
+        let final_i32 = self.i32_scalars.checked_add(i32_scalars).ok_or(
+            GeometryAuthoringSemanticError::AccountingOverflow {
+                dimension: "i32 scalar count",
             },
         )?;
         let final_blocks = self.payload_blocks.checked_add(payload_blocks).ok_or(
@@ -836,6 +899,11 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
                     u32_scalars,
                     LOGICAL_U32_BYTES,
                     "canonical u32 scalar payload",
+                )?,
+                checked_bytes(
+                    i32_scalars,
+                    LOGICAL_I32_BYTES,
+                    "canonical i32 scalar payload",
                 )?,
             ],
             "canonical scalar payload",
@@ -859,8 +927,44 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         self.semantic_cells = final_cells;
         self.f32_scalars = final_f32;
         self.u32_scalars = final_u32;
+        self.i32_scalars = final_i32;
         self.payload_blocks = final_blocks;
         self.canonical_bytes = final_canonical_bytes;
+        Ok(())
+    }
+
+    fn add_utf8_payload(&mut self, bytes: u64) -> GeometryValidationResult<(), C> {
+        let final_cells = self.semantic_cells.checked_add(bytes).ok_or(
+            GeometryAuthoringSemanticError::AccountingOverflow {
+                dimension: "semantic cells",
+            },
+        )?;
+        let final_canonical_bytes = self.canonical_bytes.checked_add(bytes).ok_or(
+            GeometryAuthoringSemanticError::AccountingOverflow {
+                dimension: "canonical geometry logical footprint",
+            },
+        )?;
+        enforce_limit::<C::Error>(
+            GeometryAuthoringLimit::SemanticCells,
+            final_cells,
+            self.limits.max_payload_cells(),
+        )?;
+        enforce_limit::<C::Error>(
+            GeometryAuthoringLimit::CanonicalBytes,
+            final_canonical_bytes,
+            self.limits.max_canonical_bytes(),
+        )?;
+        self.semantic_cells = final_cells;
+        self.canonical_bytes = final_canonical_bytes;
+        Ok(())
+    }
+
+    fn add_payload_blocks(&mut self, blocks: u32) -> GeometryValidationResult<(), C> {
+        self.payload_blocks = self.payload_blocks.checked_add(blocks).ok_or(
+            GeometryAuthoringSemanticError::AccountingOverflow {
+                dimension: "payload block count",
+            },
+        )?;
         Ok(())
     }
 
@@ -1018,42 +1122,73 @@ where
     };
 
     let mut expected_primitive_offset = 0_u32;
+    let mut logical_mesh_name_offset = 0_u32;
     for (logical_mesh_index, logical_mesh) in input.logical_meshes().iter().copied().enumerate() {
-        let (range, end) = context.run_unit(SceneValidationWork::Entity, || {
-            let range = logical_mesh.primitives();
-            if range.count() == 0 {
-                return Err(GeometryAuthoringSemanticError::EmptyLogicalMesh {
-                    logical_mesh: logical_mesh_index,
-                });
-            }
-            if range.offset() != expected_primitive_offset {
-                return Err(GeometryAuthoringSemanticError::LogicalMeshRangeOrder {
-                    logical_mesh: logical_mesh_index,
-                    expected: expected_primitive_offset,
-                    actual: range.offset(),
-                });
-            }
-            let Some(end) = range.offset().checked_add(range.count()) else {
-                return Err(
-                    GeometryAuthoringSemanticError::LogicalMeshRangeOutOfBounds {
+        let (range, end, name, next_name_offset) =
+            context.run_unit(SceneValidationWork::Entity, || {
+                let range = logical_mesh.primitives();
+                if range.count() == 0 {
+                    return Err(GeometryAuthoringSemanticError::EmptyLogicalMesh {
                         logical_mesh: logical_mesh_index,
-                        primitive_count: input.primitives().len(),
-                    },
-                );
-            };
-            if end > primitive_count {
-                return Err(
-                    GeometryAuthoringSemanticError::LogicalMeshRangeOutOfBounds {
+                    });
+                }
+                if range.offset() != expected_primitive_offset {
+                    return Err(GeometryAuthoringSemanticError::LogicalMeshRangeOrder {
                         logical_mesh: logical_mesh_index,
-                        primitive_count: input.primitives().len(),
+                        expected: expected_primitive_offset,
+                        actual: range.offset(),
+                    });
+                }
+                let Some(end) = range.offset().checked_add(range.count()) else {
+                    return Err(
+                        GeometryAuthoringSemanticError::LogicalMeshRangeOutOfBounds {
+                            logical_mesh: logical_mesh_index,
+                            primitive_count: input.primitives().len(),
+                        },
+                    );
+                };
+                if end > primitive_count {
+                    return Err(
+                        GeometryAuthoringSemanticError::LogicalMeshRangeOutOfBounds {
+                            logical_mesh: logical_mesh_index,
+                            primitive_count: input.primitives().len(),
+                        },
+                    );
+                }
+                let name = match logical_mesh.name() {
+                    Presence::Absent => None,
+                    Presence::Present(name) => {
+                        validate_entity_name_str(name).map_err(|source| {
+                            GeometryAuthoringSemanticError::InvalidLogicalMeshName {
+                                logical_mesh: logical_mesh_index,
+                                source,
+                            }
+                        })?;
+                        Some(name)
+                    }
+                };
+                let name_count = match name {
+                    Some(name) => collection_count(name.len(), "logical mesh name bytes")?,
+                    None => 0,
+                };
+                let next_name_offset = logical_mesh_name_offset.checked_add(name_count).ok_or(
+                    GeometryAuthoringSemanticError::AccountingOverflow {
+                        dimension: "logical mesh name byte offset",
                     },
-                );
+                )?;
+                Ok((range, end, name, next_name_offset))
+            })??;
+        if let Some(name) = name {
+            for byte in name.as_bytes() {
+                context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
             }
-            Ok((range, end))
-        })??;
+            context.add_utf8_payload(usize_to_u64(name.len(), "logical mesh name bytes")?)?;
+        }
         context.add_relations(u64::from(range.count()))?;
         expected_primitive_offset = end;
+        logical_mesh_name_offset = next_name_offset;
     }
+    context.add_payload_blocks(block_for_u64(u64::from(logical_mesh_name_offset)))?;
     context.run_unit(SceneValidationWork::Traversal, || {
         if expected_primitive_offset == primitive_count {
             return Ok(());
@@ -1069,6 +1204,7 @@ where
     })??;
 
     let mut expected_attribute_offset = 0_u32;
+    let mut attribute_semantic_name_offset = 0_u32;
     for (primitive_index, primitive) in input.primitives().iter().copied().enumerate() {
         let (attribute_range, attribute_end, has_material, attribute_indices) =
             context.run_unit(SceneValidationWork::Entity, || {
@@ -1133,6 +1269,7 @@ where
             attribute_indices,
             input.attributes(),
             &mut storage.attribute_plans,
+            &mut attribute_semantic_name_offset,
             &mut context,
         )?;
         storage.primitive_plans.push(plan);
@@ -1151,6 +1288,7 @@ where
             unowned: u32_to_usize(unowned, "unowned attribute count")?,
         })
     })??;
+    context.add_payload_blocks(block_for_u64(u64::from(attribute_semantic_name_offset)))?;
 
     for (instance_index, instance) in input.mesh_instances().iter().copied().enumerate() {
         context.run_unit(SceneValidationWork::Entity, || {
@@ -1186,11 +1324,14 @@ where
     } = storage;
     let compiled = GeometryValidationStorage {
         logical_mesh_count,
+        logical_mesh_name_byte_count: logical_mesh_name_offset,
+        attribute_semantic_name_byte_count: attribute_semantic_name_offset,
         primitive_count,
         mesh_instance_count,
         attribute_count,
         f32_scalar_count: context.f32_scalars,
         u32_scalar_count: context.u32_scalars,
+        i32_scalar_count: context.i32_scalars,
         payload_block_count: context.payload_blocks,
         entity_count,
         edge_count: context.edges,
@@ -1216,6 +1357,7 @@ fn validate_primitive<C>(
     attribute_indices: Range<usize>,
     attributes: &[GeometryAttributeAuthoring<'_>],
     attribute_plans: &mut Vec<ValidatedGeometryAttribute>,
+    attribute_semantic_name_offset: &mut u32,
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<ValidatedGeometryPrimitivePlan, C>
 where
@@ -1265,7 +1407,13 @@ where
     let mut position_plan = match position_index {
         Some(attribute_index) => Some((
             attribute_index,
-            validate_attribute(attribute_index, &attributes[attribute_index], None, context)?,
+            validate_attribute(
+                attribute_index,
+                &attributes[attribute_index],
+                None,
+                attribute_semantic_name_offset,
+                context,
+            )?,
         )),
         None => None,
     };
@@ -1292,11 +1440,6 @@ where
     for attribute_index in attribute_indices {
         let expected = context.run_unit(SceneValidationWork::Traversal, || {
             let attribute = &attributes[attribute_index];
-            if attribute.semantic().kind() == AttributeSemanticKind::Custom {
-                return Err(GeometryAuthoringSemanticError::CustomAttributeUnsupported {
-                    attribute: attribute_index,
-                });
-            }
             let expected = domain_cardinality(
                 attribute_index,
                 attribute.domain(),
@@ -1305,16 +1448,28 @@ where
                 face_count,
             )?;
             validate_expected_attribute_cardinality(attribute_index, attribute, expected)?;
-            Ok(expected)
+            Ok::<u32, GeometryAuthoringSemanticError>(expected)
         })??;
         let attribute = &attributes[attribute_index];
         let plan = match position_plan.take() {
             Some((position, plan)) if position == attribute_index => plan,
             Some((position, plan)) => {
                 position_plan = Some((position, plan));
-                validate_attribute(attribute_index, attribute, Some(expected), context)?
+                validate_attribute(
+                    attribute_index,
+                    attribute,
+                    Some(expected),
+                    attribute_semantic_name_offset,
+                    context,
+                )?
             }
-            None => validate_attribute(attribute_index, attribute, Some(expected), context)?,
+            None => validate_attribute(
+                attribute_index,
+                attribute,
+                Some(expected),
+                attribute_semantic_name_offset,
+                context,
+            )?,
         };
         attribute_plans.push(plan);
     }
@@ -1383,7 +1538,7 @@ where
         Presence::Absent => Ok((vertex_count, 0)),
         Presence::Present(indices) => {
             let index_count = collection_count(indices.len(), "primitive indices")?;
-            context.add_payload(0, u64::from(index_count), block_for_len(indices.len()))?;
+            context.add_payload(0, u64::from(index_count), 0, block_for_len(indices.len()))?;
             for (corner, &index) in indices.iter().enumerate() {
                 context.run_unit(SceneValidationWork::PayloadCell, || {
                     if index >= vertex_count {
@@ -1466,7 +1621,7 @@ where
         }
         GeometryTopologyAuthoring::Polygons(boundaries) => {
             let face_count = collection_count(boundaries.len(), "polygon faces")?;
-            context.add_payload(0, u64::from(face_count), block_for_len(boundaries.len()))?;
+            context.add_payload(0, u64::from(face_count), 0, block_for_len(boundaries.len()))?;
             let mut boundary_corners = 0_u32;
             for (face, &face_corner_count) in boundaries.iter().enumerate() {
                 boundary_corners = context.run_unit(SceneValidationWork::PayloadCell, || {
@@ -1522,11 +1677,31 @@ fn validate_attribute<C>(
     attribute_index: usize,
     attribute: &GeometryAttributeAuthoring<'_>,
     expected_cardinality: Option<u32>,
+    attribute_semantic_name_offset: &mut u32,
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<ValidatedGeometryAttribute, C>
 where
     C: CanonicalAuthoringControl,
 {
+    let semantic_name_offset = *attribute_semantic_name_offset;
+    let semantic_name_count = match attribute.semantic() {
+        AttributeSemantic::Custom(custom) => {
+            let name = custom.as_str();
+            let count = collection_count(name.len(), "attribute semantic name bytes")?;
+            let next = semantic_name_offset.checked_add(count).ok_or(
+                GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "attribute semantic name byte offset",
+                },
+            )?;
+            for byte in name.as_bytes() {
+                context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
+            }
+            context.add_utf8_payload(usize_to_u64(name.len(), "attribute semantic name bytes")?)?;
+            *attribute_semantic_name_offset = next;
+            count
+        }
+        _ => 0,
+    };
     match attribute.payload() {
         GeometryAttributePayloadAuthoring::DenseF32 {
             lanes,
@@ -1578,7 +1753,7 @@ where
             )?;
             let canonical_scalar_count = checked_scalar_count(element_count, lanes)?;
             let payload_block_count = block_for_u64(canonical_scalar_count);
-            context.add_payload(canonical_scalar_count, 0, payload_block_count)?;
+            context.add_payload(canonical_scalar_count, 0, 0, payload_block_count)?;
 
             inspect_f32_values(attribute_index, source_values, context)?;
             if let Some(indices) = projection {
@@ -1607,6 +1782,8 @@ where
                 explicit_element_count: element_count,
                 canonical_scalar_count,
                 payload_block_count,
+                semantic_name_offset,
+                semantic_name_count,
             })
         }
         GeometryAttributePayloadAuthoring::DenseU32 { lanes, values } => {
@@ -1630,7 +1807,7 @@ where
             )?;
             let canonical_scalar_count = usize_to_u64(values.len(), "u32 attribute scalars")?;
             let payload_block_count = block_for_len(values.len());
-            context.add_payload(0, canonical_scalar_count, payload_block_count)?;
+            context.add_payload(0, canonical_scalar_count, 0, payload_block_count)?;
             inspect_u32_values(values, context)?;
             Ok(ValidatedGeometryAttribute {
                 input_index: attribute_index,
@@ -1641,6 +1818,44 @@ where
                 explicit_element_count: element_count,
                 canonical_scalar_count,
                 payload_block_count,
+                semantic_name_offset,
+                semantic_name_count,
+            })
+        }
+        GeometryAttributePayloadAuthoring::DenseI32 { lanes, values } => {
+            let element_count = scalar_element_count(
+                attribute_index,
+                lanes,
+                values.len(),
+                "i32 attribute elements",
+            )?;
+            validate_attribute_schema(
+                attribute_index,
+                attribute,
+                GeometryAttributeScalarKind::I32,
+                lanes,
+            )?;
+            check_attribute_cardinality(
+                attribute_index,
+                attribute.domain(),
+                element_count,
+                expected_cardinality,
+            )?;
+            let canonical_scalar_count = usize_to_u64(values.len(), "i32 attribute scalars")?;
+            let payload_block_count = block_for_len(values.len());
+            context.add_payload(0, 0, canonical_scalar_count, payload_block_count)?;
+            inspect_i32_values(values, context)?;
+            Ok(ValidatedGeometryAttribute {
+                input_index: attribute_index,
+                scalar_kind: GeometryAttributeScalarKind::I32,
+                payload_kind: GeometryAttributePayloadKind::Dense,
+                source_element_count: element_count,
+                element_count,
+                explicit_element_count: element_count,
+                canonical_scalar_count,
+                payload_block_count,
+                semantic_name_offset,
+                semantic_name_count,
             })
         }
         GeometryAttributePayloadAuthoring::SparseF32 {
@@ -1658,6 +1873,8 @@ where
             values,
             default,
             expected_cardinality,
+            semantic_name_offset,
+            semantic_name_count,
             context,
         ),
         GeometryAttributePayloadAuthoring::SparseU32 {
@@ -1675,6 +1892,27 @@ where
             values,
             default,
             expected_cardinality,
+            semantic_name_offset,
+            semantic_name_count,
+            context,
+        ),
+        GeometryAttributePayloadAuthoring::SparseI32 {
+            lanes,
+            logical_count,
+            indices,
+            values,
+            default,
+        } => validate_sparse_attribute(
+            attribute_index,
+            attribute,
+            lanes,
+            logical_count,
+            indices,
+            values,
+            default,
+            expected_cardinality,
+            semantic_name_offset,
+            semantic_name_count,
             context,
         ),
     }
@@ -1717,6 +1955,19 @@ impl GeometryScalar for u32 {
     }
 }
 
+impl GeometryScalar for i32 {
+    const KIND: GeometryAttributeScalarKind = GeometryAttributeScalarKind::I32;
+
+    fn inspect<C: CanonicalAuthoringControl>(
+        _attribute_index: usize,
+        values: &[Self],
+        _scalar_offset: usize,
+        context: &mut GeometryValidationContext<'_, C>,
+    ) -> GeometryValidationResult<(), C> {
+        inspect_i32_values(values, context)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_sparse_attribute<C, T>(
     attribute_index: usize,
@@ -1727,6 +1978,8 @@ fn validate_sparse_attribute<C, T>(
     values: &[T],
     default: &[T],
     expected_cardinality: Option<u32>,
+    semantic_name_offset: u32,
+    semantic_name_count: u32,
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<ValidatedGeometryAttribute, C>
 where
@@ -1787,6 +2040,7 @@ where
             context.add_payload(
                 canonical_scalar_count,
                 index_scalar_count,
+                0,
                 payload_block_count,
             )?;
         }
@@ -1796,7 +2050,15 @@ where
                 .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
                     dimension: "u32 scalar count",
                 })?;
-            context.add_payload(0, u32_scalars, payload_block_count)?;
+            context.add_payload(0, u32_scalars, 0, payload_block_count)?;
+        }
+        GeometryAttributeScalarKind::I32 => {
+            context.add_payload(
+                0,
+                index_scalar_count,
+                canonical_scalar_count,
+                payload_block_count,
+            )?;
         }
     }
 
@@ -1831,6 +2093,8 @@ where
         explicit_element_count,
         canonical_scalar_count,
         payload_block_count,
+        semantic_name_offset,
+        semantic_name_count,
     })
 }
 
@@ -1863,8 +2127,15 @@ fn attribute_element_count(
             values.len(),
             "u32 attribute elements",
         ),
+        GeometryAttributePayloadAuthoring::DenseI32 { lanes, values } => scalar_element_count(
+            attribute_index,
+            lanes,
+            values.len(),
+            "i32 attribute elements",
+        ),
         GeometryAttributePayloadAuthoring::SparseF32 { logical_count, .. }
-        | GeometryAttributePayloadAuthoring::SparseU32 { logical_count, .. } => Ok(logical_count),
+        | GeometryAttributePayloadAuthoring::SparseU32 { logical_count, .. }
+        | GeometryAttributePayloadAuthoring::SparseI32 { logical_count, .. } => Ok(logical_count),
     }
 }
 
@@ -1913,6 +2184,20 @@ fn validate_attribute_authored_shape(
                 lanes,
             )?;
         }
+        GeometryAttributePayloadAuthoring::DenseI32 { lanes, values } => {
+            scalar_element_count(
+                attribute_index,
+                lanes,
+                values.len(),
+                "i32 attribute elements",
+            )?;
+            validate_attribute_schema(
+                attribute_index,
+                attribute,
+                GeometryAttributeScalarKind::I32,
+                lanes,
+            )?;
+        }
         GeometryAttributePayloadAuthoring::SparseF32 {
             lanes,
             indices,
@@ -1938,6 +2223,21 @@ fn validate_attribute_authored_shape(
             attribute_index,
             attribute,
             GeometryAttributeScalarKind::U32,
+            lanes,
+            indices,
+            values.len(),
+            default.len(),
+        )?,
+        GeometryAttributePayloadAuthoring::SparseI32 {
+            lanes,
+            indices,
+            values,
+            default,
+            ..
+        } => validate_sparse_attribute_authored_shape(
+            attribute_index,
+            attribute,
+            GeometryAttributeScalarKind::I32,
             lanes,
             indices,
             values.len(),
@@ -2036,11 +2336,6 @@ fn validate_attribute_schema(
     lanes: u8,
 ) -> Result<(), GeometryAuthoringSemanticError> {
     let kind = attribute.semantic().kind();
-    if kind == AttributeSemanticKind::Custom {
-        return Err(GeometryAuthoringSemanticError::CustomAttributeUnsupported {
-            attribute: attribute_index,
-        });
-    }
     if attribute.domain() == AttributeDomain::Instance {
         return Err(GeometryAuthoringSemanticError::AttributeSchema {
             attribute: attribute_index,
@@ -2086,7 +2381,14 @@ fn validate_attribute_schema(
                 && scalar_kind == GeometryAttributeScalarKind::U32
                 && lanes == 1
         }
-        AttributeSemanticKind::Custom => false,
+        AttributeSemanticKind::Custom => {
+            matches!(
+                scalar_kind,
+                GeometryAttributeScalarKind::F32
+                    | GeometryAttributeScalarKind::U32
+                    | GeometryAttributeScalarKind::I32
+            ) && (1..=16).contains(&lanes)
+        }
     };
     if valid {
         Ok(())
@@ -2149,6 +2451,19 @@ where
     Ok(())
 }
 
+fn inspect_i32_values<C>(
+    values: &[i32],
+    context: &mut GeometryValidationContext<'_, C>,
+) -> GeometryValidationResult<(), C>
+where
+    C: CanonicalAuthoringControl,
+{
+    for _ in values {
+        context.run_unit(SceneValidationWork::PayloadCell, || ())?;
+    }
+    Ok(())
+}
+
 fn check_attribute_cardinality(
     attribute: usize,
     domain: AttributeDomain,
@@ -2190,15 +2505,27 @@ where
     let primitive_count = collection_count(input.primitives().len(), "primitives")?;
     let attribute_count = collection_count(input.attributes().len(), "attributes")?;
     let mesh_instance_count = collection_count(input.mesh_instances().len(), "mesh instances")?;
-    let directory_reference_bytes = checked_sum_bytes(
-        [
-            reference_slot_bytes(logical_mesh_count != 0),
-            reference_slot_bytes(primitive_count != 0),
-            reference_slot_bytes(attribute_count != 0),
-            reference_slot_bytes(mesh_instance_count != 0),
-        ],
-        "canonical geometry directory references",
-    )?;
+    let mut logical_mesh_name_bytes = 0_u64;
+    let mut logical_mesh_rows = 0_u64;
+    for logical_mesh in input.logical_meshes() {
+        logical_mesh_rows = context.run_unit(SceneValidationWork::Traversal, || {
+            let name_count = match logical_mesh.name() {
+                Presence::Absent => 0,
+                Presence::Present(name) => usize_to_u64(name.len(), "logical mesh name bytes")?,
+            };
+            logical_mesh_name_bytes = logical_mesh_name_bytes.checked_add(name_count).ok_or(
+                GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "logical mesh name bytes",
+                },
+            )?;
+            logical_mesh_rows
+                .checked_add(LOGICAL_MESH_ROW_BYTES)
+                .and_then(|bytes| bytes.checked_add(reference_slot_bytes(name_count != 0)))
+                .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "canonical logical mesh records",
+                })
+        })??;
+    }
     let mut primitive_bytes = 0_u64;
     for primitive in input.primitives() {
         primitive_bytes = context.run_unit(SceneValidationWork::Traversal, || {
@@ -2228,8 +2555,20 @@ where
         })??;
     }
     let mut attribute_bytes = 0_u64;
+    let mut attribute_semantic_name_bytes = 0_u64;
     for attribute in input.attributes() {
         attribute_bytes = context.run_unit(SceneValidationWork::Traversal, || {
+            let semantic_name_count = match attribute.semantic() {
+                AttributeSemantic::Custom(custom) => {
+                    usize_to_u64(custom.as_str().len(), "attribute semantic name bytes")?
+                }
+                _ => 0,
+            };
+            attribute_semantic_name_bytes = attribute_semantic_name_bytes
+                .checked_add(semantic_name_count)
+                .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "attribute semantic name bytes",
+                })?;
             let (values, sparse_indices, sparse_default) = match attribute.payload() {
                 GeometryAttributePayloadAuthoring::DenseF32 {
                     source_values,
@@ -2246,6 +2585,9 @@ where
                 GeometryAttributePayloadAuthoring::DenseU32 { values, .. } => {
                     (!values.is_empty(), false, false)
                 }
+                GeometryAttributePayloadAuthoring::DenseI32 { values, .. } => {
+                    (!values.is_empty(), false, false)
+                }
                 GeometryAttributePayloadAuthoring::SparseF32 {
                     indices,
                     values,
@@ -2258,12 +2600,19 @@ where
                     default,
                     ..
                 } => (!values.is_empty(), !indices.is_empty(), !default.is_empty()),
+                GeometryAttributePayloadAuthoring::SparseI32 {
+                    indices,
+                    values,
+                    default,
+                    ..
+                } => (!values.is_empty(), !indices.is_empty(), !default.is_empty()),
             };
             let reference_bytes = checked_sum_bytes(
                 [
                     reference_slot_bytes(values),
                     reference_slot_bytes(sparse_indices),
                     reference_slot_bytes(sparse_default),
+                    reference_slot_bytes(semantic_name_count != 0),
                 ],
                 "canonical attribute references",
             )?;
@@ -2275,15 +2624,22 @@ where
                 })
         })??;
     }
+    let directory_reference_bytes = checked_sum_bytes(
+        [
+            reference_slot_bytes(logical_mesh_count != 0),
+            reference_slot_bytes(primitive_count != 0),
+            reference_slot_bytes(attribute_count != 0),
+            reference_slot_bytes(mesh_instance_count != 0),
+            reference_slot_bytes(logical_mesh_name_bytes != 0),
+            reference_slot_bytes(attribute_semantic_name_bytes != 0),
+        ],
+        "canonical geometry directory references",
+    )?;
     let structural_bytes = checked_sum_bytes(
         [
             GEOMETRY_DIRECTORY_FIXED_BYTES,
             directory_reference_bytes,
-            checked_bytes(
-                u64::from(logical_mesh_count),
-                LOGICAL_MESH_ROW_BYTES,
-                "canonical logical mesh records",
-            )?,
+            logical_mesh_rows,
             primitive_bytes,
             checked_bytes(
                 u64::from(mesh_instance_count),

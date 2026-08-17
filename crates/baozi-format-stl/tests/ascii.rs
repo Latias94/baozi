@@ -1,10 +1,13 @@
 mod common;
 
 use baozi_format_stl::StlFailureCode;
-use baozi_import::{ImportCause, ImportDimension, ResourceLimits, ScopeAbortCause};
+use baozi_import::{
+    ImportCause, ImportDimension, ImportTerminalCause, ImportTerminalFailureClass, ResourceLimits,
+    ScopeAbortCause,
+};
 use common::{
-    ascii_triangle, expected_stl_failure, import_bytes, import_bytes_with_limits,
-    stl_string_detail, stl_unsigned_detail,
+    ascii_triangle, expected_stl_failure, import_bytes, import_bytes_with_limits, scene_snapshot,
+    snapshot_line, stl_string_detail, stl_unsigned_detail,
 };
 use std::error::Error;
 
@@ -14,15 +17,27 @@ type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 fn imports_one_triangle_ascii_stl_through_session() -> TestResult {
     let bytes = ascii_triangle("triangle");
     let report = import_bytes("triangle.stl", bytes.as_bytes())?;
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
 
     assert_eq!(report.format().id().as_str(), "org.baozi.stl");
-    assert_eq!(scene.nodes().len(), 2);
-    assert_eq!(scene.meshes().len(), 1);
-    assert_eq!(scene.materials().len(), 1);
-    assert_eq!(scene.nodes()[1].name.as_deref(), Some("triangle"));
-    assert_eq!(scene.meshes()[0].positions.len(), 3);
-    assert_eq!(scene.meshes()[0].indices, [0, 1, 2]);
+    assert_eq!(snapshot.node_count(), 1);
+    assert_eq!(snapshot.root_count(), 1);
+    assert_eq!(snapshot.logical_mesh_count(), 1);
+    assert_eq!(snapshot.material_count(), 1);
+    assert_eq!(snapshot.primitive_count(), 1);
+    assert_eq!(snapshot.attribute_count(), 2);
+    assert_eq!(snapshot.mesh_instance_count(), 1);
+    assert_eq!(snapshot.primitive_index_count(), 3);
+    assert_eq!(snapshot.f32_scalar_count(), 18);
+    assert!(snapshot_line(&snapshot, "node[0]").contains(" name=triangle "));
+    assert!(snapshot_line(&snapshot, "logical_mesh[0]").contains(" name=triangle "));
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains(concat!(
+        "semantic=position semantic_set=0 domain=vertex scalar=f32 lanes=3 ",
+        "normalization=none payload=dense elements=3"
+    )));
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains("indices(present,total=3)=[0,1,2]"));
+    assert!(!snapshot.preview_bytes_truncated());
+    assert!(!snapshot.preview_items_truncated());
     assert!(report.diagnostics().is_empty());
     assert_eq!(report.ledger().current_live_bytes(), 0);
     assert!(
@@ -72,12 +87,15 @@ fn imports_one_triangle_ascii_stl_through_session() -> TestResult {
 fn imports_multiple_ascii_solids_as_multiple_meshes() -> TestResult {
     let bytes = format!("{}{}", ascii_triangle("left"), ascii_triangle("right"));
     let report = import_bytes("multi.stl", bytes.as_bytes())?;
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
 
-    assert_eq!(scene.meshes().len(), 2);
-    assert_eq!(scene.nodes().len(), 3);
-    assert_eq!(scene.nodes()[1].name.as_deref(), Some("left"));
-    assert_eq!(scene.nodes()[2].name.as_deref(), Some("right"));
+    assert_eq!(snapshot.logical_mesh_count(), 2);
+    assert_eq!(snapshot.node_count(), 2);
+    assert_eq!(snapshot.root_count(), 2);
+    assert!(snapshot_line(&snapshot, "node[0]").contains(" name=left "));
+    assert!(snapshot_line(&snapshot, "logical_mesh[0]").contains(" name=left "));
+    assert!(snapshot_line(&snapshot, "node[1]").contains(" name=right "));
+    assert!(snapshot_line(&snapshot, "logical_mesh[1]").contains(" name=right "));
     Ok(())
 }
 
@@ -138,7 +156,11 @@ fn ascii_numeric_grammar_uses_dot_and_rejects_locale_decimal_comma() {
     let report =
         import_bytes_with_limits("dotted.stl", dotted.as_bytes(), ResourceLimits::default())
             .expect("Rust ASCII float grammar must accept a decimal point");
-    assert_eq!(report.scene().meshes()[0].positions[1].x, 1.5);
+    let snapshot = scene_snapshot(&report).expect("dotted STL semantic snapshot");
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains(concat!(
+        "values(present,total=9)=[",
+        "0x00000000,0x00000000,0x00000000,0x3fc00000"
+    )));
 
     let comma = ascii_triangle("comma").replace("vertex 1 0 0", "vertex 1,5 0 0");
     let failure =
@@ -243,7 +265,7 @@ fn topology_cells_are_charged_before_index_allocation() -> TestResult {
     exact.max_total_topology_cells = 3;
     let report = import_bytes_with_limits("topology-exact.stl", bytes.as_bytes(), exact)
         .expect("the exact topology limit must succeed");
-    assert_eq!(report.scene().meshes()[0].indices.len(), 3);
+    assert_eq!(scene_snapshot(&report)?.primitive_index_count(), 3);
 
     let mut excess = ResourceLimits::default();
     excess.max_total_topology_cells = 2;
@@ -284,10 +306,17 @@ fn live_byte_limit_is_exact_across_parse_and_scene_handoff() -> TestResult {
     excess.max_live_bytes = excess_limit;
     let failure = import_bytes_with_limits(source, bytes.as_bytes(), excess)
         .expect_err("one byte below the observed peak must fail");
-    assert!(matches!(
-        failure.cause(),
-        ImportCause::Scope(abort) if matches!(abort.cause(), ScopeAbortCause::Ledger(_))
-    ));
+    let ImportCause::OperationTerminal(terminal) = failure.cause() else {
+        panic!(
+            "expected live-byte terminal rejection, got {:?}",
+            failure.cause()
+        )
+    };
+    assert_eq!(terminal.class(), ImportTerminalFailureClass::Ledger);
+    assert_eq!(
+        failure.ledger().terminal_cause(),
+        ImportTerminalCause::Failure(*terminal)
+    );
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     Ok(())
 }

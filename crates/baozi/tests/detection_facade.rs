@@ -4,8 +4,12 @@
 )]
 #![cfg(feature = "format-obj")]
 
+mod common;
+
 #[cfg(any(feature = "format-stl", feature = "format-ply"))]
 use baozi::{Importer, Result};
+#[cfg(any(feature = "format-stl", feature = "format-ply"))]
+use common::scene_snapshot;
 
 #[cfg(all(feature = "format-obj", feature = "format-stl"))]
 fn large_binary_stl(facet_count: u32) -> Vec<u8> {
@@ -32,9 +36,10 @@ fn greedy_obj_detection_does_not_block_large_binary_stl() -> Result<()> {
     assert!(bytes.len() > 4096);
 
     let report = Importer::new()?.read_bytes("large.mesh", bytes)?;
+    let snapshot = scene_snapshot(&report);
 
     assert_eq!(report.format().id().as_str(), "org.baozi.stl");
-    assert_eq!(report.scene().meshes().len(), 1);
+    assert_eq!(snapshot.logical_mesh_count(), 1);
     Ok(())
 }
 
@@ -61,8 +66,9 @@ end_header\n\
     assert!(bytes.len() > 4096);
 
     let report = Importer::new()?.read_bytes("large.mesh", bytes)?;
+    let snapshot = scene_snapshot(&report);
 
     assert_eq!(report.format().id().as_str(), "org.baozi.ply");
-    assert_eq!(report.scene().meshes().len(), 1);
+    assert_eq!(snapshot.logical_mesh_count(), 1);
     Ok(())
 }

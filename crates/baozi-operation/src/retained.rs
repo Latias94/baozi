@@ -291,6 +291,24 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn report_progress(&mut self, phase: PP, unit: U, completed: u64, total: Option<u64>)
+    where
+        P: TerminalEvidenceKey,
+        D: TerminalEvidenceKey,
+    {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return;
+        }
+        let Some(operation) = self.operation.as_mut() else {
+            self.containment = AssemblyContainmentProvenance::NewFaultPending;
+            return;
+        };
+        let _ = operation
+            .producer_host()
+            .report_progress(phase, unit, completed, total);
+    }
+
     pub(crate) fn record_terminal_cause(&mut self, cause: PreparationFailureCode) {
         match self.operation.as_mut() {
             Some(operation) => operation.record_terminal_cause(cause),
@@ -407,6 +425,7 @@ where
     RichFailure {
         failure: RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
         cause: PreparationFailureCode,
+        control_cause: Option<ControlCause>,
     },
     DestinationRejected {
         failure: RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
@@ -1162,6 +1181,7 @@ where
     pub(crate) fn validate_success_controlled<CanonicalTag, EvidenceTag>(
         mut self,
         work_dimension: D,
+        scratch_dimension: D,
         canonical_root: CanonicalRetainedSlot<CanonicalBlock, CanonicalTag>,
         evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
         validate: impl for<'session, 'control> FnOnce(
@@ -1208,7 +1228,11 @@ where
                 }
             };
             let control = match self.operation.as_mut() {
-                Some(operation) => Some(operation.split_work_control(work_dimension).0),
+                Some(operation) => Some(
+                    operation
+                        .split_work_and_reservation_control(work_dimension, scratch_dimension)
+                        .0,
+                ),
                 None => {
                     self.containment = AssemblyContainmentProvenance::NewFaultPending;
                     None
@@ -2594,8 +2618,9 @@ where
                     Some(operation) => {
                         let control_cause =
                             prepare_terminal_control(&mut operation.coordinator, final_progress);
-                        if let Some(cause) = control_cause {
-                            operation.record_terminal_cause(cause);
+                        if let Some(cause) = control_cause.as_ref() {
+                            operation
+                                .record_terminal_cause(PreparationFailureCode::from_control(cause));
                         }
                         operation.sticky_terminal_cause()
                     }
@@ -2677,8 +2702,9 @@ where
                     Some(operation) => {
                         let control_cause =
                             prepare_terminal_control(&mut operation.coordinator, final_progress);
-                        if let Some(cause) = control_cause {
-                            operation.record_terminal_cause(cause);
+                        if let Some(cause) = control_cause.as_ref() {
+                            operation
+                                .record_terminal_cause(PreparationFailureCode::from_control(cause));
                         }
                         operation.sticky_terminal_cause()
                     }
@@ -3179,14 +3205,14 @@ where
             return Err(self.contain_activation_fault());
         }
 
-        let terminal_cause = match self.assembly.operation.as_mut() {
+        let (terminal_cause, control_cause) = match self.assembly.operation.as_mut() {
             Some(operation) => {
                 let control_cause =
                     prepare_terminal_control(&mut operation.coordinator, final_progress);
-                if let Some(cause) = control_cause {
-                    operation.record_terminal_cause(cause);
+                if let Some(cause) = control_cause.as_ref() {
+                    operation.record_terminal_cause(PreparationFailureCode::from_control(cause));
                 }
-                operation.sticky_terminal_cause()
+                (operation.sticky_terminal_cause(), control_cause)
             }
             None => return Err(self.contain_activation_fault()),
         };
@@ -3195,6 +3221,7 @@ where
             return Ok(RetainedSuccessFreezePermitIssue::RichFailure {
                 failure: assembly.try_discard_canonical_for_rejection(cause)?,
                 cause,
+                control_cause,
             });
         }
         Ok(RetainedSuccessFreezePermitIssue::Ready(

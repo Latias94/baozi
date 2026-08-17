@@ -125,7 +125,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use crate::capacity::{CapacityPlan, CapacityPlanError};
-use crate::control::{OperationControl, ProgressPhase, ProgressUnit};
+use crate::control::{ControlCause, OperationControl, ProgressPhase, ProgressUnit};
 use crate::coordinator::FinalProgress;
 #[cfg(feature = "_u4-activation")]
 use crate::ledger::DimensionPolicy;
@@ -1933,10 +1933,10 @@ where
     terminal_only: bool,
 }
 
-/// Poll-and-work capability lent to one controlled canonical builder or validator.
+/// Poll, work, and scratch capability lent to one controlled canonical builder or validator.
 ///
-/// The work dimension is validated and bound before the callback begins. This capability cannot
-/// reserve storage, report progress, mutate retained tables, or enter publication. Any rejected
+/// Work and reservation dimensions are validated and bound before the callback begins. This
+/// capability cannot report progress, mutate retained tables, or enter publication. Any rejected
 /// control action is sticky: ignoring the returned error still rejects the enclosing operation.
 pub struct RetainedStoreWorkControl<'a, O, PP, U>
 where
@@ -2151,6 +2151,63 @@ where
             .map_err(StoreRuntimeError::Ledger)
     }
 
+    /// Records non-refundable attempted work before a producer action begins.
+    ///
+    /// This short-borrow operation supports parser callbacks that must release the producer host
+    /// before acquiring metered storage from the same retained operation.
+    pub fn charge_attempted(
+        &mut self,
+        dimension: StoreDimensionKey,
+        amount: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
+        self.validate_dimension(dimension)?;
+        self.raw
+            .charge_attempted(dimension, amount)
+            .map_err(map_producer_work_start_error)
+    }
+
+    /// Records one physically completed work prefix after its producer action returns normally.
+    pub fn charge_consumed(
+        &mut self,
+        dimension: StoreDimensionKey,
+        amount: u64,
+    ) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
+        self.validate_dimension(dimension)?;
+        self.raw
+            .charge_consumed(dimension, amount)
+            .map_err(map_producer_work_start_error)
+    }
+
+    /// Records ordered attempted-and-consumed pairs after validating the complete key set.
+    pub fn charge_observed_batch<const N: usize>(
+        &mut self,
+        charges: [(StoreDimensionKey, u64); N],
+    ) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
+        for &(dimension, _) in &charges {
+            self.validate_dimension(dimension)?;
+        }
+        self.raw
+            .charge_observed_batch(&charges)
+            .map_err(map_producer_work_start_error)
+    }
+
+    /// Atomically records a sorted batch of completed work after validating every key.
+    pub fn charge_consumed_batch<const N: usize>(
+        &mut self,
+        charges: [(StoreDimensionKey, u64); N],
+    ) -> Result<(), StoreRuntimeError> {
+        self.ensure_mutable()?;
+        for &(dimension, _) in &charges {
+            self.validate_dimension(dimension)?;
+        }
+        self.raw
+            .charge_consumed_batch(&charges)
+            .map_err(map_producer_work_start_error)
+    }
+
     /// Admits one fixed, domain-qualified observed-work envelope before its action begins.
     ///
     /// Attempted work is permanent at admission. Future completion calls accept one amount per
@@ -2166,13 +2223,18 @@ where
         self.raw
             .try_begin_observed_work(charges)
             .map(|raw| RetainedStoreObservedWork { raw })
-            .map_err(|cause| match cause {
-                RetainedProducerWorkStartError::Control(cause) => StoreRuntimeError::Control(cause),
-                RetainedProducerWorkStartError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
-                RetainedProducerWorkStartError::Outstanding => {
-                    StoreRuntimeError::ObservedWorkOutstanding
-                }
-            })
+            .map_err(map_producer_work_start_error)
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+fn map_producer_work_start_error(
+    cause: RetainedProducerWorkStartError<StoreDimensionKey>,
+) -> StoreRuntimeError {
+    match cause {
+        RetainedProducerWorkStartError::Control(cause) => StoreRuntimeError::Control(cause),
+        RetainedProducerWorkStartError::Ledger(cause) => StoreRuntimeError::Ledger(cause),
+        RetainedProducerWorkStartError::Outstanding => StoreRuntimeError::ObservedWorkOutstanding,
     }
 }
 
@@ -2365,6 +2427,11 @@ where
     U: ProgressUnit,
 {
     #[cfg(feature = "_u4-activation")]
+    fn activation_terminal_cause(&self) -> Option<PreparationFailureCode> {
+        self.raw.sticky_terminal_cause()
+    }
+
+    #[cfg(feature = "_u4-activation")]
     fn latch_activation_terminal_cause(&mut self, cause: PreparationFailureCode) {
         self.raw.record_terminal_cause(cause);
     }
@@ -2441,6 +2508,18 @@ where
         self.validate_writer_keys(phase, dimensions)
     }
 
+    #[cfg(feature = "_u4-activation")]
+    fn rebind_activation_canonical_assembly(
+        &mut self,
+        plan: RetainedStoreBlockTablePlan,
+    ) -> Result<(), StoreRuntimeError> {
+        let writer = plan.writer();
+        self.validate_writer_plan(writer)?;
+        self.raw
+            .try_rebind_canonical_assembly(writer.into_raw())
+            .map_err(|cause| map_writer_error(&cause))
+    }
+
     fn validate_writer_keys(
         &self,
         phase: StorePhaseKey,
@@ -2461,9 +2540,18 @@ where
     }
 
     #[cfg(feature = "_u4-activation")]
-    fn validate_activation_dimensions(
+    fn validate_activation_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
+        self.validate_phase_key(phase)?;
+        if !self.raw.contains_phase(phase) {
+            return Err(StoreRuntimeError::InvalidPublicationPlan);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    fn validate_activation_dimensions<const N: usize>(
         &self,
-        dimensions: [StoreDimensionKey; 4],
+        dimensions: [StoreDimensionKey; N],
     ) -> Result<(), StoreRuntimeError> {
         for dimension in dimensions {
             self.validate_dimension_key(dimension)?;
@@ -3011,6 +3099,11 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    #[cfg(feature = "_u4-activation")]
+    fn report_progress(&mut self, phase: PP, unit: U, completed: u64, total: Option<u64>) {
+        self.raw.report_progress(phase, unit, completed, total);
+    }
+
     /// Borrows transient storage and control authority from the operation owned by this assembly.
     ///
     /// The checkpoint cannot inspect or mutate either publication table. Callers must release every
@@ -4083,6 +4176,7 @@ where
     pub fn validate_success_controlled<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>(
         mut self,
         work_dimension: StoreDimensionKey,
+        scratch_dimension: StoreDimensionKey,
         canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
         evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
         validate: impl for<'session, 'storage, 'control> FnOnce(
@@ -4106,6 +4200,12 @@ where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
         if let Err(cause) = self.validate_dimension(work_dimension) {
+            return StoreControlledSuccessValidation::InvalidWorkDimension {
+                assembly: self,
+                cause,
+            };
+        }
+        if let Err(cause) = self.validate_dimension(scratch_dimension) {
             return StoreControlledSuccessValidation::InvalidWorkDimension {
                 assembly: self,
                 cause,
@@ -4157,6 +4257,7 @@ where
         let mut callback_cause = None;
         let validation = raw.validate_success_controlled(
             work_dimension,
+            scratch_dimension,
             canonical_root.raw,
             evidence_root.raw,
             |raw, _, _, raw_control| {
@@ -4668,18 +4769,21 @@ where
                     domain,
                 }),
             ),
-            RetainedSuccessFreezePermitIssue::RichFailure { failure, cause } => {
-                Ok(StoreSuccessFreezePermitIssue::RichFailure {
-                    failure: StoreFailureAssembly {
-                        raw: failure,
-                        fallback_only: false,
-                        forced_cause: Some(cause),
-                        evidence_root,
-                        domain,
-                    },
-                    cause,
-                })
-            }
+            RetainedSuccessFreezePermitIssue::RichFailure {
+                failure,
+                cause,
+                control_cause,
+            } => Ok(StoreSuccessFreezePermitIssue::RichFailure {
+                failure: StoreFailureAssembly {
+                    raw: failure,
+                    fallback_only: false,
+                    forced_cause: Some(cause),
+                    evidence_root,
+                    domain,
+                },
+                cause,
+                control_cause,
+            }),
             RetainedSuccessFreezePermitIssue::DestinationRejected { failure, cause } => {
                 Ok(StoreSuccessFreezePermitIssue::DestinationRejected {
                     failure: StoreFailureAssembly {
@@ -4815,6 +4919,7 @@ pub(super) enum StoreSuccessFreezePermitIssue<
     RichFailure {
         failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
         cause: PreparationFailureCode,
+        control_cause: Option<ControlCause>,
     },
     DestinationRejected {
         failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,

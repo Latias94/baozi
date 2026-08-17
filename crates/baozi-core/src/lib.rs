@@ -51,6 +51,21 @@ mod shared_storage;
 mod validation;
 mod validation_control;
 
+#[cfg(not(feature = "_u4-import"))]
+/// The temporary U4 import bridge is absent from ordinary `baozi-core` builds.
+///
+/// ```compile_fail,E0432
+/// use baozi_core::__canonical_import::SceneDraft;
+/// ```
+mod canonical_import_visibility_contract {}
+
+/// Temporary cross-crate integration surface for the atomic U4 import cutover.
+#[cfg(feature = "_u4-import")]
+#[doc(hidden)]
+pub mod __canonical_import {
+    pub use crate::canonical_scene::store::api::import::*;
+}
+
 pub use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSeverity, SourceLocation};
 pub use error::{
     MetadataKeyViolation, MetadataValueViolation, SceneAnimationValueKind, SceneBuildError,

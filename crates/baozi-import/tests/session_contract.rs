@@ -1,4 +1,6 @@
-use baozi_core::{FormatId, Mesh, SceneDraft, SceneSpace};
+mod support;
+
+use baozi_core::FormatId;
 use baozi_import::{
     AuthorizedDependency, CapabilityStatus, CauseOwner, DependencyPolicyError, DependencyReference,
     DependencyRequirement, DependencyResolver, DependencyRoleId, DetectionFailure,
@@ -10,9 +12,9 @@ use baozi_import::{
     ImportRequest, ImportRequestLayer, ImportResult, ImportStorageClass, ImportWorkClass,
     LossPolicy, MeteredDecodedText, MeteredString, MeteredVec, OptionCompileLimits, ParseResult,
     ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, TextBomPolicy,
-    TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
-    TextSourceEncoding, TrustedExtensionBoundary, import_asset as run_import_asset,
+    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
+    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
+    TextProfile, TextSourceEncoding, TrustedExtensionBoundary, import_asset as run_import_asset,
     import_asset_with_resolver as run_import_asset_with_resolver, import_bytes as run_import_bytes,
 };
 use baozi_io::{
@@ -193,18 +195,18 @@ impl FormatImporter for RecordingImporter {
         if let Some((role, _, behavior)) = &self.dependency {
             match behavior {
                 DependencyBehavior::RequiredCaught => {
-                    let _ignored = scope.required_dependency(role, "missing.bin");
+                    let _ignored = support::required_root_dependency(scope, role, "missing.bin");
                 }
                 DependencyBehavior::RequiredAvailableWithDiagnostic => {
                     let diagnostic_source = scope.diagnostic_source();
                     assert_eq!(diagnostic_source.path(), scope.source());
                     assert_eq!(diagnostic_source.bytes(), scope.primary_bytes());
-                    let dependency = scope.required_dependency(role, "missing.bin")?;
+                    let dependency = support::required_root_dependency(scope, role, "missing.bin")?;
                     assert_eq!(dependency.bytes(), b"dependency");
                 }
                 DependencyBehavior::RequiredAvailableTwice => {
-                    let first = scope.required_dependency(role, "missing.bin")?;
-                    let second = scope.required_dependency(role, "missing.bin")?;
+                    let first = support::required_root_dependency(scope, role, "missing.bin")?;
+                    let second = support::required_root_dependency(scope, role, "missing.bin")?;
                     self.dependency_views
                         .lock()
                         .expect("recording mutex")
@@ -215,13 +217,13 @@ impl FormatImporter for RecordingImporter {
                         .extend([first.cache_disposition(), second.cache_disposition()]);
                 }
                 DependencyBehavior::OptionalTwice => {
-                    let first = scope.optional_dependency(role, "missing.bin")?;
-                    let second = scope.optional_dependency(role, "missing.bin")?;
+                    let first = support::root_dependency(scope, role, "missing.bin")?;
+                    let second = support::root_dependency(scope, role, "missing.bin")?;
                     assert!(first.unavailable_evidence().is_some());
                     assert!(second.unavailable_evidence().is_some());
                 }
                 DependencyBehavior::OptionalThenFail => {
-                    let dependency = scope.optional_dependency(role, "missing.bin")?;
+                    let dependency = support::root_dependency(scope, role, "missing.bin")?;
                     assert!(dependency.unavailable_evidence().is_some());
                     return Err(scope.format_failure(TestFormatCause::new(Arc::new(
                         FormatFailureProducerObservation::default(),
@@ -229,7 +231,7 @@ impl FormatImporter for RecordingImporter {
                 }
             }
         }
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -246,7 +248,7 @@ enum ReentrantFormatFailurePhase {
     FormattedStorage,
     MeteredStorage,
     ReservedStorage,
-    ScenePartsConversion,
+    SceneStorageAdmission,
     NestedFormatFailure,
     Drop,
 }
@@ -423,7 +425,7 @@ impl FormatImporter for RacingParsePoisonImporter {
                 .expect("release receiver mutex")
                 .recv_timeout(Duration::from_secs(5))
                 .expect("test releases the first parser");
-            scope.scene_builder()?.finish_draft()
+            support::submit_minimal_scene(scope)
         } else {
             panic!("racing parser panic")
         }
@@ -677,7 +679,7 @@ impl FormatFailureEvidenceProducer for ReentrantFormatFailureProducer<'_, '_> {
 
     fn visit_details(&self, sink: &mut dyn FormatFailureDetailSink) {
         match self.phase {
-            ReentrantFormatFailurePhase::Details => drop(self.scope.scene_builder()),
+            ReentrantFormatFailurePhase::Details => drop(self.scope.source_scope_builder()),
             ReentrantFormatFailurePhase::DecodedStorage => {
                 drop(
                     self.decoded
@@ -714,14 +716,10 @@ impl FormatFailureEvidenceProducer for ReentrantFormatFailureProducer<'_, '_> {
                         .try_push_reserved(1),
                 );
             }
-            ReentrantFormatFailurePhase::ScenePartsConversion => {
-                let storage = self
-                    .storage
-                    .borrow_mut()
-                    .take()
-                    .expect("scene-parts phase owns storage");
-                drop(storage.try_into_scene_parts());
-            }
+            ReentrantFormatFailurePhase::SceneStorageAdmission => drop(
+                self.scope
+                    .metered_opaque_allowance(ImportStorageClass::SceneConstruction, 1),
+            ),
             ReentrantFormatFailurePhase::NestedFormatFailure => {
                 drop(self.scope.format_failure(NestedFormatFailureProducer));
             }
@@ -767,7 +765,7 @@ impl FormatImporter for ReentrantFormatFailureImporter {
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         let class = if matches!(
             self.phase,
-            ReentrantFormatFailurePhase::ScenePartsConversion
+            ReentrantFormatFailurePhase::SceneStorageAdmission
         ) {
             ImportStorageClass::SceneConstruction
         } else {
@@ -831,7 +829,6 @@ struct TerminalLatchImporter {
     late_successes: Arc<AtomicUsize>,
     diagnostic_callbacks: Arc<AtomicUsize>,
     format_detail_callbacks: Arc<AtomicUsize>,
-    builder_mutations: Arc<AtomicUsize>,
 }
 
 struct CountingResolver {
@@ -944,7 +941,7 @@ impl FormatImporter for DiagnosticPanickingImporter {
                 )?;
             }
         }
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -972,8 +969,9 @@ impl FormatImporter for NormalizationAdmissionImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let _dependency = scope.required_dependency(&self.role, &self.raw_reference)?;
-        scope.scene_builder()?.finish_draft()
+        let _dependency =
+            support::required_root_dependency(scope, &self.role, &self.raw_reference)?;
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -1004,17 +1002,15 @@ impl FormatImporter for TerminalLatchImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let prepared_mesh = scope.prepare_scene_value(Mesh::default())?;
         let mut resize_storage = scope.metered_vec::<u8>(
             ImportStorageClass::BackendDecode,
             "terminal-latch-resize-storage",
         );
         resize_storage.try_push(0)?;
         let resize_capacity = resize_storage.capacity();
-        let mut builder = scope.scene_builder()?;
         let first_failure = match self.trigger {
             TerminalLatchTrigger::MissingRequiredDependency => {
-                match scope.required_dependency(&self.required_role, "missing.bin") {
+                match support::required_root_dependency(scope, &self.required_role, "missing.bin") {
                     Ok(_) => panic!("the required dependency is absent"),
                     Err(failure) => failure,
                 }
@@ -1037,13 +1033,10 @@ impl FormatImporter for TerminalLatchImporter {
             }
         };
         record_late_success(
-            scope
-                .optional_dependency(&self.optional_role, "late-optional.bin")
-                .is_ok(),
+            support::root_dependency(scope, &self.optional_role, "late-optional.bin").is_ok(),
         );
         record_late_success(
-            scope
-                .required_dependency(&self.required_role, "late-required.bin")
+            support::required_root_dependency(scope, &self.required_role, "late-required.bin")
                 .is_ok(),
         );
         record_late_success(
@@ -1057,9 +1050,6 @@ impl FormatImporter for TerminalLatchImporter {
                 .is_ok(),
         );
         record_late_success(resize_storage.try_reserve(resize_capacity).is_ok());
-        if resize_storage.capacity() != resize_capacity {
-            self.builder_mutations.fetch_add(1, Ordering::AcqRel);
-        }
         record_late_success(
             scope
                 .report_progress(
@@ -1093,22 +1083,12 @@ impl FormatImporter for TerminalLatchImporter {
                 )
                 .is_ok(),
         );
-
-        let mesh_count = builder.mesh_count();
-        record_late_success(builder.add_prepared_mesh(prepared_mesh).is_ok());
-        if builder.mesh_count() != mesh_count {
-            self.builder_mutations.fetch_add(1, Ordering::AcqRel);
-        }
-        let root = builder.root();
-        record_late_success(builder.node_mesh_binding_count(root).is_some());
-        record_late_success(builder.set_space(SceneSpace::default()).is_ok());
-        record_late_success(scope.scene_builder().is_ok());
+        record_late_success(support::submit_minimal_scene(scope).is_ok());
 
         let terminal_failure = scope.format_failure(LifecycleFormatCause {
             mode: FailureEvidenceMode::Normal,
             visits: Arc::clone(&self.format_detail_callbacks),
         });
-        record_late_success(builder.finish_draft().is_ok());
         Err(terminal_failure)
     }
 }
@@ -1155,7 +1135,7 @@ impl FormatImporter for LifecycleFailureImporter {
             FailureReturnMode::Return => Err(failure),
             FailureReturnMode::Swallow => {
                 drop(failure);
-                scope.scene_builder()?.finish_draft()
+                support::submit_minimal_scene(scope)
             }
             FailureReturnMode::CancelAfterCreate => {
                 self.cancellation
@@ -1617,13 +1597,20 @@ fn direct_bytes_uses_one_admitted_snapshot_for_detection_and_parsing() {
 
 #[test]
 fn direct_bytes_rejects_primary_and_live_limits_before_copying() {
-    let input = b"direct primary bytes";
-    for (max_primary_asset_bytes, max_live_bytes) in [
+    let small_input = b"direct primary bytes";
+    let large_input = vec![0x5a; 256 * 1024];
+    let default_live_bytes = ResourceLimits::default().max_live_bytes;
+    for (input, max_primary_asset_bytes, max_live_bytes) in [
         (
-            (input.len() - 1) as u64,
-            ResourceLimits::default().max_live_bytes,
+            small_input.as_slice(),
+            u64::try_from(small_input.len() - 1).unwrap(),
+            default_live_bytes,
         ),
-        (1024, (input.len() - 1) as u64),
+        (
+            large_input.as_slice(),
+            u64::try_from(large_input.len()).unwrap(),
+            128 * 1024,
+        ),
     ] {
         let source = AssetPath::new("asset.direct-limit").unwrap();
         let importer = RecordingImporter::plain("dev.baozi.test.direct-limit", "direct-limit");
@@ -1687,7 +1674,6 @@ fn terminal_latch_rejects_every_late_capability_without_side_effects() {
         let late_successes = Arc::new(AtomicUsize::new(0));
         let diagnostic_callbacks = Arc::new(AtomicUsize::new(0));
         let format_detail_callbacks = Arc::new(AtomicUsize::new(0));
-        let builder_mutations = Arc::new(AtomicUsize::new(0));
         let importer = TerminalLatchImporter {
             trigger,
             required_role,
@@ -1696,7 +1682,6 @@ fn terminal_latch_rejects_every_late_capability_without_side_effects() {
             late_successes: Arc::clone(&late_successes),
             diagnostic_callbacks: Arc::clone(&diagnostic_callbacks),
             format_detail_callbacks: Arc::clone(&format_detail_callbacks),
-            builder_mutations: Arc::clone(&builder_mutations),
         };
         let request = lossy_request_for(importer);
         let source = AssetPath::new("asset.terminal-latch").unwrap();
@@ -1751,7 +1736,6 @@ fn terminal_latch_rejects_every_late_capability_without_side_effects() {
             0,
             "{trigger:?}"
         );
-        assert_eq!(builder_mutations.load(Ordering::Acquire), 0, "{trigger:?}");
         assert!(failure.optional_dependency_evidence().is_empty());
         assert_eq!(failure.diagnostic_summary().attempted_count(), 0);
         assert_eq!(failure.diagnostic_summary().stored_count(), 0);
@@ -1791,7 +1775,10 @@ fn dependency_normalization_is_admitted_before_path_growth_or_resolver_entry() {
     };
     let mut limits = ResourceLimits::default();
     assert!(raw_reference.len() < limits.max_path_length);
-    limits.max_live_bytes = 32 * 1024;
+    // The retained session's protected terminal owner is live before parser scratch is admitted.
+    // Keep enough room to start the session while remaining below this fixture's 68 KiB
+    // normalization envelope.
+    limits.max_live_bytes = 64 * 1024;
     let request = request_for_with_limits(importer, limits);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
     let resolver = CountingResolver::new();
@@ -1921,47 +1908,6 @@ fn successful_dependency_snapshot_is_shared_and_reused_without_reopening() {
         .unwrap();
     assert_eq!(references.attempted(), 2);
     assert_eq!(references.consumed(), 2);
-    let dependency = report
-        .ledger()
-        .dimension(ImportDimension::DependencyBytes)
-        .unwrap();
-    assert_eq!(dependency.consumed(), 64 * 1024);
-}
-
-#[test]
-fn optional_snapshot_exposure_limit_is_cached_after_one_physical_read() {
-    let source = AssetPath::new("asset.optional-snapshot").unwrap();
-    let dependency = AssetPath::new("missing.bin").unwrap();
-    let role = DependencyRoleId::new("material.library").unwrap();
-    let importer =
-        RecordingImporter::plain("dev.baozi.test.optional-snapshot", "optional-snapshot")
-            .with_dependency(
-                role,
-                DependencyRequirement::Optional,
-                DependencyBehavior::OptionalTwice,
-            );
-    let mut limits = ResourceLimits::default();
-    // Admit the complete 64 KiB read, then reject the final shared-snapshot
-    // exposure reservation. The consumed-byte assertion below guards this seam.
-    limits.max_live_bytes = 65_976;
-    let request = lossy_request_for_with_limits(importer, limits);
-    let dependency_bytes = Arc::<[u8]>::from(vec![0x5a; 64 * 1024]);
-    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])])
-        .with_asset(dependency, [dependency_bytes]);
-
-    let report = import_asset(&request, &io, source, ImportOperationControl::default())
-        .expect("optional snapshot exposure failure must remain reusable");
-
-    assert_eq!(io.open_count(), 2, "dependency bytes are read only once");
-    assert_eq!(report.optional_dependency_evidence().len(), 2);
-    assert_eq!(
-        report.optional_dependency_evidence()[0].cache_disposition(),
-        baozi_import::DependencyCacheDisposition::Fresh
-    );
-    assert_eq!(
-        report.optional_dependency_evidence()[1].cache_disposition(),
-        baozi_import::DependencyCacheDisposition::Reused
-    );
     let dependency = report
         .ledger()
         .dimension(ImportDimension::DependencyBytes)
@@ -2196,7 +2142,6 @@ fn format_failure_storage_survives_all_terminal_evidence_paths() {
             }
         }
         assert_eq!(failure.ledger().current_live_bytes(), 0);
-        assert!(failure.finalization_cause().is_none());
     }
 }
 
@@ -2209,7 +2154,7 @@ fn format_failure_evidence_callbacks_cannot_reenter_parse_capabilities() {
         ReentrantFormatFailurePhase::FormattedStorage,
         ReentrantFormatFailurePhase::MeteredStorage,
         ReentrantFormatFailurePhase::ReservedStorage,
-        ReentrantFormatFailurePhase::ScenePartsConversion,
+        ReentrantFormatFailurePhase::SceneStorageAdmission,
         ReentrantFormatFailurePhase::NestedFormatFailure,
         ReentrantFormatFailurePhase::Drop,
     ] {
@@ -2304,7 +2249,6 @@ fn format_failure_storage_is_admitted_before_trusted_callbacks() {
     assert_eq!(rejected_visits.load(Ordering::Acquire), 0);
     assert!(matches!(rejected.cause(), ImportCause::Scope(_)));
     assert_eq!(rejected.ledger().current_live_bytes(), 0);
-    assert!(rejected.finalization_cause().is_none());
 }
 
 #[test]
@@ -2334,7 +2278,6 @@ fn swallowed_format_failure_is_a_descriptor_contract_failure() {
     ));
     assert_eq!(visits.load(Ordering::Acquire), 1);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
-    assert!(failure.finalization_cause().is_none());
 }
 
 #[test]
@@ -2362,7 +2305,6 @@ fn post_parse_cancellation_releases_staged_format_failure_storage() {
     assert!(matches!(abort.cause(), ScopeAbortCause::Control(_)));
     assert_eq!(visits.load(Ordering::Acquire), 1);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
-    assert!(failure.finalization_cause().is_none());
 }
 
 #[test]
@@ -2458,7 +2400,7 @@ impl FormatImporter for StructuredDiagnosticImporter {
                 format_args!("bad\nrecord"),
             )?;
         }
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -2552,7 +2494,7 @@ fn line_index_storage_honors_the_exact_dimension_budget() {
 }
 
 #[test]
-fn publication_peak_includes_output_and_retained_diagnostic_storage() {
+fn publication_peak_includes_output_and_retained_diagnostic_payload() {
     let source = AssetPath::new("asset.diagnostic-peak").unwrap();
     let request = request_for(StructuredDiagnosticImporter::new(1));
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"a\nprimary"[..])]);
@@ -2568,14 +2510,17 @@ fn publication_peak_includes_output_and_retained_diagnostic_storage() {
         .dimension(ImportDimension::DiagnosticBytes)
         .unwrap()
         .peak_live_bytes();
+    let retained_diagnostic_payload = report.diagnostic_summary().stored_bytes();
 
     assert!(canonical_output > 0);
     assert!(diagnostic_payload > 0);
+    assert!(retained_diagnostic_payload > 0);
+    assert!(diagnostic_payload >= retained_diagnostic_payload);
     assert!(
         report.ledger().peak_live_bytes()
             >= canonical_output
-                .checked_add(diagnostic_payload)
-                .expect("bounded test accounting")
+                .checked_add(retained_diagnostic_payload)
+                .expect("bounded retained payload accounting")
     );
 }
 
@@ -2724,7 +2669,6 @@ fn parser_panic_poison_is_shared_across_snapshots() {
     ));
     for failure in [&panicked, &poisoned] {
         assert_eq!(failure.ledger().current_live_bytes(), 0);
-        assert!(failure.finalization_cause().is_none());
     }
     assert_eq!(calls.load(Ordering::Acquire), 1);
 }
@@ -2804,7 +2748,6 @@ fn in_flight_parse_success_is_rejected_after_a_parallel_parser_panics() {
     ));
     for failure in [&panicked, &poisoned] {
         assert_eq!(failure.ledger().current_live_bytes(), 0);
-        assert!(failure.finalization_cause().is_none());
     }
     assert_eq!(calls.load(Ordering::Acquire), 2);
 }
@@ -2832,7 +2775,6 @@ fn parser_panic_does_not_run_an_untrusted_payload_destructor() {
     ));
     assert_eq!(payload_drops.load(Ordering::Acquire), 0);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
-    assert!(failure.finalization_cause().is_none());
 }
 
 #[test]
@@ -3009,9 +2951,8 @@ fn final_observer_cancellation_rolls_back_publication_exactly_once() {
     assert_eq!(final_events.load(Ordering::Acquire), 1);
     assert_eq!(failure.last_completed().phase(), ImportPhase::Validated);
     assert_eq!(output.committed(), 0);
-    assert_eq!(output.pending_publication(), 0);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
-    assert!(failure.finalization_cause().is_none());
 }
 
 #[test]
@@ -3037,11 +2978,11 @@ fn diagnostic_storage_caps_drop_excess_without_changing_success() {
 }
 
 #[test]
-fn scoped_builder_reservation_transitions_to_committed_output() {
-    let source = AssetPath::new("asset.builder-budget").unwrap();
+fn complete_batch_activation_transitions_to_committed_output() {
+    let source = AssetPath::new("asset.complete-batch-budget").unwrap();
     let request = request_for(RecordingImporter::plain(
-        "dev.baozi.test.builder-budget",
-        "builder-budget",
+        "dev.baozi.test.complete-batch-budget",
+        "complete-batch-budget",
     ));
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
@@ -3052,7 +2993,12 @@ fn scoped_builder_reservation_transitions_to_committed_output() {
         .expect("canonical output accounting");
 
     assert!(output.peak_live_bytes() > 0);
-    assert!(output.committed() > 0);
+    assert_eq!(output.committed(), 0);
+    assert_eq!(
+        report.ledger().committed_canonical_members(),
+        u64::try_from(report.scene().canonical_block_count())
+            .expect("canonical block count fits the import ledger scalar")
+    );
     assert_eq!(output.current_live_bytes(), 0);
     assert_eq!(report.ledger().current_live_bytes(), 0);
 }

@@ -1,8 +1,34 @@
 mod common;
 
-use baozi_core::{AlphaMode, ColorSpace, MetadataValue, TextureRole, TextureSource, Vec3};
-use baozi_import::{ImportCause, ResourceLimits, ScopeAbortCause};
-use common::{TestResult, expected_failure, import_assets, import_assets_result, scene};
+use baozi_import::{
+    ImportCause, ImportDimension, ImportTerminalCause, ImportTerminalFailureClass, ResourceLimits,
+    SceneSnapshot, ScopeAbortCause,
+};
+use common::{
+    TestResult, expected_failure, import_assets, import_assets_result, scene_snapshot,
+    snapshot_line, snapshot_line_containing,
+};
+
+const TEXTURE_BYTES: &[u8] = b"snapshotted-obj-texture";
+
+fn material_factor_bits(snapshot: &SceneSnapshot, material: usize, factor: usize) -> u32 {
+    let line = snapshot_line(snapshot, &format!("material[{material}]"));
+    let factors = line
+        .split_once("factors(present,total=39)=[")
+        .expect("material snapshot must expose canonical factors")
+        .1
+        .split_once(']')
+        .expect("material factor list must terminate")
+        .0;
+    let encoded = factors
+        .split(',')
+        .nth(factor)
+        .unwrap_or_else(|| panic!("material factor {factor} is missing"))
+        .trim()
+        .strip_prefix("0x")
+        .expect("material factor must be hexadecimal");
+    u32::from_str_radix(encoded, 16).expect("material factor must be valid hexadecimal")
+}
 
 fn sidecar_limits() -> ResourceLimits {
     ResourceLimits::default()
@@ -18,54 +44,80 @@ fn loads_mtllib_sidecar_and_binds_usemtl() -> TestResult<()> {
         [
             ("model.obj", obj.as_slice()),
             ("materials/cube.mtl", mtl.as_slice()),
+            ("materials/textures/diffuse.png", TEXTURE_BYTES),
         ],
         sidecar_limits(),
     )?;
-    let scene = scene(&report);
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
-    assert_eq!(scene.materials().len(), 1);
-    assert_eq!(scene.textures().len(), 1);
-    assert_eq!(scene.meshes()[0].material.map(|id| id.index()), Some(0));
+    assert_eq!(snapshot.material_count(), 1);
+    assert_eq!(snapshot.image_count(), 1);
+    assert_eq!(snapshot.sampler_count(), 1);
+    assert_eq!(snapshot.texture_count(), 1);
+    assert_eq!(snapshot.material_binding_count(), 1);
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains("material=0"));
 
-    let material = &scene.materials()[0];
-    assert_eq!(material.name.as_deref(), Some("red"));
-    assert_eq!(material.base_color.r, 0.8);
-    assert_eq!(material.base_color.g, 0.1);
-    assert_eq!(material.base_color.b, 0.2);
-    assert_eq!(material.base_color.a, 0.5);
-    assert_eq!(material.alpha_mode, AlphaMode::Blend);
-    assert_eq!(
-        material.emissive,
-        baozi_core::Color::linear_rgba(0.1, 0.2, 0.3, 1.0)
-    );
-    assert_eq!(
-        material.metadata.get("obj:illum"),
-        Some(&MetadataValue::I64(2))
-    );
-    assert_eq!(
-        material.metadata.get("obj:ns"),
-        Some(&MetadataValue::F64(32.0))
-    );
-    assert_eq!(
-        material.metadata.get("obj:ni"),
-        Some(&MetadataValue::F64(1.5))
-    );
-    assert_eq!(material.texture_slots.len(), 1);
-    assert_eq!(material.texture_slots[0].role, TextureRole::Diffuse);
-    assert_eq!(material.texture_slots[0].color_space, ColorSpace::Srgb);
-    assert_eq!(
-        material.texture_slots[0].source_key.as_deref(),
-        Some("map_Kd")
-    );
+    let material = snapshot_line(&snapshot, "material[0]");
+    assert!(material.contains("shading=2"));
+    assert!(material.contains("alpha=2"));
+    assert!(material.contains("binding_offset=0 binding_count=1"));
+    assert!(material.contains("name=red"));
+    assert_eq!(material_factor_bits(&snapshot, 0, 0), 0.1_f32.to_bits());
+    assert_eq!(material_factor_bits(&snapshot, 0, 1), 0.2_f32.to_bits());
+    assert_eq!(material_factor_bits(&snapshot, 0, 2), 0.3_f32.to_bits());
+    assert_eq!(material_factor_bits(&snapshot, 0, 20), 0.8_f32.to_bits());
+    assert_eq!(material_factor_bits(&snapshot, 0, 21), 0.1_f32.to_bits());
+    assert_eq!(material_factor_bits(&snapshot, 0, 22), 0.2_f32.to_bits());
+    assert_eq!(material_factor_bits(&snapshot, 0, 29), 32.0_f32.to_bits());
+    assert_eq!(material_factor_bits(&snapshot, 0, 30), 0.5_f32.to_bits());
 
-    match &scene.textures()[0].source {
-        TextureSource::External { uri } => {
-            assert_eq!(uri, "materials/textures/diffuse.png");
-        }
-        other => panic!("expected external texture, got {other:?}"),
-    }
-    assert_eq!(scene.meshes()[0].normals[0], Vec3::new(0.0, 0.0, 1.0));
+    let binding = snapshot_line(&snapshot, "binding[0]");
+    assert!(binding.contains("texture=0 role=1"));
+    assert!(binding.contains("coordinate_set=0 channels=4 color=0"));
+    assert!(binding.contains("source_key=map_Kd"));
+    assert!(snapshot_line(&snapshot, "texture[0]").contains("image=0 sampler=0"));
+    assert!(
+        snapshot_line(&snapshot, "image[0]")
+            .contains(&format!("payload_bytes={}", TEXTURE_BYTES.len()))
+    );
+    assert!(snapshot_line_containing(&snapshot, "key=obj:illum").contains("i64=2"));
+    assert!(
+        snapshot_line_containing(&snapshot, "key=obj:ns").contains("f64_bits=0x4040000000000000")
+    );
+    assert!(
+        snapshot_line_containing(&snapshot, "key=obj:ni").contains("f64_bits=0x3ff8000000000000")
+    );
+    let normal = snapshot_line_containing(&snapshot, "semantic=normal");
+    assert!(normal.contains("lanes=3"));
+    assert!(normal.contains("elements=3"));
+    Ok(())
+}
+
+#[test]
+fn texture_dependency_resolves_from_the_declaring_mtl_origin() -> TestResult<()> {
+    let obj = b"mtllib ../materials/ship.mtl\nusemtl hull\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let mtl = b"newmtl hull\nmap_Kd ../textures/hull.png\n";
+    let decoy = b"incorrect-primary-relative-texture";
+
+    let report = import_assets(
+        "assets/models/ship.obj",
+        [
+            ("assets/models/ship.obj", obj.as_slice()),
+            ("assets/materials/ship.mtl", mtl.as_slice()),
+            ("assets/textures/hull.png", TEXTURE_BYTES),
+            ("assets/models/assets/textures/hull.png", decoy.as_slice()),
+        ],
+        sidecar_limits(),
+    )?;
+    let snapshot = scene_snapshot(&report)?;
+
+    assert!(report.diagnostics().is_empty());
+    assert_eq!(snapshot.image_count(), 1);
+    assert!(
+        snapshot_line(&snapshot, "image[0]")
+            .contains(&format!("payload_bytes={}", TEXTURE_BYTES.len()))
+    );
     Ok(())
 }
 
@@ -84,11 +136,11 @@ fn loads_multiple_mtllib_tokens_from_one_statement() -> TestResult<()> {
         ],
         sidecar_limits(),
     )?;
-    let scene = scene(&report);
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
-    assert_eq!(scene.materials()[0].name.as_deref(), Some("red"));
-    assert_eq!(scene.materials()[0].base_color.r, 1.0);
+    assert!(snapshot_line(&snapshot, "material[0]").contains("name=red"));
+    assert_eq!(material_factor_bits(&snapshot, 0, 20), 1.0_f32.to_bits());
     Ok(())
 }
 
@@ -107,16 +159,16 @@ fn duplicate_materials_across_libraries_keep_the_last_definition() -> TestResult
         ],
         sidecar_limits(),
     )?;
-    let scene = scene(&report);
+    let snapshot = scene_snapshot(&report)?;
 
     assert_eq!(report.diagnostics().len(), 1);
     assert_eq!(
         report.diagnostics()[0].code().as_str(),
         "obj.mtl_duplicate_material"
     );
-    assert_eq!(scene.materials().len(), 1);
-    assert_eq!(scene.materials()[0].base_color.r, 0.0);
-    assert_eq!(scene.materials()[0].base_color.g, 1.0);
+    assert_eq!(snapshot.material_count(), 1);
+    assert_eq!(material_factor_bits(&snapshot, 0, 20), 0.0_f32.to_bits());
+    assert_eq!(material_factor_bits(&snapshot, 0, 21), 1.0_f32.to_bits());
     Ok(())
 }
 
@@ -133,10 +185,10 @@ fn mtl_utf8_bom_is_accepted() -> TestResult<()> {
         ],
         sidecar_limits(),
     )?;
-    let scene = scene(&report);
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
-    assert_eq!(scene.materials()[0].name.as_deref(), Some("red"));
+    assert!(snapshot_line(&snapshot, "material[0]").contains("name=red"));
     Ok(())
 }
 
@@ -153,10 +205,10 @@ fn unknown_mtl_statement_warns_and_keeps_geometry() -> TestResult<()> {
         ],
         sidecar_limits(),
     )?;
-    let scene = scene(&report);
+    let snapshot = scene_snapshot(&report)?;
     let diagnostics = report.diagnostics();
 
-    assert_eq!(scene.meshes().len(), 1);
+    assert_eq!(snapshot.logical_mesh_count(), 1);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code().as_str(), "obj.mtl_unknown_statement");
     assert_eq!(diagnostics[0].source().as_str(), "material.mtl");
@@ -173,13 +225,15 @@ fn unsupported_texture_map_option_warns_but_finds_texture_path() -> TestResult<(
         [
             ("model.obj", obj.as_slice()),
             ("material.mtl", material.as_slice()),
+            ("textures/red.png", TEXTURE_BYTES),
         ],
         sidecar_limits(),
     )?;
-    let scene = scene(&report);
+    let snapshot = scene_snapshot(&report)?;
     let diagnostics = report.diagnostics();
 
-    assert_eq!(scene.textures().len(), 1);
+    assert_eq!(snapshot.texture_count(), 1);
+    assert!(snapshot_line(&snapshot, "binding[0]").contains("source_key=map_Kd"));
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(
         diagnostics[0].code().as_str(),
@@ -198,17 +252,18 @@ fn variable_length_texture_transform_options_do_not_swallow_texture_path() -> Te
         [
             ("model.obj", obj.as_slice()),
             ("material.mtl", material.as_slice()),
+            ("textures/red.png", TEXTURE_BYTES),
         ],
         sidecar_limits(),
     )?;
-    let scene = scene(&report);
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
-    assert_eq!(scene.textures().len(), 1);
-    match &scene.textures()[0].source {
-        TextureSource::External { uri } => assert_eq!(uri, "textures/red.png"),
-        other => panic!("expected external texture, got {other:?}"),
-    }
+    assert_eq!(snapshot.texture_count(), 1);
+    assert!(
+        snapshot_line(&snapshot, "image[0]")
+            .contains(&format!("payload_bytes={}", TEXTURE_BYTES.len()))
+    );
     Ok(())
 }
 
@@ -222,17 +277,15 @@ fn negative_texture_transform_option_values_do_not_swallow_texture_path() -> Tes
         [
             ("model.obj", obj.as_slice()),
             ("material.mtl", material.as_slice()),
+            ("textures/red.png", TEXTURE_BYTES),
         ],
         sidecar_limits(),
     )?;
-    let scene = scene(&report);
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
-    assert_eq!(scene.textures().len(), 1);
-    match &scene.textures()[0].source {
-        TextureSource::External { uri } => assert_eq!(uri, "textures/red.png"),
-        other => panic!("expected external texture, got {other:?}"),
-    }
+    assert_eq!(snapshot.texture_count(), 1);
+    assert!(snapshot_line(&snapshot, "binding[0]").contains("role=1"));
     Ok(())
 }
 
@@ -245,10 +298,10 @@ fn unavailable_mtl_is_explicit_warning_not_geometry_failure() -> TestResult<()> 
         [("model.obj", obj.as_slice())],
         sidecar_limits(),
     )?;
-    let scene = scene(&report);
+    let snapshot = scene_snapshot(&report)?;
     let diagnostics = report.diagnostics();
 
-    assert_eq!(scene.meshes().len(), 1);
+    assert_eq!(snapshot.logical_mesh_count(), 1);
     assert_eq!(diagnostics.len(), 3);
     assert!(
         diagnostics.iter().any(
@@ -265,7 +318,7 @@ fn unavailable_mtl_is_explicit_warning_not_geometry_failure() -> TestResult<()> 
             .iter()
             .any(|diagnostic| diagnostic.code().as_str() == "obj.material_missing")
     );
-    assert_eq!(scene.materials()[0].name.as_deref(), Some("red"));
+    assert!(snapshot_line(&snapshot, "material[0]").contains("name=red"));
     Ok(())
 }
 
@@ -278,10 +331,10 @@ fn missing_mtl_is_warning_not_geometry_failure() -> TestResult<()> {
         [("model.obj", obj.as_slice())],
         sidecar_limits(),
     )?;
-    let scene = scene(&report);
+    let snapshot = scene_snapshot(&report)?;
     let diagnostics = report.diagnostics();
 
-    assert_eq!(scene.meshes().len(), 1);
+    assert_eq!(snapshot.logical_mesh_count(), 1);
     assert_eq!(diagnostics.len(), 2);
     assert_eq!(
         diagnostics[0].code().as_str(),
@@ -328,7 +381,7 @@ fn sidecar_byte_limit_warns_and_keeps_geometry() -> TestResult<()> {
         ],
         limits,
     )?;
-    assert_eq!(scene(&report).meshes().len(), 1);
+    assert_eq!(scene_snapshot(&report)?.logical_mesh_count(), 1);
     assert_eq!(report.diagnostics().len(), 2);
     assert_eq!(
         report.diagnostics()[1].code().as_str(),
@@ -338,48 +391,82 @@ fn sidecar_byte_limit_warns_and_keeps_geometry() -> TestResult<()> {
 }
 
 #[test]
-fn sidecar_total_byte_limit_warns_and_keeps_geometry() -> TestResult<()> {
+fn sidecar_total_byte_limit_is_terminal_after_recording_optional_loss_evidence() -> TestResult<()> {
     let obj = b"mtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
     let mtl = b"newmtl red\nKd 1 0 0\n";
     let mut limits = sidecar_limits();
     limits.max_total_asset_bytes = obj.len() as u64 + 4;
 
-    let report = import_assets(
+    let failure = expected_failure(import_assets_result(
         "model.obj",
         [
             ("model.obj", obj.as_slice()),
             ("material.mtl", mtl.as_slice()),
         ],
         limits,
-    )?;
-    assert_eq!(scene(&report).meshes().len(), 1);
-    assert_eq!(report.diagnostics().len(), 2);
+        true,
+    )?);
+    let terminal = match failure.cause() {
+        ImportCause::OperationTerminal(terminal) => *terminal,
+        cause => panic!("expected terminal ledger failure, got {cause:?}"),
+    };
+    assert_eq!(terminal.class(), ImportTerminalFailureClass::Ledger);
     assert_eq!(
-        report.diagnostics()[1].code().as_str(),
+        failure.ledger().terminal_cause(),
+        ImportTerminalCause::Failure(terminal)
+    );
+    let total = failure
+        .ledger()
+        .dimension(ImportDimension::TotalAssetBytes)
+        .expect("aggregate asset-byte evidence remains queryable");
+    assert_eq!(total.attempted(), (obj.len() + mtl.len()) as u64);
+    assert_eq!(total.consumed(), obj.len() as u64);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    assert_eq!(failure.optional_dependency_evidence().len(), 1);
+    assert_eq!(failure.diagnostics().len(), 2);
+    assert_eq!(
+        failure.diagnostics()[1].code().as_str(),
         "obj.mtl_unavailable"
     );
     Ok(())
 }
 
 #[test]
-fn sidecar_open_asset_limit_warns_and_keeps_geometry() -> TestResult<()> {
+fn sidecar_open_asset_limit_is_terminal_after_recording_optional_loss_evidence() -> TestResult<()> {
     let obj = b"mtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
     let mtl = b"newmtl red\nKd 1 0 0\n";
     let mut limits = sidecar_limits();
     limits.max_open_assets = 1;
 
-    let report = import_assets(
+    let failure = expected_failure(import_assets_result(
         "model.obj",
         [
             ("model.obj", obj.as_slice()),
             ("material.mtl", mtl.as_slice()),
         ],
         limits,
-    )?;
-    assert_eq!(scene(&report).meshes().len(), 1);
-    assert_eq!(report.diagnostics().len(), 2);
+        true,
+    )?);
+    let terminal = match failure.cause() {
+        ImportCause::OperationTerminal(terminal) => *terminal,
+        cause => panic!("expected terminal ledger failure, got {cause:?}"),
+    };
+    assert_eq!(terminal.class(), ImportTerminalFailureClass::Ledger);
     assert_eq!(
-        report.diagnostics()[1].code().as_str(),
+        failure.ledger().terminal_cause(),
+        ImportTerminalCause::Failure(terminal)
+    );
+    let opens = failure
+        .ledger()
+        .dimension(ImportDimension::AssetOpen)
+        .expect("asset-open evidence remains queryable");
+    assert_eq!(opens.attempted(), 2);
+    assert_eq!(opens.consumed(), 1);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    assert_eq!(failure.optional_dependency_evidence().len(), 1);
+    assert_eq!(failure.diagnostics().len(), 2);
+    assert_eq!(
+        failure.diagnostics()[1].code().as_str(),
         "obj.mtl_unavailable"
     );
     Ok(())

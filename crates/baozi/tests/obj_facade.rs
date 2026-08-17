@@ -4,13 +4,15 @@
 )]
 #![cfg(feature = "format-obj")]
 
+mod common;
+
 use baozi::{
     AssetPath, CapabilityStatus, FormatCapability, ImportConfigOverlay, ImportDimension,
-    ImportLossKind, ImportOperationControl, ImportPhase, ImportRequest, ImportRequestLayer,
-    Importer, LossPolicy, MemoryAssetIo, OptionCompileLimits, PostProcessLimits,
-    PostProcessPipeline, PostProcessStep, PrimitiveTopology, ResourceLimits, ResourceLimitsOverlay,
-    Result, TextureSource,
+    ImportLossKind, ImportOperationControl, ImportRequest, ImportRequestLayer, ImportTerminalCause,
+    ImportTerminalFailureClass, Importer, LossPolicy, MemoryAssetIo, OptionCompileLimits,
+    ResourceLimits, ResourceLimitsOverlay, Result,
 };
+use common::{scene_snapshot, snapshot_line};
 use std::sync::Arc;
 
 fn triangle_obj() -> &'static [u8] {
@@ -25,13 +27,12 @@ f 1 2 3
 #[test]
 fn facade_reads_obj_from_bytes() -> Result<()> {
     let report = Importer::new()?.read_bytes("facade.obj", triangle_obj())?;
+    let snapshot = scene_snapshot(&report);
 
     assert_eq!(report.format().id().as_str(), "org.baozi.obj");
-    assert_eq!(report.scene().meshes().len(), 1);
-    assert_eq!(
-        report.scene().meshes()[0].topology,
-        PrimitiveTopology::Triangles
-    );
+    assert_eq!(snapshot.logical_mesh_count(), 1);
+    assert_eq!(snapshot.primitive_count(), 1);
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains("topology=triangle_list"));
     assert!(report.diagnostics().is_empty());
     Ok(())
 }
@@ -72,20 +73,23 @@ fn same_importer_reads_obj_repeatedly() -> Result<()> {
     let importer = Importer::new()?;
     let first = importer.read_bytes("first.obj", triangle_obj())?;
     let second = importer.read_bytes("second.obj", triangle_obj())?;
+    let first_snapshot = scene_snapshot(&first);
+    let second_snapshot = scene_snapshot(&second);
 
     assert_eq!(first.format().id().as_str(), "org.baozi.obj");
     assert_eq!(second.format().id().as_str(), "org.baozi.obj");
-    assert_eq!(first.scene().meshes().len(), 1);
-    assert_eq!(second.scene().meshes().len(), 1);
+    assert_eq!(first_snapshot.logical_mesh_count(), 1);
+    assert_eq!(second_snapshot.logical_mesh_count(), 1);
     Ok(())
 }
 
 #[test]
 fn facade_detects_obj_content_with_unknown_extension() -> Result<()> {
     let report = Importer::new()?.read_bytes("facade.mesh", triangle_obj())?;
+    let snapshot = scene_snapshot(&report);
 
     assert_eq!(report.format().id().as_str(), "org.baozi.obj");
-    assert_eq!(report.scene().meshes().len(), 1);
+    assert_eq!(snapshot.logical_mesh_count(), 1);
     Ok(())
 }
 
@@ -118,7 +122,7 @@ f 1 2 3
     )?;
 
     assert_eq!(report.format().id().as_str(), "org.baozi.obj");
-    assert_eq!(report.scene().meshes().len(), 1);
+    assert_eq!(scene_snapshot(&report).logical_mesh_count(), 1);
     assert_eq!(report.optional_dependency_evidence().len(), 1);
     assert!(
         report
@@ -130,7 +134,7 @@ f 1 2 3
 }
 
 #[test]
-fn repeated_oversized_mtl_references_do_not_refund_read_budget() -> Result<()> {
+fn repeated_oversized_mtl_references_preserve_non_refundable_terminal_budget() -> Result<()> {
     let obj_path = AssetPath::new("models/repeated-mtl.obj")?;
     let mtl_path = AssetPath::new("models/material.mtl")?;
     let obj = b"mtllib material.mtl\nmtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
@@ -157,16 +161,20 @@ fn repeated_oversized_mtl_references_do_not_refund_read_budget() -> Result<()> {
     );
     let request = importer.prepare_request(&options, OptionCompileLimits::default())?;
 
-    let report = importer.read_asset_with_request(
-        &io,
-        obj_path,
-        &request,
-        ImportOperationControl::default(),
-    )?;
-
-    assert_eq!(report.scene().meshes().len(), 1);
+    let error = importer
+        .read_asset_with_request(&io, obj_path, &request, ImportOperationControl::default())
+        .expect_err("dependency-byte exhaustion must remain the terminal ledger cause");
+    let baozi::Error::Import(failure) = error else {
+        panic!("dependency-byte exhaustion must retain a complete import failure")
+    };
+    let ImportTerminalCause::Failure(terminal) = failure.ledger().terminal_cause() else {
+        panic!("dependency-byte exhaustion cannot publish a successful terminal")
+    };
+    assert_eq!(terminal.class(), ImportTerminalFailureClass::Ledger);
+    assert_eq!(terminal.code(), 1);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
     assert_eq!(
-        report
+        failure
             .ledger()
             .dimension(ImportDimension::AssetOpen)
             .expect("asset-open accounting should exist")
@@ -174,16 +182,22 @@ fn repeated_oversized_mtl_references_do_not_refund_read_budget() -> Result<()> {
         2
     );
     assert_eq!(
-        report
+        failure
             .ledger()
             .dimension(ImportDimension::DependencyReference)
             .expect("dependency-reference accounting should exist")
             .consumed(),
         2
     );
-    assert_eq!(report.optional_dependency_evidence().len(), 2);
+    let dependency_bytes = failure
+        .ledger()
+        .dimension(ImportDimension::DependencyBytes)
+        .expect("dependency-byte accounting should exist");
+    assert_eq!(dependency_bytes.attempted(), mtl.len() as u64);
+    assert_eq!(dependency_bytes.consumed(), 0);
+    assert_eq!(failure.optional_dependency_evidence().len(), 2);
     assert_eq!(
-        report
+        failure
             .diagnostics()
             .iter()
             .filter(|diagnostic| diagnostic.code().as_str() == "obj.mtl_unavailable")
@@ -214,13 +228,15 @@ fn facade_reads_obj_from_path() {
     std::fs::remove_dir(&root).expect("temporary OBJ directory should be removable");
 
     assert_eq!(report.format().id().as_str(), "org.baozi.obj");
-    assert_eq!(report.scene().meshes().len(), 1);
+    assert_eq!(scene_snapshot(&report).logical_mesh_count(), 1);
 }
 
 #[test]
 fn facade_reads_obj_with_memory_mtl_sidecar() -> Result<()> {
     let obj_path = AssetPath::new("models/cube.obj")?;
     let mtl_path = AssetPath::new("models/materials/cube.mtl")?;
+    let texture_path = AssetPath::new("models/materials/textures/red.png")?;
+    let primary_relative_decoy = AssetPath::new("models/models/materials/textures/red.png")?;
     let obj = b"mtllib materials/cube.mtl
 usemtl red
 v 0 0 0
@@ -232,91 +248,32 @@ f 1 2 3
 Kd 1 0 0
 map_Kd textures/red.png
 ";
+    let texture = b"facade-red-texture";
+    let decoy = b"wrong-primary-relative-texture-payload";
     let io = MemoryAssetIo::new();
     io.try_insert(obj_path.clone(), Arc::from(obj.as_slice()))
         .expect("the in-memory OBJ index should reserve one entry");
     io.try_insert(mtl_path, Arc::from(mtl.as_slice()))
         .expect("the in-memory MTL index should reserve one entry");
+    io.try_insert(texture_path, Arc::from(texture.as_slice()))
+        .expect("the in-memory texture index should reserve one entry");
+    io.try_insert(primary_relative_decoy, Arc::from(decoy.as_slice()))
+        .expect("the in-memory decoy texture index should reserve one entry");
 
     let report = Importer::new()?.read_asset(&io, obj_path)?;
 
     assert_eq!(report.format().id().as_str(), "org.baozi.obj");
     assert!(report.diagnostics().is_empty());
-    assert_eq!(report.scene().materials()[0].name.as_deref(), Some("red"));
-    match &report.scene().textures()[0].source {
-        TextureSource::External { uri } => {
-            assert_eq!(uri, "models/materials/textures/red.png");
-        }
-        other => panic!("expected external texture, got {other:?}"),
-    }
-    Ok(())
-}
-
-#[test]
-fn facade_obj_quad_can_be_triangulated_by_postprocess() -> Result<()> {
-    let source = b"v 0 0 0
-v 1 0 0
-v 1 1 0
-v 0 1 0
-f 1 2 3 4
-";
-    let importer = Importer::new()?;
-    let report = importer.read_bytes("quad.obj", source)?;
-    assert_eq!(report.last_completed().phase(), ImportPhase::Validated);
-    assert_eq!(
-        report.scene().meshes()[0].topology,
-        PrimitiveTopology::Polygons
+    let snapshot = scene_snapshot(&report);
+    assert_eq!(snapshot.material_count(), 1);
+    assert_eq!(snapshot.image_count(), 1);
+    assert_eq!(snapshot.sampler_count(), 1);
+    assert_eq!(snapshot.texture_count(), 1);
+    assert_eq!(snapshot.material_binding_count(), 1);
+    assert!(snapshot_line(&snapshot, "material[0]").contains("name=red"));
+    assert!(snapshot_line(&snapshot, "binding[0]").contains("source_key=map_Kd"));
+    assert!(
+        snapshot_line(&snapshot, "image[0]").contains(&format!("payload_bytes={}", texture.len()))
     );
-    let detection_evidence = report.detection_evidence().to_vec();
-
-    let pipeline = PostProcessPipeline::new([PostProcessStep::Triangulate])
-        .expect("the static test post-process plan must be valid");
-    let processed = importer
-        .read_bytes_with_postprocess("quad.obj", source, &pipeline)
-        .expect("post-process import should succeed");
-
-    assert_eq!(
-        processed.scene().meshes()[0].topology,
-        PrimitiveTopology::Triangles
-    );
-    assert_eq!(
-        processed.scene().meshes()[0].indices,
-        vec![0, 1, 2, 0, 2, 3]
-    );
-    assert_eq!(processed.import().detection_evidence(), detection_evidence);
-    assert_ne!(
-        processed.import().scene().generation(),
-        processed.scene().generation()
-    );
-    Ok(())
-}
-
-#[test]
-fn postprocess_failure_retains_completed_import_evidence() -> Result<()> {
-    let source = b"v 0 0 0
-v 1 0 0
-v 1 1 0
-v 0 1 0
-f 1 2 3 4
-";
-    let importer = Importer::new()?;
-    let report = importer.read_bytes("quad.obj", source)?;
-    let imported_generation = report.scene().generation();
-    let pipeline = PostProcessPipeline::new([PostProcessStep::Triangulate])
-        .expect("the static test post-process plan must be valid")
-        .with_limits(PostProcessLimits::new(0, 1024));
-
-    let failure = Importer::process(report, &pipeline)
-        .expect_err("zero post-process work budget should fail");
-
-    assert_eq!(
-        failure
-            .completed_import()
-            .expect("completed import should be retained")
-            .scene()
-            .generation(),
-        imported_generation
-    );
-    assert!(failure.postprocess_failure().is_some());
     Ok(())
 }

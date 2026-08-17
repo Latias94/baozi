@@ -62,6 +62,45 @@ fn factory_enforces_exact_live_account_and_control_byte_limits() {
 }
 
 #[test]
+fn derived_factory_limits_cover_the_exact_live_account_envelope() {
+    let live_accounts = NonZeroU64::new(2).unwrap();
+    let control_bytes =
+        FinalOwnerAllocation::<AccountControlInner>::checked_layout_bytes().unwrap();
+    let factory = PhysicalStorageAccountFactory::try_new_for_live_accounts(live_accounts).unwrap();
+    assert_eq!(factory.limits().max_live_accounts(), 2);
+    assert_eq!(
+        factory.limits().max_account_control_bytes(),
+        control_bytes.checked_mul(2).unwrap()
+    );
+
+    let account_limits = PhysicalStorageAccountLimits::new(1_024, 8).unwrap();
+    let first = factory.try_create_account(account_limits).unwrap();
+    let second = factory.try_create_account(account_limits).unwrap();
+    assert!(matches!(
+        factory.try_create_account(account_limits),
+        Err(PhysicalStorageAccountCreateError::ControlByteLimitExceeded { .. })
+            | Err(PhysicalStorageAccountCreateError::LiveAccountLimitExceeded { .. })
+    ));
+    assert_eq!(factory.snapshot().live_accounts(), 2);
+    assert_eq!(
+        factory.snapshot().live_account_control_bytes(),
+        control_bytes.checked_mul(2).unwrap()
+    );
+
+    drop((first, second));
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+    assert_eq!(factory.snapshot().live_account_control_bytes(), 0);
+}
+
+#[test]
+fn derived_factory_limits_reject_control_envelope_overflow_without_allocating() {
+    assert_eq!(
+        PhysicalStorageAccountFactory::try_new_for_live_accounts(NonZeroU64::MAX).err(),
+        Some(PhysicalStorageAccountFactoryCreateError::AccountingOverflow)
+    );
+}
+
+#[test]
 fn account_control_allocation_failure_rolls_back_factory_admission() {
     let factory = account_factory(1);
     let account_limits = PhysicalStorageAccountLimits::new(1_024, 8).unwrap();

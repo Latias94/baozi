@@ -1,7 +1,7 @@
 //! Operation-bound node authoring for canonical store construction.
 
 mod control;
-mod input;
+pub(in crate::canonical_scene::store) mod input;
 mod plan;
 mod scene;
 
@@ -15,6 +15,10 @@ pub(super) use control::{
 pub(super) use input::NodeAuthoringBatch;
 #[cfg(test)]
 pub(super) use input::ProfileAuthoringBatch;
+#[cfg(test)]
+pub(super) use input::ResourceSnapshotAuthoring;
+#[cfg(test)]
+pub(super) use input::ResourceSnapshotAuthoringTable;
 #[cfg(test)]
 pub(super) use input::animation::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,

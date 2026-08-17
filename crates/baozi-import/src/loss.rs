@@ -1,7 +1,8 @@
 use crate::config::ImportLossKind;
 use crate::diagnostic::{DiagnosticByteRange, DiagnosticCode};
-use crate::ledger::ImportReservation;
+use crate::store::ImportStoreReservation;
 use baozi_io::AssetPath;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ImportLossDisposition {
@@ -19,7 +20,6 @@ pub enum ImportLossSubject {
 }
 
 /// A bounded, session-authenticated fact about semantic loss or recovery.
-#[derive(Debug)]
 pub struct ImportLossEvidence {
     kind: ImportLossKind,
     subject: ImportLossSubject,
@@ -27,7 +27,22 @@ pub struct ImportLossEvidence {
     source: AssetPath,
     raw_range: Option<DiagnosticByteRange>,
     disposition: ImportLossDisposition,
-    reservation: Option<ImportReservation>,
+    reservation: Option<ImportStoreReservation>,
+}
+
+impl fmt::Debug for ImportLossEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportLossEvidence")
+            .field("kind", &self.kind)
+            .field("subject", &self.subject)
+            .field("code", &self.code)
+            .field("source", &self.source)
+            .field("raw_range", &self.raw_range)
+            .field("disposition", &self.disposition)
+            .field("reservation_live", &self.reservation.is_some())
+            .finish()
+    }
 }
 
 impl ImportLossEvidence {
@@ -38,7 +53,7 @@ impl ImportLossEvidence {
         source: AssetPath,
         raw_range: Option<DiagnosticByteRange>,
         disposition: ImportLossDisposition,
-        reservation: ImportReservation,
+        reservation: ImportStoreReservation,
     ) -> Self {
         Self {
             kind,
@@ -76,23 +91,6 @@ impl ImportLossEvidence {
 
     pub const fn disposition(&self) -> ImportLossDisposition {
         self.disposition
-    }
-
-    pub(crate) fn reservation_count(&self) -> usize {
-        usize::from(self.reservation.is_some())
-    }
-
-    pub(crate) fn move_reservation_into(
-        &mut self,
-        target: &mut crate::metered_storage::AccountedReservationVec,
-    ) {
-        assert!(
-            target.has_slots(self.reservation_count()),
-            "loss-evidence publication slots must be admitted before moving a token"
-        );
-        if let Some(reservation) = self.reservation.take() {
-            target.push_reserved_infallible(reservation);
-        }
     }
 
     pub(crate) fn release_reservation(&mut self) {

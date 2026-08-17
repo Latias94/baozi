@@ -1,12 +1,13 @@
 mod common;
 
-use baozi_core::Color;
 use baozi_format_stl::StlFailureCode;
 use baozi_import::{
-    DetectionOutcome, ImportCause, ImportDimension, ReadConfidence, ResourceLimits,
+    DetectionOutcome, ImportCause, ImportDimension, ImportTerminalCause,
+    ImportTerminalFailureClass, ReadConfidence, ResourceLimits,
 };
 use common::{
     BinaryFacet, binary_stl, expected_stl_failure, import_bytes, import_bytes_with_limits,
+    scene_snapshot, snapshot_line,
 };
 use std::error::Error;
 
@@ -16,13 +17,25 @@ type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 fn imports_one_triangle_binary_stl_through_session() -> TestResult {
     let bytes = binary_stl(b"binary", &[BinaryFacet::unit_triangle()]);
     let report = import_bytes("triangle.stl", &bytes)?;
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
 
-    assert_eq!(scene.nodes().len(), 2);
-    assert_eq!(scene.meshes().len(), 1);
-    assert_eq!(scene.meshes()[0].name.as_deref(), Some("<STL_BINARY>"));
-    assert_eq!(scene.meshes()[0].positions[1].x, 1.0);
-    assert_eq!(scene.meshes()[0].normals[0].z, 1.0);
+    assert_eq!(snapshot.node_count(), 1);
+    assert_eq!(snapshot.root_count(), 1);
+    assert_eq!(snapshot.logical_mesh_count(), 1);
+    assert_eq!(snapshot.primitive_count(), 1);
+    assert_eq!(snapshot.attribute_count(), 2);
+    assert_eq!(snapshot.primitive_index_count(), 3);
+    assert_eq!(snapshot.f32_scalar_count(), 18);
+    assert!(snapshot_line(&snapshot, "node[0]").contains(" name=<STL_BINARY> "));
+    assert!(snapshot_line(&snapshot, "logical_mesh[0]").contains(" name=<STL_BINARY> "));
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains(concat!(
+        "values(present,total=9)=[",
+        "0x00000000,0x00000000,0x00000000,0x3f800000"
+    )));
+    assert!(snapshot_line(&snapshot, "attribute[1]").contains(concat!(
+        "values(present,total=9)=[",
+        "0x00000000,0x00000000,0x3f800000"
+    )));
     assert!(report.diagnostics().is_empty());
     assert_eq!(report.ledger().current_live_bytes(), 0);
     assert!(
@@ -68,7 +81,11 @@ fn binary_with_solid_magic_and_arbitrary_bytes_bypasses_ascii_profile() -> TestR
         evidence.outcome(),
         &DetectionOutcome::Match(ReadConfidence::Certain)
     );
-    assert_eq!(report.scene().meshes()[0].positions.len(), 3);
+    let snapshot = scene_snapshot(&report)?;
+    assert_eq!(snapshot.primitive_count(), 1);
+    assert_eq!(snapshot.primitive_index_count(), 3);
+    assert_eq!(snapshot.f32_scalar_count(), 30);
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains("elements=3"));
     Ok(())
 }
 
@@ -104,7 +121,17 @@ fn non_finite_binary_float_reaches_canonical_validation() {
     let failure = import_bytes_with_limits("nan.stl", &bytes, ResourceLimits::default())
         .expect_err("non-finite geometry must fail validation");
 
-    assert!(matches!(failure.cause(), ImportCause::Validation(_)));
+    let ImportCause::OperationTerminal(terminal) = failure.cause() else {
+        panic!(
+            "expected canonical authoring rejection, got {:?}",
+            failure.cause()
+        )
+    };
+    assert_eq!(terminal.class(), ImportTerminalFailureClass::Requested);
+    assert_eq!(
+        failure.ledger().terminal_cause(),
+        ImportTerminalCause::Failure(*terminal)
+    );
 }
 
 #[test]
@@ -122,10 +149,12 @@ fn face_limit_is_checked_before_binary_allocation() {
 fn materialise_header_color_maps_to_default_material() -> TestResult {
     let bytes = binary_stl(b"COLOR=\x20\x40\x80\xff", &[BinaryFacet::unit_triangle()]);
     let report = import_bytes("materialise-color.stl", &bytes)?;
-    assert_color_close(
-        report.scene().materials()[0].base_color,
-        Color::linear_rgba(32.0 / 255.0, 64.0 / 255.0, 128.0 / 255.0, 1.0),
-    );
+    let snapshot = scene_snapshot(&report)?;
+    assert!(snapshot_line(&snapshot, "material[0]").contains(concat!(
+        "factors(present,total=39)=[",
+        "0x00000000,0x00000000,0x00000000,",
+        "0x3e008081,0x3e808081,0x3f008081,0x3f800000"
+    )));
     Ok(())
 }
 
@@ -135,10 +164,18 @@ fn binary_facet_colors_expand_to_vertex_color_channel() -> TestResult {
     facet.attribute = 0x8000 | (31 << 10);
     let bytes = binary_stl(b"binary", &[facet]);
     let report = import_bytes("colored.stl", &bytes)?;
-    let colors = &report.scene().meshes()[0].colors[0];
+    let snapshot = scene_snapshot(&report)?;
 
-    assert_eq!(colors.len(), 3);
-    assert_color_close(colors[0], Color::linear_rgba(1.0, 0.0, 0.0, 1.0));
+    assert_eq!(snapshot.attribute_count(), 3);
+    assert_eq!(snapshot.f32_scalar_count(), 30);
+    assert!(snapshot_line(&snapshot, "attribute[2]").contains(concat!(
+        "semantic=color semantic_set=0 domain=vertex scalar=f32 lanes=4 ",
+        "normalization=none payload=dense elements=3 "
+    )));
+    assert!(snapshot_line(&snapshot, "attribute[2]").contains(concat!(
+        "values(present,total=12)=[",
+        "0x3f800000,0x00000000,0x00000000,0x3f800000"
+    )));
     Ok(())
 }
 
@@ -148,18 +185,11 @@ fn materialise_facet_color_uses_materialise_channel_order() -> TestResult {
     facet.attribute = 0x8000 | 31;
     let bytes = binary_stl(b"COLOR=\x20\x40\x80\xff", &[facet]);
     let report = import_bytes("materialise-facet-color.stl", &bytes)?;
+    let snapshot = scene_snapshot(&report)?;
 
-    assert_color_close(
-        report.scene().meshes()[0].colors[0][0],
-        Color::linear_rgba(1.0, 0.0, 0.0, 1.0),
-    );
+    assert!(snapshot_line(&snapshot, "attribute[2]").contains(concat!(
+        "values(present,total=12)=[",
+        "0x3f800000,0x00000000,0x00000000,0x3f800000"
+    )));
     Ok(())
-}
-
-fn assert_color_close(actual: Color, expected: Color) {
-    let epsilon = 0.000_001;
-    assert!((actual.r - expected.r).abs() < epsilon);
-    assert!((actual.g - expected.g).abs() < epsilon);
-    assert!((actual.b - expected.b).abs() < epsilon);
-    assert!((actual.a - expected.a).abs() < epsilon);
 }

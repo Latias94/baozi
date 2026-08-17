@@ -4,7 +4,7 @@ use baozi_format_obj::ObjFailureCode;
 use baozi_import::{
     FormatFailureDetailValue, FormatFailureEnvelope, ImportCause, ImportFailure, ResourceLimits,
 };
-use common::{TestResult, expected_failure, import_bytes, import_bytes_result, scene};
+use common::{TestResult, expected_failure, import_bytes, import_bytes_result, scene_snapshot};
 
 fn format_envelope(failure: &ImportFailure) -> &FormatFailureEnvelope {
     match failure.cause() {
@@ -129,10 +129,10 @@ fn unsupported_obj_statement_warns_and_geometry_imports() -> TestResult<()> {
     let bytes = b"curv 0 1 1 2\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
 
     let report = import_bytes("unsupported.obj", bytes)?;
-    let scene = scene(&report);
+    let snapshot = scene_snapshot(&report)?;
     let diagnostics = report.diagnostics();
 
-    assert_eq!(scene.meshes().len(), 1);
+    assert_eq!(snapshot.logical_mesh_count(), 1);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code().as_str(), "obj.unsupported_statement");
     Ok(())

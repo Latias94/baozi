@@ -4,7 +4,7 @@ use baozi_operation::__canonical_activation::{
 use baozi_operation::{
     CapacityPlan, OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, RecordPlan,
     ScalarSequence, SequencePlan, StoreBuildError, StoreControlledError, StorePlanError,
-    StoreRuntimeError,
+    StoreRuntimeError, Utf8Block, Utf8Plan,
 };
 
 use crate::SCENE_VALIDATION_POLL_INTERVAL;
@@ -17,12 +17,13 @@ use crate::canonical_scene::store::schema::geometry::{
     GEOMETRY_ATTRIBUTE_FIELD_COUNT, GEOMETRY_LOGICAL_MESH_FIELD_COUNT,
     GEOMETRY_MESH_INSTANCE_FIELD_COUNT, GEOMETRY_NORMALIZATION_NONE, GEOMETRY_PAYLOAD_DENSE,
     GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32,
-    GEOMETRY_SCALAR_U32, GeometryAttributeTableSchema, GeometryF32ValuesSchema,
-    GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
+    GEOMETRY_SCALAR_I32, GEOMETRY_SCALAR_U32, GeometryAttributeSemanticNameSchema,
+    GeometryAttributeTableSchema, GeometryF32ValuesSchema, GeometryI32ValuesSchema,
+    GeometryLogicalMeshNameSchema, GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
     GeometryPolygonBoundariesSchema, GeometryPrimitiveIndicesSchema, GeometryPrimitiveTableSchema,
-    GeometrySparseF32DefaultsSchema, GeometrySparseIndicesSchema, GeometrySparseU32DefaultsSchema,
-    GeometryU32ValuesSchema, encode_geometry_domain, encode_geometry_semantic,
-    encode_geometry_topology,
+    GeometrySparseF32DefaultsSchema, GeometrySparseI32DefaultsSchema, GeometrySparseIndicesSchema,
+    GeometrySparseU32DefaultsSchema, GeometryU32ValuesSchema, encode_geometry_domain,
+    encode_geometry_semantic, encode_geometry_topology,
 };
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
@@ -31,20 +32,28 @@ use crate::canonical_scene::store::schema::{
 };
 
 use super::NodeSceneBuildFaults;
-use super::{checked_validation_work_sum, optional_record_validation_work, record_validation_work};
+use super::{
+    checked_validation_work_sum, optional_record_validation_work, optional_utf8_validation_work,
+    record_validation_work,
+};
 
 pub(super) struct GeometryMaterializationPlans {
+    logical_mesh_names: Option<Utf8Plan>,
+    attribute_semantic_names: Option<Utf8Plan>,
     logical_meshes: Option<RecordPlan>,
     primitives: Option<RecordPlan>,
     attributes: Option<RecordPlan>,
     mesh_instances: Option<RecordPlan>,
     directory: RecordPlan,
     logical_mesh_count: u32,
+    logical_mesh_name_byte_count: u32,
+    attribute_semantic_name_byte_count: u32,
     primitive_count: u32,
     attribute_count: u32,
     mesh_instance_count: u32,
     f32_scalar_count: u64,
     u32_scalar_count: u64,
+    i32_scalar_count: u64,
     payload_block_count: u32,
     canonical_block_count: usize,
 }
@@ -52,13 +61,18 @@ pub(super) struct GeometryMaterializationPlans {
 impl GeometryMaterializationPlans {
     pub(super) fn new<R>(batch: &ValidatedGeometryBatch<'_, R>) -> Result<Self, StorePlanError> {
         let logical_mesh_count = batch.logical_mesh_count();
+        let logical_mesh_name_byte_count = batch.logical_mesh_name_byte_count();
+        let attribute_semantic_name_byte_count = batch.attribute_semantic_name_byte_count();
         let primitive_count = batch.primitive_count();
         let attribute_count = batch.attribute_count();
         let mesh_instance_count = batch.mesh_instance_count();
         let f32_scalar_count = batch.f32_scalar_count();
         let u32_scalar_count = batch.u32_scalar_count();
+        let i32_scalar_count = batch.i32_scalar_count();
         let logical_meshes =
             record_plan_if_nonempty(logical_mesh_count, GEOMETRY_LOGICAL_MESH_FIELD_COUNT)?;
+        let logical_mesh_names = utf8_plan_if_nonempty(logical_mesh_name_byte_count)?;
+        let attribute_semantic_names = utf8_plan_if_nonempty(attribute_semantic_name_byte_count)?;
         let primitives = record_plan_if_nonempty(primitive_count, GEOMETRY_PRIMITIVE_FIELD_COUNT)?;
         let attributes = record_plan_if_nonempty(attribute_count, GEOMETRY_ATTRIBUTE_FIELD_COUNT)?;
         let mesh_instances =
@@ -73,6 +87,12 @@ impl GeometryMaterializationPlans {
         .filter(|present| *present)
         .count();
         let payload_block_count = batch.payload_block_count();
+        if (logical_mesh_name_byte_count != 0) != logical_mesh_names.is_some() {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
+        if (attribute_semantic_name_byte_count != 0) != attribute_semantic_names.is_some() {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
         let canonical_block_count = 1_usize
             .checked_add(table_block_count)
             .and_then(|count| {
@@ -82,17 +102,22 @@ impl GeometryMaterializationPlans {
             })
             .ok_or(StorePlanError::SizeOverflow)?;
         Ok(Self {
+            logical_mesh_names,
+            attribute_semantic_names,
             logical_meshes,
             primitives,
             attributes,
             mesh_instances,
             directory: RecordPlan::new(1, SCENE_GEOMETRY_DIRECTORY_FIELD_COUNT)?,
             logical_mesh_count,
+            logical_mesh_name_byte_count,
+            attribute_semantic_name_byte_count,
             primitive_count,
             attribute_count,
             mesh_instance_count,
             f32_scalar_count,
             u32_scalar_count,
+            i32_scalar_count,
             payload_block_count,
             canonical_block_count,
         })
@@ -104,6 +129,14 @@ impl GeometryMaterializationPlans {
 
     pub(super) const fn logical_mesh_count(&self) -> u32 {
         self.logical_mesh_count
+    }
+
+    pub(super) const fn logical_mesh_name_byte_count(&self) -> u32 {
+        self.logical_mesh_name_byte_count
+    }
+
+    pub(super) const fn attribute_semantic_name_byte_count(&self) -> u32 {
+        self.attribute_semantic_name_byte_count
     }
 
     pub(super) const fn primitive_count(&self) -> u32 {
@@ -126,6 +159,9 @@ impl GeometryMaterializationPlans {
         checked_validation_work_sum([
             self.f32_scalar_count,
             self.u32_scalar_count,
+            self.i32_scalar_count,
+            optional_utf8_validation_work(self.logical_mesh_names)?,
+            optional_utf8_validation_work(self.attribute_semantic_names)?,
             optional_record_validation_work(self.logical_meshes)?,
             optional_record_validation_work(self.primitives)?,
             optional_record_validation_work(self.attributes)?,
@@ -153,6 +189,7 @@ enum AttributeValuesRef {
     Absent,
     F32(CanonicalBlockRef<GeometryF32ValuesSchema>),
     U32(CanonicalBlockRef<GeometryU32ValuesSchema>),
+    I32(CanonicalBlockRef<GeometryI32ValuesSchema>),
 }
 
 #[derive(Clone, Copy)]
@@ -160,6 +197,7 @@ enum AttributeDefaultRef {
     Absent,
     F32(CanonicalBlockRef<GeometrySparseF32DefaultsSchema>),
     U32(CanonicalBlockRef<GeometrySparseU32DefaultsSchema>),
+    I32(CanonicalBlockRef<GeometrySparseI32DefaultsSchema>),
 }
 
 #[derive(Clone, Copy)]
@@ -328,6 +366,16 @@ fn record_plan_if_nonempty(
     }
 }
 
+fn utf8_plan_if_nonempty(count: u32) -> Result<Option<Utf8Plan>, StorePlanError> {
+    if count == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(Utf8Plan::new(
+            usize::try_from(count).map_err(|_| StorePlanError::SizeOverflow)?,
+        )?))
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct GeometryTableRefs {
     pub(in crate::canonical_scene::store) logical_meshes:
@@ -341,10 +389,19 @@ pub(in crate::canonical_scene::store) struct GeometryTableRefs {
 }
 
 #[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct GeometryPayloadRefs {
+    pub(in crate::canonical_scene::store) logical_mesh_names:
+        Option<CanonicalBlockRef<GeometryLogicalMeshNameSchema>>,
+    pub(in crate::canonical_scene::store) attribute_semantic_names:
+        Option<CanonicalBlockRef<GeometryAttributeSemanticNameSchema>>,
+}
+
+#[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct RetainedGeometryRefs {
     pub(in crate::canonical_scene::store) directory:
         CanonicalBlockRef<SceneGeometryDirectorySchema>,
     pub(in crate::canonical_scene::store) tables: GeometryTableRefs,
+    pub(in crate::canonical_scene::store) payloads: GeometryPayloadRefs,
 }
 
 impl RetainedGeometryRefs {
@@ -362,6 +419,18 @@ impl RetainedGeometryRefs {
         self,
     ) -> Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>> {
         self.tables.primitives
+    }
+
+    pub(super) const fn logical_mesh_names(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryLogicalMeshNameSchema>> {
+        self.payloads.logical_mesh_names
+    }
+
+    pub(super) const fn attribute_semantic_names(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryAttributeSemanticNameSchema>> {
+        self.payloads.attribute_semantic_names
     }
 
     pub(super) const fn mesh_instances(
@@ -388,12 +457,22 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    let logical_mesh_names = match plans.logical_mesh_names {
+        Some(plan) => Some(retain_logical_mesh_names(lane, plan, batch, failure)?),
+        None => None,
+    };
+    let attribute_semantic_names = match plans.attribute_semantic_names {
+        Some(plan) => Some(retain_attribute_semantic_names(lane, plan, batch, failure)?),
+        None => None,
+    };
     let primitive_payload_blocks =
         retain_primitive_leaves(lane, batch, &mut scratch.primitive_refs, failure)?;
     let attribute_payload_blocks =
         retain_attribute_leaves(lane, batch, &mut scratch.attribute_refs, faults, failure)?;
     let payload_block_count = primitive_payload_blocks
         .checked_add(attribute_payload_blocks)
+        .and_then(|count| count.checked_add(u32::from(logical_mesh_names.is_some())))
+        .and_then(|count| count.checked_add(u32::from(attribute_semantic_names.is_some())))
         .ok_or(StoreRuntimeError::Build(failure))?;
     if payload_block_count != batch.payload_block_count() {
         return Err(StoreRuntimeError::Build(failure));
@@ -405,6 +484,7 @@ where
             plan,
             batch,
             &scratch.attribute_refs,
+            attribute_semantic_names,
             failure,
         )?),
         None => None,
@@ -423,7 +503,12 @@ where
     };
     let logical_meshes = match plans.logical_meshes {
         Some(plan) => Some(retain_logical_mesh_table(
-            lane, plan, batch, primitives, failure,
+            lane,
+            plan,
+            batch,
+            primitives,
+            logical_mesh_names,
+            failure,
         )?),
         None => None,
     };
@@ -445,11 +530,86 @@ where
         attributes,
         mesh_instances,
     };
-    let directory = retain_geometry_directory(lane, plans, refs, failure)?;
+    let payloads = GeometryPayloadRefs {
+        logical_mesh_names,
+        attribute_semantic_names,
+    };
+    let directory = retain_geometry_directory(lane, plans, refs, payloads, failure)?;
     Ok(RetainedGeometryRefs {
         directory,
         tables: refs,
+        payloads,
     })
+}
+
+fn retain_logical_mesh_names<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
+    plan: Utf8Plan,
+    batch: &ValidatedGeometryBatch<'_, R>,
+    failure: StoreBuildError,
+) -> Result<CanonicalBlockRef<GeometryLogicalMeshNameSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_utf8(plan, GeometryLogicalMeshNameSchema, |control| {
+        let mut expected_offset = 0_u32;
+        for logical_mesh in batch.input().logical_meshes() {
+            match logical_mesh.name() {
+                Presence::Absent => {}
+                Presence::Present(name) => {
+                    let count = u32::try_from(name.len()).map_err(|_| failure)?;
+                    control.write_str(name)?;
+                    expected_offset = expected_offset.checked_add(count).ok_or(failure)?;
+                }
+            }
+        }
+        if expected_offset != batch.logical_mesh_name_byte_count() {
+            return Err(failure.into());
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
+}
+
+fn retain_attribute_semantic_names<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
+    plan: Utf8Plan,
+    batch: &ValidatedGeometryBatch<'_, R>,
+    failure: StoreBuildError,
+) -> Result<CanonicalBlockRef<GeometryAttributeSemanticNameSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_utf8(plan, GeometryAttributeSemanticNameSchema, |control| {
+        let mut expected_offset = 0_u32;
+        for attribute_index in 0..usize::try_from(batch.attribute_count()).map_err(|_| failure)? {
+            let attribute = batch.attribute(attribute_index).ok_or(failure)?;
+            if let crate::attribute::AttributeSemantic::Custom(custom) = attribute.semantic() {
+                let name = custom.as_str();
+                let count = u32::try_from(name.len()).map_err(|_| failure)?;
+                if attribute.semantic_name_offset() != expected_offset
+                    || attribute.semantic_name_count() != count
+                {
+                    return Err(failure.into());
+                }
+                control.write_str(name)?;
+                expected_offset = expected_offset.checked_add(count).ok_or(failure)?;
+            } else if attribute.semantic_name_offset() != expected_offset
+                || attribute.semantic_name_count() != 0
+            {
+                return Err(failure.into());
+            }
+        }
+        if expected_offset != batch.attribute_semantic_name_byte_count() {
+            return Err(failure.into());
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
 }
 
 fn retain_primitive_leaves<'lane, O, PP, U, L, R>(
@@ -554,6 +714,16 @@ where
                     record_payload_block(&mut payload_block_count, failure)?;
                 }
             }
+            GeometryAttributePayloadAuthoring::DenseI32 { values, .. } => {
+                if !values.is_empty() {
+                    target.values = AttributeValuesRef::I32(retain_i32_sequence(
+                        lane,
+                        values,
+                        GeometryI32ValuesSchema,
+                    )?);
+                    record_payload_block(&mut payload_block_count, failure)?;
+                }
+            }
             GeometryAttributePayloadAuthoring::SparseF32 {
                 indices,
                 values,
@@ -618,6 +788,37 @@ where
                     record_payload_block(&mut payload_block_count, failure)?;
                 }
             }
+            GeometryAttributePayloadAuthoring::SparseI32 {
+                indices,
+                values,
+                default,
+                ..
+            } => {
+                if !values.is_empty() {
+                    target.values = AttributeValuesRef::I32(retain_i32_sequence(
+                        lane,
+                        values,
+                        GeometryI32ValuesSchema,
+                    )?);
+                    record_payload_block(&mut payload_block_count, failure)?;
+                }
+                if !indices.is_empty() {
+                    target.sparse_indices = Some(retain_u32_sequence(
+                        lane,
+                        indices,
+                        GeometrySparseIndicesSchema,
+                    )?);
+                    record_payload_block(&mut payload_block_count, failure)?;
+                }
+                if !default.is_empty() {
+                    target.sparse_default = AttributeDefaultRef::I32(retain_i32_sequence(
+                        lane,
+                        default,
+                        GeometrySparseI32DefaultsSchema,
+                    )?);
+                    record_payload_block(&mut payload_block_count, failure)?;
+                }
+            }
         }
     }
     Ok(payload_block_count)
@@ -671,6 +872,22 @@ where
     .map(CanonicalBlockRef::from_store)
 }
 
+fn retain_i32_sequence<'lane, O, PP, U, L, Tag>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
+    values: &[i32],
+    tag: Tag,
+) -> Result<CanonicalBlockRef<Tag>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    Tag: CanonicalSchema<StoreKind = ScalarSequence<i32>>,
+{
+    let plan = SequencePlan::<i32>::new(values.len()).map_err(StoreRuntimeError::Plan)?;
+    lane.try_retain_sequence(plan, tag, |control| control.extend_from_slice(values))
+        .map(CanonicalBlockRef::from_store)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn retain_projected_f32_sequence<'lane, O, PP, U, L>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
@@ -712,6 +929,7 @@ fn retain_attribute_table<'lane, O, PP, U, L, R>(
     plan: RecordPlan,
     batch: &ValidatedGeometryBatch<'_, R>,
     refs: &[AttributeLeafRefs],
+    attribute_semantic_names: Option<CanonicalBlockRef<GeometryAttributeSemanticNameSchema>>,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<GeometryAttributeTableSchema>, StoreRuntimeError>
 where
@@ -730,6 +948,7 @@ where
             let scalar_kind = match attribute.scalar_kind() {
                 GeometryAttributeScalarKind::F32 => GEOMETRY_SCALAR_F32,
                 GeometryAttributeScalarKind::U32 => GEOMETRY_SCALAR_U32,
+                GeometryAttributeScalarKind::I32 => GEOMETRY_SCALAR_I32,
             };
             let payload_kind = match attribute.payload_kind() {
                 GeometryAttributePayloadKind::Dense => GEOMETRY_PAYLOAD_DENSE,
@@ -755,6 +974,9 @@ where
                     AttributeValuesRef::U32(reference) => {
                         row.write_sequence_ref(reference.into_store())?;
                     }
+                    AttributeValuesRef::I32(reference) => {
+                        row.write_sequence_ref(reference.into_store())?;
+                    }
                 }
                 match payload_refs.sparse_indices {
                     Some(reference) => row.write_sequence_ref(reference.into_store())?,
@@ -768,8 +990,22 @@ where
                     AttributeDefaultRef::U32(reference) => {
                         row.write_sequence_ref(reference.into_store())?;
                     }
+                    AttributeDefaultRef::I32(reference) => {
+                        row.write_sequence_ref(reference.into_store())?;
+                    }
                 }
-                Ok(())
+                row.write_scalar(attribute.semantic_name_offset())?;
+                row.write_scalar(attribute.semantic_name_count())?;
+                write_optional_utf8_ref(
+                    row,
+                    attribute.semantic_name_count(),
+                    if attribute.semantic_name_count() == 0 {
+                        None
+                    } else {
+                        attribute_semantic_names
+                    },
+                    failure,
+                )
             })?;
         }
         Ok(())
@@ -862,6 +1098,7 @@ fn retain_logical_mesh_table<'lane, O, PP, U, L, R>(
     plan: RecordPlan,
     batch: &ValidatedGeometryBatch<'_, R>,
     primitives: Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>>,
+    logical_mesh_names: Option<CanonicalBlockRef<GeometryLogicalMeshNameSchema>>,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<GeometryLogicalMeshTableSchema>, StoreRuntimeError>
 where
@@ -873,15 +1110,35 @@ where
     let logical_meshes = input.logical_meshes();
     lane.try_retain_records(plan, GeometryLogicalMeshTableSchema, |control| {
         let primitive_table = primitives.ok_or(failure)?;
+        let mut name_offset = 0_u32;
         for (logical_mesh_index, logical_mesh) in logical_meshes.iter().copied().enumerate() {
             let logical_mesh_id = u32::try_from(logical_mesh_index).map_err(|_| failure)?;
             let range = logical_mesh.primitives();
+            let (name_presence, name_count, name_reference) = match logical_mesh.name() {
+                Presence::Absent => (PRESENCE_ABSENT, 0, None),
+                Presence::Present(name) => {
+                    let count = u32::try_from(name.len()).map_err(|_| failure)?;
+                    (
+                        PRESENCE_PRESENT,
+                        count,
+                        if count == 0 { None } else { logical_mesh_names },
+                    )
+                }
+            };
             control.write_row(|row| {
                 row.write_scalar(logical_mesh_id)?;
                 row.write_scalar(range.offset())?;
                 row.write_scalar(range.count())?;
-                row.write_record_ref(primitive_table.into_store())
+                row.write_record_ref(primitive_table.into_store())?;
+                row.write_scalar(name_presence)?;
+                row.write_scalar(name_offset)?;
+                row.write_scalar(name_count)?;
+                write_optional_utf8_ref(row, name_count, name_reference, failure)
             })?;
+            name_offset = name_offset.checked_add(name_count).ok_or(failure)?;
+        }
+        if name_offset != batch.logical_mesh_name_byte_count() {
+            return Err(failure.into());
         }
         Ok(())
     })
@@ -929,6 +1186,7 @@ fn retain_geometry_directory<'lane, O, PP, U, L>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plans: &GeometryMaterializationPlans,
     refs: GeometryTableRefs,
+    payloads: GeometryPayloadRefs,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<SceneGeometryDirectorySchema>, StoreRuntimeError>
 where
@@ -943,10 +1201,42 @@ where
             write_optional_table_ref(row, plans.primitive_count, refs.primitives, failure)?;
             write_optional_table_ref(row, plans.attribute_count, refs.attributes, failure)?;
             write_optional_table_ref(row, plans.mesh_instance_count, refs.mesh_instances, failure)?;
-            Ok(())
+            row.write_scalar(plans.logical_mesh_name_byte_count)?;
+            write_optional_utf8_ref(
+                row,
+                plans.logical_mesh_name_byte_count,
+                payloads.logical_mesh_names,
+                failure,
+            )?;
+            row.write_scalar(plans.attribute_semantic_name_byte_count)?;
+            write_optional_utf8_ref(
+                row,
+                plans.attribute_semantic_name_byte_count,
+                payloads.attribute_semantic_names,
+                failure,
+            )
         })
     })
     .map(CanonicalBlockRef::from_store)
+}
+
+fn write_optional_utf8_ref<Tag>(
+    row: &mut CanonicalRecordBuildRow<'_, '_>,
+    count: u32,
+    reference: Option<CanonicalBlockRef<Tag>>,
+    failure: StoreBuildError,
+) -> Result<(), StoreControlledError>
+where
+    Tag: CanonicalSchema<StoreKind = Utf8Block>,
+{
+    if count == 0 {
+        if reference.is_some() {
+            return Err(failure.into());
+        }
+        row.write_scalar(0_u8)
+    } else {
+        row.write_utf8_ref(reference.ok_or(failure)?.into_store())
+    }
 }
 
 fn write_optional_table_ref<Tag>(

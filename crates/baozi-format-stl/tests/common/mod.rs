@@ -6,7 +6,8 @@ use baozi_import::{
     FormatFailureDetailValue, FormatFailureEnvelope, FormatSelection, ImportCause,
     ImportConfigOverlay, ImportFailure, ImportOperationControl, ImportReport, ImportRequest,
     ImportRequestLayer, ImportResult, OptionCompileLimits, PreparedImportRequest,
-    RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, import_asset,
+    RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot,
+    SceneSnapshotError, SceneSnapshotLimits, import_asset,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::error::Error;
@@ -59,6 +60,25 @@ pub fn import_bytes(
         Ok(report) => Ok(report),
         Err(failure) => Err(Box::new(failure)),
     }
+}
+
+pub fn scene_snapshot(report: &ImportReport) -> Result<SceneSnapshot, SceneSnapshotError> {
+    let limits = SceneSnapshotLimits::try_new(16 * 1024, 64, 1_000_000)?;
+    let snapshot = report.scene().capture_snapshot(limits)?;
+    assert!(!snapshot.preview_bytes_truncated());
+    assert!(!snapshot.preview_items_truncated());
+    Ok(snapshot)
+}
+
+pub fn snapshot_line<'snapshot>(
+    snapshot: &'snapshot SceneSnapshot,
+    prefix: &str,
+) -> &'snapshot str {
+    snapshot
+        .preview()
+        .lines()
+        .find(|line| line.trim_start().starts_with(prefix))
+        .unwrap_or_else(|| panic!("missing canonical snapshot line: {prefix}"))
 }
 
 pub struct TestImportOutcome<T> {

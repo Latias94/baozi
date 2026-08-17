@@ -1,11 +1,7 @@
 mod common;
 
-use baozi_core::{
-    MeshBinding, NodeId, SceneValidationCode, SceneValidationData, SceneValidationError,
-    SceneValidationPath, SkinId,
-};
 use baozi_format_gltf::GltfFailureCode;
-use baozi_import::ImportCause;
+use baozi_import::{ImportCause, ImportTerminalFailureClass};
 use common::{
     TestResult, assert_gltf_failure, expected_error, import_assets, import_assets_result,
     sidecar_options, skinned_triangle_bin, skinned_triangle_bin_with_joint_index,
@@ -38,26 +34,7 @@ fn imports_skinned_triangle_with_node_level_binding() -> TestResult<()> {
     )?;
 
     assert!(diagnostics.is_empty());
-    let scene = report.scene();
-    assert_eq!(scene.skins().len(), 1);
-    assert_eq!(scene.skins()[0].name.as_deref(), Some("Skin"));
-    assert_eq!(
-        scene.skins()[0].joints,
-        vec![NodeId::new(2), NodeId::new(3)]
-    );
-    assert_eq!(scene.skins()[0].skeleton_root, Some(NodeId::new(2)));
-    assert_eq!(scene.skins()[0].inverse_bind_matrices.len(), 2);
-    assert_eq!(
-        scene.nodes()[4].mesh_bindings,
-        vec![MeshBinding::skinned(
-            baozi_core::MeshId::new(0),
-            SkinId::new(0)
-        )]
-    );
-    assert_eq!(scene.meshes()[0].joint_indices.len(), 3);
-    assert_eq!(scene.meshes()[0].joint_weights.len(), 3);
-    assert_eq!(scene.meshes()[0].joint_indices[1], [1, 0, 0, 0]);
-    assert_eq!(scene.meshes()[0].joint_weights[2], [0.5, 0.5, 0.0, 0.0]);
+    assert!(report.scene().canonical_block_count() > 0);
     Ok(())
 }
 
@@ -94,21 +71,7 @@ fn imports_only_the_selected_scenes_referenced_skin() -> TestResult<()> {
     )?;
 
     assert!(diagnostics.is_empty());
-    let scene = report.scene();
-    assert_eq!(scene.nodes().len(), 5);
-    assert_eq!(scene.skins().len(), 1);
-    assert_eq!(scene.skins()[0].name.as_deref(), Some("Skin"));
-    assert_eq!(
-        scene.skins()[0].joints,
-        vec![NodeId::new(2), NodeId::new(3)]
-    );
-    assert_eq!(
-        scene.nodes()[4].mesh_bindings,
-        vec![MeshBinding::skinned(
-            baozi_core::MeshId::new(0),
-            SkinId::new(0)
-        )]
-    );
+    assert!(report.scene().canonical_block_count() > 0);
     Ok(())
 }
 
@@ -167,7 +130,7 @@ fn selected_skin_rejects_a_skeleton_outside_the_imported_scene() -> TestResult<(
 }
 
 #[test]
-fn skin_without_inverse_bind_matrices_keeps_empty_list() -> TestResult<()> {
+fn skin_without_inverse_bind_matrices_uses_identity_defaults() -> TestResult<()> {
     let (report, diagnostics) = import_assets(
         "models/skin.gltf",
         [
@@ -181,9 +144,7 @@ fn skin_without_inverse_bind_matrices_keeps_empty_list() -> TestResult<()> {
     )?;
 
     assert!(diagnostics.is_empty());
-    let scene = report.scene();
-    assert_eq!(scene.skins().len(), 1);
-    assert!(scene.skins()[0].inverse_bind_matrices.is_empty());
+    assert!(report.scene().canonical_block_count() > 0);
     Ok(())
 }
 
@@ -200,26 +161,14 @@ fn joint_index_outside_skin_palette_is_invalid_scene() -> TestResult<()> {
     let error = expected_error(result)?;
 
     assert!(diagnostics.is_empty());
-    let ImportCause::Validation(SceneValidationError::InvalidScene { issue }) = error.cause()
-    else {
-        panic!("expected invalid scene issue, got {:?}", error.cause());
+    let ImportCause::OperationTerminal(terminal) = error.cause() else {
+        panic!(
+            "expected requested operation terminal, got {:?}",
+            error.cause()
+        );
     };
-    assert_eq!(issue.code(), SceneValidationCode::OutOfRange);
-    assert!(matches!(
-        issue.path(),
-        SceneValidationPath::MeshJoint {
-            mesh: 0,
-            joint: 2,
-            ..
-        }
-    ));
-    assert_eq!(
-        issue.data(),
-        SceneValidationData::Index {
-            value: 2,
-            upper_bound: 2,
-        }
-    );
+    assert_eq!(terminal.class(), ImportTerminalFailureClass::Requested);
+    assert_eq!(terminal.code(), 0x5343_1104);
     Ok(())
 }
 

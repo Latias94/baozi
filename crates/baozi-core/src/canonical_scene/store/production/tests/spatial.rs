@@ -29,7 +29,7 @@ fn node(
     parent: Presence<NodeParent>,
     camera: Presence<CameraLocalId>,
     light: Presence<LightLocalId>,
-) -> NodeAuthoringNode {
+) -> NodeAuthoringNode<'static> {
     NodeAuthoringNode::new(parent, AuthoredTransform::identity_trs(), camera, light)
 }
 

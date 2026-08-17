@@ -1,13 +1,16 @@
-use baozi_core::{FormatId, MeshBinding, MeshId, SceneDraft};
+mod support;
+
+use baozi_core::FormatId;
 use baozi_import::{
     CapabilityStatus, CauseOwner, ConformancePolicy, DetectionOutcome, DetectionResult,
     DetectionScope, DiagnosticByteRange, DiagnosticCode, FormatCapability, FormatDescriptor,
     FormatEncoding, FormatFailureDetailSink, FormatFailureEvidenceProducer, FormatImporter,
     ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossDisposition,
     ImportLossKind, ImportLossSubject, ImportOperationControl, ImportProgressPhase,
-    ImportProgressUnit, ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy,
-    OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint,
-    RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause,
+    ImportProgressUnit, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
+    ImportTerminalCause, ImportTerminalFailureClass, LossPolicy, OptionCompileLimits, ParseResult,
+    ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
     TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
     TextProfile, TextSourceEncoding, import_bytes,
 };
@@ -25,7 +28,7 @@ const RECOVERY_CODE: &str = "test.recovered_token";
 enum RecoveryExit {
     Success,
     FormatFailure,
-    ValidationFailure,
+    AuthoringRejection,
     Cancellation,
 }
 
@@ -66,13 +69,9 @@ impl FormatImporter for RecoveryImporter {
         )?;
 
         match self.exit {
-            RecoveryExit::Success => scope.scene_builder()?.finish_draft(),
+            RecoveryExit::Success => support::submit_minimal_scene(scope),
             RecoveryExit::FormatFailure => Err(scope.format_failure(TestFormatFailure)),
-            RecoveryExit::ValidationFailure => {
-                let mut builder = scope.scene_builder()?;
-                builder.add_node_mesh_binding(builder.root(), MeshBinding::new(MeshId::new(99)))?;
-                builder.finish_draft()
-            }
+            RecoveryExit::AuthoringRejection => support::submit_invalid_parent_scene(scope),
             RecoveryExit::Cancellation => {
                 self.cancellation
                     .as_ref()
@@ -291,9 +290,8 @@ fn final_observer_cancellation_rolls_back_output_and_retains_recovery_evidence()
         .dimension(ImportDimension::CanonicalOutputBytes)
         .unwrap();
     assert_eq!(output.committed(), 0);
-    assert_eq!(output.pending_publication(), 0);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
-    assert!(failure.finalization_cause().is_none());
 }
 
 #[test]
@@ -343,10 +341,10 @@ fn common_policies_reject_recovery_after_retaining_the_typed_disposition() {
 }
 
 #[test]
-fn later_format_validation_and_cancellation_failures_retain_recovery_evidence() {
+fn later_format_authoring_rejection_and_cancellation_retain_recovery_evidence() {
     for exit in [
         RecoveryExit::FormatFailure,
-        RecoveryExit::ValidationFailure,
+        RecoveryExit::AuthoringRejection,
         RecoveryExit::Cancellation,
     ] {
         let cancellation = (exit == RecoveryExit::Cancellation).then(CancellationToken::new);
@@ -363,8 +361,11 @@ fn later_format_validation_and_cancellation_failures_retain_recovery_evidence() 
         assert_eq!(failure.diagnostics().len(), 1);
         match (exit, failure.cause()) {
             (RecoveryExit::FormatFailure, ImportCause::Format(_))
-            | (RecoveryExit::ValidationFailure, ImportCause::Validation(_))
             | (RecoveryExit::Cancellation, ImportCause::Scope(_)) => {}
+            (RecoveryExit::AuthoringRejection, ImportCause::OperationTerminal(terminal))
+                if terminal.class() == ImportTerminalFailureClass::Requested
+                    && failure.ledger().terminal_cause()
+                        == ImportTerminalCause::Failure(*terminal) => {}
             _ => panic!("{exit:?}: wrong terminal cause: {:?}", failure.cause()),
         }
         assert_eq!(failure.ledger().current_live_bytes(), 0);

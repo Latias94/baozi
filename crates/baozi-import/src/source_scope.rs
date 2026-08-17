@@ -1,6 +1,6 @@
 use crate::error::ScopeAbortCause;
 use crate::ledger::ImportDimension;
-use crate::metered_storage::{AccountedReservationVec, AccountedVec};
+use crate::metered_storage::AccountedVec;
 use crate::scope::{
     ImportStorageClass, METERED_COPY_POLL_INTERVAL, ParseFailure, ParseResult, ParseScope,
 };
@@ -441,27 +441,6 @@ impl LiveSourceScopeRecord {
         self.collapsed_detail_bytes
     }
 
-    pub(crate) fn publication_reservation_count(&self) -> Option<usize> {
-        self.detail_indexes
-            .capacity_reservation_count()
-            .checked_add(self.detail_bytes.capacity_reservation_count())
-    }
-
-    pub(crate) fn move_publication_reservations_into(
-        &mut self,
-        target: &mut AccountedReservationVec,
-    ) {
-        let additional = self
-            .publication_reservation_count()
-            .expect("source-scope publication reservation count must fit usize");
-        assert!(
-            target.has_slots(additional),
-            "source-scope publication slots must be admitted before moving tokens"
-        );
-        self.detail_indexes.move_capacity_reservation_into(target);
-        self.detail_bytes.move_capacity_reservation_into(target);
-    }
-
     pub(crate) fn into_terminal(self) -> SourceScopeRecord {
         let detail_indexes = self.detail_indexes.into_terminal().into_values();
         let detail_bytes = self.detail_bytes.into_terminal().into_values();
@@ -502,7 +481,8 @@ mod tests {
         OptionCompileLimits, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
         ResourceLimits, ResourceLimitsOverlay,
     };
-    use baozi_core::{FormatId, SceneDraft};
+    use baozi_core::__canonical_import::SceneDraft as CanonicalSceneDraft;
+    use baozi_core::FormatId;
     use baozi_io::AssetPath;
 
     struct CollapsedAllocationFailureImporter;
@@ -529,7 +509,7 @@ mod tests {
             Ok(DetectionOutcome::Match(ReadConfidence::Certain))
         }
 
-        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<CanonicalSceneDraft> {
             let mut builder = scope.source_scope_builder()?;
             builder.observe(
                 SourceScopeEntityKind::Scene,

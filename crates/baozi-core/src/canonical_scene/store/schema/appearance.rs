@@ -19,13 +19,13 @@ use crate::math::{Color, Vec2, Vec3};
 
 use super::CanonicalSchema;
 
-pub(in super::super) const APPEARANCE_SCHEMA_REVISION: u32 = 1;
+pub(in super::super) const APPEARANCE_SCHEMA_REVISION: u32 = 2;
 
-pub(in super::super) const APPEARANCE_DIRECTORY_FIELD_COUNT: usize = 21;
+pub(in super::super) const APPEARANCE_DIRECTORY_FIELD_COUNT: usize = 23;
 pub(in super::super) const APPEARANCE_IMAGE_FIELD_COUNT: usize = 10;
 pub(in super::super) const APPEARANCE_SAMPLER_FIELD_COUNT: usize = 7;
 pub(in super::super) const APPEARANCE_TEXTURE_FIELD_COUNT: usize = 5;
-pub(in super::super) const APPEARANCE_MATERIAL_FIELD_COUNT: usize = 14;
+pub(in super::super) const APPEARANCE_MATERIAL_FIELD_COUNT: usize = 18;
 pub(in super::super) const APPEARANCE_BINDING_FIELD_COUNT: usize = 19;
 pub(in super::super) const APPEARANCE_MATERIAL_FACTOR_STRIDE: usize = 39;
 pub(in super::super) const APPEARANCE_BINDING_SEMANTIC_STRIDE: usize = 6;
@@ -73,6 +73,7 @@ pub(in super::super) const APPEARANCE_SHADING_PHONG: u8 = 2;
 pub(in super::super) const APPEARANCE_SHADING_BLINN_PHONG: u8 = 3;
 pub(in super::super) const APPEARANCE_SHADING_PBR_METALLIC_ROUGHNESS: u8 = 4;
 pub(in super::super) const APPEARANCE_SHADING_PBR_SPECULAR_GLOSSINESS: u8 = 5;
+pub(in super::super) const APPEARANCE_SHADING_UNSPECIFIED: u8 = 6;
 
 pub(in super::super) const APPEARANCE_ALPHA_OPAQUE: u8 = 0;
 pub(in super::super) const APPEARANCE_ALPHA_MASK: u8 = 1;
@@ -172,6 +173,7 @@ pub(in super::super) const fn decode_appearance_texture_role(tag: u8) -> Option<
 
 pub(in super::super) const fn encode_appearance_shading_model(model: &ShadingModel) -> Option<u8> {
     match model {
+        ShadingModel::Unspecified => Some(APPEARANCE_SHADING_UNSPECIFIED),
         ShadingModel::Unlit => Some(APPEARANCE_SHADING_UNLIT),
         ShadingModel::Lambert => Some(APPEARANCE_SHADING_LAMBERT),
         ShadingModel::Phong => Some(APPEARANCE_SHADING_PHONG),
@@ -184,6 +186,7 @@ pub(in super::super) const fn encode_appearance_shading_model(model: &ShadingMod
 
 pub(in super::super) const fn decode_appearance_shading_model(tag: u8) -> Option<ShadingModel> {
     match tag {
+        APPEARANCE_SHADING_UNSPECIFIED => Some(ShadingModel::Unspecified),
         APPEARANCE_SHADING_UNLIT => Some(ShadingModel::Unlit),
         APPEARANCE_SHADING_LAMBERT => Some(ShadingModel::Lambert),
         APPEARANCE_SHADING_PHONG => Some(ShadingModel::Phong),
@@ -488,6 +491,8 @@ pub(in super::super) mod appearance_directory_field {
     pub(crate) const BINDING_SEMANTIC_SCALARS: usize = 18;
     pub(crate) const MATERIAL_FACTOR_SCALAR_COUNT: usize = 19;
     pub(crate) const MATERIAL_FACTOR_SCALARS: usize = 20;
+    pub(crate) const MATERIAL_NAME_BYTE_COUNT: usize = 21;
+    pub(crate) const MATERIAL_NAMES: usize = 22;
 }
 
 pub(in super::super) mod appearance_image_field {
@@ -536,6 +541,10 @@ pub(in super::super) mod appearance_material_field {
     pub(crate) const FACTOR_OFFSET: usize = 11;
     pub(crate) const FACTOR_COUNT: usize = 12;
     pub(crate) const FACTORS: usize = 13;
+    pub(crate) const NAME_PRESENCE: usize = 14;
+    pub(crate) const NAME_OFFSET: usize = 15;
+    pub(crate) const NAME_COUNT: usize = 16;
+    pub(crate) const NAMES: usize = 17;
 }
 
 pub(in super::super) mod appearance_binding_field {
@@ -639,6 +648,9 @@ pub(in super::super) struct AppearanceMediaTypeSchema;
 pub(in super::super) struct AppearanceSourceKeySchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(in super::super) struct AppearanceMaterialNameSchema;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in super::super) struct AppearanceBindingSemanticScalarSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -680,6 +692,10 @@ impl CanonicalSchema for AppearanceSourceKeySchema {
     type StoreKind = Utf8Block;
 }
 
+impl CanonicalSchema for AppearanceMaterialNameSchema {
+    type StoreKind = Utf8Block;
+}
+
 impl CanonicalSchema for AppearanceBindingSemanticScalarSchema {
     type StoreKind = ScalarSequence<f32>;
 }
@@ -704,6 +720,13 @@ mod tests {
                 decode_appearance_shading_model(tag).expect("built-in shading tag should decode");
             assert_eq!(encode_appearance_shading_model(&model), Some(tag));
         }
+        let unspecified = decode_appearance_shading_model(APPEARANCE_SHADING_UNSPECIFIED)
+            .expect("unspecified shading tag should decode");
+        assert_eq!(unspecified, ShadingModel::Unspecified);
+        assert_eq!(
+            encode_appearance_shading_model(&unspecified),
+            Some(APPEARANCE_SHADING_UNSPECIFIED)
+        );
         for tag in APPEARANCE_CHANNEL_RED..=APPEARANCE_CHANNEL_ONE {
             let channel = decode_appearance_channel(tag).expect("channel tag should decode");
             assert_eq!(encode_appearance_channel(channel), tag);

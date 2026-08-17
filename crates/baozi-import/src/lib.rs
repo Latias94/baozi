@@ -23,11 +23,44 @@ mod request_wire;
 mod scope;
 mod session;
 mod source_scope;
-#[allow(
-    dead_code,
-    reason = "the private retained-store host bootstrap precedes the atomic ImportSession cutover"
-)]
 mod store;
+
+pub use baozi_core::__canonical_import::{
+    SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
+};
+
+#[doc(hidden)]
+pub use baozi_core::__canonical_import::{
+    AlphaMode, AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
+    AnimationExtrapolationAuthoring, AnimationInterpolationAuthoring, AnimationTargetAuthoring,
+    AnimationTimeDomainAuthoring, AppearanceAuthoringBatch, AppearanceBuildError, AttributeDomain,
+    AttributeSemantic, AuthoredTransform, AuthoringRange, Axis, CameraAuthoring, CameraLocalId,
+    CameraProjection, Color, ColorInterpretation, ContentDigest, CustomAttributeSemantic,
+    DeformationAuthoringBatch, DigestAlgorithm, EntityName, EvidenceDigest, ExtensionMediaType,
+    ExtensionValueRef, FormatId, FrontFaceWinding, GeometryAttributeAuthoring,
+    GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, Handedness, ImageAuthoring,
+    ImageLocalId, InfluenceAuthoring, InfluenceRowsAuthoring, LegacyMaterialFactors,
+    LightAuthoring, LightAuthoringError, LightKind, LightLocalId, LineageAuthoringBatch,
+    LogicalMeshLocalId, LogicalMorphAuthoring, MAX_ENTITY_NAME_BYTES, Mat4, MaterialAuthoring,
+    MaterialBindingAuthoring, MaterialFactors, MaterialLocalId, MeshInstanceDeformationAuthoring,
+    MetadataAuthoringBatch, MetadataAuthoringEntry, MipmapFilter, MorphDeltaAuthoring,
+    MorphDeltaPayloadAuthoring, MorphDeltaSemantic, MorphTargetDefinitionAuthoring,
+    MorphTargetIdentity, NamespacedName, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
+    NodeParent, ObservedResourceAuthoring, OperationEvidenceSummary, OperationKind, OptionsDigest,
+    OwnerProvenanceAuthoring, PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, Presence,
+    PrimitiveDeformationAuthoring, PrimitiveMorphTargetAuthoring, ProfileAuthoringBatch,
+    ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, Quat,
+    ResourceIdentity, ResourceIdentityLocalId, ResourceSnapshotAuthoring, SamplerAuthoring,
+    SamplerLocalId, SamplerState, SceneAuthoringBatch, SceneDraft, SceneSpace, SessionOpaqueReason,
+    ShadingModel, SkinAuthoring, SkinLocalId, SkinMatrixSpaces, SourceDisplayName,
+    SourceIdentityAuthoring, SourceIdentityLocalId, SourceObjectKind, SourceObjectLocator,
+    SpatialAuthoringBatch, SupplementalPbrFactors, TangentBasisConvention,
+    TangentHandednessEncoding, TexelFilter, TextureAddressMode, TextureAuthoring,
+    TextureBlendOperation, TextureChannel, TextureChannelMapping, TextureChannelSwizzle,
+    TextureCoordinateSource, TextureLocalId, TextureRole, TextureSourceKey, TextureStrength,
+    TextureTransform, TransformConvention, UvOrigin, Vec2, Vec3,
+};
 
 pub use config::{
     ConformancePolicy, DetectionOptions, DetectionOptionsError, FormatSelection, ImportConfig,
@@ -37,9 +70,9 @@ pub use config::{
 };
 pub use dependency::{
     AuthorizedDependency, DenyDependencies, DependencyCacheDisposition, DependencyIdentity,
-    DependencyPolicyError, DependencyReference, DependencyRequirement, DependencyResolver,
-    DependencyRoleId, DependencyRoleIdError, DependencySnapshot, OptionalDependencyEvidence,
-    OptionalDependencyOutcome, SameAuthorityResolver,
+    DependencyOrigin, DependencyOutcome, DependencyPolicyError, DependencyReference,
+    DependencyRequirement, DependencyResolver, DependencyRoleId, DependencyRoleIdError,
+    DependencySnapshot, OptionalDependencyEvidence, SameAuthorityResolver,
 };
 pub use descriptor::{
     CapabilityStatus, DeclarationEvidenceAuthority, DescriptorError, FormatCapability,
@@ -65,13 +98,13 @@ pub use format::{
 };
 pub use ledger::{
     ImportDimension, ImportLedgerPhase, ImportLedgerSnapshot, ImportOperationControl,
-    ImportProgressPhase, ImportProgressUnit,
+    ImportProgressPhase, ImportProgressUnit, ImportTerminalCause, ImportTerminalFailure,
+    ImportTerminalFailureClass,
 };
 pub use limits::{ResourceLimits, ResourceLimitsOverlay};
 pub use loss::{ImportLossDisposition, ImportLossEvidence, ImportLossSubject};
 pub use metered_storage::{
-    MeteredDecodedText, MeteredMetadataMap, MeteredOpaqueAllowance, MeteredOrderedMap,
-    MeteredSceneVec, MeteredString, MeteredVec, PreparedSceneValue, SceneValueParts,
+    MeteredDecodedText, MeteredOpaqueAllowance, MeteredOrderedMap, MeteredString, MeteredVec,
 };
 pub use options::{
     CompiledFormatOptions, FormatOptionCodec, FormatOptionEnvelope, FormatOptionEnvelopeError,
@@ -95,9 +128,7 @@ pub use request_wire::{
     RequestWireError, RequestWireLimits, RequestWireScope, SerializedImportRequest,
 };
 pub use scope::{
-    CameraBuildConfig, ImportStorageClass, ImportWorkClass, ImportWorkScope, MaterialBuildConfig,
-    MeshBuildConfig, NodeBuildConfig, ParseFailure, ParseResult, ParseScope, ScopedSceneBuilder,
-    SkinBuildConfig, TextureBuildConfig, TextureSlotBuildConfig,
+    ImportStorageClass, ImportWorkClass, ImportWorkScope, ParseFailure, ParseResult, ParseScope,
 };
 pub use session::{ReadHint, import_asset, import_asset_with_resolver, import_bytes};
 pub use source_scope::{

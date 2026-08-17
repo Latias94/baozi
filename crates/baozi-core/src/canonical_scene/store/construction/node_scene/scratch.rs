@@ -25,8 +25,8 @@ use crate::canonical_scene::store::validation::{
     GeometryAttributeValidationScratch, GeometryCanonicalCounts,
     GeometryLogicalMeshValidationProjection, GeometryMeshInstanceValidationProjection,
     GeometryPrimitiveValidationProjection, GeometryPrimitiveValidationScratch,
-    GeometryValidationScratch, GeometryValidationScratchRequirements, NodeSceneValidationScratch,
-    ProfileMeteredCounts, ProfileMeteredScratch,
+    GeometryValidationScratch, GeometryValidationScratchRequirements, NodeNameValidationScratch,
+    NodeSceneValidationScratch, ProfileMeteredCounts, ProfileMeteredScratch,
 };
 
 use super::super::SceneConstructionOwner;
@@ -39,6 +39,7 @@ use super::{
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
     node_transform_kinds: CapacityPlan,
+    node_names: CapacityPlan,
     camera_placement_counts: CapacityPlan,
     light_placement_counts: CapacityPlan,
     appearance_image_media_counts: CapacityPlan,
@@ -148,6 +149,7 @@ impl NodeSceneValidationScratchPlan {
         )
         .ok_or(StorePlanError::SizeOverflow)?;
         let node_transform_kinds = scratch_capacity_plan::<u8>(node_count)?;
+        let node_names = scratch_capacity_plan::<NodeNameValidationScratch>(node_count)?;
         let camera_placement_counts = scratch_capacity_plan::<u32>(camera_count)?;
         let light_placement_counts = scratch_capacity_plan::<u32>(light_count)?;
         let appearance_image_media_counts =
@@ -268,6 +270,7 @@ impl NodeSceneValidationScratchPlan {
             scratch_capacity_plan::<f32>(profile_count(profile_counts.metadata_f32_count)?)?;
         let envelope_bytes = [
             node_transform_kinds,
+            node_names,
             camera_placement_counts,
             light_placement_counts,
             appearance_image_media_counts,
@@ -323,6 +326,7 @@ impl NodeSceneValidationScratchPlan {
         })?;
         let base_initialization_work = [
             node_count,
+            node_count,
             camera_count,
             light_count,
             palette_count,
@@ -376,6 +380,7 @@ impl NodeSceneValidationScratchPlan {
 
         Ok(Self {
             node_transform_kinds,
+            node_names,
             camera_placement_counts,
             light_placement_counts,
             appearance_image_media_counts,
@@ -492,6 +497,7 @@ pub(in crate::canonical_scene::store) struct ScopedNodeSceneValidationScratchOwn
 {
     // Storage must drop before the reservation that accounts for it.
     node_transform_kinds: Vec<u8>,
+    node_names: Vec<NodeNameValidationScratch>,
     camera_placement_counts: Vec<u32>,
     light_placement_counts: Vec<u32>,
     appearance_image_media_counts: Vec<u32>,
@@ -542,6 +548,7 @@ pub(in crate::canonical_scene::store) struct ScopedNodeSceneValidationScratchOwn
 
 pub(in crate::canonical_scene::store) struct NodeSceneMeteredValidationScratch<'scratch, 'session> {
     pub(in crate::canonical_scene::store) node_transform_kinds: &'scratch mut [u8],
+    pub(in crate::canonical_scene::store) node_names: &'scratch mut [NodeNameValidationScratch],
     pub(in crate::canonical_scene::store) camera_placement_counts: &'scratch mut [u32],
     pub(in crate::canonical_scene::store) light_placement_counts: &'scratch mut [u32],
     pub(in crate::canonical_scene::store) appearance: AppearanceValidationScratch<'scratch>,
@@ -583,6 +590,7 @@ where
         }
 
         let node_transform_kinds = allocate!(node_transform_kinds);
+        let node_names = allocate!(node_names);
         let camera_placement_counts = allocate!(camera_placement_counts);
         let light_placement_counts = allocate!(light_placement_counts);
         let appearance_image_media_counts = allocate!(appearance_image_media_counts);
@@ -632,6 +640,7 @@ where
 
         Ok(Self {
             node_transform_kinds,
+            node_names,
             camera_placement_counts,
             light_placement_counts,
             appearance_image_media_counts,
@@ -699,6 +708,7 @@ where
         }
 
         initialize!(node_transform_kinds, 0);
+        initialize!(node_names, NodeNameValidationScratch::EMPTY);
         initialize!(camera_placement_counts, 0);
         initialize!(light_placement_counts, 0);
         initialize!(appearance_image_media_counts, 0);
@@ -800,6 +810,7 @@ where
     ) -> NodeSceneMeteredValidationScratch<'_, 'session> {
         NodeSceneMeteredValidationScratch {
             node_transform_kinds: &mut self.node_transform_kinds,
+            node_names: &mut self.node_names,
             camera_placement_counts: &mut self.camera_placement_counts,
             light_placement_counts: &mut self.light_placement_counts,
             appearance: AppearanceValidationScratch::new(

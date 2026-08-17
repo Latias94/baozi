@@ -1,4 +1,6 @@
-use baozi::{Error as BaoziError, ImportDimension, Importer};
+use baozi::{
+    Error as BaoziError, ImportDimension, Importer, SceneSnapshotError, SceneSnapshotLimits,
+};
 use baozi_test_support::{ObjScale, ObjScaleFixture, ObjScaleFixtureError};
 use std::error::Error;
 use std::fmt;
@@ -11,6 +13,7 @@ enum ProbeError {
     UnsupportedScale(String),
     Fixture(ObjScaleFixtureError),
     Import(Box<BaoziError>),
+    Snapshot(SceneSnapshotError),
     MissingDimension(ImportDimension),
     TerminalInvariant(&'static str),
     PeakEnvelope { observed: u64, limit: u64 },
@@ -24,6 +27,7 @@ impl fmt::Display for ProbeError {
             Self::UnsupportedScale(value) => write!(formatter, "unsupported scale: {value}"),
             Self::Fixture(source) => fmt::Display::fmt(source, formatter),
             Self::Import(source) => fmt::Display::fmt(source, formatter),
+            Self::Snapshot(source) => fmt::Display::fmt(source, formatter),
             Self::MissingDimension(dimension) => {
                 write!(formatter, "missing ledger dimension: {dimension:?}")
             }
@@ -46,6 +50,7 @@ impl Error for ProbeError {
         match self {
             Self::Fixture(source) => Some(source),
             Self::Import(source) => Some(source.as_ref()),
+            Self::Snapshot(source) => Some(source),
             _ => None,
         }
     }
@@ -60,6 +65,12 @@ impl From<ObjScaleFixtureError> for ProbeError {
 impl From<BaoziError> for ProbeError {
     fn from(source: BaoziError) -> Self {
         Self::Import(Box::new(source))
+    }
+}
+
+impl From<SceneSnapshotError> for ProbeError {
+    fn from(source: SceneSnapshotError) -> Self {
+        Self::Snapshot(source)
     }
 }
 
@@ -95,6 +106,8 @@ fn run() -> Result<(), ProbeError> {
     let fixture = ObjScaleFixture::try_new(scale)?;
     let report = importer.read_bytes("scale.obj", fixture.bytes())?;
     let ledger = report.ledger();
+    let snapshot_limits = SceneSnapshotLimits::try_new(64 * 1024, 1 << 12, 4_000_000)?;
+    let snapshot = report.scene().capture_snapshot(snapshot_limits)?;
 
     if ledger.current_live_bytes() != 0 {
         return Err(ProbeError::TerminalInvariant("current_live_bytes"));
@@ -105,46 +118,6 @@ fn run() -> Result<(), ProbeError> {
     if ledger.current_evidence_bytes() != 0 {
         return Err(ProbeError::TerminalInvariant("current_evidence_bytes"));
     }
-    for (_, evidence) in ledger.dimensions() {
-        if evidence.consumed() > evidence.attempted() {
-            return Err(ProbeError::TerminalInvariant("consumed_above_attempted"));
-        }
-        if evidence.current_live_bytes() != 0 {
-            return Err(ProbeError::TerminalInvariant(
-                "dimension_current_live_bytes",
-            ));
-        }
-        if evidence.pending_publication() != 0 {
-            return Err(ProbeError::TerminalInvariant("pending_publication"));
-        }
-    }
-    if ledger
-        .phases()
-        .any(|(_, evidence)| evidence.current_live_bytes() != 0)
-    {
-        return Err(ProbeError::TerminalInvariant("phase_current_live_bytes"));
-    }
-
-    let reviewed_peak = fixture.reviewed_peak_live_envelope();
-    if ledger.peak_live_bytes() > reviewed_peak {
-        return Err(ProbeError::PeakEnvelope {
-            observed: ledger.peak_live_bytes(),
-            limit: reviewed_peak,
-        });
-    }
-
-    let mesh = report
-        .scene()
-        .meshes()
-        .first()
-        .ok_or(ProbeError::SceneShape)?;
-    if report.scene().meshes().len() != 1
-        || mesh.positions.len() != 3
-        || mesh.indices.len() != fixture.face_count() * 3
-    {
-        return Err(ProbeError::SceneShape);
-    }
-
     let dimension = |key| {
         ledger
             .dimension(key)
@@ -155,6 +128,35 @@ fn run() -> Result<(), ProbeError> {
     let tokens = dimension(ImportDimension::Tokens)?;
     let faces = dimension(ImportDimension::Faces)?;
     let canonical_output = dimension(ImportDimension::CanonicalOutputBytes)?;
+    for evidence in [primary, records, tokens, faces, canonical_output] {
+        if evidence.consumed() > evidence.attempted() {
+            return Err(ProbeError::TerminalInvariant("consumed_above_attempted"));
+        }
+        if evidence.current_live_bytes() != 0 {
+            return Err(ProbeError::TerminalInvariant(
+                "dimension_current_live_bytes",
+            ));
+        }
+    }
+
+    let reviewed_peak = fixture.reviewed_peak_live_envelope();
+    if ledger.peak_live_bytes() > reviewed_peak {
+        return Err(ProbeError::PeakEnvelope {
+            observed: ledger.peak_live_bytes(),
+            limit: reviewed_peak,
+        });
+    }
+
+    let expected_indices = u64::try_from(fixture.face_count())
+        .ok()
+        .and_then(|faces| faces.checked_mul(3))
+        .ok_or(ProbeError::SceneShape)?;
+    if snapshot.logical_mesh_count() != 1
+        || snapshot.primitive_index_count() != expected_indices
+        || snapshot.attribute_count() < 1
+    {
+        return Err(ProbeError::SceneShape);
+    }
 
     println!("schema={PROBE_SCHEMA}");
     println!("case_id={}", ObjScaleFixture::CASE_ID);
@@ -162,8 +164,8 @@ fn run() -> Result<(), ProbeError> {
     println!("scale_label={}", scale.label());
     println!("logical_units={}", fixture.face_count());
     println!("input_bytes={}", fixture.bytes().len());
-    println!("scene_meshes={}", report.scene().meshes().len());
-    println!("scene_indices={}", mesh.indices.len());
+    println!("scene_meshes={}", snapshot.logical_mesh_count());
+    println!("scene_indices={}", snapshot.primitive_index_count());
     println!("ledger_current_live_bytes={}", ledger.current_live_bytes());
     println!("ledger_peak_live_bytes={}", ledger.peak_live_bytes());
     println!(

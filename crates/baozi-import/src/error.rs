@@ -3,7 +3,7 @@ use crate::descriptor::FormatDescriptor;
 use crate::diagnostic::{
     DiagnosticCause, DiagnosticCode, MAX_DIAGNOSTIC_CODE_BYTES, valid_detail_key,
 };
-use crate::ledger::ImportDimension;
+use crate::ledger::{ImportDimension, ImportTerminalFailure};
 use baozi_core::{FormatId, SceneBuildError, SceneBuildResource, SceneValidationError};
 use baozi_io::{AssetOpenError, AssetReadError, PathError};
 use baozi_operation::{CapacityPlan, CapacityPlanError, ControlCause, LedgerCause};
@@ -892,6 +892,7 @@ pub enum ImportCause {
     },
     UnsupportedFormat,
     Detection(DetectionFailure),
+    OperationTerminal(ImportTerminalFailure),
 }
 
 impl ImportCause {
@@ -909,6 +910,7 @@ impl ImportCause {
             Self::Validation(_) => CauseOwner::Core,
             Self::TrustedExtension { .. } => CauseOwner::TrustedExtension,
             Self::UnsupportedFormat | Self::Detection(_) => CauseOwner::Import,
+            Self::OperationTerminal(_) => CauseOwner::Operation,
         }
     }
 }
@@ -927,6 +929,14 @@ impl fmt::Display for ImportCause {
             }
             Self::UnsupportedFormat => formatter.write_str("no registered format matched input"),
             Self::Detection(failure) => failure.fmt(formatter),
+            Self::OperationTerminal(failure) => {
+                write!(
+                    formatter,
+                    "canonical import terminal failed as {:?} with code {}",
+                    failure.class(),
+                    failure.code()
+                )
+            }
         }
     }
 }
@@ -937,7 +947,9 @@ impl Error for ImportCause {
             Self::Scope(abort) => Some(abort),
             Self::Format(envelope) => Some(envelope),
             Self::Validation(error) => Some(error),
-            Self::TrustedExtension { .. } | Self::UnsupportedFormat => None,
+            Self::TrustedExtension { .. }
+            | Self::UnsupportedFormat
+            | Self::OperationTerminal(_) => None,
             Self::Detection(failure) => Some(failure),
         }
     }

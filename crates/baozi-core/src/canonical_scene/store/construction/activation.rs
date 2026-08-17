@@ -4,8 +4,9 @@ use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationPolicy,
     CanonicalActivationSeal, CanonicalBuildControl, CanonicalCandidateStoreSession,
     CanonicalCentralValidationOutcome, CanonicalFailureRequirements, CanonicalFreezePermitIssue,
-    CanonicalJointCommit, CanonicalJointSeal, CanonicalScopedDisposition,
-    CanonicalSuccessRequirements, CanonicalTableShape, CanonicalValidationDecision,
+    CanonicalJointCommit, CanonicalJointSeal, CanonicalMaterializationRole,
+    CanonicalScopedDisposition, CanonicalSuccessRequirements, CanonicalTableShape,
+    CanonicalValidationDecision, CanonicalValidationProgress, CanonicalValidationRole,
     FailureEvidenceMember, FailureEvidenceOutcome, FailureEvidenceValidationSession,
     RootedFailureValidation,
 };
@@ -359,8 +360,8 @@ impl SceneActivationProgram {
         Ok(CanonicalActivationPolicy::new(
             canonical_writer,
             evidence_writer,
-            keys.dimension,
-            keys.dimension,
+            CanonicalMaterializationRole::new(keys.dimension, keys.dimension),
+            CanonicalValidationRole::new(keys.phase, keys.dimension, keys.dimension),
             keys.dimension,
             keys.dimension,
         ))
@@ -774,6 +775,7 @@ impl SceneConstructionOperation {
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
     ) -> Result<Self, SceneConstructionStartError> {
+        let brand = ConstructionBrand::reserve()?;
         let start = try_plan_scene_operation(
             limits,
             control,
@@ -788,7 +790,7 @@ impl SceneConstructionOperation {
         )?;
         Ok(Self {
             raw,
-            brand: start.brand,
+            brand,
             keys: start.keys,
         })
     }
@@ -913,6 +915,10 @@ fn drive_fresh_two_node_activation(
         }
     };
     let outcome = activated.validate_centrally(
+        CanonicalValidationProgress::new(
+            super::SceneConstructionPhase::Validation,
+            super::SceneConstructionUnit::WorkUnits,
+        ),
         |lane, _output| {
             let evidence =
                 match lane.try_retain_records(evidence_plan, OutcomeEvidenceSchema, |writer| {

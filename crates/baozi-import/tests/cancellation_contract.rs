@@ -1,15 +1,14 @@
-use baozi_core::{
-    Animation, Camera, FormatId, Light, Material, Mesh, MeshBinding, MetadataMap, Node, SceneDraft,
-    Skin, Texture, TextureSampler, TextureSource,
-};
+mod support;
+
+use baozi_core::FormatId;
 use baozi_import::{
     AuthorizedDependency, CapabilityStatus, CauseOwner, DependencyPolicyError, DependencyReference,
     DependencyRequirement, DependencyResolver, DependencyRoleId, DetectionOutcome, DetectionResult,
     DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter,
     ImportCause, ImportDimension, ImportFailure, ImportOperationControl, ImportPhase, ImportReport,
-    ImportRequest, ImportResult, ImportStorageClass, OptionCompileLimits, ParseResult, ParseScope,
+    ImportRequest, ImportResult, OptionCompileLimits, ParseResult, ParseScope,
     PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    ScopeAbortCause, import_asset as run_import_asset,
+    SceneDraft, ScopeAbortCause, import_asset as run_import_asset,
     import_asset_with_resolver as run_import_asset_with_resolver,
 };
 use baozi_io::{
@@ -74,26 +73,7 @@ struct RequiredDependencyImporter {
     role: DependencyRoleId,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum BuilderAction {
-    AddPreparedNode,
-    AddPreparedChildNode,
-    AddPreparedMesh,
-    AddPreparedMaterial,
-    AddPreparedTexture,
-    AddPreparedAnimation,
-    AddPreparedCamera,
-    AddPreparedLight,
-    AddPreparedSkin,
-    AddNodeMeshBinding,
-    SetNodeMeshBindingSkin,
-    SetSpace,
-    InsertMetadata,
-    FinishDraft,
-}
-
-struct BuilderCancellationImporter {
-    action: BuilderAction,
+struct SceneSubmissionCancellationImporter {
     cancellation: CancellationToken,
     late_successes: Arc<AtomicUsize>,
 }
@@ -127,7 +107,7 @@ impl FormatImporter for EmptyImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -155,12 +135,12 @@ impl FormatImporter for RequiredDependencyImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let _dependency = scope.required_dependency(&self.role, "sidecar.bin")?;
-        scope.scene_builder()?.finish_draft()
+        let _dependency = support::required_root_dependency(scope, &self.role, "sidecar.bin")?;
+        support::submit_minimal_scene(scope)
     }
 }
 
-impl BuilderCancellationImporter {
+impl SceneSubmissionCancellationImporter {
     fn record_late_success(&self, succeeded: bool) {
         if succeeded {
             self.late_successes.fetch_add(1, Ordering::AcqRel);
@@ -172,13 +152,13 @@ impl BuilderCancellationImporter {
     }
 }
 
-impl FormatImporter for BuilderCancellationImporter {
+impl FormatImporter for SceneSubmissionCancellationImporter {
     fn descriptor(&self) -> FormatDescriptor {
         FormatDescriptor::builder(
-            FormatId::new("dev.baozi.test.builder-cancellation").unwrap(),
-            "Builder Cancellation Contract",
+            FormatId::new("dev.baozi.test.scene-submission-cancellation").unwrap(),
+            "Scene Submission Cancellation Contract",
         )
-        .extensions(["builder-cancel"])
+        .extensions(["scene-submit-cancel"])
         .encoding(FormatEncoding::Binary)
         .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
         .build()
@@ -195,118 +175,14 @@ impl FormatImporter for BuilderCancellationImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        match self.action {
-            BuilderAction::AddPreparedNode => {
-                let node = scope.prepare_scene_value(Node::default())?;
-                let mut builder = scope.scene_builder()?;
-                self.cancel();
-                self.record_late_success(builder.add_prepared_node(node).is_ok());
+        self.cancel();
+        match support::submit_minimal_scene(scope) {
+            Ok(draft) => {
+                self.record_late_success(true);
+                Ok(draft)
             }
-            BuilderAction::AddPreparedChildNode => {
-                let node = scope.prepare_scene_value(Node::default())?;
-                let mut builder = scope.scene_builder()?;
-                let parent = builder.root();
-                self.cancel();
-                self.record_late_success(builder.add_prepared_child_node(parent, node).is_ok());
-            }
-            BuilderAction::AddPreparedMesh => {
-                let mesh = scope.prepare_scene_value(Mesh::default())?;
-                let mut builder = scope.scene_builder()?;
-                self.cancel();
-                self.record_late_success(builder.add_prepared_mesh(mesh).is_ok());
-            }
-            BuilderAction::AddPreparedMaterial => {
-                let material = scope.prepare_scene_value(Material::default())?;
-                let mut builder = scope.scene_builder()?;
-                self.cancel();
-                self.record_late_success(builder.add_prepared_material(material).is_ok());
-            }
-            BuilderAction::AddPreparedTexture => {
-                let texture = Texture {
-                    name: None,
-                    source: TextureSource::External { uri: String::new() },
-                    sampler: TextureSampler::default(),
-                    metadata: MetadataMap::new(),
-                };
-                let texture = scope.prepare_scene_value(texture)?;
-                let mut builder = scope.scene_builder()?;
-                self.cancel();
-                self.record_late_success(builder.add_prepared_texture(texture).is_ok());
-            }
-            BuilderAction::AddPreparedAnimation => {
-                let animation = scope.prepare_scene_value(Animation::default())?;
-                let mut builder = scope.scene_builder()?;
-                self.cancel();
-                self.record_late_success(builder.add_prepared_animation(animation).is_ok());
-            }
-            BuilderAction::AddPreparedCamera => {
-                let camera = scope.prepare_scene_value(Camera::default())?;
-                let mut builder = scope.scene_builder()?;
-                self.cancel();
-                self.record_late_success(builder.add_prepared_camera(camera).is_ok());
-            }
-            BuilderAction::AddPreparedLight => {
-                let light = scope.prepare_scene_value(Light::default())?;
-                let mut builder = scope.scene_builder()?;
-                self.cancel();
-                self.record_late_success(builder.add_prepared_light(light).is_ok());
-            }
-            BuilderAction::AddPreparedSkin => {
-                let skin = scope.prepare_scene_value(Skin::default())?;
-                let mut builder = scope.scene_builder()?;
-                self.cancel();
-                self.record_late_success(builder.add_prepared_skin(skin).is_ok());
-            }
-            BuilderAction::AddNodeMeshBinding => {
-                let mesh = scope.prepare_scene_value(Mesh::default())?;
-                let mut builder = scope.scene_builder()?;
-                let node = builder.root();
-                let mesh = builder.add_prepared_mesh(mesh)?;
-                let binding = MeshBinding::new(mesh);
-                self.cancel();
-                self.record_late_success(builder.add_node_mesh_binding(node, binding).is_ok());
-            }
-            BuilderAction::SetNodeMeshBindingSkin => {
-                let mesh = scope.prepare_scene_value(Mesh::default())?;
-                let skin = scope.prepare_scene_value(Skin::default())?;
-                let mut builder = scope.scene_builder()?;
-                let node = builder.root();
-                let mesh = builder.add_prepared_mesh(mesh)?;
-                let skin = builder.add_prepared_skin(skin)?;
-                builder.add_node_mesh_binding(node, MeshBinding::new(mesh))?;
-                self.cancel();
-                self.record_late_success(builder.set_node_mesh_binding_skin(node, 0, skin));
-            }
-            BuilderAction::SetSpace => {
-                let mut builder = scope.scene_builder()?;
-                self.cancel();
-                self.record_late_success(
-                    builder.set_space(baozi_core::SceneSpace::default()).is_ok(),
-                );
-            }
-            BuilderAction::InsertMetadata => {
-                let mut key = scope.metered_string(
-                    ImportStorageClass::SceneConstruction,
-                    "cancelled-metadata-key",
-                );
-                key.try_push_str("cancelled")?;
-                let prepared = key
-                    .try_into_scene_parts()?
-                    .into_metadata_bool_entry(true)
-                    .finish()?;
-                let mut builder = scope.scene_builder()?;
-                self.cancel();
-                self.record_late_success(builder.insert_prepared_metadata(prepared).is_ok());
-            }
-            BuilderAction::FinishDraft => {
-                let builder = scope.scene_builder()?;
-                self.cancel();
-                self.record_late_success(builder.finish_draft().is_ok());
-            }
+            Err(failure) => Err(failure),
         }
-
-        scope.poll()?;
-        unreachable!("cancelled parser must not continue")
     }
 }
 
@@ -334,11 +210,12 @@ impl FormatImporter for CachedDependencyCancellationImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let first = scope.required_dependency(&self.role, "sidecar.bin")?;
+        let first = support::required_root_dependency(scope, &self.role, "sidecar.bin")?;
         drop(first);
 
         self.cancellation.cancel();
-        let second_succeeded = scope.required_dependency(&self.role, "sidecar.bin").is_ok();
+        let second_succeeded =
+            support::required_root_dependency(scope, &self.role, "sidecar.bin").is_ok();
         if second_succeeded {
             self.late_successes.fetch_add(1, Ordering::AcqRel);
         }
@@ -589,64 +466,42 @@ fn dependency_open_cancellation_precedes_exact_length_charge_capacity_and_reader
 }
 
 #[test]
-fn cancellation_is_admitted_before_every_builder_side_effect() {
-    for action in [
-        BuilderAction::AddPreparedNode,
-        BuilderAction::AddPreparedChildNode,
-        BuilderAction::AddPreparedMesh,
-        BuilderAction::AddPreparedMaterial,
-        BuilderAction::AddPreparedTexture,
-        BuilderAction::AddPreparedAnimation,
-        BuilderAction::AddPreparedCamera,
-        BuilderAction::AddPreparedLight,
-        BuilderAction::AddPreparedSkin,
-        BuilderAction::AddNodeMeshBinding,
-        BuilderAction::SetNodeMeshBindingSkin,
-        BuilderAction::SetSpace,
-        BuilderAction::InsertMetadata,
-        BuilderAction::FinishDraft,
-    ] {
-        let source = AssetPath::new("asset.builder-cancel").unwrap();
-        let cancellation = CancellationToken::new();
-        let late_successes = Arc::new(AtomicUsize::new(0));
-        let io = StableDependencyIo {
-            domain: AuthorityDomain::new(),
-            primary: source.clone(),
-            dependency: None,
-            opens: AtomicUsize::new(0),
-        };
-        let request = request_for(BuilderCancellationImporter {
-            action,
-            cancellation: cancellation.clone(),
-            late_successes: Arc::clone(&late_successes),
-        });
-        let control = ImportOperationControl::default().with_cancellation(cancellation);
+fn cancellation_is_admitted_before_complete_batch_scene_submission() {
+    let source = AssetPath::new("asset.scene-submit-cancel").unwrap();
+    let cancellation = CancellationToken::new();
+    let late_successes = Arc::new(AtomicUsize::new(0));
+    let io = StableDependencyIo {
+        domain: AuthorityDomain::new(),
+        primary: source.clone(),
+        dependency: None,
+        opens: AtomicUsize::new(0),
+    };
+    let request = request_for(SceneSubmissionCancellationImporter {
+        cancellation: cancellation.clone(),
+        late_successes: Arc::clone(&late_successes),
+    });
+    let control = ImportOperationControl::default().with_cancellation(cancellation);
 
-        let failure = import_asset(&request, &io, source, control)
-            .expect_err("builder side effects must admit cancellation before mutation");
+    let failure = import_asset(&request, &io, source, control)
+        .expect_err("Scene submission must admit cancellation before activation");
 
-        let ImportCause::Scope(abort) = failure.cause() else {
-            panic!("{action:?}: expected operation cancellation through the scope")
-        };
-        assert!(
-            matches!(
-                abort.cause(),
-                ScopeAbortCause::Control(ControlCause::Cancelled {
-                    origin: CancellationOrigin::Signal,
-                })
-            ),
-            "{action:?}"
-        );
-        assert_eq!(failure.cause().owner(), CauseOwner::Operation, "{action:?}");
-        assert_eq!(
-            failure.last_completed().phase(),
-            ImportPhase::SelectionCompleted,
-            "{action:?}"
-        );
-        assert_eq!(late_successes.load(Ordering::Acquire), 0, "{action:?}");
-        assert_eq!(io.opens.load(Ordering::Acquire), 1, "{action:?}");
-        assert_eq!(failure.ledger().current_live_bytes(), 0, "{action:?}");
-    }
+    let ImportCause::Scope(abort) = failure.cause() else {
+        panic!("expected operation cancellation through the scope")
+    };
+    assert!(matches!(
+        abort.cause(),
+        ScopeAbortCause::Control(ControlCause::Cancelled {
+            origin: CancellationOrigin::Signal,
+        })
+    ));
+    assert_eq!(failure.cause().owner(), CauseOwner::Operation);
+    assert_eq!(
+        failure.last_completed().phase(),
+        ImportPhase::SelectionCompleted
+    );
+    assert_eq!(late_successes.load(Ordering::Acquire), 0);
+    assert_eq!(io.opens.load(Ordering::Acquire), 1);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
 }
 
 #[test]

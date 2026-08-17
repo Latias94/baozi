@@ -5,14 +5,14 @@ use super::lineage::ProfileOwner;
 
 /// One descriptive metadata entry for a canonical owner.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct MetadataAuthoringEntry<'input> {
+pub struct MetadataAuthoringEntry<'input> {
     owner: ProfileOwner,
     key: &'input NamespacedName,
     value: ExtensionValueRef<'input>,
 }
 
 impl<'input> MetadataAuthoringEntry<'input> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         owner: ProfileOwner,
         key: &'input NamespacedName,
         value: ExtensionValueRef<'input>,
@@ -39,18 +39,16 @@ impl<'input> MetadataAuthoringEntry<'input> {
 /// strictly increasing byte order. Central validation uses that local ordering to reject duplicate
 /// keys while compiling canonical owner buckets with bounded linear work.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct MetadataAuthoringBatch<'input> {
+pub struct MetadataAuthoringBatch<'input> {
     entries: &'input [MetadataAuthoringEntry<'input>],
 }
 
 impl<'input> MetadataAuthoringBatch<'input> {
-    pub(in crate::canonical_scene::store) const fn new(
-        entries: &'input [MetadataAuthoringEntry<'input>],
-    ) -> Self {
+    pub const fn new(entries: &'input [MetadataAuthoringEntry<'input>]) -> Self {
         Self { entries }
     }
 
-    pub(in crate::canonical_scene::store) const fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self { entries: &[] }
     }
 

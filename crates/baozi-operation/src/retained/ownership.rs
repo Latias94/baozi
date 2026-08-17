@@ -740,6 +740,32 @@ where
         (fallback, evidence, batches)
     }
 
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn try_replace_canonical_assembly(
+        &mut self,
+        replacement: AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    ) -> Result<(), RetainedWriterError<D>> {
+        if !self.has_exact_product_graph() {
+            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedWriterError::StorageDropUnverified);
+        }
+        let Some(batches) = self.batches.as_mut() else {
+            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedWriterError::StorageDropUnverified);
+        };
+        match batches.replace_empty_canonical_assembly(replacement) {
+            Ok(previous) => {
+                drop(previous);
+                Ok(())
+            }
+            Err(replacement) => {
+                drop(replacement);
+                self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
+                Err(RetainedWriterError::StorageDropUnverified)
+            }
+        }
+    }
+
     pub(super) fn first_account(&self) -> Option<&PhysicalStorageAccount> {
         self.evidence
             .as_ref()

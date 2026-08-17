@@ -1,6 +1,6 @@
 #![cfg(feature = "tracing")]
 
-use baozi::{ImportReport, Importer, PostProcessPipeline, ProcessedImport, ValidatedScene};
+use baozi::{ImportReport, Importer, SceneSnapshotLimits, ValidatedScene};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::span::{Attributes, Id, Record};
@@ -65,14 +65,11 @@ impl Subscriber for CapturingSubscriber {
 #[test]
 fn facade_tracing_is_fieldless_and_does_not_change_results() {
     let importer = Importer::new().expect("default importer should build");
-    let pipeline = PostProcessPipeline::new([]).expect("empty pipeline should compile");
 
-    let without_subscriber = with_default(NoSubscriber::default(), || {
-        run_workflow(&importer, &pipeline)
-    });
+    let without_subscriber = with_default(NoSubscriber::default(), || run_workflow(&importer));
 
     let subscriber = CapturingSubscriber::default();
-    let with_subscriber = with_default(subscriber.clone(), || run_workflow(&importer, &pipeline));
+    let with_subscriber = with_default(subscriber.clone(), || run_workflow(&importer));
 
     assert_eq!(
         subscriber.captured_spans(),
@@ -93,29 +90,15 @@ fn facade_tracing_is_fieldless_and_does_not_change_results() {
                 name: "baozi.validate",
                 fields: Vec::new(),
             },
-            CapturedSpan {
-                name: "baozi.postprocess",
-                fields: Vec::new(),
-            },
-            CapturedSpan {
-                name: "baozi.validate",
-                fields: Vec::new(),
-            },
         ]
     );
-    assert_import_eq(without_subscriber.import(), with_subscriber.import());
-    assert_scene_content_eq(without_subscriber.scene(), with_subscriber.scene());
-    assert_eq!(
-        without_subscriber.postprocess().ledger(),
-        with_subscriber.postprocess().ledger()
-    );
+    assert_import_eq(&without_subscriber, &with_subscriber);
 }
 
-fn run_workflow(importer: &Importer, pipeline: &PostProcessPipeline) -> ProcessedImport {
-    let report = importer
+fn run_workflow(importer: &Importer) -> ImportReport {
+    importer
         .read_bytes("triangle.obj", b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
-        .expect("OBJ import should succeed");
-    Importer::process(report, pipeline).expect("post-process should succeed")
+        .expect("OBJ import should succeed")
 }
 
 fn assert_import_eq(left: &ImportReport, right: &ImportReport) {
@@ -132,16 +115,13 @@ fn assert_import_eq(left: &ImportReport, right: &ImportReport) {
 }
 
 fn assert_scene_content_eq(left: &ValidatedScene, right: &ValidatedScene) {
-    assert_eq!(left.root(), right.root());
-    assert_eq!(left.nodes(), right.nodes());
-    assert_eq!(left.meshes(), right.meshes());
-    assert_eq!(left.materials(), right.materials());
-    assert_eq!(left.textures(), right.textures());
-    assert_eq!(left.animations(), right.animations());
-    assert_eq!(left.cameras(), right.cameras());
-    assert_eq!(left.lights(), right.lights());
-    assert_eq!(left.skins(), right.skins());
-    assert_eq!(left.metadata(), right.metadata());
-    assert_eq!(left.space(), right.space());
-    assert_eq!(left.validation_stats(), right.validation_stats());
+    let limits = SceneSnapshotLimits::try_new(16 * 1024, 64, 1_000_000)
+        .expect("tracing snapshot limits must be valid");
+    let left = left
+        .capture_snapshot(limits)
+        .expect("left validated Scene snapshot must succeed");
+    let right = right
+        .capture_snapshot(limits)
+        .expect("right validated Scene snapshot must succeed");
+    assert_eq!(left, right);
 }

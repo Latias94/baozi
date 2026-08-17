@@ -110,6 +110,7 @@ pub(super) fn prepare_edit_candidate<'scene>(
         let mut scratch_view = scratch.validation_view();
         assembly.validate_success_controlled(
             keys.dimension,
+            keys.dimension,
             directory.into_store(),
             evidence,
             |session, directory, evidence, control| {

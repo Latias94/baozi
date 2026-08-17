@@ -2,10 +2,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use crate::SceneValidationLimits;
-use crate::attribute::{AttributeDomain, AttributeSemantic};
+use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemantic};
 use crate::canonical_scene::store::production::plan::geometry::{
-    GeometryAuthoringFailure, GeometryAuthoringLimit, GeometryAuthoringSemanticError,
-    ValidatedGeometryBatch, validate_geometry_batch_with_control,
+    GeometryAttributePayloadKind, GeometryAttributeScalarKind, GeometryAuthoringFailure,
+    GeometryAuthoringLimit, GeometryAuthoringSemanticError, ValidatedGeometryBatch,
+    validate_geometry_batch_with_control,
 };
 use crate::canonical_scene::store::production::{
     AuthoringRange, GeometryAttributeAuthoring, GeometryAuthoringBatch,
@@ -161,9 +162,9 @@ fn obj_corner_domains_preserve_shared_positions_without_tuple_vertex_expansion()
     assert_eq!(validated.f32_scalar_count(), 39);
     assert_eq!(validated.u32_scalar_count(), 8);
     assert_eq!(validated.payload_block_count(), 5);
-    assert_eq!(validated.canonical_bytes(), 454);
-    assert_eq!(validated.validation_work(), 77);
-    assert_eq!(control.work, 77);
+    assert_eq!(validated.canonical_bytes(), 510);
+    assert_eq!(validated.validation_work(), 78);
+    assert_eq!(control.work, 78);
 
     let primitive = validated
         .primitive(0)
@@ -198,6 +199,89 @@ fn obj_corner_domains_preserve_shared_positions_without_tuple_vertex_expansion()
     assert_eq!(smoothing.source_element_count(), 2);
     assert_eq!(smoothing.element_count(), 2);
     assert!(primitive.attribute(4).is_none());
+}
+
+#[test]
+fn custom_dense_and_sparse_i32_attributes_preserve_signed_values_and_exact_accounting() {
+    let positions = [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let dense_values = [i32::MIN, -1, i32::MAX];
+    let sparse_indices = [1_u32];
+    let sparse_values = [i32::MIN];
+    let sparse_default = [i32::MAX];
+    let dense_semantic = CustomAttributeSemantic::new("ply:dense_signed")
+        .expect("dense custom semantic must be canonical");
+    let sparse_semantic = CustomAttributeSemantic::new("ply:sparse_signed")
+        .expect("sparse custom semantic must be canonical");
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::i32(
+            AttributeSemantic::Custom(dense_semantic),
+            AttributeDomain::Vertex,
+            1,
+            &dense_values,
+        ),
+        GeometryAttributeAuthoring::sparse_i32(
+            AttributeSemantic::Custom(sparse_semantic),
+            AttributeDomain::Vertex,
+            1,
+            3,
+            &sparse_indices,
+            &sparse_values,
+            &sparse_default,
+        ),
+    ];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::TriangleList,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 3),
+    )];
+    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let mut control = TestControl::default();
+
+    let validated = validate_geometry_batch_with_control(
+        GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]),
+        0,
+        0,
+        SceneValidationLimits::default(),
+        &mut control,
+    )
+    .expect("PLY-shaped signed custom attributes must validate losslessly");
+
+    assert_eq!(validated.attribute_count(), 3);
+    assert_eq!(validated.attribute_semantic_name_byte_count(), 33);
+    assert_eq!(validated.f32_scalar_count(), 9);
+    assert_eq!(validated.i32_scalar_count(), 5);
+    assert_eq!(validated.u32_scalar_count(), 1);
+    assert_eq!(validated.payload_block_count(), 6);
+    assert_eq!(validated.semantic_cell_count(), 48);
+    assert_eq!(validated.canonical_bytes(), 359);
+    assert_eq!(validated.validation_work(), 73);
+    assert_eq!(control.work, 73);
+
+    let primitive = validated.primitive(0).expect("validated primitive");
+    let dense = primitive.attribute(1).expect("dense I32 attribute");
+    assert_eq!(dense.scalar_kind(), GeometryAttributeScalarKind::I32);
+    assert_eq!(dense.payload_kind(), GeometryAttributePayloadKind::Dense);
+    assert_eq!(dense.semantic_name_offset(), 0);
+    assert_eq!(dense.semantic_name_count(), 16);
+    assert_eq!(dense.canonical_scalar_count(), 3);
+    assert_eq!(dense.payload_block_count(), 1);
+
+    let sparse = primitive.attribute(2).expect("sparse I32 attribute");
+    assert_eq!(sparse.scalar_kind(), GeometryAttributeScalarKind::I32);
+    assert_eq!(sparse.payload_kind(), GeometryAttributePayloadKind::Sparse);
+    assert_eq!(sparse.semantic_name_offset(), 16);
+    assert_eq!(sparse.semantic_name_count(), 17);
+    assert_eq!(sparse.explicit_element_count(), 1);
+    assert_eq!(sparse.canonical_scalar_count(), 2);
+    assert_eq!(sparse.payload_block_count(), 3);
 }
 
 #[test]
@@ -304,7 +388,7 @@ fn sparse_attribute_counts_indices_values_and_default_without_dense_expansion() 
     assert_eq!(validated.f32_scalar_count(), 12);
     assert_eq!(validated.u32_scalar_count(), 1);
     assert_eq!(validated.payload_block_count(), 4);
-    assert_eq!(validated.canonical_bytes(), 226);
+    assert_eq!(validated.canonical_bytes(), 264);
     let primitive = validated.primitive(0).expect("sparse primitive plan");
     let color = primitive.attribute(1).expect("sparse color plan");
     assert_eq!(color.source_element_count(), 1);

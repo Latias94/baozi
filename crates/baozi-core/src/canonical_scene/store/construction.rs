@@ -33,7 +33,7 @@ use crate::SceneValidationLimits;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 use crate::math::Mat4;
 
-use super::production::{SceneAuthoringBatch, SceneInputEnvelope, SceneInputEnvelopeError};
+use super::production::{SceneAuthoringBatch, SceneInputEnvelopeError};
 use super::schema::{
     AuthoredMatrixSchema, CANONICAL_BLOCK_COUNT, CanonicalBlockRef, DIRECTORY_FIELD_COUNT,
     DirectorySchema, EVIDENCE_FIELD_COUNT, EVIDENCE_OUTCOME_CANDIDATE, MATRIX_SCALAR_COUNT,
@@ -73,11 +73,11 @@ const OPEN_CONTAINMENT_REJECTION_CODE: u32 = 0x5343_0008;
 const MAX_ADMITTED_CANONICAL_NEW_BLOCKS: usize = 27;
 const TERMINAL_ATTRIBUTION_SLOTS: usize = MAX_ADMITTED_CANONICAL_NEW_BLOCKS + 1;
 const TERMINAL_COMMITMENT_SLOTS: usize = 8;
-const FAILURE_TERMINAL_EVIDENCE_MEMBERS: usize = 1;
+pub(in crate::canonical_scene::store) const FAILURE_TERMINAL_EVIDENCE_MEMBERS: usize = 1;
 
 static NEXT_CONSTRUCTION_BRAND: AtomicU64 = AtomicU64::new(1);
 
-fn failure_terminal_work_requirement()
+pub(in crate::canonical_scene::store) fn failure_terminal_work_requirement()
 -> Result<RetainedStoreFailureTerminalWorkRequirement, StorePlanError> {
     RetainedStoreFailureTerminalWorkPlan::requirement_for_evidence_work(
         FAILURE_TERMINAL_EVIDENCE_MEMBERS,
@@ -133,31 +133,39 @@ fn prepare_tracer_scene_open_fallback<L>(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::canonical_scene::store) enum SceneConstructionPhase {
+    Validation,
     Publication,
 }
 
 impl ProgressPhase for SceneConstructionPhase {
     fn order(self) -> u32 {
-        0
+        self as u32
     }
 
     fn stable_id(self) -> &'static str {
-        "canonical-scene-publication"
+        match self {
+            Self::Validation => "canonical-scene-validation",
+            Self::Publication => "canonical-scene-publication",
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::canonical_scene::store) enum SceneConstructionUnit {
+    WorkUnits,
     Scene,
 }
 
 impl ProgressUnit for SceneConstructionUnit {
     fn stable_id(self) -> &'static str {
-        "scene"
+        match self {
+            Self::WorkUnits => "work_units",
+            Self::Scene => "scene",
+        }
     }
 }
 
-struct SceneConstructionOwner;
+pub(in crate::canonical_scene::store) struct SceneConstructionOwner;
 
 impl OperationOwner for SceneConstructionOwner {}
 
@@ -719,10 +727,9 @@ pub(crate) struct DerivedSceneConstructionOperation<'scene> {
 /// A fresh operation sealed to the exact producer description admitted before startup.
 #[must_use = "the admitted Scene input must be validated or deliberately dropped"]
 pub(in crate::canonical_scene::store) struct SceneAuthoringOperation<'input> {
-    operation: SceneConstructionOperation,
-    input: SceneAuthoringBatch<'input>,
-    validation_limits: SceneValidationLimits,
-    terminal_attribution_slots: usize,
+    raw: SceneStoreOperation,
+    keys: SceneStoreKeys,
+    request: node_scene::NodeSceneActivationRequest<'input>,
 }
 
 #[cfg(test)]
@@ -772,20 +779,24 @@ impl SceneConstructionOperation {
         input: SceneAuthoringBatch<'input>,
         validation_limits: SceneValidationLimits,
     ) -> Result<SceneAuthoringOperation<'input>, SceneConstructionStartError> {
-        let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
-        let terminal_attribution_slots = envelope.terminal_attribution_slots();
-        let operation = Self::start_with_control_and_attribution_slots_and_failure_work(
-            account,
+        let request = node_scene::NodeSceneActivationRequest::try_new(input, validation_limits)?;
+        let terminal_attribution_slots = request.canonical_writer_limits().attribution_slots();
+        let start = try_plan_scene_operation(
             limits,
             control,
             terminal_attribution_slots,
             SceneFailureEvidenceWork::exact_single_record(NODE_SCENE_EVIDENCE_FIELD_COUNT),
         )?;
+        let raw = SceneStoreOperation::try_start(
+            start.control,
+            start.ledger_plan,
+            account,
+            start.start_plan,
+        )?;
         Ok(SceneAuthoringOperation {
-            operation,
-            input,
-            validation_limits,
-            terminal_attribution_slots,
+            raw,
+            keys: start.keys,
+            request,
         })
     }
 
@@ -887,6 +898,7 @@ impl SceneConstructionOperation {
         limits: SceneConstructionLimits,
     ) -> Result<DerivedSceneConstructionOperation<'scene>, SceneConstructionStartError> {
         let source = input.inheritance_source();
+        let brand = ConstructionBrand::reserve()?;
         let start = try_plan_scene_operation(
             limits,
             OperationControl::default(),
@@ -901,7 +913,7 @@ impl SceneConstructionOperation {
         )?;
         Ok(DerivedSceneConstructionOperation {
             raw,
-            brand: start.brand,
+            brand,
             keys: start.keys,
             source,
         })
@@ -986,6 +998,7 @@ impl SceneConstructionOperation {
         terminal_attribution_slots: usize,
         failure_evidence_work: SceneFailureEvidenceWork,
     ) -> Result<Self, SceneConstructionStartError> {
+        let brand = ConstructionBrand::reserve()?;
         let start = try_plan_scene_operation(
             limits,
             control,
@@ -1000,7 +1013,7 @@ impl SceneConstructionOperation {
         )?;
         Ok(Self {
             raw,
-            brand: start.brand,
+            brand,
             keys: start.keys,
         })
     }
@@ -1111,7 +1124,6 @@ impl DerivedSceneConstructionOperation<'_> {
 }
 
 struct SceneOperationStart {
-    brand: ConstructionBrand,
     keys: SceneStoreKeys,
     control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
     ledger_plan: StoreLedgerPlan,
@@ -1149,7 +1161,6 @@ fn try_plan_scene_operation(
     terminal_attribution_slots: usize,
     failure_evidence_work: SceneFailureEvidenceWork,
 ) -> Result<SceneOperationStart, SceneConstructionStartError> {
-    let brand = ConstructionBrand::reserve()?;
     let domain = StoreKeyDomain::try_new(STORE_CATALOG)?;
     let keys = SceneStoreKeys {
         phase: domain
@@ -1209,7 +1220,6 @@ fn try_plan_scene_operation(
         failure_terminal_work.into_store_plan(),
     );
     Ok(SceneOperationStart {
-        brand,
         keys,
         control,
         ledger_plan,

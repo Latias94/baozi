@@ -1,4 +1,6 @@
-use baozi_core::{FormatId, SceneDraft};
+mod support;
+
+use baozi_core::FormatId;
 use baozi_import::{
     AuthorizedDependency, CapabilityStatus, CauseOwner, DependencyCacheDisposition,
     DependencyPolicyError, DependencyReference, DependencyRequirement, DependencyResolver,
@@ -7,7 +9,8 @@ use baozi_import::{
     ImportDimension, ImportFailure, ImportLedgerSnapshot, ImportLossKind, ImportOperationControl,
     ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy, OptionCompileLimits,
     ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, ScopeAbortCause, import_asset_with_resolver as run_import_asset_with_resolver,
+    RegistryBuilder, SceneDraft, ScopeAbortCause,
+    import_asset_with_resolver as run_import_asset_with_resolver,
 };
 use baozi_io::{AssetIo, AssetOpenError, AssetPath, AuthorityDomain, MemoryAssetIo, OpenedAsset};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -363,14 +366,15 @@ impl FormatImporter for DependencySequenceImporter {
         for step in &self.steps {
             let observation = match step.requirement {
                 DependencyRequirement::Required => {
-                    let snapshot = scope.required_dependency(&step.role, step.raw_reference)?;
+                    let snapshot =
+                        support::required_root_dependency(scope, &step.role, step.raw_reference)?;
                     SnapshotObservation {
                         bytes: snapshot.bytes().to_vec(),
                         cache_disposition: snapshot.cache_disposition(),
                     }
                 }
                 DependencyRequirement::Optional => {
-                    let outcome = scope.optional_dependency(&step.role, step.raw_reference)?;
+                    let outcome = support::root_dependency(scope, &step.role, step.raw_reference)?;
                     let Some(snapshot) = outcome.snapshot() else {
                         continue;
                     };
@@ -385,7 +389,7 @@ impl FormatImporter for DependencySequenceImporter {
                 .expect("observation mutex must remain usable")
                 .push(observation);
         }
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 

@@ -3,12 +3,12 @@
 use super::CanonicalSchema;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::geometry::TopologyKind;
-use baozi_operation::{RecordBlock, ScalarSequence};
+use baozi_operation::{RecordBlock, ScalarSequence, Utf8Block};
 
-pub(in super::super) const GEOMETRY_LOGICAL_MESH_FIELD_COUNT: usize = 4;
+pub(in super::super) const GEOMETRY_LOGICAL_MESH_FIELD_COUNT: usize = 8;
 pub(in super::super) const GEOMETRY_MESH_INSTANCE_FIELD_COUNT: usize = 5;
 pub(in super::super) const GEOMETRY_PRIMITIVE_FIELD_COUNT: usize = 17;
-pub(in super::super) const GEOMETRY_ATTRIBUTE_FIELD_COUNT: usize = 14;
+pub(in super::super) const GEOMETRY_ATTRIBUTE_FIELD_COUNT: usize = 17;
 
 pub(in super::super) const GEOMETRY_TOPOLOGY_POINTS: u8 = 0;
 pub(in super::super) const GEOMETRY_TOPOLOGY_LINE_LIST: u8 = 1;
@@ -25,6 +25,7 @@ pub(in super::super) const GEOMETRY_SEMANTIC_TANGENT: u8 = 2;
 pub(in super::super) const GEOMETRY_SEMANTIC_TEXCOORD: u8 = 3;
 pub(in super::super) const GEOMETRY_SEMANTIC_COLOR: u8 = 4;
 pub(in super::super) const GEOMETRY_SEMANTIC_SMOOTHING_GROUP: u8 = 5;
+pub(in super::super) const GEOMETRY_SEMANTIC_CUSTOM: u8 = 6;
 
 pub(in super::super) const GEOMETRY_DOMAIN_VERTEX: u8 = 0;
 pub(in super::super) const GEOMETRY_DOMAIN_CORNER: u8 = 1;
@@ -32,6 +33,7 @@ pub(in super::super) const GEOMETRY_DOMAIN_FACE: u8 = 2;
 
 pub(in super::super) const GEOMETRY_SCALAR_F32: u8 = 0;
 pub(in super::super) const GEOMETRY_SCALAR_U32: u8 = 1;
+pub(in super::super) const GEOMETRY_SCALAR_I32: u8 = 2;
 pub(in super::super) const GEOMETRY_NORMALIZATION_NONE: u8 = 0;
 pub(in super::super) const GEOMETRY_PAYLOAD_DENSE: u8 = 0;
 pub(in super::super) const GEOMETRY_PAYLOAD_SPARSE: u8 = 1;
@@ -59,7 +61,7 @@ pub(in super::super) fn encode_geometry_semantic(
         AttributeSemantic::Texcoord(set) => Some((GEOMETRY_SEMANTIC_TEXCOORD, *set)),
         AttributeSemantic::Color(set) => Some((GEOMETRY_SEMANTIC_COLOR, *set)),
         AttributeSemantic::SmoothingGroup => Some((GEOMETRY_SEMANTIC_SMOOTHING_GROUP, 0)),
-        AttributeSemantic::Custom(_) => None,
+        AttributeSemantic::Custom(_) => Some((GEOMETRY_SEMANTIC_CUSTOM, 0)),
     }
 }
 
@@ -77,6 +79,10 @@ pub(in super::super) mod geometry_logical_mesh_field {
     pub(crate) const PRIMITIVE_OFFSET: usize = 1;
     pub(crate) const PRIMITIVE_COUNT: usize = 2;
     pub(crate) const PRIMITIVES: usize = 3;
+    pub(crate) const NAME_PRESENCE: usize = 4;
+    pub(crate) const NAME_OFFSET: usize = 5;
+    pub(crate) const NAME_COUNT: usize = 6;
+    pub(crate) const NAMES: usize = 7;
 }
 
 pub(in super::super) mod geometry_mesh_instance_field {
@@ -122,10 +128,16 @@ pub(in super::super) mod geometry_attribute_field {
     pub(crate) const VALUES: usize = 11;
     pub(crate) const SPARSE_INDICES: usize = 12;
     pub(crate) const SPARSE_DEFAULT: usize = 13;
+    pub(crate) const SEMANTIC_NAME_OFFSET: usize = 14;
+    pub(crate) const SEMANTIC_NAME_COUNT: usize = 15;
+    pub(crate) const SEMANTIC_NAMES: usize = 16;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in super::super) struct GeometryLogicalMeshTableSchema;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in super::super) struct GeometryLogicalMeshNameSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in super::super) struct GeometryMeshInstanceTableSchema;
@@ -149,6 +161,9 @@ pub(in super::super) struct GeometryF32ValuesSchema;
 pub(in super::super) struct GeometryU32ValuesSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(in super::super) struct GeometryI32ValuesSchema;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in super::super) struct GeometrySparseIndicesSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -157,8 +172,18 @@ pub(in super::super) struct GeometrySparseF32DefaultsSchema;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in super::super) struct GeometrySparseU32DefaultsSchema;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in super::super) struct GeometrySparseI32DefaultsSchema;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in super::super) struct GeometryAttributeSemanticNameSchema;
+
 impl CanonicalSchema for GeometryLogicalMeshTableSchema {
     type StoreKind = RecordBlock;
+}
+
+impl CanonicalSchema for GeometryLogicalMeshNameSchema {
+    type StoreKind = Utf8Block;
 }
 
 impl CanonicalSchema for GeometryMeshInstanceTableSchema {
@@ -189,6 +214,10 @@ impl CanonicalSchema for GeometryU32ValuesSchema {
     type StoreKind = ScalarSequence<u32>;
 }
 
+impl CanonicalSchema for GeometryI32ValuesSchema {
+    type StoreKind = ScalarSequence<i32>;
+}
+
 impl CanonicalSchema for GeometrySparseIndicesSchema {
     type StoreKind = ScalarSequence<u32>;
 }
@@ -199,4 +228,12 @@ impl CanonicalSchema for GeometrySparseF32DefaultsSchema {
 
 impl CanonicalSchema for GeometrySparseU32DefaultsSchema {
     type StoreKind = ScalarSequence<u32>;
+}
+
+impl CanonicalSchema for GeometrySparseI32DefaultsSchema {
+    type StoreKind = ScalarSequence<i32>;
+}
+
+impl CanonicalSchema for GeometryAttributeSemanticNameSchema {
+    type StoreKind = Utf8Block;
 }

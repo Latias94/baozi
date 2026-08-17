@@ -132,8 +132,12 @@ pub(crate) fn parse<'scope>(
                     let v0 = vec3_at(record, 12, scope, offset + 12)?;
                     let v1 = vec3_at(record, 24, scope, offset + 24)?;
                     let v2 = vec3_at(record, 36, scope, offset + 36)?;
-                    positions.try_extend_from_slice_reserved(&[v0, v1, v2])?;
-                    normals.try_extend_from_slice_reserved(&[normal, normal, normal])?;
+                    positions.try_extend_from_slice_reserved(&[
+                        vec3_components(v0),
+                        vec3_components(v1),
+                        vec3_components(v2),
+                    ])?;
+                    normals.try_extend_from_slice_reserved(&[vec3_components(normal); 3])?;
 
                     let Some(attribute_bytes) = record.get(48..50) else {
                         return Err(scope.format_failure(
@@ -186,7 +190,9 @@ pub(crate) fn parse<'scope>(
                         work.poll()?;
                     }
                     work.run([3, 1], || {
-                        colors.try_extend_from_slice_reserved(&[color.unwrap_or(fallback); 3])
+                        colors.try_extend_from_slice_reserved(
+                            &[color_components(color.unwrap_or(fallback)); 3],
+                        )
                     })?;
                 }
                 Ok(colors)
@@ -317,4 +323,12 @@ fn facet_color(attribute: u16, materialise: bool) -> Option<Color> {
 
 fn byte_color(value: u8) -> f32 {
     value as f32 / 255.0
+}
+
+const fn vec3_components(value: Vec3) -> [f32; 3] {
+    [value.x, value.y, value.z]
+}
+
+const fn color_components(value: Color) -> [f32; 4] {
+    [value.r, value.g, value.b, value.a]
 }

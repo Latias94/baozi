@@ -14,7 +14,8 @@ use baozi_import::{
 use baozi_io::{AssetPath, MemoryAssetIo};
 use common::{
     TestResult, expected_failure, expected_success, import_assets_result_with_text_policy,
-    import_bytes_result, import_bytes_result_with_text_policy, operation_result,
+    import_bytes_result, import_bytes_result_with_text_policy, operation_result, scene_snapshot,
+    snapshot_line,
 };
 use std::sync::Arc;
 
@@ -363,6 +364,15 @@ fn decoder_carries_utf8_state_across_four_kib_boundaries() -> TestResult<()> {
     valid.extend_from_slice(GEOMETRY);
     let report = import_recovered_obj(&valid)?;
     assert!(report.loss_evidence().is_empty());
+    let snapshot = scene_snapshot(&report)?;
+    assert!(snapshot_line(&snapshot, "node[0]").contains(" name=absent "));
+    assert!(
+        snapshot
+            .preview()
+            .lines()
+            .any(|line| line.contains("key=obj:object") && line.len() >= 4_000),
+        "the long object name must remain available as canonical metadata"
+    );
 
     let mut truncated = Vec::from(b"o ".as_slice());
     truncated.extend(std::iter::repeat_n(b'a', 4_093));
@@ -515,10 +525,8 @@ fn mtl_recovers_only_names_and_map_paths() -> TestResult<()> {
             .iter()
             .all(|evidence| evidence.source().as_str() == "material.mtl")
     );
-    assert_eq!(
-        report.scene().materials()[0].name.as_deref(),
-        Some("r\u{fffd}d")
-    );
+    let snapshot = scene_snapshot(&report)?;
+    assert!(snapshot_line(&snapshot, "material[0]").contains(" name=r\u{fffd}d"));
     Ok(())
 }
 

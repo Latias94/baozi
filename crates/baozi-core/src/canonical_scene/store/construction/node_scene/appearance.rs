@@ -14,7 +14,7 @@ use crate::canonical_scene::store::schema::appearance::{
     APPEARANCE_PRESENCE_PRESENT, APPEARANCE_SAMPLER_FIELD_COUNT, APPEARANCE_SCHEMA_REVISION,
     APPEARANCE_TEXTURE_FIELD_COUNT, AppearanceBindingSemanticScalarSchema,
     AppearanceBindingTableSchema, AppearanceDirectorySchema, AppearanceEncodedImagePayloadSchema,
-    AppearanceImageTableSchema, AppearanceMaterialFactorScalarSchema,
+    AppearanceImageTableSchema, AppearanceMaterialFactorScalarSchema, AppearanceMaterialNameSchema,
     AppearanceMaterialTableSchema, AppearanceMediaTypeSchema, AppearanceSamplerTableSchema,
     AppearanceSourceKeySchema, AppearanceTextureTableSchema,
     appearance_material_factor_scalar as factor_scalar, encode_appearance_address_mode,
@@ -31,6 +31,7 @@ pub(super) struct AppearanceMaterializationPlans {
     image_payloads: Option<BytesPlan>,
     media_types: Option<Utf8Plan>,
     source_keys: Option<Utf8Plan>,
+    material_names: Option<Utf8Plan>,
     binding_semantic_scalars: Option<SequencePlan<f32>>,
     material_factor_scalars: Option<SequencePlan<f32>>,
     images: Option<RecordPlan>,
@@ -47,6 +48,7 @@ pub(super) struct AppearanceMaterializationPlans {
     image_payload_byte_count: u32,
     media_type_byte_count: u32,
     source_key_byte_count: u32,
+    material_name_byte_count: u32,
     binding_semantic_scalar_count: u32,
     material_factor_scalar_count: u32,
     table_block_count: usize,
@@ -64,12 +66,14 @@ impl AppearanceMaterializationPlans {
         let image_payload_byte_count = batch.image_payload_byte_count();
         let media_type_byte_count = batch.media_type_byte_count();
         let source_key_byte_count = batch.source_key_byte_count();
+        let material_name_byte_count = batch.material_name_byte_count();
         let binding_semantic_scalar_count = batch.binding_semantic_scalar_count();
         let material_factor_scalar_count = batch.material_factor_scalar_count();
 
         let image_payloads = bytes_plan_if_nonempty(image_payload_byte_count)?;
         let media_types = utf8_plan_if_nonempty(media_type_byte_count)?;
         let source_keys = utf8_plan_if_nonempty(source_key_byte_count)?;
+        let material_names = utf8_plan_if_nonempty(material_name_byte_count)?;
         let binding_semantic_scalars = sequence_plan_if_nonempty(binding_semantic_scalar_count)?;
         let material_factor_scalars = sequence_plan_if_nonempty(material_factor_scalar_count)?;
         let images = record_plan_if_nonempty(image_count, APPEARANCE_IMAGE_FIELD_COUNT)?;
@@ -93,6 +97,7 @@ impl AppearanceMaterializationPlans {
         let payload_block_count = u32::from(image_payloads.is_some())
             .checked_add(u32::from(media_types.is_some()))
             .and_then(|count| count.checked_add(u32::from(source_keys.is_some())))
+            .and_then(|count| count.checked_add(u32::from(material_names.is_some())))
             .and_then(|count| count.checked_add(u32::from(binding_semantic_scalars.is_some())))
             .and_then(|count| count.checked_add(u32::from(material_factor_scalars.is_some())))
             .ok_or(StorePlanError::SizeOverflow)?;
@@ -100,6 +105,7 @@ impl AppearanceMaterializationPlans {
             || (image_count == 0) != image_payloads.is_none()
             || (media_type_byte_count != 0 && image_count == 0)
             || (source_key_byte_count != 0 && binding_count == 0)
+            || (material_name_byte_count != 0 && material_count == 0)
             || binding_semantic_scalar_count != expected_binding_semantic_scalars
             || material_factor_scalar_count != expected_material_factor_scalars
         {
@@ -129,6 +135,7 @@ impl AppearanceMaterializationPlans {
             image_payloads,
             media_types,
             source_keys,
+            material_names,
             binding_semantic_scalars,
             material_factor_scalars,
             images,
@@ -145,6 +152,7 @@ impl AppearanceMaterializationPlans {
             image_payload_byte_count,
             media_type_byte_count,
             source_key_byte_count,
+            material_name_byte_count,
             binding_semantic_scalar_count,
             material_factor_scalar_count,
             table_block_count,
@@ -189,6 +197,10 @@ impl AppearanceMaterializationPlans {
         self.source_key_byte_count
     }
 
+    pub(super) const fn material_name_byte_count(&self) -> u32 {
+        self.material_name_byte_count
+    }
+
     pub(super) const fn binding_semantic_scalar_count(&self) -> u32 {
         self.binding_semantic_scalar_count
     }
@@ -210,6 +222,7 @@ impl AppearanceMaterializationPlans {
             optional_bytes_validation_work(self.image_payloads)?,
             optional_utf8_validation_work(self.media_types)?,
             optional_utf8_validation_work(self.source_keys)?,
+            optional_utf8_validation_work(self.material_names)?,
             optional_sequence_validation_work(self.binding_semantic_scalars)?,
             optional_sequence_validation_work(self.material_factor_scalars)?,
             optional_record_validation_work(self.images)?,
@@ -263,6 +276,8 @@ pub(in crate::canonical_scene::store) struct AppearancePayloadRefs {
         Option<CanonicalBlockRef<AppearanceMediaTypeSchema>>,
     pub(in crate::canonical_scene::store) source_keys:
         Option<CanonicalBlockRef<AppearanceSourceKeySchema>>,
+    pub(in crate::canonical_scene::store) material_names:
+        Option<CanonicalBlockRef<AppearanceMaterialNameSchema>>,
     pub(in crate::canonical_scene::store) binding_semantic_scalars:
         Option<CanonicalBlockRef<AppearanceBindingSemanticScalarSchema>>,
     pub(in crate::canonical_scene::store) material_factor_scalars:
@@ -292,6 +307,10 @@ where
         Some(plan) => Some(retain_source_keys(lane, plan, batch, failure)?),
         None => None,
     };
+    let material_names = match plans.material_names {
+        Some(plan) => Some(retain_material_names(lane, plan, batch, failure)?),
+        None => None,
+    };
     let binding_semantic_scalars = match plans.binding_semantic_scalars {
         Some(plan) => Some(retain_binding_semantic_scalars(lane, plan, batch, failure)?),
         None => None,
@@ -304,6 +323,7 @@ where
         image_payloads,
         media_types,
         source_keys,
+        material_names,
         binding_semantic_scalars,
         material_factor_scalars,
     };
@@ -419,6 +439,44 @@ where
             }
         }
         if expected_offset != batch.source_key_byte_count() {
+            return Err(failure.into());
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
+}
+
+fn retain_material_names<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
+    plan: Utf8Plan,
+    batch: &ValidatedAppearanceBatch<'_, R>,
+    failure: StoreBuildError,
+) -> Result<CanonicalBlockRef<AppearanceMaterialNameSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    lane.try_retain_utf8(plan, AppearanceMaterialNameSchema, |control| {
+        let mut expected_offset = 0_u32;
+        for material in batch.materials() {
+            if material.name_offset() != expected_offset {
+                return Err(failure.into());
+            }
+            match material.authored().name() {
+                Presence::Absent if material.name_count() == 0 => {}
+                Presence::Present(name) => {
+                    let count = u32::try_from(name.len()).map_err(|_| failure)?;
+                    if material.name_count() != count {
+                        return Err(failure.into());
+                    }
+                    control.write_str(name)?;
+                    expected_offset = expected_offset.checked_add(count).ok_or(failure)?;
+                }
+                Presence::Absent => return Err(failure.into()),
+            }
+        }
+        if expected_offset != batch.material_name_byte_count() {
             return Err(failure.into());
         }
         Ok(())
@@ -743,6 +801,24 @@ where
         for material in batch.materials() {
             let material_id = u32::try_from(material.input_index()).map_err(|_| failure)?;
             let range = material.authored().bindings();
+            let (name_presence, name_reference) = match material.authored().name() {
+                Presence::Absent if material.name_count() == 0 => {
+                    (APPEARANCE_PRESENCE_ABSENT, None)
+                }
+                Presence::Present(name)
+                    if u32::try_from(name.len()).map_err(|_| failure)? == material.name_count() =>
+                {
+                    (
+                        APPEARANCE_PRESENCE_PRESENT,
+                        if name.is_empty() {
+                            None
+                        } else {
+                            payloads.material_names
+                        },
+                    )
+                }
+                Presence::Absent | Presence::Present(_) => return Err(failure.into()),
+            };
             control.write_row(|row| {
                 row.write_scalar(material_id)?;
                 row.write_scalar(material.shading_model_tag())?;
@@ -761,7 +837,10 @@ where
                 }
                 row.write_scalar(material.factor_offset())?;
                 row.write_scalar(factor_count)?;
-                row.write_sequence_ref(factor_scalars.into_store())
+                row.write_sequence_ref(factor_scalars.into_store())?;
+                row.write_scalar(name_presence)?;
+                row.write_scalar(material.name_offset())?;
+                write_optional_utf8_ref(row, material.name_count(), name_reference, failure)
             })?;
         }
         Ok(())
@@ -817,6 +896,12 @@ where
                 row,
                 plans.material_factor_scalar_count,
                 payloads.material_factor_scalars,
+                failure,
+            )?;
+            write_optional_utf8_ref(
+                row,
+                plans.material_name_byte_count,
+                payloads.material_names,
                 failure,
             )
         })

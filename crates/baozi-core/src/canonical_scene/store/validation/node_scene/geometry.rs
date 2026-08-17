@@ -2,10 +2,11 @@ use baozi_operation::__canonical_activation::{
     CanonicalValidationMember, CanonicalValidationSession,
 };
 use baozi_operation::{
-    CanonicalRecordRef, CanonicalRecordView, OperationOwner, ProgressPhase, ProgressUnit,
-    RecordBlock, ScalarSequence, StoreValidationSession, StoreWorkError,
+    CanonicalRecordRef, CanonicalRecordView, CanonicalUtf8Ref, OperationOwner, ProgressPhase,
+    ProgressUnit, RecordBlock, ScalarSequence, StoreValidationSession, StoreWorkError, Utf8Block,
 };
 
+use crate::attribute::CustomAttributeSemantic;
 use crate::canonical_scene::store::production::{
     GeometryAttributePayloadAuthoring, GeometryAttributePayloadKind, GeometryAttributeScalarKind,
     GeometryTopologyAuthoring, Presence, ValidatedGeometryBatch, ValidatedNodeBatch,
@@ -15,31 +16,37 @@ use crate::canonical_scene::store::schema::geometry::{
     GEOMETRY_ATTRIBUTE_FIELD_COUNT, GEOMETRY_DOMAIN_CORNER, GEOMETRY_DOMAIN_FACE,
     GEOMETRY_DOMAIN_VERTEX, GEOMETRY_LOGICAL_MESH_FIELD_COUNT, GEOMETRY_MESH_INSTANCE_FIELD_COUNT,
     GEOMETRY_NORMALIZATION_NONE, GEOMETRY_PAYLOAD_DENSE, GEOMETRY_PAYLOAD_SPARSE,
-    GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32, GEOMETRY_SCALAR_U32,
-    GEOMETRY_SEMANTIC_COLOR, GEOMETRY_SEMANTIC_NORMAL, GEOMETRY_SEMANTIC_POSITION,
-    GEOMETRY_SEMANTIC_SMOOTHING_GROUP, GEOMETRY_SEMANTIC_TANGENT, GEOMETRY_SEMANTIC_TEXCOORD,
-    GEOMETRY_TOPOLOGY_LINE_LIST, GEOMETRY_TOPOLOGY_LINE_LOOP, GEOMETRY_TOPOLOGY_LINE_STRIP,
-    GEOMETRY_TOPOLOGY_POINTS, GEOMETRY_TOPOLOGY_POLYGONS, GEOMETRY_TOPOLOGY_TRIANGLE_FAN,
-    GEOMETRY_TOPOLOGY_TRIANGLE_LIST, GEOMETRY_TOPOLOGY_TRIANGLE_STRIP,
-    GeometryAttributeTableSchema, GeometryF32ValuesSchema, GeometryLogicalMeshTableSchema,
-    GeometryMeshInstanceTableSchema, GeometryPolygonBoundariesSchema,
-    GeometryPrimitiveIndicesSchema, GeometryPrimitiveTableSchema, GeometrySparseF32DefaultsSchema,
-    GeometrySparseIndicesSchema, GeometrySparseU32DefaultsSchema, GeometryU32ValuesSchema,
-    encode_geometry_domain, encode_geometry_semantic, encode_geometry_topology,
-    geometry_attribute_field, geometry_logical_mesh_field, geometry_mesh_instance_field,
-    geometry_primitive_field,
+    GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32, GEOMETRY_SCALAR_I32, GEOMETRY_SCALAR_U32,
+    GEOMETRY_SEMANTIC_COLOR, GEOMETRY_SEMANTIC_CUSTOM, GEOMETRY_SEMANTIC_NORMAL,
+    GEOMETRY_SEMANTIC_POSITION, GEOMETRY_SEMANTIC_SMOOTHING_GROUP, GEOMETRY_SEMANTIC_TANGENT,
+    GEOMETRY_SEMANTIC_TEXCOORD, GEOMETRY_TOPOLOGY_LINE_LIST, GEOMETRY_TOPOLOGY_LINE_LOOP,
+    GEOMETRY_TOPOLOGY_LINE_STRIP, GEOMETRY_TOPOLOGY_POINTS, GEOMETRY_TOPOLOGY_POLYGONS,
+    GEOMETRY_TOPOLOGY_TRIANGLE_FAN, GEOMETRY_TOPOLOGY_TRIANGLE_LIST,
+    GEOMETRY_TOPOLOGY_TRIANGLE_STRIP, GeometryAttributeSemanticNameSchema,
+    GeometryAttributeTableSchema, GeometryF32ValuesSchema, GeometryI32ValuesSchema,
+    GeometryLogicalMeshNameSchema, GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
+    GeometryPolygonBoundariesSchema, GeometryPrimitiveIndicesSchema, GeometryPrimitiveTableSchema,
+    GeometrySparseF32DefaultsSchema, GeometrySparseI32DefaultsSchema, GeometrySparseIndicesSchema,
+    GeometrySparseU32DefaultsSchema, GeometryU32ValuesSchema, encode_geometry_domain,
+    encode_geometry_semantic, encode_geometry_topology, geometry_attribute_field,
+    geometry_logical_mesh_field, geometry_mesh_instance_field, geometry_primitive_field,
 };
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, NodeSceneNodeTableSchema, PRESENCE_ABSENT,
     PRESENCE_PRESENT, SCENE_GEOMETRY_DIRECTORY_FIELD_COUNT, SCENE_GEOMETRY_SCHEMA_REVISION,
     SceneGeometryDirectorySchema, scene_geometry_directory_field,
 };
+use crate::entity::{MAX_ENTITY_NAME_BYTES, validate_entity_name_str};
+use crate::namespaced::{MAX_NAMESPACED_NAME_LEN, NamespacedName};
 
 use super::super::require_scalar;
 
 #[derive(Clone, Copy)]
 pub(super) struct GeometryValidatedRefs {
     pub(super) logical_meshes: Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>>,
+    pub(super) logical_mesh_names: Option<CanonicalBlockRef<GeometryLogicalMeshNameSchema>>,
+    pub(super) attribute_semantic_names:
+        Option<CanonicalBlockRef<GeometryAttributeSemanticNameSchema>>,
     pub(super) primitives: Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>>,
     pub(super) attributes: Option<CanonicalBlockRef<GeometryAttributeTableSchema>>,
     pub(super) mesh_instances: Option<CanonicalBlockRef<GeometryMeshInstanceTableSchema>>,
@@ -61,6 +68,10 @@ pub(super) struct GeometryValidatedMembers<'session> {
         Option<CanonicalValidationMember<'session, RecordBlock, GeometryAttributeTableSchema>>,
     pub(super) mesh_instances:
         Option<CanonicalValidationMember<'session, RecordBlock, GeometryMeshInstanceTableSchema>>,
+    pub(super) logical_mesh_names:
+        Option<CanonicalValidationMember<'session, Utf8Block, GeometryLogicalMeshNameSchema>>,
+    pub(super) attribute_semantic_names:
+        Option<CanonicalValidationMember<'session, Utf8Block, GeometryAttributeSemanticNameSchema>>,
 }
 
 #[derive(Clone, Copy)]
@@ -207,6 +218,7 @@ enum GeometryAttributeValuesMember<'session> {
     Absent,
     F32(CanonicalValidationMember<'session, ScalarSequence<f32>, GeometryF32ValuesSchema>),
     U32(CanonicalValidationMember<'session, ScalarSequence<u32>, GeometryU32ValuesSchema>),
+    I32(CanonicalValidationMember<'session, ScalarSequence<i32>, GeometryI32ValuesSchema>),
 }
 
 #[derive(Clone, Copy)]
@@ -214,12 +226,34 @@ enum GeometryAttributeDefaultMember<'session> {
     Absent,
     F32(CanonicalValidationMember<'session, ScalarSequence<f32>, GeometrySparseF32DefaultsSchema>),
     U32(CanonicalValidationMember<'session, ScalarSequence<u32>, GeometrySparseU32DefaultsSchema>),
+    I32(CanonicalValidationMember<'session, ScalarSequence<i32>, GeometrySparseI32DefaultsSchema>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct GeometryAttributeSemanticName {
+    bytes: [u8; MAX_NAMESPACED_NAME_LEN],
+    len: u8,
+}
+
+impl GeometryAttributeSemanticName {
+    fn try_new(value: &str) -> Option<Self> {
+        NamespacedName::new(value).ok()?;
+        let len = u8::try_from(value.len()).ok()?;
+        let mut bytes = [0_u8; MAX_NAMESPACED_NAME_LEN];
+        bytes
+            .get_mut(..value.len())?
+            .copy_from_slice(value.as_bytes());
+        Some(Self { bytes, len })
+    }
 }
 
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct GeometryAttributeValidationScratch<'session> {
     semantic: u8,
     semantic_set: u32,
+    semantic_name_offset: u32,
+    semantic_name_count: u32,
+    semantic_name: Option<GeometryAttributeSemanticName>,
     domain: u8,
     scalar_kind: u8,
     lanes: u8,
@@ -239,6 +273,9 @@ impl<'session> GeometryAttributeValidationScratch<'session> {
     pub(in crate::canonical_scene::store) const EMPTY: Self = Self {
         semantic: 0,
         semantic_set: 0,
+        semantic_name_offset: 0,
+        semantic_name_count: 0,
+        semantic_name: None,
         domain: 0,
         scalar_kind: 0,
         lanes: 0,
@@ -306,12 +343,16 @@ impl<'session> GeometryPrimitiveValidationScratch<'session> {
 pub(in crate::canonical_scene::store) struct GeometryLogicalMeshValidationProjection {
     pub(super) primitive_offset: u32,
     pub(super) primitive_count: u32,
+    name_presence: u8,
+    name_count: u32,
 }
 
 impl GeometryLogicalMeshValidationProjection {
     pub(in crate::canonical_scene::store) const EMPTY: Self = Self {
         primitive_offset: 0,
         primitive_count: 0,
+        name_presence: PRESENCE_ABSENT,
+        name_count: 0,
     };
 }
 
@@ -416,6 +457,9 @@ enum CanonicalGeometryAttributePayload<'a> {
     DenseU32 {
         values: &'a [u32],
     },
+    DenseI32 {
+        values: &'a [i32],
+    },
     SparseF32 {
         indices: &'a [u32],
         values: &'a [f32],
@@ -425,6 +469,11 @@ enum CanonicalGeometryAttributePayload<'a> {
         indices: &'a [u32],
         values: &'a [u32],
         default: &'a [u32],
+    },
+    SparseI32 {
+        indices: &'a [u32],
+        values: &'a [i32],
+        default: &'a [i32],
     },
 }
 
@@ -449,6 +498,7 @@ impl CanonicalGeometryAttributePayload<'_> {
         match self {
             Self::DenseF32 { values } => u32::from(!values.is_empty()),
             Self::DenseU32 { values } => u32::from(!values.is_empty()),
+            Self::DenseI32 { values } => u32::from(!values.is_empty()),
             Self::SparseF32 {
                 indices,
                 values,
@@ -459,6 +509,15 @@ impl CanonicalGeometryAttributePayload<'_> {
                     + u32::from(!default.is_empty())
             }
             Self::SparseU32 {
+                indices,
+                values,
+                default,
+            } => {
+                u32::from(!indices.is_empty())
+                    + u32::from(!values.is_empty())
+                    + u32::from(!default.is_empty())
+            }
+            Self::SparseI32 {
                 indices,
                 values,
                 default,
@@ -501,7 +560,12 @@ impl CanonicalGeometryPrimitivePayload<'_> {
 trait GeometryEquivalence {
     fn validate_directory(&mut self, directory: CanonicalRecordView<'_>) -> Option<()>;
 
-    fn validate_attribute(&mut self, row: usize, table: CanonicalRecordView<'_>) -> Option<()>;
+    fn validate_attribute(
+        &mut self,
+        row: usize,
+        table: CanonicalRecordView<'_>,
+        semantic_name: Option<&str>,
+    ) -> Option<()>;
 
     fn attribute_payload(&self, row: usize) -> Option<GeometryAttributePayloadExpectation<'_>>;
 
@@ -522,6 +586,7 @@ trait GeometryEquivalence {
         row: usize,
         table: CanonicalRecordView<'_>,
         primitives: CanonicalRecordRef<GeometryPrimitiveTableSchema>,
+        name: Option<&str>,
     ) -> Option<()>;
 
     fn validate_mesh_instance(
@@ -540,7 +605,12 @@ impl GeometryEquivalence for CanonicalGeometryEquivalence {
         Some(())
     }
 
-    fn validate_attribute(&mut self, _row: usize, _table: CanonicalRecordView<'_>) -> Option<()> {
+    fn validate_attribute(
+        &mut self,
+        _row: usize,
+        _table: CanonicalRecordView<'_>,
+        _semantic_name: Option<&str>,
+    ) -> Option<()> {
         Some(())
     }
 
@@ -571,6 +641,7 @@ impl GeometryEquivalence for CanonicalGeometryEquivalence {
         _row: usize,
         _table: CanonicalRecordView<'_>,
         _primitives: CanonicalRecordRef<GeometryPrimitiveTableSchema>,
+        _name: Option<&str>,
     ) -> Option<()> {
         Some(())
     }
@@ -599,6 +670,14 @@ impl<NR, GR> GeometryEquivalence for FreshGeometryEquivalence<'_, '_, '_, NR, GR
                 self.expected.logical_mesh_count(),
             ),
             (
+                scene_geometry_directory_field::LOGICAL_MESH_NAME_BYTE_COUNT,
+                self.expected.logical_mesh_name_byte_count(),
+            ),
+            (
+                scene_geometry_directory_field::ATTRIBUTE_SEMANTIC_NAME_BYTE_COUNT,
+                self.expected.attribute_semantic_name_byte_count(),
+            ),
+            (
                 scene_geometry_directory_field::PRIMITIVE_COUNT,
                 self.expected.primitive_count(),
             ),
@@ -616,8 +695,13 @@ impl<NR, GR> GeometryEquivalence for FreshGeometryEquivalence<'_, '_, '_, NR, GR
         Some(())
     }
 
-    fn validate_attribute(&mut self, row: usize, table: CanonicalRecordView<'_>) -> Option<()> {
-        validate_attribute_fresh(row, table, self.expected)
+    fn validate_attribute(
+        &mut self,
+        row: usize,
+        table: CanonicalRecordView<'_>,
+        semantic_name: Option<&str>,
+    ) -> Option<()> {
+        validate_attribute_fresh(row, table, semantic_name, self.expected)
     }
 
     fn attribute_payload(&self, row: usize) -> Option<GeometryAttributePayloadExpectation<'_>> {
@@ -653,8 +737,9 @@ impl<NR, GR> GeometryEquivalence for FreshGeometryEquivalence<'_, '_, '_, NR, GR
         row: usize,
         table: CanonicalRecordView<'_>,
         primitives: CanonicalRecordRef<GeometryPrimitiveTableSchema>,
+        name: Option<&str>,
     ) -> Option<()> {
-        validate_logical_mesh_fresh(row, table, primitives, self.expected)
+        validate_logical_mesh_fresh(row, table, primitives, name, self.expected)
     }
 
     fn validate_mesh_instance(
@@ -744,6 +829,12 @@ where
     let mut mesh_instance_count = None;
     let mut mesh_instances = None;
     let mut mesh_instances_absent = None;
+    let mut logical_mesh_name_byte_count = None;
+    let mut logical_mesh_names = None;
+    let mut logical_mesh_names_absent = None;
+    let mut attribute_semantic_name_byte_count = None;
+    let mut attribute_semantic_names = None;
+    let mut attribute_semantic_names_absent = None;
     let directory_complete = session.visit_canonical_records(
         geometry,
         1,
@@ -813,6 +904,36 @@ where
                     |value: u8| value,
                 )?;
             }
+            logical_mesh_name_byte_count = row.scalar(
+                scene_geometry_directory_field::LOGICAL_MESH_NAME_BYTE_COUNT,
+                |value: u32| value,
+            )?;
+            if logical_mesh_name_byte_count.is_some_and(|count| count != 0) {
+                logical_mesh_names = row.utf8_ref::<GeometryLogicalMeshNameSchema, _>(
+                    scene_geometry_directory_field::LOGICAL_MESH_NAMES,
+                    |value| value,
+                )?;
+            } else {
+                logical_mesh_names_absent = row.scalar(
+                    scene_geometry_directory_field::LOGICAL_MESH_NAMES,
+                    |value: u8| value,
+                )?;
+            }
+            attribute_semantic_name_byte_count = row.scalar(
+                scene_geometry_directory_field::ATTRIBUTE_SEMANTIC_NAME_BYTE_COUNT,
+                |value: u32| value,
+            )?;
+            if attribute_semantic_name_byte_count.is_some_and(|count| count != 0) {
+                attribute_semantic_names = row.utf8_ref::<GeometryAttributeSemanticNameSchema, _>(
+                    scene_geometry_directory_field::ATTRIBUTE_SEMANTIC_NAMES,
+                    |value| value,
+                )?;
+            } else {
+                attribute_semantic_names_absent = row.scalar(
+                    scene_geometry_directory_field::ATTRIBUTE_SEMANTIC_NAMES,
+                    |value: u8| value,
+                )?;
+            }
             Ok(true)
         },
     )?;
@@ -842,15 +963,43 @@ where
             mesh_instances,
             mesh_instances_absent,
         )
+        || !metered_directory_payload_is_valid(
+            logical_mesh_name_byte_count,
+            logical_mesh_names,
+            logical_mesh_names_absent,
+        )
+        || !metered_directory_payload_is_valid(
+            attribute_semantic_name_byte_count,
+            attribute_semantic_names,
+            attribute_semantic_names_absent,
+        )
     {
         return Ok(None);
     }
+    let Some(logical_mesh_name_byte_count) = logical_mesh_name_byte_count else {
+        return Ok(None);
+    };
+    let Some(attribute_semantic_name_byte_count) = attribute_semantic_name_byte_count else {
+        return Ok(None);
+    };
 
-    let Some(attribute_payload_block_count) =
-        validate_attribute_table_metered(session, attributes, attributes_scratch)?
+    let Some(attribute_payload_block_count) = validate_attribute_table_metered(
+        session,
+        attributes,
+        attribute_semantic_names,
+        attributes_scratch,
+    )?
     else {
         return Ok(None);
     };
+    if !visit_geometry_attribute_semantic_names(
+        session,
+        attribute_semantic_names,
+        attribute_semantic_name_byte_count,
+        attributes_scratch,
+    )? {
+        return Ok(None);
+    }
     let Some(primitive_payload_block_count) = validate_primitive_table_metered(
         session,
         primitives,
@@ -869,6 +1018,13 @@ where
         logical_meshes,
         primitives,
         counts.primitives,
+        logical_mesh_names,
+        logical_mesh_name_byte_count,
+        logical_mesh_projections,
+    )? || !visit_geometry_logical_mesh_names(
+        session,
+        logical_mesh_names,
+        logical_mesh_name_byte_count,
         logical_mesh_projections,
     )? || !validate_mesh_instance_table_metered(
         session,
@@ -881,8 +1037,10 @@ where
     )? {
         return Ok(None);
     }
-    let Some(payload_block_count) =
-        attribute_payload_block_count.checked_add(primitive_payload_block_count)
+    let Some(payload_block_count) = attribute_payload_block_count
+        .checked_add(primitive_payload_block_count)
+        .and_then(|count| count.checked_add(u32::from(logical_mesh_names.is_some())))
+        .and_then(|count| count.checked_add(u32::from(attribute_semantic_names.is_some())))
     else {
         return Ok(None);
     };
@@ -892,6 +1050,8 @@ where
             primitives,
             attributes,
             mesh_instances,
+            logical_mesh_names,
+            attribute_semantic_names,
         },
         payload_block_count,
     }))
@@ -909,6 +1069,18 @@ fn metered_directory_collection_is_valid<T>(
         } else {
             member.is_some()
         }
+}
+
+fn metered_directory_payload_is_valid<T>(
+    count: Option<u32>,
+    member: Option<T>,
+    absent: Option<u8>,
+) -> bool {
+    match count {
+        Some(0) => member.is_none() && absent == Some(0),
+        Some(_) => member.is_some() && absent.is_none(),
+        None => false,
+    }
 }
 
 #[allow(
@@ -1000,9 +1172,34 @@ fn validate_geometry_graph_inner(
         counts.mesh_instances,
         GEOMETRY_MESH_INSTANCE_FIELD_COUNT,
     )?;
+    let logical_mesh_names = optional_utf8_ref::<GeometryLogicalMeshNameSchema>(
+        session,
+        directory,
+        scene_geometry_directory_field::LOGICAL_MESH_NAME_BYTE_COUNT,
+        scene_geometry_directory_field::LOGICAL_MESH_NAMES,
+        directory.scalar::<u32>(
+            0,
+            scene_geometry_directory_field::LOGICAL_MESH_NAME_BYTE_COUNT,
+        )?,
+    )?;
+    let attribute_semantic_names = optional_utf8_ref::<GeometryAttributeSemanticNameSchema>(
+        session,
+        directory,
+        scene_geometry_directory_field::ATTRIBUTE_SEMANTIC_NAME_BYTE_COUNT,
+        scene_geometry_directory_field::ATTRIBUTE_SEMANTIC_NAMES,
+        directory.scalar::<u32>(
+            0,
+            scene_geometry_directory_field::ATTRIBUTE_SEMANTIC_NAME_BYTE_COUNT,
+        )?,
+    )?;
 
-    let (attribute_table, attribute_payload_block_count) =
-        validate_attribute_table(session, attributes, equivalence, observe_work)?;
+    let (attribute_table, attribute_payload_block_count) = validate_attribute_table(
+        session,
+        attributes,
+        attribute_semantic_names,
+        equivalence,
+        observe_work,
+    )?;
     let primitive_payload_block_count = validate_primitive_table(
         session,
         primitives,
@@ -1010,6 +1207,7 @@ fn validate_geometry_graph_inner(
         dependencies.material_count,
         attributes,
         attribute_table,
+        attribute_semantic_names,
         equivalence,
         observe_work,
     )?;
@@ -1018,6 +1216,7 @@ fn validate_geometry_graph_inner(
         logical_meshes,
         primitives,
         counts.primitives,
+        logical_mesh_names,
         equivalence,
         observe_work,
     )?;
@@ -1035,12 +1234,16 @@ fn validate_geometry_graph_inner(
     Some(GeometryValidatedShape {
         refs: GeometryValidatedRefs {
             logical_meshes: logical_meshes.map(CanonicalBlockRef::from_store),
+            logical_mesh_names: logical_mesh_names.map(CanonicalBlockRef::from_store),
+            attribute_semantic_names: attribute_semantic_names.map(CanonicalBlockRef::from_store),
             primitives: primitives.map(CanonicalBlockRef::from_store),
             attributes: attributes.map(CanonicalBlockRef::from_store),
             mesh_instances: mesh_instances.map(CanonicalBlockRef::from_store),
         },
         payload_block_count: attribute_payload_block_count
-            .checked_add(primitive_payload_block_count)?,
+            .checked_add(primitive_payload_block_count)?
+            .checked_add(u32::from(logical_mesh_names.is_some()))?
+            .checked_add(u32::from(attribute_semantic_names.is_some()))?,
     })
 }
 
@@ -1071,6 +1274,27 @@ where
     }
 }
 
+fn optional_utf8_ref<Tag>(
+    session: &mut StoreValidationSession<'_, '_>,
+    directory: CanonicalRecordView<'_>,
+    count_field: usize,
+    reference_field: usize,
+    expected_count: u32,
+) -> Option<Option<CanonicalUtf8Ref<Tag>>>
+where
+    Tag: Copy + Send + Sync + 'static,
+{
+    require_scalar(directory.scalar::<u32>(0, count_field), expected_count)?;
+    if expected_count == 0 {
+        require_scalar(directory.scalar::<u8>(0, reference_field), 0_u8)?;
+        Some(None)
+    } else {
+        let reference = directory.utf8_ref::<Tag>(0, reference_field)?;
+        let payload = session.canonical_utf8(reference)?;
+        (payload.len() == usize::try_from(expected_count).ok()?).then_some(Some(reference))
+    }
+}
+
 #[derive(Clone, Copy)]
 enum GeometryAttributeLeafShape {
     DenseF32 {
@@ -1079,12 +1303,20 @@ enum GeometryAttributeLeafShape {
     DenseU32 {
         values: usize,
     },
+    DenseI32 {
+        values: usize,
+    },
     SparseF32 {
         values: usize,
         indices: usize,
         default: usize,
     },
     SparseU32 {
+        values: usize,
+        indices: usize,
+        default: usize,
+    },
+    SparseI32 {
         values: usize,
         indices: usize,
         default: usize,
@@ -1118,6 +1350,11 @@ fn geometry_attribute_leaf_shape(
         .then_some(GeometryAttributeLeafShape::DenseU32 {
             values: dense_scalar_count,
         }),
+        (GEOMETRY_PAYLOAD_DENSE, GEOMETRY_SCALAR_I32) => (explicit_count_usize == element_count
+            && canonical_scalar_count == u64::try_from(dense_scalar_count).ok()?)
+        .then_some(GeometryAttributeLeafShape::DenseI32 {
+            values: dense_scalar_count,
+        }),
         (GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_SCALAR_F32) => (explicit_count_usize <= element_count
             && canonical_scalar_count
                 == u64::try_from(explicit_scalar_count.checked_add(lane_count)?).ok()?)
@@ -1134,6 +1371,14 @@ fn geometry_attribute_leaf_shape(
             indices: explicit_count_usize,
             default: lane_count,
         }),
+        (GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_SCALAR_I32) => (explicit_count_usize <= element_count
+            && canonical_scalar_count
+                == u64::try_from(explicit_scalar_count.checked_add(lane_count)?).ok()?)
+        .then_some(GeometryAttributeLeafShape::SparseI32 {
+            values: explicit_scalar_count,
+            indices: explicit_count_usize,
+            default: lane_count,
+        }),
         _ => None,
     }
 }
@@ -1141,6 +1386,9 @@ fn geometry_attribute_leaf_shape(
 fn validate_attribute_table_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     member: Option<CanonicalValidationMember<'session, RecordBlock, GeometryAttributeTableSchema>>,
+    semantic_names: Option<
+        CanonicalValidationMember<'session, Utf8Block, GeometryAttributeSemanticNameSchema>,
+    >,
     scratch: &mut [GeometryAttributeValidationScratch<'session>],
 ) -> Result<Option<u32>, StoreWorkError>
 where
@@ -1180,6 +1428,23 @@ where
                 geometry_attribute_field::CANONICAL_SCALAR_COUNT,
                 |value: u64| value,
             )?;
+            let semantic_name_offset = row.scalar(
+                geometry_attribute_field::SEMANTIC_NAME_OFFSET,
+                |value: u32| value,
+            )?;
+            let semantic_name_count = row.scalar(
+                geometry_attribute_field::SEMANTIC_NAME_COUNT,
+                |value: u32| value,
+            )?;
+            let semantic_name_cell_valid = if semantic_name_count.is_some_and(|count| count != 0) {
+                row.utf8_ref::<GeometryAttributeSemanticNameSchema, _>(
+                    geometry_attribute_field::SEMANTIC_NAMES,
+                    |value| value,
+                )? == semantic_names
+                    && semantic_names.is_some()
+            } else {
+                row.scalar(geometry_attribute_field::SEMANTIC_NAMES, |value: u8| value)? == Some(0)
+            };
             let leaf_shape = match (
                 scalar_kind,
                 payload_kind,
@@ -1241,6 +1506,23 @@ where
                         valid,
                     )
                 }
+                Some(GeometryAttributeLeafShape::DenseI32 { values })
+                | Some(GeometryAttributeLeafShape::SparseI32 { values, .. })
+                    if values != 0 =>
+                {
+                    let value = row.sequence_ref::<i32, GeometryI32ValuesSchema, _>(
+                        geometry_attribute_field::VALUES,
+                        |value| value,
+                    )?;
+                    let valid = value.is_some();
+                    (
+                        value.map_or(
+                            GeometryAttributeValuesMember::Absent,
+                            GeometryAttributeValuesMember::I32,
+                        ),
+                        valid,
+                    )
+                }
                 _ => {
                     let absent = row.scalar(geometry_attribute_field::VALUES, |value: u8| value)?;
                     (GeometryAttributeValuesMember::Absent, absent == Some(0))
@@ -1250,6 +1532,7 @@ where
             let (sparse_indices, sparse_indices_cell_valid) = match leaf_shape {
                 Some(GeometryAttributeLeafShape::SparseF32 { indices, .. })
                 | Some(GeometryAttributeLeafShape::SparseU32 { indices, .. })
+                | Some(GeometryAttributeLeafShape::SparseI32 { indices, .. })
                     if indices != 0 =>
                 {
                     let value = row.sequence_ref::<u32, GeometrySparseIndicesSchema, _>(
@@ -1295,6 +1578,20 @@ where
                         valid,
                     )
                 }
+                Some(GeometryAttributeLeafShape::SparseI32 { default, .. }) if default != 0 => {
+                    let value = row.sequence_ref::<i32, GeometrySparseI32DefaultsSchema, _>(
+                        geometry_attribute_field::SPARSE_DEFAULT,
+                        |value| value,
+                    )?;
+                    let valid = value.is_some();
+                    (
+                        value.map_or(
+                            GeometryAttributeDefaultMember::Absent,
+                            GeometryAttributeDefaultMember::I32,
+                        ),
+                        valid,
+                    )
+                }
                 _ => {
                     let absent =
                         row.scalar(geometry_attribute_field::SPARSE_DEFAULT, |value: u8| value)?;
@@ -1315,6 +1612,8 @@ where
                 Some(element_count),
                 Some(explicit_count),
                 Some(canonical_scalar_count),
+                Some(semantic_name_offset),
+                Some(semantic_name_count),
             ) = (
                 semantic,
                 semantic_set,
@@ -1325,6 +1624,8 @@ where
                 element_count,
                 explicit_count,
                 canonical_scalar_count,
+                semantic_name_offset,
+                semantic_name_count,
             )
             else {
                 return Ok(false);
@@ -1336,7 +1637,10 @@ where
                 && leaf_shape.is_some()
                 && values_cell_valid
                 && sparse_indices_cell_valid
-                && sparse_default_cell_valid;
+                && sparse_default_cell_valid
+                && semantic_name_cell_valid
+                && ((semantic == GEOMETRY_SEMANTIC_CUSTOM && semantic_name_count != 0)
+                    || (semantic != GEOMETRY_SEMANTIC_CUSTOM && semantic_name_count == 0));
             if valid {
                 let Some(destination) = scratch.get_mut(row_index) else {
                     return Ok(false);
@@ -1344,6 +1648,9 @@ where
                 *destination = GeometryAttributeValidationScratch {
                     semantic,
                     semantic_set,
+                    semantic_name_offset,
+                    semantic_name_count,
+                    semantic_name: None,
                     domain,
                     scalar_kind,
                     lanes,
@@ -1438,6 +1745,18 @@ where
             }
             u32::from(values != 0)
         }
+        GeometryAttributeLeafShape::DenseI32 { values } => {
+            if !validate_i32_values_metered(session, current.values, values)?
+                || !matches!(
+                    current.sparse_default,
+                    GeometryAttributeDefaultMember::Absent
+                )
+                || current.sparse_indices.is_some()
+            {
+                return Ok(None);
+            }
+            u32::from(values != 0)
+        }
         GeometryAttributeLeafShape::SparseF32 {
             values,
             indices,
@@ -1472,6 +1791,33 @@ where
         } => {
             if !validate_u32_values_metered(session, current.values, values)?
                 || !validate_u32_default_metered(session, current.sparse_default, default)?
+            {
+                return Ok(None);
+            }
+            let Some(maximum) = validate_sparse_indices_metered(
+                session,
+                current.sparse_indices,
+                indices,
+                current.element_count,
+                cached_sparse_maximum,
+            )?
+            else {
+                return Ok(None);
+            };
+            if let Some(destination) = scratch.get_mut(row_index) {
+                destination.sparse_maximum = maximum;
+            } else {
+                return Ok(None);
+            }
+            u32::from(values != 0) + u32::from(indices != 0) + u32::from(default != 0)
+        }
+        GeometryAttributeLeafShape::SparseI32 {
+            values,
+            indices,
+            default,
+        } => {
+            if !validate_i32_values_metered(session, current.values, values)?
+                || !validate_i32_default_metered(session, current.sparse_default, default)?
             {
                 return Ok(None);
             }
@@ -1533,6 +1879,25 @@ where
     }
 }
 
+fn validate_i32_values_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    member: GeometryAttributeValuesMember<'session>,
+    expected_len: usize,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    match (member, expected_len) {
+        (GeometryAttributeValuesMember::Absent, 0) => Ok(true),
+        (GeometryAttributeValuesMember::I32(member), expected_len) if expected_len != 0 => {
+            session.visit_canonical_sequence(member, expected_len, |_index, _value| true)
+        }
+        _ => Ok(false),
+    }
+}
+
 fn validate_f32_default_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     member: GeometryAttributeDefaultMember<'session>,
@@ -1564,6 +1929,25 @@ where
     match (member, expected_len) {
         (GeometryAttributeDefaultMember::Absent, 0) => Ok(true),
         (GeometryAttributeDefaultMember::U32(member), expected_len) if expected_len != 0 => {
+            session.visit_canonical_sequence(member, expected_len, |_index, _value| true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn validate_i32_default_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    member: GeometryAttributeDefaultMember<'session>,
+    expected_len: usize,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    match (member, expected_len) {
+        (GeometryAttributeDefaultMember::Absent, 0) => Ok(true),
+        (GeometryAttributeDefaultMember::I32(member), expected_len) if expected_len != 0 => {
             session.visit_canonical_sequence(member, expected_len, |_index, _value| true)
         }
         _ => Ok(false),
@@ -1607,6 +1991,102 @@ where
         accepted
     })?;
     Ok((complete && maximum.is_some()).then_some(maximum))
+}
+
+fn visit_geometry_attribute_semantic_names<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    names: Option<
+        CanonicalValidationMember<'session, Utf8Block, GeometryAttributeSemanticNameSchema>,
+    >,
+    name_byte_count: u32,
+    attributes: &mut [GeometryAttributeValidationScratch<'session>],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(names) = names else {
+        return Ok(name_byte_count == 0
+            && attributes.iter().all(|attribute| {
+                attribute.semantic != GEOMETRY_SEMANTIC_CUSTOM
+                    && attribute.semantic_name_offset == 0
+                    && attribute.semantic_name_count == 0
+                    && attribute.semantic_name.is_none()
+            }));
+    };
+    let Some(name_byte_count) = usize::try_from(name_byte_count).ok() else {
+        return Ok(false);
+    };
+    let mut attribute_index = 0_usize;
+    let mut name_cursor = 0_u32;
+    let mut segment_len = 0_usize;
+    let mut segment = [0_u8; MAX_NAMESPACED_NAME_LEN];
+    let complete = session.visit_canonical_utf8_bytes(names, name_byte_count, |_index, byte| {
+        while let Some(attribute) = attributes.get(attribute_index) {
+            if attribute.semantic_name_count != 0 {
+                break;
+            }
+            if attribute.semantic == GEOMETRY_SEMANTIC_CUSTOM
+                || attribute.semantic_name_offset != name_cursor
+                || attribute.semantic_name.is_some()
+            {
+                return false;
+            }
+            attribute_index += 1;
+        }
+        let Some(attribute) = attributes.get(attribute_index) else {
+            return false;
+        };
+        let Some(segment_count) = usize::try_from(attribute.semantic_name_count).ok() else {
+            return false;
+        };
+        if attribute.semantic != GEOMETRY_SEMANTIC_CUSTOM
+            || attribute.semantic_name_offset != name_cursor
+            || segment_count == 0
+            || segment_count > segment.len()
+            || segment_len >= segment_count
+        {
+            return false;
+        }
+        segment[segment_len] = byte;
+        segment_len += 1;
+        if segment_len != segment_count {
+            return true;
+        }
+        let Some(name) = std::str::from_utf8(&segment[..segment_len])
+            .ok()
+            .and_then(GeometryAttributeSemanticName::try_new)
+        else {
+            return false;
+        };
+        let Some(destination) = attributes.get_mut(attribute_index) else {
+            return false;
+        };
+        destination.semantic_name = Some(name);
+        let Some(next_name_cursor) = name_cursor.checked_add(destination.semantic_name_count)
+        else {
+            return false;
+        };
+        name_cursor = next_name_cursor;
+        attribute_index += 1;
+        segment_len = 0;
+        true
+    })?;
+    while let Some(attribute) = attributes.get(attribute_index) {
+        if attribute.semantic == GEOMETRY_SEMANTIC_CUSTOM
+            || attribute.semantic_name_offset != name_cursor
+            || attribute.semantic_name_count != 0
+            || attribute.semantic_name.is_some()
+        {
+            return Ok(false);
+        }
+        attribute_index += 1;
+    }
+    Ok(complete
+        && segment_len == 0
+        && attribute_index == attributes.len()
+        && usize::try_from(name_cursor).ok() == Some(name_byte_count))
 }
 
 #[allow(
@@ -2038,18 +2518,22 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let mut previous_key = None;
+    let mut previous_attribute = None;
     let mut has_position = false;
     for row_index in range {
         let Some(valid) = session.run_validation_unit(|| {
             let Some(attribute) = attributes.get(row_index) else {
                 return false;
             };
-            let key = (attribute.semantic, attribute.semantic_set, attribute.domain);
-            if previous_key.is_some_and(|previous| previous >= key) {
-                return false;
+            if let Some(previous) = previous_attribute {
+                let Some(ordering) = compare_geometry_attribute_keys(previous, attribute) else {
+                    return false;
+                };
+                if ordering != std::cmp::Ordering::Less {
+                    return false;
+                }
             }
-            previous_key = Some(key);
+            previous_attribute = Some(attribute);
             let expected_element_count = match attribute.domain {
                 GEOMETRY_DOMAIN_VERTEX => vertex_count,
                 GEOMETRY_DOMAIN_CORNER => corner_count,
@@ -2069,6 +2553,27 @@ where
     Ok(vertex_count == 0 || has_position)
 }
 
+fn compare_geometry_attribute_keys(
+    left: &GeometryAttributeValidationScratch<'_>,
+    right: &GeometryAttributeValidationScratch<'_>,
+) -> Option<std::cmp::Ordering> {
+    let semantic = left.semantic.cmp(&right.semantic);
+    if semantic != std::cmp::Ordering::Equal {
+        return Some(semantic);
+    }
+    let semantic_identity = if left.semantic == GEOMETRY_SEMANTIC_CUSTOM {
+        left.semantic_name
+            .as_ref()?
+            .cmp(right.semantic_name.as_ref()?)
+    } else {
+        left.semantic_set.cmp(&right.semantic_set)
+    };
+    if semantic_identity != std::cmp::Ordering::Equal {
+        return Some(semantic_identity);
+    }
+    Some(left.domain.cmp(&right.domain))
+}
+
 fn validate_logical_mesh_table_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     member: Option<
@@ -2078,6 +2583,10 @@ fn validate_logical_mesh_table_metered<'session, 'storage, 'control, 'operation,
         CanonicalValidationMember<'session, RecordBlock, GeometryPrimitiveTableSchema>,
     >,
     primitive_count: u32,
+    logical_mesh_names: Option<
+        CanonicalValidationMember<'session, Utf8Block, GeometryLogicalMeshNameSchema>,
+    >,
+    logical_mesh_name_byte_count: u32,
     projections: &mut [GeometryLogicalMeshValidationProjection],
 ) -> Result<bool, StoreWorkError>
 where
@@ -2086,12 +2595,16 @@ where
     U: ProgressUnit,
 {
     if projections.is_empty() {
-        return Ok(member.is_none() && primitive_count == 0);
+        return Ok(member.is_none()
+            && primitive_count == 0
+            && logical_mesh_names.is_none()
+            && logical_mesh_name_byte_count == 0);
     }
     let (Some(member), Some(primitives)) = (member, primitives) else {
         return Ok(false);
     };
     let mut primitive_cursor = 0_u32;
+    let mut name_cursor = 0_u32;
     let complete = session.visit_canonical_records(
         member,
         projections.len(),
@@ -2113,6 +2626,24 @@ where
                 geometry_logical_mesh_field::PRIMITIVES,
                 |value| value,
             )?;
+            let name_presence = row
+                .scalar(geometry_logical_mesh_field::NAME_PRESENCE, |value: u8| {
+                    value
+                })?;
+            let name_offset =
+                row.scalar(geometry_logical_mesh_field::NAME_OFFSET, |value: u32| value)?;
+            let name_count =
+                row.scalar(geometry_logical_mesh_field::NAME_COUNT, |value: u32| value)?;
+            let mut names_member = None;
+            let mut names_absent = None;
+            if name_count == Some(0) {
+                names_absent = row.scalar(geometry_logical_mesh_field::NAMES, |value: u8| value)?;
+            } else {
+                names_member = row.utf8_ref::<GeometryLogicalMeshNameSchema, _>(
+                    geometry_logical_mesh_field::NAMES,
+                    |value| value,
+                )?;
+            }
             let Some(expected_logical_mesh) = u32::try_from(row_index).ok() else {
                 return Ok(false);
             };
@@ -2124,11 +2655,31 @@ where
             let Some(next_cursor) = primitive_offset.checked_add(row_primitive_count) else {
                 return Ok(false);
             };
+            let (Some(name_offset), Some(name_count)) = (name_offset, name_count) else {
+                return Ok(false);
+            };
+            let Some(next_name_cursor) = name_offset.checked_add(name_count) else {
+                return Ok(false);
+            };
+            let name_valid = match (name_presence, name_count) {
+                (Some(PRESENCE_ABSENT), 0) | (Some(PRESENCE_PRESENT), 0) => {
+                    names_member.is_none() && names_absent == Some(0)
+                }
+                (Some(PRESENCE_PRESENT), _) => {
+                    names_member == logical_mesh_names
+                        && names_member.is_some()
+                        && names_absent.is_none()
+                }
+                _ => false,
+            };
             let valid = require_scalar(logical_mesh, expected_logical_mesh).is_some()
                 && primitive_offset == primitive_cursor
                 && row_primitive_count != 0
                 && next_cursor <= primitive_count
-                && primitive_member == Some(primitives);
+                && primitive_member == Some(primitives)
+                && name_offset == name_cursor
+                && next_name_cursor <= logical_mesh_name_byte_count
+                && name_valid;
             if valid {
                 let Some(destination) = projections.get_mut(row_index) else {
                     return Ok(false);
@@ -2136,13 +2687,102 @@ where
                 *destination = GeometryLogicalMeshValidationProjection {
                     primitive_offset,
                     primitive_count: row_primitive_count,
+                    name_presence: name_presence.unwrap_or(PRESENCE_ABSENT),
+                    name_count,
                 };
                 primitive_cursor = next_cursor;
+                name_cursor = next_name_cursor;
             }
             Ok(valid)
         },
     )?;
-    Ok(complete && primitive_cursor == primitive_count)
+    Ok(complete
+        && primitive_cursor == primitive_count
+        && name_cursor == logical_mesh_name_byte_count)
+}
+
+fn visit_geometry_logical_mesh_names<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    names: Option<CanonicalValidationMember<'session, Utf8Block, GeometryLogicalMeshNameSchema>>,
+    name_byte_count: u32,
+    logical_meshes: &[GeometryLogicalMeshValidationProjection],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(names) = names else {
+        return Ok(name_byte_count == 0
+            && logical_meshes.iter().all(|logical_mesh| {
+                logical_mesh.name_count == 0
+                    && matches!(
+                        logical_mesh.name_presence,
+                        PRESENCE_ABSENT | PRESENCE_PRESENT
+                    )
+                    && (logical_mesh.name_presence != PRESENCE_PRESENT
+                        || validate_entity_name_str("").is_ok())
+            }));
+    };
+    let mut logical_mesh_index = 0_usize;
+    let mut segment_len = 0_usize;
+    let mut segment = [0_u8; MAX_ENTITY_NAME_BYTES];
+    let Some(name_byte_count) = usize::try_from(name_byte_count).ok() else {
+        return Ok(false);
+    };
+    let complete = session.visit_canonical_utf8_bytes(names, name_byte_count, |_index, byte| {
+        while let Some(logical_mesh) = logical_meshes.get(logical_mesh_index) {
+            if logical_mesh.name_count != 0 {
+                break;
+            }
+            if !matches!(
+                logical_mesh.name_presence,
+                PRESENCE_ABSENT | PRESENCE_PRESENT
+            ) || (logical_mesh.name_presence == PRESENCE_PRESENT
+                && validate_entity_name_str("").is_err())
+            {
+                return false;
+            }
+            logical_mesh_index += 1;
+        }
+        let Some(logical_mesh) = logical_meshes.get(logical_mesh_index) else {
+            return false;
+        };
+        let Some(segment_count) = usize::try_from(logical_mesh.name_count).ok() else {
+            return false;
+        };
+        if logical_mesh.name_presence != PRESENCE_PRESENT
+            || segment_count > segment.len()
+            || segment_len >= segment_count
+        {
+            return false;
+        }
+        segment[segment_len] = byte;
+        segment_len += 1;
+        if segment_len != segment_count {
+            return true;
+        }
+        let valid = std::str::from_utf8(&segment[..segment_len])
+            .ok()
+            .is_some_and(|name| validate_entity_name_str(name).is_ok());
+        logical_mesh_index += 1;
+        segment_len = 0;
+        valid
+    })?;
+    while let Some(logical_mesh) = logical_meshes.get(logical_mesh_index) {
+        if logical_mesh.name_count != 0
+            || !matches!(
+                logical_mesh.name_presence,
+                PRESENCE_ABSENT | PRESENCE_PRESENT
+            )
+            || (logical_mesh.name_presence == PRESENCE_PRESENT
+                && validate_entity_name_str("").is_err())
+        {
+            return Ok(false);
+        }
+        logical_mesh_index += 1;
+    }
+    Ok(complete && segment_len == 0 && logical_mesh_index == logical_meshes.len())
 }
 
 #[allow(
@@ -2224,15 +2864,21 @@ fn validate_logical_mesh_table(
     reference: Option<CanonicalRecordRef<GeometryLogicalMeshTableSchema>>,
     primitive_reference: Option<CanonicalRecordRef<GeometryPrimitiveTableSchema>>,
     primitive_count: u32,
+    logical_mesh_names: Option<CanonicalUtf8Ref<GeometryLogicalMeshNameSchema>>,
     equivalence: &mut impl GeometryEquivalence,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
 ) -> Option<()> {
     let Some(reference) = reference else {
-        return (primitive_count == 0).then_some(());
+        return (primitive_count == 0 && logical_mesh_names.is_none()).then_some(());
     };
     let primitive_reference = primitive_reference?;
     let table = session.canonical_records(reference)?;
+    let logical_mesh_names = match logical_mesh_names {
+        Some(reference) => Some((reference, session.canonical_utf8(reference)?)),
+        None => None,
+    };
     let mut primitive_cursor = 0_u32;
+    let mut name_cursor = 0_usize;
     for row in 0..table.rows() {
         observe_work(1)?;
         require_scalar(
@@ -2256,9 +2902,49 @@ fn validate_logical_mesh_table(
             ),
             primitive_reference,
         )?;
-        equivalence.validate_logical_mesh(row, table, primitive_reference)?;
+        let name_presence = table.scalar::<u8>(row, geometry_logical_mesh_field::NAME_PRESENCE)?;
+        let name_offset = table.scalar::<u32>(row, geometry_logical_mesh_field::NAME_OFFSET)?;
+        let name_count = table.scalar::<u32>(row, geometry_logical_mesh_field::NAME_COUNT)?;
+        require_scalar(Some(name_offset), u32::try_from(name_cursor).ok()?)?;
+        let (name, next_name_cursor) = match (name_presence, name_count) {
+            (PRESENCE_ABSENT, 0) => {
+                require_scalar(
+                    table.scalar::<u8>(row, geometry_logical_mesh_field::NAMES),
+                    0_u8,
+                )?;
+                (None, name_cursor)
+            }
+            (PRESENCE_PRESENT, 0) => {
+                require_scalar(
+                    table.scalar::<u8>(row, geometry_logical_mesh_field::NAMES),
+                    0_u8,
+                )?;
+                validate_entity_name_str("").ok()?;
+                (Some(""), name_cursor)
+            }
+            (PRESENCE_PRESENT, _) => {
+                let (names_reference, payload) = logical_mesh_names?;
+                require_scalar(
+                    table.utf8_ref::<GeometryLogicalMeshNameSchema>(
+                        row,
+                        geometry_logical_mesh_field::NAMES,
+                    ),
+                    names_reference,
+                )?;
+                let range = checked_range(name_offset, name_count, payload.len())?;
+                observe_work(u64::try_from(range.len()).ok()?)?;
+                let name = payload.get(range.clone())?;
+                validate_entity_name_str(name).ok()?;
+                (Some(name), range.end)
+            }
+            _ => return None,
+        };
+        name_cursor = next_name_cursor;
+        equivalence.validate_logical_mesh(row, table, primitive_reference, name)?;
     }
-    (primitive_cursor == primitive_count).then_some(())
+    (primitive_cursor == primitive_count
+        && name_cursor == logical_mesh_names.map_or(0, |(_, payload)| payload.len()))
+    .then_some(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2269,6 +2955,7 @@ fn validate_primitive_table(
     material_count: u32,
     attribute_reference: Option<CanonicalRecordRef<GeometryAttributeTableSchema>>,
     attribute_table: Option<CanonicalRecordView<'_>>,
+    attribute_semantic_names: Option<CanonicalUtf8Ref<GeometryAttributeSemanticNameSchema>>,
     equivalence: &mut impl GeometryEquivalence,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
 ) -> Option<u32> {
@@ -2276,6 +2963,10 @@ fn validate_primitive_table(
         return attribute_reference.is_none().then_some(0);
     };
     let table = session.canonical_records(reference)?;
+    let attribute_semantic_names = match attribute_semantic_names {
+        Some(reference) => Some(session.canonical_utf8(reference)?),
+        None => None,
+    };
     let attribute_rows = attribute_table.map_or(0, CanonicalRecordView::rows);
     let mut attribute_cursor = 0_usize;
     let mut payload_block_count = 0_u32;
@@ -2376,6 +3067,7 @@ fn validate_primitive_table(
                     vertex_count,
                     corner_count,
                     face_count,
+                    attribute_semantic_names,
                     observe_work,
                 )?;
             }
@@ -2585,6 +3277,7 @@ fn validate_primitive_attribute_range(
     vertex_count: u32,
     corner_count: u32,
     face_count: u32,
+    attribute_semantic_names: Option<&str>,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
 ) -> Option<()> {
     let mut previous_key = None;
@@ -2594,7 +3287,17 @@ fn validate_primitive_attribute_range(
         let semantic = table.scalar::<u8>(row, geometry_attribute_field::SEMANTIC_KIND)?;
         let semantic_set = table.scalar::<u32>(row, geometry_attribute_field::SEMANTIC_SET)?;
         let domain = table.scalar::<u8>(row, geometry_attribute_field::DOMAIN)?;
-        let key = (semantic, semantic_set, domain);
+        let semantic_name = if semantic == GEOMETRY_SEMANTIC_CUSTOM {
+            let names = attribute_semantic_names?;
+            let offset =
+                table.scalar::<u32>(row, geometry_attribute_field::SEMANTIC_NAME_OFFSET)?;
+            let count = table.scalar::<u32>(row, geometry_attribute_field::SEMANTIC_NAME_COUNT)?;
+            let range = checked_range(offset, count, names.len())?;
+            names.get(range)
+        } else {
+            None
+        };
+        let key = (semantic, semantic_set, semantic_name, domain);
         if previous_key.is_some_and(|previous| previous >= key) {
             return None;
         }
@@ -2618,13 +3321,19 @@ fn validate_primitive_attribute_range(
 fn validate_attribute_table<'session, 'storage>(
     session: &mut StoreValidationSession<'session, 'storage>,
     reference: Option<CanonicalRecordRef<GeometryAttributeTableSchema>>,
+    semantic_names_reference: Option<CanonicalUtf8Ref<GeometryAttributeSemanticNameSchema>>,
     equivalence: &mut impl GeometryEquivalence,
     observe_work: &mut impl FnMut(u64) -> Option<()>,
 ) -> Option<(Option<CanonicalRecordView<'storage>>, u32)> {
     let Some(reference) = reference else {
-        return Some((None, 0));
+        return semantic_names_reference.is_none().then_some((None, 0));
     };
     let table = session.canonical_records(reference)?;
+    let semantic_names = match semantic_names_reference {
+        Some(reference) => Some((reference, session.canonical_utf8(reference)?)),
+        None => None,
+    };
+    let mut semantic_name_cursor = 0_usize;
     let mut payload_block_count = 0_u32;
     for row in 0..table.rows() {
         observe_work(1)?;
@@ -2647,7 +3356,45 @@ fn validate_attribute_table<'session, 'storage>(
         let explicit_count = table.scalar::<u32>(row, geometry_attribute_field::EXPLICIT_COUNT)?;
         let scalar_count =
             table.scalar::<u64>(row, geometry_attribute_field::CANONICAL_SCALAR_COUNT)?;
-        equivalence.validate_attribute(row, table)?;
+        let semantic_name_offset =
+            table.scalar::<u32>(row, geometry_attribute_field::SEMANTIC_NAME_OFFSET)?;
+        let semantic_name_count =
+            table.scalar::<u32>(row, geometry_attribute_field::SEMANTIC_NAME_COUNT)?;
+        require_scalar(
+            Some(semantic_name_offset),
+            u32::try_from(semantic_name_cursor).ok()?,
+        )?;
+        let semantic_name = if semantic == GEOMETRY_SEMANTIC_CUSTOM {
+            if semantic_name_count == 0 {
+                return None;
+            }
+            let (semantic_names_reference, semantic_names) = semantic_names?;
+            require_scalar(
+                table.utf8_ref::<GeometryAttributeSemanticNameSchema>(
+                    row,
+                    geometry_attribute_field::SEMANTIC_NAMES,
+                ),
+                semantic_names_reference,
+            )?;
+            let range = checked_range(
+                semantic_name_offset,
+                semantic_name_count,
+                semantic_names.len(),
+            )?;
+            observe_work(u64::try_from(range.len()).ok()?)?;
+            let name = semantic_names.get(range.clone())?;
+            CustomAttributeSemantic::new(name).ok()?;
+            semantic_name_cursor = range.end;
+            Some(name)
+        } else {
+            require_scalar(Some(semantic_name_count), 0_u32)?;
+            require_scalar(
+                table.scalar::<u8>(row, geometry_attribute_field::SEMANTIC_NAMES),
+                0_u8,
+            )?;
+            None
+        };
+        equivalence.validate_attribute(row, table, semantic_name)?;
         let payload_expectation = equivalence.attribute_payload(row)?;
         let payload = validate_attribute_payload_structure(
             session,
@@ -2664,7 +3411,8 @@ fn validate_attribute_table<'session, 'storage>(
         )?;
         payload_block_count = payload_block_count.checked_add(payload.block_count())?;
     }
-    Some((Some(table), payload_block_count))
+    (semantic_name_cursor == semantic_names.map_or(0, |(_, names)| names.len()))
+        .then_some((Some(table), payload_block_count))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2753,6 +3501,32 @@ fn validate_attribute_payload_structure<'session, 'storage>(
             require_absent_leaf(table, row, geometry_attribute_field::SPARSE_INDICES)?;
             require_absent_leaf(table, row, geometry_attribute_field::SPARSE_DEFAULT)?;
             Some(CanonicalGeometryAttributePayload::DenseU32 { values })
+        }
+        (GEOMETRY_PAYLOAD_DENSE, GEOMETRY_SCALAR_I32) => {
+            require_scalar(Some(explicit_count), element_count)?;
+            require_scalar(
+                Some(canonical_scalar_count),
+                u64::try_from(dense_scalar_count).ok()?,
+            )?;
+            let expected = match expectation {
+                GeometryAttributePayloadExpectation::StructuralOnly => None,
+                GeometryAttributePayloadExpectation::Exact(
+                    GeometryAttributePayloadAuthoring::DenseI32 { values, .. },
+                ) => Some(values),
+                GeometryAttributePayloadExpectation::Exact(_) => return None,
+            };
+            let values = read_i32_leaf::<GeometryI32ValuesSchema>(
+                session,
+                table,
+                row,
+                geometry_attribute_field::VALUES,
+                dense_scalar_count,
+                expected,
+                observe_work,
+            )?;
+            require_absent_leaf(table, row, geometry_attribute_field::SPARSE_INDICES)?;
+            require_absent_leaf(table, row, geometry_attribute_field::SPARSE_DEFAULT)?;
+            Some(CanonicalGeometryAttributePayload::DenseI32 { values })
         }
         (GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_SCALAR_F32) => {
             if explicit_count > element_count {
@@ -2866,6 +3640,59 @@ fn validate_attribute_payload_structure<'session, 'storage>(
                 default,
             })
         }
+        (GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_SCALAR_I32) => {
+            if explicit_count > element_count {
+                return None;
+            }
+            require_scalar(
+                Some(canonical_scalar_count),
+                u64::try_from(explicit_scalar_count.checked_add(lane_count)?).ok()?,
+            )?;
+            let (expected_indices, expected_values, expected_default) = match expectation {
+                GeometryAttributePayloadExpectation::StructuralOnly => (None, None, None),
+                GeometryAttributePayloadExpectation::Exact(
+                    GeometryAttributePayloadAuthoring::SparseI32 {
+                        indices,
+                        values,
+                        default,
+                        ..
+                    },
+                ) => (Some(indices), Some(values), Some(default)),
+                GeometryAttributePayloadExpectation::Exact(_) => return None,
+            };
+            let values = read_i32_leaf::<GeometryI32ValuesSchema>(
+                session,
+                table,
+                row,
+                geometry_attribute_field::VALUES,
+                explicit_scalar_count,
+                expected_values,
+                observe_work,
+            )?;
+            let indices = read_sparse_indices(
+                session,
+                table,
+                row,
+                explicit_count_usize,
+                element_count,
+                expected_indices,
+                observe_work,
+            )?;
+            let default = read_i32_leaf::<GeometrySparseI32DefaultsSchema>(
+                session,
+                table,
+                row,
+                geometry_attribute_field::SPARSE_DEFAULT,
+                lane_count,
+                expected_default,
+                observe_work,
+            )?;
+            Some(CanonicalGeometryAttributePayload::SparseI32 {
+                indices,
+                values,
+                default,
+            })
+        }
         _ => None,
     }
 }
@@ -2913,6 +3740,18 @@ fn validate_attribute_schema(
                 && domain == GEOMETRY_DOMAIN_FACE
                 && scalar_kind == GEOMETRY_SCALAR_U32
                 && lanes == 1
+        }
+        GEOMETRY_SEMANTIC_CUSTOM => {
+            semantic_set == 0
+                && matches!(
+                    domain,
+                    GEOMETRY_DOMAIN_VERTEX | GEOMETRY_DOMAIN_CORNER | GEOMETRY_DOMAIN_FACE
+                )
+                && matches!(
+                    scalar_kind,
+                    GEOMETRY_SCALAR_F32 | GEOMETRY_SCALAR_U32 | GEOMETRY_SCALAR_I32
+                )
+                && (1..=16).contains(&lanes)
         }
         _ => false,
     };
@@ -3034,6 +3873,43 @@ where
     Some(values)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the leaf reader keeps schema coordinates, exact typed expectations, and work accounting explicit"
+)]
+fn read_i32_leaf<'session, 'storage, Tag>(
+    session: &mut StoreValidationSession<'session, 'storage>,
+    table: CanonicalRecordView<'storage>,
+    row: usize,
+    field: usize,
+    expected_len: usize,
+    expectation: Option<&[i32]>,
+    observe_work: &mut impl FnMut(u64) -> Option<()>,
+) -> Option<&'storage [i32]>
+where
+    Tag: CanonicalSchema<StoreKind = ScalarSequence<i32>>,
+{
+    if expectation.is_some_and(|expectation| expectation.len() != expected_len) {
+        return None;
+    }
+    if expected_len == 0 {
+        require_absent_leaf(table, row, field)?;
+        return Some(&[]);
+    }
+    let reference = table.sequence_ref::<i32, Tag>(row, field)?;
+    let values = session.canonical_sequence(reference)?.as_slice();
+    if values.len() != expected_len {
+        return None;
+    }
+    for (index, &value) in values.iter().enumerate() {
+        observe_work(1)?;
+        if expectation.is_some_and(|expectation| expectation.get(index) != Some(&value)) {
+            return None;
+        }
+    }
+    Some(values)
+}
+
 fn read_sparse_indices<'session, 'storage>(
     session: &mut StoreValidationSession<'session, 'storage>,
     table: CanonicalRecordView<'storage>,
@@ -3108,6 +3984,7 @@ fn require_absent_leaf(table: CanonicalRecordView<'_>, row: usize, field: usize)
 fn validate_attribute_fresh<R>(
     row: usize,
     table: CanonicalRecordView<'_>,
+    semantic_name: Option<&str>,
     expected: &ValidatedGeometryBatch<'_, R>,
 ) -> Option<()> {
     let attribute = expected.attribute(row)?;
@@ -3116,6 +3993,7 @@ fn validate_attribute_fresh<R>(
     let scalar_kind = match attribute.scalar_kind() {
         GeometryAttributeScalarKind::F32 => GEOMETRY_SCALAR_F32,
         GeometryAttributeScalarKind::U32 => GEOMETRY_SCALAR_U32,
+        GeometryAttributeScalarKind::I32 => GEOMETRY_SCALAR_I32,
     };
     let payload_kind = match attribute.payload_kind() {
         GeometryAttributePayloadKind::Dense => GEOMETRY_PAYLOAD_DENSE,
@@ -3156,7 +4034,21 @@ fn validate_attribute_fresh<R>(
     require_scalar(
         table.scalar::<u64>(row, geometry_attribute_field::CANONICAL_SCALAR_COUNT),
         attribute.canonical_scalar_count(),
-    )
+    )?;
+    require_scalar(
+        table.scalar::<u32>(row, geometry_attribute_field::SEMANTIC_NAME_OFFSET),
+        attribute.semantic_name_offset(),
+    )?;
+    require_scalar(
+        table.scalar::<u32>(row, geometry_attribute_field::SEMANTIC_NAME_COUNT),
+        attribute.semantic_name_count(),
+    )?;
+    match attribute.semantic() {
+        crate::attribute::AttributeSemantic::Custom(custom) => {
+            (semantic_name == Some(custom.as_str())).then_some(())
+        }
+        _ => semantic_name.is_none().then_some(()),
+    }
 }
 
 fn validate_primitive_fresh<R>(
@@ -3231,16 +4123,18 @@ fn validate_logical_mesh_fresh<R>(
     row: usize,
     table: CanonicalRecordView<'_>,
     primitives: CanonicalRecordRef<GeometryPrimitiveTableSchema>,
+    name: Option<&str>,
     expected: &ValidatedGeometryBatch<'_, R>,
 ) -> Option<()> {
-    let logical_mesh = expected.input().logical_meshes().get(row)?.primitives();
+    let logical_mesh = *expected.input().logical_meshes().get(row)?;
+    let primitives_range = logical_mesh.primitives();
     require_scalar(
         table.scalar::<u32>(row, geometry_logical_mesh_field::PRIMITIVE_OFFSET),
-        logical_mesh.offset(),
+        primitives_range.offset(),
     )?;
     require_scalar(
         table.scalar::<u32>(row, geometry_logical_mesh_field::PRIMITIVE_COUNT),
-        logical_mesh.count(),
+        primitives_range.count(),
     )?;
     require_scalar(
         table.record_ref::<GeometryPrimitiveTableSchema>(
@@ -3248,7 +4142,11 @@ fn validate_logical_mesh_fresh<R>(
             geometry_logical_mesh_field::PRIMITIVES,
         ),
         primitives,
-    )
+    )?;
+    match logical_mesh.name() {
+        Presence::Absent => name.is_none().then_some(()),
+        Presence::Present(expected_name) => (name == Some(expected_name)).then_some(()),
+    }
 }
 
 fn validate_mesh_instance_fresh<NR, GR>(

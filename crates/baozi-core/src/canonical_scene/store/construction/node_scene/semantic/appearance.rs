@@ -20,13 +20,14 @@ use crate::canonical_scene::store::schema::appearance::{
     APPEARANCE_PRESENCE_PRESENT, APPEARANCE_SAMPLER_FIELD_COUNT, APPEARANCE_TEXEL_FILTER_LINEAR,
     APPEARANCE_TEXEL_FILTER_NEAREST, APPEARANCE_TEXTURE_FIELD_COUNT,
     AppearanceBindingSemanticScalarSchema, AppearanceEncodedImagePayloadSchema,
-    AppearanceMaterialFactorScalarSchema, AppearanceMediaTypeSchema, AppearanceSourceKeySchema,
-    appearance_binding_field, appearance_image_field, appearance_material_field,
-    appearance_sampler_field, appearance_texture_field, decode_appearance_alpha_mode,
-    decode_appearance_binding_numeric_semantics, decode_appearance_blend_operation,
-    decode_appearance_channel, decode_appearance_color_interpretation,
-    decode_appearance_coordinate_source, decode_appearance_material_factors,
-    decode_appearance_shading_model, decode_appearance_texture_role,
+    AppearanceMaterialFactorScalarSchema, AppearanceMaterialNameSchema, AppearanceMediaTypeSchema,
+    AppearanceSourceKeySchema, appearance_binding_field, appearance_image_field,
+    appearance_material_field, appearance_sampler_field, appearance_texture_field,
+    decode_appearance_alpha_mode, decode_appearance_binding_numeric_semantics,
+    decode_appearance_blend_operation, decode_appearance_channel,
+    decode_appearance_color_interpretation, decode_appearance_coordinate_source,
+    decode_appearance_material_factors, decode_appearance_shading_model,
+    decode_appearance_texture_role,
 };
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, SceneDirectorySchema,
@@ -47,6 +48,7 @@ pub(super) struct NodeSceneAppearanceTables<'scene> {
     image_payloads: Option<&'scene [u8]>,
     media_types: Option<&'scene str>,
     source_keys: Option<&'scene str>,
+    material_names: Option<&'scene str>,
     binding_semantic_scalars: Option<&'scene [f32]>,
     material_factor_scalars: Option<&'scene [f32]>,
 }
@@ -147,6 +149,11 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
                 "validated image media-type payload is unavailable or mistyped",
             )?,
             source_keys,
+            material_names: resolve_utf8(
+                canonical,
+                proof.appearance_material_names(),
+                "validated material-name payload is unavailable or mistyped",
+            )?,
             binding_semantic_scalars,
             material_factor_scalars,
         })
@@ -169,6 +176,7 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
             next_binding: 0,
             next_material_binding_offset: 0,
             next_material_factor_offset: 0,
+            next_material_name_offset: 0,
             next_binding_semantic_offset: 0,
             next_source_key_offset: 0,
         }
@@ -293,6 +301,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneAppearanceCursor<'scene> {
     next_binding: usize,
     next_material_binding_offset: usize,
     next_material_factor_offset: usize,
+    next_material_name_offset: usize,
     next_binding_semantic_offset: usize,
     next_source_key_offset: usize,
 }
@@ -760,11 +769,74 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
         ))
         .map_err(|_| invariant("validated material semantics are inconsistent"))?;
 
+        let name_presence = read_scalar::<u8>(
+            table,
+            row,
+            appearance_material_field::NAME_PRESENCE,
+            "validated material name presence is unreadable",
+        )?;
+        let name_offset = read_u32_as_usize(
+            table,
+            row,
+            appearance_material_field::NAME_OFFSET,
+            "validated material name offset is unreadable",
+        )?;
+        let name_count = read_u32_as_usize(
+            table,
+            row,
+            appearance_material_field::NAME_COUNT,
+            "validated material name count is unreadable",
+        )?;
+        if name_offset != self.next_material_name_offset {
+            return Err(invariant(
+                "validated material-name ranges are not contiguous",
+            ));
+        }
+        let (name, name_end) = match name_presence {
+            APPEARANCE_PRESENCE_ABSENT if name_count == 0 => {
+                if table.scalar::<u8>(row, appearance_material_field::NAMES) != Some(0) {
+                    return Err(invariant(
+                        "validated absent material name has a nonzero sentinel",
+                    ));
+                }
+                (None, name_offset)
+            }
+            APPEARANCE_PRESENCE_PRESENT if name_count == 0 => {
+                if table.scalar::<u8>(row, appearance_material_field::NAMES) != Some(0) {
+                    return Err(invariant(
+                        "validated empty material name has a nonzero sentinel",
+                    ));
+                }
+                (Some(""), name_offset)
+            }
+            APPEARANCE_PRESENCE_PRESENT => {
+                require_utf8_ref::<AppearanceMaterialNameSchema>(
+                    table,
+                    row,
+                    appearance_material_field::NAMES,
+                    self.proof.appearance_material_names(),
+                    "validated material-name reference is unreadable",
+                    "validated material-name reference disagrees with validation proof",
+                )?;
+                let end = name_offset
+                    .checked_add(name_count)
+                    .ok_or_else(|| invariant("validated material name range overflows"))?;
+                let value = self
+                    .tables
+                    .material_names
+                    .and_then(|names| names.get(name_offset..end))
+                    .ok_or_else(|| invariant("validated material name range is unreadable"))?;
+                (Some(value), end)
+            }
+            _ => return Err(invariant("validated material name presence is invalid")),
+        };
+
         let factor_end = factor_offset
             .checked_add(factor_count)
             .ok_or_else(|| invariant("validated material factor range overflows"))?;
         self.next_material_binding_offset = binding_end;
         self.next_material_factor_offset = factor_end;
+        self.next_material_name_offset = name_end;
         self.next_material = advance_row(row, "material cursor index overflows")?;
         Ok(Some(NodeSceneAppearanceMaterial {
             source_index: row,
@@ -772,6 +844,7 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
             alpha_mode,
             double_sided,
             factors,
+            name,
             binding_offset,
             binding_count,
             factor_offset,
@@ -1027,6 +1100,7 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
             || self.next_material_binding_offset != self.proof.material_binding_count()
             || self.next_material_factor_offset
                 != self.tables.material_factor_scalars.map_or(0, <[f32]>::len)
+            || self.next_material_name_offset != self.tables.material_names.map_or(0, str::len)
             || self.next_binding_semantic_offset
                 != self.tables.binding_semantic_scalars.map_or(0, <[f32]>::len)
             || self.next_source_key_offset != self.tables.source_keys.map_or(0, str::len)
@@ -1137,6 +1211,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneAppearanceMaterial<'scene>
     alpha_mode: AlphaMode,
     double_sided: bool,
     factors: MaterialFactors,
+    name: Option<&'scene str>,
     binding_offset: usize,
     binding_count: usize,
     factor_offset: usize,
@@ -1162,6 +1237,10 @@ impl<'scene> NodeSceneAppearanceMaterial<'scene> {
 
     pub(in crate::canonical_scene::store) const fn factors(&self) -> MaterialFactors {
         self.factors
+    }
+
+    pub(in crate::canonical_scene::store) const fn name(&self) -> Option<&'scene str> {
+        self.name
     }
 
     pub(in crate::canonical_scene::store) const fn binding_offset(&self) -> usize {

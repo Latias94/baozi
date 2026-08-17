@@ -4,13 +4,16 @@ use std::num::NonZeroU64;
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationSeal,
     CanonicalCentralValidationOutcome, CanonicalFailureRequirements, CanonicalLane,
-    CanonicalMaterialization, CanonicalRecordBuildRow, CanonicalSuccessRequirements,
-    CanonicalTableShape, CanonicalValidationDecision,
+    CanonicalMaterialization, CanonicalMaterializationRole, CanonicalRecordBuildRow,
+    CanonicalSuccessRequirements, CanonicalTableShape, CanonicalValidationDecision,
+    CanonicalValidationProgress, CanonicalValidationRole, ScopedRetainedStoreSessionOutcomeOwner,
+    StoreActivationContainment,
 };
 use baozi_operation::{
-    OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit, RecordBlock,
-    RecordPlan, RetainedStoreBatchLimits, RetainedStoreWriterPlan, SequencePlan, StoreBuildError,
-    StoreControlledError, StorePlanError, StoreRuntimeError, StoredScalar,
+    FinalProgress, OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit,
+    RecordBlock, RecordPlan, RetainedStoreBatchLimits, RetainedStoreOperation,
+    RetainedStoreWriterPlan, SequencePlan, StoreBuildError, StoreControlledError,
+    StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError, StoredScalar, Utf8Plan,
 };
 
 use crate::SceneValidationLimits;
@@ -23,9 +26,10 @@ use crate::canonical_scene::store::production::{
 };
 use crate::canonical_scene::store::production::{
     AnimationTargetCatalog, CanonicalAuthoringControl, Presence, ProfileOwnerCatalog,
-    SceneAuthoringBatch, ScopedAuthoringControl, ValidatedAnimationBatch, ValidatedAppearanceBatch,
-    ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch,
-    ValidatedSpatialBatch, animation_limits_after_deformation, appearance_limits_after_nodes,
+    SceneAuthoringBatch, SceneInputEnvelope, ScopedAuthoringControl, ValidatedAnimationBatch,
+    ValidatedAppearanceBatch, ValidatedDeformationBatch, ValidatedGeometryBatch,
+    ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
+    animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
     profile_limits_after_animation, validate_animation_batch_with_control,
     validate_appearance_batch_with_control, validate_deformation_batch_with_control,
@@ -44,9 +48,10 @@ use crate::canonical_scene::store::schema::{
     NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
     NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_NODE_FIELD_COUNT, NODE_SCENE_TRANSFORM_MATRIX,
     NODE_SCENE_TRANSFORM_SYNTHETIC, NODE_SCENE_TRANSFORM_TRS, NODE_SCENE_TRS_SCALAR_COUNT,
-    NodeSceneAuthoredTransformSchema, NodeSceneChildReferenceTableSchema, NodeSceneNodeTableSchema,
-    NodeSceneOutcomeEvidenceSchema, PRESENCE_ABSENT, PRESENCE_PRESENT, SCENE_DIRECTORY_FIELD_COUNT,
-    SCENE_SCHEMA_REVISION, SceneDirectorySchema, SceneGeometryDirectorySchema,
+    NodeSceneAuthoredTransformSchema, NodeSceneChildReferenceTableSchema, NodeSceneNodeNameSchema,
+    NodeSceneNodeTableSchema, NodeSceneOutcomeEvidenceSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
+    SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION, SceneDirectorySchema,
+    SceneGeometryDirectorySchema,
 };
 use crate::entity::AuthoredTransformKind;
 #[cfg(test)]
@@ -55,8 +60,7 @@ use crate::provenance::{OperationKind, OptionsDigest};
 use crate::scene_space::SceneSpace;
 
 use super::super::{
-    SceneAuthoringOperation, SceneConstructionError, SceneConstructionOperation,
-    SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit, SceneStoreKeys,
+    SceneAuthoringOperation, SceneConstructionError, SceneConstructionStartError, SceneStoreKeys,
 };
 use super::animation::{AnimationMaterializationPlans, AnimationTargetTableRefs, retain_animation};
 use super::appearance::{AppearanceMaterializationPlans, retain_appearance};
@@ -68,15 +72,13 @@ use super::geometry::{
     retain_geometry,
 };
 use super::profile::{ProfileMaterializationPlans, retain_profile};
-use super::publication::{
-    prepare_node_activation_failure, prepare_node_central_failure, prepare_node_central_fallback,
-    validate_node_scene_failure_evidence,
-};
+use super::publication::NodeActivationFailureCause;
 use super::scratch::{NodeSceneValidationScratchPlan, ScopedNodeSceneValidationScratchOwner};
 mod spatial;
 use super::{
-    NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneBuildFaults, NodeSceneConstructionRejection,
-    NodeSceneDraft, NodeSceneDraftBuild, PendingNodeSceneDraft, SceneEvidenceCounts,
+    DeferredNodeSceneDraftBuild, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneBuildFaults,
+    NodeSceneConstructionRejection, NodeSceneDraft, NodeSceneDraftBuild, PendingNodeSceneDraft,
+    PendingNodeSceneFailure, SceneEvidenceCounts,
 };
 use spatial::{RetainedSpatialRefs, SpatialMaterializationPlans, retain_spatial};
 
@@ -159,6 +161,257 @@ pub(super) enum NodeScenePlanningFault {
     Publication,
 }
 
+/// Core-owned, roleless request for one scoped NodeScene activation.
+///
+/// The request derives its writer envelopes from the complete producer batch and mints the private
+/// construction brand retained by its execution payload. It carries no store key, account, ledger,
+/// or publication authority; the consuming host maps the roleless limits to its own vocabulary
+/// before it creates the scoped outcome owner. Exact canonical shape remains absent until semantic
+/// preflight seals [`NodeSceneSealedPlan`].
+#[must_use = "the NodeScene activation request must be bound to one scoped outcome owner"]
+pub(in crate::canonical_scene::store) struct NodeSceneActivationRequest<'input> {
+    execution: NodeSceneActivationExecution<'input>,
+    policy: NodeSceneActivationPolicyRequirements,
+}
+
+/// Roleless writer and failure envelopes supplied by core to the operation-owning host.
+#[must_use = "the NodeScene activation policy requirements must bind one scoped outcome owner"]
+struct NodeSceneActivationPolicyRequirements {
+    canonical_writer_limits: RetainedStoreBatchLimits,
+    outcome_evidence_writer_limits: RetainedStoreBatchLimits,
+    failure: CanonicalFailureRequirements,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) struct NodeSceneWriterRoles {
+    phase: StorePhaseKey,
+    capacity_dimension: StoreDimensionKey,
+    attribution_dimension: StoreDimensionKey,
+}
+
+impl NodeSceneWriterRoles {
+    pub(in crate::canonical_scene::store) const fn new(
+        phase: StorePhaseKey,
+        capacity_dimension: StoreDimensionKey,
+        attribution_dimension: StoreDimensionKey,
+    ) -> Self {
+        Self {
+            phase,
+            capacity_dimension,
+            attribution_dimension,
+        }
+    }
+
+    const fn bind(self, limits: RetainedStoreBatchLimits) -> RetainedStoreWriterPlan {
+        RetainedStoreWriterPlan::new(
+            self.phase,
+            self.capacity_dimension,
+            self.attribution_dimension,
+            limits,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) struct NodeSceneActivationRoles {
+    canonical_writer: NodeSceneWriterRoles,
+    outcome_evidence_writer: NodeSceneWriterRoles,
+    materialization_work_dimension: StoreDimensionKey,
+    materialization_scratch_dimension: StoreDimensionKey,
+    validation_phase: StorePhaseKey,
+    validation_work_dimension: StoreDimensionKey,
+    validation_scratch_dimension: StoreDimensionKey,
+    canonical_destination_dimension: StoreDimensionKey,
+    outcome_evidence_destination_dimension: StoreDimensionKey,
+    canonical_string_dimension: Option<StoreDimensionKey>,
+}
+
+impl NodeSceneActivationRoles {
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::canonical_scene::store) const fn new(
+        canonical_writer: NodeSceneWriterRoles,
+        outcome_evidence_writer: NodeSceneWriterRoles,
+        materialization_work_dimension: StoreDimensionKey,
+        materialization_scratch_dimension: StoreDimensionKey,
+        validation_phase: StorePhaseKey,
+        validation_work_dimension: StoreDimensionKey,
+        validation_scratch_dimension: StoreDimensionKey,
+        canonical_destination_dimension: StoreDimensionKey,
+        outcome_evidence_destination_dimension: StoreDimensionKey,
+    ) -> Self {
+        Self {
+            canonical_writer,
+            outcome_evidence_writer,
+            materialization_work_dimension,
+            materialization_scratch_dimension,
+            validation_phase,
+            validation_work_dimension,
+            validation_scratch_dimension,
+            canonical_destination_dimension,
+            outcome_evidence_destination_dimension,
+            canonical_string_dimension: None,
+        }
+    }
+
+    pub(in crate::canonical_scene::store) const fn with_canonical_string_dimension(
+        mut self,
+        dimension: StoreDimensionKey,
+    ) -> Self {
+        self.canonical_string_dimension = Some(dimension);
+        self
+    }
+
+    const fn bind(
+        self,
+        canonical_writer_limits: RetainedStoreBatchLimits,
+        outcome_evidence_writer_limits: RetainedStoreBatchLimits,
+    ) -> CanonicalActivationPolicy {
+        let policy = CanonicalActivationPolicy::new(
+            self.canonical_writer.bind(canonical_writer_limits),
+            self.outcome_evidence_writer
+                .bind(outcome_evidence_writer_limits),
+            CanonicalMaterializationRole::new(
+                self.materialization_work_dimension,
+                self.materialization_scratch_dimension,
+            ),
+            CanonicalValidationRole::new(
+                self.validation_phase,
+                self.validation_work_dimension,
+                self.validation_scratch_dimension,
+            ),
+            self.canonical_destination_dimension,
+            self.outcome_evidence_destination_dimension,
+        );
+        match self.canonical_string_dimension {
+            Some(dimension) => policy.with_semantic_bytes_dimension(dimension),
+            None => policy,
+        }
+    }
+}
+
+/// Core execution payload, including its unforgeable brand, retained after policy binding.
+#[must_use = "the NodeScene activation execution must run with its bound scoped outcome owner"]
+struct NodeSceneActivationExecution<'input> {
+    brand: super::super::ConstructionBrand,
+    input: SceneAuthoringBatch<'input>,
+    validation_limits: SceneValidationLimits,
+    failure_evidence: NodeSceneFailureEvidencePlan,
+}
+
+impl<'input> NodeSceneActivationRequest<'input> {
+    pub(in crate::canonical_scene::store) fn try_new(
+        input: SceneAuthoringBatch<'input>,
+        validation_limits: SceneValidationLimits,
+    ) -> Result<Self, SceneConstructionStartError> {
+        let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
+        let failure_evidence = NodeSceneFailureEvidencePlan::try_new()?;
+        let policy = NodeSceneActivationPolicyRequirements {
+            canonical_writer_limits: RetainedStoreBatchLimits::new(
+                envelope.terminal_attribution_slots(),
+                4,
+            )?,
+            outcome_evidence_writer_limits: RetainedStoreBatchLimits::new(2, 4)?,
+            failure: failure_evidence.requirements()?,
+        };
+        let brand = super::super::ConstructionBrand::reserve()?;
+        Ok(Self {
+            execution: NodeSceneActivationExecution {
+                brand,
+                input,
+                validation_limits,
+                failure_evidence,
+            },
+            policy,
+        })
+    }
+
+    pub(in crate::canonical_scene::store) const fn canonical_writer_limits(
+        &self,
+    ) -> RetainedStoreBatchLimits {
+        self.policy.canonical_writer_limits
+    }
+
+    pub(in crate::canonical_scene::store) fn activate<O, PP, U>(
+        self,
+        operation: RetainedStoreOperation<O, PP, U>,
+        roles: NodeSceneActivationRoles,
+        validation_progress: CanonicalValidationProgress<PP, U>,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
+    where
+        O: OperationOwner,
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        let activation = self.bind_operation(operation, roles)?;
+        activate_node_scene_scoped(activation, validation_progress, final_progress)
+    }
+
+    pub(in crate::canonical_scene::store) fn activate_deferred<O, PP, U>(
+        self,
+        operation: RetainedStoreOperation<O, PP, U>,
+        roles: NodeSceneActivationRoles,
+        validation_progress: CanonicalValidationProgress<PP, U>,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<DeferredNodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
+    where
+        O: OperationOwner,
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        let activation = self.bind_operation(operation, roles)?;
+        activate_node_scene_scoped_deferred(activation, validation_progress, final_progress)
+    }
+
+    fn bind_operation<O, PP, U>(
+        self,
+        operation: RetainedStoreOperation<O, PP, U>,
+        roles: NodeSceneActivationRoles,
+    ) -> Result<
+        BoundNodeSceneActivation<'input, O, PP, U, baozi_operation::FreshStoreLineage>,
+        StoreActivationContainment,
+    >
+    where
+        O: OperationOwner,
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        let Self { execution, policy } = self;
+        let (canonical_writer_limits, outcome_evidence_writer_limits, failure) =
+            policy.into_parts();
+        let policy = roles.bind(canonical_writer_limits, outcome_evidence_writer_limits);
+        let owner = operation.into_scoped_session_outcome_owner(policy, failure)?;
+        Ok(BoundNodeSceneActivation { owner, execution })
+    }
+}
+
+/// One request's execution payload structurally paired with its bound scoped outcome owner.
+struct BoundNodeSceneActivation<'input, O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    owner: ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, L>,
+    execution: NodeSceneActivationExecution<'input>,
+}
+
+impl NodeSceneActivationPolicyRequirements {
+    fn into_parts(
+        self,
+    ) -> (
+        RetainedStoreBatchLimits,
+        RetainedStoreBatchLimits,
+        CanonicalFailureRequirements,
+    ) {
+        (
+            self.canonical_writer_limits,
+            self.outcome_evidence_writer_limits,
+            self.failure,
+        )
+    }
+}
+
 fn validate_node_scene_batches<'input, C>(
     input: SceneAuthoringBatch<'input>,
     limits: SceneValidationLimits,
@@ -179,9 +432,13 @@ where
         .map_err(NodeSceneConstructionRejection::NodeAuthoring)?;
     let appearance_limits = appearance_limits_after_nodes(&nodes, node_limits)
         .map_err(NodeSceneConstructionRejection::Aggregate)?;
-    let appearance =
-        validate_appearance_batch_with_control(input.appearance(), appearance_limits, control)
-            .map_err(NodeSceneConstructionRejection::AppearanceAuthoring)?;
+    let appearance = validate_appearance_batch_with_control(
+        input.appearance(),
+        input.profile().resource_snapshots(),
+        appearance_limits,
+        control,
+    )
+    .map_err(NodeSceneConstructionRejection::AppearanceAuthoring)?;
     let geometry_limits = geometry_limits_after_appearance(&appearance, appearance_limits)
         .map_err(NodeSceneConstructionRejection::Aggregate)?;
     let geometry = validate_geometry_batch_with_control(
@@ -279,7 +536,16 @@ impl<'input> SceneAuthoringOperation<'input> {
     pub(in crate::canonical_scene::store) fn finish_draft(
         self,
     ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
-        self.finish_draft_with_faults(NodeSceneBuildFaults::none())
+        let Self { raw, keys, request } = self;
+        request.activate(
+            raw,
+            node_scene_activation_roles(keys),
+            CanonicalValidationProgress::new(
+                super::super::SceneConstructionPhase::Validation,
+                super::super::SceneConstructionUnit::WorkUnits,
+            ),
+            super::super::final_progress(),
+        )
     }
 
     #[cfg(test)]
@@ -305,19 +571,15 @@ impl<'input> SceneAuthoringOperation<'input> {
         self,
         faults: NodeSceneBuildFaults,
     ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
-        let Self {
-            operation: SceneConstructionOperation { raw, brand, keys },
-            input,
-            validation_limits,
-            terminal_attribution_slots,
-        } = self;
+        let Self { raw, keys, request } = self;
+        let activation = request.bind_operation(raw, node_scene_activation_roles(keys))?;
         drive_node_scene_activation(
-            raw,
-            brand,
-            keys,
-            input,
-            validation_limits,
-            terminal_attribution_slots,
+            activation,
+            CanonicalValidationProgress::new(
+                super::super::SceneConstructionPhase::Validation,
+                super::super::SceneConstructionUnit::WorkUnits,
+            ),
+            super::super::final_progress(),
             faults,
         )
     }
@@ -399,6 +661,8 @@ pub(in crate::canonical_scene::store) struct NodeSceneMaterializedRefs {
         Option<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>>,
     pub(in crate::canonical_scene::store) transforms:
         Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
+    pub(in crate::canonical_scene::store) node_names:
+        Option<CanonicalBlockRef<NodeSceneNodeNameSchema>>,
     pub(in crate::canonical_scene::store) spatial: RetainedSpatialRefs,
     pub(in crate::canonical_scene::store) appearance: super::appearance::RetainedAppearanceRefs,
     pub(in crate::canonical_scene::store) geometry: super::geometry::RetainedGeometryRefs,
@@ -417,6 +681,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneActivationOutput {
 
 struct NodeSceneMaterializationPlans {
     transforms: Option<SequencePlan<f32>>,
+    node_names: Option<Utf8Plan>,
     references: Option<RecordPlan>,
     nodes: RecordPlan,
     spatial: SpatialMaterializationPlans,
@@ -431,6 +696,8 @@ struct NodeSceneMaterializationPlans {
     source_node_count: u32,
     source_root_count: u32,
     transform_scalar_count: u32,
+    node_name_byte_count: u32,
+    canonical_string_bytes: u64,
     payload_block_count: u32,
     shareable_leaf_block_count: u32,
     build_invariant: StoreBuildError,
@@ -490,6 +757,7 @@ impl NodeSceneMaterializationPlans {
             canonical_block_count,
             validation_work,
         )
+        .map(|requirements| requirements.with_semantic_bytes(self.canonical_string_bytes))
     }
 
     fn validation_work_units(
@@ -500,6 +768,7 @@ impl NodeSceneMaterializationPlans {
         [
             failure_evidence.validation_work_units()?,
             optional_sequence_validation_work(self.transforms)?,
+            optional_utf8_validation_work(self.node_names)?,
             optional_record_validation_work(self.references)?,
             record_validation_work(self.nodes)?,
             self.spatial.validation_work_units()?,
@@ -580,6 +849,26 @@ impl NodeSceneMaterializationPlans {
             u32::try_from(transform_scalar_count_u64).map_err(|_| StorePlanError::SizeOverflow)?;
         let transform_scalar_count_usize =
             usize::try_from(transform_scalar_count).map_err(|_| StorePlanError::SizeOverflow)?;
+        let node_name_byte_count = u32::try_from(nodes_batch.node_name_byte_count())
+            .map_err(|_| StorePlanError::SizeOverflow)?;
+        let profile_shape = profile_batch.retention_shape();
+        let canonical_string_bytes = [
+            u64::from(node_name_byte_count),
+            u64::from(spatial_batch.tangent_basis_schema_name_bytes()),
+            u64::from(spatial_batch.tangent_encoding_schema_name_bytes()),
+            u64::from(appearance_batch.media_type_byte_count()),
+            u64::from(appearance_batch.source_key_byte_count()),
+            u64::from(appearance_batch.material_name_byte_count()),
+            u64::from(geometry_batch.logical_mesh_name_byte_count()),
+            u64::from(geometry_batch.attribute_semantic_name_byte_count()),
+            u64::from(deformation_batch.skin_name_byte_count()),
+            u64::from(deformation_batch.morph_name_byte_count()),
+            u64::from(profile_shape.lineage_text_bytes()),
+            u64::from(profile_shape.metadata_text_bytes()),
+        ]
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or(StorePlanError::SizeOverflow)?;
 
         let nodes = RecordPlan::new(
             usize::try_from(node_count).map_err(|_| StorePlanError::SizeOverflow)?,
@@ -605,14 +894,23 @@ impl NodeSceneMaterializationPlans {
         } else {
             Some(SequencePlan::<f32>::new(transform_scalar_count_usize)?)
         };
+        let node_names = if node_name_byte_count == 0 {
+            None
+        } else {
+            Some(Utf8Plan::new(
+                usize::try_from(node_name_byte_count).map_err(|_| StorePlanError::SizeOverflow)?,
+            )?)
+        };
 
         let record_block_count = [Some(nodes), Some(directory), references]
             .into_iter()
             .flatten()
             .count();
         let sequence_block_count = [transforms].into_iter().flatten().count();
+        let utf8_block_count = [node_names].into_iter().flatten().count();
         let canonical_block_count_usize = record_block_count
             .checked_add(sequence_block_count)
+            .and_then(|count| count.checked_add(utf8_block_count))
             .and_then(|count| count.checked_add(spatial.canonical_block_count()))
             .and_then(|count| count.checked_add(appearance.canonical_block_count()))
             .and_then(|count| count.checked_add(geometry.canonical_block_count()))
@@ -628,6 +926,7 @@ impl NodeSceneMaterializationPlans {
             .and_then(|count| count.checked_add(geometry.payload_block_count()))
             .and_then(|count| count.checked_add(deformation.payload_block_count()))
             .and_then(|count| count.checked_add(animation.payload_block_count()))
+            .and_then(|count| count.checked_add(u32::from(node_names.is_some())))
             .ok_or(StorePlanError::SizeOverflow)?;
         let payload_block_count = domain_payload_block_count
             .checked_add(profile.payload_block_count())
@@ -639,6 +938,7 @@ impl NodeSceneMaterializationPlans {
 
         Ok(Self {
             transforms,
+            node_names,
             references,
             nodes,
             spatial,
@@ -653,6 +953,8 @@ impl NodeSceneMaterializationPlans {
             source_node_count,
             source_root_count,
             transform_scalar_count,
+            node_name_byte_count,
+            canonical_string_bytes,
             payload_block_count,
             shareable_leaf_block_count,
             build_invariant,
@@ -682,39 +984,28 @@ fn optional_sequence_validation_work<T: StoredScalar>(
         .map(|work| work.unwrap_or(0))
 }
 
-fn node_scene_writer_plan(
-    keys: SceneStoreKeys,
-    attribution_slots: usize,
-) -> Result<RetainedStoreWriterPlan, StorePlanError> {
-    Ok(RetainedStoreWriterPlan::new(
+fn optional_utf8_validation_work(plan: Option<Utf8Plan>) -> Result<u64, StorePlanError> {
+    plan.map(|plan| u64::try_from(plan.bytes()).map_err(|_| StorePlanError::SizeOverflow))
+        .transpose()
+        .map(|work| work.unwrap_or(0))
+}
+
+fn node_scene_activation_roles(keys: SceneStoreKeys) -> NodeSceneActivationRoles {
+    NodeSceneActivationRoles::new(
+        NodeSceneWriterRoles::new(keys.phase, keys.dimension, keys.dimension),
+        NodeSceneWriterRoles::new(keys.phase, keys.dimension, keys.dimension),
+        keys.dimension,
+        keys.dimension,
         keys.phase,
         keys.dimension,
         keys.dimension,
-        RetainedStoreBatchLimits::new(attribution_slots, 4)?,
-    ))
+        keys.dimension,
+        keys.dimension,
+    )
 }
 
-fn node_scene_activation_policy(
-    keys: SceneStoreKeys,
-    canonical_attribution_slots: usize,
-) -> Result<CanonicalActivationPolicy, StorePlanError> {
-    Ok(CanonicalActivationPolicy::new(
-        node_scene_writer_plan(keys, canonical_attribution_slots)?,
-        node_scene_writer_plan(keys, 2)?,
-        keys.dimension,
-        keys.dimension,
-        keys.dimension,
-        keys.dimension,
-    ))
-}
-
-fn materialize_node_scene<'lane, R>(
-    mut lane: CanonicalLane<
-        'lane,
-        SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
-    >,
+fn materialize_node_scene<'lane, R, O, PP, U, L>(
+    mut lane: CanonicalLane<'lane, O, PP, U, L>,
     plan: &NodeSceneExecutionPlan<'_, R>,
     brand: super::super::ConstructionBrand,
     mut faults: NodeSceneBuildFaults,
@@ -724,7 +1015,12 @@ fn materialize_node_scene<'lane, R>(
     NodeSceneConstructionRejection<StoreRuntimeError>,
     RecordBlock,
     SceneDirectorySchema,
-> {
+>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     macro_rules! materialize {
         ($expression:expr) => {
             match $expression {
@@ -761,6 +1057,15 @@ fn materialize_node_scene<'lane, R>(
         ))),
         None => None,
     };
+    let node_names = match plans.node_names {
+        Some(plan) => Some(materialize!(retain_node_scene_names(
+            &mut lane,
+            plan,
+            &batches.nodes,
+            plans,
+        ))),
+        None => None,
+    };
     let references = match plans.references {
         Some(plan) => Some(materialize!(retain_node_scene_references(
             &mut lane,
@@ -775,6 +1080,7 @@ fn materialize_node_scene<'lane, R>(
         plans.nodes,
         RetainedNodePayloadRefs {
             transforms,
+            names: node_names,
             spatial,
         },
         &batches.nodes,
@@ -854,6 +1160,7 @@ fn materialize_node_scene<'lane, R>(
             nodes,
             references,
             transforms,
+            node_names,
             spatial,
             appearance,
             geometry,
@@ -867,26 +1174,84 @@ fn materialize_node_scene<'lane, R>(
     lane.complete(directory.into_store(), output)
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the scoped driver consumes the sole retained owner together with its complete producer batch and bounded policy"
-)]
-fn drive_node_scene_activation<'input>(
-    raw: super::super::SceneStoreOperation,
-    brand: super::super::ConstructionBrand,
-    keys: SceneStoreKeys,
-    input: SceneAuthoringBatch<'input>,
-    validation_limits: SceneValidationLimits,
-    terminal_attribution_slots: usize,
+/// Runs one core execution payload with the caller's already policy-bound scoped outcome owner.
+///
+/// The interface accepts no raw operation, store key, account, ledger, or proof capability. Its
+/// generic vocabulary is preserved through rejection, central validation, and pending joint
+/// publication so the caller's sole session ledger remains the only ledger involved.
+fn activate_node_scene_scoped<'input, O, PP, U, L>(
+    activation: BoundNodeSceneActivation<'input, O, PP, U, L>,
+    validation_progress: CanonicalValidationProgress<PP, U>,
+    final_progress: FinalProgress<PP, U>,
+) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    drive_node_scene_activation_deferred(
+        activation,
+        validation_progress,
+        final_progress,
+        NodeSceneBuildFaults::none(),
+    )?
+    .prepare_immediately()
+}
+
+fn activate_node_scene_scoped_deferred<'input, O, PP, U, L>(
+    activation: BoundNodeSceneActivation<'input, O, PP, U, L>,
+    validation_progress: CanonicalValidationProgress<PP, U>,
+    final_progress: FinalProgress<PP, U>,
+) -> Result<DeferredNodeSceneDraftBuild<O, PP, U, L>, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    drive_node_scene_activation_deferred(
+        activation,
+        validation_progress,
+        final_progress,
+        NodeSceneBuildFaults::none(),
+    )
+}
+
+fn drive_node_scene_activation<'input, O, PP, U, L>(
+    activation: BoundNodeSceneActivation<'input, O, PP, U, L>,
+    validation_progress: CanonicalValidationProgress<PP, U>,
+    final_progress: FinalProgress<PP, U>,
     faults: NodeSceneBuildFaults,
-) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
+) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    drive_node_scene_activation_deferred(activation, validation_progress, final_progress, faults)?
+        .prepare_immediately()
+}
+
+fn drive_node_scene_activation_deferred<'input, O, PP, U, L>(
+    activation: BoundNodeSceneActivation<'input, O, PP, U, L>,
+    validation_progress: CanonicalValidationProgress<PP, U>,
+    final_progress: FinalProgress<PP, U>,
+    faults: NodeSceneBuildFaults,
+) -> Result<DeferredNodeSceneDraftBuild<O, PP, U, L>, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     #[cfg(test)]
     let panic_central_validator = faults.panic_central_validator;
-    let failure_evidence = NodeSceneFailureEvidencePlan::try_new()?;
-    let failure_requirements = failure_evidence.requirements()?;
-    let policy = node_scene_activation_policy(keys, terminal_attribution_slots)?;
+    let BoundNodeSceneActivation { owner, execution } = activation;
+    let NodeSceneActivationExecution {
+        brand,
+        input,
+        validation_limits,
+        failure_evidence,
+    } = execution;
     let evidence_plan = failure_evidence.records;
-    let owner = raw.into_scoped_session_outcome_owner(policy, failure_requirements)?;
     let sealed_counts = Cell::new(SceneEvidenceCounts::authoring_rejection());
     let sealed_counts_ref = &sealed_counts;
 
@@ -905,7 +1270,7 @@ fn drive_node_scene_activation<'input>(
                 match validation {
                     Ok(plan) => match semantic.finish_exact() {
                         Ok(completion) => Ok((plan, completion)),
-                        Err(_) => {
+                        Err(_cause) => {
                             drop(plan);
                             Err(NodeSceneConstructionRejection::<StoreRuntimeError>::Materialization(
                                 StoreRuntimeError::ConstructionInvariantUnverified,
@@ -918,11 +1283,11 @@ fn drive_node_scene_activation<'input>(
                     }
                 }
             }
-            Err(_) => Err(
-                NodeSceneConstructionRejection::<StoreRuntimeError>::Materialization(
+            Err(_cause) => {
+                Err(NodeSceneConstructionRejection::<StoreRuntimeError>::Materialization(
                     StoreRuntimeError::ConstructionInvariantUnverified,
-                ),
-            ),
+                ))
+            }
         };
         let (plan, completion) = match preflight {
             Ok(ready) => ready,
@@ -966,41 +1331,48 @@ fn drive_node_scene_activation<'input>(
     let activated = match outcome {
         CanonicalActivationOutcome::Activated(activated) => activated,
         CanonicalActivationOutcome::Rejected(rejected) => {
-            let counts = sealed_counts.get();
-            let failure = rejected.build_failure_evidence(|lane| {
-                match lane.try_retain_records(
+            let authoring_rejected = rejected.cause().is_authoring_rejection();
+            let control_cause = rejected.cause().control_cause().cloned();
+            return Ok(DeferredNodeSceneDraftBuild::Failure {
+                authoring_rejected,
+                draft_built: false,
+                control_cause,
+                owner: PendingNodeSceneFailure::ActivationRejected {
+                    owner: rejected,
                     evidence_plan,
-                    NodeSceneOutcomeEvidenceSchema,
-                    |writer| writer.write_row(|row| write_node_scene_evidence_row(row, counts)),
-                ) {
-                    Ok(evidence) => lane.complete(evidence),
-                    Err(_) => lane.abort(),
-                }
+                    evidence_counts: sealed_counts.get(),
+                    final_progress,
+                },
             });
-            return prepare_node_activation_failure(failure, counts);
         }
         CanonicalActivationOutcome::NeverActivated(never_activated) => {
-            let counts = sealed_counts.get();
-            let failure = never_activated.build_failure_evidence(|lane| {
-                match lane.try_retain_records(
+            let authoring_rejected = never_activated.cause().is_authoring_rejection();
+            let control_cause = never_activated.cause().control_cause().cloned();
+            return Ok(DeferredNodeSceneDraftBuild::Failure {
+                authoring_rejected,
+                draft_built: false,
+                control_cause,
+                owner: PendingNodeSceneFailure::NeverActivated {
+                    owner: never_activated,
                     evidence_plan,
-                    NodeSceneOutcomeEvidenceSchema,
-                    |writer| writer.write_row(|row| write_node_scene_evidence_row(row, counts)),
-                ) {
-                    Ok(evidence) => lane.complete(evidence),
-                    Err(_) => lane.abort(),
-                }
+                    evidence_counts: sealed_counts.get(),
+                    final_progress,
+                },
             });
-            return prepare_node_activation_failure(failure, counts);
         }
         CanonicalActivationOutcome::Fallback(fallback) => {
-            let (store, _cause) = fallback.into_parts();
-            return Ok(prepare_node_central_fallback(store));
+            return Ok(DeferredNodeSceneDraftBuild::Failure {
+                authoring_rejected: false,
+                draft_built: false,
+                control_cause: None,
+                owner: PendingNodeSceneFailure::PreparedFallback(fallback),
+            });
         }
     };
 
     let central_counts = activated.output().evidence_counts;
     let outcome = activated.validate_centrally(
+        validation_progress,
         |lane, output| match lane.try_retain_records(
             evidence_plan,
             NodeSceneOutcomeEvidenceSchema,
@@ -1055,29 +1427,52 @@ fn drive_node_scene_activation<'input>(
     match outcome {
         CanonicalCentralValidationOutcome::Candidate(candidate) => {
             let draft = candidate.output().draft;
-            Ok(NodeSceneDraftBuild::Draft {
+            Ok(DeferredNodeSceneDraftBuild::Draft {
                 draft,
-                owner: PendingNodeSceneDraft { candidate },
+                owner: PendingNodeSceneDraft {
+                    candidate,
+                    final_progress,
+                },
             })
         }
         CanonicalCentralValidationOutcome::Rejected(rejected) => {
-            prepare_node_central_failure(rejected.validate_rich_failure(|session, root| {
-                validate_node_scene_failure_evidence(session, root, central_counts)
-            }))
+            let authoring_rejected = rejected.cause().is_authoring_rejection();
+            Ok(DeferredNodeSceneDraftBuild::Failure {
+                authoring_rejected,
+                draft_built: true,
+                control_cause: None,
+                owner: PendingNodeSceneFailure::CentralRejected {
+                    owner: rejected,
+                    evidence_counts: central_counts,
+                    final_progress,
+                },
+            })
         }
         CanonicalCentralValidationOutcome::Interrupted(interrupted) => {
-            prepare_node_central_failure(interrupted.validate_rich_failure(|session, root| {
-                validate_node_scene_failure_evidence(session, root, central_counts)
-            }))
+            let control_cause = interrupted.cause().control_cause().cloned();
+            Ok(DeferredNodeSceneDraftBuild::Failure {
+                authoring_rejected: false,
+                draft_built: true,
+                control_cause,
+                owner: PendingNodeSceneFailure::CentralInterrupted {
+                    owner: interrupted,
+                    evidence_counts: central_counts,
+                    final_progress,
+                },
+            })
         }
         CanonicalCentralValidationOutcome::Fallback(fallback) => {
-            let (store, _cause) = fallback.into_parts();
-            Ok(prepare_node_central_fallback(store))
+            Ok(DeferredNodeSceneDraftBuild::Failure {
+                authoring_rejected: false,
+                draft_built: true,
+                control_cause: None,
+                owner: PendingNodeSceneFailure::PreparedFallback(fallback),
+            })
         }
     }
 }
 
-fn write_node_scene_evidence_row(
+pub(super) fn write_node_scene_evidence_row(
     row: &mut OutcomeEvidenceRecordRowWriter<'_>,
     counts: SceneEvidenceCounts,
 ) -> Result<(), StoreBuildError> {
@@ -1164,6 +1559,39 @@ where
     .map(CanonicalBlockRef::from_store)
 }
 
+fn retain_node_scene_names<'lane, O, PP, U, L, R>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
+    plan: Utf8Plan,
+    batch: &ValidatedNodeBatch<'_, R>,
+    plans: &NodeSceneMaterializationPlans,
+) -> Result<CanonicalBlockRef<NodeSceneNodeNameSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let nodes = batch.input().nodes();
+    let failure = plans.build_invariant;
+    lane.try_retain_utf8(plan, NodeSceneNodeNameSchema, |control| {
+        let mut written = 0_u32;
+        for &local in batch.canonical_order() {
+            let authored = nodes.get(local).ok_or(failure)?;
+            let Presence::Present(name) = authored.name() else {
+                continue;
+            };
+            control.write_str(name)?;
+            written = written
+                .checked_add(u32::try_from(name.len()).map_err(|_| failure)?)
+                .ok_or(failure)?;
+        }
+        if written != plans.node_name_byte_count {
+            return Err(failure.into());
+        }
+        Ok(())
+    })
+    .map(CanonicalBlockRef::from_store)
+}
+
 fn retain_node_scene_references<'lane, O, PP, U, L, R>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: RecordPlan,
@@ -1194,6 +1622,7 @@ where
 #[derive(Clone, Copy)]
 struct RetainedNodePayloadRefs {
     transforms: Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
+    names: Option<CanonicalBlockRef<NodeSceneNodeNameSchema>>,
     spatial: RetainedSpatialRefs,
 }
 
@@ -1211,6 +1640,7 @@ where
 {
     let RetainedNodePayloadRefs {
         transforms,
+        names,
         spatial,
     } = payloads;
     let authored_nodes = batch.input().nodes();
@@ -1223,6 +1653,10 @@ where
             row.write_scalar(0_u32)?;
             row.write_scalar(plans.source_root_count)?;
             row.write_scalar(NODE_SCENE_TRANSFORM_SYNTHETIC)?;
+            row.write_scalar(0_u32)?;
+            row.write_scalar(0_u32)?;
+            row.write_scalar(0_u8)?;
+            row.write_scalar(PRESENCE_ABSENT)?;
             row.write_scalar(0_u32)?;
             row.write_scalar(0_u32)?;
             row.write_scalar(0_u8)?;
@@ -1251,6 +1685,7 @@ where
         }
         let transforms = transforms.ok_or(failure)?;
         let mut transform_offset = 0_u32;
+        let mut name_offset = 0_u32;
         let mut child_reference_offset = plans.source_root_count;
         for &local in batch.canonical_order() {
             let authored_node = authored_nodes.get(local).ok_or(failure)?;
@@ -1267,6 +1702,13 @@ where
             };
             let node = *mapping.get(local).ok_or(failure)?;
             let child_count = batch.child_count_by_local(local).ok_or(failure)?;
+            let (name_presence, name_count) = match authored_node.name() {
+                Presence::Absent => (PRESENCE_ABSENT, 0_u32),
+                Presence::Present(name) => (
+                    PRESENCE_PRESENT,
+                    u32::try_from(name.len()).map_err(|_| failure)?,
+                ),
+            };
             control.write_row(|row| {
                 row.write_scalar(node)?;
                 row.write_scalar(PRESENCE_PRESENT)?;
@@ -1276,6 +1718,14 @@ where
                 row.write_scalar(transform_offset)?;
                 row.write_scalar(transform_length)?;
                 row.write_sequence_ref(transforms.into_store())?;
+                row.write_scalar(name_presence)?;
+                row.write_scalar(name_offset)?;
+                row.write_scalar(name_count)?;
+                if name_count == 0 {
+                    row.write_scalar(0_u8)?;
+                } else {
+                    row.write_utf8_ref(names.ok_or(failure)?.into_store())?;
+                }
                 write_node_spatial_attachment::<SpatialCameraTableSchema>(
                     row,
                     match authored_node.camera() {
@@ -1298,11 +1748,13 @@ where
             transform_offset = transform_offset
                 .checked_add(transform_length)
                 .ok_or(failure)?;
+            name_offset = name_offset.checked_add(name_count).ok_or(failure)?;
             child_reference_offset = child_reference_offset
                 .checked_add(child_count)
                 .ok_or(failure)?;
         }
         if transform_offset != plans.transform_scalar_count
+            || name_offset != plans.node_name_byte_count
             || child_reference_offset != plans.source_node_count
         {
             return Err(failure.into());

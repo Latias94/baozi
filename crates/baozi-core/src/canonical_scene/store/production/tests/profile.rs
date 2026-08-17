@@ -145,9 +145,13 @@ fn validated_domains<'input>(
     .expect("the fixture spatial domain must validate");
     let nodes = validate(Presence::Present(roots), nodes, limits, control)
         .expect("the fixture node domain must validate");
-    let appearance =
-        validate_appearance_batch_with_control(AppearanceAuthoringBatch::empty(), limits, control)
-            .expect("the fixture appearance domain must validate");
+    let appearance = validate_appearance_batch_with_control(
+        AppearanceAuthoringBatch::empty(),
+        super::super::ResourceSnapshotAuthoringTable::empty(),
+        limits,
+        control,
+    )
+    .expect("the fixture appearance domain must validate");
     let geometry = validate_geometry_batch_with_control(
         GeometryAuthoringBatch::empty(),
         roots.len(),

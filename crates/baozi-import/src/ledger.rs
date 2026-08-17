@@ -1,6 +1,10 @@
 use crate::limits::ResourceLimits;
+use crate::store::{
+    ImportStoreHost, ImportStoreHostError, ImportStoreTerminalCause, ImportStoreTerminalEvidence,
+    ImportStoreTerminalFailureClass,
+};
 use baozi_operation::{
-    DimensionPolicy, LedgerCause, LedgerLimits, LedgerLimitsError, LedgerSnapshot, LiveReservation,
+    DimensionPolicy, LedgerCause, LedgerLimits, LedgerLimitsError, LiveReservation,
     OperationControl, OperationCoordinator, OperationOwner, PendingPublication, ProgressPhase,
     ProgressUnit, PublicationReservationBatch, PublicationReservationBatchError,
 };
@@ -65,6 +69,62 @@ impl ProgressPhase for ImportProgressPhase {
             Self::BuildDraft => "import.build_draft",
             Self::Validate => "import.validate",
             Self::Finalize => "import.finalize",
+        }
+    }
+}
+
+/// Stable terminal failure classes projected from the unique retained-store ledger header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportTerminalFailureClass {
+    Requested,
+    Control,
+    ProductGraph,
+    Ledger,
+}
+
+/// Import-owned terminal failure identity with no retained-store key or implementation detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportTerminalFailure {
+    class: ImportTerminalFailureClass,
+    code: u32,
+}
+
+impl ImportTerminalFailure {
+    const fn from_store(class: ImportStoreTerminalFailureClass, code: u32) -> Self {
+        let class = match class {
+            ImportStoreTerminalFailureClass::Requested => ImportTerminalFailureClass::Requested,
+            ImportStoreTerminalFailureClass::Control => ImportTerminalFailureClass::Control,
+            ImportStoreTerminalFailureClass::ProductGraph => {
+                ImportTerminalFailureClass::ProductGraph
+            }
+            ImportStoreTerminalFailureClass::Ledger => ImportTerminalFailureClass::Ledger,
+        };
+        Self { class, code }
+    }
+
+    pub const fn class(self) -> ImportTerminalFailureClass {
+        self.class
+    }
+
+    pub const fn code(self) -> u32 {
+        self.code
+    }
+}
+
+/// Terminal cause projected once from the sole import ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportTerminalCause {
+    Success,
+    Failure(ImportTerminalFailure),
+}
+
+impl ImportTerminalCause {
+    pub(crate) const fn from_store(cause: ImportStoreTerminalCause) -> Self {
+        match cause {
+            ImportStoreTerminalCause::Success => Self::Success,
+            ImportStoreTerminalCause::Failure { class, code } => {
+                Self::Failure(ImportTerminalFailure::from_store(class, code))
+            }
         }
     }
 }
@@ -289,7 +349,114 @@ pub(crate) fn import_ledger_limits(
 }
 
 pub type ImportOperationControl = OperationControl<ImportProgressPhase, ImportProgressUnit>;
-pub type ImportLedgerSnapshot = LedgerSnapshot<ImportLedgerPhase, ImportDimension>;
+/// Import-owned immutable projection of the unique retained-store terminal evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportLedgerSnapshot {
+    evidence: ImportStoreTerminalEvidence,
+}
+
+impl ImportLedgerSnapshot {
+    pub(crate) const fn from_store(evidence: ImportStoreTerminalEvidence) -> Self {
+        Self { evidence }
+    }
+
+    pub const fn current_live_bytes(&self) -> u64 {
+        self.evidence.current_live_bytes()
+    }
+
+    pub const fn peak_live_bytes(&self) -> u64 {
+        self.evidence.peak_live_bytes()
+    }
+
+    pub const fn active_reservations(&self) -> u64 {
+        self.evidence.active_reservations()
+    }
+
+    /// Returns the terminal operation's currently retained evidence bytes.
+    ///
+    /// A fully published terminal must report zero. The value is an import-owned scalar summary;
+    /// no retained-store evidence or key escapes through this accessor.
+    pub const fn current_evidence_bytes(&self) -> u64 {
+        self.evidence.current_evidence_bytes()
+    }
+
+    /// Returns the peak evidence bytes retained while producing this terminal.
+    pub const fn peak_evidence_bytes(&self) -> u64 {
+        self.evidence.peak_evidence_bytes()
+    }
+
+    /// Returns the sole terminal cause frozen in this import ledger.
+    pub const fn terminal_cause(&self) -> ImportTerminalCause {
+        ImportTerminalCause::from_store(self.evidence.cause())
+    }
+
+    /// Returns the logical canonical members committed by the successful joint publication.
+    ///
+    /// This is terminal attribution, not physical byte ownership. The producer-visible
+    /// [`ImportDimension::CanonicalOutputBytes`] row therefore remains a live-storage view and
+    /// does not duplicate this committed destination count.
+    pub const fn committed_canonical_members(&self) -> u64 {
+        self.evidence.committed_canonical_members()
+    }
+
+    pub fn dimension(&self, dimension: ImportDimension) -> Option<ImportDimensionSnapshot> {
+        self.evidence
+            .dimension(dimension)
+            .map(ImportDimensionSnapshot::from_store)
+    }
+
+    pub const fn last_completed_phase(&self) -> Option<ImportLedgerPhase> {
+        self.evidence.last_completed_phase()
+    }
+}
+
+/// Import-owned accounting evidence for one producer-visible dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportDimensionSnapshot {
+    attempted: u64,
+    consumed: u64,
+    current_live_bytes: u64,
+    peak_live_bytes: u64,
+    committed: u64,
+    published_outcome_evidence: u64,
+}
+
+impl ImportDimensionSnapshot {
+    const fn from_store(evidence: crate::store::ImportStoreDimensionEvidence) -> Self {
+        Self {
+            attempted: evidence.attempted(),
+            consumed: evidence.consumed(),
+            current_live_bytes: evidence.current_live_bytes(),
+            peak_live_bytes: evidence.peak_live_bytes(),
+            committed: evidence.committed(),
+            published_outcome_evidence: evidence.published_outcome_evidence(),
+        }
+    }
+
+    pub const fn attempted(self) -> u64 {
+        self.attempted
+    }
+
+    pub const fn consumed(self) -> u64 {
+        self.consumed
+    }
+
+    pub const fn current_live_bytes(self) -> u64 {
+        self.current_live_bytes
+    }
+
+    pub const fn peak_live_bytes(self) -> u64 {
+        self.peak_live_bytes
+    }
+
+    pub const fn committed(self) -> u64 {
+        self.committed
+    }
+
+    pub const fn published_outcome_evidence(self) -> u64 {
+        self.published_outcome_evidence
+    }
+}
 
 pub(crate) type ImportCoordinator = OperationCoordinator<
     ImportOperationOwner,
@@ -307,9 +474,9 @@ pub(crate) fn try_import_coordinator(
 }
 
 pub(crate) fn tighten_selected_format_limits(
-    coordinator: &mut ImportCoordinator,
+    host: ImportStoreHost<'_>,
     limits: &ResourceLimits,
-) -> Result<(), LedgerCause<ImportDimension>> {
+) -> Result<(), ImportStoreHostError> {
     for dimension in [
         ImportDimension::PrimaryBytes,
         ImportDimension::DecodedTextBytes,
@@ -317,7 +484,7 @@ pub(crate) fn tighten_selected_format_limits(
         ImportDimension::Tokens,
         ImportDimension::CanonicalStringBytes,
     ] {
-        coordinator.tighten_dimension_policy(dimension, dimension.policy(limits))?;
+        host.tighten_dimension_policy(dimension, dimension.policy(limits))?;
     }
     Ok(())
 }

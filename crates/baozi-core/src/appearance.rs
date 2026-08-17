@@ -138,13 +138,17 @@ fn require_behavior_schema(
 /// deletes legacy source truth that was also present.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ShadingModel {
+    /// The source does not declare a rendering model.
+    Unspecified,
     Unlit,
     Lambert,
     Phong,
     BlinnPhong,
     PbrMetallicRoughness,
     PbrSpecularGlossiness,
-    Namespaced { schema_id: ExtensionSchemaId },
+    Namespaced {
+        schema_id: ExtensionSchemaId,
+    },
 }
 
 impl ShadingModel {
@@ -160,7 +164,8 @@ impl ShadingModel {
     pub const fn schema_id(&self) -> Option<&ExtensionSchemaId> {
         match self {
             Self::Namespaced { schema_id } => Some(schema_id),
-            Self::Unlit
+            Self::Unspecified
+            | Self::Unlit
             | Self::Lambert
             | Self::Phong
             | Self::BlinnPhong
@@ -171,6 +176,7 @@ impl ShadingModel {
 
     pub const fn kind(&self) -> ShadingModelKind {
         match self {
+            Self::Unspecified => ShadingModelKind::Unspecified,
             Self::Unlit => ShadingModelKind::Unlit,
             Self::Lambert => ShadingModelKind::Lambert,
             Self::Phong => ShadingModelKind::Phong,
@@ -185,6 +191,7 @@ impl ShadingModel {
 /// A text-free shading category suitable for structured errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShadingModelKind {
+    Unspecified,
     Unlit,
     Lambert,
     Phong,
@@ -2193,7 +2200,8 @@ pub(crate) fn validate_material_semantics(
         {
             Some(MaterialFactorGroup::Legacy)
         }
-        ShadingModel::Unlit
+        ShadingModel::Unspecified
+        | ShadingModel::Unlit
         | ShadingModel::Lambert
         | ShadingModel::Phong
         | ShadingModel::BlinnPhong

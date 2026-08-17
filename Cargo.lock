@@ -52,7 +52,6 @@ dependencies = [
  "baozi-import",
  "baozi-io",
  "baozi-operation",
- "baozi-postprocess",
  "baozi-test-support",
  "criterion",
  "thiserror",

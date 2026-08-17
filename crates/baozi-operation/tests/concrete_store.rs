@@ -431,6 +431,46 @@ fn operation_with_catalog_limits_and_failure_work(
     construction_work_limit: u64,
     validation_work_limit: u64,
 ) -> (TestOperation, TestKeys) {
+    operation_with_catalog_limits_failure_work_and_terminal_attributions(
+        account,
+        control,
+        catalog,
+        evidence_limit,
+        committed_limit,
+        construction_work_limit,
+        validation_work_limit,
+        TEST_TERMINAL_ATTRIBUTION_SLOTS,
+    )
+}
+
+#[cfg(feature = "_u4-activation")]
+fn operation_with_terminal_attribution_slots(
+    account: &PhysicalStorageAccount,
+    terminal_attribution_slots: usize,
+) -> (TestOperation, TestKeys) {
+    operation_with_catalog_limits_failure_work_and_terminal_attributions(
+        account,
+        OperationControl::default(),
+        test_catalog(),
+        u64::MAX,
+        u64::MAX,
+        TEST_FAILURE_EVIDENCE_CONSTRUCTION_WORK_LIMIT,
+        TEST_FAILURE_EVIDENCE_VALIDATION_WORK_LIMIT,
+        terminal_attribution_slots,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn operation_with_catalog_limits_failure_work_and_terminal_attributions(
+    account: &PhysicalStorageAccount,
+    control: OperationControl<TestProgress, TestUnit>,
+    catalog: StoreSemanticCatalogId,
+    evidence_limit: u64,
+    committed_limit: u64,
+    construction_work_limit: u64,
+    validation_work_limit: u64,
+    terminal_attribution_slots: usize,
+) -> (TestOperation, TestKeys) {
     let TestVocabulary { domain, keys } = test_vocabulary_for(catalog);
     let failure_terminal_work = RetainedStoreFailureTerminalWorkPlan::with_evidence_work(
         keys.failure_terminal_dimension,
@@ -461,7 +501,7 @@ fn operation_with_catalog_limits_and_failure_work(
     .unwrap();
     let ledger_plan = StoreLedgerPlan::try_new(domain, limits, &[keys.phase]).unwrap();
     let start = RetainedStoreStartPlan::new(
-        writer_plan(keys, TEST_TERMINAL_ATTRIBUTION_SLOTS, 8),
+        writer_plan(keys, terminal_attribution_slots, 8),
         RetainedStoreSharePlan::new(keys.dimension, keys.dimension),
         StoreFallbackEnvelope::new(91),
         keys.dimension,

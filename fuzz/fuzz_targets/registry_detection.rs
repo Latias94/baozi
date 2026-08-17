@@ -1,13 +1,18 @@
 #![no_main]
 
-use baozi_core::{FormatId, SceneDraft};
+use baozi_core::FormatId;
 use baozi_import::{
-    CapabilityStatus, DetectionEvidence, DetectionInconclusive, DetectionOptions, DetectionOutcome,
-    DetectionResult, DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding,
-    FormatImporter, FormatSelection, ImportConfigOverlay, ImportOperationControl, ImportRequest,
-    ImportRequestLayer, ImportResult, OptionCompileLimits, ParseResult, ParseScope,
-    PreparedImportRequest, Probe, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    ResourceLimits, ResourceLimitsOverlay, import_bytes,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, CapabilityStatus,
+    DeformationAuthoringBatch, DetectionEvidence, DetectionInconclusive, DetectionOptions,
+    DetectionOutcome, DetectionResult, DetectionScope, FormatCapability, FormatDescriptor,
+    FormatEncoding, FormatImporter, FormatSelection, GeometryAuthoringBatch, ImportConfigOverlay,
+    ImportOperationControl, ImportRequest, ImportRequestLayer, ImportResult, LineageAuthoringBatch,
+    MetadataAuthoringBatch, NodeAuthoringBatch, OperationKind, OptionsDigest,
+    OwnerProvenanceAuthoring, ParseResult, ParseScope, PreparedImportRequest, Presence,
+    Probe, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
+    ProvenanceOperationAuthoring, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
+    ResourceLimits, ResourceLimitsOverlay, SceneAuthoringBatch, SceneDraft, SceneSpace,
+    SpatialAuthoringBatch, import_bytes,
 };
 use baozi_io::AssetPath;
 use libfuzzer_sys::fuzz_target;
@@ -234,7 +239,36 @@ impl FormatImporter for SyntheticImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        scope.scene_builder()?.finish_draft()
+        let provenance_ids = [ProvenanceLocalId::new(0)];
+        let operation_kind = OperationKind::Generated;
+        let provenance_nodes = [ProvenanceNodeAuthoring::operation(
+            ProvenanceOperationAuthoring::new(
+                &operation_kind,
+                OptionsDigest::sha256([0; 32]),
+                &[],
+                &[],
+            ),
+        )];
+        let owner_provenance = [
+            OwnerProvenanceAuthoring::new(ProfileOwner::Scene, &provenance_ids),
+            OwnerProvenanceAuthoring::new(ProfileOwner::SyntheticRoot, &provenance_ids),
+        ];
+        let roots = [];
+        let nodes = [];
+        let scene_space = SceneSpace::UNKNOWN;
+
+        scope.submit_scene(SceneAuthoringBatch::new(
+            SpatialAuthoringBatch::new(&scene_space, &[], &[]),
+            NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+            AppearanceAuthoringBatch::empty(),
+            GeometryAuthoringBatch::empty(),
+            DeformationAuthoringBatch::empty(),
+            AnimationAuthoringBatch::empty(),
+            ProfileAuthoringBatch::new(
+                LineageAuthoringBatch::new(&[], &[], &provenance_nodes, &owner_provenance),
+                MetadataAuthoringBatch::empty(),
+            ),
+        ))
     }
 }
 

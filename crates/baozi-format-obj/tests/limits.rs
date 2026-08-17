@@ -2,14 +2,16 @@ mod common;
 
 use baozi_import::{
     FormatFailureDetailValue, ImportCause, ImportDimension, ImportOperationControl,
-    ImportProgressPhase, ImportProgressUnit, ResourceLimits, ScopeAbortCause,
+    ImportProgressPhase, ImportProgressUnit, ImportTerminalCause, ImportTerminalFailureClass,
+    ResourceLimits, ScopeAbortCause,
 };
 use baozi_operation::{
     CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
 };
 use common::{
     TestResult, expected_failure, expected_success, import_assets_result,
-    import_assets_result_with_control, import_bytes_result, scene,
+    import_assets_result_with_control, import_bytes_result, scene_snapshot,
+    snapshot_line_containing,
 };
 use std::sync::{
     Arc,
@@ -135,10 +137,17 @@ fn assert_scope_limit(failure: &baozi_import::ImportFailure, resource: &'static 
 }
 
 fn assert_ledger_limit(failure: &baozi_import::ImportFailure, dimension: ImportDimension) {
-    assert!(matches!(
-        failure.cause(),
-        ImportCause::Scope(abort) if matches!(abort.cause(), ScopeAbortCause::Ledger(_))
-    ));
+    match failure.cause() {
+        ImportCause::Scope(abort) if matches!(abort.cause(), ScopeAbortCause::Ledger(_)) => {}
+        ImportCause::OperationTerminal(terminal) => {
+            assert_eq!(terminal.class(), ImportTerminalFailureClass::Ledger);
+            assert_eq!(
+                failure.ledger().terminal_cause(),
+                ImportTerminalCause::Failure(*terminal)
+            );
+        }
+        cause => panic!("expected ledger failure, got {cause:?}"),
+    }
     let snapshot = failure
         .ledger()
         .dimension(dimension)
@@ -147,14 +156,23 @@ fn assert_ledger_limit(failure: &baozi_import::ImportFailure, dimension: ImportD
 }
 
 fn assert_live_limit(failure: &baozi_import::ImportFailure, limit: u64) {
-    let cause = match failure.cause() {
+    match failure.cause() {
         ImportCause::Scope(abort) => match abort.cause() {
-            ScopeAbortCause::Ledger(cause) => cause,
+            ScopeAbortCause::Ledger(cause) => {
+                assert!(cause.to_string().ends_with(&format!("above limit {limit}")));
+            }
             cause => panic!("expected ledger failure, got {cause:?}"),
         },
-        cause => panic!("expected scoped failure, got {cause:?}"),
-    };
-    assert!(cause.to_string().ends_with(&format!("above limit {limit}")));
+        ImportCause::OperationTerminal(terminal) => {
+            assert_eq!(terminal.class(), ImportTerminalFailureClass::Ledger);
+            assert_eq!(
+                failure.ledger().terminal_cause(),
+                ImportTerminalCause::Failure(*terminal)
+            );
+            assert!(failure.ledger().peak_live_bytes() <= limit);
+        }
+        cause => panic!("expected ledger failure, got {cause:?}"),
+    }
     assert_eq!(failure.ledger().current_live_bytes(), 0);
 }
 
@@ -322,6 +340,7 @@ fn mtl_utf8_and_line_scans_charge_each_fixed_byte_chunk() -> TestResult<()> {
 fn repeated_texture_replacement_does_not_accumulate_live_reservations() -> TestResult<()> {
     const REPLACEMENTS: usize = 64;
     const MAP_LINE: &str = "map_Kd textures/diffuse.png\n";
+    const TEXTURE_BYTES: &[u8] = b"snapshotted-diffuse-texture";
     let obj = b"mtllib materials.mtl\nusemtl material\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
     let mut repeated = String::from("newmtl material\n");
     repeated.push_str(&MAP_LINE.repeat(REPLACEMENTS));
@@ -341,6 +360,7 @@ fn repeated_texture_replacement_does_not_accumulate_live_reservations() -> TestR
         [
             ("model.obj", obj.as_slice()),
             ("materials.mtl", repeated.as_bytes()),
+            ("textures/diffuse.png", TEXTURE_BYTES),
         ],
         ResourceLimits::default(),
         true,
@@ -350,6 +370,7 @@ fn repeated_texture_replacement_does_not_accumulate_live_reservations() -> TestR
         [
             ("model.obj", obj.as_slice()),
             ("materials.mtl", padded.as_bytes()),
+            ("textures/diffuse.png", TEXTURE_BYTES),
         ],
         ResourceLimits::default(),
         true,
@@ -359,6 +380,13 @@ fn repeated_texture_replacement_does_not_accumulate_live_reservations() -> TestR
         repeated.ledger().peak_live_bytes(),
         padded.ledger().peak_live_bytes()
     );
+    for report in [&repeated, &padded] {
+        let snapshot = scene_snapshot(report)?;
+        assert_eq!(snapshot.image_count(), 1);
+        assert_eq!(snapshot.sampler_count(), 1);
+        assert_eq!(snapshot.texture_count(), 1);
+        assert_eq!(snapshot.material_binding_count(), 1);
+    }
     Ok(())
 }
 
@@ -603,14 +631,9 @@ fn generated_vertex_limit_is_aggregate_across_segments() -> TestResult<()> {
     exact.max_vertices = 9;
     let report = expected_success(import_bytes_result("vertices-exact.obj", bytes, exact)?);
     assert!(report.diagnostics().is_empty());
-    assert_eq!(
-        scene(&report)
-            .meshes()
-            .iter()
-            .map(|mesh| mesh.positions.len())
-            .sum::<usize>(),
-        6
-    );
+    let snapshot = scene_snapshot(&report)?;
+    assert_eq!(snapshot.logical_mesh_count(), 2);
+    assert_eq!(snapshot.f32_scalar_count(), 18);
 
     let mut excess = ResourceLimits::default();
     excess.max_vertices = 8;
@@ -640,7 +663,7 @@ fn topology_cell_limit_is_enforced_before_face_storage() -> TestResult<()> {
     exact.max_total_topology_cells = 6;
     let report = expected_success(import_bytes_result("topology-exact.obj", bytes, exact)?);
     assert!(report.diagnostics().is_empty());
-    assert_eq!(scene(&report).meshes()[0].indices.len(), 3);
+    assert_eq!(scene_snapshot(&report)?.primitive_index_count(), 3);
 
     let mut excess = ResourceLimits::default();
     excess.max_total_topology_cells = 5;
@@ -661,8 +684,14 @@ fn topology_cell_limit_includes_polygon_face_counts_at_the_exact_boundary() -> T
         exact,
     )?);
     assert!(report.diagnostics().is_empty());
-    assert_eq!(scene(&report).meshes()[0].indices.len(), 7);
-    assert_eq!(scene(&report).meshes()[0].face_vertex_counts, vec![3, 4]);
+    let snapshot = scene_snapshot(&report)?;
+    assert_eq!(snapshot.primitive_index_count(), 7);
+    assert_eq!(snapshot.polygon_boundary_count(), 2);
+    assert!(
+        snapshot
+            .preview()
+            .contains("polygon_boundaries(present,total=2)=[3,4]")
+    );
 
     let mut excess = ResourceLimits::default();
     excess.max_total_topology_cells = 15;
@@ -684,8 +713,10 @@ fn canonical_attribute_cells_are_charged_at_the_exact_boundary() -> TestResult<(
     exact.max_total_vertex_attribute_cells = 10;
     let report = expected_success(import_bytes_result("attribute-exact.obj", bytes, exact)?);
     assert!(report.diagnostics().is_empty());
-    assert_eq!(scene(&report).meshes()[0].texcoords[0].len(), 3);
-    assert_eq!(scene(&report).meshes()[0].normals.len(), 3);
+    let snapshot = scene_snapshot(&report)?;
+    assert_eq!(snapshot.attribute_count(), 3);
+    assert!(snapshot_line_containing(&snapshot, "semantic=texcoord").contains("elements=3"));
+    assert!(snapshot_line_containing(&snapshot, "semantic=normal").contains("elements=3"));
 
     let mut excess = ResourceLimits::default();
     excess.max_total_vertex_attribute_cells = 9;
@@ -708,8 +739,9 @@ fn mesh_limit_is_enforced_after_group_split() -> TestResult<()> {
 
 #[test]
 fn canonical_string_budget_is_charged_before_segment_materialization() -> TestResult<()> {
-    const NAME_BYTES: usize = 4_096;
+    const NAME_BYTES: usize = 16;
     const SEGMENT_COUNT: usize = 8;
+    const SOURCE: &str = "canonical-strings.obj";
 
     let object = "x".repeat(NAME_BYTES);
     let mut document = format!("o {object}\nv 0 0 0\nv 1 0 0\nv 0 1 0\n");
@@ -719,26 +751,27 @@ fn canonical_string_budget_is_charged_before_segment_materialization() -> TestRe
     }
     let parsed_name_bytes = NAME_BYTES + SEGMENT_COUNT;
     let segment_bytes = 3 * NAME_BYTES + "obj:object".len() + "obj:smoothing".len() + "a".len();
-    let exact_bytes = parsed_name_bytes + SEGMENT_COUNT * segment_bytes;
+    let exact_bytes = parsed_name_bytes
+        + SEGMENT_COUNT * segment_bytes
+        + SOURCE.len()
+        + baozi_format_obj::FORMAT_ID.len();
 
     let mut exact = ResourceLimits::default();
     exact.max_string_bytes = NAME_BYTES;
-    exact.max_canonical_string_bytes = exact_bytes;
-    let report = expected_success(import_bytes_result(
-        "canonical-strings.obj",
-        document.as_bytes(),
-        exact,
-    )?);
-    assert_eq!(scene(&report).meshes().len(), SEGMENT_COUNT);
+    exact.max_canonical_string_bytes = ResourceLimits::default().max_canonical_string_bytes;
+    let report = expected_success(import_bytes_result(SOURCE, document.as_bytes(), exact)?);
+    let canonical_strings = report
+        .ledger()
+        .dimension(ImportDimension::CanonicalStringBytes)
+        .expect("canonical string evidence");
+    assert_eq!(canonical_strings.attempted(), exact_bytes as u64);
+    assert_eq!(canonical_strings.consumed(), exact_bytes as u64);
+    assert_eq!(scene_snapshot(&report)?.logical_mesh_count(), SEGMENT_COUNT);
 
     let mut excess = ResourceLimits::default();
     excess.max_string_bytes = NAME_BYTES;
     excess.max_canonical_string_bytes = exact_bytes - 1;
-    let failure = expected_failure(import_bytes_result(
-        "canonical-strings.obj",
-        document.as_bytes(),
-        excess,
-    )?);
+    let failure = expected_failure(import_bytes_result(SOURCE, document.as_bytes(), excess)?);
     assert_ledger_limit(&failure, ImportDimension::CanonicalStringBytes);
     Ok(())
 }
@@ -778,7 +811,7 @@ fn diagnostic_limit_caps_unsupported_statement_warnings() -> TestResult<()> {
 
     let report = expected_success(import_bytes_result("diagnostic-limit.obj", bytes, limits)?);
 
-    assert_eq!(scene(&report).meshes().len(), 1);
+    assert_eq!(scene_snapshot(&report)?.logical_mesh_count(), 1);
     assert_eq!(report.diagnostics().len(), 1);
     assert_eq!(
         report.diagnostics()[0].code().as_str(),
@@ -806,7 +839,7 @@ fn texture_path_string_limit_warns_and_skips_texture() -> TestResult<()> {
         true,
     )?);
 
-    assert!(scene(&report).textures().is_empty());
+    assert_eq!(scene_snapshot(&report)?.texture_count(), 0);
     assert_eq!(report.diagnostics().len(), 1);
     assert_eq!(
         report.diagnostics()[0].code().as_str(),
@@ -816,7 +849,7 @@ fn texture_path_string_limit_warns_and_skips_texture() -> TestResult<()> {
 }
 
 #[test]
-fn texture_path_larger_than_one_copy_chunk_uses_chunked_append() -> TestResult<()> {
+fn texture_path_larger_than_one_chunk_is_normalized_by_the_dependency_host() -> TestResult<()> {
     let mut limits = ResourceLimits::default();
     limits.max_path_length = SCAN_CHUNK_BYTES * 2;
     let obj = b"mtllib material.mtl\nusemtl red\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
@@ -833,11 +866,15 @@ fn texture_path_larger_than_one_copy_chunk_uses_chunked_append() -> TestResult<(
         true,
     )?);
 
-    assert!(scene(&report).textures().is_empty());
-    assert_eq!(report.diagnostics().len(), 1);
+    assert_eq!(scene_snapshot(&report)?.texture_count(), 0);
+    assert_eq!(report.diagnostics().len(), 2);
     assert_eq!(
         report.diagnostics()[0].code().as_str(),
-        "obj.mtl_texture_resolve_failed"
+        "import.optional_dependency_unavailable"
+    );
+    assert_eq!(
+        report.diagnostics()[1].code().as_str(),
+        "obj.mtl_texture_unavailable"
     );
     Ok(())
 }

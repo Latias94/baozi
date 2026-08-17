@@ -1,9 +1,8 @@
 use crate::options::{ObjTextDecodingMode, obj_import_option_key};
 use crate::{ObjFailure, mesh_builder, mtl, obj};
-use baozi_core::SceneDraft;
 use baozi_import::{
     DiagnosticByteRange, DiagnosticCode, DiagnosticSource, ImportStorageClass, ImportWorkClass,
-    MeteredDecodedText, MeteredVec, ParseFailure, ParseResult, ParseScope,
+    MeteredDecodedText, MeteredVec, ParseFailure, ParseResult, ParseScope, SceneDraft,
 };
 use std::ops::Range;
 use std::str::Utf8Error;

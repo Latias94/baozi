@@ -1,9 +1,12 @@
 use baozi_operation::__canonical_activation::{
-    CanonicalCandidateStoreSession, CanonicalJointCommit,
+    CanonicalCandidateStoreSession, CanonicalJointCommit, CentrallyRejectedCanonicalStoreSession,
+    InterruptedCanonicalStoreSession, NeverActivatedStoreSession, RejectedCanonicalStoreSession,
+    VerifiedMinimalFallback,
 };
 use baozi_operation::{
-    BytesPlan, PublishedCanonicalStore, PublishedOutcomeEvidenceStore, PublishedRichFailureStore,
-    RecordBlock, RecordPlan, RetainedStoreWorkControl, SequencePlan, StoreBuildError,
+    BytesPlan, ControlCause, FinalProgress, OperationOwner, ProgressPhase, ProgressUnit,
+    PublishedCanonicalStore, PublishedOutcomeEvidenceStore, PublishedRichFailureStore, RecordBlock,
+    RecordPlan, RetainedStoreOperation, RetainedStoreWorkControl, SequencePlan, StoreBuildError,
     StoreControlledError, StoreFailureAssembly, StoreFailureValidation, StoreLedgerEvidence,
     StorePlanError, StoreRuntimeError, StoreWorkError, StoredScalar, Utf8Plan,
     ValidatedStoreSuccess,
@@ -24,9 +27,9 @@ use super::super::schema::{
 };
 use super::super::validation::NodeSceneValidationProof;
 use super::{
-    ConstructionBrand, PreparedTracerSceneFallback, SceneConstructionOwner, SceneConstructionPhase,
-    SceneConstructionUnit, SceneStoreAssembly, SceneStoreControlCheckpoint, SceneStoreKeys,
-    SceneStoreOperation, TracerSceneFallback,
+    ConstructionBrand, PreparedTracerSceneFallback, SceneConstructionError, SceneConstructionOwner,
+    SceneConstructionPhase, SceneConstructionUnit, SceneStoreAssembly, SceneStoreControlCheckpoint,
+    SceneStoreKeys, SceneStoreOperation, TracerSceneFallback,
 };
 
 mod animation;
@@ -35,9 +38,15 @@ mod deformation;
 pub(crate) mod edit;
 mod geometry;
 mod materialization;
-pub(in crate::canonical_scene::store) use materialization::NodeSceneMaterializedRefs;
 #[cfg(test)]
 pub(in crate::canonical_scene::store) use materialization::validate_node_scene_batches_for_test;
+pub(in crate::canonical_scene::store) use materialization::{
+    NodeSceneActivationRequest, NodeSceneMaterializedRefs,
+};
+#[cfg(feature = "_u4-import")]
+pub(in crate::canonical_scene::store) use materialization::{
+    NodeSceneActivationRoles, NodeSceneWriterRoles,
+};
 mod profile;
 mod publication;
 mod scratch;
@@ -432,10 +441,14 @@ type NodeSceneStoreFailureValidation = StoreFailureValidation<
 >;
 type PreparedNodeStoreFailure =
     baozi_operation::PreparedStoreFailure<RecordBlock, NodeSceneOutcomeEvidenceSchema>;
-type ActivatedNodeSceneCandidate = CanonicalCandidateStoreSession<
-    SceneConstructionOwner,
-    SceneConstructionPhase,
-    SceneConstructionUnit,
+type ActivatedNodeSceneCandidate<
+    O = SceneConstructionOwner,
+    PP = SceneConstructionPhase,
+    U = SceneConstructionUnit,
+> = CanonicalCandidateStoreSession<
+    O,
+    PP,
+    U,
     materialization::NodeSceneActivationOutput,
     NodeSceneValidationProof,
     RecordBlock,
@@ -443,11 +456,30 @@ type ActivatedNodeSceneCandidate = CanonicalCandidateStoreSession<
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
-type NodeSceneCanonicalJointCommit<'joint> = CanonicalJointCommit<
+type RejectedNodeSceneActivation<O, PP, U> =
+    RejectedCanonicalStoreSession<O, PP, U, NodeSceneConstructionRejection<StoreRuntimeError>>;
+type NeverActivatedNodeScene<O, PP, U, L = baozi_operation::FreshStoreLineage> =
+    NeverActivatedStoreSession<O, PP, U, NodeSceneConstructionRejection<StoreRuntimeError>, L>;
+type CentrallyRejectedNodeScene<O, PP, U> = CentrallyRejectedCanonicalStoreSession<
+    O,
+    PP,
+    U,
+    NodeSceneConstructionRejection<StoreRuntimeError>,
+    RecordBlock,
+    NodeSceneOutcomeEvidenceSchema,
+>;
+type InterruptedNodeScene<O, PP, U> =
+    InterruptedCanonicalStoreSession<O, PP, U, RecordBlock, NodeSceneOutcomeEvidenceSchema>;
+type NodeSceneCanonicalJointCommit<
     'joint,
-    SceneConstructionOwner,
-    SceneConstructionPhase,
-    SceneConstructionUnit,
+    O = SceneConstructionOwner,
+    PP = SceneConstructionPhase,
+    U = SceneConstructionUnit,
+> = CanonicalJointCommit<
+    'joint,
+    O,
+    PP,
+    U,
     RecordBlock,
     SceneDirectorySchema,
     RecordBlock,
@@ -516,8 +548,17 @@ pub(in crate::canonical_scene::store) struct NodeSceneDraft {
 /// The expected directory remains private to the owner so central validation can reject a
 /// descriptor from another construction before registering commitments or allocating scratch.
 #[must_use = "a pending node Scene draft owner must be centrally prepared or deliberately dropped"]
-pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft {
-    candidate: ActivatedNodeSceneCandidate,
+pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft<
+    O = SceneConstructionOwner,
+    PP = SceneConstructionPhase,
+    U = SceneConstructionUnit,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    candidate: ActivatedNodeSceneCandidate<O, PP, U>,
+    final_progress: FinalProgress<PP, U>,
 }
 
 /// The exact outcome of source-backed materialization before central graph validation.
@@ -526,10 +567,18 @@ pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft {
     clippy::large_enum_variant,
     reason = "the failure owner stays inline so materialization preserves exact containment"
 )]
-pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild {
+pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild<
+    O = SceneConstructionOwner,
+    PP = SceneConstructionPhase,
+    U = SceneConstructionUnit,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     Draft {
         draft: NodeSceneDraft,
-        owner: PendingNodeSceneDraft,
+        owner: PendingNodeSceneDraft<O, PP, U>,
     },
     Failure {
         authoring_rejection: Option<NodeSceneConstructionRejection<StoreRuntimeError>>,
@@ -537,6 +586,77 @@ pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild {
         // cannot unwind after its containment owner has already been released.
         prepared: PreparedNodeSceneFailure,
     },
+}
+
+/// Import-specific activation result which defers terminal evidence freeze until parser-owned
+/// reservations have been released by the session.
+#[must_use = "an import Scene draft build must be installed in its session"]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the deferred failure owner stays inline so parser unwind cannot lose containment"
+)]
+pub(in crate::canonical_scene::store) enum DeferredNodeSceneDraftBuild<
+    O,
+    PP,
+    U,
+    L = baozi_operation::FreshStoreLineage,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    Draft {
+        draft: NodeSceneDraft,
+        owner: PendingNodeSceneDraft<O, PP, U>,
+    },
+    Failure {
+        authoring_rejected: bool,
+        draft_built: bool,
+        control_cause: Option<ControlCause>,
+        owner: PendingNodeSceneFailure<O, PP, U, L>,
+    },
+}
+
+/// Failure continuation retained by the import session until every parser-owned reservation has
+/// been released. No terminal ledger snapshot is frozen while this owner is pending.
+#[must_use = "a pending Scene failure must be prepared after parser storage is released"]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "all linear failure states remain inline so deferred preparation cannot allocate"
+)]
+pub(in crate::canonical_scene::store) enum PendingNodeSceneFailure<
+    O,
+    PP,
+    U,
+    L = baozi_operation::FreshStoreLineage,
+> where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    ActivationRejected {
+        owner: RejectedNodeSceneActivation<O, PP, U>,
+        evidence_plan: RecordPlan,
+        evidence_counts: SceneEvidenceCounts,
+        final_progress: FinalProgress<PP, U>,
+    },
+    NeverActivated {
+        owner: NeverActivatedNodeScene<O, PP, U, L>,
+        evidence_plan: RecordPlan,
+        evidence_counts: SceneEvidenceCounts,
+        final_progress: FinalProgress<PP, U>,
+    },
+    CentralRejected {
+        owner: CentrallyRejectedNodeScene<O, PP, U>,
+        evidence_counts: SceneEvidenceCounts,
+        final_progress: FinalProgress<PP, U>,
+    },
+    CentralInterrupted {
+        owner: InterruptedNodeScene<O, PP, U>,
+        evidence_counts: SceneEvidenceCounts,
+        final_progress: FinalProgress<PP, U>,
+    },
+    PreparedFallback(VerifiedMinimalFallback<StoreRuntimeError>),
 }
 
 #[derive(Clone, Copy)]
@@ -654,6 +774,21 @@ impl From<PreparedNodeSceneFailure> for PreparedNodeSceneConstruction {
             PreparedNodeSceneFailure::MinimalFallback(fallback) => Self::MinimalFallback(fallback),
         }
     }
+}
+
+pub(in crate::canonical_scene::store) fn prepare_unactivated_node_scene<O, PP, U>(
+    operation: RetainedStoreOperation<O, PP, U>,
+    stable_code: u32,
+) -> Result<PreparedNodeSceneConstruction, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let store = operation.prepare_minimal_fallback(stable_code)?;
+    Ok(PreparedNodeSceneConstruction::MinimalFallback(
+        PreparedTracerSceneFallback { store },
+    ))
 }
 
 /// Private inspector over a centrally validated node-domain Scene.

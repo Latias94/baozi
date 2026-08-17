@@ -5,8 +5,9 @@ use baozi_import::{
     CauseOwner, DetectionOptions, FormatFailureDetailValue, FormatFailureEnvelope, FormatSelection,
     ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportOperationControl,
     ImportReport, ImportRequest, ImportRequestLayer, ImportResult, ImportRunError,
-    OptionCompileLimits, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-    ResourceLimitsOverlay, ScopeAbortCause, import_asset,
+    ImportTerminalCause, ImportTerminalFailureClass, OptionCompileLimits, RegistryBuildLimits,
+    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotLimits,
+    ScopeAbortCause, import_asset,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::error::Error;
@@ -180,6 +181,50 @@ pub fn operation_failure(error: ImportRunError) -> TestResult<ImportFailure> {
 
 pub fn expected_report(result: ImportResult<ImportReport>) -> TestResult<ImportReport> {
     result.map_err(TestError::unexpected_failure)
+}
+
+pub fn scene_snapshot(report: &ImportReport) -> TestResult<SceneSnapshot> {
+    let limits = SceneSnapshotLimits::try_new(64 * 1024, 1 << 12, 4_000_000)
+        .map_err(|error| TestError::setup("scene snapshot limits", error))?;
+    let snapshot = report
+        .scene()
+        .capture_snapshot(limits)
+        .map_err(|error| TestError::setup("scene snapshot capture", error))?;
+    assert!(!snapshot.preview_bytes_truncated());
+    assert!(!snapshot.preview_items_truncated());
+    Ok(snapshot)
+}
+
+pub fn snapshot_line<'snapshot>(
+    snapshot: &'snapshot SceneSnapshot,
+    prefix: &str,
+) -> &'snapshot str {
+    snapshot
+        .preview()
+        .lines()
+        .find(|line| line.trim_start().starts_with(prefix))
+        .unwrap_or_else(|| panic!("missing canonical snapshot line: {prefix}"))
+}
+
+pub fn snapshot_line_containing<'snapshot>(
+    snapshot: &'snapshot SceneSnapshot,
+    fragment: &str,
+) -> &'snapshot str {
+    snapshot
+        .preview()
+        .lines()
+        .find(|line| line.contains(fragment))
+        .unwrap_or_else(|| panic!("missing canonical snapshot fragment: {fragment}"))
+}
+
+pub fn assert_requested_terminal_failure(failure: &ImportFailure) {
+    let ImportTerminalCause::Failure(terminal) = failure.ledger().terminal_cause() else {
+        panic!("failed import published a successful ledger terminal cause")
+    };
+    assert_eq!(terminal.class(), ImportTerminalFailureClass::Requested);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
 }
 
 pub fn expected_ply_failure(

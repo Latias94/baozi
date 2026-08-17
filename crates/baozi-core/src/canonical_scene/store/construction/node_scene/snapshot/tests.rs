@@ -6,7 +6,7 @@ use baozi_operation::{
 use crate::FormatId;
 use crate::SceneValidationLimits;
 use crate::appearance::{AlphaMode, MaterialFactors, MaterialSemanticsRef, ShadingModel};
-use crate::attribute::{AttributeDomain, AttributeSemantic};
+use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemantic};
 use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneProfileCursor, NodeSceneProfileMetadataArray, NodeSceneProfileMetadataArrayKind,
     NodeSceneProfileMetadataValue, NodeSceneProfileStep,
@@ -21,14 +21,15 @@ use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, CameraAuthoring,
     CameraLocalId, CanonicalProfileOwner, DeformationAuthoringBatch, GeometryAttributeAuthoring,
     GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
-    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LightAuthoring, LightLocalId,
-    LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring, MaterialAuthoring,
-    MaterialLocalId, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, ImageAuthoring, LightAuthoring,
+    LightLocalId, LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring,
+    MaterialAuthoring, MaterialLocalId, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
     MetadataAuthoringEntry, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent,
     ObservedResourceAuthoring, OwnerProvenanceAuthoring, Presence, PrimitiveDeformationAuthoring,
     ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
-    ProvenanceOperationAuthoring, ResourceIdentityLocalId, SceneAuthoringBatch,
-    SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch,
+    ProvenanceOperationAuthoring, ResourceIdentityLocalId, ResourceSnapshotAuthoring,
+    SceneAuthoringBatch, SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId,
+    SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::schema::profile::profile_segment_field;
 use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
@@ -57,49 +58,49 @@ use super::{
 };
 
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
-    0x66, 0x2f, 0x11, 0x9f, 0x56, 0x4f, 0xe1, 0x52, 0x61, 0xe4, 0x76, 0xe9, 0x29, 0x71, 0x7a, 0x74,
-    0xc8, 0xd0, 0xea, 0x61, 0xa9, 0x13, 0xf8, 0x38, 0x2d, 0x82, 0x21, 0x0c, 0xd9, 0x28, 0x14, 0x28,
+    0x62, 0xc6, 0x70, 0x44, 0x4e, 0x7d, 0x62, 0xaf, 0x06, 0xc2, 0x68, 0x97, 0xb1, 0x6f, 0xaa, 0xb9,
+    0xa8, 0x71, 0x61, 0x65, 0x66, 0x84, 0x40, 0x6a, 0x40, 0xb4, 0xe5, 0xbd, 0xe0, 0xe1, 0x82, 0x18,
 ];
 const KNOWN_GENERIC_METADATA_DIGEST: [u8; 32] = [
-    0x4b, 0xa1, 0x44, 0xc1, 0x99, 0x93, 0xa2, 0xdb, 0x94, 0xa0, 0x0a, 0x78, 0x4d, 0x3e, 0xde, 0x07,
-    0xd5, 0x27, 0xc4, 0xdb, 0xc8, 0x37, 0xca, 0x27, 0x5d, 0x72, 0xef, 0xcd, 0x21, 0xf3, 0x74, 0x37,
+    0x5e, 0xa9, 0x27, 0x10, 0x65, 0x80, 0xe8, 0x49, 0x5e, 0x4d, 0x07, 0x1e, 0x60, 0xe9, 0x58, 0x43,
+    0xaf, 0x6b, 0xbe, 0xf1, 0xda, 0x86, 0x4f, 0x03, 0x96, 0x8a, 0x77, 0x3d, 0x88, 0x85, 0x2a, 0xad,
 ];
 // Known vectors are factored at canonical domain and owner-row boundaries, but every
 // assertion still compares the complete transcript byte for byte.
 const KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740201000000030600",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740203000000030600",
     "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c010b0000000000000000",
     "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d0000000000000000",
     "0a020e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f",
-    "0e0000803f0b0a00000000000000c40c00c50c00070c010b00000000000000000b0100000000000000",
+    "0e0000803f0b0a00000000000000da0c00c40c00c50c00070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_DIGEST: [u8; 32] = [
-    0x9c, 0x7d, 0x3b, 0x38, 0xb0, 0xdb, 0xc5, 0xa6, 0x2a, 0xe1, 0x97, 0x8c, 0xcd, 0xd4, 0xf0, 0x7c,
-    0x38, 0xd1, 0xbe, 0x4c, 0x94, 0xeb, 0xb6, 0xd1, 0xbd, 0xaf, 0x79, 0xad, 0xf2, 0x1f, 0xd9, 0xdc,
+    0xc1, 0x61, 0x54, 0x36, 0x62, 0x1d, 0x1d, 0x8f, 0xc2, 0x4b, 0xac, 0x88, 0xe4, 0x99, 0xc9, 0xe8,
+    0xc5, 0x19, 0x2d, 0x15, 0x62, 0x56, 0xda, 0xc6, 0x0d, 0x85, 0xd4, 0xc2, 0x4e, 0x4e, 0xb0, 0xdc,
 ];
 const KNOWN_SPATIAL_DIGEST: [u8; 32] = [
-    0x73, 0x4a, 0xb1, 0x8b, 0x33, 0x51, 0x4a, 0x08, 0xd4, 0x51, 0xf5, 0x25, 0xb4, 0xb2, 0x40, 0xd0,
-    0xa4, 0x3f, 0x40, 0x12, 0xb8, 0xcf, 0x7e, 0x55, 0x34, 0x8f, 0xc8, 0xea, 0xe6, 0x56, 0x53, 0x92,
+    0x13, 0xa8, 0xef, 0x81, 0x85, 0xdb, 0x78, 0x55, 0x6a, 0x83, 0xe9, 0xfe, 0x7a, 0x2e, 0xbb, 0x21,
+    0xdf, 0x67, 0xac, 0x25, 0x42, 0xa2, 0x6f, 0xde, 0x0d, 0x67, 0x63, 0x60, 0x8d, 0x60, 0xe1, 0xa8,
 ];
 const KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020100000003060000000000000073",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020300000003060000000000000073",
     "6861323536a60c01a7a802a904aa05ab0c01c67b14ae47e17a843fac01ad02ae01af02b015000000000000006578616d706c653a7461",
     "6e67656e742d6261736973b102000000b202b014000000000000006578616d706c653a74616e67656e742d7369676eb103000000b30c",
     "01b40d0000000000000000b500b6c70000803fb70c01c70000c03fb8c7cdcccc3db90c01c70000c8420b0100000000000000ba0c01bb",
     "0d0000000000000000bc02bd0c01c700004842be0c01c70000803ebf0c01c70000403fc0c70000803fc1c70000803fc2c70000803fc3",
     "c7000020410b0100000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a020e0000",
     "00000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a0000000000",
-    "0000c40c010d0000000000000000c50c010d0000000000000000070c010b00000000000000000b0100000000000000",
+    "0000da0c00c40c010d0000000000000000c50c010d0000000000000000070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020100000003",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020300000003",
     "0600000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c01",
     "0b0000000000000000ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000",
     "000000000a010e0000803f0e000000000e000000000e000000000e000000000e0000803f0e000000000e000000",
     "000e000000000e000000000e0000803f0e000000000e000080400e000000000e000000000e0000803f0b100000",
-    "0000000000c40c00c50c00070c01090d01000000000000000b0100000000000000060d01000000000000000a020e000000410e",
+    "0000000000da0c00c40c00c50c00070c01090d01000000000000000b0100000000000000060d01000000000000000a020e000000410e",
     "000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b",
-    "0a00000000000000c40c00c50c00070c010b00000000000000000b0200000000000000",
+    "0a00000000000000da0c00c40c00c50c00070c010b00000000000000000b0200000000000000",
 );
 const EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
     "330c01340c010b0000000000000000380c010b0000000000000000400c010b000000000000000010",
@@ -110,7 +111,7 @@ const EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
     "00780c01790c010b00000000000000007f0c010b0000000000000000",
 );
 const EMPTY_SCENE_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740201000000030600",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740203000000030600",
     "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c010b0000000000000000",
     "ba0c010b0000000000000000040c010b0000000000000000050c010b0000000000000000",
 );
@@ -177,25 +178,25 @@ const PROFILE_MESH_INSTANCE_0_OWNER_ROW_HEX: &str = concat!(
 );
 const EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX: &str = "c9cc06ce00cf0000000000000000";
 const KNOWN_POINT_GEOMETRY_DIGEST: [u8; 32] = [
-    0xb6, 0x17, 0x73, 0x7a, 0x79, 0x37, 0x9f, 0xc6, 0xc4, 0xd9, 0xc5, 0x7d, 0xff, 0x92, 0x57, 0xcf,
-    0xb3, 0x31, 0xff, 0x13, 0xd7, 0x52, 0x4e, 0x3a, 0xff, 0x83, 0x25, 0xf3, 0x02, 0xfd, 0xb5, 0x89,
+    0xb2, 0x1a, 0x73, 0x52, 0x08, 0xd6, 0x62, 0xc3, 0x75, 0xd9, 0x06, 0x81, 0xd8, 0x73, 0x53, 0x04,
+    0x2d, 0x35, 0x09, 0x51, 0x17, 0xcc, 0xa2, 0xba, 0x8f, 0x20, 0xdc, 0x0f, 0xcc, 0x92, 0x1e, 0xa7,
 ];
 const KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020100000003060000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020300000003060000",
     "0000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c010b0000000000000000",
     "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a02",
     "0e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000",
-    "803f0b0a00000000000000c40c00c50c00070c010b00000000000000000b0100000000000000330c01340c010b000000000000000038",
+    "803f0b0a00000000000000da0c00c40c00c50c00070c010b00000000000000000b0100000000000000330c01340c010b000000000000000038",
     "0c010b0000000000000000400c010b0000000000000000100c01110d00000000000000008e008f009000000000910092",
     "00930094004800000000000000000b0000000000000000950000000000000000960b2700000000000000a500000000a5",
     "00000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a5000000",
     "00a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500",
     "000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000",
-    "a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a5000000000b0100",
-    "000000000000440c010b00000000000000000f0c01120c01130d00000000000000002c00000000000000000b01000000",
+    "a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a500000000a60c000b0100",
+    "000000000000440c010b00000000000000000f0c01120c01130d0000000000000000d80c002c00000000000000000b01000000",
     "000000000b0100000000000000140c01150d00000000000000002e002f0100000030010000003101000000160c000b00",
     "00000000000000170c000b0000000000000000180c010d0000000000000000192d00000000000000000b010000000000",
-    "00000b0100000000000000190c011a0d00000000000000001b001c000000001d001e001f032000210022010000002301",
+    "00000b0100000000000000190c011a0d00000000000000001b001c00000000dc0c001d001e001f032000210022010000002301",
     "000000240300000000000000250c010e0000803f0e000000400e000040400b0300000000000000260c000b0000000000",
     "000000270c000b00000000000000000b0100000000000000280c01290d00000000000000002a00000000000000002b00",
     "000000000000000b01000000000000004a0c014b0c010b00000000000000005d0c015e0d00000000000000005f000000",
@@ -682,6 +683,80 @@ fn point_geometry_scene(
     )
 }
 
+fn named_point_geometry_scene(
+    account: &PhysicalStorageAccount,
+    node_name: Option<&str>,
+    logical_mesh_name: Option<&str>,
+    material_name: Option<&str>,
+) -> NodeSceneSuccessParts {
+    named_point_geometry_scene_with_shading(
+        account,
+        node_name,
+        logical_mesh_name,
+        material_name,
+        ShadingModel::Unlit,
+    )
+}
+
+fn named_point_geometry_scene_with_shading(
+    account: &PhysicalStorageAccount,
+    node_name: Option<&str>,
+    logical_mesh_name: Option<&str>,
+    material_name: Option<&str>,
+    shading_model: ShadingModel,
+) -> NodeSceneSuccessParts {
+    let roots = [NodeLocalId::new(0)];
+    let node = NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
+    );
+    let nodes = [match node_name {
+        Some(name) => node.with_name(name),
+        None => node,
+    }];
+    let positions = [0.0_f32, 0.0, 0.0];
+    let attributes = [GeometryAttributeAuthoring::f32(
+        AttributeSemantic::Position,
+        AttributeDomain::Vertex,
+        3,
+        &positions,
+        Presence::Absent,
+    )];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Present(MaterialLocalId::new(0)),
+        AuthoringRange::new(0, 1),
+    )];
+    let logical_mesh = GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1));
+    let logical_meshes = [match logical_mesh_name {
+        Some(name) => logical_mesh.with_name(name),
+        None => logical_mesh,
+    }];
+    let instances = [GeometryMeshInstanceAuthoring::new(
+        NodeLocalId::new(0),
+        LogicalMeshLocalId::new(0),
+    )];
+    let alpha_mode = AlphaMode::Opaque;
+    let material_semantics =
+        MaterialSemanticsRef::new(&shading_model, &alpha_mode, false, MaterialFactors::empty());
+    let material = MaterialAuthoring::new(AuthoringRange::new(0, 0), material_semantics);
+    let materials = [match material_name {
+        Some(name) => material.with_name(name),
+        None => material,
+    }];
+
+    build_scene_with_appearance_and_geometry(
+        account,
+        &roots,
+        &nodes,
+        AppearanceAuthoringBatch::new(&[], &[], &[], &[], &materials),
+        GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &instances),
+    )
+}
+
 fn point_index_presence_scene(
     account: &PhysicalStorageAccount,
     indices_present: bool,
@@ -775,6 +850,13 @@ fn all_attribute_payload_kinds_scene(account: &PhysicalStorageAccount) -> NodeSc
     let sparse_f32_values = [0.25_f32, 0.5, 0.75];
     let sparse_f32_default = [0.0_f32, 0.0, 0.0];
     let dense_u32_values = [3_u32];
+    let dense_i32_values = [i32::MIN, -1, i32::MAX];
+    let sparse_i32_values = [i32::MIN];
+    let sparse_i32_default = [i32::MAX];
+    let dense_i32_semantic =
+        CustomAttributeSemantic::new("ply:dense_signed").expect("dense PLY custom semantic");
+    let sparse_i32_semantic =
+        CustomAttributeSemantic::new("ply:sparse_signed").expect("sparse PLY custom semantic");
     let attributes = [
         GeometryAttributeAuthoring::f32(
             AttributeSemantic::Position,
@@ -821,6 +903,21 @@ fn all_attribute_payload_kinds_scene(account: &PhysicalStorageAccount) -> NodeSc
             1,
             &dense_u32_values,
         ),
+        GeometryAttributeAuthoring::i32(
+            AttributeSemantic::Custom(dense_i32_semantic),
+            AttributeDomain::Vertex,
+            1,
+            &dense_i32_values,
+        ),
+        GeometryAttributeAuthoring::sparse_i32(
+            AttributeSemantic::Custom(sparse_i32_semantic),
+            AttributeDomain::Vertex,
+            1,
+            3,
+            &sparse_indices,
+            &sparse_i32_values,
+            &sparse_i32_default,
+        ),
     ];
     let primitives = [
         GeometryPrimitiveAuthoring::new(
@@ -839,7 +936,7 @@ fn all_attribute_payload_kinds_scene(account: &PhysicalStorageAccount) -> NodeSc
             GeometryTopologyAuthoring::TriangleList,
             Presence::Absent,
             Presence::Absent,
-            AuthoringRange::new(4, 2),
+            AuthoringRange::new(4, 4),
         ),
     ];
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 3))];
@@ -875,7 +972,7 @@ fn known_vector_is_stable_and_human_reviewable() {
             .expect("known Scene snapshot");
 
     assert_eq!(snapshot.domain, "baozi.canonical-scene.snapshot");
-    assert_eq!(snapshot.schema_revision, 1);
+    assert_eq!(snapshot.schema_revision, 3);
     assert_eq!(snapshot.algorithm, NodeSceneSnapshotAlgorithm::Sha256);
     assert_eq!(snapshot.digest, KNOWN_SINGLE_TRS_DIGEST);
     assert!(transcript.complete);
@@ -922,7 +1019,7 @@ fn known_vector_is_stable_and_human_reviewable() {
     assert_eq!(snapshot.totals.profile_owner_count, 3);
     assert_eq!(snapshot.totals.profile_attachment_count, 3);
     assert_eq!(snapshot.totals.profile_metadata_entry_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_009);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_012);
     assert_eq!(snapshot.totals.work_units, 109);
     assert!(snapshot.preview.text.contains("roots(present,total=1)=[0]"));
     assert!(snapshot.preview.text.contains("transform=trs(total=10)"));
@@ -940,6 +1037,255 @@ fn known_vector_is_stable_and_human_reviewable() {
     drop(parts);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn node_name_publishes_as_canonical_semantics() {
+    let factory = factory();
+    let account = account(&factory);
+    let parts = named_point_geometry_scene(&account, Some("Root"), None, None);
+    let snapshot = capture_node_scene(&parts.scene, snapshot_limits(16_384, 64), None)
+        .expect("node-name snapshot");
+    assert!(snapshot.preview.text.contains("Root"));
+}
+
+#[test]
+fn logical_mesh_name_publishes_as_canonical_semantics() {
+    let factory = factory();
+    let account = account(&factory);
+    let parts = named_point_geometry_scene(&account, None, Some("Solid"), None);
+    let snapshot = capture_node_scene(&parts.scene, snapshot_limits(16_384, 64), None)
+        .expect("logical-mesh-name snapshot");
+    assert!(snapshot.preview.text.contains("Solid"));
+}
+
+#[test]
+fn material_name_publishes_as_canonical_semantics() {
+    let factory = factory();
+    let account = account(&factory);
+    let parts = named_point_geometry_scene(&account, None, None, Some("STL Default Material"));
+    let snapshot = capture_node_scene(&parts.scene, snapshot_limits(16_384, 64), None)
+        .expect("material-name snapshot");
+    assert!(snapshot.preview.text.contains("STL Default Material"));
+}
+
+#[test]
+fn stl_unspecified_shading_remains_unspecified_in_canonical_semantics() {
+    let factory = factory();
+    let account = account(&factory);
+    let parts = named_point_geometry_scene_with_shading(
+        &account,
+        None,
+        None,
+        Some("STL Default Material"),
+        ShadingModel::Unspecified,
+    );
+    let unlit = named_point_geometry_scene_with_shading(
+        &account,
+        None,
+        None,
+        Some("STL Default Material"),
+        ShadingModel::Unlit,
+    );
+    let view = parts.scene.semantic_view().expect("STL semantic view");
+    let mut nodes = view.into_cursor().expect("STL semantic cursor");
+    let mut roots = nodes.take_roots().expect("STL roots");
+    assert_eq!(roots.next().expect("STL root"), Some(0));
+    roots.finish().expect("complete STL roots");
+    let node = nodes.next_node().expect("STL node read").expect("STL node");
+    node.into_children()
+        .finish()
+        .expect("complete STL children");
+    let appearance = nodes.appearance().expect("STL appearance cursor");
+    assert!(appearance.next_image().expect("STL image end").is_none());
+    assert!(
+        appearance
+            .next_sampler()
+            .expect("STL sampler end")
+            .is_none()
+    );
+    assert!(
+        appearance
+            .next_texture()
+            .expect("STL texture end")
+            .is_none()
+    );
+    let material = appearance
+        .next_material()
+        .expect("STL material read")
+        .expect("STL material");
+    assert_eq!(material.shading_model(), &ShadingModel::Unspecified);
+
+    let snapshot = capture_node_scene(&parts.scene, snapshot_limits(16_384, 64), None)
+        .expect("STL canonical snapshot");
+    let unlit_snapshot = capture_node_scene(&unlit.scene, snapshot_limits(16_384, 64), None)
+        .expect("unlit comparison snapshot");
+    assert!(snapshot.preview.text.contains("STL Default Material"));
+    assert_digest_mutation(
+        "STL unspecified shading",
+        snapshot.digest,
+        unlit_snapshot.digest,
+    );
+}
+
+fn image_scene<'input>(
+    account: &PhysicalStorageAccount,
+    image: ImageAuthoring<'input>,
+    resource_snapshots: &'input [ResourceSnapshotAuthoring<'input>],
+) -> NodeSceneSuccessParts {
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
+    )];
+    let images = [image];
+    let appearance = AppearanceAuthoringBatch::new(&images, &[], &[], &[], &[]);
+    let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+    let nodes = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+    let geometry = GeometryAuthoringBatch::empty();
+    let deformation = DeformationAuthoringBatch::empty();
+    let animations = AnimationAuthoringBatch::empty();
+    let profile = profile_fixture(
+        spatial,
+        nodes,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+    );
+    publish_scene_input(
+        account,
+        SceneAuthoringBatch::new(
+            spatial,
+            nodes,
+            appearance,
+            geometry,
+            deformation,
+            animations,
+            profile.batch().with_resource_snapshots(resource_snapshots),
+        ),
+    )
+}
+
+fn session_resource_image_scene(
+    account: &PhysicalStorageAccount,
+    snapshotted_bytes: &[u8],
+) -> NodeSceneSuccessParts {
+    let resource_snapshots = [ResourceSnapshotAuthoring::snapshotted(snapshotted_bytes)];
+    image_scene(
+        account,
+        ImageAuthoring::session_resource(ResourceIdentityLocalId::new(0), Presence::Absent),
+        &resource_snapshots,
+    )
+}
+
+fn inline_image_scene(
+    account: &PhysicalStorageAccount,
+    encoded_bytes: &[u8],
+) -> NodeSceneSuccessParts {
+    image_scene(
+        account,
+        ImageAuthoring::encoded(encoded_bytes, Presence::Absent),
+        &[],
+    )
+}
+
+#[test]
+fn session_resource_image_publishes_only_snapshotted_bytes() {
+    let factory = factory();
+    let account = account(&factory);
+    let first_payload = [0x89, b'P', b'N', b'G', 1];
+    let second_payload = [0x89, b'P', b'N', b'G', 2];
+    let first = session_resource_image_scene(&account, &first_payload);
+    let second = session_resource_image_scene(&account, &second_payload);
+    let inline = inline_image_scene(&account, &first_payload);
+
+    {
+        let view = first.scene.semantic_view().expect("resource image view");
+        let mut nodes = view.into_cursor().expect("resource image cursor");
+        let mut roots = nodes.take_roots().expect("resource image roots");
+        assert_eq!(roots.next().expect("resource image root"), Some(0));
+        roots.finish().expect("complete resource image roots");
+        nodes
+            .next_node()
+            .expect("resource image node read")
+            .expect("resource image node")
+            .into_children()
+            .finish()
+            .expect("complete resource image children");
+        let appearance = nodes.appearance().expect("resource image appearance");
+        let image = appearance
+            .next_image()
+            .expect("resource image read")
+            .expect("resource image");
+        assert_eq!(image.encoded_payload(), first_payload);
+        assert_eq!(image.media_type(), None);
+    }
+
+    let first_snapshot = capture_node_scene(&first.scene, snapshot_limits(16_384, 64), None)
+        .expect("first resource image snapshot");
+    let second_snapshot = capture_node_scene(&second.scene, snapshot_limits(16_384, 64), None)
+        .expect("second resource image snapshot");
+    let inline_snapshot = capture_node_scene(&inline.scene, snapshot_limits(16_384, 64), None)
+        .expect("inline image comparison snapshot");
+    assert_eq!(first_snapshot.digest, inline_snapshot.digest);
+    assert_eq!(first_snapshot.preview.text, inline_snapshot.preview.text);
+    assert_eq!(first_snapshot.totals, inline_snapshot.totals);
+    assert_digest_mutation(
+        "session resource snapshot bytes",
+        first_snapshot.digest,
+        second_snapshot.digest,
+    );
+    assert!(first_snapshot.preview.text.contains("payload_bytes=5"));
+}
+
+#[test]
+fn entity_names_are_canonical_snapshot_semantics() {
+    let factory = factory();
+    let account = account(&factory);
+    let baseline = named_point_geometry_scene(
+        &account,
+        Some("Root"),
+        Some("Solid"),
+        Some("STL Default Material"),
+    );
+    let node_mutation = named_point_geometry_scene(
+        &account,
+        Some("Renamed Root"),
+        Some("Solid"),
+        Some("STL Default Material"),
+    );
+    let mesh_mutation = named_point_geometry_scene(
+        &account,
+        Some("Root"),
+        Some("Renamed Solid"),
+        Some("STL Default Material"),
+    );
+    let material_mutation = named_point_geometry_scene(
+        &account,
+        Some("Root"),
+        Some("Solid"),
+        Some("Renamed Material"),
+    );
+
+    let baseline = capture_node_scene(&baseline.scene, snapshot_limits(16_384, 64), None)
+        .expect("named canonical Scene snapshot");
+    let node_mutation = capture_node_scene(&node_mutation.scene, snapshot_limits(16_384, 64), None)
+        .expect("node-name mutation snapshot");
+    let mesh_mutation = capture_node_scene(&mesh_mutation.scene, snapshot_limits(16_384, 64), None)
+        .expect("logical-mesh-name mutation snapshot");
+    let material_mutation =
+        capture_node_scene(&material_mutation.scene, snapshot_limits(16_384, 64), None)
+            .expect("material-name mutation snapshot");
+
+    assert!(baseline.preview.text.contains("Root"));
+    assert!(baseline.preview.text.contains("Solid"));
+    assert!(baseline.preview.text.contains("STL Default Material"));
+    assert_digest_mutation("node name", baseline.digest, node_mutation.digest);
+    assert_digest_mutation("logical mesh name", baseline.digest, mesh_mutation.digest);
+    assert_digest_mutation("material name", baseline.digest, material_mutation.digest);
 }
 
 #[test]
@@ -1803,7 +2149,7 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
             EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX,
         ],
     );
-    assert_eq!(snapshot.totals.transcript_bytes, 1_309);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_312);
     assert_eq!(snapshot.totals.work_units, 134);
     assert_eq!(snapshot.totals.camera_count, 1);
     assert_eq!(snapshot.totals.light_count, 1);
@@ -2348,7 +2694,7 @@ fn matrix_and_child_known_vector_pins_node_framing_and_empty_domains() {
     assert_eq!(snapshot.totals.node_count, 2);
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 1);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_190);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_196);
     assert_eq!(snapshot.totals.work_units, 137);
 }
 
@@ -2401,7 +2747,7 @@ fn point_geometry_known_vector_pins_complete_scene_framing() {
     assert_eq!(snapshot.totals.canonical_scalar_count, 3);
     assert_eq!(snapshot.totals.f32_scalar_count, 3);
     assert_eq!(snapshot.totals.u32_scalar_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_871);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_883);
     assert_eq!(snapshot.totals.work_units, 194);
     assert!(snapshot.preview.text.contains("material[0]"));
     assert!(
@@ -2537,19 +2883,35 @@ fn geometry_tables_payload_kinds_and_totals_are_complete() {
     assert_eq!(snapshot.totals.material_count, 1);
     assert_eq!(snapshot.totals.logical_mesh_count, 1);
     assert_eq!(snapshot.totals.primitive_count, 3);
-    assert_eq!(snapshot.totals.attribute_count, 6);
+    assert_eq!(snapshot.totals.attribute_count, 8);
     assert_eq!(snapshot.totals.mesh_instance_count, 1);
     assert_eq!(snapshot.totals.polygon_boundary_count, 1);
     assert_eq!(snapshot.totals.primitive_index_count, 6);
-    assert_eq!(snapshot.totals.sparse_index_count, 2);
-    assert_eq!(snapshot.totals.canonical_scalar_count, 36);
+    assert_eq!(snapshot.totals.sparse_index_count, 3);
+    assert_eq!(snapshot.totals.attribute_semantic_name_bytes, 33);
+    assert_eq!(snapshot.totals.canonical_scalar_count, 41);
     assert_eq!(snapshot.totals.f32_scalar_count, 33);
+    assert_eq!(snapshot.totals.i32_scalar_count, 5);
     assert_eq!(snapshot.totals.u32_scalar_count, 3);
-    assert_eq!(snapshot.totals.profile_owner_count, 15);
-    assert_eq!(snapshot.totals.profile_attachment_count, 15);
-    assert_eq!(snapshot.totals.work_units, 306);
+    assert_eq!(snapshot.totals.profile_owner_count, 17);
+    assert_eq!(snapshot.totals.profile_attachment_count, 17);
+    assert_eq!(snapshot.totals.work_units, 334);
     assert!(snapshot.preview.text.contains("payload=dense"));
     assert!(snapshot.preview.text.contains("payload=sparse"));
+    assert!(snapshot.preview.text.contains("semantic=ply:dense_signed"));
+    assert!(snapshot.preview.text.contains("semantic=ply:sparse_signed"));
+    assert!(
+        snapshot
+            .preview
+            .text
+            .contains("values(present,total=3)=[-2147483648,-1,2147483647]")
+    );
+    assert!(
+        snapshot
+            .preview
+            .text
+            .contains("sparse_default(present,total=1)=[2147483647]")
+    );
     assert!(snapshot.preview.text.contains("sparse_default(present"));
     assert!(snapshot.preview.text.contains("polygon_boundaries(present"));
     assert!(
@@ -3119,7 +3481,7 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
         assert!(snapshot.preview.text.len() <= 64);
         assert_eq!(
             snapshot.totals.transcript_bytes,
-            858 + 151 * node_count as u64
+            858 + 154 * node_count as u64
         );
         assert_eq!(snapshot.totals.work_units, 87 + 22 * node_count as u64);
         assert_eq!(snapshot.totals.node_count, node_count);
@@ -3135,11 +3497,11 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
         ));
     }
 
-    assert_eq!(observed[1].0 - observed[0].0, 9 * 151);
-    assert_eq!(observed[2].0 - observed[0].0, 99 * 151);
+    assert_eq!(observed[1].0 - observed[0].0, 9 * 154);
+    assert_eq!(observed[2].0 - observed[0].0, 99 * 154);
     assert_eq!(observed[1].1 - observed[0].1, 9 * 22);
     assert_eq!(observed[2].1 - observed[0].1, 99 * 22);
-    assert_eq!(observed[3].0 - observed[0].0, 999 * 151);
+    assert_eq!(observed[3].0 - observed[0].0, 999 * 154);
     assert_eq!(observed[3].1 - observed[0].1, 999 * 22);
     assert_eq!(observed[1].2, observed[0].2);
     assert_eq!(observed[2].2, observed[0].2);

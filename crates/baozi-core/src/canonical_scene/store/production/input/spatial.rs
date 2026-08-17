@@ -1,16 +1,18 @@
-use crate::entity::{CameraProjection, LightEmission, LightKind};
+use crate::entity::{CameraProjection, LightEmission, LightEmissionError, LightKind};
+use crate::math::Color;
 use crate::scene_space::SceneSpace;
+use thiserror::Error;
 
 /// Dense camera identity within one source-shaped authoring batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::canonical_scene::store) struct CameraLocalId(u32);
+pub struct CameraLocalId(u32);
 
 impl CameraLocalId {
-    pub(in crate::canonical_scene::store) const fn new(index: u32) -> Self {
+    pub const fn new(index: u32) -> Self {
         Self(index)
     }
 
-    pub(in crate::canonical_scene::store) const fn index(self) -> u32 {
+    pub const fn index(self) -> u32 {
         self.0
     }
 }
@@ -23,14 +25,14 @@ impl From<u32> for CameraLocalId {
 
 /// Dense light identity within one source-shaped authoring batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::canonical_scene::store) struct LightLocalId(u32);
+pub struct LightLocalId(u32);
 
 impl LightLocalId {
-    pub(in crate::canonical_scene::store) const fn new(index: u32) -> Self {
+    pub const fn new(index: u32) -> Self {
         Self(index)
     }
 
-    pub(in crate::canonical_scene::store) const fn index(self) -> u32 {
+    pub const fn index(self) -> u32 {
         self.0
     }
 }
@@ -43,12 +45,12 @@ impl From<u32> for LightLocalId {
 
 /// One scene-owned camera before retained materialization.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct CameraAuthoring {
+pub struct CameraAuthoring {
     projection: CameraProjection,
 }
 
 impl CameraAuthoring {
-    pub(in crate::canonical_scene::store) const fn new(projection: CameraProjection) -> Self {
+    pub const fn new(projection: CameraProjection) -> Self {
         Self { projection }
     }
 
@@ -59,12 +61,27 @@ impl CameraAuthoring {
 
 /// One scene-owned light before retained materialization.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct LightAuthoring {
+pub struct LightAuthoring {
     kind: LightKind,
     emission: LightEmission,
 }
 
+/// Why source light color and intensity could not be normalized for canonical authoring.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[error(transparent)]
+pub struct LightAuthoringError(#[from] LightEmissionError);
+
 impl LightAuthoring {
+    /// Converts source linear-sRGB color and scalar intensity into canonical emission.
+    pub fn try_from_scaled_linear_srgb(
+        kind: LightKind,
+        color: Color,
+        intensity: f32,
+    ) -> Result<Self, LightAuthoringError> {
+        let emission = LightEmission::try_from_scaled_linear_srgb(color, intensity)?;
+        Ok(Self::new(kind, emission))
+    }
+
     pub(in crate::canonical_scene::store) const fn new(
         kind: LightKind,
         emission: LightEmission,
@@ -86,14 +103,14 @@ impl LightAuthoring {
 /// Camera and light identities are their dense positions in the corresponding
 /// slices. Placement remains exclusively node-owned.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct SpatialAuthoringBatch<'a> {
+pub struct SpatialAuthoringBatch<'a> {
     scene_space: &'a SceneSpace,
     cameras: &'a [CameraAuthoring],
     lights: &'a [LightAuthoring],
 }
 
 impl<'a> SpatialAuthoringBatch<'a> {
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         scene_space: &'a SceneSpace,
         cameras: &'a [CameraAuthoring],
         lights: &'a [LightAuthoring],

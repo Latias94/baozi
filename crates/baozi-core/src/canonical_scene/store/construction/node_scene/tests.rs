@@ -14,9 +14,10 @@ use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneProfileCursor, NodeSceneProfileStep,
 };
 use crate::canonical_scene::store::construction::{
-    FAILURE_TERMINAL_WORK_DIMENSION, FALLBACK_CODE, OPEN_PLAN_REJECTION_CODE,
-    OPEN_RESOURCE_REJECTION_CODE, STORE_DIMENSION, SceneConstructionLimits,
-    SceneConstructionOperation, failure_terminal_work_requirement, tracer_scene_open_failure_code,
+    FAILURE_TERMINAL_WORK_DIMENSION, FALLBACK_CODE, GENERATION_EXHAUSTED_CODE,
+    OPEN_PLAN_REJECTION_CODE, OPEN_RESOURCE_REJECTION_CODE, STORE_DIMENSION,
+    SceneConstructionLimits, SceneConstructionOperation, failure_terminal_work_requirement,
+    tracer_scene_open_failure_code,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
@@ -106,16 +107,16 @@ const NODE_ONLY_PROFILE_CANONICAL_BLOCK_COUNT: u64 = 8;
 const SOURCE_BACKED_PROFILE_CANONICAL_BLOCK_COUNT: u64 = 10;
 // These phase boundaries are black-box accounting evidence for the complete scoped rail. They
 // include operation-owned startup and retained-share work, not only core semantic actions.
-const SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK: u64 = 78;
+const SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK: u64 = 79;
 const SINGLE_TRS_FIRST_MATERIALIZATION_ENVELOPE_WORK: u64 = 23;
 const SINGLE_TRS_FIRST_MATERIALIZATION_ATTEMPTED_WORK: u64 =
     SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK + SINGLE_TRS_FIRST_MATERIALIZATION_ENVELOPE_WORK;
-const SINGLE_TRS_CENTRAL_VALIDATION_PREFIX_WORK: u64 = 436;
-const SINGLE_TRS_PRE_VALIDATION_COMPLETED_PREFIX_WORK: u64 = 430;
-const SINGLE_TRS_CENTRAL_VALIDATION_ENVELOPE_WORK: u64 = 400;
+const SINGLE_TRS_CENTRAL_VALIDATION_PREFIX_WORK: u64 = 449;
+const SINGLE_TRS_PRE_VALIDATION_COMPLETED_PREFIX_WORK: u64 = 445;
+const SINGLE_TRS_CENTRAL_VALIDATION_ENVELOPE_WORK: u64 = 418;
 const SINGLE_TRS_COMPLETE_WORK: u64 =
     SINGLE_TRS_CENTRAL_VALIDATION_PREFIX_WORK + SINGLE_TRS_CENTRAL_VALIDATION_ENVELOPE_WORK;
-const SINGLE_TRS_INVALID_TRANSFORM_COMPLETED_PREFIX: u64 = 588;
+const SINGLE_TRS_INVALID_TRANSFORM_COMPLETED_PREFIX: u64 = 613;
 const SINGLE_TRS_ROOTS: [NodeLocalId; 1] = [NodeLocalId::new(0)];
 const SINGLE_TRS_NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
     Presence::Absent,
@@ -522,8 +523,12 @@ fn rich_failure(prepared: PreparedNodeSceneConstruction) -> NodeSceneRichFailure
             panic!("rejected node Scene must not publish canonical storage")
         }
         NodeSceneConstructionTerminal::RichFailure(failure) => failure,
-        NodeSceneConstructionTerminal::MinimalFallback(_) => {
-            panic!("recoverable node Scene rejection must preserve rich evidence")
+        NodeSceneConstructionTerminal::MinimalFallback(fallback) => {
+            panic!(
+                "recoverable node Scene rejection must preserve rich evidence; fallback terminal={:?}/0x{:08x}",
+                terminal_failure_class(fallback.ledger_evidence()),
+                terminal_failure_code(fallback.ledger_evidence())
+            )
         }
     }
 }
@@ -1070,7 +1075,7 @@ fn canonical_logical_byte_rejection_publishes_evidence_only_rich_failure() {
         &account,
         test_limits(),
         single_trs_batch(),
-        SceneValidationLimits::default().with_max_canonical_bytes(227),
+        SceneValidationLimits::default().with_max_canonical_bytes(247),
     );
     let NodeSceneDraftBuild::Failure {
         authoring_rejection: Some(rejection),
@@ -1085,8 +1090,8 @@ fn canonical_logical_byte_rejection_publishes_evidence_only_rich_failure() {
             NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
                 NodeAuthoringSemanticError::LimitExceeded {
                     limit: NodeAuthoringLimit::CanonicalBytes,
-                    actual: 168,
-                    maximum: 167,
+                    actual: 188,
+                    maximum: 187,
                 }
             ))
         ),
@@ -1097,8 +1102,8 @@ fn canonical_logical_byte_rejection_publishes_evidence_only_rich_failure() {
         NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
             NodeAuthoringSemanticError::LimitExceeded {
                 limit: NodeAuthoringLimit::CanonicalBytes,
-                actual: 168,
-                maximum: 167,
+                actual: 188,
+                maximum: 187,
             }
         ))
     ));
@@ -1276,8 +1281,13 @@ fn generation_exhaustion_discards_canonical_storage_and_preserves_evidence() {
         .ledger_evidence()
         .dimension_by_semantic(STORE_DIMENSION)
         .expect("node Scene work evidence");
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        GENERATION_EXHAUSTED_CODE
+    );
     assert_eq!(work.attempted(), SINGLE_TRS_COMPLETE_WORK);
     assert_eq!(work.consumed(), SINGLE_TRS_COMPLETE_WORK);
+    assert_eq!(work.committed_canonical_output(), 0);
     assert_released(failure, &account);
 }
 

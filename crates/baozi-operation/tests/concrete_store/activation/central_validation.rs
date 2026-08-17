@@ -175,8 +175,12 @@ fn scoped_activation_shape_with_capacity(
         policy: CanonicalActivationPolicy::new(
             writer_plan(canonical_keys, canonical_capacity + 1, 2),
             writer_plan(evidence_keys, evidence_blocks + 1, 2),
-            canonical_keys.dimension,
-            canonical_keys.dimension,
+            CanonicalMaterializationRole::new(canonical_keys.dimension, canonical_keys.dimension),
+            CanonicalValidationRole::new(
+                canonical_keys.phase,
+                canonical_keys.dimension,
+                canonical_keys.dimension,
+            ),
             canonical_keys.dimension,
             evidence_keys.dimension,
         ),
@@ -222,6 +226,7 @@ fn centrally_rejected_sequence_work(elements: usize) -> (u64, u64) {
     };
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -305,6 +310,7 @@ fn matching_activation_can_only_publish_through_central_validation() {
     let expected_output = *activated.output();
     let validated = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -376,6 +382,7 @@ fn canonical_shape_contract_cannot_be_overwritten_by_requested_rejection() {
 
     let result = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -461,6 +468,7 @@ fn canonical_contract_precedes_later_control_interruption() {
 
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -553,6 +561,7 @@ fn control_interruption_precedes_later_canonical_contract_failure() {
 
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -636,6 +645,7 @@ fn completed_member_repeat_still_polls_control_without_recharging() {
 
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -732,6 +742,7 @@ fn canonical_validation_cancellation_is_bounded_and_preserves_the_completed_pref
 
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -818,6 +829,7 @@ fn canonical_record_inspector_false_is_a_semantic_rejection() {
 
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -907,6 +919,7 @@ fn outcome_evidence_record_inspector_false_is_a_semantic_rejection() {
 
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_records(
@@ -998,6 +1011,7 @@ fn control_interruption_before_validator_panic_preserves_one_terminal_cause() {
 
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1086,6 +1100,7 @@ fn ledger_interruption_before_validator_panic_preserves_one_terminal_cause() {
 
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1180,6 +1195,7 @@ fn output_slot_outside_the_root_graph_cannot_form_a_candidate() {
 
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1272,6 +1288,7 @@ fn activation_policy_keeps_validation_work_on_its_semantic_dimension() {
     };
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1356,6 +1373,7 @@ fn central_outcome_evidence_cancellation_preserves_the_completed_prefix() {
     };
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane.try_retain_sequence(
                     SequencePlan::<u8>::new(2).unwrap(),
@@ -1438,6 +1456,7 @@ fn central_outcome_evidence_underwrite_preserves_the_completed_prefix() {
     };
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane.try_retain_sequence(
                     SequencePlan::<u8>::new(2).unwrap(),
@@ -1684,6 +1703,7 @@ fn clean_central_validation_panic_prepares_minimal_fallback_without_poisoning() 
 
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1774,6 +1794,7 @@ fn scratch_drop_panic_still_drops_the_validation_proof_before_fallback() {
 
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -1867,6 +1888,7 @@ fn canonical_validation_panic_flushes_the_nonzero_completed_prefix() {
     let outcome =
         activated
             .validate_centrally(
+                CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
                 |lane, _output| {
                     let evidence = lane
                         .try_retain_sequence(
@@ -1963,6 +1985,7 @@ fn completed_central_validation_capture_drop_panic_is_contained() {
     let validation_capture = PanicOnDrop;
 
     let result = activated.validate_centrally(
+        CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
         |lane, _output| {
             let evidence = lane
                 .try_retain_sequence(
@@ -2028,6 +2051,7 @@ fn central_evidence_body_and_capture_drop_panics_are_isolated() {
     };
 
     let result = activated.validate_centrally(
+        CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
         move |_lane, _output| -> OutcomeEvidenceDecision<(), EvidenceLeafTag> {
             let _capture = &evidence_capture;
             panic!("contained evidence callback panic")
@@ -2080,6 +2104,7 @@ fn central_evidence_builder_body_and_capture_drop_panics_are_isolated() {
     };
 
     let result = activated.validate_centrally(
+        CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
         |lane, _output| -> OutcomeEvidenceDecision<(), EvidenceLeafTag> {
             let capture = PanicOnDrop;
             let cause = lane
@@ -2146,6 +2171,7 @@ fn candidate_reports_exact_member_counts_without_running_the_joint_commit() {
     };
     let result = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 evidence_called.set(true);
                 let evidence = lane
@@ -2213,6 +2239,7 @@ fn candidate_proof_drop_panic_poison_contains_the_physical_owner() {
     };
     let result = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -2278,6 +2305,7 @@ fn candidate_output_drop_panic_poison_contains_the_physical_owner() {
     };
     let result = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -2345,6 +2373,7 @@ fn trusted_evidence_slot_limit_returns_product_graph_fallback_without_poisoning(
 
     let result = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let _root = lane
                     .try_retain_sequence(
@@ -2436,6 +2465,7 @@ fn central_validation_rejection_can_validate_existing_rich_failure_evidence() {
     };
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let sequence = lane
                     .try_retain_sequence(
@@ -2610,6 +2640,7 @@ fn central_evidence_validation_envelope_rejects_before_the_overflowing_builder()
     let overflowing_builder_called = Cell::new(false);
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let _first = lane
                     .try_retain_sequence(
@@ -2702,6 +2733,7 @@ fn central_control_interruption_can_validate_existing_rich_failure_evidence() {
     };
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -2796,6 +2828,7 @@ fn central_ledger_interruption_can_reject_existing_rich_failure_evidence() {
     let validation_called = Cell::new(false);
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -2895,6 +2928,7 @@ fn outcome_evidence_abort_uses_the_first_fault_without_caller_echo() {
 
     let result = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let _root = lane
                     .try_retain_sequence(
@@ -2989,6 +3023,7 @@ fn completing_outcome_evidence_after_an_earlier_slot_fault_is_contained() {
     };
 
     let result = activated.validate_centrally(
+        CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
         |lane, _output| {
             let root = lane
                 .try_retain_sequence(
@@ -3054,6 +3089,7 @@ fn incomplete_validation_work_cannot_form_a_candidate() {
     };
 
     let result = activated.validate_centrally(
+        CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
         |lane, _output| {
             let evidence = lane
                 .try_retain_sequence(
@@ -3114,6 +3150,7 @@ fn central_validation_rejection_eagerly_cleans_canonical_storage() {
     };
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(

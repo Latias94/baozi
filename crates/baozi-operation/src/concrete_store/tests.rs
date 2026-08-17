@@ -3,8 +3,8 @@ use super::*;
 #[cfg(feature = "_u4-activation")]
 use super::activation::{
     CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationSeal,
-    CanonicalFailureRequirements, CanonicalSuccessRequirements, CanonicalTableShape,
-    FailureEvidenceDecision, FailureEvidenceOutcome,
+    CanonicalFailureRequirements, CanonicalMaterializationRole, CanonicalSuccessRequirements,
+    CanonicalTableShape, CanonicalValidationRole, FailureEvidenceDecision, FailureEvidenceOutcome,
 };
 
 use std::num::{NonZeroU32, NonZeroU64};
@@ -157,8 +157,8 @@ fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
     let policy = CanonicalActivationPolicy::new(
         test_writer_plan(keys, 2, 2),
         test_writer_plan(keys, 2, 2),
-        keys.work_dimension,
-        keys.work_dimension,
+        CanonicalMaterializationRole::new(keys.work_dimension, keys.work_dimension),
+        CanonicalValidationRole::new(keys.phase, keys.work_dimension, keys.work_dimension),
         keys.dimension,
         keys.dimension,
     );
@@ -228,8 +228,8 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
     let policy = CanonicalActivationPolicy::new(
         test_writer_plan(keys, 2, 2),
         test_writer_plan(keys, 2, 2),
-        keys.work_dimension,
-        keys.work_dimension,
+        CanonicalMaterializationRole::new(keys.work_dimension, keys.work_dimension),
+        CanonicalValidationRole::new(keys.phase, keys.work_dimension, keys.work_dimension),
         keys.dimension,
         keys.dimension,
     );
@@ -2273,6 +2273,7 @@ fn controlled_builders_and_validation_poll_and_charge_exact_work() {
         .expect("evidence root");
     let validated = assembly.validate_success_controlled(
         keys.work_dimension,
+        keys.work_dimension,
         canonical_root,
         evidence_root,
         |session, canonical_root, evidence_root, control| {
@@ -2999,6 +3000,7 @@ fn controlled_validation_rejects_a_work_cause_from_another_operation() {
         test_simple_controlled_validation_graph(&mut second_assembly);
     let fallback = match second_assembly.validate_success_controlled(
         second_keys.work_dimension,
+        second_keys.work_dimension,
         canonical_root,
         evidence_root,
         |_, _, _, _| Err(captured.take().expect("captured work cause")),
@@ -3036,6 +3038,7 @@ fn cancellation_interruption_preserves_rich_failure_owner() {
     let (canonical_root, evidence_root) = test_simple_controlled_validation_graph(&mut assembly);
     cancellation.cancel();
     let (failure, cause) = match assembly.validate_success_controlled(
+        keys.work_dimension,
         keys.work_dimension,
         canonical_root,
         evidence_root,
@@ -3082,6 +3085,7 @@ fn budget_interruption_preserves_rich_failure_owner() {
     let (canonical_root, evidence_root) = test_simple_controlled_validation_graph(&mut assembly);
     let (failure, cause) = match assembly.validate_success_controlled(
         keys.work_dimension,
+        keys.work_dimension,
         canonical_root,
         evidence_root,
         |_, _, _, control| {
@@ -3125,6 +3129,7 @@ fn invalid_controlled_validation_dimension_returns_the_writable_assembly() {
 
     let (assembly, cause) = match assembly.validate_success_controlled(
         second_keys.work_dimension,
+        second_keys.work_dimension,
         canonical_root,
         evidence_root,
         |_, _, _, _| Ok(true),
@@ -3140,6 +3145,7 @@ fn invalid_controlled_validation_dimension_returns_the_writable_assembly() {
     ));
     assert!(matches!(
         assembly.validate_success_controlled(
+            first_keys.work_dimension,
             first_keys.work_dimension,
             canonical_root,
             evidence_root,
@@ -3166,6 +3172,7 @@ fn controlled_validation_distinguishes_semantic_rejection_from_panic() {
         assert!(matches!(
             assembly.validate_success_controlled(
                 keys.work_dimension,
+                keys.work_dimension,
                 canonical_root,
                 evidence_root,
                 |_, _, _, _| Ok(false),
@@ -3184,6 +3191,7 @@ fn controlled_validation_distinguishes_semantic_rejection_from_panic() {
             test_simple_controlled_validation_graph(&mut assembly);
         assert!(matches!(
             assembly.validate_success_controlled(
+                keys.work_dimension,
                 keys.work_dimension,
                 canonical_root,
                 evidence_root,

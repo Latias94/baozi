@@ -1771,7 +1771,7 @@ where
 pub(super) fn prepare_terminal_control<O, P, PP, U, D>(
     coordinator: &mut OperationCoordinator<O, P, PP, U, D>,
     final_progress: FinalProgress<PP, U>,
-) -> Option<PreparationFailureCode>
+) -> Option<ControlCause>
 where
     O: OperationOwner,
     P: Copy + Ord,
@@ -1779,10 +1779,7 @@ where
     U: ProgressUnit,
     D: Copy + Ord + fmt::Debug,
 {
-    coordinator
-        .try_prepare_typed_control(final_progress)
-        .err()
-        .map(|cause| PreparationFailureCode::from_control(&cause))
+    coordinator.try_prepare_typed_control(final_progress).err()
 }
 
 #[allow(

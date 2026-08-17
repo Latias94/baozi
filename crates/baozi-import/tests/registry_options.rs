@@ -1,4 +1,4 @@
-use baozi_core::{FormatId, SceneDraft};
+use baozi_core::FormatId;
 use baozi_import::{
     CapabilityStatus, CompiledFormatOptions, DetectionOutcome, DetectionResult, DetectionScope,
     FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter, FormatOptionCodec,
@@ -8,7 +8,7 @@ use baozi_import::{
     ImportRequestBuildError, ImportRequestLayer, LossPolicy, OptionBudget, OptionCompileError,
     OptionCompileLimits, OptionCompileScope, OptionRuntimeTypeKey, OptionScopeLimits, ParseResult,
     ParseScope, ReadHint, RegistryBuildError, RegistryBuildLimits, RegistryBuildScope,
-    RegistryBuilder, RequestError, ResourceLimits, ResourceLimitsOverlay,
+    RegistryBuilder, RequestError, ResourceLimits, ResourceLimitsOverlay, SceneDraft,
 };
 use std::num::NonZeroU32;
 use std::sync::Arc;

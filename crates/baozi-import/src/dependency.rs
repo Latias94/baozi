@@ -1,7 +1,7 @@
 use crate::diagnostic::DiagnosticSource;
 use crate::error::{CauseOwner, ScopeAbortCause};
-use crate::ledger::ImportReservation;
 use crate::metered_storage::AccountedVec;
+use crate::store::ImportStoreReservation;
 use baozi_io::{AssetIo, AssetPath, AuthorityDomain};
 use baozi_operation::{CapacityPlan, CapacityPlanError, ReplacementCapacityPlan};
 use std::collections::hash_map::RandomState;
@@ -174,33 +174,37 @@ impl<'a> AuthorizedDependency<'a> {
 }
 
 /// Authorizes a normalized logical dependency before cache lookup or backend IO.
+///
+/// `origin` is the immutable asset snapshot that declared `reference`. For a
+/// direct dependency it is the primary asset; for a nested dependency it is
+/// the already-authorized dependency snapshot supplied by the import session.
 pub trait DependencyResolver: Send + Sync {
     fn authorize<'a>(
         &'a self,
-        primary: &'a dyn AssetIo,
-        primary_authority: &AuthorityDomain,
-        primary_path: &AssetPath,
+        origin: &'a dyn AssetIo,
+        origin_authority: &AuthorityDomain,
+        origin_path: &AssetPath,
         role: &DependencyRoleId,
         reference: DependencyReference<'_>,
     ) -> Result<AuthorizedDependency<'a>, DependencyPolicyError>;
 }
 
-/// Restricts dependencies to the primary backend's authority namespace.
+/// Restricts dependencies to the declaring asset's backend authority namespace.
 #[derive(Debug, Default)]
 pub struct SameAuthorityResolver;
 
 impl DependencyResolver for SameAuthorityResolver {
     fn authorize<'a>(
         &'a self,
-        primary: &'a dyn AssetIo,
-        primary_authority: &AuthorityDomain,
-        _primary_path: &AssetPath,
+        origin: &'a dyn AssetIo,
+        origin_authority: &AuthorityDomain,
+        _origin_path: &AssetPath,
         _role: &DependencyRoleId,
         reference: DependencyReference<'_>,
     ) -> Result<AuthorizedDependency<'a>, DependencyPolicyError> {
         Ok(AuthorizedDependency::new(
-            primary,
-            primary_authority.clone(),
+            origin,
+            origin_authority.clone(),
             reference
                 .normalized()
                 .try_clone()
@@ -216,9 +220,9 @@ pub struct DenyDependencies;
 impl DependencyResolver for DenyDependencies {
     fn authorize<'a>(
         &'a self,
-        _primary: &'a dyn AssetIo,
-        _primary_authority: &AuthorityDomain,
-        _primary_path: &AssetPath,
+        _origin: &'a dyn AssetIo,
+        _origin_authority: &AuthorityDomain,
+        _origin_path: &AssetPath,
         _role: &DependencyRoleId,
         reference: DependencyReference<'_>,
     ) -> Result<AuthorizedDependency<'a>, DependencyPolicyError> {
@@ -260,23 +264,95 @@ pub enum DependencyCacheDisposition {
     Reused,
 }
 
+pub(crate) struct DependencyOriginIssuer {
+    _identity: u8,
+}
+
+impl DependencyOriginIssuer {
+    pub(crate) const fn new() -> Self {
+        Self { _identity: 0 }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum DependencyOriginNode {
+    Primary,
+    Dependency(usize),
+}
+
+/// An opaque, session-issued capability naming the resource that declared a dependency.
+///
+/// The handle intentionally exposes no path, identity, ordering, hashing, serialization, or
+/// value-revealing debug interface. It is only valid when returned to the issuing parse scope.
+pub struct DependencyOrigin<'scope> {
+    issuer: &'scope DependencyOriginIssuer,
+    io: &'scope dyn AssetIo,
+    node: DependencyOriginNode,
+}
+
+impl<'scope> DependencyOrigin<'scope> {
+    pub(crate) const fn primary(
+        issuer: &'scope DependencyOriginIssuer,
+        io: &'scope dyn AssetIo,
+    ) -> Self {
+        Self {
+            issuer,
+            io,
+            node: DependencyOriginNode::Primary,
+        }
+    }
+
+    const fn dependency(
+        issuer: &'scope DependencyOriginIssuer,
+        io: &'scope dyn AssetIo,
+        node: usize,
+    ) -> Self {
+        Self {
+            issuer,
+            io,
+            node: DependencyOriginNode::Dependency(node),
+        }
+    }
+
+    pub(crate) fn is_issued_by(&self, issuer: &DependencyOriginIssuer) -> bool {
+        std::ptr::eq(self.issuer, issuer)
+    }
+
+    pub(crate) const fn io(&self) -> &'scope dyn AssetIo {
+        self.io
+    }
+
+    pub(crate) const fn node(&self) -> DependencyOriginNode {
+        self.node
+    }
+}
+
 /// Immutable bytes borrowed from one import session's dependency cache.
 pub struct DependencySnapshot<'scope> {
+    issuer: &'scope DependencyOriginIssuer,
+    origin_io: &'scope dyn AssetIo,
+    origin_node: usize,
     identity: DependencyIdentity,
     bytes: Arc<SharedDependencySnapshot>,
     cache_disposition: DependencyCacheDisposition,
-    _identity_path_reservation: ImportReservation,
+    _identity_path_reservation: ImportStoreReservation,
     scope: PhantomData<&'scope ()>,
 }
 
 impl<'scope> DependencySnapshot<'scope> {
     pub(crate) fn new(
+        issuer: &'scope DependencyOriginIssuer,
+        origin_io: &'scope dyn AssetIo,
+        origin_node: usize,
         identity: DependencyIdentity,
         bytes: Arc<SharedDependencySnapshot>,
         cache_disposition: DependencyCacheDisposition,
-        identity_path_reservation: ImportReservation,
+        identity_path_reservation: ImportStoreReservation,
     ) -> Self {
         Self {
+            issuer,
+            origin_io,
+            origin_node,
             identity,
             bytes,
             cache_disposition,
@@ -287,6 +363,11 @@ impl<'scope> DependencySnapshot<'scope> {
 
     pub fn identity(&self) -> &DependencyIdentity {
         &self.identity
+    }
+
+    /// Returns the opaque origin capability for dependencies declared by this snapshot.
+    pub fn origin(&self) -> DependencyOrigin<'scope> {
+        DependencyOrigin::dependency(self.issuer, self.origin_io, self.origin_node)
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -308,7 +389,7 @@ impl<'scope> DependencySnapshot<'scope> {
 
 pub(crate) struct SharedDependencySnapshot {
     bytes: AccountedVec<u8>,
-    _sharing_reservation: ImportReservation,
+    _sharing_reservation: ImportStoreReservation,
 }
 
 pub(crate) fn shared_dependency_snapshot_allocation_bytes() -> Option<usize> {
@@ -318,7 +399,10 @@ pub(crate) fn shared_dependency_snapshot_allocation_bytes() -> Option<usize> {
 }
 
 impl SharedDependencySnapshot {
-    pub(crate) fn new(bytes: AccountedVec<u8>, sharing_reservation: ImportReservation) -> Self {
+    pub(crate) fn new(
+        bytes: AccountedVec<u8>,
+        sharing_reservation: ImportStoreReservation,
+    ) -> Self {
         Self {
             bytes,
             _sharing_reservation: sharing_reservation,
@@ -330,14 +414,33 @@ impl SharedDependencySnapshot {
     }
 }
 
-#[derive(Debug)]
 pub struct OptionalDependencyEvidence {
     identity: Option<DependencyIdentity>,
     normalized_path: AssetPath,
     owner: CauseOwner,
     cache_disposition: DependencyCacheDisposition,
-    _identity_path_reservation: Option<ImportReservation>,
-    _normalized_path_reservation: Option<ImportReservation>,
+    _identity_path_reservation: Option<ImportStoreReservation>,
+    _normalized_path_reservation: Option<ImportStoreReservation>,
+}
+
+impl fmt::Debug for OptionalDependencyEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OptionalDependencyEvidence")
+            .field("identity", &self.identity)
+            .field("normalized_path", &self.normalized_path)
+            .field("owner", &self.owner)
+            .field("cache_disposition", &self.cache_disposition)
+            .field(
+                "identity_path_reserved",
+                &self._identity_path_reservation.is_some(),
+            )
+            .field(
+                "normalized_path_reserved",
+                &self._normalized_path_reservation.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl OptionalDependencyEvidence {
@@ -346,8 +449,8 @@ impl OptionalDependencyEvidence {
         normalized_path: AssetPath,
         owner: CauseOwner,
         cache_disposition: DependencyCacheDisposition,
-        identity_path_reservation: Option<ImportReservation>,
-        normalized_path_reservation: ImportReservation,
+        identity_path_reservation: Option<ImportStoreReservation>,
+        normalized_path_reservation: ImportStoreReservation,
     ) -> Self {
         Self {
             identity,
@@ -356,27 +459,6 @@ impl OptionalDependencyEvidence {
             cache_disposition,
             _identity_path_reservation: identity_path_reservation,
             _normalized_path_reservation: Some(normalized_path_reservation),
-        }
-    }
-
-    pub(crate) fn reservation_count(&self) -> usize {
-        usize::from(self._identity_path_reservation.is_some())
-            + usize::from(self._normalized_path_reservation.is_some())
-    }
-
-    pub(crate) fn move_reservations_into(
-        &mut self,
-        target: &mut crate::metered_storage::AccountedReservationVec,
-    ) {
-        assert!(
-            target.has_slots(self.reservation_count()),
-            "optional-dependency publication slots must be admitted before moving tokens"
-        );
-        if let Some(reservation) = self._identity_path_reservation.take() {
-            target.push_reserved_infallible(reservation);
-        }
-        if let Some(reservation) = self._normalized_path_reservation.take() {
-            target.push_reserved_infallible(reservation);
         }
     }
 
@@ -402,39 +484,48 @@ impl OptionalDependencyEvidence {
     }
 }
 
-pub struct OptionalDependencyOutcome<'scope> {
-    inner: OptionalDependencyOutcomeKind<'scope>,
+pub struct DependencyOutcome<'scope> {
+    inner: DependencyOutcomeKind<'scope>,
 }
 
-enum OptionalDependencyOutcomeKind<'scope> {
+enum DependencyOutcomeKind<'scope> {
     Available(DependencySnapshot<'scope>),
     Unavailable(OptionalDependencyEvidence),
 }
 
-impl<'scope> OptionalDependencyOutcome<'scope> {
+impl<'scope> DependencyOutcome<'scope> {
     pub(crate) fn available(snapshot: DependencySnapshot<'scope>) -> Self {
         Self {
-            inner: OptionalDependencyOutcomeKind::Available(snapshot),
+            inner: DependencyOutcomeKind::Available(snapshot),
         }
     }
 
     pub(crate) fn unavailable(evidence: OptionalDependencyEvidence) -> Self {
         Self {
-            inner: OptionalDependencyOutcomeKind::Unavailable(evidence),
+            inner: DependencyOutcomeKind::Unavailable(evidence),
         }
     }
 
     pub fn snapshot(&self) -> Option<&DependencySnapshot<'scope>> {
         match &self.inner {
-            OptionalDependencyOutcomeKind::Available(snapshot) => Some(snapshot),
-            OptionalDependencyOutcomeKind::Unavailable(_) => None,
+            DependencyOutcomeKind::Available(snapshot) => Some(snapshot),
+            DependencyOutcomeKind::Unavailable(_) => None,
         }
     }
 
     pub fn unavailable_evidence(&self) -> Option<&OptionalDependencyEvidence> {
         match &self.inner {
-            OptionalDependencyOutcomeKind::Available(_) => None,
-            OptionalDependencyOutcomeKind::Unavailable(evidence) => Some(evidence),
+            DependencyOutcomeKind::Available(_) => None,
+            DependencyOutcomeKind::Unavailable(evidence) => Some(evidence),
+        }
+    }
+
+    /// Consumes the outcome, preserving ownership of either the admitted snapshot or its
+    /// structured unavailable evidence.
+    pub fn into_result(self) -> Result<DependencySnapshot<'scope>, OptionalDependencyEvidence> {
+        match self.inner {
+            DependencyOutcomeKind::Available(snapshot) => Ok(snapshot),
+            DependencyOutcomeKind::Unavailable(evidence) => Err(evidence),
         }
     }
 }
@@ -447,7 +538,7 @@ pub(crate) struct DependencyCache {
     entries: Vec<DependencyCacheRecordSlot>,
     entry_count: usize,
     free_entry: Option<usize>,
-    entry_capacity_reservation: Option<ImportReservation>,
+    entry_capacity_reservation: Option<ImportStoreReservation>,
     index: DependencyIndex,
 }
 
@@ -614,7 +705,7 @@ impl DependencyCache {
     pub(crate) fn take_capacity_reservation(
         &mut self,
         storage: DependencyCacheStorage,
-    ) -> Option<ImportReservation> {
+    ) -> Option<ImportStoreReservation> {
         match storage {
             DependencyCacheStorage::Entries => self.entry_capacity_reservation.take(),
             DependencyCacheStorage::Index => self.index.capacity_reservation.take(),
@@ -624,7 +715,7 @@ impl DependencyCache {
     pub(crate) fn retain_capacity_reservation(
         &mut self,
         storage: DependencyCacheStorage,
-        reservation: Option<ImportReservation>,
+        reservation: Option<ImportStoreReservation>,
     ) {
         match storage {
             DependencyCacheStorage::Entries => self.entry_capacity_reservation = reservation,
@@ -635,7 +726,7 @@ impl DependencyCache {
     pub(crate) fn mark_resolving(
         &mut self,
         identity: DependencyIdentity,
-        identity_path_reservation: ImportReservation,
+        identity_path_reservation: ImportStoreReservation,
     ) -> Result<bool, ()> {
         let probe = self.probe_identity(&identity);
         if probe.record_index.is_some() {
@@ -677,15 +768,24 @@ impl DependencyCache {
         &mut self,
         identity: &DependencyIdentity,
         bytes: Arc<SharedDependencySnapshot>,
-    ) -> bool {
-        let Some(entry) = self.entry_mut(identity) else {
-            return false;
+    ) -> Option<usize> {
+        let index = self.record_index(identity)?;
+        let Some(DependencyCacheRecordSlot::Occupied(record)) = self.entries.get_mut(index) else {
+            return None;
         };
+        let entry = &mut record.entry;
         let DependencyCacheEntry::Resolving = entry else {
-            return false;
+            return None;
         };
         *entry = DependencyCacheEntry::Available(CachedDependencySnapshot { bytes });
-        true
+        Some(index)
+    }
+
+    pub(crate) fn available_identity(&self, index: usize) -> Option<&DependencyIdentity> {
+        let DependencyCacheRecordSlot::Occupied(record) = self.entries.get(index)? else {
+            return None;
+        };
+        matches!(&record.entry, DependencyCacheEntry::Available(_)).then_some(&record.identity)
     }
 
     pub(crate) fn store_failed(
@@ -735,17 +835,20 @@ impl DependencyCache {
         }
     }
 
-    pub(crate) fn remove(&mut self, identity: &DependencyIdentity) {
+    pub(crate) fn remove_resolving(&mut self, identity: &DependencyIdentity) -> bool {
         let probe = self.probe_identity(identity);
         let (Some(record_index), Some(index_slot)) = (probe.record_index, probe.matched_slot)
         else {
-            return;
+            return false;
         };
         let Some(slot) = self.entries.get_mut(record_index) else {
-            return;
+            return false;
         };
-        if !matches!(slot, DependencyCacheRecordSlot::Occupied(_)) {
-            return;
+        let DependencyCacheRecordSlot::Occupied(record) = slot else {
+            return false;
+        };
+        if !matches!(&record.entry, DependencyCacheEntry::Resolving) {
+            return false;
         }
         *slot = DependencyCacheRecordSlot::Vacant {
             next: self.free_entry,
@@ -753,14 +856,7 @@ impl DependencyCache {
         self.free_entry = Some(record_index);
         self.entry_count -= 1;
         self.index.remove(index_slot);
-    }
-
-    fn entry_mut(&mut self, identity: &DependencyIdentity) -> Option<&mut DependencyCacheEntry> {
-        let index = self.record_index(identity)?;
-        let DependencyCacheRecordSlot::Occupied(record) = self.entries.get_mut(index)? else {
-            return None;
-        };
-        Some(&mut record.entry)
+        true
     }
 
     fn record_index(&self, identity: &DependencyIdentity) -> Option<usize> {
@@ -851,14 +947,14 @@ impl DependencyCacheRecordSlot {
 struct DependencyCacheRecord {
     identity: DependencyIdentity,
     entry: DependencyCacheEntry,
-    _identity_path_reservation: ImportReservation,
+    _identity_path_reservation: ImportStoreReservation,
 }
 
 struct DependencyIndex {
     slots: Vec<usize>,
     tombstones: usize,
     hash_builder: RandomState,
-    capacity_reservation: Option<ImportReservation>,
+    capacity_reservation: Option<ImportStoreReservation>,
 }
 
 impl DependencyIndex {
@@ -1062,12 +1158,72 @@ pub(crate) struct CachedDependencySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{
-        ImportDimension, ImportLedgerPhase, ImportOperationControl, import_ledger_limits,
-        try_import_coordinator,
-    };
+    use crate::ledger::{ImportDimension, ImportLedgerPhase, ImportOperationControl};
     use crate::limits::ResourceLimits;
-    use baozi_operation::LedgerCause;
+    use crate::store::{
+        ImportStoreBootstrapRequirements, ImportStoreHost, ImportStoreSessionOwner,
+        try_import_store_bootstrap,
+    };
+    use baozi_io::MemoryAssetIo;
+    use baozi_operation::{
+        PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
+        PhysicalStorageAccountLimits,
+    };
+
+    struct StoreHarness {
+        owner: ImportStoreSessionOwner,
+    }
+
+    impl StoreHarness {
+        fn new() -> Self {
+            let limits = ResourceLimits::default();
+            let requirements = ImportStoreBootstrapRequirements::for_node_scene(&limits)
+                .expect("test retained-store requirements are valid");
+            let bootstrap = try_import_store_bootstrap(&limits, requirements)
+                .expect("test import store bootstrap is valid");
+            let factory = PhysicalStorageAccountFactory::try_new(
+                PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1)
+                    .expect("test factory limits are valid"),
+            )
+            .expect("test account factory must allocate");
+            let account = factory
+                .try_create_account(
+                    PhysicalStorageAccountLimits::new(u64::MAX, u64::MAX)
+                        .expect("test account limits are valid"),
+                )
+                .expect("test physical account must allocate");
+            let owner = ImportStoreSessionOwner::try_start(
+                ImportOperationControl::default(),
+                &account,
+                bootstrap,
+            )
+            .expect("test import store owner must start");
+            drop(account);
+            drop(factory);
+            Self { owner }
+        }
+
+        fn host(&self) -> ImportStoreHost<'_> {
+            self.owner.host()
+        }
+
+        fn reserve_scratch(&self, bytes: u64) -> ImportStoreReservation {
+            self.host()
+                .reserve(
+                    ImportLedgerPhase::DependencyAcquisition,
+                    ImportDimension::ScratchBytes,
+                    bytes,
+                )
+                .expect("test scratch reservation must be admitted")
+        }
+
+        fn live_scratch_bytes(&self) -> u64 {
+            self.host()
+                .dimension_state(ImportDimension::ScratchBytes)
+                .expect("test scratch dimension must remain observable")
+                .live_bytes()
+        }
+    }
 
     fn indexed_identity(
         authority: &AuthorityDomain,
@@ -1124,8 +1280,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_cache_capacity_distinguishes_entry_and_index_ledger_evidence()
-    -> Result<(), LedgerCause<ImportDimension>> {
+    fn dependency_cache_capacity_distinguishes_entry_and_index_ledger_evidence() {
         let mut cache = DependencyCache::new();
         let plan = cache.capacity_plan().unwrap();
         let entry_envelope = plan
@@ -1137,27 +1292,9 @@ mod tests {
         assert!(entry_envelope > 0);
         assert!(index_envelope > 0);
 
-        let limits = ResourceLimits::default();
-        let mut coordinator = try_import_coordinator(
-            ImportOperationControl::default(),
-            import_ledger_limits(&limits).unwrap(),
-        )?;
-        let mut entry_reservation = coordinator
-            .checkpoint()
-            .reserve(
-                ImportLedgerPhase::DependencyAcquisition,
-                ImportDimension::ScratchBytes,
-                entry_envelope,
-            )
-            .unwrap();
-        let mut index_reservation = coordinator
-            .checkpoint()
-            .reserve(
-                ImportLedgerPhase::DependencyAcquisition,
-                ImportDimension::ScratchBytes,
-                index_envelope,
-            )
-            .unwrap();
+        let store = StoreHarness::new();
+        let mut entry_reservation = store.reserve_scratch(entry_envelope);
+        let mut index_reservation = store.reserve_scratch(index_envelope);
 
         let actual = cache.apply_capacity_plan(plan).unwrap();
         let entry_bytes = actual
@@ -1166,13 +1303,13 @@ mod tests {
         let index_bytes = actual
             .retained_bytes(DependencyCacheStorage::Index)
             .unwrap();
-        coordinator
-            .checkpoint()
-            .resize_reservation(&mut entry_reservation, entry_bytes)
+        store
+            .host()
+            .resize(&mut entry_reservation, entry_bytes)
             .unwrap();
-        coordinator
-            .checkpoint()
-            .resize_reservation(&mut index_reservation, index_bytes)
+        store
+            .host()
+            .resize(&mut index_reservation, index_bytes)
             .unwrap();
         assert_eq!(
             entry_bytes,
@@ -1200,22 +1337,12 @@ mod tests {
         cache.retain_capacity_reservation(DependencyCacheStorage::Entries, Some(entry_reservation));
         cache.retain_capacity_reservation(DependencyCacheStorage::Index, Some(index_reservation));
 
-        let evidence = coordinator
-            .dimension_evidence(ImportDimension::ScratchBytes)
-            .unwrap();
         assert_eq!(
-            evidence.current_live_bytes(),
+            store.live_scratch_bytes(),
             entry_bytes.checked_add(index_bytes).unwrap()
         );
         drop(cache);
-        assert_eq!(
-            coordinator
-                .dimension_evidence(ImportDimension::ScratchBytes)
-                .unwrap()
-                .current_live_bytes(),
-            0
-        );
-        Ok(())
+        assert_eq!(store.live_scratch_bytes(), 0);
     }
 
     #[test]
@@ -1320,13 +1447,8 @@ mod tests {
     }
 
     #[test]
-    fn dependency_cache_reuses_vacant_records_without_moving_live_indices()
-    -> Result<(), LedgerCause<ImportDimension>> {
-        let limits = ResourceLimits::default();
-        let mut coordinator = try_import_coordinator(
-            ImportOperationControl::default(),
-            import_ledger_limits(&limits).unwrap(),
-        )?;
+    fn dependency_cache_reuses_vacant_resolving_records_without_moving_live_indices() {
+        let store = StoreHarness::new();
         let authority = AuthorityDomain::new();
         let identities = (0..3)
             .map(|record_index| indexed_identity(&authority, "record", record_index))
@@ -1336,14 +1458,7 @@ mod tests {
         cache.index.slots = vec![DEPENDENCY_INDEX_EMPTY; 8];
 
         for identity in &identities {
-            let reservation = coordinator
-                .checkpoint()
-                .reserve(
-                    ImportLedgerPhase::DependencyAcquisition,
-                    ImportDimension::ScratchBytes,
-                    1,
-                )
-                .unwrap();
+            let reservation = store.reserve_scratch(1);
             assert!(
                 cache
                     .mark_resolving(identity.try_clone().unwrap(), reservation)
@@ -1354,20 +1469,13 @@ mod tests {
         assert_eq!(cache.get(&identities[1]).map(|(index, _)| index), Some(1));
         assert_eq!(cache.get(&identities[2]).map(|(index, _)| index), Some(2));
 
-        cache.remove(&identities[1]);
+        assert!(cache.remove_resolving(&identities[1]));
         assert!(cache.get(&identities[1]).is_none());
         assert_eq!(cache.get(&identities[0]).map(|(index, _)| index), Some(0));
         assert_eq!(cache.get(&identities[2]).map(|(index, _)| index), Some(2));
 
         let replacement = indexed_identity(&authority, "record-replacement", 0);
-        let replacement_reservation = coordinator
-            .checkpoint()
-            .reserve(
-                ImportLedgerPhase::DependencyAcquisition,
-                ImportDimension::ScratchBytes,
-                1,
-            )
-            .unwrap();
+        let replacement_reservation = store.reserve_scratch(1);
         assert!(
             cache
                 .mark_resolving(replacement.try_clone().unwrap(), replacement_reservation,)
@@ -1375,6 +1483,74 @@ mod tests {
         );
         assert_eq!(cache.get(&replacement).map(|(index, _)| index), Some(1));
         assert_eq!(cache.get(&identities[2]).map(|(index, _)| index), Some(2));
-        Ok(())
+    }
+
+    #[test]
+    fn dependency_cache_never_reuses_an_available_origin_node() {
+        let store = StoreHarness::new();
+        let authority = AuthorityDomain::new();
+        let identity = indexed_identity(&authority, "available", 0);
+        let mut cache = DependencyCache::new();
+        cache.entries = Vec::with_capacity(2);
+        cache.index.slots = vec![DEPENDENCY_INDEX_EMPTY; 8];
+
+        assert!(
+            cache
+                .mark_resolving(identity.try_clone().unwrap(), store.reserve_scratch(1),)
+                .unwrap()
+        );
+        let bytes = Arc::new(SharedDependencySnapshot::new(
+            AccountedVec::new(),
+            store.reserve_scratch(1),
+        ));
+        assert_eq!(cache.store_available(&identity, bytes), Some(0));
+
+        assert!(!cache.remove_resolving(&identity));
+        assert_eq!(cache.available_identity(0), Some(&identity));
+    }
+
+    #[test]
+    fn dependency_origin_remains_session_bound_after_snapshot_drop() {
+        let store = StoreHarness::new();
+        let issuer = DependencyOriginIssuer::new();
+        let io = MemoryAssetIo::new();
+        let authority = io.authority_domain();
+        let identity = indexed_identity(&authority, "origin", 0);
+        let mut cache = DependencyCache::new();
+        cache.entries = Vec::with_capacity(1);
+        cache.index.slots = vec![DEPENDENCY_INDEX_EMPTY; 8];
+        assert!(
+            cache
+                .mark_resolving(identity.try_clone().unwrap(), store.reserve_scratch(1),)
+                .unwrap()
+        );
+        let bytes = Arc::new(SharedDependencySnapshot::new(
+            AccountedVec::new(),
+            store.reserve_scratch(1),
+        ));
+        let origin_node = cache
+            .store_available(&identity, Arc::clone(&bytes))
+            .expect("the resolving dependency must become available");
+        let snapshot = DependencySnapshot::new(
+            &issuer,
+            &io,
+            origin_node,
+            identity,
+            bytes,
+            DependencyCacheDisposition::Fresh,
+            store.reserve_scratch(1),
+        );
+
+        let origin = snapshot.origin();
+        drop(snapshot);
+
+        assert!(size_of::<DependencyOriginIssuer>() > 0);
+        assert!(origin.is_issued_by(&issuer));
+        assert!(std::ptr::eq(origin.io(), &io));
+        assert!(matches!(
+            origin.node(),
+            DependencyOriginNode::Dependency(index) if index == origin_node
+        ));
+        assert!(cache.available_identity(origin_node).is_some());
     }
 }

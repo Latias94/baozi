@@ -15,7 +15,7 @@ default = []
 tracing = ["dep:tracing", "baozi-core/tracing"]
 
 [dependencies]
-baozi-core.workspace = true
+baozi-core = { workspace = true, features = ["_u4-import"] }
 baozi-io.workspace = true
 baozi-operation = { workspace = true, features = ["_u4-activation"] }
 sha2.workspace = true

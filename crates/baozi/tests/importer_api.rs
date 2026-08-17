@@ -1,15 +1,16 @@
+mod support;
+
 use baozi::{
     CancellationToken, CapabilityStatus, ConformancePolicy, DiagnosticCode, DiagnosticSeverity,
     Error, FormatCapability, FormatDescriptor, FormatEncoding, FormatFailureEvidence, FormatId,
     ImportCause, ImportConfigOverlay, ImportOperationControl, ImportPhase, ImportProgressPhase,
     ImportProgressUnit, ImportRequest, ImportRequestLayer, Importer, OptionCompileLimits,
-    PostProcessControl, PostProcessProgressPhase, PostProcessProgressUnit, ProgressDecision,
-    ProgressDeliveryLimits, ProgressEvent, ReadConfidence,
+    ProgressDecision, ProgressDeliveryLimits, ProgressEvent, ReadConfidence,
 };
 use baozi_import::{
     DetectionOutcome, DetectionResult, DetectionScope, FormatFailureDetailSink,
     FormatFailureDetailValue, FormatFailureEvidenceProducer, FormatImporter, ParseResult,
-    ParseScope, Probe, ReadHint,
+    ParseScope, Probe, ReadHint, SceneDraft,
 };
 use std::error::Error as StdError;
 use std::sync::Arc;
@@ -80,7 +81,7 @@ impl FormatImporter for TestImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<baozi_core::SceneDraft> {
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         if self.fail {
             return Err(
                 scope.format_failure(TestFormatFailure::new(Arc::clone(&self.failure_drops)))
@@ -91,7 +92,7 @@ impl FormatImporter for TestImporter {
             DiagnosticCode::new("test.imported").expect("valid diagnostic code"),
             format_args!("test importer completed"),
         )?;
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -125,17 +126,8 @@ fn facade_exposes_operation_control_construction_types() {
                 ProgressDecision::Continue
             },
         );
-    let postprocess_control = PostProcessControl::default()
-        .with_cancellation(cancellation.clone())
-        .with_progress_limits(ProgressDeliveryLimits::new(8, 512, 1))
-        .with_progress_observer(
-            |_event: ProgressEvent<PostProcessProgressPhase, PostProcessProgressUnit>| {
-                ProgressDecision::Continue
-            },
-        );
-
     assert!(!cancellation.is_cancelled());
-    drop((import_control, postprocess_control));
+    drop(import_control);
 }
 
 #[test]

@@ -474,6 +474,21 @@ where
         )
     }
 
+    pub(crate) fn replace_empty_canonical_assembly(
+        &mut self,
+        replacement: AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    ) -> Result<
+        AttributionReservationBatch<O, P, D, CanonicalOutput>,
+        AttributionReservationBatch<O, P, D, CanonicalOutput>,
+    > {
+        if !self.canonical_assembly.is_empty_storage_shell()
+            || !replacement.is_empty_storage_shell()
+        {
+            return Err(replacement);
+        }
+        Ok(std::mem::replace(&mut self.canonical_assembly, replacement))
+    }
+
     pub(super) fn try_prepare_fallback_sources(&mut self) -> Result<(), ()> {
         if !self
             .evidence_assembly

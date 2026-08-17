@@ -1,12 +1,14 @@
+mod support;
+
 use baozi::{
     AssetIo, AssetLength, AssetOpenError, AssetPath, AuthorityDomain, CapabilityStatus, Error,
     FormatCapability, FormatDescriptor, FormatEncoding, FormatId, ImportCause, ImportDimension,
-    ImportOperationControl, Importer, MeshBinding, PostProcessLimits, PostProcessPipeline,
-    PostProcessRunError, PostProcessStep, PrimitiveTopology, ReadConfidence, RequestError, Vec3,
+    ImportOperationControl, ImportTerminalCause, ImportTerminalFailureClass, Importer,
+    ReadConfidence, RequestError, SceneSnapshotLimits,
 };
 use baozi_import::{
-    DetectionOutcome, DetectionResult, DetectionScope, FormatImporter, ImportStorageClass,
-    MeshBuildConfig, ParseResult, ParseScope, Probe, ReadHint, SameAuthorityResolver,
+    DetectionOutcome, DetectionResult, DetectionScope, FormatImporter, ParseResult, ParseScope,
+    Probe, ReadHint, SameAuthorityResolver, SceneDraft,
 };
 use baozi_io::OpenedAsset;
 use std::io::Cursor;
@@ -57,9 +59,9 @@ impl FormatImporter for OpenOnceImporter {
         }
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<baozi_core::SceneDraft> {
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         assert_eq!(scope.primary_bytes(), b"stable primary");
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -79,10 +81,8 @@ impl FormatImporter for InvalidDraftImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<baozi_core::SceneDraft> {
-        let mut builder = scope.scene_builder()?;
-        builder.add_node_mesh_binding(builder.root(), MeshBinding::new(baozi::MeshId::new(99)))?;
-        builder.finish_draft()
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        support::submit_invalid_parent_scene(scope)
     }
 }
 
@@ -102,29 +102,8 @@ impl FormatImporter for GeometryImporter {
         Ok(DetectionOutcome::Match(ReadConfidence::Certain))
     }
 
-    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<baozi_core::SceneDraft> {
-        let mut positions = scope.metered_vec(
-            ImportStorageClass::SceneConstruction,
-            "test-position-storage",
-        );
-        positions.try_push(Vec3::ZERO)?;
-        let name = scope
-            .metered_string(ImportStorageClass::SceneConstruction, "test-mesh-name")
-            .try_into_scene_parts()?
-            .discard_into_none();
-        let mesh = name
-            .into_mesh(MeshBuildConfig {
-                topology: PrimitiveTopology::Points,
-                material: None,
-                bounds: None,
-            })
-            .with_positions(positions.try_into_scene_parts()?)?
-            .finish()?;
-
-        let mut builder = scope.scene_builder()?;
-        let mesh = builder.add_prepared_mesh(mesh)?;
-        builder.add_node_mesh_binding(builder.root(), MeshBinding::new(mesh))?;
-        builder.finish_draft()
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        support::submit_point_geometry_scene(scope)
     }
 }
 
@@ -303,7 +282,7 @@ fn facade_opens_primary_exactly_once_and_reuses_the_bound_snapshot() {
 }
 
 #[test]
-fn facade_forwards_central_validation_failure_without_reclassification() {
+fn facade_forwards_canonical_authoring_rejection_without_reclassification() {
     let importer = importer_with(InvalidDraftImporter);
     let error = importer
         .read_bytes("model.invalid", b"invalid")
@@ -312,12 +291,43 @@ fn facade_forwards_central_validation_failure_without_reclassification() {
     let Error::Import(failure) = error else {
         panic!("expected import failure");
     };
-    assert!(matches!(failure.cause(), ImportCause::Validation(_)));
+    let ImportCause::OperationTerminal(terminal) = failure.cause() else {
+        panic!("expected canonical authoring terminal rejection");
+    };
+    assert_eq!(terminal.class(), ImportTerminalFailureClass::Requested);
+    assert_eq!(
+        failure.ledger().terminal_cause(),
+        ImportTerminalCause::Failure(*terminal)
+    );
     assert_eq!(
         failure.selected_format().map(FormatId::as_str),
         Some(INVALID_ID)
     );
     assert_eq!(failure.detection_evidence().len(), 1);
+}
+
+#[test]
+fn facade_imports_complete_batch_point_geometry() {
+    let importer = importer_with(GeometryImporter);
+    let report = importer
+        .read_bytes("model.geometry", b"geometry")
+        .expect("point geometry import must succeed");
+    let snapshot = report
+        .scene()
+        .capture_snapshot(
+            SceneSnapshotLimits::try_new(16 * 1024, 128, 16 * 1024)
+                .expect("fixture snapshot limits must be valid"),
+        )
+        .expect("point geometry snapshot must succeed");
+
+    assert_eq!(report.format().id().as_str(), GEOMETRY_ID);
+    assert_eq!(snapshot.node_count(), 1);
+    assert_eq!(snapshot.root_count(), 1);
+    assert_eq!(snapshot.logical_mesh_count(), 1);
+    assert_eq!(snapshot.primitive_count(), 1);
+    assert_eq!(snapshot.attribute_count(), 1);
+    assert_eq!(snapshot.mesh_instance_count(), 1);
+    assert_eq!(snapshot.f32_scalar_count(), 3);
 }
 
 #[test]
@@ -327,46 +337,6 @@ fn invalid_source_path_fails_before_session_creation() {
         .read_bytes("../escape.once", b"stable primary")
         .expect_err("parent traversal must be rejected");
     assert!(matches!(error, Error::Path(_)));
-}
-
-#[test]
-fn processed_failure_retains_the_completed_import_and_separate_ledger() {
-    let importer = importer_with(GeometryImporter);
-    let report = importer
-        .read_bytes("model.geometry", b"geometry")
-        .expect("geometry import must succeed");
-    let import_generation = report.scene().generation();
-    let pipeline = PostProcessPipeline::new([PostProcessStep::GenerateBoundingBoxes])
-        .expect("the static test post-process plan must be valid")
-        .with_limits(PostProcessLimits::new(0, 1024));
-
-    let failure = Importer::process(report, &pipeline)
-        .expect_err("zero work budget must reject post-processing");
-    let completed = failure
-        .completed_import()
-        .expect("post-process failure retains import report");
-
-    assert_eq!(completed.scene().generation(), import_generation);
-    assert_eq!(completed.format().id().as_str(), GEOMETRY_ID);
-    assert!(matches!(
-        failure.postprocess_run_error(),
-        Some(PostProcessRunError::Operation { .. })
-    ));
-    assert!(
-        std::error::Error::source(&failure)
-            .and_then(|source| source.downcast_ref::<PostProcessRunError>())
-            .is_some()
-    );
-    assert!(failure.postprocess_failure().is_some());
-    assert_eq!(completed.ledger().current_live_bytes(), 0);
-    assert_eq!(
-        failure
-            .postprocess_failure()
-            .expect("post-process evidence")
-            .ledger()
-            .current_live_bytes(),
-        0
-    );
 }
 
 #[test]

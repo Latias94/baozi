@@ -30,10 +30,13 @@ where
         let roles_are_valid = self
             .validate_writer_keys(canonical_phase, canonical_dimensions)
             .and_then(|()| self.validate_writer_keys(evidence_phase, evidence_dimensions))
+            .and_then(|()| self.validate_activation_phase(policy.validation_phase))
             .and_then(|()| {
                 self.validate_activation_dimensions([
                     policy.materialization_work_dimension,
+                    policy.materialization_scratch_dimension,
                     policy.validation_work_dimension,
+                    policy.validation_scratch_dimension,
                     policy.canonical_destination_dimension,
                     policy.outcome_evidence_destination_dimension,
                 ])
@@ -151,6 +154,7 @@ where
                 failure_work: _,
                 validation_phase: _,
                 validation_work_dimension: _,
+                validation_scratch_dimension: _,
                 canonical_destination_dimension: _,
                 outcome_evidence_destination_dimension: _,
                 validation_work: _,
@@ -366,7 +370,9 @@ where
             return Err(());
         };
         let outcome_evidence_destination_dimension = failure.outcome_evidence_destination_dimension;
+        let semantic_bytes_dimension = roles.policy.semantic_bytes_dimension;
         let (phase, dimensions) = request.canonical_plan.keys_for_publication_validation();
+        let original_baseline = self.planning_baseline;
         let Some(operation) = self.planning_operation_mut() else {
             let _ = preserve_first_fault::<()>(
                 &mut self.first_fault,
@@ -377,12 +383,61 @@ where
         let writer = operation.validate_writer_keys(phase, dimensions);
         let activation_dimensions = operation.validate_activation_dimensions([
             request.materialization_work_dimension,
+            request.materialization_scratch_dimension,
             request.validation_work_dimension,
+            request.validation_scratch_dimension,
             request.canonical_destination_dimension,
             outcome_evidence_destination_dimension,
         ]);
+        let semantic_dimension = semantic_bytes_dimension.map_or(Ok(()), |dimension| {
+            operation.validate_activation_dimensions([dimension])
+        });
+        let semantic_bytes = if writer.is_ok()
+            && activation_dimensions.is_ok()
+            && semantic_dimension.is_ok()
+            && request.semantic_bytes != 0
+        {
+            semantic_bytes_dimension.map_or(Ok(()), |dimension| {
+                operation
+                    .producer_host()
+                    .charge_observed_batch([(dimension, request.semantic_bytes)])
+            })
+        } else {
+            Ok(())
+        };
+        let (canonical_assembly, rebound_baseline) = if writer.is_ok()
+            && activation_dimensions.is_ok()
+            && semantic_dimension.is_ok()
+            && semantic_bytes.is_ok()
+        {
+            let before = operation.raw.planning_baseline();
+            let canonical_assembly =
+                operation.rebind_activation_canonical_assembly(request.canonical_plan);
+            let rebound_baseline = canonical_assembly.as_ref().ok().and_then(|_| {
+                original_baseline
+                    .checked_apply_rebind_delta(before, operation.raw.planning_baseline())
+            });
+            (Some(canonical_assembly), rebound_baseline)
+        } else {
+            (None, None)
+        };
         let _ = preserve_first_fault(&mut self.first_fault, writer);
         let _ = preserve_first_fault(&mut self.first_fault, activation_dimensions);
+        let _ = preserve_first_fault(&mut self.first_fault, semantic_dimension);
+        let _ = preserve_first_fault(&mut self.first_fault, semantic_bytes);
+        if let Some(canonical_assembly) = canonical_assembly {
+            let succeeded = canonical_assembly.is_ok();
+            let _ = preserve_first_fault(&mut self.first_fault, canonical_assembly);
+            if succeeded && rebound_baseline.is_none() {
+                let _ = preserve_first_fault::<()>(
+                    &mut self.first_fault,
+                    Err(StoreRuntimeError::ConstructionInvariantUnverified),
+                );
+            }
+        }
+        if let Some(baseline) = rebound_baseline {
+            self.planning_baseline = baseline;
+        }
         if !semantic_complete || self.first_fault.is_some() {
             Err(())
         } else {
@@ -477,7 +532,7 @@ where
                 Err(StoreRuntimeError::ConstructionInvariantUnverified),
             );
         };
-        let (phase, dimension) = roles.policy.authoring_keys();
+        let (phase, work_dimension, scratch_dimension) = roles.policy.authoring_keys();
         let operation = match state {
             ScopedActivationState::Planning(operation) => operation,
             _ => {
@@ -492,7 +547,8 @@ where
             operation,
             first_fault,
             phase,
-            dimension,
+            work_dimension,
+            scratch_dimension,
             state: semantic_state,
             receipt_brand,
             work_batch: work_batch::CompletionPrefixBatch::new(),
@@ -870,10 +926,14 @@ where
         let BoundScopedSuccessRequest {
             canonical_plan,
             materialization_work_dimension,
+            materialization_scratch_dimension,
+            validation_phase,
             validation_work_dimension,
+            validation_scratch_dimension,
             canonical_destination_dimension,
             validation_work,
             expected_materialized_blocks,
+            semantic_bytes: _,
         } = request;
         let (materialization_phase, _) = canonical_plan.keys_for_publication_validation();
         let outcome_evidence_destination_dimension = failure.outcome_evidence_destination_dimension;
@@ -960,6 +1020,7 @@ where
                 first_fault: &mut driver.first_fault,
                 materialization_phase,
                 materialization_work_dimension,
+                materialization_scratch_dimension,
             };
             let (plan, materialize) = inputs.plan_and_materializer_mut();
             materialize(lane, plan).into_state()
@@ -1107,8 +1168,9 @@ where
                             canonical_root: root,
                             output,
                             failure_work,
-                            validation_phase: materialization_phase,
+                            validation_phase,
                             validation_work_dimension,
+                            validation_scratch_dimension,
                             canonical_destination_dimension,
                             outcome_evidence_destination_dimension,
                             validation_work,
@@ -1267,7 +1329,7 @@ where
             self.work_batch.note_poll();
         }
         let mut host = self.operation.producer_host();
-        let start = host.try_begin_observed_work([(self.dimension, 1)]);
+        let start = host.try_begin_observed_work([(self.work_dimension, 1)]);
         let mut observed = preserve_first_fault(self.first_fault, start)?;
         let mut action = ManuallyDrop::new(Some(action));
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -1317,7 +1379,7 @@ where
     ) -> Result<CanonicalReservation<'scope, O>, StoreRuntimeError> {
         self.poll_if_due()?;
         let phase = self.phase;
-        let dimension = self.dimension;
+        let dimension = self.scratch_dimension;
         let mut checkpoint = CanonicalControlCheckpoint {
             raw: self.operation.control_checkpoint(),
             first_fault: &mut *self.first_fault,
@@ -1476,7 +1538,7 @@ where
                     activation: PhantomData,
                 },
                 phase: self.materialization_phase,
-                dimension: self.materialization_work_dimension,
+                dimension: self.materialization_scratch_dimension,
             }),
             Err(cause) => preserve_first_fault(self.first_fault, Err(cause)),
         }

@@ -7,7 +7,7 @@ mod parser;
 pub(crate) use error::GltfFailure;
 pub use error::GltfFailureCode;
 
-use baozi_core::{FormatId, SceneDraft};
+use baozi_core::{__canonical_import::SceneDraft, FormatId};
 use baozi_import::{
     CapabilityStatus, DependencyRequirement, DependencyRoleId, DetectionOutcome, DetectionResult,
     DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter,
@@ -18,6 +18,7 @@ use baozi_import::{
 /// Stable identity used only by the internal development harness.
 pub const FORMAT_ID: &str = "org.baozi.gltf";
 const EXTERNAL_BUFFER_ROLE: &str = "external-buffer";
+const EXTERNAL_IMAGE_ROLE: &str = "external-image";
 
 /// Internal importer retained outside the admitted facade registry until U6.
 #[doc(hidden)]
@@ -58,7 +59,10 @@ pub fn format_descriptor_for_development() -> FormatDescriptor {
         (FormatCapability::Diagnostics, CapabilityStatus::Supported),
         (FormatCapability::ResourceLimits, CapabilityStatus::Partial),
     ])
-    .dependency_roles([(external_buffer_role(), DependencyRequirement::Required)])
+    .dependency_roles([
+        (external_buffer_role(), DependencyRequirement::Required),
+        (external_image_role(), DependencyRequirement::Required),
+    ])
     .notes("internal glTF 2.0 development importer; not admitted to facade registries")
     .docs_path("docs/formats/gltf.md")
     .build()
@@ -90,6 +94,10 @@ pub(crate) fn external_buffer_role() -> DependencyRoleId {
     DependencyRoleId::new(EXTERNAL_BUFFER_ROLE).expect("static glTF dependency role must be valid")
 }
 
+pub(crate) fn external_image_role() -> DependencyRoleId {
+    DependencyRoleId::new(EXTERNAL_IMAGE_ROLE).expect("static glTF dependency role must be valid")
+}
+
 impl FormatImporter for GltfImporter {
     fn descriptor(&self) -> FormatDescriptor {
         format_descriptor_for_development()
@@ -114,11 +122,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn descriptor_is_qualified_and_external_buffers_are_required() {
+    fn descriptor_is_qualified_and_external_resources_are_required() {
         let descriptor = format_descriptor_for_development();
         assert_eq!(descriptor.id().as_str(), FORMAT_ID);
         assert!(descriptor.dependency_roles().any(|(role, requirement)| {
             role == &external_buffer_role() && requirement == DependencyRequirement::Required
+        }));
+        assert!(descriptor.dependency_roles().any(|(role, requirement)| {
+            role == &external_image_role() && requirement == DependencyRequirement::Required
         }));
         assert_eq!(
             descriptor.capability_status(FormatCapability::ResourceLimits),

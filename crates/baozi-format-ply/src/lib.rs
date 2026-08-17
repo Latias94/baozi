@@ -7,19 +7,21 @@ mod parser;
 pub(crate) use error::PlyFailure;
 pub use error::PlyFailureCode;
 
-use baozi_core::{FormatId, SceneDraft};
+use baozi_core::FormatId;
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
     FormatDescriptor, FormatEncoding, FormatImporter, ParseResult, ParseScope, Probe, ReadHint,
-    RegistryBuilder, RegistryRegistrationError, TextBomPolicy, TextControlPolicy, TextDecodingMode,
-    TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    RegistryBuilder, RegistryRegistrationError, SceneDraft, TextBomPolicy, TextControlPolicy,
+    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
 };
+
+pub(crate) const FORMAT_ID: &str = "org.baozi.ply";
 
 pub struct PlyImporter;
 
 pub fn format_descriptor() -> FormatDescriptor {
     FormatDescriptor::builder(
-        FormatId::new("org.baozi.ply").expect("built-in PLY format id is valid"),
+        FormatId::new(FORMAT_ID).expect("built-in PLY format id is valid"),
         "PLY",
     )
     .extensions(["ply"])

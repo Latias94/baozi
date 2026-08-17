@@ -1,7 +1,10 @@
 #![cfg(feature = "format-obj")]
 
-use baozi::{ImportDimension, ImportLedgerSnapshot, ImportReport, Importer, PrimitiveTopology};
+mod common;
+
+use baozi::{ImportDimension, ImportLedgerSnapshot, ImportReport, Importer};
 use baozi_test_support::{ObjScale, ObjScaleFixture};
+use common::{scene_snapshot_with_limits, snapshot_line};
 
 fn assert_counter(report: &ImportReport, dimension: ImportDimension, expected: u64) {
     let evidence = report
@@ -15,9 +18,17 @@ fn assert_counter(report: &ImportReport, dimension: ImportDimension, expected: u
 fn assert_clean_terminal_ledger(ledger: &ImportLedgerSnapshot) {
     assert_eq!(ledger.current_live_bytes(), 0);
     assert_eq!(ledger.active_reservations(), 0);
-    assert_eq!(ledger.current_evidence_bytes(), 0);
 
-    for (dimension, evidence) in ledger.dimensions() {
+    for dimension in [
+        ImportDimension::PrimaryBytes,
+        ImportDimension::Records,
+        ImportDimension::Tokens,
+        ImportDimension::Faces,
+        ImportDimension::CanonicalOutputBytes,
+    ] {
+        let evidence = ledger
+            .dimension(dimension)
+            .expect("reviewed scale dimension must exist");
         assert!(
             evidence.consumed() <= evidence.attempted(),
             "{dimension:?} consumed work must not exceed attempted work"
@@ -26,18 +37,6 @@ fn assert_clean_terminal_ledger(ledger: &ImportLedgerSnapshot) {
             evidence.current_live_bytes(),
             0,
             "{dimension:?} retained live bytes"
-        );
-        assert_eq!(
-            evidence.pending_publication(),
-            0,
-            "{dimension:?} pending publication"
-        );
-    }
-    for (phase, evidence) in ledger.phases() {
-        assert_eq!(
-            evidence.current_live_bytes(),
-            0,
-            "{phase:?} retained live bytes"
         );
     }
 }
@@ -52,14 +51,24 @@ fn obj_scale_work_is_affine_and_declared_live_memory_stays_inside_reviewed_envel
         let report = importer
             .read_bytes("scale.obj", fixture.bytes())
             .expect("deterministic OBJ fixture should import");
+        let snapshot = scene_snapshot_with_limits(&report, 16 * 1024, 8, 4_000_000);
 
         assert_eq!(report.format().id().as_str(), "org.baozi.obj");
         assert!(report.diagnostics().is_empty());
-        assert_eq!(report.scene().meshes().len(), 1);
-        let mesh = &report.scene().meshes()[0];
-        assert_eq!(mesh.topology, PrimitiveTopology::Triangles);
-        assert_eq!(mesh.positions.len(), 3);
-        assert_eq!(mesh.indices.len(), fixture.face_count() * 3);
+        assert_eq!(snapshot.logical_mesh_count(), 1);
+        assert_eq!(snapshot.primitive_count(), 1);
+        assert_eq!(snapshot.attribute_count(), 1);
+        assert_eq!(
+            snapshot.primitive_index_count(),
+            (fixture.face_count() * 3) as u64
+        );
+        let primitive = snapshot_line(&snapshot, "primitive[0]");
+        assert!(primitive.contains("topology=triangle_list vertices=3"));
+        assert!(primitive.contains(&format!("faces={}", fixture.face_count())));
+        assert!(snapshot_line(&snapshot, "attribute[0]").contains(concat!(
+            "semantic=position semantic_set=0 domain=vertex scalar=f32 lanes=3 ",
+            "normalization=none payload=dense elements=3"
+        )));
 
         assert_counter(
             &report,

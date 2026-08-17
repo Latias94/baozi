@@ -3,8 +3,8 @@ mod common;
 use baozi_format_stl::StlFailureCode;
 use baozi_import::{DetectionOutcome, ImportCause, ReadConfidence, ResourceLimits};
 use common::{
-    ascii_triangle, expected_stl_failure, import_bytes_forced_with_limits, stl_string_detail,
-    stl_unsigned_detail,
+    ascii_triangle, expected_stl_failure, import_bytes_forced_with_limits, scene_snapshot,
+    stl_string_detail, stl_unsigned_detail,
 };
 
 #[test]
@@ -113,7 +113,12 @@ fn crlf_and_horizontal_tab_remain_valid_ascii_stl() {
         ResourceLimits::default(),
     )
     .expect("the declared CRLF and horizontal-tab forms must remain valid");
-    assert_eq!(report.scene().meshes().len(), 1);
+    assert_eq!(
+        scene_snapshot(&report)
+            .expect("strict-profile STL semantic snapshot")
+            .logical_mesh_count(),
+        1
+    );
 }
 
 fn assert_profile_failure(

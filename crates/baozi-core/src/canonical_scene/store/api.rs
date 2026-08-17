@@ -23,6 +23,8 @@ use super::construction::node_scene::{
 };
 
 pub(crate) mod continuation;
+#[cfg(feature = "_u4-import")]
+pub(crate) mod import;
 
 /// A non-owning descriptor for one materialized canonical Scene directory.
 ///

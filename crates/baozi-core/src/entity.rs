@@ -27,18 +27,7 @@ impl EntityName {
     /// Fallibly copies one bounded UTF-8 display name.
     pub fn try_new(value: impl AsRef<str>) -> Result<Self, EntityNameError> {
         let value = value.as_ref();
-        if value.len() > MAX_ENTITY_NAME_BYTES {
-            return Err(EntityNameError::TooLong {
-                actual: value.len(),
-                maximum: MAX_ENTITY_NAME_BYTES,
-            });
-        }
-        if let Some(offset) = value
-            .char_indices()
-            .find_map(|(offset, character)| character.is_control().then_some(offset))
-        {
-            return Err(EntityNameError::ControlCharacter { offset });
-        }
+        validate_entity_name_str(value)?;
 
         let mut owned = String::new();
         owned
@@ -61,6 +50,22 @@ impl EntityName {
     pub(crate) fn capacity(&self) -> usize {
         self.0.capacity()
     }
+}
+
+pub(crate) fn validate_entity_name_str(value: &str) -> Result<(), EntityNameError> {
+    if value.len() > MAX_ENTITY_NAME_BYTES {
+        return Err(EntityNameError::TooLong {
+            actual: value.len(),
+            maximum: MAX_ENTITY_NAME_BYTES,
+        });
+    }
+    if let Some(offset) = value
+        .char_indices()
+        .find_map(|(offset, character)| character.is_control().then_some(offset))
+    {
+        return Err(EntityNameError::ControlCharacter { offset });
+    }
+    Ok(())
 }
 
 impl AsRef<str> for EntityName {

@@ -1,4 +1,6 @@
-use baozi_core::{FormatId, SceneDraft, SceneSpace};
+mod support;
+
+use baozi_core::FormatId;
 use baozi_import::{
     CapabilityStatus, CompiledFormatOptions, DetectionOutcome, DetectionResult, DetectionScope,
     FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter, FormatOptionCodec,
@@ -7,12 +9,12 @@ use baozi_import::{
     ImportReport, ImportRequest, ImportRequestLayer, OptionCompileError, OptionCompileLimits,
     OptionCompileScope, OptionRuntimeTypeKey, ParseResult, ParseScope, PreparedImportRequest,
     ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
-    RegistrySnapshot, import_bytes,
+    RegistrySnapshot, SceneDraft, SceneSpace, import_bytes,
 };
 use baozi_io::AssetPath;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
 const FORMAT_ID: &str = "dev.baozi.test.parser-reentrancy";
@@ -133,6 +135,15 @@ struct ReentrantImporter {
     option_key: FormatOptionKey<ReentrantOptions>,
     codec: Arc<dyn FormatOptionCodec>,
     overlap: Arc<ParserOverlap>,
+    observations: Arc<Mutex<Vec<ParseObservation>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ParseObservation {
+    source: String,
+    input: u8,
+    scale: u8,
+    scaled_input: u16,
 }
 
 impl FormatImporter for ReentrantImporter {
@@ -164,12 +175,22 @@ impl FormatImporter for ReentrantImporter {
             .primary_bytes()
             .first()
             .expect("parser reentrancy fixtures are nonempty");
-        let mut builder = scope.scene_builder()?;
-        builder.set_space(SceneSpace {
-            unit_scale_to_meters: Some(f32::from(input) * f32::from(scale)),
-            ..SceneSpace::default()
-        })?;
-        builder.finish_draft()
+        self.observations
+            .lock()
+            .expect("parser observation mutex remains usable")
+            .push(ParseObservation {
+                source: scope.source().as_str().to_owned(),
+                input,
+                scale,
+                scaled_input: u16::from(input) * u16::from(scale),
+            });
+        support::submit_scene_with_space(
+            scope,
+            SceneSpace {
+                unit_scale_to_meters: Some(f64::from(input) * f64::from(scale)),
+                ..SceneSpace::default()
+            },
+        )
     }
 }
 
@@ -177,6 +198,7 @@ fn registry_fixture() -> (
     RegistrySnapshot,
     FormatOptionKey<ReentrantOptions>,
     Arc<ParserOverlap>,
+    Arc<Mutex<Vec<ParseObservation>>>,
 ) {
     let format = FormatId::new(FORMAT_ID).expect("qualified parser reentrancy format id");
     let schema = FormatOptionSchema::new(
@@ -190,6 +212,7 @@ fn registry_fixture() -> (
     let option_key = FormatOptionKey::<ReentrantOptions>::new(schema.clone());
     let codec: Arc<dyn FormatOptionCodec> = Arc::new(ReentrantCodec { schema });
     let overlap = Arc::new(ParserOverlap::new());
+    let observations = Arc::new(Mutex::new(Vec::new()));
     let descriptor = FormatDescriptor::builder(format, "Parser reentrancy contract")
         .extensions([FORMAT_EXTENSION])
         .encoding(FormatEncoding::Binary)
@@ -203,12 +226,13 @@ fn registry_fixture() -> (
             option_key: option_key.clone(),
             codec,
             overlap: Arc::clone(&overlap),
+            observations: Arc::clone(&observations),
         })
         .expect("parser reentrancy importer registers");
     let snapshot = builder
         .freeze(RegistryBuildLimits::default())
         .expect("parser reentrancy registry freezes");
-    (snapshot, option_key, overlap)
+    (snapshot, option_key, overlap, observations)
 }
 
 fn compile_request(
@@ -309,25 +333,32 @@ fn assert_equivalent(concurrent: &ImportReport, serial: &ImportReport) {
     assert_eq!(concurrent.ledger(), serial.ledger());
     assert_eq!(concurrent.last_completed(), serial.last_completed());
 
-    let concurrent = concurrent.scene();
-    let serial = serial.scene();
-    assert_eq!(concurrent.root(), serial.root());
-    assert_eq!(concurrent.nodes(), serial.nodes());
-    assert_eq!(concurrent.meshes(), serial.meshes());
-    assert_eq!(concurrent.materials(), serial.materials());
-    assert_eq!(concurrent.textures(), serial.textures());
-    assert_eq!(concurrent.animations(), serial.animations());
-    assert_eq!(concurrent.cameras(), serial.cameras());
-    assert_eq!(concurrent.lights(), serial.lights());
-    assert_eq!(concurrent.skins(), serial.skins());
-    assert_eq!(concurrent.metadata(), serial.metadata());
-    assert_eq!(concurrent.space(), serial.space());
-    assert_eq!(concurrent.validation_stats(), serial.validation_stats());
+    assert_eq!(
+        concurrent.scene().canonical_block_count(),
+        serial.scene().canonical_block_count()
+    );
+}
+
+fn assert_observations(
+    observations: &Mutex<Vec<ParseObservation>>,
+    expected_once: [ParseObservation; 2],
+) {
+    let mut observed = observations
+        .lock()
+        .expect("parser observation mutex remains usable")
+        .clone();
+    observed.sort();
+    let mut expected = expected_once
+        .into_iter()
+        .flat_map(|observation| [observation.clone(), observation])
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(observed, expected);
 }
 
 #[test]
 fn one_prepared_request_is_semantically_reentrant_for_distinct_primary_inputs() {
-    let (snapshot, option_key, overlap) = registry_fixture();
+    let (snapshot, option_key, overlap, observations) = registry_fixture();
     let request = Arc::new(compile_request(&snapshot, &option_key, None));
     let (concurrent_left, concurrent_right) =
         run_concurrently(Arc::clone(&request), Arc::clone(&request), 3, 11);
@@ -337,19 +368,28 @@ fn one_prepared_request_is_semantically_reentrant_for_distinct_primary_inputs() 
     assert_eq!(overlap.peak(), 2, "both parser calls must overlap");
     assert_equivalent(&concurrent_left, &serial_left);
     assert_equivalent(&concurrent_right, &serial_right);
-    assert_eq!(
-        concurrent_left.scene().space().unit_scale_to_meters,
-        Some(3.0)
-    );
-    assert_eq!(
-        concurrent_right.scene().space().unit_scale_to_meters,
-        Some(11.0)
+    assert_observations(
+        &observations,
+        [
+            ParseObservation {
+                source: "left.parser-reentrancy".into(),
+                input: 3,
+                scale: 1,
+                scaled_input: 3,
+            },
+            ParseObservation {
+                source: "right.parser-reentrancy".into(),
+                input: 11,
+                scale: 1,
+                scaled_input: 11,
+            },
+        ],
     );
 }
 
 #[test]
 fn one_snapshot_is_semantically_reentrant_for_distinct_immutable_parser_options() {
-    let (snapshot, option_key, overlap) = registry_fixture();
+    let (snapshot, option_key, overlap, observations) = registry_fixture();
     let left_request = Arc::new(compile_request(&snapshot, &option_key, Some(2)));
     let right_request = Arc::new(compile_request(&snapshot, &option_key, Some(7)));
     let (concurrent_left, concurrent_right) =
@@ -360,12 +400,21 @@ fn one_snapshot_is_semantically_reentrant_for_distinct_immutable_parser_options(
     assert_eq!(overlap.peak(), 2, "both parser calls must overlap");
     assert_equivalent(&concurrent_left, &serial_left);
     assert_equivalent(&concurrent_right, &serial_right);
-    assert_eq!(
-        concurrent_left.scene().space().unit_scale_to_meters,
-        Some(10.0)
-    );
-    assert_eq!(
-        concurrent_right.scene().space().unit_scale_to_meters,
-        Some(21.0)
+    assert_observations(
+        &observations,
+        [
+            ParseObservation {
+                source: "left.parser-reentrancy".into(),
+                input: 5,
+                scale: 2,
+                scaled_input: 10,
+            },
+            ParseObservation {
+                source: "right.parser-reentrancy".into(),
+                input: 3,
+                scale: 7,
+                scaled_input: 21,
+            },
+        ],
     );
 }

@@ -1,4 +1,6 @@
-use baozi_core::{FormatId, SceneDraft};
+mod support;
+
+use baozi_core::FormatId;
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
     FormatDescriptor, FormatEncoding, FormatFailureDetailSink, FormatFailureEvidenceProducer,
@@ -6,8 +8,8 @@ use baozi_import::{
     ImportLossSubject, ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer,
     ImportResult, LossPolicy, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
     ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-    ResourceLimitsOverlay, ScopeAbortCause, SourceScopeDetailState, SourceScopeDisposition,
-    SourceScopeEntityKind, import_bytes,
+    ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, SourceScopeDetailState,
+    SourceScopeDisposition, SourceScopeEntityKind, import_bytes,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationOrigin, CancellationToken, ControlCause};
@@ -53,17 +55,17 @@ impl FormatImporter for ScopeImporter {
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         if matches!(self.exit, Exit::NoRecord) {
-            return scope.scene_builder()?.finish_draft();
+            return support::submit_minimal_scene(scope);
         }
         if matches!(self.exit, Exit::TypedSuccess) {
             record_typed(scope)?;
-            return scope.scene_builder()?.finish_draft();
+            return support::submit_minimal_scene(scope);
         }
 
         record(scope, self.identities)?;
         match self.exit {
             Exit::NoRecord => unreachable!(),
-            Exit::Success => scope.scene_builder()?.finish_draft(),
+            Exit::Success => support::submit_minimal_scene(scope),
             Exit::TypedSuccess => unreachable!(),
             Exit::FailureAfterRecord => Err(scope.format_failure(TestFormatFailure)),
             Exit::Duplicate => {

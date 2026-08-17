@@ -8,11 +8,17 @@ use crate::registry::{
     FormatUnavailability, RegistrationInvocationError, RegistryEntry, RegistrySnapshot,
 };
 use baozi_core::FormatId;
+use baozi_operation::{
+    PhysicalStorageAccount, PhysicalStorageAccountCreateError, PhysicalStorageAccountFactory,
+    PhysicalStorageAccountLimits,
+};
 use std::collections::{HashMap, hash_map::Entry};
 use std::fmt;
 use std::hash::Hash;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
+
+const MAX_LIVE_STORAGE_ACCOUNTS_PER_PREPARED_REQUEST: u64 = 1024;
 
 /// Immutable, snapshot-bound result of complete pre-session request compilation.
 #[derive(Clone)]
@@ -21,6 +27,7 @@ pub struct PreparedImportRequest {
     config: ImportConfig,
     overrides: HashMap<usize, Arc<CompiledFormatOptions>>,
     override_order: Vec<usize>,
+    account_factory: PhysicalStorageAccountFactory,
 }
 
 impl PreparedImportRequest {
@@ -62,6 +69,15 @@ impl PreparedImportRequest {
                 .cloned()
                 .unwrap_or_else(|| entry.default_options()),
         )
+    }
+
+    pub(crate) fn try_create_storage_account(
+        &self,
+    ) -> Result<PhysicalStorageAccount, PhysicalStorageAccountCreateError> {
+        let max_retained_bytes = self.limits().max_live_bytes.max(1);
+        let limits = PhysicalStorageAccountLimits::new(max_retained_bytes, max_retained_bytes)
+            .expect("the import storage account limits are nonzero by construction");
+        self.account_factory.try_create_account(limits)
     }
 }
 
@@ -265,11 +281,18 @@ impl RegistrySnapshot {
             override_order.push(index);
         }
 
+        let account_factory = PhysicalStorageAccountFactory::try_new_for_live_accounts(
+            NonZeroU64::new(MAX_LIVE_STORAGE_ACCOUNTS_PER_PREPARED_REQUEST)
+                .expect("the prepared-request account limit is nonzero"),
+        )
+        .map_err(|_| RequestError::AllocationFailed)?;
+
         Ok(PreparedImportRequest {
             snapshot: self.clone(),
             config,
             overrides,
             override_order,
+            account_factory,
         })
     }
 

@@ -343,7 +343,7 @@ fn parent(node: u32, child_ordinal: u32) -> Presence<NodeParent> {
     Presence::Present(NodeParent::new(NodeLocalId::new(node), child_ordinal))
 }
 
-fn trs(parent: Presence<NodeParent>) -> NodeAuthoringNode {
+fn trs(parent: Presence<NodeParent>) -> NodeAuthoringNode<'static> {
     NodeAuthoringNode::new(
         parent,
         AuthoredTransform::identity_trs(),
@@ -352,7 +352,7 @@ fn trs(parent: Presence<NodeParent>) -> NodeAuthoringNode {
     )
 }
 
-fn matrix(parent: Presence<NodeParent>) -> NodeAuthoringNode {
+fn matrix(parent: Presence<NodeParent>) -> NodeAuthoringNode<'static> {
     NodeAuthoringNode::new(
         parent,
         AuthoredTransform::try_matrix(Mat4::IDENTITY).expect("identity matrix transform"),
@@ -387,7 +387,7 @@ fn single_trs_authoring_work_is_accounted_exactly() {
     )
     .expect("single TRS node must validate");
 
-    assert_eq!(control.work, 25);
+    assert_eq!(control.work, 26);
     drop(batch);
 }
 
@@ -442,7 +442,7 @@ fn valid_forest_compiles_parent_before_child_order_and_counts() {
     assert_eq!(batch.reference_count(), 5);
     assert_eq!(batch.matrix_scalar_count(), 32);
     assert_eq!(batch.trs_scalar_count(), 30);
-    assert_eq!(batch.canonical_bytes(), 512);
+    assert_eq!(batch.canonical_bytes(), 572);
     assert_eq!(batch.canonical_order(), &[2, 0, 3, 1, 4]);
     assert_eq!(batch.canonical_index_by_local(), &[2, 4, 1, 3, 5]);
     assert_eq!(control.live.get(), 1);
@@ -576,7 +576,7 @@ fn present_empty_is_valid_and_absent_is_not() {
     let batch = validate(
         Presence::Present(&roots),
         &nodes,
-        SceneValidationLimits::default().with_max_canonical_bytes(88),
+        SceneValidationLimits::default().with_max_canonical_bytes(98),
         &mut control,
     )
     .expect("present empty forest");
@@ -584,7 +584,7 @@ fn present_empty_is_valid_and_absent_is_not() {
     assert_eq!(batch.reference_count(), 0);
     assert_eq!(batch.matrix_scalar_count(), 0);
     assert_eq!(batch.trs_scalar_count(), 0);
-    assert_eq!(batch.canonical_bytes(), 88);
+    assert_eq!(batch.canonical_bytes(), 98);
     assert!(batch.canonical_order().is_empty());
     assert!(batch.canonical_index_by_local().is_empty());
     drop(batch);

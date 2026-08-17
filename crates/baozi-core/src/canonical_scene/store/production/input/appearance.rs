@@ -1,21 +1,27 @@
-use crate::appearance::{MaterialSemanticsRef, TextureBindingSemanticsRef, TextureRole};
+use crate::appearance::{
+    AlphaMode, AppearanceBuildError, ColorInterpretation, MaterialFactors, MaterialSemanticsRef,
+    ShadingModel, TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelMapping,
+    TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
+    validate_material_semantics, validate_texture_binding_semantics,
+};
 use crate::extension::ExtensionMediaType;
 use crate::image::SamplerState;
 
 use super::Presence;
 use super::geometry::AuthoringRange;
+use super::lineage::ResourceIdentityLocalId;
 
 macro_rules! local_id {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub(in crate::canonical_scene::store) struct $name(u32);
+        pub struct $name(u32);
 
         impl $name {
-            pub(in crate::canonical_scene::store) const fn new(index: u32) -> Self {
+            pub const fn new(index: u32) -> Self {
                 Self(index)
             }
 
-            pub(in crate::canonical_scene::store) const fn index(self) -> u32 {
+            pub const fn index(self) -> u32 {
                 self.0
             }
         }
@@ -34,21 +40,38 @@ pub(in crate::canonical_scene::store) enum ImagePayloadAuthoring<'a> {
         bytes: &'a [u8],
         media_type: Presence<&'a ExtensionMediaType>,
     },
+    SessionResource {
+        resource: ResourceIdentityLocalId,
+        media_type: Presence<&'a ExtensionMediaType>,
+    },
 }
 
 /// One source image before its payload enters retained storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) struct ImageAuthoring<'a> {
+pub struct ImageAuthoring<'a> {
     payload: ImagePayloadAuthoring<'a>,
 }
 
 impl<'a> ImageAuthoring<'a> {
-    pub(in crate::canonical_scene::store) const fn encoded(
-        bytes: &'a [u8],
+    pub const fn encoded(bytes: &'a [u8], media_type: Presence<&'a ExtensionMediaType>) -> Self {
+        Self {
+            payload: ImagePayloadAuthoring::Encoded { bytes, media_type },
+        }
+    }
+
+    /// References bytes snapshotted by the owning import session for one profile resource.
+    ///
+    /// `resource` must index the resource table in the same `ProfileAuthoringBatch`. The
+    /// format producer supplies no stable-identity authority and need not load the resource bytes.
+    pub const fn session_resource(
+        resource: ResourceIdentityLocalId,
         media_type: Presence<&'a ExtensionMediaType>,
     ) -> Self {
         Self {
-            payload: ImagePayloadAuthoring::Encoded { bytes, media_type },
+            payload: ImagePayloadAuthoring::SessionResource {
+                resource,
+                media_type,
+            },
         }
     }
 
@@ -59,12 +82,12 @@ impl<'a> ImageAuthoring<'a> {
 
 /// One canonical sampler state before retained construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) struct SamplerAuthoring {
+pub struct SamplerAuthoring {
     state: SamplerState,
 }
 
 impl SamplerAuthoring {
-    pub(in crate::canonical_scene::store) const fn new(state: SamplerState) -> Self {
+    pub const fn new(state: SamplerState) -> Self {
         Self { state }
     }
 
@@ -75,16 +98,13 @@ impl SamplerAuthoring {
 
 /// One scene-local image/sampler pairing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) struct TextureAuthoring {
+pub struct TextureAuthoring {
     image: ImageLocalId,
     sampler: SamplerLocalId,
 }
 
 impl TextureAuthoring {
-    pub(in crate::canonical_scene::store) const fn new(
-        image: ImageLocalId,
-        sampler: SamplerLocalId,
-    ) -> Self {
+    pub const fn new(image: ImageLocalId, sampler: SamplerLocalId) -> Self {
         Self { image, sampler }
     }
 
@@ -99,12 +119,39 @@ impl TextureAuthoring {
 
 /// One material-owned typed texture binding.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct MaterialBindingAuthoring<'a> {
+pub struct MaterialBindingAuthoring<'a> {
     texture: TextureLocalId,
     semantics: TextureBindingSemanticsRef<'a>,
 }
 
 impl<'a> MaterialBindingAuthoring<'a> {
+    /// Creates one binding from public semantic values after checking their cross-field contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_parts(
+        texture: TextureLocalId,
+        role: &'a TextureRole,
+        coordinate_source: &'a TextureCoordinateSource,
+        channel_mapping: &'a TextureChannelMapping,
+        color_interpretation: &'a ColorInterpretation,
+        transform: TextureTransform,
+        strength: TextureStrength,
+        blend: &'a TextureBlendOperation,
+        source_key: Option<&'a TextureSourceKey>,
+    ) -> Result<Self, AppearanceBuildError> {
+        let semantics = TextureBindingSemanticsRef::new(
+            role,
+            coordinate_source,
+            channel_mapping,
+            color_interpretation,
+            transform,
+            strength,
+            blend,
+            source_key,
+        );
+        validate_texture_binding_semantics(semantics)?;
+        Ok(Self::new(texture, semantics))
+    }
+
     pub(in crate::canonical_scene::store) const fn new(
         texture: TextureLocalId,
         semantics: TextureBindingSemanticsRef<'a>,
@@ -129,12 +176,26 @@ impl<'a> MaterialBindingAuthoring<'a> {
 
 /// One logical material owning a contiguous source-ordered binding range.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct MaterialAuthoring<'a> {
+pub struct MaterialAuthoring<'a> {
     bindings: AuthoringRange,
     semantics: MaterialSemanticsRef<'a>,
+    name: Presence<&'a str>,
 }
 
 impl<'a> MaterialAuthoring<'a> {
+    /// Creates one material from public semantic values after checking required factor groups.
+    pub fn try_from_parts(
+        bindings: AuthoringRange,
+        shading_model: &'a ShadingModel,
+        alpha_mode: &'a AlphaMode,
+        double_sided: bool,
+        factors: MaterialFactors,
+    ) -> Result<Self, AppearanceBuildError> {
+        let semantics = MaterialSemanticsRef::new(shading_model, alpha_mode, double_sided, factors);
+        validate_material_semantics(semantics)?;
+        Ok(Self::new(bindings, semantics))
+    }
+
     pub(in crate::canonical_scene::store) const fn new(
         bindings: AuthoringRange,
         semantics: MaterialSemanticsRef<'a>,
@@ -142,7 +203,13 @@ impl<'a> MaterialAuthoring<'a> {
         Self {
             bindings,
             semantics,
+            name: Presence::Absent,
         }
+    }
+
+    pub const fn with_name(mut self, name: &'a str) -> Self {
+        self.name = Presence::Present(name);
+        self
     }
 
     pub(in crate::canonical_scene::store) const fn bindings(self) -> AuthoringRange {
@@ -152,11 +219,15 @@ impl<'a> MaterialAuthoring<'a> {
     pub(in crate::canonical_scene::store) const fn semantics(self) -> MaterialSemanticsRef<'a> {
         self.semantics
     }
+
+    pub(in crate::canonical_scene::store) const fn name(self) -> Presence<&'a str> {
+        self.name
+    }
 }
 
 /// Borrowed appearance-domain input supplied by a format adapter.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct AppearanceAuthoringBatch<'a> {
+pub struct AppearanceAuthoringBatch<'a> {
     images: &'a [ImageAuthoring<'a>],
     samplers: &'a [SamplerAuthoring],
     textures: &'a [TextureAuthoring],
@@ -165,11 +236,11 @@ pub(in crate::canonical_scene::store) struct AppearanceAuthoringBatch<'a> {
 }
 
 impl<'a> AppearanceAuthoringBatch<'a> {
-    pub(in crate::canonical_scene::store) const fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self::new(&[], &[], &[], &[], &[])
     }
 
-    pub(in crate::canonical_scene::store) const fn new(
+    pub const fn new(
         images: &'a [ImageAuthoring<'a>],
         samplers: &'a [SamplerAuthoring],
         textures: &'a [TextureAuthoring],

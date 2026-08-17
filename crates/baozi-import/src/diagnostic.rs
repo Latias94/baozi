@@ -1,7 +1,8 @@
 use crate::error::ScopeAbortCause;
 use crate::format::discard_untrusted_panic_payload;
-use crate::ledger::{ImportProgressPhase, ImportReservation};
+use crate::ledger::ImportProgressPhase;
 use crate::metered_storage::{AccountedReservationVec, AccountedVec};
+use crate::store::ImportStoreReservation;
 use baozi_io::{AssetPath, AuthorityDomain};
 use baozi_operation::{CapacityPlan, CapacityPlanError};
 use std::error::Error;
@@ -819,7 +820,7 @@ impl DiagnosticSink {
 
     pub(crate) fn try_reserve_storage_slot(
         &mut self,
-        reserve: impl FnOnce(u64) -> Result<ImportReservation, ScopeAbortCause>,
+        reserve: impl FnOnce(u64) -> Result<ImportStoreReservation, ScopeAbortCause>,
     ) -> Result<(), ScopeAbortCause> {
         self.diagnostics
             .try_reserve(1, "diagnostic-storage", reserve)
@@ -828,7 +829,7 @@ impl DiagnosticSink {
     pub(crate) fn try_reserve_reservation_slots(
         &mut self,
         additional: usize,
-        reserve: impl FnOnce(u64) -> Result<ImportReservation, ScopeAbortCause>,
+        reserve: impl FnOnce(u64) -> Result<ImportStoreReservation, ScopeAbortCause>,
     ) -> Result<(), ScopeAbortCause> {
         self.reservations
             .try_reserve(additional, "diagnostic-reservation-list", reserve)
@@ -837,8 +838,8 @@ impl DiagnosticSink {
     pub(crate) fn can_commit(
         &self,
         prepared: &PreparedDiagnostic,
-        payload: &Option<ImportReservation>,
-        structural: &Option<ImportReservation>,
+        payload: &Option<ImportStoreReservation>,
+        structural: &Option<ImportStoreReservation>,
     ) -> bool {
         if !prepared.is_stored() {
             return false;
@@ -852,8 +853,8 @@ impl DiagnosticSink {
     pub(crate) fn commit_reserved_infallible(
         &mut self,
         prepared: PreparedDiagnostic,
-        payload: Option<ImportReservation>,
-        structural: Option<ImportReservation>,
+        payload: Option<ImportStoreReservation>,
+        structural: Option<ImportStoreReservation>,
     ) {
         assert!(
             self.can_commit(&prepared, &payload, &structural),
@@ -893,27 +894,6 @@ impl DiagnosticSink {
     #[cfg(test)]
     pub(crate) const fn summary(&self) -> DiagnosticSummary {
         self.summary
-    }
-
-    pub(crate) fn publication_reservation_count(&self) -> Option<usize> {
-        self.diagnostics
-            .capacity_reservation_count()
-            .checked_add(self.reservations.publication_reservation_count()?)
-    }
-
-    pub(crate) fn move_publication_reservations_into(
-        &mut self,
-        target: &mut AccountedReservationVec,
-    ) {
-        let additional = self
-            .publication_reservation_count()
-            .expect("diagnostic reservation count must fit usize");
-        assert!(
-            target.has_slots(additional),
-            "diagnostic publication slots must be admitted before moving tokens"
-        );
-        self.reservations.move_publication_reservations_into(target);
-        self.diagnostics.move_capacity_reservation_into(target);
     }
 
     pub(crate) fn into_terminal(self) -> TerminalDiagnosticEvidence {

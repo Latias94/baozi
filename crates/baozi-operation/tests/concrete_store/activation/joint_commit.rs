@@ -8,6 +8,10 @@ const GENERATION_REJECTION_CODE: u32 = 0x4745_4e45;
 const LEDGER_LIMIT_CODE: u32 = 1;
 const CANCELLATION_CODE: u32 = 1;
 
+fn candidate_final_progress() -> FinalProgress<TestProgress, TestUnit> {
+    FinalProgress::new(TestProgress::Build, TestUnit::Items, 2)
+}
+
 type TestCanonicalCandidate =
     baozi_operation::__canonical_activation::CanonicalCandidateStoreSession<
         TestOwner,
@@ -56,6 +60,7 @@ fn candidate_with_operation(
     };
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -120,7 +125,10 @@ fn ready_permit(
     ScalarSequence<u8>,
     EvidenceLeafTag,
 > {
-    match candidate.try_issue_freeze_permit(final_progress()).unwrap() {
+    match candidate
+        .try_issue_freeze_permit(candidate_final_progress())
+        .unwrap()
+    {
         CanonicalFreezePermitIssue::Ready(permit) => permit,
         CanonicalFreezePermitIssue::Interrupted(_) => panic!("final progress must remain open"),
         CanonicalFreezePermitIssue::DestinationRejected(_) => {
@@ -234,7 +242,10 @@ fn destination_rejection_preserves_ordinary_failure_preparation() {
     let factory = factory(1);
     let account = account(&factory);
     let (candidate, keys) = candidate_with_operation(operation_with_commit_limit(&account, 0));
-    let rejected = match candidate.try_issue_freeze_permit(final_progress()).unwrap() {
+    let rejected = match candidate
+        .try_issue_freeze_permit(candidate_final_progress())
+        .unwrap()
+    {
         CanonicalFreezePermitIssue::Ready(_) => {
             panic!("the committed-output limit must reject the destination")
         }
@@ -262,7 +273,7 @@ fn destination_rejection_preserves_ordinary_failure_preparation() {
         }
     };
     let (prepared, _cause) = validated
-        .try_prepare(final_progress())
+        .try_prepare(candidate_final_progress())
         .unwrap()
         .into_parts();
     let prepared = match prepared {
@@ -290,7 +301,10 @@ fn final_progress_interruption_never_issues_a_success_permit() {
     let control = OperationControl::default().with_cancellation(cancellation.clone());
     let (candidate, _keys) = candidate_with_control(&account, control);
     cancellation.cancel();
-    let interrupted = match candidate.try_issue_freeze_permit(final_progress()).unwrap() {
+    let interrupted = match candidate
+        .try_issue_freeze_permit(candidate_final_progress())
+        .unwrap()
+    {
         CanonicalFreezePermitIssue::Ready(_) => panic!("cancelled progress cannot issue a permit"),
         CanonicalFreezePermitIssue::Interrupted(interrupted) => interrupted,
         CanonicalFreezePermitIssue::DestinationRejected(_) => {
@@ -333,6 +347,7 @@ fn non_copy_output_remains_contained_before_the_success_binder() {
     };
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -369,7 +384,10 @@ fn non_copy_output_remains_contained_before_the_success_binder() {
         | CanonicalCentralValidationOutcome::Fallback(_)
         | CanonicalCentralValidationOutcome::Interrupted(_) => panic!("validation must succeed"),
     };
-    let permit = match candidate.try_issue_freeze_permit(final_progress()).unwrap() {
+    let permit = match candidate
+        .try_issue_freeze_permit(candidate_final_progress())
+        .unwrap()
+    {
         CanonicalFreezePermitIssue::Ready(permit) => permit,
         CanonicalFreezePermitIssue::Interrupted(_) => panic!("final progress must remain open"),
         CanonicalFreezePermitIssue::DestinationRejected(_) => {
@@ -424,6 +442,7 @@ fn non_copy_proof_remains_contained_before_the_success_binder() {
     };
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let evidence = lane
                     .try_retain_sequence(
@@ -463,7 +482,10 @@ fn non_copy_proof_remains_contained_before_the_success_binder() {
         | CanonicalCentralValidationOutcome::Fallback(_)
         | CanonicalCentralValidationOutcome::Interrupted(_) => panic!("validation must succeed"),
     };
-    let permit = match candidate.try_issue_freeze_permit(final_progress()).unwrap() {
+    let permit = match candidate
+        .try_issue_freeze_permit(candidate_final_progress())
+        .unwrap()
+    {
         CanonicalFreezePermitIssue::Ready(permit) => permit,
         CanonicalFreezePermitIssue::Interrupted(_) => panic!("final progress must remain open"),
         CanonicalFreezePermitIssue::DestinationRejected(_) => {

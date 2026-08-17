@@ -149,7 +149,7 @@ fn scene_envelope_accounts_for_the_complete_scene_shape() {
     let populated_nodes =
         SceneInputEnvelope::try_new(populated_input.batch(), SceneValidationLimits::default())
             .expect("the populated node shape is representable");
-    assert_eq!(populated_nodes.terminal_attribution_slots(), 34);
+    assert_eq!(populated_nodes.terminal_attribution_slots(), 35);
 }
 
 #[test]
@@ -290,9 +290,10 @@ fn scene_envelope_reserves_complete_appearance_payload_envelope() {
     let envelope = SceneInputEnvelope::try_new(input, SceneValidationLimits::default())
         .expect("appearance envelope should be representable without deep validation");
 
-    // Binding semantics, optional source keys, and material factors each own an independently
-    // attributable aggregate payload block; the mandatory profile adds its complete ceiling.
-    assert_eq!(envelope.terminal_attribution_slots(), 37);
+    // Binding semantics, optional source keys, material factors, and material names each own an
+    // independently attributable aggregate payload block; the mandatory profile adds its
+    // complete ceiling.
+    assert_eq!(envelope.terminal_attribution_slots(), 38);
 }
 
 #[test]
@@ -321,9 +322,13 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
             .expect("empty spatial domain validates independently");
     let node_batch = validate(Presence::Present(&roots), &nodes, defaults, &mut control)
         .expect("node domain validates independently");
-    let appearance_batch =
-        validate_appearance_batch_with_control(appearance_input, defaults, &mut control)
-            .expect("empty appearance domain validates independently");
+    let appearance_batch = validate_appearance_batch_with_control(
+        appearance_input,
+        super::super::ResourceSnapshotAuthoringTable::empty(),
+        defaults,
+        &mut control,
+    )
+    .expect("empty appearance domain validates independently");
     let geometry_batch = validate_geometry_batch_with_control(
         geometry_input,
         nodes.len(),

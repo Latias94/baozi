@@ -588,6 +588,7 @@ fn central_evidence_builder_error_preserves_domain_cause_before_partial_resoluti
     let expected = StoreBuildError::domain(DOMAIN_CODE).unwrap();
     let outcome = activated
         .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
             |lane, _output| {
                 let cause = lane
                     .try_retain_sequence(

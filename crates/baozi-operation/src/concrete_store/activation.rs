@@ -32,7 +32,7 @@ use super::{
     ValidatedStoreFailure, ValidatedStoreSuccess, classify_prepared_fallback,
     map_publication_error, map_writer_error,
 };
-use crate::control::{ProgressPhase, ProgressUnit, discard_untrusted_panic_payload};
+use crate::control::{ControlCause, ProgressPhase, ProgressUnit, discard_untrusted_panic_payload};
 use crate::coordinator::FinalProgress;
 use crate::ledger::STARTUP_ACCOUNT_SHARE_STEP_COUNT;
 use crate::owner::OperationOwner;
@@ -1348,6 +1348,16 @@ where
         }
         Ok(Ok(())) => {}
     }
+    if plan.is_success_capable() {
+        if let Some(failure_code) = operation.activation_terminal_cause() {
+            return Err(ActivationOpenFailure::Recoverable {
+                operation,
+                cause: StoreRuntimeError::SuccessOutcomeRejected,
+                failure_code,
+                fallback_only: false,
+            });
+        }
+    }
     let RetainedStoreOperation {
         raw,
         domain,
@@ -1476,7 +1486,8 @@ where
     operation: &'borrow mut RetainedStoreOperation<O, PP, U, L>,
     first_fault: &'borrow mut Option<ActivationFirstFault>,
     phase: StorePhaseKey,
-    dimension: StoreDimensionKey,
+    work_dimension: StoreDimensionKey,
+    scratch_dimension: StoreDimensionKey,
     state: &'borrow mut ScopedSemanticState,
     receipt_brand: &'scope ScopedReceiptBrand,
     work_batch: work_batch::CompletionPrefixBatch,
@@ -1740,6 +1751,7 @@ pub struct CanonicalSuccessRequirements {
     canonical: CanonicalTableShape,
     expected_materialized_blocks: usize,
     validation_work: NonZeroU64,
+    semantic_bytes: u64,
 }
 
 impl CanonicalSuccessRequirements {
@@ -1757,7 +1769,14 @@ impl CanonicalSuccessRequirements {
             canonical,
             expected_materialized_blocks,
             validation_work,
+            semantic_bytes: 0,
         })
+    }
+
+    /// Binds one exact semantic-byte observation derived from the same sealed construction plan.
+    pub const fn with_semantic_bytes(mut self, semantic_bytes: u64) -> Self {
+        self.semantic_bytes = semantic_bytes;
+        self
     }
 
     /// Returns the exact structural work for this success shape and its session-bound failure shape.
@@ -1777,10 +1796,79 @@ struct BoundScopedFailureRequest {
 struct BoundScopedSuccessRequest {
     canonical_plan: RetainedStoreBlockTablePlan,
     materialization_work_dimension: StoreDimensionKey,
+    materialization_scratch_dimension: StoreDimensionKey,
+    validation_phase: StorePhaseKey,
     validation_work_dimension: StoreDimensionKey,
+    validation_scratch_dimension: StoreDimensionKey,
     canonical_destination_dimension: StoreDimensionKey,
     validation_work: NonZeroU64,
     expected_materialized_blocks: usize,
+    semantic_bytes: u64,
+}
+
+/// Host-owned dimensions for semantic planning and retained materialization work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalMaterializationRole {
+    work_dimension: StoreDimensionKey,
+    scratch_dimension: StoreDimensionKey,
+}
+
+impl CanonicalMaterializationRole {
+    pub const fn new(
+        work_dimension: StoreDimensionKey,
+        scratch_dimension: StoreDimensionKey,
+    ) -> Self {
+        Self {
+            work_dimension,
+            scratch_dimension,
+        }
+    }
+}
+
+/// Host-owned phase and dimensions for central validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalValidationRole {
+    phase: StorePhaseKey,
+    work_dimension: StoreDimensionKey,
+    scratch_dimension: StoreDimensionKey,
+}
+
+/// Owner-defined progress vocabulary emitted exactly when central validation begins.
+///
+/// The sealed success requirements remain the sole authority for the total validation work; the
+/// owner supplies only the phase and unit labels understood by its observer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalValidationProgress<PP, U> {
+    phase: PP,
+    unit: U,
+}
+
+impl<PP: Copy, U: Copy> CanonicalValidationProgress<PP, U> {
+    pub const fn new(phase: PP, unit: U) -> Self {
+        Self { phase, unit }
+    }
+
+    const fn phase(self) -> PP {
+        self.phase
+    }
+
+    const fn unit(self) -> U {
+        self.unit
+    }
+}
+
+impl CanonicalValidationRole {
+    pub const fn new(
+        phase: StorePhaseKey,
+        work_dimension: StoreDimensionKey,
+        scratch_dimension: StoreDimensionKey,
+    ) -> Self {
+        Self {
+            phase,
+            work_dimension,
+            scratch_dimension,
+        }
+    }
 }
 
 /// Host-owned role policy consumed before any canonical activation request is accepted.
@@ -1792,33 +1880,51 @@ pub struct CanonicalActivationPolicy {
     canonical_writer: RetainedStoreWriterPlan,
     outcome_evidence_writer: RetainedStoreWriterPlan,
     materialization_work_dimension: StoreDimensionKey,
+    materialization_scratch_dimension: StoreDimensionKey,
+    validation_phase: StorePhaseKey,
     validation_work_dimension: StoreDimensionKey,
+    validation_scratch_dimension: StoreDimensionKey,
     canonical_destination_dimension: StoreDimensionKey,
     outcome_evidence_destination_dimension: StoreDimensionKey,
+    semantic_bytes_dimension: Option<StoreDimensionKey>,
 }
 
 impl CanonicalActivationPolicy {
     pub const fn new(
         canonical_writer: RetainedStoreWriterPlan,
         outcome_evidence_writer: RetainedStoreWriterPlan,
-        materialization_work_dimension: StoreDimensionKey,
-        validation_work_dimension: StoreDimensionKey,
+        materialization: CanonicalMaterializationRole,
+        validation: CanonicalValidationRole,
         canonical_destination_dimension: StoreDimensionKey,
         outcome_evidence_destination_dimension: StoreDimensionKey,
     ) -> Self {
         Self {
             canonical_writer,
             outcome_evidence_writer,
-            materialization_work_dimension,
-            validation_work_dimension,
+            materialization_work_dimension: materialization.work_dimension,
+            materialization_scratch_dimension: materialization.scratch_dimension,
+            validation_phase: validation.phase,
+            validation_work_dimension: validation.work_dimension,
+            validation_scratch_dimension: validation.scratch_dimension,
             canonical_destination_dimension,
             outcome_evidence_destination_dimension,
+            semantic_bytes_dimension: None,
         }
     }
 
-    fn authoring_keys(&self) -> (StorePhaseKey, StoreDimensionKey) {
+    /// Projects exact sealed semantic bytes into one host-owned accounting dimension.
+    pub const fn with_semantic_bytes_dimension(mut self, dimension: StoreDimensionKey) -> Self {
+        self.semantic_bytes_dimension = Some(dimension);
+        self
+    }
+
+    fn authoring_keys(&self) -> (StorePhaseKey, StoreDimensionKey, StoreDimensionKey) {
         let (phase, _) = self.canonical_writer.keys_for_publication_validation();
-        (phase, self.materialization_work_dimension)
+        (
+            phase,
+            self.materialization_work_dimension,
+            self.materialization_scratch_dimension,
+        )
     }
 
     fn bind_scoped_failure(
@@ -1840,10 +1946,14 @@ impl CanonicalActivationPolicy {
         Ok(BoundScopedSuccessRequest {
             canonical_plan: requirements.canonical.bind(self.canonical_writer)?,
             materialization_work_dimension: self.materialization_work_dimension,
+            materialization_scratch_dimension: self.materialization_scratch_dimension,
+            validation_phase: self.validation_phase,
             validation_work_dimension: self.validation_work_dimension,
+            validation_scratch_dimension: self.validation_scratch_dimension,
             canonical_destination_dimension: self.canonical_destination_dimension,
             validation_work: requirements.validation_work,
             expected_materialized_blocks: requirements.expected_materialized_blocks,
+            semantic_bytes: requirements.semantic_bytes,
         })
     }
 }
@@ -1868,6 +1978,7 @@ where
     first_fault: &'lane mut Option<ActivationFirstFault>,
     materialization_phase: StorePhaseKey,
     materialization_work_dimension: StoreDimensionKey,
+    materialization_scratch_dimension: StoreDimensionKey,
 }
 
 /// Opaque result returned by the scoped materialization callback.
@@ -1920,6 +2031,7 @@ pub struct ActivatedCanonicalStoreSession<
     failure_work: FailureEvidenceWorkBudget,
     validation_phase: StorePhaseKey,
     validation_work_dimension: StoreDimensionKey,
+    validation_scratch_dimension: StoreDimensionKey,
     canonical_destination_dimension: StoreDimensionKey,
     outcome_evidence_destination_dimension: StoreDimensionKey,
     validation_work: NonZeroU64,
@@ -2110,10 +2222,11 @@ pub enum CanonicalFreezePermitIssue<
 }
 
 /// Stable typed classification for a final-progress or already-latched runtime interruption.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalFreezeInterruption {
     class: CanonicalFreezeInterruptionClass,
     stable_code: u32,
+    control_cause: Option<ControlCause>,
 }
 
 /// Trusted terminal class retained across generation admission.
@@ -2863,8 +2976,8 @@ mod scoped_transition_tests {
             CanonicalActivationPolicy::new(
                 writer_plan(keys, 2, 2),
                 writer_plan(keys, 2, 2),
-                keys.dimension,
-                keys.dimension,
+                CanonicalMaterializationRole::new(keys.dimension, keys.dimension),
+                CanonicalValidationRole::new(keys.phase, keys.dimension, keys.dimension),
                 keys.dimension,
                 keys.dimension,
             ),

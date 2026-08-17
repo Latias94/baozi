@@ -42,6 +42,7 @@ where
     #[allow(clippy::type_complexity, clippy::result_large_err)]
     pub fn validate_centrally<EvidenceKind, EvidenceTag, Proof, E>(
         self,
+        progress: CanonicalValidationProgress<PP, U>,
         build_evidence: impl for<'lane> FnMut(
             &mut CanonicalOutcomeEvidenceLane<'lane, O, PP, U, L>,
             &T,
@@ -94,6 +95,7 @@ where
             failure_work,
             validation_phase,
             validation_work_dimension,
+            validation_scratch_dimension,
             canonical_destination_dimension,
             outcome_evidence_destination_dimension,
             validation_work,
@@ -170,11 +172,19 @@ where
             });
         }
 
+        assembly.report_progress(
+            progress.phase(),
+            progress.unit(),
+            0,
+            Some(validation_work.get()),
+        );
+
         let mut attempt = None;
         let mut exact = None;
         let mut validation_first_fault = None;
         let validation = assembly.validate_success_controlled(
             work_dimension,
+            validation_scratch_dimension,
             canonical_root,
             evidence_root,
             |session, canonical, evidence, control| {
@@ -572,7 +582,11 @@ where
                     store,
                 }))
             }
-            StoreSuccessFreezePermitIssue::RichFailure { failure, cause } => {
+            StoreSuccessFreezePermitIssue::RichFailure {
+                failure,
+                cause,
+                control_cause,
+            } => {
                 let proof_drop_failed = drop_scoped_value(proof).is_err();
                 let output_drop_failed = drop_scoped_value(output).is_err();
                 if proof_drop_failed || output_drop_failed {
@@ -583,7 +597,7 @@ where
                 Ok(CanonicalFreezePermitIssue::Interrupted(
                     RootedFailureEvidence {
                         failure,
-                        cause: CanonicalFreezeInterruption::from_failure_code(cause),
+                        cause: CanonicalFreezeInterruption::from_failure_code(cause, control_cause),
                         failure_work,
                         outcome_evidence_destination_dimension: outcome_evidence_dimension,
                         _lifecycle: PhantomData::<FrozenFailureState>,
@@ -601,7 +615,7 @@ where
                 Ok(CanonicalFreezePermitIssue::DestinationRejected(
                     RootedFailureEvidence {
                         failure,
-                        cause: CanonicalFreezeInterruption::from_failure_code(cause),
+                        cause: CanonicalFreezeInterruption::from_failure_code(cause, None),
                         failure_work,
                         outcome_evidence_destination_dimension: outcome_evidence_dimension,
                         _lifecycle: PhantomData::<OrdinaryFailureState>,
@@ -613,7 +627,10 @@ where
 }
 
 impl CanonicalFreezeInterruption {
-    fn from_failure_code(cause: PreparationFailureCode) -> Self {
+    fn from_failure_code(
+        cause: PreparationFailureCode,
+        control_cause: Option<ControlCause>,
+    ) -> Self {
         let class = match cause.class() {
             PreparationFailureClass::Control => CanonicalFreezeInterruptionClass::Control,
             PreparationFailureClass::Ledger => CanonicalFreezeInterruptionClass::Ledger,
@@ -624,15 +641,20 @@ impl CanonicalFreezeInterruption {
         Self {
             class,
             stable_code: cause.code(),
+            control_cause,
         }
     }
 
-    pub const fn class(self) -> CanonicalFreezeInterruptionClass {
+    pub const fn class(&self) -> CanonicalFreezeInterruptionClass {
         self.class
     }
 
-    pub const fn stable_code(self) -> u32 {
+    pub const fn stable_code(&self) -> u32 {
         self.stable_code
+    }
+
+    pub const fn control_cause(&self) -> Option<&ControlCause> {
+        self.control_cause.as_ref()
     }
 }
 

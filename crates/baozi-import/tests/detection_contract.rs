@@ -3,15 +3,18 @@
     reason = "detection failures retain complete bounded terminal evidence by value"
 )]
 
-use baozi_core::{FormatId, SceneDraft, SceneSpace};
+mod support;
+
+use baozi_core::FormatId;
 use baozi_import::{
     CapabilityStatus, DetectionEvidence, DetectionFailure, DetectionInconclusive, DetectionOptions,
     DetectionOutcome, DetectionResult, DetectionScope, FormatCapability, FormatDescriptor,
     FormatEncoding, FormatFailureEvidenceProducer, FormatImporter, FormatSelection, ImportCause,
     ImportConfigOverlay, ImportFailure, ImportOperationControl, ImportPhase, ImportProgressPhase,
-    ImportProgressUnit, ImportRequest, ImportRequestLayer, ImportRunError, OptionCompileLimits,
-    ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, import_bytes,
+    ImportProgressUnit, ImportRequest, ImportRequestLayer, ImportRunError, ImportTerminalCause,
+    ImportTerminalFailureClass, OptionCompileLimits, ParseResult, ParseScope,
+    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
+    SceneDraft, import_bytes,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationToken, ProgressDecision, ProgressEvent};
@@ -56,7 +59,7 @@ impl DetectorBehavior {
 enum ParseBehavior {
     Success,
     FormatFailure,
-    InvalidScene,
+    RejectedScene,
     Cancel(CancellationToken),
 }
 
@@ -114,20 +117,13 @@ impl FormatImporter for TestImporter {
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         match &self.parser {
-            ParseBehavior::Success => scope.scene_builder()?.finish_draft(),
+            ParseBehavior::Success => support::submit_minimal_scene(scope),
             ParseBehavior::FormatFailure => Err(scope.format_failure(TestFormatCause)),
-            ParseBehavior::InvalidScene => {
-                let mut builder = scope.scene_builder()?;
-                builder.set_space(SceneSpace {
-                    unit_scale_to_meters: Some(f32::NAN),
-                    ..SceneSpace::default()
-                })?;
-                builder.finish_draft()
-            }
+            ParseBehavior::RejectedScene => support::submit_invalid_parent_scene(scope),
             ParseBehavior::Cancel(token) => {
                 token.cancel();
                 scope.poll()?;
-                scope.scene_builder()?.finish_draft()
+                support::submit_minimal_scene(scope)
             }
         }
     }
@@ -656,7 +652,7 @@ fn probe_budget_boundary_preserves_typed_inconclusive_evidence() {
 #[derive(Debug, Clone, Copy)]
 enum TerminalCase {
     Parse,
-    Validation,
+    AuthoringRejection,
     Cancellation,
     Publication,
 }
@@ -668,14 +664,14 @@ fn ordered_detection_evidence_survives_every_post_selection_terminal_failure() {
 
     for terminal_case in [
         TerminalCase::Parse,
-        TerminalCase::Validation,
+        TerminalCase::AuthoringRejection,
         TerminalCase::Cancellation,
         TerminalCase::Publication,
     ] {
         let cancellation = CancellationToken::new();
         let parser = match terminal_case {
             TerminalCase::Parse => ParseBehavior::FormatFailure,
-            TerminalCase::Validation => ParseBehavior::InvalidScene,
+            TerminalCase::AuthoringRejection => ParseBehavior::RejectedScene,
             TerminalCase::Cancellation => ParseBehavior::Cancel(cancellation.clone()),
             TerminalCase::Publication => ParseBehavior::Success,
         };
@@ -719,7 +715,9 @@ fn ordered_detection_evidence_survives_every_post_selection_terminal_failure() {
                     }
                 },
             ),
-            TerminalCase::Parse | TerminalCase::Validation => ImportOperationControl::default(),
+            TerminalCase::Parse | TerminalCase::AuthoringRejection => {
+                ImportOperationControl::default()
+            }
         };
         let failure = operation_failure(
             import_bytes(
@@ -757,8 +755,9 @@ fn ordered_detection_evidence_survives_every_post_selection_terminal_failure() {
         );
 
         let expected_phase = match terminal_case {
-            TerminalCase::Parse | TerminalCase::Cancellation => ImportPhase::SelectionCompleted,
-            TerminalCase::Validation => ImportPhase::DraftBuilt,
+            TerminalCase::Parse | TerminalCase::AuthoringRejection | TerminalCase::Cancellation => {
+                ImportPhase::SelectionCompleted
+            }
             TerminalCase::Publication => ImportPhase::Validated,
         };
         assert_eq!(failure.last_completed().phase(), expected_phase);
@@ -769,8 +768,15 @@ fn ordered_detection_evidence_survives_every_post_selection_terminal_failure() {
                 };
                 assert_eq!(envelope.code(), "test.detection.parser_failure");
             }
-            TerminalCase::Validation => {
-                assert!(matches!(failure.cause(), ImportCause::Validation(_)));
+            TerminalCase::AuthoringRejection => {
+                let ImportCause::OperationTerminal(terminal) = failure.cause() else {
+                    panic!("expected canonical authoring terminal rejection");
+                };
+                assert_eq!(terminal.class(), ImportTerminalFailureClass::Requested);
+                assert_eq!(
+                    failure.ledger().terminal_cause(),
+                    ImportTerminalCause::Failure(*terminal)
+                );
             }
             TerminalCase::Cancellation | TerminalCase::Publication => {
                 assert!(matches!(failure.cause(), ImportCause::Scope(_)));

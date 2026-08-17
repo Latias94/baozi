@@ -1,87 +1,114 @@
 mod common;
 
-use baozi_core::{PrimitiveTopology, Vec2, Vec3, VertexAttributeData};
 use baozi_format_ply::PlyFailureCode;
 use baozi_import::ResourceLimits;
 use common::{
     TestResult, ascii_point_cloud, ascii_quad, ascii_triangle, assert_resource_limit,
     binary_triangle, expected_error, expected_ply_failure, import_bytes, import_bytes_result,
-    ply_unsigned_detail,
+    ply_unsigned_detail, scene_snapshot, snapshot_line, snapshot_line_containing,
 };
 
 #[test]
 fn imports_ascii_triangle_with_common_vertex_streams() -> TestResult<()> {
     let report = import_bytes("triangle.ply", ascii_triangle())?;
-    let scene = report.scene();
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
     assert_eq!(report.format().id().as_str(), "org.baozi.ply");
     assert_eq!(report.source().as_str(), "triangle.ply");
     assert!(report.ledger().current_live_bytes() == 0);
-    assert_eq!(scene.meshes().len(), 1);
-    assert_eq!(scene.nodes().len(), 2);
-    assert_eq!(scene.nodes()[1].name.as_deref(), Some("PLY"));
-
-    let mesh = &scene.meshes()[0];
-    assert_eq!(mesh.name.as_deref(), Some("PLY Mesh"));
-    assert_eq!(mesh.topology, PrimitiveTopology::Triangles);
-    assert_eq!(
-        mesh.positions,
-        vec![
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-        ]
-    );
-    assert_eq!(mesh.normals, vec![Vec3::new(0.0, 0.0, 1.0); 3]);
-    assert_eq!(mesh.texcoords[0][1], Vec2::new(1.0, 0.0));
-    assert_eq!(mesh.colors[0][0].r, 1.0);
-    assert_eq!(mesh.colors[0][1].g, 1.0);
-    assert_eq!(mesh.colors[0][2].b, 1.0);
-    assert_eq!(mesh.indices, vec![0, 1, 2]);
-    assert!(mesh.face_vertex_counts.is_empty());
-    assert_eq!(
-        mesh.metadata.get("ply:format"),
-        Some(&baozi_core::MetadataValue::String("ascii".to_owned()))
-    );
-    assert_eq!(
-        mesh.metadata.get("ply:comment.0"),
-        Some(&baozi_core::MetadataValue::String(
-            "fixture triangle".to_owned()
-        ))
-    );
-    assert_eq!(mesh.custom_attributes.len(), 1);
-    assert_eq!(mesh.custom_attributes[0].name, "ply:temperature");
-    assert!(matches!(
-        &mesh.custom_attributes[0].data,
-        VertexAttributeData::F32(values)
-            if values == &vec![0.5, 0.75, 1.0]
+    assert_eq!(snapshot.node_count(), 1);
+    assert_eq!(snapshot.root_count(), 1);
+    assert_eq!(snapshot.logical_mesh_count(), 1);
+    assert_eq!(snapshot.primitive_count(), 1);
+    assert_eq!(snapshot.attribute_count(), 5);
+    assert_eq!(snapshot.mesh_instance_count(), 1);
+    assert_eq!(snapshot.primitive_index_count(), 3);
+    assert_eq!(snapshot.polygon_boundary_count(), 0);
+    assert_eq!(snapshot.f32_scalar_count(), 39);
+    assert_eq!(snapshot.u32_scalar_count(), 0);
+    assert_eq!(snapshot.i32_scalar_count(), 0);
+    assert_eq!(snapshot.profile_metadata_entry_count(), 4);
+    assert!(snapshot_line(&snapshot, "node[0]").contains("name=PLY"));
+    assert!(snapshot_line(&snapshot, "logical_mesh[0]").contains("name=PLY Mesh"));
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains(concat!(
+        "topology=triangle_list vertices=3 corners=3 faces=1 ",
+        "polygon_boundaries(absent,total=0)=[] indices(present,total=3)=[0,1,2]"
+    )));
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains(concat!(
+        "semantic=position semantic_set=0 domain=vertex scalar=f32 lanes=3 ",
+        "normalization=none payload=dense elements=3"
+    )));
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains(
+        "values(present,total=9)=[0x00000000,0x00000000,0x00000000,0x3f800000,0x00000000,0x00000000,0x00000000,0x3f800000,0x00000000]"
     ));
+    assert!(snapshot_line(&snapshot, "attribute[1]").contains(
+        "values(present,total=9)=[0x00000000,0x00000000,0x3f800000,0x00000000,0x00000000,0x3f800000,0x00000000,0x00000000,0x3f800000]"
+    ));
+    assert!(
+        snapshot_line(&snapshot, "attribute[2]")
+            .contains("semantic=texcoord semantic_set=0 domain=vertex scalar=f32 lanes=2")
+    );
+    assert!(snapshot_line(&snapshot, "attribute[2]").contains(
+        "values(present,total=6)=[0x00000000,0x00000000,0x3f800000,0x00000000,0x00000000,0x3f800000]"
+    ));
+    assert!(
+        snapshot_line(&snapshot, "attribute[3]")
+            .contains("semantic=color semantic_set=0 domain=vertex scalar=f32 lanes=4")
+    );
+    assert!(snapshot_line(&snapshot, "attribute[3]").contains(
+        "values(present,total=12)=[0x3f800000,0x00000000,0x00000000,0x3f800000,0x00000000,0x3f800000,0x00000000,0x3f800000,0x00000000,0x00000000,0x3f800000,0x3f800000]"
+    ));
+    assert!(
+        snapshot_line(&snapshot, "attribute[4]")
+            .contains("semantic=ply:temperature semantic_set=0 domain=vertex scalar=f32 lanes=1")
+    );
+    assert!(
+        snapshot_line(&snapshot, "attribute[4]")
+            .contains("values(present,total=3)=[0x3f000000,0x3f400000,0x3f800000]")
+    );
+    assert!(snapshot_line_containing(&snapshot, "key=ply:format").contains("string=ascii"));
+    // Indexed header metadata uses canonical NamespacedName-safe underscores;
+    // the source values and deterministic ordering remain unchanged.
+    assert!(
+        snapshot_line_containing(&snapshot, "key=ply:comment_0")
+            .contains("string=fixture triangle")
+    );
+    assert!(
+        snapshot_line_containing(&snapshot, "key=ply:obj_info_0")
+            .contains("string=generated by baozi tests")
+    );
     Ok(())
 }
 
 #[test]
 fn imports_ascii_point_cloud_without_faces() -> TestResult<()> {
     let report = import_bytes("points.ply", ascii_point_cloud())?;
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
-    let mesh = &report.scene().meshes()[0];
-    assert_eq!(mesh.topology, PrimitiveTopology::Points);
-    assert_eq!(mesh.positions.len(), 2);
-    assert!(mesh.indices.is_empty());
-    assert!(mesh.face_vertex_counts.is_empty());
+    assert_eq!(snapshot.logical_mesh_count(), 1);
+    assert_eq!(snapshot.primitive_index_count(), 0);
+    assert_eq!(snapshot.polygon_boundary_count(), 0);
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains(
+        "topology=points vertices=2 corners=2 faces=2 polygon_boundaries(absent,total=0)=[] indices(absent,total=0)=[]"
+    ));
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains("elements=2"));
     Ok(())
 }
 
 #[test]
 fn imports_ascii_quad_as_polygon() -> TestResult<()> {
     let report = import_bytes("quad.ply", ascii_quad())?;
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
-    let mesh = &report.scene().meshes()[0];
-    assert_eq!(mesh.topology, PrimitiveTopology::Polygons);
-    assert_eq!(mesh.indices, vec![0, 1, 2, 3]);
-    assert_eq!(mesh.face_vertex_counts, vec![4]);
+    assert_eq!(snapshot.primitive_index_count(), 4);
+    assert_eq!(snapshot.polygon_boundary_count(), 1);
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains(concat!(
+        "topology=polygons vertices=4 corners=4 faces=1 ",
+        "polygon_boundaries(present,total=1)=[4] indices(present,total=4)=[0,1,2,3]"
+    )));
     Ok(())
 }
 
@@ -89,17 +116,16 @@ fn imports_ascii_quad_as_polygon() -> TestResult<()> {
 fn imports_binary_little_endian_triangle() -> TestResult<()> {
     let bytes = binary_triangle(true);
     let report = import_bytes("triangle-le.ply", &bytes)?;
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
-    let mesh = &report.scene().meshes()[0];
-    assert_eq!(mesh.topology, PrimitiveTopology::Triangles);
-    assert_eq!(mesh.positions[1], Vec3::new(1.0, 0.0, 0.0));
-    assert_eq!(mesh.indices, vec![0, 1, 2]);
-    assert_eq!(
-        mesh.metadata.get("ply:format"),
-        Some(&baozi_core::MetadataValue::String(
-            "binary_little_endian".to_owned()
-        ))
+    assert_eq!(snapshot.primitive_index_count(), 3);
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains(
+        "values(present,total=9)=[0x00000000,0x00000000,0x00000000,0x3f800000,0x00000000,0x00000000,0x00000000,0x3f800000,0x00000000]"
+    ));
+    assert!(
+        snapshot_line_containing(&snapshot, "key=ply:format")
+            .contains("string=binary_little_endian")
     );
     Ok(())
 }
@@ -108,17 +134,15 @@ fn imports_binary_little_endian_triangle() -> TestResult<()> {
 fn imports_binary_big_endian_triangle() -> TestResult<()> {
     let bytes = binary_triangle(false);
     let report = import_bytes("triangle-be.ply", &bytes)?;
+    let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
-    let mesh = &report.scene().meshes()[0];
-    assert_eq!(mesh.topology, PrimitiveTopology::Triangles);
-    assert_eq!(mesh.positions[2], Vec3::new(0.0, 1.0, 0.0));
-    assert_eq!(mesh.indices, vec![0, 1, 2]);
-    assert_eq!(
-        mesh.metadata.get("ply:format"),
-        Some(&baozi_core::MetadataValue::String(
-            "binary_big_endian".to_owned()
-        ))
+    assert_eq!(snapshot.primitive_index_count(), 3);
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains(
+        "values(present,total=9)=[0x00000000,0x00000000,0x00000000,0x3f800000,0x00000000,0x00000000,0x00000000,0x3f800000,0x00000000]"
+    ));
+    assert!(
+        snapshot_line_containing(&snapshot, "key=ply:format").contains("string=binary_big_endian")
     );
     Ok(())
 }

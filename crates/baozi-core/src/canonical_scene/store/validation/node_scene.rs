@@ -2,12 +2,12 @@ use baozi_operation::__canonical_activation::{
     CanonicalValidationMember, CanonicalValidationSession, OutcomeEvidenceValidationMember,
 };
 use baozi_operation::{
-    CanonicalRecordRef, CanonicalSequenceRef, OperationOwner, OutcomeEvidenceRecordRef,
-    ProgressPhase, ProgressUnit, RecordBlock, ScalarSequence, StoreEvidenceValidationSession,
-    StoreValidationSession, StoreWorkError,
+    CanonicalRecordRef, CanonicalSequenceRef, CanonicalUtf8Ref, OperationOwner,
+    OutcomeEvidenceRecordRef, ProgressPhase, ProgressUnit, RecordBlock, ScalarSequence,
+    StoreEvidenceValidationSession, StoreValidationSession, StoreWorkError, Utf8Block,
 };
 
-use crate::entity::AuthoredTransform;
+use crate::entity::{AuthoredTransform, MAX_ENTITY_NAME_BYTES, validate_entity_name_str};
 
 mod animation;
 mod appearance;
@@ -33,8 +33,9 @@ use super::super::schema::animation::{
 use super::super::schema::appearance::{
     AppearanceBindingSemanticScalarSchema, AppearanceBindingTableSchema, AppearanceDirectorySchema,
     AppearanceEncodedImagePayloadSchema, AppearanceImageTableSchema,
-    AppearanceMaterialFactorScalarSchema, AppearanceMaterialTableSchema, AppearanceMediaTypeSchema,
-    AppearanceSamplerTableSchema, AppearanceSourceKeySchema, AppearanceTextureTableSchema,
+    AppearanceMaterialFactorScalarSchema, AppearanceMaterialNameSchema,
+    AppearanceMaterialTableSchema, AppearanceMediaTypeSchema, AppearanceSamplerTableSchema,
+    AppearanceSourceKeySchema, AppearanceTextureTableSchema,
 };
 use super::super::schema::deformation::{
     DeformationDirectorySchema, DeformationInfluenceJointSchema,
@@ -49,7 +50,8 @@ use super::super::schema::deformation::{
     DeformationSkinJointNodeSchema, DeformationSkinNameSchema, DeformationSkinTableSchema,
 };
 use super::super::schema::geometry::{
-    GeometryAttributeTableSchema, GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
+    GeometryAttributeSemanticNameSchema, GeometryAttributeTableSchema,
+    GeometryLogicalMeshNameSchema, GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
     GeometryPrimitiveTableSchema,
 };
 use super::super::schema::profile::{
@@ -64,10 +66,11 @@ use super::super::schema::{
     CanonicalBlockRef, CanonicalSchema, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT,
     NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
     NODE_SCENE_NODE_FIELD_COUNT, NODE_SCENE_TRANSFORM_SYNTHETIC, NodeSceneAuthoredTransformSchema,
-    NodeSceneChildReferenceTableSchema, NodeSceneNodeTableSchema, NodeSceneOutcomeEvidenceSchema,
-    PRESENCE_ABSENT, PRESENCE_PRESENT, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
-    SceneDirectorySchema, SceneGeometryDirectorySchema, node_scene_child_reference_field,
-    node_scene_evidence_field, node_scene_node_field, scene_directory_field,
+    NodeSceneChildReferenceTableSchema, NodeSceneNodeNameSchema, NodeSceneNodeTableSchema,
+    NodeSceneOutcomeEvidenceSchema, PRESENCE_ABSENT, PRESENCE_PRESENT, SCENE_DIRECTORY_FIELD_COUNT,
+    SCENE_SCHEMA_REVISION, SceneDirectorySchema, SceneGeometryDirectorySchema,
+    node_scene_child_reference_field, node_scene_evidence_field, node_scene_node_field,
+    scene_directory_field,
 };
 use super::{require_optional_collection, require_scalar};
 use animation::{
@@ -137,6 +140,8 @@ trait NodeEquivalence {
 
     fn validate_node_transform(&mut self, row: usize, transform: AuthoredTransform) -> Option<()>;
 
+    fn validate_node_name(&mut self, row: usize, name: Option<&str>) -> Option<()>;
+
     fn validate_node_spatial_attachments(
         &mut self,
         row: usize,
@@ -177,6 +182,10 @@ impl NodeEquivalence for CanonicalNodeEquivalence {
         _row: usize,
         _transform: AuthoredTransform,
     ) -> Option<()> {
+        Some(())
+    }
+
+    fn validate_node_name(&mut self, _row: usize, _name: Option<&str>) -> Option<()> {
         Some(())
     }
 
@@ -251,6 +260,17 @@ impl<R> NodeEquivalence for FreshNodeEquivalence<'_, '_, R> {
             .then_some(())
     }
 
+    fn validate_node_name(&mut self, row: usize, name: Option<&str>) -> Option<()> {
+        let source_row = row.checked_sub(1)?;
+        let local = *self.expected.canonical_order().get(source_row)?;
+        let expected = self.expected.input().nodes().get(local)?.name();
+        match (expected, name) {
+            (Presence::Absent, None) => Some(()),
+            (Presence::Present(expected), Some(actual)) if expected == actual => Some(()),
+            _ => None,
+        }
+    }
+
     fn validate_node_spatial_attachments(
         &mut self,
         row: usize,
@@ -278,6 +298,7 @@ struct NodeCanonicalStructure {
     nodes: CanonicalRecordRef<NodeSceneNodeTableSchema>,
     references: Option<CanonicalRecordRef<NodeSceneChildReferenceTableSchema>>,
     transforms: Option<CanonicalSequenceRef<f32, NodeSceneAuthoredTransformSchema>>,
+    node_names: Option<CanonicalUtf8Ref<NodeSceneNodeNameSchema>>,
     spatial: SpatialValidatedRefs,
     appearance_directory: CanonicalRecordRef<AppearanceDirectorySchema>,
     geometry_directory: CanonicalRecordRef<SceneGeometryDirectorySchema>,
@@ -299,6 +320,7 @@ struct NodeMeteredStructure<'session> {
     transforms: Option<
         CanonicalValidationMember<'session, ScalarSequence<f32>, NodeSceneAuthoredTransformSchema>,
     >,
+    node_names: Option<CanonicalValidationMember<'session, Utf8Block, NodeSceneNodeNameSchema>>,
     spatial: SpatialValidatedMembers<'session>,
     appearance_directory:
         CanonicalValidationMember<'session, RecordBlock, AppearanceDirectorySchema>,
@@ -311,6 +333,19 @@ struct NodeMeteredStructure<'session> {
     source_node_count: usize,
     source_root_count: usize,
     source_edge_count: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct NodeNameValidationScratch {
+    presence: u8,
+    count: u32,
+}
+
+impl NodeNameValidationScratch {
+    pub(in crate::canonical_scene::store) const EMPTY: Self = Self {
+        presence: PRESENCE_ABSENT,
+        count: 0,
+    };
 }
 
 pub(in crate::canonical_scene::store) struct NodeSceneValidationScratch<'scratch> {
@@ -468,6 +503,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
     nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
     references: Option<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>>,
     transforms: Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
+    node_names: Option<CanonicalBlockRef<NodeSceneNodeNameSchema>>,
     appearance: AppearanceValidatedRefs,
     geometry: GeometryValidatedRefs,
     deformation: DeformationValidatedRefs,
@@ -559,6 +595,12 @@ impl NodeSceneValidationProof {
         self.transforms
     }
 
+    pub(in crate::canonical_scene::store) const fn node_names(
+        self,
+    ) -> Option<CanonicalBlockRef<NodeSceneNodeNameSchema>> {
+        self.node_names
+    }
+
     pub(in crate::canonical_scene::store) const fn appearance_images(
         self,
     ) -> Option<CanonicalBlockRef<AppearanceImageTableSchema>> {
@@ -619,10 +661,28 @@ impl NodeSceneValidationProof {
         self.appearance.material_factor_scalars
     }
 
+    pub(in crate::canonical_scene::store) const fn appearance_material_names(
+        self,
+    ) -> Option<CanonicalBlockRef<AppearanceMaterialNameSchema>> {
+        self.appearance.material_names
+    }
+
     pub(in crate::canonical_scene::store) const fn logical_meshes(
         self,
     ) -> Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>> {
         self.geometry.logical_meshes
+    }
+
+    pub(in crate::canonical_scene::store) const fn logical_mesh_names(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryLogicalMeshNameSchema>> {
+        self.geometry.logical_mesh_names
+    }
+
+    pub(in crate::canonical_scene::store) const fn attribute_semantic_names(
+        self,
+    ) -> Option<CanonicalBlockRef<GeometryAttributeSemanticNameSchema>> {
+        self.geometry.attribute_semantic_names
     }
 
     pub(in crate::canonical_scene::store) const fn primitives(
@@ -1145,6 +1205,16 @@ fn validate_node_canonical_structure<SR>(
     )?;
     require_scalar(nodes.scalar::<u8>(0, node_scene_node_field::TRANSFORMS), 0)?;
     require_scalar(
+        nodes.scalar::<u8>(0, node_scene_node_field::NAME_PRESENCE),
+        PRESENCE_ABSENT,
+    )?;
+    require_scalar(
+        nodes.scalar::<u32>(0, node_scene_node_field::NAME_OFFSET),
+        0,
+    )?;
+    require_scalar(nodes.scalar::<u32>(0, node_scene_node_field::NAME_COUNT), 0)?;
+    require_scalar(nodes.scalar::<u8>(0, node_scene_node_field::NAMES), 0)?;
+    require_scalar(
         nodes.scalar::<u8>(0, node_scene_node_field::CAMERA_PRESENCE),
         PRESENCE_ABSENT,
     )?;
@@ -1173,6 +1243,8 @@ fn validate_node_canonical_structure<SR>(
     }
 
     let mut transform_offset = 0_usize;
+    let mut node_name_cursor = 0_usize;
+    let mut node_names_ref = None;
     let mut child_reference_offset = source_root_count_u32;
     for row in 1..node_count {
         observe_work(1)?;
@@ -1223,6 +1295,39 @@ fn validate_node_canonical_structure<SR>(
         equivalence.validate_node_transform(row, transform)?;
         transform_offset = next_transform_offset;
 
+        let name_presence = nodes.scalar::<u8>(row, node_scene_node_field::NAME_PRESENCE)?;
+        let name_offset = nodes.scalar::<u32>(row, node_scene_node_field::NAME_OFFSET)?;
+        let name_count = nodes.scalar::<u32>(row, node_scene_node_field::NAME_COUNT)?;
+        require_scalar(Some(name_offset), u32::try_from(node_name_cursor).ok()?)?;
+        let name = match (name_presence, name_count) {
+            (PRESENCE_ABSENT, 0) => {
+                require_scalar(nodes.scalar::<u8>(row, node_scene_node_field::NAMES), 0_u8)?;
+                None
+            }
+            (PRESENCE_PRESENT, 0) => {
+                require_scalar(nodes.scalar::<u8>(row, node_scene_node_field::NAMES), 0_u8)?;
+                validate_entity_name_str("").ok()?;
+                Some("")
+            }
+            (PRESENCE_PRESENT, _) => {
+                let reference =
+                    nodes.utf8_ref::<NodeSceneNodeNameSchema>(row, node_scene_node_field::NAMES)?;
+                match node_names_ref {
+                    Some(expected) => require_scalar(Some(reference), expected)?,
+                    None => node_names_ref = Some(reference),
+                }
+                let payload = session.canonical_utf8(reference)?;
+                let range = checked_utf8_range(name_offset, name_count, payload.len())?;
+                observe_work(u64::try_from(range.len()).ok()?)?;
+                let name = payload.get(range.clone())?;
+                validate_entity_name_str(name).ok()?;
+                node_name_cursor = range.end;
+                Some(name)
+            }
+            _ => return None,
+        };
+        equivalence.validate_node_name(row, name)?;
+
         let camera = validate_node_spatial_attachment::<SpatialCameraTableSchema>(
             nodes,
             row,
@@ -1253,6 +1358,13 @@ fn validate_node_canonical_structure<SR>(
     )?;
     if has_source_nodes && transform_offset != transforms?.len() {
         return None;
+    }
+    match node_names_ref {
+        Some(reference) => require_scalar(
+            Some(node_name_cursor),
+            session.canonical_utf8(reference)?.len(),
+        )?,
+        None => require_scalar(Some(node_name_cursor), 0)?,
     }
     if let Some(counts) = camera_placement_counts {
         for &placements in counts.get(..usize::try_from(spatial.camera_count).ok()?)? {
@@ -1286,6 +1398,7 @@ fn validate_node_canonical_structure<SR>(
         nodes: nodes_ref,
         references: references_ref,
         transforms: transforms_ref,
+        node_names: node_names_ref,
         spatial,
         appearance_directory,
         geometry_directory,
@@ -1296,6 +1409,13 @@ fn validate_node_canonical_structure<SR>(
         source_root_count,
         source_edge_count: source_node_count.checked_sub(source_root_count)?,
     })
+}
+
+fn checked_utf8_range(offset: u32, count: u32, len: usize) -> Option<std::ops::Range<usize>> {
+    let start = usize::try_from(offset).ok()?;
+    let count = usize::try_from(count).ok()?;
+    let end = start.checked_add(count)?;
+    (end <= len).then_some(start..end)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1414,6 +1534,7 @@ where
     let mut transform_presence = None;
     let mut transform_scalar_count = None;
     let mut transforms = None;
+    let mut node_names = None;
     let mut source_root_count = None;
     let mut spatial = None;
     let mut appearance = None;
@@ -1629,6 +1750,7 @@ where
 
     let mut child_reference_offset = source_root_count;
     let mut transform_offset = 0_u32;
+    let mut node_name_offset = 0_u32;
     let nodes_valid = session.visit_canonical_records(
         nodes,
         usize::try_from(node_count).unwrap_or(usize::MAX),
@@ -1678,6 +1800,54 @@ where
                     node_scene_node_field::TRANSFORMS,
                     |member| Some(member) == transforms,
                 )? == Some(true)
+            };
+            let Some(name_presence) =
+                row.scalar(node_scene_node_field::NAME_PRESENCE, |value: u8| value)?
+            else {
+                return Ok(false);
+            };
+            let Some(stored_name_offset) =
+                row.scalar(node_scene_node_field::NAME_OFFSET, |value: u32| value)?
+            else {
+                return Ok(false);
+            };
+            let Some(name_count) =
+                row.scalar(node_scene_node_field::NAME_COUNT, |value: u32| value)?
+            else {
+                return Ok(false);
+            };
+            let (names_ref, names_absent) = if name_count == 0 {
+                (
+                    None,
+                    row.scalar(node_scene_node_field::NAMES, |value: u8| value)?,
+                )
+            } else {
+                (
+                    row.utf8_ref::<NodeSceneNodeNameSchema, _>(
+                        node_scene_node_field::NAMES,
+                        |member| member,
+                    )?,
+                    None,
+                )
+            };
+            if name_count != 0 && node_names.is_none() {
+                node_names = names_ref;
+            }
+            let name_valid = match (name_presence, name_count) {
+                (PRESENCE_ABSENT, 0) | (PRESENCE_PRESENT, 0) => {
+                    names_ref.is_none() && names_absent == Some(0)
+                }
+                (PRESENCE_PRESENT, _) => {
+                    names_ref == node_names && names_ref.is_some() && names_absent.is_none()
+                }
+                _ => false,
+            };
+            let Some(name_slot) = scratch.node_names.get_mut(row_index) else {
+                return Ok(false);
+            };
+            *name_slot = NodeNameValidationScratch {
+                presence: name_presence,
+                count: name_count,
             };
             let Some(camera_presence) =
                 row.scalar(node_scene_node_field::CAMERA_PRESENCE, |value: u8| value)?
@@ -1745,6 +1915,10 @@ where
                     && stored_transform_offset == 0
                     && stored_transform_length == 0
                     && transforms_match
+                    && name_presence == PRESENCE_ABSENT
+                    && stored_name_offset == 0
+                    && name_count == 0
+                    && name_valid
                     && camera_presence == PRESENCE_ABSENT
                     && camera_cell_valid
                     && cameras_match
@@ -1765,11 +1939,16 @@ where
                 && stored_transform_offset == transform_offset
                 && stored_transform_length == width
                 && transforms_match;
+            let name_shape_valid = stored_name_offset == node_name_offset && name_valid;
             child_reference_offset = match child_reference_offset.checked_add(child_count) {
                 Some(next) => next,
                 None => return Ok(false),
             };
             transform_offset = match transform_offset.checked_add(width) {
+                Some(next) => next,
+                None => return Ok(false),
+            };
+            node_name_offset = match node_name_offset.checked_add(name_count) {
                 Some(next) => next,
                 None => return Ok(false),
             };
@@ -1807,12 +1986,13 @@ where
                 }
                 _ => false,
             };
-            Ok(topology_valid && camera_valid && light_valid)
+            Ok(topology_valid && name_shape_valid && camera_valid && light_valid)
         },
     )?;
     if !nodes_valid
         || child_reference_offset != source_node_count
         || transform_offset != transform_scalar_count
+        || !validate_node_names_metered(session, node_names, node_name_offset, scratch.node_names)?
     {
         return Ok(None);
     }
@@ -1879,6 +2059,7 @@ where
         nodes,
         references,
         transforms,
+        node_names,
         spatial,
         appearance_directory,
         geometry_directory,
@@ -1889,6 +2070,82 @@ where
         source_root_count: source_root_count_usize,
         source_edge_count: source_node_count_usize.saturating_sub(source_root_count_usize),
     }))
+}
+
+fn validate_node_names_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    names: Option<CanonicalValidationMember<'session, Utf8Block, NodeSceneNodeNameSchema>>,
+    expected_len: u32,
+    nodes: &[NodeNameValidationScratch],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(names) = names else {
+        return Ok(expected_len == 0
+            && nodes.iter().all(|node| match (node.presence, node.count) {
+                (PRESENCE_ABSENT, 0) => true,
+                (PRESENCE_PRESENT, 0) => validate_entity_name_str("").is_ok(),
+                _ => false,
+            }));
+    };
+    let Ok(expected_len) = usize::try_from(expected_len) else {
+        return Ok(false);
+    };
+    let mut node_index = 0_usize;
+    let mut segment_len = 0_usize;
+    let mut segment = [0_u8; MAX_ENTITY_NAME_BYTES];
+    let complete = session.visit_canonical_utf8_bytes(names, expected_len, |_index, byte| {
+        while let Some(node) = nodes.get(node_index) {
+            if node.count != 0 {
+                break;
+            }
+            if !matches!(node.presence, PRESENCE_ABSENT | PRESENCE_PRESENT)
+                || (node.presence == PRESENCE_PRESENT && validate_entity_name_str("").is_err())
+            {
+                return false;
+            }
+            node_index += 1;
+        }
+        let Some(node) = nodes.get(node_index) else {
+            return false;
+        };
+        let Some(segment_count) = usize::try_from(node.count).ok() else {
+            return false;
+        };
+        if node.presence != PRESENCE_PRESENT
+            || segment_count > segment.len()
+            || segment_len >= segment_count
+        {
+            return false;
+        }
+        segment[segment_len] = byte;
+        segment_len += 1;
+        if segment_len != segment_count {
+            return true;
+        }
+        let valid = std::str::from_utf8(&segment[..segment_len])
+            .ok()
+            .is_some_and(|name| validate_entity_name_str(name).is_ok());
+        segment_len = 0;
+        node_index += 1;
+        valid
+    })?;
+    if !complete || segment_len != 0 {
+        return Ok(false);
+    }
+    while let Some(node) = nodes.get(node_index) {
+        if node.count != 0
+            || !matches!(node.presence, PRESENCE_ABSENT | PRESENCE_PRESENT)
+            || (node.presence == PRESENCE_PRESENT && validate_entity_name_str("").is_err())
+        {
+            return Ok(false);
+        }
+        node_index += 1;
+    }
+    Ok(node_index == nodes.len())
 }
 
 fn validate_node_scene_success_evidence_metered<
@@ -2279,12 +2536,14 @@ where
         appearance.source_keys.is_some(),
         appearance.binding_semantic_scalars.is_some(),
         appearance.material_factor_scalars.is_some(),
+        appearance.material_names.is_some(),
     ]
     .into_iter()
     .map(u32::from)
     .sum::<u32>();
-    let domain_payload_count = spatial_payload_count
-        .checked_add(appearance_payload_count)
+    let domain_payload_count = u32::from(node.node_names.is_some())
+        .checked_add(spatial_payload_count)
+        .and_then(|count| count.checked_add(appearance_payload_count))
         .and_then(|count| count.checked_add(geometry.payload_block_count))
         .and_then(|count| count.checked_add(deformation.payload_block_count))
         .and_then(|count| count.checked_add(animation.payload_block_count));
@@ -2301,6 +2560,7 @@ where
     let canonical_block_count = 2_u32
         .checked_add(u32::from(node.references.is_some()))
         .and_then(|count| count.checked_add(u32::from(node.transforms.is_some())))
+        .and_then(|count| count.checked_add(u32::from(node.node_names.is_some())))
         .and_then(|count| {
             count.checked_add(
                 1 + [
@@ -2327,6 +2587,7 @@ where
                     appearance.source_keys.is_some(),
                     appearance.binding_semantic_scalars.is_some(),
                     appearance.material_factor_scalars.is_some(),
+                    appearance.material_names.is_some(),
                 ]
                 .into_iter()
                 .map(u32::from)
@@ -2387,6 +2648,7 @@ where
         && node.nodes.identifies(expected_refs.nodes.into_store())
         && optional_member_identifies(node.references, expected_refs.references)
         && optional_member_identifies(node.transforms, expected_refs.transforms)
+        && optional_member_identifies(node.node_names, expected_refs.node_names)
         && node
             .spatial
             .directory
@@ -2439,8 +2701,16 @@ where
             expected_refs.appearance.payloads.material_factor_scalars,
         )
         && optional_member_identifies(
+            appearance.material_names,
+            expected_refs.appearance.payloads.material_names,
+        )
+        && optional_member_identifies(
             geometry.members.logical_meshes,
             expected_refs.geometry.tables.logical_meshes,
+        )
+        && optional_member_identifies(
+            geometry.members.logical_mesh_names,
+            expected_refs.geometry.payloads.logical_mesh_names,
         )
         && optional_member_identifies(
             geometry.members.primitives,
@@ -2647,6 +2917,7 @@ where
         nodes: expected_refs.nodes,
         references: expected_refs.references,
         transforms: expected_refs.transforms,
+        node_names: expected_refs.node_names,
         appearance: AppearanceValidatedRefs {
             images: expected_refs.appearance.tables.images,
             samplers: expected_refs.appearance.tables.samplers,
@@ -2658,9 +2929,12 @@ where
             source_keys: expected_refs.appearance.payloads.source_keys,
             binding_semantic_scalars: expected_refs.appearance.payloads.binding_semantic_scalars,
             material_factor_scalars: expected_refs.appearance.payloads.material_factor_scalars,
+            material_names: expected_refs.appearance.payloads.material_names,
         },
         geometry: GeometryValidatedRefs {
             logical_meshes: expected_refs.geometry.tables.logical_meshes,
+            logical_mesh_names: expected_refs.geometry.payloads.logical_mesh_names,
+            attribute_semantic_names: expected_refs.geometry.payloads.attribute_semantic_names,
             primitives: expected_refs.geometry.tables.primitives,
             attributes: expected_refs.geometry.tables.attributes,
             mesh_instances: expected_refs.geometry.tables.mesh_instances,
@@ -3223,6 +3497,7 @@ fn validate_canonical_evidence_counts(
         appearance.source_keys.is_some(),
         appearance.binding_semantic_scalars.is_some(),
         appearance.material_factor_scalars.is_some(),
+        appearance.material_names.is_some(),
     ])?;
     let deformation_payload_block_count = present_count(&[
         deformation.refs.joint_nodes.is_some(),
@@ -3253,7 +3528,8 @@ fn validate_canonical_evidence_counts(
         Some(animation.payload_block_count),
         animation_payload_block_count,
     )?;
-    let domain_payload_block_count = spatial_payload_block_count
+    let domain_payload_block_count = u32::from(node.node_names.is_some())
+        .checked_add(spatial_payload_block_count)?
         .checked_add(appearance_payload_block_count)?
         .checked_add(geometry.payload_block_count)?
         .checked_add(deformation_payload_block_count)?
@@ -3269,7 +3545,8 @@ fn validate_canonical_evidence_counts(
 
     let node_block_count = 2_u32
         .checked_add(u32::from(node.references.is_some()))?
-        .checked_add(u32::from(node.transforms.is_some()))?;
+        .checked_add(u32::from(node.transforms.is_some()))?
+        .checked_add(u32::from(node.node_names.is_some()))?;
     let spatial_block_count = 1_u32.checked_add(present_count(&[
         node.spatial.cameras.is_some(),
         node.spatial.lights.is_some(),
@@ -3287,6 +3564,7 @@ fn validate_canonical_evidence_counts(
         appearance.source_keys.is_some(),
         appearance.binding_semantic_scalars.is_some(),
         appearance.material_factor_scalars.is_some(),
+        appearance.material_names.is_some(),
     ])?)?;
     let geometry_block_count = 1_u32
         .checked_add(present_count(&[
@@ -3369,6 +3647,7 @@ fn assemble_node_scene_validation_proof(
         nodes: CanonicalBlockRef::from_store(node.nodes),
         references: node.references.map(CanonicalBlockRef::from_store),
         transforms: node.transforms.map(CanonicalBlockRef::from_store),
+        node_names: node.node_names.map(CanonicalBlockRef::from_store),
         appearance,
         geometry,
         deformation: deformation.refs,
@@ -3498,9 +3777,11 @@ fn evidence_counts_match_batches<SR, NR, AR, GR, DR, ANR, PR>(
     animation: &ValidatedAnimationBatch<'_, ANR>,
     profile: &ValidatedProfileBatch<'_, PR>,
 ) -> bool {
+    let node_payload_block_count = u32::from(nodes.node_name_byte_count() != 0);
     let payload_block_count = spatial
         .payload_block_count()
-        .checked_add(appearance.payload_block_count())
+        .checked_add(node_payload_block_count)
+        .and_then(|count| count.checked_add(appearance.payload_block_count()))
         .and_then(|count| count.checked_add(geometry.payload_block_count()))
         .and_then(|count| count.checked_add(deformation.payload_block_count()))
         .and_then(|count| count.checked_add(animation.payload_block_count()))
@@ -3508,7 +3789,8 @@ fn evidence_counts_match_batches<SR, NR, AR, GR, DR, ANR, PR>(
     let profile_shape = profile.retention_shape();
     let domain_payload_block_count = spatial
         .payload_block_count()
-        .checked_add(appearance.payload_block_count())
+        .checked_add(node_payload_block_count)
+        .and_then(|count| count.checked_add(appearance.payload_block_count()))
         .and_then(|count| count.checked_add(geometry.payload_block_count()))
         .and_then(|count| count.checked_add(deformation.payload_block_count()))
         .and_then(|count| count.checked_add(animation.payload_block_count()));

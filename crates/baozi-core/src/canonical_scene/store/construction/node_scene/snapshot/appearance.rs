@@ -61,6 +61,8 @@ const TAG_SOURCE_KEY: u8 = 162;
 const TAG_SOURCE_KEY_OFFSET: u8 = 163;
 const TAG_SOURCE_KEY_BYTES: u8 = 164;
 const TAG_F32_BITS: u8 = 165;
+const TAG_MATERIAL_NAME: u8 = 166;
+const TAG_MATERIAL_NAME_BYTES: u8 = 167;
 
 const SNAPSHOT_PAYLOAD_CHUNK_BYTES: usize = 4 * 1024;
 
@@ -272,6 +274,7 @@ fn write_materials(
             .ok_or(unsupported("namespaced material alpha mode"))?;
         let alpha_cutoff = material.alpha_mode().mask_cutoff().unwrap_or(0.0);
         let factors = material.factors();
+        let factor_values = material.factor_values();
         transcript.write_tag(TAG_MATERIAL)?;
         transcript.tagged_usize(TAG_REFERENCE, material.source_index())?;
         transcript.tagged_u8(TAG_SHADING_MODEL, shading_model)?;
@@ -293,17 +296,20 @@ fn write_materials(
         transcript.tagged_usize(TAG_BINDING_OFFSET, material.binding_offset())?;
         transcript.tagged_usize(TAG_COLLECTION_TOTAL, material.binding_count())?;
         transcript.tagged_usize(TAG_FACTOR_OFFSET, material.factor_offset())?;
-        write_metered_f32_bits(
-            transcript,
-            work,
-            TAG_FACTOR_VALUES,
-            material.factor_values(),
-        )?;
+        write_metered_f32_bits(transcript, work, TAG_FACTOR_VALUES, factor_values)?;
         totals.material_factor_scalars = add_bytes(
             totals.material_factor_scalars,
-            material.factor_values().len(),
+            factor_values.len(),
             "material factor scalars",
         )?;
+        transcript.write_tag(TAG_MATERIAL_NAME)?;
+        match material.name() {
+            Some(name) => {
+                transcript.tagged_u8(TAG_PRESENCE, PRESENCE_PRESENT)?;
+                write_metered_bytes(transcript, work, TAG_MATERIAL_NAME_BYTES, name.as_bytes())?;
+            }
+            None => transcript.tagged_u8(TAG_PRESENCE, PRESENCE_ABSENT)?,
+        }
         let render = preview.begin_geometry_item("material", material.source_index())?;
         preview.geometry_field_u32(render, "shading", u32::from(shading_model));
         preview.geometry_field_u32(render, "alpha", u32::from(alpha_mode));
@@ -319,7 +325,13 @@ fn write_materials(
         preview.geometry_field_usize(render, "binding_offset", material.binding_offset());
         preview.geometry_field_usize(render, "binding_count", material.binding_count());
         preview.geometry_field_usize(render, "factor_offset", material.factor_offset());
-        preview.geometry_field_usize(render, "factor_count", material.factor_values().len());
+        preview.geometry_field_usize(render, "factor_count", factor_values.len());
+        preview.begin_geometry_leaf(render, "factors", true, factor_values.len());
+        for (ordinal, value) in factor_values.iter().enumerate() {
+            preview.geometry_f32_bits(render, ordinal, value.to_bits())?;
+        }
+        preview.end_geometry_leaf(render);
+        preview.geometry_field_word(render, "name", material.name().unwrap_or("absent"));
         preview.end_geometry_item(render);
     }
     transcript.tagged_usize(TAG_COLLECTION_TOTAL, count)?;

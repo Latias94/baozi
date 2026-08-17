@@ -1,4 +1,6 @@
-use baozi_core::{FormatId, SceneDraft};
+mod support;
+
+use baozi_core::FormatId;
 use baozi_import::{
     CapabilityStatus, CauseOwner, ConformancePolicy, DetectionOutcome, DetectionResult,
     DetectionScope, DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, FormatCapability,
@@ -7,8 +9,8 @@ use baozi_import::{
     ImportOperationControl, ImportPhase, ImportReport, ImportRequest, ImportRequestLayer,
     ImportResult, LossPolicy, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
     ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-    ResourceLimitsOverlay, ScopeAbortCause, TextBomPolicy, TextControlPolicy, TextDecodingMode,
-    TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, TextBomPolicy, TextControlPolicy,
+    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
     import_asset as run_import_asset, import_bytes as run_import_bytes,
 };
 use baozi_io::{
@@ -87,7 +89,7 @@ impl FormatImporter for ContractImporter {
             )?;
         }
 
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -238,7 +240,6 @@ fn assert_conformance_gate(failure: &ImportFailure) {
         assert_eq!(evidence.consumed(), 1);
     }
     assert_eq!(failure.ledger().current_live_bytes(), 0);
-    assert!(failure.finalization_cause().is_none());
 }
 
 fn assert_recovery_disposition(
@@ -463,7 +464,6 @@ fn primary_bytes_over_text_profile_raw_cap_fail_before_parser_entry() {
     assert_eq!(primary.attempted(), SOURCE_BYTES.len() as u64);
     assert_eq!(primary.consumed(), SOURCE_BYTES.len() as u64);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
-    assert!(failure.finalization_cause().is_none());
 }
 
 struct CountingReader {
@@ -637,5 +637,4 @@ fn lower_backend_hard_cap_wins_on_primary_open_before_read_or_parse() {
     assert_eq!(primary.consumed(), 0);
     assert_eq!(primary.peak_live_bytes(), 0);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
-    assert!(failure.finalization_cause().is_none());
 }

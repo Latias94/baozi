@@ -87,6 +87,7 @@ where
     pub(super) coordinator: OperationCoordinator<O, P, PP, U, D>,
     pub(super) baseline: FallbackPublicationBaseline<O, P, D, F>,
     terminal_writer: RetainedWriterPlan<P, D>,
+    canonical_assembly_limits: RetainedBatchLimits,
     terminal_account_share_work: RetainedHandleSharePlan<D>,
     failure_terminal_work: Option<FailureTerminalWorkCapability<D>>,
     failure_terminal_work_dimension: Option<D>,
@@ -111,6 +112,21 @@ pub(crate) struct RetainedPlanningBaseline {
 
 #[cfg(feature = "_u4-activation")]
 impl RetainedPlanningBaseline {
+    pub(crate) fn checked_apply_rebind_delta(self, before: Self, after: Self) -> Option<Self> {
+        Some(Self {
+            current_live_bytes: checked_apply_delta(
+                self.current_live_bytes,
+                before.current_live_bytes,
+                after.current_live_bytes,
+            )?,
+            active_reservations: checked_apply_delta(
+                self.active_reservations,
+                before.active_reservations,
+                after.active_reservations,
+            )?,
+        })
+    }
+
     fn checked_add_publication_storage(
         self,
         publication_live_bytes: u64,
@@ -124,6 +140,15 @@ impl RetainedPlanningBaseline {
                 .active_reservations
                 .checked_add(publication_reservations)?,
         })
+    }
+}
+
+#[cfg(feature = "_u4-activation")]
+fn checked_apply_delta(value: u64, before: u64, after: u64) -> Option<u64> {
+    if after >= before {
+        value.checked_add(after - before)
+    } else {
+        value.checked_sub(before - after)
     }
 }
 
@@ -390,10 +415,11 @@ where
     resolved: bool,
 }
 
-/// Poll-and-observed-work authority bound to one prevalidated dimension.
+/// Poll, observed-work, and scratch authority bound to prevalidated dimensions.
 ///
-/// This private capability is moved into a retained builder or validator closure. It cannot
-/// reserve storage, report progress, mutate tables, or enter publication.
+/// This private capability is moved into a retained builder or validator closure. Work and live
+/// reservations may use distinct dimensions; it cannot report progress, mutate tables, or enter
+/// publication.
 pub(crate) struct RetainedWorkControl<'a, O, P, PP, U, D>
 where
     O: OperationOwner,
@@ -405,6 +431,7 @@ where
     poll: OperationPollCheckpoint<'a, PP, U>,
     ledger: &'a crate::ledger::Ledger<O, P, D>,
     dimension: D,
+    reservation_dimension: D,
     failure_terminal_work_dimension: Option<D>,
     #[allow(
         dead_code,
@@ -593,6 +620,80 @@ where
         result
     }
 
+    pub(crate) fn charge_attempted(
+        &mut self,
+        dimension: D,
+        amount: u64,
+    ) -> Result<(), RetainedProducerWorkStartError<D>> {
+        self.ensure_direct_accounting_available()?;
+        self.validate_dimension(dimension)
+            .map_err(RetainedProducerWorkStartError::Ledger)?;
+        let result = self
+            .coordinator
+            .retained_ledger()
+            .charge_attempted(dimension, amount);
+        if result.is_err() {
+            self.record_ledger_failure();
+        }
+        result.map_err(RetainedProducerWorkStartError::Ledger)
+    }
+
+    pub(crate) fn charge_consumed(
+        &mut self,
+        dimension: D,
+        amount: u64,
+    ) -> Result<(), RetainedProducerWorkStartError<D>> {
+        self.ensure_direct_accounting_available()?;
+        self.validate_dimension(dimension)
+            .map_err(RetainedProducerWorkStartError::Ledger)?;
+        let result = self
+            .coordinator
+            .retained_ledger()
+            .charge_consumed(dimension, amount);
+        if result.is_err() {
+            self.record_ledger_failure();
+        }
+        result.map_err(RetainedProducerWorkStartError::Ledger)
+    }
+
+    pub(crate) fn charge_observed_batch(
+        &mut self,
+        charges: &[(D, u64)],
+    ) -> Result<(), RetainedProducerWorkStartError<D>> {
+        self.ensure_direct_accounting_available()?;
+        for &(dimension, _) in charges {
+            self.validate_dimension(dimension)
+                .map_err(RetainedProducerWorkStartError::Ledger)?;
+        }
+        let result = self
+            .coordinator
+            .retained_ledger()
+            .charge_observed_batch(charges);
+        if result.is_err() {
+            self.record_ledger_failure();
+        }
+        result.map_err(RetainedProducerWorkStartError::Ledger)
+    }
+
+    pub(crate) fn charge_consumed_batch<const N: usize>(
+        &mut self,
+        charges: &[(D, u64); N],
+    ) -> Result<(), RetainedProducerWorkStartError<D>> {
+        self.ensure_direct_accounting_available()?;
+        for &(dimension, _) in charges {
+            self.validate_dimension(dimension)
+                .map_err(RetainedProducerWorkStartError::Ledger)?;
+        }
+        let result = self
+            .coordinator
+            .retained_ledger()
+            .charge_consumed_batch(charges);
+        if result.is_err() {
+            self.record_ledger_failure();
+        }
+        result.map_err(RetainedProducerWorkStartError::Ledger)
+    }
+
     pub(crate) fn try_begin_observed_work<const N: usize>(
         &mut self,
         charges: [(D, u64); N],
@@ -644,6 +745,20 @@ where
             self.sticky_terminal_cause,
             PreparationFailureCode::ledger(),
         );
+    }
+
+    fn ensure_direct_accounting_available(
+        &mut self,
+    ) -> Result<(), RetainedProducerWorkStartError<D>> {
+        if *self.permit_outstanding {
+            record_terminal_cause_with_precedence(
+                self.sticky_terminal_cause,
+                PreparationFailureCode::product_graph(ORDINARY_WORK_PERMIT_ABANDONED_CODE),
+            );
+            Err(RetainedProducerWorkStartError::Outstanding)
+        } else {
+            Ok(())
+        }
     }
 
     fn validate_dimension(&mut self, dimension: D) -> Result<(), LedgerCause<D>> {
@@ -861,7 +976,9 @@ where
         phase: P,
         bytes: u64,
     ) -> Result<LiveReservation<O, P, D>, LedgerCause<D>> {
-        let result = self.ledger.reserve(phase, self.dimension, bytes);
+        let result = self
+            .ledger
+            .reserve(phase, self.reservation_dimension, bytes);
         if result.is_err() {
             record_terminal_cause_with_precedence(
                 self.sticky_terminal_cause,
@@ -1524,6 +1641,17 @@ where
         RetainedWorkControl<'_, O, P, PP, U, D>,
         &crate::ledger::Ledger<O, P, D>,
     ) {
+        self.split_work_and_reservation_control(dimension, dimension)
+    }
+
+    pub(crate) fn split_work_and_reservation_control(
+        &mut self,
+        work_dimension: D,
+        reservation_dimension: D,
+    ) -> (
+        RetainedWorkControl<'_, O, P, PP, U, D>,
+        &crate::ledger::Ledger<O, P, D>,
+    ) {
         let Self {
             coordinator,
             failure_terminal_work_dimension,
@@ -1537,7 +1665,8 @@ where
             RetainedWorkControl {
                 poll,
                 ledger,
-                dimension,
+                dimension: work_dimension,
+                reservation_dimension,
                 failure_terminal_work_dimension: *failure_terminal_work_dimension,
                 ordinary_work_permit_outstanding,
                 ordinary_work_permit_partially_resolved,
@@ -1842,6 +1971,7 @@ where
             coordinator,
             baseline,
             terminal_writer: plan.terminal_writer,
+            canonical_assembly_limits: canonical_assembly,
             terminal_account_share_work: plan.terminal_account_share_work,
             failure_terminal_work,
             failure_terminal_work_dimension,
@@ -1871,6 +2001,28 @@ where
                 capability.validation_work_limit,
             )
         })
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn try_rebind_canonical_assembly(
+        &mut self,
+        writer: RetainedWriterPlan<P, D>,
+    ) -> Result<(), RetainedWriterError<D>> {
+        let replacement_plan = AttributionBatchPlan::<O, P, D, CanonicalOutput>::try_new(
+            writer.phase,
+            writer.capacity_dimension,
+            writer.limits.attribution_slots,
+            writer.limits.commitment_slots,
+        )
+        .map_err(map_batch_error)?;
+        let replacement = self
+            .coordinator
+            .retained_ledger()
+            .try_attribution_batch_from_plan(replacement_plan)
+            .map_err(map_batch_error)?;
+        self.baseline.try_replace_canonical_assembly(replacement)?;
+        self.canonical_assembly_limits = writer.limits;
+        Ok(())
     }
 
     pub(super) fn split_failure_terminal_work_control(
@@ -1903,7 +2055,7 @@ where
         )
     }
 
-    pub(super) const fn sticky_terminal_cause(&self) -> Option<PreparationFailureCode> {
+    pub(crate) const fn sticky_terminal_cause(&self) -> Option<PreparationFailureCode> {
         let permit_outstanding =
             self.failure_work_permit_outstanding || self.ordinary_work_permit_outstanding;
         let abandoned_code = if self.failure_work_permit_outstanding {
@@ -2056,6 +2208,7 @@ where
             *canonical = canonical.with_canonical_source_mapping_capacity(capacity);
         }
         let terminal_limits = self.terminal_writer.limits;
+        let canonical_assembly_limits = self.canonical_assembly_limits;
         let evidence_qualified = match try_qualify_retained_block_table_plan::<
             O,
             P,
@@ -2083,7 +2236,7 @@ where
             >(
                 self.account(),
                 canonical,
-                terminal_limits,
+                canonical_assembly_limits,
                 RetainedMembershipDestination::Canonical,
             ) {
                 Ok(qualified) => Some(qualified),

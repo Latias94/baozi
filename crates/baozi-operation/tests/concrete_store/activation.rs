@@ -9,9 +9,10 @@ use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationPolicy,
     CanonicalActivationSeal, CanonicalActivationSealFailure, CanonicalCentralValidationOutcome,
     CanonicalFailureRequirements, CanonicalFreezePermit, CanonicalJointCommit, CanonicalJointSeal,
-    CanonicalLane, CanonicalMaterialization, CanonicalReservation, CanonicalScopedDisposition,
-    CanonicalSemanticCompletion, CanonicalSuccessRequirements, CanonicalTableShape,
-    CanonicalValidationDecision, CanonicalValidationMember, CanonicalValidationSession,
+    CanonicalLane, CanonicalMaterialization, CanonicalMaterializationRole, CanonicalReservation,
+    CanonicalScopedDisposition, CanonicalSemanticCompletion, CanonicalSuccessRequirements,
+    CanonicalTableShape, CanonicalValidationDecision, CanonicalValidationMember,
+    CanonicalValidationProgress, CanonicalValidationRole, CanonicalValidationSession,
     FailureEvidenceDecision, FailureEvidenceMember, FailureEvidenceOutcome,
     OutcomeEvidenceDecision, OutcomeEvidenceValidationMember, RootedFailureValidation,
     StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
@@ -276,8 +277,15 @@ fn scoped_activation_shape_with_dimensions_and_validation_work(
     let policy = CanonicalActivationPolicy::new(
         writer_plan(keys, canonical_blocks + 1, 2),
         writer_plan(keys, evidence_blocks + 1, 2),
-        materialization_work_dimension,
-        validation_work_dimension,
+        CanonicalMaterializationRole::new(
+            materialization_work_dimension,
+            materialization_work_dimension,
+        ),
+        CanonicalValidationRole::new(
+            keys.phase,
+            validation_work_dimension,
+            validation_work_dimension,
+        ),
         canonical_destination_dimension,
         outcome_evidence_destination_dimension,
     );

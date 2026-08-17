@@ -248,6 +248,91 @@ fn grouped_completion_records_two_dimension_prefixes_together() {
 }
 
 #[test]
+fn split_parser_accounting_preserves_attempted_and_consumed_prefixes() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (mut operation, keys) = operation_with_producer_dimensions(
+        &account,
+        OperationControl::default(),
+        DimensionPolicy::counter(16, 16, 0),
+    );
+    let primary = operation
+        .producer_host()
+        .dimension_state(keys.dimension)
+        .expect("primary dimension state");
+    let secondary = operation
+        .producer_host()
+        .dimension_state(keys.other_dimension)
+        .expect("secondary dimension state");
+
+    {
+        let mut host = operation.producer_host();
+        host.charge_attempted(keys.dimension, 4)
+            .expect("the parser admits the primary envelope before work");
+        host.charge_attempted(keys.other_dimension, 2)
+            .expect("the parser admits the secondary envelope before work");
+        host.charge_consumed(keys.dimension, 3)
+            .expect("one completed primary prefix is retained");
+        host.charge_consumed_batch([(keys.dimension, 1), (keys.other_dimension, 2)])
+            .expect("the final grouped prefix is committed atomically");
+    }
+
+    let primary_after = operation
+        .producer_host()
+        .dimension_state(keys.dimension)
+        .expect("primary dimension state after split accounting");
+    let secondary_after = operation
+        .producer_host()
+        .dimension_state(keys.other_dimension)
+        .expect("secondary dimension state after split accounting");
+    assert_eq!(primary_after.attempted(), primary.attempted() + 4);
+    assert_eq!(primary_after.consumed(), primary.consumed() + 4);
+    assert_eq!(secondary_after.attempted(), secondary.attempted() + 2);
+    assert_eq!(secondary_after.consumed(), secondary.consumed() + 2);
+
+    drop(requested_fallback_evidence(operation, 82));
+}
+
+#[test]
+fn split_parser_batches_validate_every_dimension_before_charging() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (mut operation, keys) = operation(&account);
+    let baseline = operation
+        .producer_host()
+        .dimension_state(keys.dimension)
+        .expect("primary dimension state");
+
+    assert!(matches!(
+        operation
+            .producer_host()
+            .charge_observed_batch([(keys.dimension, 1), (foreign_dimension(), 1),]),
+        Err(StoreRuntimeError::ForeignDimensionDomain { .. })
+    ));
+    let after_foreign = operation
+        .producer_host()
+        .dimension_state(keys.dimension)
+        .expect("primary dimension remains observable");
+    assert_eq!(after_foreign.attempted(), baseline.attempted());
+    assert_eq!(after_foreign.consumed(), baseline.consumed());
+
+    assert!(matches!(
+        operation
+            .producer_host()
+            .charge_attempted(keys.failure_terminal_dimension, 1),
+        Err(StoreRuntimeError::Ledger(LedgerCause::UnknownDimension {
+            dimension,
+        })) if dimension == keys.failure_terminal_dimension
+    ));
+
+    let evidence = requested_fallback_evidence(operation, 83);
+    assert_eq!(
+        store_failure_cause(&evidence).class(),
+        StorePreparationFailureClass::Ledger
+    );
+}
+
+#[test]
 fn group_overrun_is_side_effect_free_and_latches_product_graph() {
     let factory = factory(1);
     let account = account(&factory);

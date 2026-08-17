@@ -19,7 +19,7 @@ all-formats = ["format-stl", "format-obj", "format-ply"]
 format-stl = ["dep:baozi-format-stl"]
 format-obj = ["dep:baozi-format-obj"]
 format-ply = ["dep:baozi-format-ply"]
-tracing = ["dep:tracing", "baozi-import/tracing", "baozi-postprocess/tracing"]
+tracing = ["dep:tracing", "baozi-import/tracing"]
 mint = ["baozi-core/mint"]
 
 [dependencies]
@@ -27,7 +27,6 @@ baozi-core.workspace = true
 baozi-import.workspace = true
 baozi-io.workspace = true
 baozi-operation.workspace = true
-baozi-postprocess.workspace = true
 thiserror.workspace = true
 baozi-format-stl = { workspace = true, optional = true }
 baozi-format-obj = { workspace = true, optional = true }

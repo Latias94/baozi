@@ -19,8 +19,8 @@ use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneAnimationExtrapolation, NodeSceneAnimationInterpolation, NodeSceneAnimationTarget,
     NodeSceneAnimationTimeDomain, NodeSceneDeformationF32Cursor, NodeSceneDeformationMorphPayload,
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic,
-    NodeSceneGeometryF32Cursor, NodeSceneGeometryU32Cursor, NodeSceneProfileStep,
-    NodeSceneSemanticResult,
+    NodeSceneGeometryF32Cursor, NodeSceneGeometryI32Cursor, NodeSceneGeometryU32Cursor,
+    NodeSceneProfileStep, NodeSceneSemanticResult,
 };
 use crate::canonical_scene::store::construction::node_scene::snapshot::{
     NodeSceneSnapshot, NodeSceneSnapshotLimits,
@@ -96,6 +96,7 @@ enum GltfCapabilityMutation {
     PrimitiveMaterial,
     SkinInverseBind,
     SkinInverseBindCountMismatch,
+    PaletteJointOutOfRange,
     InfluenceWeight,
     MorphSparseIndex,
     AnimationValue,
@@ -283,6 +284,10 @@ impl GltfSourceEncoder {
         self.bytes.extend_from_slice(&value.to_le_bytes());
     }
 
+    fn i32(&mut self, value: i32) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
     fn usize(&mut self, value: usize) {
         let value = u64::try_from(value).expect("glTF source vector length must fit u64");
         self.bytes.extend_from_slice(&value.to_le_bytes());
@@ -337,6 +342,10 @@ fn encode_gltf_source(
 
     fn encode_u32_slice(encoder: &mut GltfSourceEncoder, values: &[u32]) {
         encoder.list(values, |encoder, value| encoder.u32(*value));
+    }
+
+    fn encode_i32_slice(encoder: &mut GltfSourceEncoder, values: &[i32]) {
+        encoder.list(values, |encoder, value| encoder.i32(*value));
     }
 
     fn encode_transform(encoder: &mut GltfSourceEncoder, transform: AuthoredTransform) {
@@ -462,6 +471,7 @@ fn encode_gltf_source(
 
     fn encode_shading_model(encoder: &mut GltfSourceEncoder, model: &ShadingModel) {
         let tag = match model {
+            ShadingModel::Unspecified => 7,
             ShadingModel::Unlit => 0,
             ShadingModel::Lambert => 1,
             ShadingModel::Phong => 2,
@@ -832,6 +842,11 @@ fn encode_gltf_source(
                 encoder.u8(lanes);
                 encode_u32_slice(encoder, values);
             }
+            GeometryAttributePayloadAuthoring::DenseI32 { lanes, values } => {
+                encoder.u8(4);
+                encoder.u8(lanes);
+                encode_i32_slice(encoder, values);
+            }
             GeometryAttributePayloadAuthoring::SparseF32 {
                 lanes,
                 logical_count,
@@ -859,6 +874,20 @@ fn encode_gltf_source(
                 encode_u32_slice(encoder, indices);
                 encode_u32_slice(encoder, values);
                 encode_u32_slice(encoder, default);
+            }
+            GeometryAttributePayloadAuthoring::SparseI32 {
+                lanes,
+                logical_count,
+                indices,
+                values,
+                default,
+            } => {
+                encoder.u8(5);
+                encoder.u8(lanes);
+                encoder.u32(logical_count);
+                encode_u32_slice(encoder, indices);
+                encode_i32_slice(encoder, values);
+                encode_i32_slice(encoder, default);
             }
         }
     });
@@ -1457,6 +1486,9 @@ fn with_gltf_capability_input<R>(
     ];
     if mutation == GltfCapabilityMutation::InfluenceWeight {
         primitive_zero_influences[0] = InfluenceAuthoring::new(0, 0.45, 0);
+    }
+    if mutation == GltfCapabilityMutation::PaletteJointOutOfRange {
+        primitive_zero_influences[0] = InfluenceAuthoring::new(2, 0.40, 0);
     }
     let primitive_zero_offsets = [0, 5, 7, 8];
     let primitive_one_offsets = [0, 1, 2, 3];
@@ -2625,6 +2657,22 @@ fn observe_facade_typed_view(
         Ok(count)
     }
 
+    fn drain_geometry_i32(
+        mut values: NodeSceneGeometryI32Cursor<'_>,
+        transcript: &mut FacadeTranscript,
+        label: &'static str,
+    ) -> NodeSceneSemanticResult<usize> {
+        let mut count: usize = 0;
+        while let Some(value) = values.next()? {
+            transcript.debug(label, &value);
+            count = count
+                .checked_add(1)
+                .expect("facade geometry I32 observation count must fit usize");
+        }
+        values.finish()?;
+        Ok(count)
+    }
+
     fn drain_deformation_f32(
         mut values: NodeSceneDeformationF32Cursor<'_>,
         transcript: &mut FacadeTranscript,
@@ -2874,6 +2922,9 @@ fn observe_facade_typed_view(
                 NodeSceneGeometryAttributePayload::DenseU32 { values } => {
                     let _ = drain_geometry_u32(values, &mut transcript, "attribute-value-u32")?;
                 }
+                NodeSceneGeometryAttributePayload::DenseI32 { values } => {
+                    let _ = drain_geometry_i32(values, &mut transcript, "attribute-value-i32")?;
+                }
                 NodeSceneGeometryAttributePayload::SparseF32 {
                     values,
                     indices,
@@ -2891,6 +2942,15 @@ fn observe_facade_typed_view(
                     let _ = drain_geometry_u32(values, &mut transcript, "attribute-value-u32")?;
                     let _ = drain_geometry_u32(indices, &mut transcript, "attribute-index")?;
                     let _ = drain_geometry_u32(default, &mut transcript, "attribute-default-u32")?;
+                }
+                NodeSceneGeometryAttributePayload::SparseI32 {
+                    values,
+                    indices,
+                    default,
+                } => {
+                    let _ = drain_geometry_i32(values, &mut transcript, "attribute-value-i32")?;
+                    let _ = drain_geometry_u32(indices, &mut transcript, "attribute-index")?;
+                    let _ = drain_geometry_i32(default, &mut transcript, "attribute-default-i32")?;
                 }
             }
         }
@@ -3415,6 +3475,26 @@ fn gltf_semantic_failures_are_attributed_to_the_owning_domain() {
     );
     reject_gltf_mutation(
         &account,
+        GltfCapabilityMutation::PaletteJointOutOfRange,
+        |failure| match failure {
+            NodeSceneConstructionRejection::DeformationAuthoring(
+                DeformationAuthoringFailure::Semantic(
+                    DeformationAuthoringSemanticError::PaletteJointOutOfRange {
+                        instance: 0,
+                        logical_mesh: 0,
+                        skin: 0,
+                        joint_count: 2,
+                        primitive: 0,
+                        influence: 0,
+                        palette_joint: 2,
+                    },
+                ),
+            ) => {}
+            other => panic!("unexpected deformation rejection: {other:?}"),
+        },
+    );
+    reject_gltf_mutation(
+        &account,
         GltfCapabilityMutation::AnimationTimeOrder,
         |failure| match failure {
             NodeSceneConstructionRejection::AnimationAuthoring(
@@ -3554,7 +3634,7 @@ fn gltf_shape_materializes_all_five_canonical_domains() {
     );
 
     let (full, bounded) = capture_gltf_capability_snapshots_for_probe(&parts);
-    assert_eq!(full.schema_revision, 1);
+    assert_eq!(full.schema_revision, 3);
     assert_eq!(bounded.digest, full.digest);
     assert_eq!(bounded.totals, full.totals);
     assert!(bounded.preview.bytes_truncated || bounded.preview.items_truncated);

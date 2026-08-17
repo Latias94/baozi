@@ -552,7 +552,7 @@ impl RetainedStoreBatchLimits {
         self.commitment_slots
     }
 
-    const fn into_raw(self) -> RetainedBatchLimits {
+    pub(super) const fn into_raw(self) -> RetainedBatchLimits {
         RetainedBatchLimits::new(self.attribution_slots, self.commitment_slots)
     }
 }
@@ -582,7 +582,7 @@ impl RetainedStoreWriterPlan {
         }
     }
 
-    const fn into_raw(self) -> RetainedWriterPlan<StorePhaseKey, StoreDimensionKey> {
+    pub(super) const fn into_raw(self) -> RetainedWriterPlan<StorePhaseKey, StoreDimensionKey> {
         RetainedWriterPlan::new(
             self.phase,
             self.capacity_dimension,
@@ -922,6 +922,12 @@ impl RetainedStoreBlockTablePlan {
         {
             return Err(StorePlanError::InvalidBlockTable);
         }
+        let writer = RetainedStoreWriterPlan::new(
+            writer.phase,
+            writer.capacity_dimension,
+            writer.attribution_dimension,
+            RetainedStoreBatchLimits::new(required_attributions, writer.limits.commitment_slots)?,
+        );
         Ok(Self {
             writer,
             total_blocks,
@@ -941,6 +947,10 @@ impl RetainedStoreBlockTablePlan {
         self,
     ) -> (StorePhaseKey, [StoreDimensionKey; 2]) {
         self.writer.keys_for_publication_validation()
+    }
+
+    pub(super) const fn writer(self) -> RetainedStoreWriterPlan {
+        self.writer
     }
 }
 
@@ -969,6 +979,10 @@ impl RetainedStorePublicationPlan {
             canonical: None,
             outcome_evidence,
         }
+    }
+
+    pub(super) const fn is_success_capable(&self) -> bool {
+        self.canonical.is_some()
     }
 
     pub(super) const fn tables_for_validation(&self) -> [Option<RetainedStoreBlockTablePlan>; 2] {

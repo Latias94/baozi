@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
-use baozi_core::{FormatId, ValidatedScene};
+use baozi_core::FormatId;
 use baozi_format_obj::{FORMAT_ID, ObjImportOptions, ObjImporter};
 use baozi_import::{
     ConformancePolicy, FormatSelection, ImportConfigOverlay, ImportFailure, ImportLossKind,
     ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
     LossPolicy, OptionCompileLimits, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-    ResourceLimitsOverlay, import_asset,
+    ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, import_asset,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::error::Error;
@@ -162,8 +162,34 @@ pub fn operation_result(
     }
 }
 
-pub fn scene(report: &ImportReport) -> &ValidatedScene {
-    report.scene()
+pub fn scene_snapshot(report: &ImportReport) -> Result<SceneSnapshot, SceneSnapshotError> {
+    let limits = SceneSnapshotLimits::try_new(64 * 1024, 1 << 12, 4_000_000)?;
+    let snapshot = report.scene().capture_snapshot(limits)?;
+    assert!(!snapshot.preview_bytes_truncated());
+    assert!(!snapshot.preview_items_truncated());
+    Ok(snapshot)
+}
+
+pub fn snapshot_line<'snapshot>(
+    snapshot: &'snapshot SceneSnapshot,
+    prefix: &str,
+) -> &'snapshot str {
+    snapshot
+        .preview()
+        .lines()
+        .find(|line| line.trim_start().starts_with(prefix))
+        .unwrap_or_else(|| panic!("missing canonical snapshot line: {prefix}"))
+}
+
+pub fn snapshot_line_containing<'snapshot>(
+    snapshot: &'snapshot SceneSnapshot,
+    fragment: &str,
+) -> &'snapshot str {
+    snapshot
+        .preview()
+        .lines()
+        .find(|line| line.contains(fragment))
+        .unwrap_or_else(|| panic!("missing canonical snapshot fragment: {fragment}"))
 }
 
 pub fn expected_success(result: Result<ImportReport, ImportFailure>) -> ImportReport {

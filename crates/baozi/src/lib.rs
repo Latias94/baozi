@@ -15,8 +15,8 @@ pub use baozi_core::{
     SceneGenerationId, SceneMetadataOwner, SceneSpace, SceneStorageFootprint, SceneStringOwner,
     SceneStringViolation, SceneValidationError, SceneValidationLimit, SceneValidationStats, Skin,
     SkinId, Texture, TextureFilterMode, TextureId, TextureRole, TextureSampler, TextureSlot,
-    TextureSource, TextureTransform, TextureWrapMode, ValidatedScene, Vec2, Vec3, Vec4,
-    VertexAttribute, VertexAttributeData, VertexAttributeSemantic,
+    TextureSource, TextureTransform, TextureWrapMode, Vec2, Vec3, Vec4, VertexAttribute,
+    VertexAttributeData, VertexAttributeSemantic,
 };
 pub use baozi_import::{
     CapabilityStatus, CauseOwner, ConformancePolicy, DeclarationEvidenceAuthority,
@@ -30,10 +30,15 @@ pub use baozi_import::{
     ImportDimension, ImportFailure, ImportInitializationError, ImportLedgerPhase,
     ImportLedgerSnapshot, ImportLossKind, ImportOperationControl, ImportPhase, ImportPhaseEvidence,
     ImportPreset, ImportProgressPhase, ImportProgressUnit, ImportReport, ImportRequest,
-    ImportRequestBuildError, ImportRequestLayer, ImportRunError, LossPolicy, OptionCompileLimits,
+    ImportRequestBuildError, ImportRequestLayer, ImportRunError, ImportTerminalCause,
+    ImportTerminalFailure, ImportTerminalFailureClass, LossPolicy, OptionCompileLimits,
     PreparedImportRequest, ReadConfidence, RegistryBuildError, RegistryBuildLimits,
-    RegistryRegistrationError, RequestError, ResourceLimits, ResourceLimitsOverlay, ScopeAbort,
-    ScopeAbortCause, TrustedExtensionBoundary,
+    RegistryRegistrationError, RequestError, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot,
+    SceneSnapshotError, SceneSnapshotLimits, ScopeAbort, ScopeAbortCause, TrustedExtensionBoundary,
+    ValidatedScene,
+};
+use baozi_import::{
+    RegistryBuilder, RegistrySnapshot, import_asset, import_asset_with_resolver, import_bytes,
 };
 pub use baozi_io::{
     AssetIo, AssetLength, AssetObjectKind, AssetOpenError, AssetOpenErrorKind, AssetOpenStage,
@@ -48,17 +53,6 @@ pub use baozi_operation::{
     CancellationOrigin, CancellationSignal, CancellationToken, ControlCause, LedgerLimitsError,
     ProgressDecision, ProgressDeliveryLimits, ProgressEvent, ProgressObserver,
     ProgressStorageError, ProgressViolation,
-};
-pub use baozi_postprocess::{
-    PostProcessControl, PostProcessDimension, PostProcessError, PostProcessFailure,
-    PostProcessInitializationError, PostProcessLedgerPhase, PostProcessLedgerSnapshot,
-    PostProcessLimits, PostProcessPipeline, PostProcessPlanError, PostProcessPreset,
-    PostProcessProgressPhase, PostProcessProgressUnit, PostProcessRunError, PostProcessStep,
-    PostProcessSuccess,
-};
-
-use baozi_import::{
-    RegistryBuilder, RegistrySnapshot, import_asset, import_asset_with_resolver, import_bytes,
 };
 use thiserror::Error;
 
@@ -105,90 +99,26 @@ pub enum Error {
 
     #[error(transparent)]
     Import(#[from] ImportFailure),
+
+    #[error("import terminal finalization failed: {code}")]
+    ImportFinalization { code: &'static str },
+
+    #[error(transparent)]
+    ImportRun(ImportRunError),
 }
 
 impl From<ImportRunError> for Error {
     fn from(error: ImportRunError) -> Self {
-        match error.into_operation_failure() {
-            Ok(failure) => Self::Import(failure),
-            Err(source) => Self::ImportInitialization(source),
+        match error {
+            ImportRunError::Initialization { source } => Self::ImportInitialization(source),
+            ImportRunError::Operation { failure } => Self::Import(failure),
+            ImportRunError::Finalization { code } => Self::ImportFinalization { code },
+            other => Self::ImportRun(other),
         }
     }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-pub type ProcessedImportResult<T> = std::result::Result<T, ProcessedImportFailure>;
-
-/// One successful import followed by a distinct successful post-process operation.
-#[derive(Debug)]
-pub struct ProcessedImport {
-    import: ImportReport,
-    postprocess: PostProcessSuccess,
-}
-
-impl ProcessedImport {
-    pub const fn import(&self) -> &ImportReport {
-        &self.import
-    }
-
-    pub const fn postprocess(&self) -> &PostProcessSuccess {
-        &self.postprocess
-    }
-
-    pub const fn scene(&self) -> &ValidatedScene {
-        self.postprocess.scene()
-    }
-
-    pub fn into_parts(self) -> (ImportReport, PostProcessSuccess) {
-        (self.import, self.postprocess)
-    }
-}
-
-/// A composed workflow failure that retains a completed import when post-processing fails.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "composed failures retain either complete import evidence or the completed import report by value"
-)]
-pub enum ProcessedImportFailure {
-    #[error(transparent)]
-    Import(#[from] Error),
-
-    #[error("post-process failed after import succeeded")]
-    PostProcess {
-        import: ImportReport,
-        #[source]
-        failure: PostProcessRunError,
-    },
-}
-
-impl ProcessedImportFailure {
-    pub fn completed_import(&self) -> Option<&ImportReport> {
-        match self {
-            Self::Import(_) => None,
-            Self::PostProcess { import, .. } => Some(import),
-        }
-    }
-
-    pub fn postprocess_failure(&self) -> Option<&PostProcessFailure> {
-        match self {
-            Self::Import(_) => None,
-            Self::PostProcess {
-                failure: PostProcessRunError::Operation { failure },
-                ..
-            } => Some(failure),
-            Self::PostProcess { .. } => None,
-        }
-    }
-
-    pub fn postprocess_run_error(&self) -> Option<&PostProcessRunError> {
-        match self {
-            Self::Import(_) => None,
-            Self::PostProcess { failure, .. } => Some(failure),
-        }
-    }
-}
 
 /// Mutable registry proposal that can publish one immutable [`Importer`].
 pub struct ImporterBuilder {
@@ -381,50 +311,6 @@ impl Importer {
         }
     }
 
-    pub fn process(
-        report: ImportReport,
-        pipeline: &PostProcessPipeline,
-    ) -> ProcessedImportResult<ProcessedImport> {
-        Self::process_with_control(report, pipeline, PostProcessControl::default())
-    }
-
-    pub fn process_with_control(
-        report: ImportReport,
-        pipeline: &PostProcessPipeline,
-        control: PostProcessControl,
-    ) -> ProcessedImportResult<ProcessedImport> {
-        match pipeline.run_with_control(report.scene(), control) {
-            Ok(postprocess) => Ok(ProcessedImport {
-                import: report,
-                postprocess,
-            }),
-            Err(failure) => Err(ProcessedImportFailure::PostProcess {
-                import: report,
-                failure,
-            }),
-        }
-    }
-
-    pub fn read_bytes_with_postprocess(
-        &self,
-        source: impl AsRef<str>,
-        bytes: impl AsRef<[u8]>,
-        pipeline: &PostProcessPipeline,
-    ) -> ProcessedImportResult<ProcessedImport> {
-        let report = self.read_bytes(source, bytes)?;
-        Self::process(report, pipeline)
-    }
-
-    pub fn read_asset_with_postprocess(
-        &self,
-        io: &dyn AssetIo,
-        source: AssetPath,
-        pipeline: &PostProcessPipeline,
-    ) -> ProcessedImportResult<ProcessedImport> {
-        let report = self.read_asset(io, source)?;
-        Self::process(report, pipeline)
-    }
-
     #[cfg(feature = "native-fs-candidate")]
     /// Imports from a native path through the unregistered candidate adapter.
     pub fn read_path(&self, path: impl AsRef<Path>) -> Result<ImportReport> {
@@ -452,17 +338,6 @@ impl Importer {
             NativeDirectoryCapability::open_ambient(root).map_err(Error::NativeRoot)?;
         let io = FileSystemAssetIo::from_capability(capability);
         self.read_asset_with_request(&io, AssetPath::new(file_name)?, request, control)
-    }
-
-    #[cfg(feature = "native-fs-candidate")]
-    /// Imports and post-processes a native path through the candidate adapter.
-    pub fn read_path_with_postprocess(
-        &self,
-        path: impl AsRef<Path>,
-        pipeline: &PostProcessPipeline,
-    ) -> ProcessedImportResult<ProcessedImport> {
-        let report = self.read_path(path)?;
-        Self::process(report, pipeline)
     }
 }
 
@@ -499,5 +374,19 @@ mod tests {
             .and_then(|source| source.downcast_ref::<LedgerCause<ImportDimension>>())
             .expect("facade initialization must retain the typed coordinator cause");
         assert_eq!(coordinator_source, &cause);
+    }
+
+    #[test]
+    fn terminal_finalization_survives_the_facade_conversion() {
+        let error = Error::from(ImportRunError::Finalization {
+            code: "test.finalization",
+        });
+
+        assert!(matches!(
+            error,
+            Error::ImportFinalization {
+                code: "test.finalization"
+            }
+        ));
     }
 }

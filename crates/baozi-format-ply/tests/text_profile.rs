@@ -3,8 +3,9 @@ mod common;
 use baozi_format_ply::PlyFailureCode;
 use baozi_import::{FormatFailureEvidence, ImportDimension, ResourceLimits};
 use common::{
-    TestResult, assert_scope_resource_limit, binary_triangle, expected_error, expected_ply_failure,
-    expected_report, import_bytes_forced_result, ply_string_detail, ply_unsigned_detail,
+    TestResult, assert_requested_terminal_failure, assert_scope_resource_limit, binary_triangle,
+    expected_error, expected_ply_failure, expected_report, import_bytes_forced_result,
+    ply_string_detail, ply_unsigned_detail, scene_snapshot, snapshot_line,
 };
 use std::error::Error;
 
@@ -133,8 +134,7 @@ fn trailing_invalid_utf8_preserves_inert_evidence_offset_and_failed_record_accou
         .expect("record accounting is configured");
     assert_eq!(records.attempted(), 1);
     assert_eq!(records.consumed(), 0);
-    assert_eq!(failure.ledger().current_live_bytes(), 0);
-    assert!(failure.finalization_cause().is_none());
+    assert_requested_terminal_failure(&failure);
     Ok(())
 }
 
@@ -287,9 +287,10 @@ fn lf_crlf_and_horizontal_tab_remain_valid_ascii_syntax() -> TestResult<()> {
             bytes,
             ResourceLimits::default(),
         )?)?;
-        assert_eq!(
-            report.scene().meshes()[0].positions,
-            [baozi_core::Vec3::new(1.0, 2.0, 3.0)]
+        let snapshot = scene_snapshot(&report)?;
+        assert!(
+            snapshot_line(&snapshot, "attribute[0]")
+                .contains("values(present,total=3)=[0x3f800000,0x40000000,0x40400000]")
         );
     }
     Ok(())
@@ -311,7 +312,8 @@ fn binary_body_bytes_are_not_scanned_as_ascii_text() -> TestResult<()> {
         &bytes,
         ResourceLimits::default(),
     )?)?;
-    assert_eq!(report.scene().meshes()[0].positions.len(), 3);
+    let snapshot = scene_snapshot(&report)?;
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains("elements=3"));
     Ok(())
 }
 
@@ -328,7 +330,8 @@ fn ascii_decoded_utf8_budget_counts_the_entire_input() -> TestResult<()> {
         bytes,
         exact_limits,
     )?)?;
-    assert_eq!(report.scene().meshes()[0].positions.len(), 1);
+    let snapshot = scene_snapshot(&report)?;
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains("elements=1"));
 
     let below_limit = decoded_bytes
         .checked_sub(1)
@@ -367,7 +370,8 @@ fn binary_decoded_utf8_budget_counts_only_the_header() -> TestResult<()> {
         &bytes,
         exact_limits,
     )?)?;
-    assert_eq!(report.scene().meshes()[0].positions.len(), 3);
+    let snapshot = scene_snapshot(&report)?;
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains("elements=3"));
 
     let below_limit = decoded_bytes
         .checked_sub(1)
@@ -391,9 +395,10 @@ fn ascii_numeric_parsing_uses_dot_syntax_and_rejects_decimal_commas() -> TestRes
         accepted,
         ResourceLimits::default(),
     )?)?;
-    assert_eq!(
-        report.scene().meshes()[0].positions,
-        [baozi_core::Vec3::new(1.5, -2.5, 10.0)]
+    let snapshot = scene_snapshot(&report)?;
+    assert!(
+        snapshot_line(&snapshot, "attribute[0]")
+            .contains("values(present,total=3)=[0x3fc00000,0xc0200000,0x41200000]")
     );
 
     let comma = b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n1,5 0 0\n";
@@ -418,9 +423,10 @@ fn ascii_numeric_literals_enforce_the_4096_byte_format_boundary() -> TestResult<
         accepted.as_bytes(),
         ResourceLimits::default(),
     )?)?;
-    assert_eq!(
-        report.scene().meshes()[0].positions,
-        [baozi_core::Vec3::new(0.0, 0.0, 0.0)]
+    let snapshot = scene_snapshot(&report)?;
+    assert!(
+        snapshot_line(&snapshot, "attribute[0]")
+            .contains("values(present,total=3)=[0x00000000,0x00000000,0x00000000]")
     );
 
     let over_limit = "0".repeat(MAX_NUMERIC_LITERAL_BYTES + 1);
@@ -446,8 +452,7 @@ fn ascii_numeric_literals_enforce_the_4096_byte_format_boundary() -> TestResult<
         .expect("record accounting is configured");
     assert_eq!(records.attempted(), 1);
     assert_eq!(records.consumed(), 0);
-    assert_eq!(failure.ledger().current_live_bytes(), 0);
-    assert!(failure.finalization_cause().is_none());
+    assert_requested_terminal_failure(&failure);
     Ok(())
 }
 
@@ -464,9 +469,10 @@ fn header_element_counts_enforce_the_4096_byte_format_boundary() -> TestResult<(
         accepted.as_bytes(),
         ResourceLimits::default(),
     )?)?;
-    assert_eq!(
-        report.scene().meshes()[0].positions,
-        [baozi_core::Vec3::new(0.0, 0.0, 0.0)]
+    let snapshot = scene_snapshot(&report)?;
+    assert!(
+        snapshot_line(&snapshot, "attribute[0]")
+            .contains("values(present,total=3)=[0x00000000,0x00000000,0x00000000]")
     );
 
     let over_limit = format!("{}1", "0".repeat(MAX_NUMERIC_LITERAL_BYTES));
@@ -489,7 +495,6 @@ fn header_element_counts_enforce_the_4096_byte_format_boundary() -> TestResult<(
         .expect("record accounting is configured");
     assert_eq!(records.attempted(), 0);
     assert_eq!(records.consumed(), 0);
-    assert_eq!(failure.ledger().current_live_bytes(), 0);
-    assert!(failure.finalization_cause().is_none());
+    assert_requested_terminal_failure(&failure);
     Ok(())
 }

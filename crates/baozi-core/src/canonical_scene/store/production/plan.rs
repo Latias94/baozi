@@ -16,7 +16,7 @@ use std::fmt;
 use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
-use crate::entity::AuthoredTransformKind;
+use crate::entity::{AuthoredTransformKind, EntityNameError, validate_entity_name_str};
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
 use super::super::schema::{NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_TRS_SCALAR_COUNT};
@@ -124,9 +124,10 @@ pub(super) fn node_shape_scratch_envelope(
         retained_bytes,
     })
 }
-const NODE_SCENE_NODE_BASE_BYTES: u64 = (5 * LOGICAL_U32_BYTES) + (2 * LOGICAL_U8_BYTES);
+const NODE_SCENE_NODE_BASE_BYTES: u64 = (7 * LOGICAL_U32_BYTES) + (3 * LOGICAL_U8_BYTES);
 const NODE_SCENE_SYNTHETIC_TRANSFORM_SLOT_BYTES: u64 = LOGICAL_U8_BYTES;
 const NODE_SCENE_NODE_TRANSFORM_REFERENCE_BYTES: u64 = LOGICAL_REFERENCE_BYTES;
+const NODE_SCENE_SYNTHETIC_NAME_SLOT_BYTES: u64 = LOGICAL_U8_BYTES;
 const NODE_SCENE_REFERENCE_BYTES: u64 = 2 * LOGICAL_U32_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +185,12 @@ pub(in crate::canonical_scene::store) enum NodeAuthoringSemanticError {
     },
     #[error("node {node} references itself as parent")]
     SelfParent { node: usize },
+    #[error("node {node} has an invalid display name: {cause}")]
+    InvalidName {
+        node: usize,
+        #[source]
+        cause: EntityNameError,
+    },
     #[error("node parent graph contains a cycle through node {node}")]
     Cycle { node: usize },
     #[error(
@@ -247,6 +254,8 @@ struct NodeValidationStorage<R> {
     reference_count: u64,
     matrix_scalar_count: u64,
     trs_scalar_count: u64,
+    node_name_byte_count: u64,
+    node_name_reference_count: u64,
     canonical_bytes: u64,
     validation_work: u64,
     scratch_bytes: u64,
@@ -290,6 +299,14 @@ impl<'input, R> ValidatedNodeBatch<'input, R> {
 
     pub(in crate::canonical_scene::store) const fn trs_scalar_count(&self) -> u64 {
         self.compiled.trs_scalar_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn node_name_byte_count(&self) -> u64 {
+        self.compiled.node_name_byte_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn node_name_reference_count(&self) -> u64 {
+        self.compiled.node_name_reference_count
     }
 
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
@@ -368,6 +385,8 @@ impl<R> fmt::Debug for NodeValidationStorage<R> {
             .field("reference_count", &self.reference_count)
             .field("matrix_scalar_count", &self.matrix_scalar_count)
             .field("trs_scalar_count", &self.trs_scalar_count)
+            .field("node_name_byte_count", &self.node_name_byte_count)
+            .field("node_name_reference_count", &self.node_name_reference_count)
             .field("canonical_order", &self.canonical_order)
             .field("canonical_index_by_local", &self.canonical_index_by_local)
             .field("child_ranges_by_local", &self.child_ranges_by_local)
@@ -814,7 +833,35 @@ where
         context.add_relation()?;
     }
 
+    let mut node_name_byte_count = 0_u64;
+    let mut node_name_reference_count = 0_u64;
     for (node_index, node) in nodes.iter().copied().enumerate() {
+        let name_byte_count = context.run_semantic_unit(SceneValidationWork::Entity, || {
+            let Presence::Present(name) = node.name() else {
+                return Ok(0_u64);
+            };
+            validate_entity_name_str(name).map_err(|cause| {
+                NodeAuthoringSemanticError::InvalidName {
+                    node: node_index,
+                    cause,
+                }
+            })?;
+            u64::try_from(name.len()).map_err(|_| NodeAuthoringSemanticError::AccountingOverflow {
+                dimension: "node name bytes",
+            })
+        })?;
+        if name_byte_count != 0 {
+            node_name_reference_count = node_name_reference_count.checked_add(1).ok_or(
+                NodeAuthoringSemanticError::AccountingOverflow {
+                    dimension: "node name references",
+                },
+            )?;
+        }
+        node_name_byte_count = node_name_byte_count.checked_add(name_byte_count).ok_or(
+            NodeAuthoringSemanticError::AccountingOverflow {
+                dimension: "node name bytes",
+            },
+        )?;
         let has_parent_relation =
             context.run_semantic_unit(SceneValidationWork::GraphNode, || {
                 let declared_root = matches!(
@@ -936,6 +983,8 @@ where
         canonical_node_count,
         context.references,
         transform_scalar_count,
+        node_name_byte_count,
+        node_name_reference_count,
     )?;
     enforce_limit::<C::Error>(
         NodeAuthoringLimit::CanonicalBytes,
@@ -964,6 +1013,8 @@ where
         reference_count: context.references,
         matrix_scalar_count: context.matrix_scalars,
         trs_scalar_count: context.trs_scalars,
+        node_name_byte_count,
+        node_name_reference_count,
         canonical_bytes,
         validation_work: context.work,
         scratch_bytes: retained_bytes,
@@ -1206,6 +1257,8 @@ fn node_scene_logical_bytes(
     canonical_node_count: u64,
     reference_count: u64,
     transform_scalar_count: u64,
+    node_name_byte_count: u64,
+    node_name_reference_count: u64,
 ) -> Result<u64, NodeAuthoringSemanticError> {
     let source_node_count = canonical_node_count.checked_sub(1).ok_or(
         NodeAuthoringSemanticError::AccountingOverflow {
@@ -1217,6 +1270,11 @@ fn node_scene_logical_bytes(
             dimension: "canonical parent references",
         });
     }
+    let absent_node_name_count = source_node_count
+        .checked_sub(node_name_reference_count)
+        .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
+            dimension: "node name references",
+        })?;
 
     let directory_bytes = if source_node_count == 0 {
         SCENE_DIRECTORY_BASE_BYTES
@@ -1239,6 +1297,7 @@ fn node_scene_logical_bytes(
         })?;
     let node_bytes = NODE_SCENE_NODE_BASE_BYTES
         .checked_add(NODE_SCENE_SYNTHETIC_TRANSFORM_SLOT_BYTES)
+        .and_then(|bytes| bytes.checked_add(NODE_SCENE_SYNTHETIC_NAME_SLOT_BYTES))
         .and_then(|bytes| bytes.checked_add(source_node_bytes))
         .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
             dimension: "canonical node records",
@@ -1253,6 +1312,16 @@ fn node_scene_logical_bytes(
         .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
             dimension: "canonical transform values",
         })?;
+    let node_name_reference_bytes = node_name_reference_count
+        .checked_mul(LOGICAL_REFERENCE_BYTES)
+        .and_then(|bytes| {
+            absent_node_name_count
+                .checked_mul(LOGICAL_U8_BYTES)
+                .and_then(|absent| bytes.checked_add(absent))
+        })
+        .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
+            dimension: "canonical node name references",
+        })?;
 
     checked_sum_bytes(
         [
@@ -1261,6 +1330,8 @@ fn node_scene_logical_bytes(
             node_bytes,
             reference_bytes,
             transform_bytes,
+            node_name_reference_bytes,
+            node_name_byte_count,
         ],
         "canonical logical footprint",
     )

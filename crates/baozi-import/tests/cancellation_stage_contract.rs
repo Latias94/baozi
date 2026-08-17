@@ -1,12 +1,14 @@
-use baozi_core::{FormatId, Node, SCENE_VALIDATION_POLL_INTERVAL, SceneDraft};
+mod support;
+
+use baozi_core::{FormatId, SCENE_VALIDATION_POLL_INTERVAL};
 use baozi_import::{
     CapabilityStatus, CauseOwner, DependencyRequirement, DependencyRoleId, DetectionAbort,
     DetectionFaultCode, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
     FormatDescriptor, FormatEncoding, FormatImporter, ImportCause, ImportDimension, ImportFailure,
-    ImportLedgerPhase, ImportOperationControl, ImportPhase, ImportProgressPhase,
-    ImportProgressUnit, ImportReport, ImportRequest, ImportResult, OptionCompileLimits,
-    ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, ScopeAbortCause, import_asset as run_import_asset,
+    ImportOperationControl, ImportPhase, ImportProgressPhase, ImportProgressUnit, ImportReport,
+    ImportRequest, ImportResult, OptionCompileLimits, ParseResult, ParseScope,
+    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
+    SceneDraft, ScopeAbortCause, import_asset as run_import_asset,
     import_bytes as run_import_bytes,
 };
 use baozi_io::{
@@ -103,7 +105,7 @@ impl FormatImporter for EmptyImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -136,8 +138,8 @@ impl FormatImporter for RequiredDependencyImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let _dependency = scope.required_dependency(&self.role, "sidecar.bin")?;
-        scope.scene_builder()?.finish_draft()
+        let _dependency = support::required_root_dependency(scope, &self.role, "sidecar.bin")?;
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -162,12 +164,7 @@ impl FormatImporter for DeepSceneImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let mut builder = scope.scene_builder()?;
-        for _ in 1..VALIDATION_NODE_COUNT {
-            let node = scope.prepare_scene_value(Node::default())?;
-            builder.add_prepared_node(node)?;
-        }
-        builder.finish_draft()
+        support::submit_node_scene(scope, VALIDATION_NODE_COUNT)
     }
 }
 
@@ -211,7 +208,7 @@ impl FormatImporter for DetectorScanCancellationImporter {
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -250,7 +247,7 @@ impl FormatImporter for LatchThenPanicDetectorImporter {
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -372,7 +369,7 @@ impl FormatImporter for DetectorContractImporter {
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -400,7 +397,7 @@ impl FormatImporter for RecoveringDetectorCancellationImporter {
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         self.parse_calls.fetch_add(1, Ordering::AcqRel);
-        scope.scene_builder()?.finish_draft()
+        support::submit_minimal_scene(scope)
     }
 }
 
@@ -517,7 +514,6 @@ fn assert_signal_cancellation(failure: &ImportFailure) {
         })
     ));
     assert_eq!(failure.cause().owner(), CauseOwner::Operation);
-    assert!(failure.finalization_cause().is_none());
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     assert_eq!(failure.ledger().active_reservations(), 0);
 }
@@ -536,7 +532,6 @@ fn assert_detector_contract_failure(
         ScopeAbortCause::DescriptorContract { code } if *code == expected_code
     ));
     assert_eq!(failure.cause().owner(), CauseOwner::Import);
-    assert!(failure.finalization_cause().is_none());
     assert_eq!(failure.last_completed().phase(), ImportPhase::PrimaryBound);
     assert!(failure.selected_format().is_none());
     assert!(failure.detection_evidence().is_empty());
@@ -912,18 +907,18 @@ fn import_validation_cancellation_preserves_draft_stage_and_releases_validation_
     );
     assert_eq!(validation_events.load(Ordering::Acquire), 1);
     assert_eq!(failure.last_completed().phase(), ImportPhase::DraftBuilt);
-    let validation = failure
+    let validation_scratch = failure
         .ledger()
-        .phase(ImportLedgerPhase::Validation)
-        .expect("validation phase evidence");
-    assert_eq!(validation.current_live_bytes(), 0);
-    assert!(validation.peak_live_bytes() > 0);
+        .dimension(ImportDimension::ScratchBytes)
+        .expect("validation scratch evidence");
+    assert_eq!(validation_scratch.current_live_bytes(), 0);
+    assert!(validation_scratch.peak_live_bytes() > 0);
     let output = failure
         .ledger()
         .dimension(ImportDimension::CanonicalOutputBytes)
         .expect("canonical output evidence");
-    assert_eq!(output.pending_publication(), 0);
     assert_eq!(output.committed(), 0);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
 }
 
 #[test]
@@ -964,6 +959,6 @@ fn final_progress_can_trigger_signal_cancellation_at_the_last_publication_checkp
         .ledger()
         .dimension(ImportDimension::CanonicalOutputBytes)
         .expect("canonical output evidence");
-    assert_eq!(output.pending_publication(), 0);
     assert_eq!(output.committed(), 0);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
 }

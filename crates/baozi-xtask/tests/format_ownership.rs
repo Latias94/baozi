@@ -42,10 +42,7 @@ fn format_ownership_accepts_central_owning_wrappers() {
     repository.write_source(
         "baozi-format-obj",
         "src/nested/parser.rs",
-        concat!(
-            "use baozi_import::{MeteredVec, PreparedSceneValue};\n",
-            "pub struct Parser;\n",
-        ),
+        concat!("use baozi_import::MeteredVec;\n", "pub struct Parser;\n",),
     );
 
     let report = baozi_xtask::format_ownership::check_repository(repository.path());

@@ -2,11 +2,10 @@ use crate::material_library_role;
 use crate::parser::{self, TextDecodeFailure};
 use baozi_core::{AlphaMode, Color};
 use baozi_import::{
-    DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
+    DependencyOrigin, DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
     ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredOrderedMap, MeteredString,
     MeteredVec, ParseFailure, ParseResult, ParseScope,
 };
-use baozi_io::AssetPath;
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -204,6 +203,7 @@ pub(crate) fn interruptible_str_eq(
 
 pub(crate) struct MaterialLibrary<'scope> {
     materials: MeteredVec<'scope, ParsedMaterial<'scope>>,
+    origins: MeteredVec<'scope, DependencyOrigin<'scope>>,
     next_order: usize,
 }
 
@@ -218,8 +218,8 @@ pub(crate) struct ParsedMaterial<'scope> {
 }
 
 pub(crate) struct ParsedTexture<'scope> {
-    pub uri: MeteredString<'scope>,
-    pub source_key: &'static str,
+    pub reference: MeteredString<'scope>,
+    pub origin: usize,
 }
 
 pub(crate) struct ParsedMetadata<'scope> {
@@ -288,46 +288,51 @@ pub(crate) fn load_libraries<'scope>(
     let role = material_library_role();
     let mut library = MaterialLibrary {
         materials: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-materials"),
+        origins: scope.metered_vec(
+            ImportStorageClass::FormatNormalization,
+            "obj-mtl-resource-origins",
+        ),
         next_order: 0,
     };
+    library.origins.try_reserve(mtllibs.len())?;
+    let root = scope.root_origin();
     for mtllib in mtllibs {
-        let outcome = scope.optional_dependency(&role, mtllib.as_str())?;
-        if let Some(snapshot) = outcome.snapshot() {
-            let text = match parser::decode_utf8(scope, snapshot.bytes(), "obj-mtl-text") {
-                Ok(text) => text,
-                Err(TextDecodeFailure::Scope(failure)) => return Err(failure),
-                Err(TextDecodeFailure::InvalidUtf8 {
-                    source,
-                    base_offset,
-                }) => {
-                    let failure = crate::ObjFailure::invalid_utf8_at(source, base_offset)
-                        .ok_or_else(|| {
-                            scope.allocation_failure("obj-mtl-invalid-utf8-byte-offset")
-                        })?;
-                    return Err(scope.format_failure(failure));
-                }
-            };
-            parse_mtl(scope, snapshot, &text, &mut library)?;
-            drop(text);
-            continue;
+        let outcome = scope.dependency(&root, &role, mtllib.as_str())?;
+        match outcome.into_result() {
+            Ok(snapshot) => {
+                let origin = library.origins.len();
+                let dependency_origin = snapshot.origin();
+                let text = match parser::decode_utf8(scope, snapshot.bytes(), "obj-mtl-text") {
+                    Ok(text) => text,
+                    Err(TextDecodeFailure::Scope(failure)) => return Err(failure),
+                    Err(TextDecodeFailure::InvalidUtf8 {
+                        source,
+                        base_offset,
+                    }) => {
+                        let failure = crate::ObjFailure::invalid_utf8_at(source, base_offset)
+                            .ok_or_else(|| {
+                                scope.allocation_failure("obj-mtl-invalid-utf8-byte-offset")
+                            })?;
+                        return Err(scope.format_failure(failure));
+                    }
+                };
+                parse_mtl(scope, &snapshot, &text, origin, &mut library)?;
+                drop(text);
+                drop(snapshot);
+                library.origins.try_push_reserved(dependency_origin)?;
+            }
+            Err(evidence) => push_warning(
+                scope,
+                None,
+                "obj.mtl_unavailable",
+                format_args!(
+                    "optional material library '{}' is unavailable; owner={:?}, cache={:?}",
+                    evidence.normalized_path(),
+                    evidence.owner(),
+                    evidence.cache_disposition()
+                ),
+            )?,
         }
-
-        let Some(evidence) = outcome.unavailable_evidence() else {
-            return Err(scope.format_failure(crate::ObjFailure::internal(
-                "optional-dependency-outcome-without-evidence",
-            )));
-        };
-        push_warning(
-            scope,
-            None,
-            "obj.mtl_unavailable",
-            format_args!(
-                "optional material library '{}' is unavailable; owner={:?}, cache={:?}",
-                evidence.normalized_path(),
-                evidence.owner(),
-                evidence.cache_disposition()
-            ),
-        )?;
     }
     finalize_materials(scope, &mut library)?;
     Ok(library)
@@ -345,15 +350,19 @@ impl<'scope> MaterialLibrary<'scope> {
             })?;
         Ok(index.map(|index| &self.materials.as_slice()[index]))
     }
+
+    pub(crate) fn origin(&self, index: usize) -> Option<&DependencyOrigin<'scope>> {
+        self.origins.as_slice().get(index)
+    }
 }
 
 fn parse_mtl<'scope>(
     scope: &'scope ParseScope<'_>,
     snapshot: &DependencySnapshot<'_>,
     text: &parser::DecodedText<'_>,
+    origin: usize,
     library: &mut MaterialLibrary<'scope>,
 ) -> ParseResult<()> {
-    let path = snapshot.identity().path();
     let mut current = None;
 
     parser::scan_lines(scope, text, |decoded_line, line_number| {
@@ -494,71 +503,10 @@ fn parse_mtl<'scope>(
                 if let Some(material) = current.as_mut() {
                     match texture_path_from_map(scope, snapshot, &tokens[1..], line_number)? {
                         TexturePathOutcome::Value(texture_path) => {
-                            let path_work = path
-                                .as_str()
-                                .len()
-                                .checked_add(texture_path.len())
-                                .ok_or_else(|| {
-                                    scope.allocation_failure("obj-mtl-texture-path-work")
-                                })?;
-                            let (resolved, resolution_allowance) = scope.with_work(
-                                ImportWorkClass::WorkUnits,
-                                usize_amount(scope, path_work, "obj-mtl-texture-path-work")?,
-                                |work| {
-                                    let resolution_allowance = scope.metered_opaque_allowance(
-                                        ImportStorageClass::FormatNormalization,
-                                        usize_amount(
-                                            scope,
-                                            path_resolution_allowance(
-                                                scope,
-                                                path,
-                                                texture_path.as_str(),
-                                            )?,
-                                            "obj-mtl-texture-path-resolution",
-                                        )?,
-                                    )?;
-                                    let resolved = path.resolve_from_file(texture_path.as_str());
-                                    work.complete_all()?;
-                                    Ok((resolved, resolution_allowance))
-                                },
-                            )?;
-                            match resolved {
-                                Ok(resolved) => {
-                                    if resolved.as_str().len() > parser::max_text_value_bytes(scope)
-                                    {
-                                        push_dependency_warning(
-                                            scope,
-                                            snapshot,
-                                            Some((line_number, 1)),
-                                            "obj.mtl_texture_path_limit",
-                                            format_args!(
-                                                "resolved MTL map_Kd texture URI exceeded max_string_bytes"
-                                            ),
-                                        )?;
-                                    } else {
-                                        let uri = owned_string(
-                                            scope,
-                                            resolved.as_str(),
-                                            "obj-mtl-texture-uri",
-                                        )?;
-                                        material.diffuse_texture = Some(ParsedTexture {
-                                            uri,
-                                            source_key: "map_Kd",
-                                        });
-                                    }
-                                }
-                                Err(error) => push_dependency_warning(
-                                    scope,
-                                    snapshot,
-                                    Some((line_number, 1)),
-                                    "obj.mtl_texture_resolve_failed",
-                                    format_args!(
-                                        "MTL map_Kd texture could not be resolved: {error}"
-                                    ),
-                                )?,
-                            }
-                            drop(resolution_allowance);
-                            drop(texture_path);
+                            material.diffuse_texture = Some(ParsedTexture {
+                                reference: texture_path,
+                                origin,
+                            });
                         }
                         TexturePathOutcome::TooLong => push_dependency_warning(
                             scope,
@@ -919,39 +867,6 @@ enum TexturePathOutcome<'scope> {
     Missing,
     TooLong,
     Value(MeteredString<'scope>),
-}
-
-fn path_resolution_allowance(
-    scope: &ParseScope<'_>,
-    base: &AssetPath,
-    reference: &str,
-) -> ParseResult<usize> {
-    let source_bytes = base
-        .as_str()
-        .len()
-        .checked_add(reference.len())
-        .ok_or_else(|| scope.allocation_failure("obj-mtl-texture-path-resolution"))?;
-    let mut component_count = 2usize;
-    for bytes in [base.as_str().as_bytes(), reference.as_bytes()] {
-        for chunk in bytes.chunks(parser::SCAN_CHUNK_BYTES) {
-            scope.poll()?;
-            for byte in chunk {
-                if *byte == b'/' || *byte == b'\\' {
-                    component_count = component_count.checked_add(1).ok_or_else(|| {
-                        scope.allocation_failure("obj-mtl-texture-path-resolution")
-                    })?;
-                }
-            }
-        }
-    }
-    let component_storage = std::mem::size_of::<String>()
-        .checked_add(std::mem::size_of::<&str>())
-        .and_then(|bytes| bytes.checked_mul(component_count))
-        .ok_or_else(|| scope.allocation_failure("obj-mtl-texture-path-resolution"))?;
-    source_bytes
-        .checked_mul(6)
-        .and_then(|bytes| bytes.checked_add(component_storage))
-        .ok_or_else(|| scope.allocation_failure("obj-mtl-texture-path-resolution"))
 }
 
 fn owned_string<'scope>(

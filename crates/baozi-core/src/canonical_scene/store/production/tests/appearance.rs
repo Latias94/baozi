@@ -6,6 +6,7 @@ use crate::appearance::{
     ShadingModel, TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelMapping,
     TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
 };
+use crate::extension::ExtensionMediaType;
 use crate::image::SamplerState;
 
 use super::super::plan::appearance::{
@@ -14,7 +15,8 @@ use super::super::plan::appearance::{
 };
 use super::super::{
     AppearanceAuthoringBatch, AuthoringRange, ImageAuthoring, ImageLocalId, MaterialAuthoring,
-    MaterialBindingAuthoring, Presence, SamplerAuthoring, SamplerLocalId, TextureAuthoring,
+    MaterialBindingAuthoring, Presence, ResourceIdentityLocalId, ResourceSnapshotAuthoring,
+    ResourceSnapshotAuthoringTable, SamplerAuthoring, SamplerLocalId, TextureAuthoring,
     TextureLocalId,
 };
 use super::{SceneValidationLimits, TestControl};
@@ -28,6 +30,7 @@ fn compiled_appearance_facts_do_not_borrow_authored_storage() {
 
         validate_appearance_batch_with_control(
             AppearanceAuthoringBatch::new(&images, &[], &[], &[], &[]),
+            ResourceSnapshotAuthoringTable::empty(),
             SceneValidationLimits::default(),
             &mut control,
         )
@@ -55,6 +58,7 @@ fn compiled_appearance_storage_drops_before_its_reservation() {
     };
     let mut validated = validate_appearance_batch_with_control(
         AppearanceAuthoringBatch::new(&images, &[], &[], &[], &[]),
+        ResourceSnapshotAuthoringTable::empty(),
         SceneValidationLimits::default(),
         &mut control,
     )
@@ -65,6 +69,136 @@ fn compiled_appearance_storage_drops_before_its_reservation() {
 
     assert_eq!(stage.get(), 2);
     assert_eq!(control.live.get(), 0);
+}
+
+#[test]
+fn session_resource_image_resolves_from_the_aligned_snapshot_table() {
+    let snapshotted_bytes = [0x89, b'P', b'N', b'G'];
+    let media_type = ExtensionMediaType::new("image/png").expect("valid image media type");
+    let images = [ImageAuthoring::session_resource(
+        ResourceIdentityLocalId::new(0),
+        Presence::Present(&media_type),
+    )];
+    let snapshots = [ResourceSnapshotAuthoring::snapshotted(&snapshotted_bytes)];
+    let mut control = TestControl::default();
+
+    let validated = validate_appearance_batch_with_control(
+        AppearanceAuthoringBatch::new(&images, &[], &[], &[], &[]),
+        ResourceSnapshotAuthoringTable::new(1, &snapshots),
+        SceneValidationLimits::default(),
+        &mut control,
+    )
+    .expect("same-session resource snapshot must resolve");
+
+    assert_eq!(
+        validated
+            .image(0)
+            .expect("validated resource image")
+            .payload(),
+        snapshotted_bytes
+    );
+    assert_eq!(
+        validated
+            .image(0)
+            .expect("validated resource image")
+            .media_type(),
+        Presence::Present(&media_type)
+    );
+    drop(validated);
+    assert_eq!(control.live.get(), 0);
+}
+
+#[test]
+fn session_resource_image_rejects_missing_or_foreign_snapshots() {
+    let missing_images = [ImageAuthoring::session_resource(
+        ResourceIdentityLocalId::new(0),
+        Presence::Absent,
+    )];
+    let missing_snapshots = [ResourceSnapshotAuthoring::absent()];
+    let mut missing_control = TestControl::default();
+    let missing = validate_appearance_batch_with_control(
+        AppearanceAuthoringBatch::new(&missing_images, &[], &[], &[], &[]),
+        ResourceSnapshotAuthoringTable::new(1, &missing_snapshots),
+        SceneValidationLimits::default(),
+        &mut missing_control,
+    );
+    assert!(matches!(
+        missing,
+        Err(AppearanceAuthoringFailure::Semantic(
+            AppearanceAuthoringSemanticError::ImageResourceSnapshotAbsent {
+                image: 0,
+                resource: 0,
+            }
+        ))
+    ));
+
+    let empty_bytes = [];
+    let empty_snapshots = [ResourceSnapshotAuthoring::snapshotted(&empty_bytes)];
+    let mut empty_control = TestControl::default();
+    let empty = validate_appearance_batch_with_control(
+        AppearanceAuthoringBatch::new(&missing_images, &[], &[], &[], &[]),
+        ResourceSnapshotAuthoringTable::new(1, &empty_snapshots),
+        SceneValidationLimits::default(),
+        &mut empty_control,
+    );
+    assert!(matches!(
+        empty,
+        Err(AppearanceAuthoringFailure::Semantic(
+            AppearanceAuthoringSemanticError::EmptyEncodedPayload { image: 0 }
+        ))
+    ));
+
+    let foreign_images = [ImageAuthoring::session_resource(
+        ResourceIdentityLocalId::new(1),
+        Presence::Absent,
+    )];
+    let snapshotted_bytes = [1_u8];
+    let snapshots = [ResourceSnapshotAuthoring::snapshotted(&snapshotted_bytes)];
+    let mut foreign_control = TestControl::default();
+    let foreign = validate_appearance_batch_with_control(
+        AppearanceAuthoringBatch::new(&foreign_images, &[], &[], &[], &[]),
+        ResourceSnapshotAuthoringTable::new(1, &snapshots),
+        SceneValidationLimits::default(),
+        &mut foreign_control,
+    );
+    assert!(matches!(
+        foreign,
+        Err(AppearanceAuthoringFailure::Semantic(
+            AppearanceAuthoringSemanticError::ImageResourceOutOfRange {
+                image: 0,
+                resource: 1,
+                resource_count: 1,
+            }
+        ))
+    ));
+}
+
+#[test]
+fn resource_snapshot_table_must_align_with_profile_resources() {
+    let image_bytes = [1_u8];
+    let images = [ImageAuthoring::encoded(&image_bytes, Presence::Absent)];
+    let snapshots = [
+        ResourceSnapshotAuthoring::snapshotted(&image_bytes),
+        ResourceSnapshotAuthoring::absent(),
+    ];
+    let mut control = TestControl::default();
+
+    let result = validate_appearance_batch_with_control(
+        AppearanceAuthoringBatch::new(&images, &[], &[], &[], &[]),
+        ResourceSnapshotAuthoringTable::new(1, &snapshots),
+        SceneValidationLimits::default(),
+        &mut control,
+    );
+
+    assert!(matches!(
+        result,
+        Err(AppearanceAuthoringFailure::Semantic(
+            AppearanceAuthoringSemanticError::ResourceSnapshotCardinalityMismatch {
+                snapshot_count: 2,
+                resource_count: 1,
+            }
+        ))
+    ));
 }
 
 #[test]
@@ -111,6 +245,7 @@ fn duplicate_material_binding_stops_at_the_exact_completed_prefix() {
 
     let result = validate_appearance_batch_with_control(
         input,
+        ResourceSnapshotAuthoringTable::empty(),
         SceneValidationLimits::default(),
         &mut control,
     );
@@ -168,6 +303,7 @@ fn unowned_material_binding_is_a_completed_traversal_action() {
 
     let result = validate_appearance_batch_with_control(
         input,
+        ResourceSnapshotAuthoringTable::empty(),
         SceneValidationLimits::default(),
         &mut control,
     );

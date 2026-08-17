@@ -704,14 +704,65 @@ fn write_metadata_entry(
     write_u8_field(transcript, work, METADATA_OWNER_KIND, owner_kind)?;
     write_u32_field(transcript, work, METADATA_OWNER_INDEX, owner_index)?;
     write_bytes_field(transcript, work, METADATA_KEY, entry.key().as_bytes())?;
-    let value_kind = write_metadata_value(entry.value(), transcript, work)?;
+    let value = entry.value();
+    let value_kind = write_metadata_value(value, transcript, work)?;
 
     let render = preview.begin_geometry_item("profile_metadata", ordinal)?;
     preview.geometry_field_u32(render, "owner_kind", u32::from(owner_kind));
     preview.geometry_field_u32(render, "owner_index", owner_index);
-    preview.geometry_field_usize(render, "key_bytes", entry.key().len());
+    preview.geometry_field_word(render, "key", entry.key());
     preview.geometry_field_u32(render, "value_kind", u32::from(value_kind));
+    preview_metadata_value(preview, render, value)?;
     preview.end_geometry_item(render);
+    Ok(())
+}
+
+fn preview_metadata_value(
+    preview: &mut PreviewSink,
+    render: bool,
+    value: NodeSceneProfileMetadataValue<'_>,
+) -> Result<(), NodeSceneSnapshotError> {
+    match value {
+        NodeSceneProfileMetadataValue::Bool(value) => {
+            preview.geometry_field_word(render, "bool", if value { "true" } else { "false" });
+        }
+        NodeSceneProfileMetadataValue::I64(value) => {
+            preview.geometry_field_i64(render, "i64", value);
+        }
+        NodeSceneProfileMetadataValue::U64(value) => {
+            preview.geometry_field_u64(render, "u64", value);
+        }
+        NodeSceneProfileMetadataValue::F64(value) => {
+            preview.geometry_field_f64_bits(render, "f64_bits", value);
+        }
+        NodeSceneProfileMetadataValue::String(value) => {
+            preview.geometry_field_word(render, "string", value);
+        }
+        NodeSceneProfileMetadataValue::Bytes {
+            media_type,
+            payload,
+        } => {
+            preview.geometry_field_word(render, "media_type", media_type);
+            preview.geometry_field_usize(render, "payload_bytes", payload.len());
+        }
+        NodeSceneProfileMetadataValue::Vec2(values)
+        | NodeSceneProfileMetadataValue::Vec3(values)
+        | NodeSceneProfileMetadataValue::Vec4(values)
+        | NodeSceneProfileMetadataValue::Color(values)
+        | NodeSceneProfileMetadataValue::Mat4(values) => {
+            preview.begin_geometry_leaf(render, "f32", true, values.len());
+            for (ordinal, value) in values.iter().enumerate() {
+                preview.geometry_f32_bits(render, ordinal, value.to_bits())?;
+            }
+            preview.end_geometry_leaf(render);
+        }
+        NodeSceneProfileMetadataValue::DenseArray {
+            logical_element_count,
+            ..
+        } => {
+            preview.geometry_field_usize(render, "logical_elements", logical_element_count);
+        }
+    }
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 use baozi_operation::{
     CanonicalRecordView, PublishedCanonicalStore, RecordBlock, SequenceView, StoredScalar,
+    Utf8Block,
 };
 
 use crate::attribute::AttributeDomain;
@@ -8,14 +9,16 @@ use crate::canonical_scene::store::schema::geometry::{
     GEOMETRY_ATTRIBUTE_FIELD_COUNT, GEOMETRY_DOMAIN_CORNER, GEOMETRY_DOMAIN_FACE,
     GEOMETRY_DOMAIN_VERTEX, GEOMETRY_LOGICAL_MESH_FIELD_COUNT, GEOMETRY_MESH_INSTANCE_FIELD_COUNT,
     GEOMETRY_NORMALIZATION_NONE, GEOMETRY_PAYLOAD_DENSE, GEOMETRY_PAYLOAD_SPARSE,
-    GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32, GEOMETRY_SCALAR_U32,
-    GEOMETRY_SEMANTIC_COLOR, GEOMETRY_SEMANTIC_NORMAL, GEOMETRY_SEMANTIC_POSITION,
-    GEOMETRY_SEMANTIC_SMOOTHING_GROUP, GEOMETRY_SEMANTIC_TANGENT, GEOMETRY_SEMANTIC_TEXCOORD,
-    GEOMETRY_TOPOLOGY_LINE_LIST, GEOMETRY_TOPOLOGY_LINE_LOOP, GEOMETRY_TOPOLOGY_LINE_STRIP,
-    GEOMETRY_TOPOLOGY_POINTS, GEOMETRY_TOPOLOGY_POLYGONS, GEOMETRY_TOPOLOGY_TRIANGLE_FAN,
-    GEOMETRY_TOPOLOGY_TRIANGLE_LIST, GEOMETRY_TOPOLOGY_TRIANGLE_STRIP, GeometryF32ValuesSchema,
-    GeometryPolygonBoundariesSchema, GeometryPrimitiveIndicesSchema,
-    GeometrySparseF32DefaultsSchema, GeometrySparseIndicesSchema, GeometrySparseU32DefaultsSchema,
+    GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32, GEOMETRY_SCALAR_I32, GEOMETRY_SCALAR_U32,
+    GEOMETRY_SEMANTIC_COLOR, GEOMETRY_SEMANTIC_CUSTOM, GEOMETRY_SEMANTIC_NORMAL,
+    GEOMETRY_SEMANTIC_POSITION, GEOMETRY_SEMANTIC_SMOOTHING_GROUP, GEOMETRY_SEMANTIC_TANGENT,
+    GEOMETRY_SEMANTIC_TEXCOORD, GEOMETRY_TOPOLOGY_LINE_LIST, GEOMETRY_TOPOLOGY_LINE_LOOP,
+    GEOMETRY_TOPOLOGY_LINE_STRIP, GEOMETRY_TOPOLOGY_POINTS, GEOMETRY_TOPOLOGY_POLYGONS,
+    GEOMETRY_TOPOLOGY_TRIANGLE_FAN, GEOMETRY_TOPOLOGY_TRIANGLE_LIST,
+    GEOMETRY_TOPOLOGY_TRIANGLE_STRIP, GeometryAttributeSemanticNameSchema, GeometryF32ValuesSchema,
+    GeometryI32ValuesSchema, GeometryLogicalMeshNameSchema, GeometryPolygonBoundariesSchema,
+    GeometryPrimitiveIndicesSchema, GeometrySparseF32DefaultsSchema,
+    GeometrySparseI32DefaultsSchema, GeometrySparseIndicesSchema, GeometrySparseU32DefaultsSchema,
     GeometryU32ValuesSchema, geometry_attribute_field, geometry_logical_mesh_field,
     geometry_mesh_instance_field, geometry_primitive_field,
 };
@@ -36,6 +39,8 @@ pub(super) struct NodeSceneGeometryTables<'scene> {
     primitives: Option<CanonicalRecordView<'scene>>,
     attributes: Option<CanonicalRecordView<'scene>>,
     mesh_instances: Option<CanonicalRecordView<'scene>>,
+    logical_mesh_names: Option<&'scene str>,
+    attribute_semantic_names: Option<&'scene str>,
 }
 
 impl<'scene> NodeSceneGeometryTables<'scene> {
@@ -79,6 +84,16 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
             "validated mesh-instance table presence disagrees with validation proof",
             "validated mesh-instance table layout disagrees with validation proof",
         )?;
+        let logical_mesh_names = resolve_utf8(
+            canonical,
+            proof.logical_mesh_names(),
+            "validated logical-mesh-name payload is unavailable or mistyped",
+        )?;
+        let attribute_semantic_names = resolve_utf8(
+            canonical,
+            proof.attribute_semantic_names(),
+            "validated attribute-semantic-name payload is unavailable or mistyped",
+        )?;
 
         Ok(Self {
             canonical,
@@ -86,6 +101,8 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
             primitives,
             attributes,
             mesh_instances,
+            logical_mesh_names,
+            attribute_semantic_names,
         })
     }
 
@@ -98,11 +115,30 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
             proof,
             phase: GeometryCursorPhase::LogicalMeshes,
             next_logical_mesh: 0,
+            next_logical_mesh_name_offset: 0,
             next_primitive: 0,
             next_attribute: 0,
+            next_attribute_semantic_name_offset: 0,
             next_mesh_instance: 0,
         }
     }
+}
+
+fn resolve_utf8<'scene, Tag>(
+    canonical: &'scene SceneCanonicalStore,
+    reference: Option<CanonicalBlockRef<Tag>>,
+    unavailable_reason: &'static str,
+) -> NodeSceneSemanticResult<Option<&'scene str>>
+where
+    Tag: CanonicalSchema<StoreKind = Utf8Block>,
+{
+    reference
+        .map(|reference| {
+            canonical
+                .utf8(reference.into_store())
+                .ok_or_else(|| invariant(unavailable_reason))
+        })
+        .transpose()
 }
 
 fn resolve_table<'scene, Tag>(
@@ -147,8 +183,10 @@ pub(in crate::canonical_scene::store) struct NodeSceneGeometryCursor<'scene> {
     proof: NodeSceneValidationProof,
     phase: GeometryCursorPhase,
     next_logical_mesh: usize,
+    next_logical_mesh_name_offset: usize,
     next_primitive: usize,
     next_attribute: usize,
+    next_attribute_semantic_name_offset: usize,
     next_mesh_instance: usize,
 }
 
@@ -171,7 +209,7 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
 
     pub(in crate::canonical_scene::store) fn next_logical_mesh(
         &mut self,
-    ) -> NodeSceneSemanticResult<Option<NodeSceneGeometryLogicalMesh>> {
+    ) -> NodeSceneSemanticResult<Option<NodeSceneGeometryLogicalMesh<'scene>>> {
         self.enter_phase(GeometryCursorPhase::LogicalMeshes)?;
         let Some(row) = next_row(
             self.next_logical_mesh,
@@ -221,10 +259,73 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
             primitives,
             "validated logical-mesh primitive-table reference is unreadable",
         )?;
+        let name_presence = read_scalar::<u8>(
+            table,
+            row,
+            geometry_logical_mesh_field::NAME_PRESENCE,
+            "validated logical-mesh name presence is unreadable",
+        )?;
+        let name_offset = read_u32_as_usize(
+            table,
+            row,
+            geometry_logical_mesh_field::NAME_OFFSET,
+            "validated logical-mesh name offset is unreadable",
+        )?;
+        let name_count = read_u32_as_usize(
+            table,
+            row,
+            geometry_logical_mesh_field::NAME_COUNT,
+            "validated logical-mesh name count is unreadable",
+        )?;
+        if name_offset != self.next_logical_mesh_name_offset {
+            return Err(invariant(
+                "validated logical-mesh-name ranges are not contiguous",
+            ));
+        }
+        let (name, name_end) = match name_presence {
+            PRESENCE_ABSENT if name_count == 0 => {
+                if table.scalar::<u8>(row, geometry_logical_mesh_field::NAMES) != Some(0) {
+                    return Err(invariant(
+                        "validated absent logical-mesh name has a nonzero sentinel",
+                    ));
+                }
+                (None, name_offset)
+            }
+            PRESENCE_PRESENT if name_count == 0 => {
+                if table.scalar::<u8>(row, geometry_logical_mesh_field::NAMES) != Some(0) {
+                    return Err(invariant(
+                        "validated empty logical-mesh name has a nonzero sentinel",
+                    ));
+                }
+                (Some(""), name_offset)
+            }
+            PRESENCE_PRESENT => {
+                require_utf8_ref::<GeometryLogicalMeshNameSchema>(
+                    table,
+                    row,
+                    geometry_logical_mesh_field::NAMES,
+                    self.proof.logical_mesh_names(),
+                    "validated logical-mesh-name reference is unreadable",
+                    "validated logical-mesh-name reference disagrees with validation proof",
+                )?;
+                let end = name_offset
+                    .checked_add(name_count)
+                    .ok_or_else(|| invariant("validated logical-mesh name range overflows"))?;
+                let value = self
+                    .tables
+                    .logical_mesh_names
+                    .and_then(|names| names.get(name_offset..end))
+                    .ok_or_else(|| invariant("validated logical-mesh name range is unreadable"))?;
+                (Some(value), end)
+            }
+            _ => return Err(invariant("validated logical-mesh name presence is invalid")),
+        };
 
+        self.next_logical_mesh_name_offset = name_end;
         self.next_logical_mesh = advance_row(row, "logical-mesh cursor index overflows")?;
         Ok(Some(NodeSceneGeometryLogicalMesh {
             source_index: row,
+            name,
             primitive_offset,
             primitive_count,
         }))
@@ -397,7 +498,59 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
             geometry_attribute_field::SEMANTIC_SET,
             "validated attribute semantic set is unreadable",
         )?;
-        let semantic = decode_semantic(semantic_kind, semantic_set)?;
+        let semantic_name_offset = read_u32_as_usize(
+            table,
+            row,
+            geometry_attribute_field::SEMANTIC_NAME_OFFSET,
+            "validated attribute semantic-name offset is unreadable",
+        )?;
+        let semantic_name_count = read_u32_as_usize(
+            table,
+            row,
+            geometry_attribute_field::SEMANTIC_NAME_COUNT,
+            "validated attribute semantic-name count is unreadable",
+        )?;
+        if semantic_name_offset != self.next_attribute_semantic_name_offset {
+            return Err(invariant(
+                "validated attribute-semantic-name ranges are not contiguous",
+            ));
+        }
+        let (semantic_name, semantic_name_end) = if semantic_kind == GEOMETRY_SEMANTIC_CUSTOM {
+            if semantic_name_count == 0 {
+                return Err(invariant(
+                    "validated custom attribute semantic has an empty name",
+                ));
+            }
+            require_utf8_ref::<GeometryAttributeSemanticNameSchema>(
+                table,
+                row,
+                geometry_attribute_field::SEMANTIC_NAMES,
+                self.proof.attribute_semantic_names(),
+                "validated attribute-semantic-name reference is unreadable",
+                "validated attribute-semantic-name reference disagrees with validation proof",
+            )?;
+            let end = semantic_name_offset
+                .checked_add(semantic_name_count)
+                .ok_or_else(|| invariant("validated attribute semantic-name range overflows"))?;
+            let name = self
+                .tables
+                .attribute_semantic_names
+                .and_then(|names| names.get(semantic_name_offset..end))
+                .ok_or_else(|| {
+                    invariant("validated attribute semantic-name range is unreadable")
+                })?;
+            (Some(name), end)
+        } else {
+            if semantic_name_count != 0
+                || table.scalar::<u8>(row, geometry_attribute_field::SEMANTIC_NAMES) != Some(0)
+            {
+                return Err(invariant(
+                    "validated built-in attribute semantic retains a custom name",
+                ));
+            }
+            (None, semantic_name_offset)
+        };
+        let semantic = decode_semantic(semantic_kind, semantic_set, semantic_name)?;
         let domain = decode_domain(read_scalar::<u8>(
             table,
             row,
@@ -461,6 +614,7 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
             canonical_scalar_count,
         )?;
 
+        self.next_attribute_semantic_name_offset = semantic_name_end;
         self.next_attribute = advance_row(row, "attribute cursor index overflows")?;
         Ok(Some(NodeSceneGeometryAttribute {
             source_index: row,
@@ -558,6 +712,12 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
                 "logical-mesh cursor ended before its proof-qualified count",
             ));
         }
+        if self.next_logical_mesh_name_offset != self.tables.logical_mesh_names.map_or(0, str::len)
+        {
+            return Err(invariant(
+                "logical-mesh-name cursor ended before its proof-qualified payload",
+            ));
+        }
         if self.next_primitive != self.proof.primitive_count() {
             return Err(invariant(
                 "primitive cursor ended before its proof-qualified count",
@@ -566,6 +726,13 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
         if self.next_attribute != self.proof.attribute_count() {
             return Err(invariant(
                 "attribute cursor ended before its proof-qualified count",
+            ));
+        }
+        if self.next_attribute_semantic_name_offset
+            != self.tables.attribute_semantic_names.map_or(0, str::len)
+        {
+            return Err(invariant(
+                "attribute-semantic-name cursor ended before its proof-qualified payload",
             ));
         }
         if self.next_mesh_instance != self.proof.mesh_instance_count() {
@@ -610,19 +777,24 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
 
 /// One logical mesh and its exact primitive range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) struct NodeSceneGeometryLogicalMesh {
+pub(in crate::canonical_scene::store) struct NodeSceneGeometryLogicalMesh<'scene> {
     source_index: usize,
+    name: Option<&'scene str>,
     primitive_offset: usize,
     primitive_count: usize,
 }
 
-impl NodeSceneGeometryLogicalMesh {
+impl<'scene> NodeSceneGeometryLogicalMesh<'scene> {
     pub(in crate::canonical_scene::store) const fn source_index(self) -> usize {
         self.source_index
     }
 
     pub(in crate::canonical_scene::store) const fn primitive_offset(self) -> usize {
         self.primitive_offset
+    }
+
+    pub(in crate::canonical_scene::store) const fn name(self) -> Option<&'scene str> {
+        self.name
     }
 
     pub(in crate::canonical_scene::store) const fn primitive_count(self) -> usize {
@@ -713,19 +885,21 @@ impl<'scene> NodeSceneGeometryPrimitive<'scene> {
 
 /// Allocation-free built-in semantic decoded from the canonical wire code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) enum NodeSceneGeometryAttributeSemantic {
+pub(in crate::canonical_scene::store) enum NodeSceneGeometryAttributeSemantic<'scene> {
     Position,
     Normal,
     Tangent,
     Texcoord(u32),
     Color(u32),
     SmoothingGroup,
+    Custom(&'scene str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) enum NodeSceneGeometryScalarKind {
     F32,
     U32,
+    I32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -743,7 +917,7 @@ pub(in crate::canonical_scene::store) enum NodeSceneGeometryPayloadKind {
 #[must_use = "the attribute payload cursors must be consumed or deliberately discarded"]
 pub(in crate::canonical_scene::store) struct NodeSceneGeometryAttribute<'scene> {
     source_index: usize,
-    semantic: NodeSceneGeometryAttributeSemantic,
+    semantic: NodeSceneGeometryAttributeSemantic<'scene>,
     domain: AttributeDomain,
     scalar_kind: NodeSceneGeometryScalarKind,
     lanes: u8,
@@ -762,7 +936,7 @@ impl<'scene> NodeSceneGeometryAttribute<'scene> {
 
     pub(in crate::canonical_scene::store) const fn semantic(
         &self,
-    ) -> NodeSceneGeometryAttributeSemantic {
+    ) -> NodeSceneGeometryAttributeSemantic<'scene> {
         self.semantic
     }
 
@@ -820,6 +994,9 @@ pub(in crate::canonical_scene::store) enum NodeSceneGeometryAttributePayload<'sc
     DenseU32 {
         values: NodeSceneGeometryU32Cursor<'scene>,
     },
+    DenseI32 {
+        values: NodeSceneGeometryI32Cursor<'scene>,
+    },
     SparseF32 {
         values: NodeSceneGeometryF32Cursor<'scene>,
         indices: NodeSceneGeometryU32Cursor<'scene>,
@@ -829,6 +1006,11 @@ pub(in crate::canonical_scene::store) enum NodeSceneGeometryAttributePayload<'sc
         values: NodeSceneGeometryU32Cursor<'scene>,
         indices: NodeSceneGeometryU32Cursor<'scene>,
         default: NodeSceneGeometryU32Cursor<'scene>,
+    },
+    SparseI32 {
+        values: NodeSceneGeometryI32Cursor<'scene>,
+        indices: NodeSceneGeometryU32Cursor<'scene>,
+        default: NodeSceneGeometryI32Cursor<'scene>,
     },
 }
 
@@ -865,6 +1047,8 @@ pub(in crate::canonical_scene::store) type NodeSceneGeometryF32Cursor<'scene> =
     NodeSceneGeometryLeafCursor<'scene, f32>;
 pub(in crate::canonical_scene::store) type NodeSceneGeometryU32Cursor<'scene> =
     NodeSceneGeometryLeafCursor<'scene, u32>;
+pub(in crate::canonical_scene::store) type NodeSceneGeometryI32Cursor<'scene> =
+    NodeSceneGeometryLeafCursor<'scene, i32>;
 
 impl<'scene, T: StoredScalar> NodeSceneGeometryLeafCursor<'scene, T> {
     const fn new(values: &'scene [T]) -> Self {
@@ -996,6 +1180,29 @@ fn read_attribute_payload<'scene>(
             )?;
             Ok(NodeSceneGeometryAttributePayload::DenseU32 { values })
         }
+        (NodeSceneGeometryScalarKind::I32, NodeSceneGeometryPayloadKind::Dense) => {
+            let values = read_i32_leaf::<GeometryI32ValuesSchema>(
+                canonical,
+                table,
+                row,
+                geometry_attribute_field::VALUES,
+                value_count,
+                "validated dense i32 values are unavailable or mistyped",
+            )?;
+            require_absent_cell(
+                table,
+                row,
+                geometry_attribute_field::SPARSE_INDICES,
+                "validated dense attribute retains sparse indices",
+            )?;
+            require_absent_cell(
+                table,
+                row,
+                geometry_attribute_field::SPARSE_DEFAULT,
+                "validated dense attribute retains a sparse default",
+            )?;
+            Ok(NodeSceneGeometryAttributePayload::DenseI32 { values })
+        }
         (NodeSceneGeometryScalarKind::F32, NodeSceneGeometryPayloadKind::Sparse) => {
             let values = read_f32_leaf::<GeometryF32ValuesSchema>(
                 canonical,
@@ -1053,6 +1260,37 @@ fn read_attribute_payload<'scene>(
                 "validated sparse u32 default is unavailable or mistyped",
             )?;
             Ok(NodeSceneGeometryAttributePayload::SparseU32 {
+                values,
+                indices,
+                default,
+            })
+        }
+        (NodeSceneGeometryScalarKind::I32, NodeSceneGeometryPayloadKind::Sparse) => {
+            let values = read_i32_leaf::<GeometryI32ValuesSchema>(
+                canonical,
+                table,
+                row,
+                geometry_attribute_field::VALUES,
+                value_count,
+                "validated sparse i32 values are unavailable or mistyped",
+            )?;
+            let indices = read_u32_leaf::<GeometrySparseIndicesSchema>(
+                canonical,
+                table,
+                row,
+                geometry_attribute_field::SPARSE_INDICES,
+                explicit_element_count,
+                "validated sparse indices are unavailable or mistyped",
+            )?;
+            let default = read_i32_leaf::<GeometrySparseI32DefaultsSchema>(
+                canonical,
+                table,
+                row,
+                geometry_attribute_field::SPARSE_DEFAULT,
+                lane_count,
+                "validated sparse i32 default is unavailable or mistyped",
+            )?;
+            Ok(NodeSceneGeometryAttributePayload::SparseI32 {
                 values,
                 indices,
                 default,
@@ -1128,6 +1366,21 @@ where
     Tag: Copy + Send + Sync + 'static,
 {
     let values = resolve_leaf::<u32, Tag>(canonical, table, row, field, expected_count, reason)?;
+    Ok(NodeSceneGeometryLeafCursor::new(values))
+}
+
+fn read_i32_leaf<'scene, Tag>(
+    canonical: &'scene SceneCanonicalStore,
+    table: CanonicalRecordView<'scene>,
+    row: usize,
+    field: usize,
+    expected_count: usize,
+    reason: &'static str,
+) -> NodeSceneSemanticResult<NodeSceneGeometryI32Cursor<'scene>>
+where
+    Tag: Copy + Send + Sync + 'static,
+{
+    let values = resolve_leaf::<i32, Tag>(canonical, table, row, field, expected_count, reason)?;
     Ok(NodeSceneGeometryLeafCursor::new(values))
 }
 
@@ -1262,6 +1515,26 @@ where
     Ok(())
 }
 
+fn require_utf8_ref<Tag>(
+    table: CanonicalRecordView<'_>,
+    row: usize,
+    field: usize,
+    expected: Option<CanonicalBlockRef<Tag>>,
+    unreadable_reason: &'static str,
+    mismatch_reason: &'static str,
+) -> NodeSceneSemanticResult<()>
+where
+    Tag: CanonicalSchema<StoreKind = Utf8Block>,
+{
+    let reference = table
+        .utf8_ref::<Tag>(row, field)
+        .ok_or_else(|| invariant(unreadable_reason))?;
+    if Some(CanonicalBlockRef::from_store(reference)) != expected {
+        return Err(invariant(mismatch_reason));
+    }
+    Ok(())
+}
+
 fn require_absent_cell(
     table: CanonicalRecordView<'_>,
     row: usize,
@@ -1333,19 +1606,33 @@ fn decode_topology(value: u8) -> NodeSceneSemanticResult<TopologyKind> {
     }
 }
 
-fn decode_semantic(
+fn decode_semantic<'scene>(
     kind: u8,
     set: u32,
-) -> NodeSceneSemanticResult<NodeSceneGeometryAttributeSemantic> {
+    custom_name: Option<&'scene str>,
+) -> NodeSceneSemanticResult<NodeSceneGeometryAttributeSemantic<'scene>> {
     match kind {
-        GEOMETRY_SEMANTIC_POSITION if set == 0 => Ok(NodeSceneGeometryAttributeSemantic::Position),
-        GEOMETRY_SEMANTIC_NORMAL if set == 0 => Ok(NodeSceneGeometryAttributeSemantic::Normal),
-        GEOMETRY_SEMANTIC_TANGENT if set == 0 => Ok(NodeSceneGeometryAttributeSemantic::Tangent),
-        GEOMETRY_SEMANTIC_TEXCOORD => Ok(NodeSceneGeometryAttributeSemantic::Texcoord(set)),
-        GEOMETRY_SEMANTIC_COLOR => Ok(NodeSceneGeometryAttributeSemantic::Color(set)),
+        GEOMETRY_SEMANTIC_POSITION if set == 0 && custom_name.is_none() => {
+            Ok(NodeSceneGeometryAttributeSemantic::Position)
+        }
+        GEOMETRY_SEMANTIC_NORMAL if set == 0 && custom_name.is_none() => {
+            Ok(NodeSceneGeometryAttributeSemantic::Normal)
+        }
+        GEOMETRY_SEMANTIC_TANGENT if set == 0 && custom_name.is_none() => {
+            Ok(NodeSceneGeometryAttributeSemantic::Tangent)
+        }
+        GEOMETRY_SEMANTIC_TEXCOORD if custom_name.is_none() => {
+            Ok(NodeSceneGeometryAttributeSemantic::Texcoord(set))
+        }
+        GEOMETRY_SEMANTIC_COLOR if custom_name.is_none() => {
+            Ok(NodeSceneGeometryAttributeSemantic::Color(set))
+        }
         GEOMETRY_SEMANTIC_SMOOTHING_GROUP if set == 0 => {
             Ok(NodeSceneGeometryAttributeSemantic::SmoothingGroup)
         }
+        GEOMETRY_SEMANTIC_CUSTOM if set == 0 => custom_name
+            .map(NodeSceneGeometryAttributeSemantic::Custom)
+            .ok_or_else(|| invariant("validated custom attribute semantic has no name")),
         GEOMETRY_SEMANTIC_POSITION
         | GEOMETRY_SEMANTIC_NORMAL
         | GEOMETRY_SEMANTIC_TANGENT
@@ -1369,6 +1656,7 @@ fn decode_scalar_kind(value: u8) -> NodeSceneSemanticResult<NodeSceneGeometrySca
     match value {
         GEOMETRY_SCALAR_F32 => Ok(NodeSceneGeometryScalarKind::F32),
         GEOMETRY_SCALAR_U32 => Ok(NodeSceneGeometryScalarKind::U32),
+        GEOMETRY_SCALAR_I32 => Ok(NodeSceneGeometryScalarKind::I32),
         _ => Err(invariant("validated attribute scalar-kind code is unknown")),
     }
 }

@@ -14,6 +14,7 @@ use crate::appearance::{
     MaterialTextureBindingSemanticsValidator, TextureBindingSemanticsRef, TextureRole,
     validate_material_semantics, validate_texture_binding_semantics,
 };
+use crate::entity::validate_entity_name_str;
 use crate::image::{MAX_ENCODED_IMAGE_BYTES, SamplerState};
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
@@ -25,24 +26,24 @@ use super::super::super::schema::appearance::{
     encode_appearance_shading_model, encode_appearance_texture_role,
 };
 use super::super::control::CanonicalAuthoringControl;
-use super::super::input::Presence;
 use super::super::input::appearance::{
     AppearanceAuthoringBatch, ImageAuthoring, ImageLocalId, ImagePayloadAuthoring,
     MaterialAuthoring, MaterialBindingAuthoring, SamplerAuthoring, SamplerLocalId,
     TextureAuthoring, TextureLocalId,
 };
+use super::super::input::{Presence, ResourceSnapshotAuthoringTable};
 
 const LOGICAL_U8_BYTES: u64 = 1;
 const LOGICAL_U32_BYTES: u64 = 4;
 const LOGICAL_F32_BYTES: u64 = 4;
 const LOGICAL_REFERENCE_BYTES: u64 = 4;
 
-const APPEARANCE_DIRECTORY_FIXED_BYTES: u64 = 11 * LOGICAL_U32_BYTES;
+const APPEARANCE_DIRECTORY_FIXED_BYTES: u64 = 12 * LOGICAL_U32_BYTES;
 const IMAGE_ROW_FIXED_BYTES: u64 = (5 * LOGICAL_U32_BYTES) + (3 * LOGICAL_U8_BYTES);
 const SAMPLER_ROW_BYTES: u64 = LOGICAL_U32_BYTES + (6 * LOGICAL_U8_BYTES);
 const TEXTURE_ROW_BYTES: u64 = (3 * LOGICAL_U32_BYTES) + (2 * LOGICAL_REFERENCE_BYTES);
 const MATERIAL_ROW_FIXED_BYTES: u64 =
-    (5 * LOGICAL_U32_BYTES) + LOGICAL_F32_BYTES + (6 * LOGICAL_U8_BYTES);
+    (7 * LOGICAL_U32_BYTES) + LOGICAL_F32_BYTES + (7 * LOGICAL_U8_BYTES);
 const BINDING_ROW_FIXED_BYTES: u64 =
     (7 * LOGICAL_U32_BYTES) + LOGICAL_REFERENCE_BYTES + (9 * LOGICAL_U8_BYTES);
 
@@ -79,6 +80,23 @@ pub(in crate::canonical_scene::store) enum AppearanceAuthoringSemanticError {
         actual: usize,
         maximum: usize,
     },
+    #[error(
+        "session resource snapshot table has {snapshot_count} rows; the profile declares {resource_count} resources"
+    )]
+    ResourceSnapshotCardinalityMismatch {
+        snapshot_count: usize,
+        resource_count: usize,
+    },
+    #[error(
+        "image {image} references session resource {resource}; the profile declares {resource_count} resources"
+    )]
+    ImageResourceOutOfRange {
+        image: usize,
+        resource: u32,
+        resource_count: usize,
+    },
+    #[error("image {image} session resource {resource} has no snapshotted bytes")]
+    ImageResourceSnapshotAbsent { image: usize, resource: u32 },
     #[error(
         "material {material} binding range starts at {actual}; canonical owner coverage expected {expected}"
     )]
@@ -137,6 +155,12 @@ pub(in crate::canonical_scene::store) enum AppearanceAuthoringSemanticError {
         #[source]
         source: AppearanceBuildError,
     },
+    #[error("material {material} has an invalid entity name")]
+    InvalidMaterialName {
+        material: usize,
+        #[source]
+        source: crate::entity::EntityNameError,
+    },
     #[error(
         "material {material} passed semantic validation but could not enter canonical encoding"
     )]
@@ -175,8 +199,9 @@ where
     Control(#[source] E),
 }
 
-struct ValidatedAppearanceImagePlan {
+struct ValidatedAppearanceImagePlan<'input> {
     input_index: usize,
+    payload: &'input [u8],
     payload_offset: u32,
     payload_count: u32,
     media_type_offset: u32,
@@ -196,6 +221,8 @@ struct ValidatedAppearanceMaterialPlan {
     pbr_specular_glossiness_presence: u8,
     legacy_presence: u8,
     factor_offset: u32,
+    name_offset: u32,
+    name_count: u32,
 }
 
 struct ValidatedAppearanceBindingPlan {
@@ -214,7 +241,7 @@ struct ValidatedAppearanceBindingPlan {
 
 pub(in crate::canonical_scene::store) struct ValidatedAppearanceImage<'view, 'input> {
     input: &'view ImageAuthoring<'input>,
-    plan: &'view ValidatedAppearanceImagePlan,
+    plan: &'view ValidatedAppearanceImagePlan<'input>,
 }
 
 impl<'input> ValidatedAppearanceImage<'_, 'input> {
@@ -239,16 +266,15 @@ impl<'input> ValidatedAppearanceImage<'_, 'input> {
     }
 
     pub(in crate::canonical_scene::store) const fn payload(&self) -> &'input [u8] {
-        match self.input.payload() {
-            ImagePayloadAuthoring::Encoded { bytes, .. } => bytes,
-        }
+        self.plan.payload
     }
 
     pub(in crate::canonical_scene::store) const fn media_type(
         &self,
     ) -> Presence<&'input crate::extension::ExtensionMediaType> {
         match self.input.payload() {
-            ImagePayloadAuthoring::Encoded { media_type, .. } => media_type,
+            ImagePayloadAuthoring::Encoded { media_type, .. }
+            | ImagePayloadAuthoring::SessionResource { media_type, .. } => media_type,
         }
     }
 
@@ -400,6 +426,14 @@ impl<'view, 'input> ValidatedAppearanceMaterial<'view, 'input> {
         self.plan.factor_offset
     }
 
+    pub(in crate::canonical_scene::store) const fn name_offset(&self) -> u32 {
+        self.plan.name_offset
+    }
+
+    pub(in crate::canonical_scene::store) const fn name_count(&self) -> u32 {
+        self.plan.name_count
+    }
+
     pub(in crate::canonical_scene::store) fn bindings(
         &self,
     ) -> impl ExactSizeIterator<Item = ValidatedAppearanceBinding<'_, 'input>> + '_ {
@@ -412,11 +446,11 @@ impl<'view, 'input> ValidatedAppearanceMaterial<'view, 'input> {
 
 #[must_use = "dropping the validated appearance batch releases its compiled-plan reservation"]
 pub(in crate::canonical_scene::store) struct ValidatedAppearanceBatch<'input, R> {
-    compiled: AppearanceValidationStorage<R>,
+    compiled: AppearanceValidationStorage<'input, R>,
     input: AppearanceAuthoringBatch<'input>,
 }
 
-struct AppearanceValidationStorage<R> {
+struct AppearanceValidationStorage<'input, R> {
     image_count: u32,
     sampler_count: u32,
     texture_count: u32,
@@ -425,6 +459,7 @@ struct AppearanceValidationStorage<R> {
     image_payload_byte_count: u32,
     media_type_byte_count: u32,
     source_key_byte_count: u32,
+    material_name_byte_count: u32,
     binding_semantic_scalar_count: u32,
     material_factor_scalar_count: u32,
     payload_block_count: u32,
@@ -435,7 +470,7 @@ struct AppearanceValidationStorage<R> {
     canonical_bytes: u64,
     validation_work: u64,
     scratch_bytes: u64,
-    image_plans: Vec<ValidatedAppearanceImagePlan>,
+    image_plans: Vec<ValidatedAppearanceImagePlan<'input>>,
     material_plans: Vec<ValidatedAppearanceMaterialPlan>,
     binding_plans: Vec<ValidatedAppearanceBindingPlan>,
     #[cfg(test)]
@@ -447,7 +482,7 @@ struct AppearanceValidationStorage<R> {
 impl<'input, R> ValidatedAppearanceBatch<'input, R> {
     const fn new(
         input: AppearanceAuthoringBatch<'input>,
-        compiled: AppearanceValidationStorage<R>,
+        compiled: AppearanceValidationStorage<'input, R>,
     ) -> Self {
         Self { compiled, input }
     }
@@ -488,6 +523,10 @@ impl<'input, R> ValidatedAppearanceBatch<'input, R> {
 
     pub(in crate::canonical_scene::store) const fn source_key_byte_count(&self) -> u32 {
         self.compiled.source_key_byte_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn material_name_byte_count(&self) -> u32 {
+        self.compiled.material_name_byte_count
     }
 
     pub(in crate::canonical_scene::store) const fn binding_semantic_scalar_count(&self) -> u32 {
@@ -680,6 +719,10 @@ impl<R> fmt::Debug for ValidatedAppearanceBatch<'_, R> {
                 &self.compiled.source_key_byte_count,
             )
             .field(
+                "material_name_byte_count",
+                &self.compiled.material_name_byte_count,
+            )
+            .field(
                 "binding_semantic_scalar_count",
                 &self.compiled.binding_semantic_scalar_count,
             )
@@ -700,8 +743,8 @@ impl<R> fmt::Debug for ValidatedAppearanceBatch<'_, R> {
     }
 }
 
-struct AppearanceValidationScratch<R> {
-    image_plans: Vec<ValidatedAppearanceImagePlan>,
+struct AppearanceValidationScratch<'input, R> {
+    image_plans: Vec<ValidatedAppearanceImagePlan<'input>>,
     material_plans: Vec<ValidatedAppearanceMaterialPlan>,
     binding_plans: Vec<ValidatedAppearanceBindingPlan>,
     // Every allocation above must drop before its accounting token.
@@ -926,15 +969,17 @@ impl<'control, C: CanonicalAuthoringControl> AppearanceValidationContext<'contro
     }
 }
 
-pub(in crate::canonical_scene::store) fn appearance_shape_scratch_envelope(
-    input: AppearanceAuthoringBatch<'_>,
+pub(in crate::canonical_scene::store) fn appearance_shape_scratch_envelope<'input>(
+    input: AppearanceAuthoringBatch<'input>,
+    resource_snapshots: ResourceSnapshotAuthoringTable<'input>,
 ) -> Result<u64, AppearanceAuthoringSemanticError> {
+    validate_resource_snapshot_table(resource_snapshots)?;
     for (image, authored) in input.images().iter().enumerate() {
-        let ImagePayloadAuthoring::Encoded { bytes, .. } = authored.payload();
+        let (bytes, _) = resolve_image_payload(image, *authored, resource_snapshots)?;
         validate_encoded_payload_limit(image, bytes.len())?;
     }
     let image_plan =
-        CapacityPlan::for_type::<ValidatedAppearanceImagePlan>(0, 0, input.images().len())
+        CapacityPlan::for_type::<ValidatedAppearanceImagePlan<'input>>(0, 0, input.images().len())
             .map_err(|cause| AppearanceAuthoringSemanticError::ScratchCapacity {
                 resource: "validated appearance image plans",
                 cause,
@@ -963,17 +1008,19 @@ pub(in crate::canonical_scene::store) fn appearance_shape_scratch_envelope(
 
 pub(in crate::canonical_scene::store) fn validate_appearance_batch_with_control<'input, C>(
     input: AppearanceAuthoringBatch<'input>,
+    resource_snapshots: ResourceSnapshotAuthoringTable<'input>,
     limits: SceneValidationLimits,
     control: &mut C,
 ) -> Result<ValidatedAppearanceBatch<'input, C::Reservation>, AppearanceAuthoringFailure<C::Error>>
 where
     C: CanonicalAuthoringControl,
 {
-    validate_appearance_batch_inner(input, limits, control)
+    validate_appearance_batch_inner(input, resource_snapshots, limits, control)
 }
 
 fn validate_appearance_batch_inner<'input, C>(
     input: AppearanceAuthoringBatch<'input>,
+    resource_snapshots: ResourceSnapshotAuthoringTable<'input>,
     limits: SceneValidationLimits,
     control: &mut C,
 ) -> Result<ValidatedAppearanceBatch<'input, C::Reservation>, AppearanceAuthoringFailure<C::Error>>
@@ -982,6 +1029,7 @@ where
 {
     let mut context = AppearanceValidationContext::new(limits, control);
     context.poll_now()?;
+    validate_resource_snapshot_table(resource_snapshots)?;
 
     let image_count = collection_count(input.images().len(), "images")?;
     let sampler_count = collection_count(input.samplers().len(), "samplers")?;
@@ -1004,10 +1052,10 @@ where
         limits.max_entities(),
     )?;
 
-    let structural_bytes = appearance_structural_bytes(input, &mut context)?;
+    let structural_bytes = appearance_structural_bytes(input, resource_snapshots, &mut context)?;
     context.set_structural_bytes(structural_bytes)?;
 
-    let image_plan = context.scratch_plan::<ValidatedAppearanceImagePlan>(
+    let image_plan = context.scratch_plan::<ValidatedAppearanceImagePlan<'input>>(
         input.images().len(),
         "validated appearance image plans",
     )?;
@@ -1068,7 +1116,8 @@ where
     let mut media_type_offset = 0_u32;
     for (image_index, image) in input.images().iter().enumerate() {
         let (bytes, media_type) = context.run_unit(SceneValidationWork::Entity, || {
-            let ImagePayloadAuthoring::Encoded { bytes, media_type } = image.payload();
+            let (bytes, media_type) =
+                resolve_image_payload(image_index, *image, resource_snapshots)?;
             if bytes.is_empty() {
                 return Err(AppearanceAuthoringSemanticError::EmptyEncodedPayload {
                     image: image_index,
@@ -1107,6 +1156,7 @@ where
         )?;
         storage.image_plans.push(ValidatedAppearanceImagePlan {
             input_index: image_index,
+            payload: bytes,
             payload_offset,
             payload_count,
             media_type_offset,
@@ -1266,6 +1316,7 @@ where
 
     let mut expected_binding_offset = 0_u32;
     let mut material_factor_offset = 0_u32;
+    let mut material_name_offset = 0_u32;
     for (material_index, material) in input.materials().iter().copied().enumerate() {
         let semantics = material.semantics();
         let (
@@ -1275,6 +1326,8 @@ where
             binding_end,
             range_count,
             next_material_factor_offset,
+            next_material_name_offset,
+            name,
         ) = context.run_unit(SceneValidationWork::Entity, || {
             if let Some(behavior) = namespaced_material_behavior(semantics) {
                 return Err(
@@ -1356,6 +1409,27 @@ where
                 .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
                     dimension: "material factor scalar offset",
                 })?;
+            let name = match material.name() {
+                Presence::Absent => None,
+                Presence::Present(name) => {
+                    validate_entity_name_str(name).map_err(|source| {
+                        AppearanceAuthoringSemanticError::InvalidMaterialName {
+                            material: material_index,
+                            source,
+                        }
+                    })?;
+                    Some(name)
+                }
+            };
+            let name_count = match name {
+                Some(name) => collection_count(name.len(), "material name bytes")?,
+                None => 0,
+            };
+            let next_material_name_offset = material_name_offset.checked_add(name_count).ok_or(
+                AppearanceAuthoringSemanticError::AccountingOverflow {
+                    dimension: "material name byte offset",
+                },
+            )?;
             Ok::<_, AppearanceAuthoringSemanticError>((
                 ValidatedAppearanceMaterialPlan {
                     input_index: material_index,
@@ -1373,12 +1447,16 @@ where
                     pbr_specular_glossiness_presence,
                     legacy_presence,
                     factor_offset: material_factor_offset,
+                    name_offset: material_name_offset,
+                    name_count,
                 },
                 end,
                 binding_start,
                 binding_end,
                 range.count(),
                 next_material_factor_offset,
+                next_material_name_offset,
+                name,
             ))
         })??;
         let material_bindings = &input.bindings()[binding_start..binding_end];
@@ -1399,12 +1477,19 @@ where
         for scalar in 0..material_factor_stride {
             context.run_unit(SceneValidationWork::PayloadCell, || scalar)?;
         }
+        if let Some(name) = name {
+            for byte in name.as_bytes() {
+                context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
+            }
+        }
         context.add_payload_cells_and_bytes(
             u64::from(material_factor_stride),
             u64::from(material_factor_stride) * LOGICAL_F32_BYTES,
         )?;
+        context.add_payload_bytes(u64::from(material_plan.name_count))?;
         storage.material_plans.push(material_plan);
         material_factor_offset = next_material_factor_offset;
+        material_name_offset = next_material_name_offset;
         context.add_relations(u64::from(range_count))?;
         expected_binding_offset = end;
     }
@@ -1434,6 +1519,7 @@ where
     let payload_block_count = block_for_count(payload_offset)
         .checked_add(block_for_count(media_type_offset))
         .and_then(|count| count.checked_add(block_for_count(source_key_offset)))
+        .and_then(|count| count.checked_add(block_for_count(material_name_offset)))
         .and_then(|count| count.checked_add(block_for_count(binding_semantic_scalar_count)))
         .and_then(|count| count.checked_add(block_for_count(material_factor_scalar_count)))
         .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
@@ -1454,6 +1540,7 @@ where
         image_payload_byte_count: payload_offset,
         media_type_byte_count: media_type_offset,
         source_key_byte_count: source_key_offset,
+        material_name_byte_count: material_name_offset,
         binding_semantic_scalar_count,
         material_factor_scalar_count,
         payload_block_count,
@@ -1519,8 +1606,72 @@ pub(in crate::canonical_scene::store) fn validate_encoded_payload_limit(
     }
 }
 
-fn appearance_structural_bytes<C>(
-    input: AppearanceAuthoringBatch<'_>,
+fn validate_resource_snapshot_table(
+    resource_snapshots: ResourceSnapshotAuthoringTable<'_>,
+) -> Result<(), AppearanceAuthoringSemanticError> {
+    let snapshot_count = resource_snapshots.snapshots().len();
+    let resource_count = resource_snapshots.resource_count();
+    if snapshot_count == 0 || snapshot_count == resource_count {
+        Ok(())
+    } else {
+        Err(
+            AppearanceAuthoringSemanticError::ResourceSnapshotCardinalityMismatch {
+                snapshot_count,
+                resource_count,
+            },
+        )
+    }
+}
+
+fn resolve_image_payload<'input>(
+    image: usize,
+    authored: ImageAuthoring<'input>,
+    resource_snapshots: ResourceSnapshotAuthoringTable<'input>,
+) -> Result<
+    (
+        &'input [u8],
+        Presence<&'input crate::extension::ExtensionMediaType>,
+    ),
+    AppearanceAuthoringSemanticError,
+> {
+    match authored.payload() {
+        ImagePayloadAuthoring::Encoded { bytes, media_type } => Ok((bytes, media_type)),
+        ImagePayloadAuthoring::SessionResource {
+            resource,
+            media_type,
+        } => {
+            let resource_index = u32_to_usize(resource.index(), "image session resource index")?;
+            if resource_index >= resource_snapshots.resource_count() {
+                return Err(AppearanceAuthoringSemanticError::ImageResourceOutOfRange {
+                    image,
+                    resource: resource.index(),
+                    resource_count: resource_snapshots.resource_count(),
+                });
+            }
+            let Some(snapshot) = resource_snapshots.snapshots().get(resource_index) else {
+                return Err(
+                    AppearanceAuthoringSemanticError::ImageResourceSnapshotAbsent {
+                        image,
+                        resource: resource.index(),
+                    },
+                );
+            };
+            let Presence::Present(bytes) = snapshot.bytes() else {
+                return Err(
+                    AppearanceAuthoringSemanticError::ImageResourceSnapshotAbsent {
+                        image,
+                        resource: resource.index(),
+                    },
+                );
+            };
+            Ok((bytes, media_type))
+        }
+    }
+}
+
+fn appearance_structural_bytes<'input, C>(
+    input: AppearanceAuthoringBatch<'input>,
+    resource_snapshots: ResourceSnapshotAuthoringTable<'input>,
     context: &mut AppearanceValidationContext<'_, C>,
 ) -> AppearanceValidationResult<u64, C>
 where
@@ -1535,9 +1686,10 @@ where
     let mut payload_bytes = 0_u64;
     let mut media_type_bytes = 0_u64;
     let mut image_rows = 0_u64;
-    for image in input.images() {
+    for (image_index, image) in input.images().iter().copied().enumerate() {
         context.run_unit(SceneValidationWork::Traversal, || {
-            let ImagePayloadAuthoring::Encoded { bytes, media_type } = image.payload();
+            let (bytes, media_type) =
+                resolve_image_payload(image_index, image, resource_snapshots)?;
             let payload_count = usize_to_u64(bytes.len(), "encoded image payload bytes")?;
             let media_count = match media_type {
                 Presence::Absent => 0,
@@ -1566,15 +1718,26 @@ where
         })??;
     }
 
+    let mut material_name_bytes = 0_u64;
     let mut material_rows = 0_u64;
     for material in input.materials() {
         context.run_unit(SceneValidationWork::Traversal, || {
+            let name_count = match material.name() {
+                Presence::Absent => 0,
+                Presence::Present(name) => usize_to_u64(name.len(), "material name bytes")?,
+            };
+            material_name_bytes = material_name_bytes.checked_add(name_count).ok_or(
+                AppearanceAuthoringSemanticError::AccountingOverflow {
+                    dimension: "material name bytes",
+                },
+            )?;
             material_rows = material_rows
                 .checked_add(MATERIAL_ROW_FIXED_BYTES)
                 .and_then(|bytes| {
                     bytes.checked_add(reference_slot_bytes(material.bindings().count() != 0))
                 })
                 .and_then(|bytes| bytes.checked_add(LOGICAL_REFERENCE_BYTES))
+                .and_then(|bytes| bytes.checked_add(reference_slot_bytes(name_count != 0)))
                 .ok_or(AppearanceAuthoringSemanticError::AccountingOverflow {
                     dimension: "canonical material records",
                 })?;
@@ -1617,6 +1780,7 @@ where
             reference_slot_bytes(payload_bytes != 0),
             reference_slot_bytes(media_type_bytes != 0),
             reference_slot_bytes(source_key_bytes != 0),
+            reference_slot_bytes(material_name_bytes != 0),
             reference_slot_bytes(binding_count != 0),
             reference_slot_bytes(material_count != 0),
         ],

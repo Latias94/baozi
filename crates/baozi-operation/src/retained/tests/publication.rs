@@ -504,6 +504,7 @@ fn assert_unresolved_validation_permit_cannot_validate_success(forget: bool) {
 
     let validation = assembly.validate_success_controlled(
         TestDimension::Work,
+        TestDimension::Work,
         canonical_root,
         evidence_root,
         |session, canonical, evidence, mut control| {
@@ -604,6 +605,7 @@ fn partially_resolved_validation_work_cannot_validate_success() {
 
     let rejected = match assembly.validate_success_controlled(
         TestDimension::Work,
+        TestDimension::Work,
         canonical_root,
         evidence_root,
         |session, canonical, evidence, mut control| {
@@ -669,6 +671,7 @@ fn ignored_validation_control_failure_cannot_validate_success() {
 
     let rejected = match assembly.validate_success_controlled(
         TestDimension::Work,
+        TestDimension::Work,
         canonical_root,
         evidence_root,
         |session, canonical, evidence, mut control| {
@@ -716,6 +719,7 @@ fn ignored_validation_ledger_failure_cannot_validate_success() {
     let (canonical_root, evidence_root) = retain_scalar_success(&mut assembly);
 
     let rejected = match assembly.validate_success_controlled(
+        TestDimension::Work,
         TestDimension::Work,
         canonical_root,
         evidence_root,

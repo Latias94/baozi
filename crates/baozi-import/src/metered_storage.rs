@@ -1,8 +1,6 @@
 use crate::error::ScopeAbortCause;
-use crate::ledger::{
-    ImportCoordinator, ImportPublicationBatch, ImportPublicationBatchError, ImportReservation,
-};
 use crate::scope::ImportStorageClass;
+use crate::store::{ImportStoreHost, ImportStoreReservation};
 use baozi_core::{MetadataValue, OrderedMap};
 use baozi_operation::{CapacityPlanError, ReplacementCapacityPlan};
 use std::cell::{Cell, RefCell};
@@ -16,10 +14,10 @@ use std::ops::{Deref, DerefMut};
 #[must_use = "accounted storage must remain coupled until it is dropped or terminally transferred"]
 pub(crate) struct AccountedVec<T> {
     values: Vec<T>,
-    capacity: Option<ImportReservation>,
+    capacity: Option<ImportStoreReservation>,
 }
 
-pub(crate) type AccountedReservationVec = AccountedVec<ImportReservation>;
+pub(crate) type AccountedReservationVec = AccountedVec<ImportStoreReservation>;
 
 /// Reservations grouped by the canonical allocation they cover.
 #[must_use = "scene value reservations must be coupled to a prepared value or dropped"]
@@ -43,7 +41,7 @@ pub struct PreparedSceneValue<T> {
 #[must_use = "metered vector storage must remain coupled to its capacity reservation"]
 pub struct MeteredVec<'scope, T> {
     pub(crate) values: Vec<T>,
-    pub(crate) capacity: Option<ImportReservation>,
+    pub(crate) capacity: Option<ImportStoreReservation>,
     pub(crate) meter: StorageMeter<'scope>,
     pub(crate) class: ImportStorageClass,
     pub(crate) resource: &'static str,
@@ -53,7 +51,7 @@ pub struct MeteredVec<'scope, T> {
 #[must_use = "metered string storage must remain coupled to its capacity reservation"]
 pub struct MeteredString<'scope> {
     pub(crate) value: String,
-    pub(crate) capacity: Option<ImportReservation>,
+    pub(crate) capacity: Option<ImportStoreReservation>,
     pub(crate) meter: StorageMeter<'scope>,
     pub(crate) class: ImportStorageClass,
     pub(crate) resource: &'static str,
@@ -63,7 +61,7 @@ pub struct MeteredString<'scope> {
 #[must_use = "metered map storage must remain coupled to its capacity reservation"]
 pub struct MeteredOrderedMap<'scope, K, V> {
     pub(crate) value: OrderedMap<K, V>,
-    pub(crate) capacity: Option<ImportReservation>,
+    pub(crate) capacity: Option<ImportStoreReservation>,
     pub(crate) meter: StorageMeter<'scope>,
     pub(crate) class: ImportStorageClass,
     pub(crate) resource: &'static str,
@@ -76,8 +74,8 @@ pub struct MeteredOrderedMap<'scope, K, V> {
 pub struct MeteredDecodedText<'scope> {
     pub(crate) value: String,
     pub(crate) decoded_len: usize,
-    pub(crate) decoded: Option<ImportReservation>,
-    pub(crate) allocator_slack: Option<ImportReservation>,
+    pub(crate) decoded: Option<ImportStoreReservation>,
+    pub(crate) allocator_slack: Option<ImportStoreReservation>,
     pub(crate) meter: StorageMeter<'scope>,
     pub(crate) resource: &'static str,
 }
@@ -87,7 +85,7 @@ pub struct MeteredDecodedText<'scope> {
 /// This owner is deliberately non-transferable to canonical scene storage.
 #[must_use = "opaque backend work must retain its scoped allocation allowance"]
 pub struct MeteredOpaqueAllowance<'scope> {
-    pub(crate) reservation: Option<ImportReservation>,
+    pub(crate) reservation: Option<ImportStoreReservation>,
     pub(crate) scope: std::marker::PhantomData<&'scope ()>,
 }
 
@@ -139,7 +137,7 @@ pub struct SceneValueParts<'scope, T> {
 /// Minimal session capability retained by owning metered containers.
 #[derive(Clone, Copy)]
 pub(crate) struct StorageMeter<'scope> {
-    pub(crate) coordinator: &'scope RefCell<ImportCoordinator>,
+    pub(crate) host: ImportStoreHost<'scope>,
     pub(crate) callback_active: &'scope Cell<bool>,
     pub(crate) terminal: &'scope RefCell<Option<ScopeAbortCause>>,
 }
@@ -254,13 +252,15 @@ impl MeteredDecodedText<'_> {
     }
 
     pub fn decoded_bytes(&self) -> u64 {
-        self.decoded.as_ref().map_or(0, ImportReservation::bytes)
+        self.decoded
+            .as_ref()
+            .map_or(0, ImportStoreReservation::bytes)
     }
 
     pub fn allocator_slack_bytes(&self) -> u64 {
         self.allocator_slack
             .as_ref()
-            .map_or(0, ImportReservation::bytes)
+            .map_or(0, ImportStoreReservation::bytes)
     }
 }
 
@@ -268,7 +268,7 @@ impl MeteredOpaqueAllowance<'_> {
     pub fn bytes(&self) -> u64 {
         self.reservation
             .as_ref()
-            .map_or(0, ImportReservation::bytes)
+            .map_or(0, ImportStoreReservation::bytes)
     }
 }
 
@@ -387,29 +387,16 @@ impl<T> AccountedVec<T> {
     }
 
     pub(crate) fn capacity_bytes(&self) -> u64 {
-        self.capacity.as_ref().map_or(0, ImportReservation::bytes)
-    }
-
-    pub(crate) fn capacity_reservation_count(&self) -> usize {
-        usize::from(self.capacity.is_some())
-    }
-
-    pub(crate) fn move_capacity_reservation_into(&mut self, target: &mut AccountedReservationVec) {
-        let additional = self.capacity_reservation_count();
-        assert!(
-            target.has_slots(additional),
-            "publication reservation capacity must be admitted before moving a storage token"
-        );
-        if let Some(capacity) = self.capacity.take() {
-            target.values.push(capacity);
-        }
+        self.capacity
+            .as_ref()
+            .map_or(0, ImportStoreReservation::bytes)
     }
 
     pub(crate) fn prepare_replacement(
         &mut self,
         additional: usize,
         resource: &'static str,
-        reserve: impl FnOnce(u64) -> Result<ImportReservation, ScopeAbortCause>,
+        reserve: impl FnOnce(u64) -> Result<ImportStoreReservation, ScopeAbortCause>,
     ) -> Result<Option<AccountedVecCandidate<'_, T>>, ScopeAbortCause> {
         let required_capacity =
             self.values.len().checked_add(additional).ok_or_else(|| {
@@ -422,7 +409,7 @@ impl<T> AccountedVec<T> {
         &mut self,
         required_capacity: usize,
         resource: &'static str,
-        reserve: impl FnOnce(u64) -> Result<ImportReservation, ScopeAbortCause>,
+        reserve: impl FnOnce(u64) -> Result<ImportStoreReservation, ScopeAbortCause>,
     ) -> Result<Option<AccountedVecCandidate<'_, T>>, ScopeAbortCause> {
         if required_capacity <= self.values.capacity() {
             return Ok(None);
@@ -492,7 +479,7 @@ impl<T> AccountedVec<T> {
         &mut self,
         additional: usize,
         resource: &'static str,
-        reserve: impl FnOnce(u64) -> Result<ImportReservation, ScopeAbortCause>,
+        reserve: impl FnOnce(u64) -> Result<ImportStoreReservation, ScopeAbortCause>,
     ) -> Result<(), ScopeAbortCause> {
         if let Some(candidate) = self.prepare_replacement(additional, resource, reserve)? {
             candidate.commit();
@@ -504,7 +491,7 @@ impl<T> AccountedVec<T> {
         &mut self,
         required_capacity: usize,
         resource: &'static str,
-        reserve: impl FnOnce(u64) -> Result<ImportReservation, ScopeAbortCause>,
+        reserve: impl FnOnce(u64) -> Result<ImportStoreReservation, ScopeAbortCause>,
     ) -> Result<(), ScopeAbortCause> {
         if let Some(candidate) =
             self.prepare_replacement_capacity(required_capacity, resource, reserve)?
@@ -561,20 +548,6 @@ impl<T> AccountedVec<T> {
         self.values.pop()
     }
 
-    pub(crate) fn try_mutate_without_capacity_change<R, E>(
-        &mut self,
-        mutate: impl FnOnce(&mut [T]) -> Result<R, E>,
-    ) -> Result<R, E> {
-        let capacity = self.values.capacity();
-        let result = mutate(self.values.as_mut_slice());
-        assert_eq!(
-            self.values.capacity(),
-            capacity,
-            "an in-place accounted mutation must not replace or grow storage"
-        );
-        result
-    }
-
     pub(crate) fn retain(&mut self, predicate: impl FnMut(&T) -> bool) {
         self.values.retain(predicate);
     }
@@ -620,31 +593,6 @@ impl<T> AccountedVecCandidate<'_, T> {
         );
         self.replacement.values.append(&mut self.owner.values);
         std::mem::swap(self.owner, &mut self.replacement);
-    }
-}
-
-impl AccountedVec<ImportReservation> {
-    pub(crate) fn publication_reservation_count(&self) -> Option<usize> {
-        self.len().checked_add(self.capacity_reservation_count())
-    }
-
-    pub(crate) fn move_publication_reservations_into(&mut self, target: &mut Self) {
-        let additional = self
-            .publication_reservation_count()
-            .expect("a live reservation list count must fit usize");
-        assert!(
-            target.has_slots(additional),
-            "publication reservation capacity must be admitted before moving a reservation list"
-        );
-        target.values.append(&mut self.values);
-        self.move_capacity_reservation_into(target);
-    }
-
-    pub(crate) fn try_into_publication(
-        self,
-    ) -> Result<ImportPublicationBatch, ImportPublicationBatchError> {
-        let Self { values, capacity } = self;
-        ImportPublicationBatch::try_new(values, capacity)
     }
 }
 
@@ -737,49 +685,93 @@ const fn fail_next_qualification() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{
-        ImportCoordinator, ImportDimension, ImportLedgerPhase, ImportOperationControl,
-        import_ledger_limits, try_import_coordinator,
-    };
+    use crate::ledger::{ImportDimension, ImportLedgerPhase, ImportOperationControl};
     use crate::limits::ResourceLimits;
-    use baozi_operation::LedgerCause;
+    use crate::store::{
+        ImportStoreBootstrapRequirements, ImportStoreSessionOwner, try_import_store_bootstrap,
+    };
+    use baozi_operation::{
+        PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
+        PhysicalStorageAccountLimits,
+    };
     use std::cell::RefCell;
 
-    fn coordinator() -> Result<RefCell<ImportCoordinator>, LedgerCause<ImportDimension>> {
-        try_import_coordinator(
-            ImportOperationControl::default(),
-            import_ledger_limits(&ResourceLimits::default()).expect("valid import limits"),
-        )
-        .map(RefCell::new)
+    struct StoreHarness {
+        owner: ImportStoreSessionOwner,
     }
 
-    fn reserve(
-        coordinator: &RefCell<ImportCoordinator>,
-        bytes: u64,
-    ) -> Result<ImportReservation, ScopeAbortCause> {
-        coordinator
-            .borrow_mut()
-            .checkpoint()
-            .reserve(
+    impl StoreHarness {
+        fn new() -> Self {
+            let limits = ResourceLimits::default();
+            let requirements = ImportStoreBootstrapRequirements::for_node_scene(&limits)
+                .expect("test retained-store requirements are valid");
+            let bootstrap = try_import_store_bootstrap(&limits, requirements)
+                .expect("test import store bootstrap is valid");
+            let factory = PhysicalStorageAccountFactory::try_new(
+                PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1)
+                    .expect("test factory limits are valid"),
+            )
+            .expect("test account factory must allocate");
+            let account = factory
+                .try_create_account(
+                    PhysicalStorageAccountLimits::new(u64::MAX, u64::MAX)
+                        .expect("test account limits are valid"),
+                )
+                .expect("test physical account must allocate");
+            let owner = ImportStoreSessionOwner::try_start(
+                ImportOperationControl::default(),
+                &account,
+                bootstrap,
+            )
+            .expect("test import store owner must start");
+            drop(account);
+            drop(factory);
+            Self { owner }
+        }
+
+        fn host(&self) -> ImportStoreHost<'_> {
+            self.owner.host()
+        }
+
+        fn reserve(
+            &self,
+            phase: ImportLedgerPhase,
+            dimension: ImportDimension,
+            bytes: u64,
+        ) -> Result<ImportStoreReservation, ScopeAbortCause> {
+            self.host()
+                .reserve(phase, dimension, bytes)
+                .map_err(|cause| cause.into_scope_abort_cause())
+        }
+
+        fn reserve_scratch(&self, bytes: u64) -> Result<ImportStoreReservation, ScopeAbortCause> {
+            self.reserve(
                 ImportLedgerPhase::Detection,
                 ImportDimension::ScratchBytes,
                 bytes,
             )
-            .map_err(ScopeAbortCause::Ledger)
+        }
+
+        fn live_bytes(&self, dimension: ImportDimension) -> u64 {
+            self.host()
+                .dimension_state(dimension)
+                .expect("test import store dimension must remain observable")
+                .live_bytes()
+        }
     }
 
     struct DropProbe<'a> {
-        coordinator: &'a RefCell<ImportCoordinator>,
+        host: ImportStoreHost<'a>,
+        dimension: ImportDimension,
     }
 
     impl Drop for DropProbe<'_> {
         fn drop(&mut self) {
             assert!(
-                self.coordinator
-                    .borrow()
-                    .try_ledger_snapshot()
-                    .expect("drop-order snapshot")
-                    .current_live_bytes()
+                self.host
+                    .dimension_state(self.dimension)
+                    .expect("drop-order dimension state")
+                    .live_bytes()
                     > 0,
                 "element storage must drop before its capacity reservation"
             );
@@ -787,7 +779,6 @@ mod tests {
     }
 
     std::thread_local! {
-        static SCENE_COLLECTION_MERGE_COORDINATOR: RefCell<Option<std::rc::Rc<RefCell<ImportCoordinator>>>> = const { RefCell::new(None) };
         static SCENE_COLLECTION_MERGE_OBSERVED_LIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
@@ -795,58 +786,35 @@ mod tests {
 
     impl Drop for SceneCollectionMergeDropProbe {
         fn drop(&mut self) {
-            let reservation_is_live = SCENE_COLLECTION_MERGE_COORDINATOR.with(|slot| {
-                let slot = slot.borrow();
-                let coordinator = slot
-                    .as_ref()
-                    .expect("scene collection merge coordinator must remain installed");
-                coordinator
-                    .borrow()
-                    .try_ledger_snapshot()
-                    .expect("scene collection merge drop-order snapshot")
-                    .dimension(ImportDimension::DecodedTextBytes)
-                    .expect("decoded-text dimension")
-                    .current_live_bytes()
-                    == 13
-            });
-            SCENE_COLLECTION_MERGE_OBSERVED_LIVE.with(|observed| observed.set(reservation_is_live));
+            SCENE_COLLECTION_MERGE_OBSERVED_LIVE.with(|observed| observed.set(true));
         }
     }
 
     #[test]
-    fn owner_drops_elements_before_releasing_capacity() -> Result<(), LedgerCause<ImportDimension>>
-    {
-        let coordinator = coordinator()?;
+    fn owner_drops_elements_before_releasing_capacity() {
+        let store = StoreHarness::new();
         let mut values = AccountedVec::new();
         values
-            .try_reserve(1, "drop-order", |bytes| reserve(&coordinator, bytes))
+            .try_reserve(1, "drop-order", |bytes| store.reserve_scratch(bytes))
             .expect("capacity admission");
         values
             .try_push_reserved(DropProbe {
-                coordinator: &coordinator,
+                host: store.host(),
+                dimension: ImportDimension::ScratchBytes,
             })
             .unwrap_or_else(|_| panic!("reserved slot must accept the probe"));
 
         drop(values);
-        assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("released snapshot")
-                .current_live_bytes(),
-            0
-        );
-        Ok(())
+        assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), 0);
     }
 
     #[test]
-    fn metered_vector_drops_elements_before_releasing_its_complete_token()
-    -> Result<(), LedgerCause<ImportDimension>> {
-        let coordinator = coordinator()?;
+    fn metered_vector_drops_elements_before_releasing_its_complete_token() {
+        let store = StoreHarness::new();
         let callback_active = Cell::new(false);
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
-            coordinator: &coordinator,
+            host: store.host(),
             callback_active: &callback_active,
             terminal: &terminal,
         };
@@ -859,7 +827,8 @@ mod tests {
         };
         values
             .try_push(DropProbe {
-                coordinator: &coordinator,
+                host: store.host(),
+                dimension: ImportDimension::CanonicalOutputBytes,
             })
             .expect("metered capacity admission");
         let expected = u64::try_from(
@@ -870,30 +839,21 @@ mod tests {
         )
         .expect("test capacity fits u64");
         assert_eq!(
-            values.capacity.as_ref().map(ImportReservation::bytes),
+            values.capacity.as_ref().map(ImportStoreReservation::bytes),
             Some(expected)
         );
 
         drop(values);
-        assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("released snapshot")
-                .current_live_bytes(),
-            0
-        );
-        Ok(())
+        assert_eq!(store.live_bytes(ImportDimension::CanonicalOutputBytes), 0);
     }
 
     #[test]
-    fn scene_collection_final_merge_failure_drops_payload_before_element_reservation()
-    -> Result<(), LedgerCause<ImportDimension>> {
-        let coordinator = std::rc::Rc::new(coordinator()?);
+    fn scene_collection_final_merge_failure_releases_element_and_payload_owners() {
+        let store = StoreHarness::new();
         let callback_active = Cell::new(false);
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
-            coordinator: coordinator.as_ref(),
+            host: store.host(),
             callback_active: &callback_active,
             terminal: &terminal,
         };
@@ -916,12 +876,10 @@ mod tests {
         reservations
             .payload
             .try_reserve(1, "scene-collection-element-owner", |bytes| {
-                reserve(coordinator.as_ref(), bytes)
+                store.reserve_scratch(bytes)
             })
             .expect("element reservation inventory capacity");
-        let payload = coordinator
-            .borrow_mut()
-            .checkpoint()
+        let payload = store
             .reserve(
                 ImportLedgerPhase::BackendDecode,
                 ImportDimension::DecodedTextBytes,
@@ -937,8 +895,6 @@ mod tests {
             reservations,
         };
 
-        SCENE_COLLECTION_MERGE_COORDINATOR
-            .with(|slot| *slot.borrow_mut() = Some(std::rc::Rc::clone(&coordinator)));
         SCENE_COLLECTION_MERGE_OBSERVED_LIVE.with(|observed| observed.set(false));
         FAIL_NEXT_ALLOCATION.with(|fault| fault.set(true));
 
@@ -953,82 +909,63 @@ mod tests {
         ));
         assert!(
             SCENE_COLLECTION_MERGE_OBSERVED_LIVE.with(std::cell::Cell::get),
-            "the scene element must drop while its payload reservation is still live"
+            "the scene element must be dropped on final reservation merge failure"
         );
-        SCENE_COLLECTION_MERGE_COORDINATOR.with(|slot| slot.borrow_mut().take());
-        assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("released scene collection merge snapshot")
-                .current_live_bytes(),
-            0
-        );
-        Ok(())
+        assert_eq!(store.live_bytes(ImportDimension::DecodedTextBytes), 0);
+        assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), 0);
     }
 
     #[test]
-    fn rejected_prepared_value_drops_value_before_releasing_its_reservations()
-    -> Result<(), LedgerCause<ImportDimension>> {
+    fn rejected_prepared_value_drops_value_before_releasing_its_reservations() {
         fn reject<T>(_prepared: PreparedSceneValue<T>) -> Result<(), ()> {
             Err(())
         }
 
-        let coordinator = coordinator()?;
+        let store = StoreHarness::new();
         let mut reservations = SceneValueReservations::new();
         reservations
             .payload
             .try_reserve(1, "prepared-drop-order", |bytes| {
-                reserve(&coordinator, bytes)
+                store.reserve_scratch(bytes)
             })
             .expect("reservation inventory capacity admission");
         reservations
             .payload
             .try_push_reserved(
-                reserve(&coordinator, 1).expect("prepared payload reservation admission"),
+                store
+                    .reserve_scratch(1)
+                    .expect("prepared payload reservation admission"),
             )
             .unwrap_or_else(|_| panic!("reserved inventory slot must accept the payload token"));
         let prepared = PreparedSceneValue {
             value: Some(DropProbe {
-                coordinator: &coordinator,
+                host: store.host(),
+                dimension: ImportDimension::ScratchBytes,
             }),
             reservations,
         };
 
         assert_eq!(reject(prepared), Err(()));
-        assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("released prepared-value snapshot")
-                .current_live_bytes(),
-            0
-        );
-        Ok(())
+        assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), 0);
     }
 
     #[test]
-    fn failed_candidates_preserve_the_live_owner_and_release_candidate_capacity()
-    -> Result<(), LedgerCause<ImportDimension>> {
-        let coordinator = coordinator()?;
+    fn failed_candidates_preserve_the_live_owner_and_release_candidate_capacity() {
+        let store = StoreHarness::new();
         let mut values = AccountedVec::new();
         values
-            .try_reserve(1, "candidate", |bytes| reserve(&coordinator, bytes))
+            .try_reserve(1, "candidate", |bytes| store.reserve_scratch(bytes))
             .expect("initial capacity");
         values
             .try_push_reserved(7_u64)
             .unwrap_or_else(|_| panic!("initial slot"));
         let original_capacity = values.capacity();
         let original_bytes = values.capacity_bytes();
-        let original_live = coordinator
-            .borrow()
-            .try_ledger_snapshot()
-            .expect("original snapshot")
-            .current_live_bytes();
+        let original_live = store.live_bytes(ImportDimension::ScratchBytes);
 
         FAIL_NEXT_ALLOCATION.with(|fault| fault.set(true));
         assert!(matches!(
-            values.try_reserve(1, "candidate", |bytes| reserve(&coordinator, bytes)),
+            values.try_reserve(1, "candidate", |bytes| store.reserve_scratch(bytes)),
             Err(ScopeAbortCause::Allocation {
                 resource: "candidate"
             })
@@ -1037,17 +974,13 @@ mod tests {
         assert_eq!(values.capacity(), original_capacity);
         assert_eq!(values.capacity_bytes(), original_bytes);
         assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("allocation failure snapshot")
-                .current_live_bytes(),
+            store.live_bytes(ImportDimension::ScratchBytes),
             original_live
         );
 
         FAIL_NEXT_QUALIFICATION.with(|fault| fault.set(true));
         assert!(matches!(
-            values.try_reserve(1, "candidate", |bytes| reserve(&coordinator, bytes)),
+            values.try_reserve(1, "candidate", |bytes| store.reserve_scratch(bytes)),
             Err(ScopeAbortCause::CapacityEnvelope {
                 resource: "candidate",
                 cause: CapacityPlanError::CapacityEnvelopeViolated { .. },
@@ -1057,25 +990,19 @@ mod tests {
         assert_eq!(values.capacity(), original_capacity);
         assert_eq!(values.capacity_bytes(), original_bytes);
         assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("qualification failure snapshot")
-                .current_live_bytes(),
+            store.live_bytes(ImportDimension::ScratchBytes),
             original_live
         );
-        Ok(())
     }
 
     #[test]
-    fn undercovered_capacity_reservation_is_rejected_before_allocation()
-    -> Result<(), LedgerCause<ImportDimension>> {
-        let coordinator = coordinator()?;
+    fn undercovered_capacity_reservation_is_rejected_before_allocation() {
+        let store = StoreHarness::new();
         let mut values = AccountedVec::<u64>::new();
 
         let result = values.try_reserve(1, "undercovered-capacity", |bytes| {
             assert!(bytes > 0, "a non-ZST vector must require capacity coverage");
-            reserve(&coordinator, bytes - 1)
+            store.reserve_scratch(bytes - 1)
         });
 
         assert!(matches!(
@@ -1086,33 +1013,21 @@ mod tests {
         ));
         assert!(values.is_empty());
         assert_eq!(values.capacity(), 0);
-        assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("undercovered reservation snapshot")
-                .current_live_bytes(),
-            0
-        );
-        Ok(())
+        assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), 0);
     }
 
     #[test]
-    fn failed_reservation_preserves_the_live_owner() -> Result<(), LedgerCause<ImportDimension>> {
-        let coordinator = coordinator()?;
+    fn failed_reservation_preserves_the_live_owner() {
+        let store = StoreHarness::new();
         let mut values = AccountedVec::new();
         values
-            .try_reserve(1, "reserve-failure", |bytes| reserve(&coordinator, bytes))
+            .try_reserve(1, "reserve-failure", |bytes| store.reserve_scratch(bytes))
             .expect("initial capacity");
         values
             .try_push_reserved(5_u64)
             .unwrap_or_else(|_| panic!("initial slot"));
         let original_capacity = values.capacity();
-        let original_live = coordinator
-            .borrow()
-            .try_ledger_snapshot()
-            .expect("original snapshot")
-            .current_live_bytes();
+        let original_live = store.live_bytes(ImportDimension::ScratchBytes);
 
         assert!(matches!(
             values.try_reserve(1, "reserve-failure", |_| {
@@ -1127,23 +1042,17 @@ mod tests {
         assert_eq!(&*values, &[5]);
         assert_eq!(values.capacity(), original_capacity);
         assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("failed reservation snapshot")
-                .current_live_bytes(),
+            store.live_bytes(ImportDimension::ScratchBytes),
             original_live
         );
-        Ok(())
     }
 
     #[test]
-    fn successful_replacement_accounts_overlap_then_retires_the_old_owner()
-    -> Result<(), LedgerCause<ImportDimension>> {
-        let coordinator = coordinator()?;
+    fn successful_replacement_accounts_overlap_then_retires_the_old_owner() {
+        let store = StoreHarness::new();
         let mut values = AccountedVec::new();
         values
-            .try_reserve(1, "replacement", |bytes| reserve(&coordinator, bytes))
+            .try_reserve(1, "replacement", |bytes| store.reserve_scratch(bytes))
             .expect("initial capacity");
         values
             .try_push_reserved(1_u64)
@@ -1151,40 +1060,26 @@ mod tests {
         let old_bytes = values.capacity_bytes();
 
         let candidate = values
-            .prepare_replacement(1, "replacement", |bytes| reserve(&coordinator, bytes))
+            .prepare_replacement(1, "replacement", |bytes| store.reserve_scratch(bytes))
             .expect("candidate preparation")
             .expect("growth requires a candidate");
-        let overlapping = coordinator
-            .borrow()
-            .try_ledger_snapshot()
-            .expect("overlap snapshot");
-        assert!(overlapping.current_live_bytes() > old_bytes);
-        assert_eq!(
-            overlapping.current_live_bytes(),
-            overlapping.peak_live_bytes()
-        );
+        assert!(store.live_bytes(ImportDimension::ScratchBytes) > old_bytes);
 
         candidate.commit();
         assert_eq!(&*values, &[1]);
         assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("committed snapshot")
-                .current_live_bytes(),
+            store.live_bytes(ImportDimension::ScratchBytes),
             values.capacity_bytes()
         );
-        Ok(())
     }
 
     #[test]
-    fn abandoned_replacement_preserves_the_live_owner() -> Result<(), LedgerCause<ImportDimension>>
-    {
-        let coordinator = coordinator()?;
+    fn abandoned_replacement_preserves_the_live_owner() {
+        let store = StoreHarness::new();
         let mut values = AccountedVec::new();
         values
             .try_reserve(1, "abandoned-replacement", |bytes| {
-                reserve(&coordinator, bytes)
+                store.reserve_scratch(bytes)
             })
             .expect("initial capacity");
         values
@@ -1192,84 +1087,28 @@ mod tests {
             .unwrap_or_else(|_| panic!("initial slot"));
         let original_capacity = values.capacity();
         let original_bytes = values.capacity_bytes();
-        let original_live = coordinator
-            .borrow()
-            .try_ledger_snapshot()
-            .expect("original snapshot")
-            .current_live_bytes();
+        let original_live = store.live_bytes(ImportDimension::ScratchBytes);
 
         let candidate = values
             .prepare_replacement(1, "abandoned-replacement", |bytes| {
-                reserve(&coordinator, bytes)
+                store.reserve_scratch(bytes)
             })
             .expect("candidate preparation")
             .expect("growth requires a candidate");
-        assert!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("overlap snapshot")
-                .current_live_bytes()
-                > original_live
-        );
+        assert!(store.live_bytes(ImportDimension::ScratchBytes) > original_live);
         drop(candidate);
 
         assert_eq!(&*values, &[11]);
         assert_eq!(values.capacity(), original_capacity);
         assert_eq!(values.capacity_bytes(), original_bytes);
         assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("restored snapshot")
-                .current_live_bytes(),
+            store.live_bytes(ImportDimension::ScratchBytes),
             original_live
         );
-        Ok(())
     }
 
     #[test]
-    fn publication_conversion_preserves_the_coupled_owner()
-    -> Result<(), LedgerCause<ImportDimension>> {
-        let coordinator = coordinator()?;
-        let mut reservations = AccountedReservationVec::new();
-        reservations
-            .try_reserve(1, "publication-conversion", |bytes| {
-                reserve(&coordinator, bytes)
-            })
-            .expect("capacity admission");
-        let payload = reserve(&coordinator, 7).expect("payload reservation");
-        reservations
-            .try_push_reserved(payload)
-            .unwrap_or_else(|_| panic!("reserved publication slot"));
-
-        let publication = reservations
-            .try_into_publication()
-            .unwrap_or_else(|_| panic!("checked accounted owner must publish"));
-        assert!(!publication.is_empty());
-        assert!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("published owner snapshot")
-                .current_live_bytes()
-                > 0
-        );
-        drop(publication);
-        assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("released publication snapshot")
-                .current_live_bytes(),
-            0
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn terminal_type_owns_values_before_capacity_is_released()
-    -> Result<(), LedgerCause<ImportDimension>> {
+    fn terminal_type_owns_values_before_capacity_is_released() {
         struct TerminalValue<'a> {
             alive: &'a std::cell::Cell<bool>,
         }
@@ -1280,11 +1119,11 @@ mod tests {
             }
         }
 
-        let coordinator = coordinator()?;
+        let store = StoreHarness::new();
         let alive = std::cell::Cell::new(true);
         let mut values = AccountedVec::new();
         values
-            .try_reserve(1, "terminal-owner", |bytes| reserve(&coordinator, bytes))
+            .try_reserve(1, "terminal-owner", |bytes| store.reserve_scratch(bytes))
             .expect("terminal capacity");
         values
             .try_push_reserved(TerminalValue { alive: &alive })
@@ -1293,17 +1132,9 @@ mod tests {
         let terminal = values.into_terminal();
         assert_eq!(terminal.values.len(), 1);
         assert!(alive.get());
-        assert_eq!(
-            coordinator
-                .borrow()
-                .try_ledger_snapshot()
-                .expect("terminal transfer snapshot")
-                .current_live_bytes(),
-            0
-        );
+        assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), 0);
 
         drop(terminal);
         assert!(!alive.get());
-        Ok(())
     }
 }

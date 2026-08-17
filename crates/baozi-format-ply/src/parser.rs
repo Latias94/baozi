@@ -1,13 +1,19 @@
-use crate::{PlyFailure, PlyFailureCode};
-use baozi_core::{
-    Aabb, Color, Mat4, MeshBinding, PrimitiveTopology, SceneDraft, Vec2, Vec3, VertexAttribute,
-    VertexAttributeData,
-};
+use crate::{FORMAT_ID, PlyFailure, PlyFailureCode};
 use baozi_import::{
-    DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
-    ImportStorageClass, ImportWorkClass, ImportWorkScope, MeshBuildConfig, MeteredMetadataMap,
-    MeteredSceneVec, MeteredString, MeteredVec, NodeBuildConfig, ParseFailure, ParseResult,
-    ParseScope, SceneValueParts,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, AttributeDomain, AttributeSemantic,
+    AuthoredTransform, AuthoringRange, CustomAttributeSemantic, DeformationAuthoringBatch,
+    DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, ExtensionValueRef, FormatId,
+    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
+    GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
+    ImportProgressPhase, ImportStorageClass, ImportWorkClass, ImportWorkScope,
+    LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring,
+    MeshInstanceDeformationAuthoring, MetadataAuthoringBatch, MetadataAuthoringEntry,
+    MeteredString, MeteredVec, NamespacedName, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
+    ObservedResourceAuthoring, OwnerProvenanceAuthoring, ParseFailure, ParseResult, ParseScope,
+    Presence, PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner,
+    ProvenanceLocalId, ProvenanceNodeAuthoring, ResourceIdentity, ResourceIdentityLocalId,
+    SceneAuthoringBatch, SceneDraft, SceneSpace, SessionOpaqueReason, SourceIdentityAuthoring,
+    SourceIdentityLocalId, SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch,
 };
 use std::cell::RefCell;
 use std::fmt;
@@ -23,6 +29,10 @@ const BODY_TOKENS: usize = 4;
 const BODY_TOKEN_BYTES: usize = 5;
 const BODY_WORK_UNITS: usize = 6;
 const BODY_TOPOLOGY_CELLS: usize = 7;
+const MESH_NAME: &str = "PLY Mesh";
+const NODE_NAME: &str = "PLY";
+const FALLBACK_RESOURCE_IDENTITY: &str = "session/ply-primary";
+const SOURCE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(0)];
 
 fn body_completion(index: usize, amount: u64) -> [u64; BODY_WORK_ENTRIES] {
     let mut completed = [0; BODY_WORK_ENTRIES];
@@ -97,10 +107,10 @@ struct Header<'scope> {
 }
 
 struct ParsedPly<'scope> {
-    positions: MeteredVec<'scope, Vec3>,
-    normals: MeteredVec<'scope, Vec3>,
-    texcoords: MeteredVec<'scope, Vec2>,
-    colors: MeteredVec<'scope, Color>,
+    positions: MeteredVec<'scope, [f32; 3]>,
+    normals: MeteredVec<'scope, [f32; 3]>,
+    texcoords: MeteredVec<'scope, [f32; 2]>,
+    colors: MeteredVec<'scope, [f32; 4]>,
     indices: MeteredVec<'scope, u32>,
     face_vertex_counts: MeteredVec<'scope, u32>,
     has_polygon: bool,
@@ -183,6 +193,16 @@ enum CustomAttributeData<'scope> {
     F32(MeteredVec<'scope, f32>),
     U32(MeteredVec<'scope, u32>),
     I32(MeteredVec<'scope, i32>),
+}
+
+struct CustomAttributeStorage<'scope> {
+    semantic: CustomAttributeSemantic,
+    data: CustomAttributeData<'scope>,
+}
+
+struct PendingMetadata<'scope> {
+    key: MeteredString<'scope>,
+    value: MeteredString<'scope>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -664,23 +684,23 @@ fn parse_body<'scope>(
     let vertex_count = vertex_element.count;
     let vertex_profile = vertex_property_profile(ctx, vertex_element)?;
     validate_vertex_attribute_budget(ctx, vertex_count, vertex_profile.stream_count)?;
-    let mut positions = ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-positions");
+    let mut positions = ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-positions");
     positions.try_reserve(vertex_count)?;
-    let mut normals = ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-normals");
+    let mut normals = ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-normals");
     let channels = vertex_profile.channels;
     if channels.normals {
         normals.try_reserve(vertex_count)?;
     }
-    let mut texcoords = ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-texcoords");
+    let mut texcoords = ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-texcoords");
     if channels.texcoords {
         texcoords.try_reserve(vertex_count)?;
     }
-    let mut colors = ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-colors");
+    let mut colors = ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-colors");
     if channels.colors {
         colors.try_reserve(vertex_count)?;
     }
     let mut face_vertex_counts =
-        ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-face-counts");
+        ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-face-counts");
     face_vertex_counts.try_reserve(face_count)?;
     let custom_attributes =
         custom_accumulators(ctx, vertex_element, vertex_profile.custom_scalar_count)?;
@@ -689,7 +709,7 @@ fn parse_body<'scope>(
         normals,
         texcoords,
         colors,
-        indices: ctx.metered_vec(ImportStorageClass::SceneConstruction, "ply-indices"),
+        indices: ctx.metered_vec(ImportStorageClass::FormatNormalization, "ply-indices"),
         face_vertex_counts,
         has_polygon: false,
         custom_attributes,
@@ -1326,12 +1346,12 @@ fn parse_vertex_row<'scope>(
         }
     }
 
-    let position = Vec3::new(
+    let position = [
         x.ok_or_else(|| parse_error(ctx, None, "PLY vertex is missing x"))?,
         y.ok_or_else(|| parse_error(ctx, None, "PLY vertex is missing y"))?,
         z.ok_or_else(|| parse_error(ctx, None, "PLY vertex is missing z"))?,
-    );
-    if !position.is_finite() {
+    ];
+    if !position.iter().all(|component| component.is_finite()) {
         return Err(ply_parse_error(
             ctx,
             PlyFailureCode::InvalidScalar,
@@ -1342,21 +1362,21 @@ fn parse_vertex_row<'scope>(
     parsed.positions.try_push_reserved(position)?;
 
     match (nx, ny, nz) {
-        (Some(nx), Some(ny), Some(nz)) => {
-            parsed.normals.try_push_reserved(Vec3::new(nx, ny, nz))?
-        }
+        (Some(nx), Some(ny), Some(nz)) => parsed.normals.try_push_reserved([nx, ny, nz])?,
         (None, None, None) => {}
         _ => {}
     }
     match (s, t) {
-        (Some(s), Some(t)) => parsed.texcoords.try_push_reserved(Vec2::new(s, t))?,
+        (Some(s), Some(t)) => parsed.texcoords.try_push_reserved([s, t])?,
         (None, None) => {}
         _ => {}
     }
     match (red, green, blue) {
-        (Some(red), Some(green), Some(blue)) => parsed
-            .colors
-            .try_push_reserved(Color::linear_rgba(red, green, blue, alpha.unwrap_or(1.0)))?,
+        (Some(red), Some(green), Some(blue)) => {
+            parsed
+                .colors
+                .try_push_reserved([red, green, blue, alpha.unwrap_or(1.0)])?
+        }
         (None, None, None) => {}
         _ => {}
     }
@@ -1565,13 +1585,6 @@ fn scene_from_parsed<'scope>(
     )?;
 
     let keep_face_counts = parsed.has_polygon;
-    let topology = if parsed.indices.is_empty() {
-        PrimitiveTopology::Points
-    } else if !keep_face_counts {
-        PrimitiveTopology::Triangles
-    } else {
-        PrimitiveTopology::Polygons
-    };
     let topology_cells = parsed
         .indices
         .len()
@@ -1593,11 +1606,11 @@ fn scene_from_parsed<'scope>(
         ctx.limits().max_total_topology_cells,
         ImportWorkClass::TopologyCells,
     )?;
-    let bounds = compute_bounds(ctx, parsed.positions.as_slice())?;
+    let _bounds = compute_bounds(ctx, parsed.positions.as_slice())?;
 
     let canonical_string_bytes = canonical_string_bytes(ctx, &header)?;
     let metadata_work = metadata_insertion_work(ctx, &header)?;
-    let (metadata, mesh_name, node_name) = ctx.with_work_group(
+    let (pending_metadata, mesh_name, node_name) = ctx.with_work_group(
         [
             (
                 ImportWorkClass::CanonicalStringBytes,
@@ -1609,7 +1622,10 @@ fn scene_from_parsed<'scope>(
             ),
         ],
         |work| -> ParseResult<_> {
-            let mut metadata = ctx.metered_metadata_map("ply-metadata-entry");
+            let mut metadata = ctx.metered_vec(
+                ImportStorageClass::FormatNormalization,
+                "ply-complete-batch-pending-metadata",
+            );
             insert_string_metadata(
                 ctx,
                 &mut metadata,
@@ -1633,7 +1649,7 @@ fn scene_from_parsed<'scope>(
                 insert_indexed_string_metadata(
                     ctx,
                     &mut metadata,
-                    "ply:comment.",
+                    "ply:comment_",
                     index,
                     comment.as_str(),
                     work,
@@ -1644,18 +1660,19 @@ fn scene_from_parsed<'scope>(
                 insert_indexed_string_metadata(
                     ctx,
                     &mut metadata,
-                    "ply:obj_info.",
+                    "ply:obj_info_",
                     index,
                     info.as_str(),
                     work,
                 )?;
             }
             let mut mesh_name =
-                ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-mesh-name");
-            mesh_name.try_push_str("PLY Mesh")?;
+                ctx.metered_string(ImportStorageClass::FormatNormalization, "ply-mesh-name");
+            mesh_name.try_push_str(MESH_NAME)?;
             let mut node_name =
-                ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-node-name");
-            node_name.try_push_str("PLY")?;
+                ctx.metered_string(ImportStorageClass::FormatNormalization, "ply-node-name");
+            node_name.try_push_str(NODE_NAME)?;
+            metadata.sort_unstable_by(|left, right| left.key.as_str().cmp(right.key.as_str()));
             work.complete([
                 usize_amount(ctx, canonical_string_bytes, "ply-canonical-string-bytes")?,
                 0,
@@ -1675,43 +1692,238 @@ fn scene_from_parsed<'scope>(
         custom_attributes,
         ..
     } = parsed;
-    let face_vertex_counts = if keep_face_counts {
-        face_vertex_counts.try_into_scene_parts()?
-    } else {
-        drop(face_vertex_counts);
-        ctx.metered_vec::<u32>(ImportStorageClass::SceneConstruction, "ply-face-counts")
-            .try_into_scene_parts()?
-    };
-    let texcoords = optional_nested_stream(ctx, texcoords, "ply-texcoord-streams")?;
-    let colors = optional_nested_stream(ctx, colors, "ply-color-streams")?;
-    let custom_attributes = finish_custom_attributes(ctx, custom_attributes)?;
+    let mut custom_attributes = finish_custom_attributes(ctx, custom_attributes)?;
+    custom_attributes.sort_unstable_by(|left, right| left.semantic.cmp(&right.semantic));
 
-    let mut mesh_parts = mesh_name
-        .try_into_scene_parts()?
-        .into_some()
-        .into_mesh(MeshBuildConfig {
-            topology,
-            material: None,
-            bounds,
-        });
-    mesh_parts = mesh_parts.with_positions(positions.try_into_scene_parts()?)?;
-    mesh_parts = mesh_parts.with_normals(normals.try_into_scene_parts()?)?;
-    mesh_parts = mesh_parts.with_texcoords(texcoords)?;
-    mesh_parts = mesh_parts.with_colors(colors)?;
-    mesh_parts = mesh_parts.with_indices(indices.try_into_scene_parts()?)?;
-    mesh_parts = mesh_parts.with_face_vertex_counts(face_vertex_counts)?;
-    mesh_parts = mesh_parts.with_custom_attributes(custom_attributes)?;
-    mesh_parts = mesh_parts.with_metadata(metadata.try_into_scene_parts()?)?;
-    let mesh = mesh_parts.finish()?;
-    let node = node_name
-        .try_into_scene_parts()?
-        .into_some()
-        .into_node(NodeBuildConfig {
-            transform: Mat4::IDENTITY,
-            camera: None,
-            light: None,
-        })
-        .finish()?;
+    let mut attributes = ctx.metered_vec(
+        ImportStorageClass::FormatNormalization,
+        "ply-complete-batch-attributes",
+    );
+    let builtin_attribute_count = 1usize
+        .checked_add(usize::from(!normals.is_empty()))
+        .and_then(|count| count.checked_add(usize::from(!texcoords.is_empty())))
+        .and_then(|count| count.checked_add(usize::from(!colors.is_empty())))
+        .ok_or_else(|| ctx.allocation_failure("ply-authoring-attribute-count"))?;
+    let attribute_count = builtin_attribute_count
+        .checked_add(custom_attributes.len())
+        .ok_or_else(|| ctx.allocation_failure("ply-authoring-attribute-count"))?;
+    attributes.try_reserve(attribute_count)?;
+    attributes.try_push(GeometryAttributeAuthoring::f32(
+        AttributeSemantic::Position,
+        AttributeDomain::Vertex,
+        3,
+        positions.as_slice().as_flattened(),
+        Presence::Absent,
+    ))?;
+    if !normals.is_empty() {
+        attributes.try_push(GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Normal,
+            AttributeDomain::Vertex,
+            3,
+            normals.as_slice().as_flattened(),
+            Presence::Absent,
+        ))?;
+    }
+    if !texcoords.is_empty() {
+        attributes.try_push(GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Texcoord(0),
+            AttributeDomain::Vertex,
+            2,
+            texcoords.as_slice().as_flattened(),
+            Presence::Absent,
+        ))?;
+    }
+    if !colors.is_empty() {
+        attributes.try_push(GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Color(0),
+            AttributeDomain::Vertex,
+            4,
+            colors.as_slice().as_flattened(),
+            Presence::Absent,
+        ))?;
+    }
+    for custom in custom_attributes.as_slice() {
+        attributes.try_push(custom.authoring())?;
+    }
+
+    let attribute_count = canonical_u32(ctx, attributes.len(), "ply-authoring-attribute-count")?;
+    let topology = if indices.is_empty() {
+        GeometryTopologyAuthoring::Points
+    } else if keep_face_counts {
+        GeometryTopologyAuthoring::Polygons(face_vertex_counts.as_slice())
+    } else {
+        GeometryTopologyAuthoring::TriangleList
+    };
+    let index_presence = if indices.is_empty() {
+        Presence::Absent
+    } else {
+        Presence::Present(indices.as_slice())
+    };
+    let logical_mesh =
+        GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1)).with_name(mesh_name.as_str());
+    let primitive = GeometryPrimitiveAuthoring::new(
+        topology,
+        index_presence,
+        Presence::Absent,
+        AuthoringRange::new(0, attribute_count),
+    );
+    let mesh_instance =
+        GeometryMeshInstanceAuthoring::new(NodeLocalId::new(0), LogicalMeshLocalId::new(0));
+    let logical_meshes = [logical_mesh];
+    let primitives = [primitive];
+    let mesh_instances = [mesh_instance];
+    let geometry = GeometryAuthoringBatch::new(
+        &logical_meshes,
+        &primitives,
+        attributes.as_slice(),
+        &mesh_instances,
+    );
+
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
+    )
+    .with_name(node_name.as_str())];
+    let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+
+    let logical_morphs = [LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[])];
+    let primitive_deformations = [PrimitiveDeformationAuthoring::new(Presence::Absent, &[])];
+    let mesh_instance_deformations = [MeshInstanceDeformationAuthoring::new(
+        Presence::Absent,
+        Presence::Absent,
+    )];
+    let deformation = DeformationAuthoringBatch::new(
+        &[],
+        &[],
+        &logical_morphs,
+        &primitive_deformations,
+        &mesh_instance_deformations,
+    );
+
+    let mut metadata_keys = ctx.metered_vec(
+        ImportStorageClass::FormatNormalization,
+        "ply-complete-batch-metadata-keys",
+    );
+    metadata_keys.try_reserve(pending_metadata.len())?;
+    for (index, metadata) in pending_metadata.as_slice().iter().enumerate() {
+        poll_collection(ctx, index)?;
+        let key = NamespacedName::new(metadata.key.as_str())
+            .map_err(|_| canonical_contract_failure(ctx, "ply-complete-batch-metadata-key"))?;
+        metadata_keys.try_push_reserved(key)?;
+    }
+    let mut metadata_entries = ctx.metered_vec(
+        ImportStorageClass::FormatNormalization,
+        "ply-complete-batch-metadata-authoring",
+    );
+    metadata_entries.try_reserve(pending_metadata.len())?;
+    for (metadata, key) in pending_metadata
+        .as_slice()
+        .iter()
+        .zip(metadata_keys.as_slice())
+    {
+        metadata_entries.try_push_reserved(MetadataAuthoringEntry::new(
+            ProfileOwner::LogicalMesh(0),
+            key,
+            ExtensionValueRef::String(metadata.value.as_str()),
+        ))?;
+    }
+
+    let (resource_identity, resource_stability) = profile_resource_identity(ctx)?;
+    let format =
+        FormatId::new(FORMAT_ID).map_err(|_| ctx.allocation_failure("ply-profile-format-id"))?;
+    let locator = SourceObjectLocator::indexed(SourceObjectKind::Document, 0);
+    let resources = [ObservedResourceAuthoring::session_opaque(
+        &resource_identity,
+        resource_stability,
+    )];
+    let source_identities = [SourceIdentityAuthoring::new(
+        ResourceIdentityLocalId::new(0),
+        &format,
+        &locator,
+    )];
+    let provenance_nodes = [ProvenanceNodeAuthoring::source(SourceIdentityLocalId::new(
+        0,
+    ))];
+    let owner_count = 2usize
+        .checked_add(nodes.len())
+        .and_then(|count| count.checked_add(logical_meshes.len()))
+        .and_then(|count| count.checked_add(primitives.len()))
+        .and_then(|count| count.checked_add(attributes.len()))
+        .and_then(|count| count.checked_add(mesh_instances.len()))
+        .ok_or_else(|| ctx.allocation_failure("ply-profile-owner-count"))?;
+    let mut owner_provenance = ctx.metered_vec(
+        ImportStorageClass::FormatNormalization,
+        "ply-complete-batch-owner-provenance",
+    );
+    owner_provenance.try_reserve(owner_count)?;
+    owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+        ProfileOwner::Scene,
+        &SOURCE_PROVENANCE,
+    ))?;
+    owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+        ProfileOwner::SyntheticRoot,
+        &SOURCE_PROVENANCE,
+    ))?;
+    for index in 0..nodes.len() {
+        owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+            ProfileOwner::Node(NodeLocalId::new(canonical_u32(
+                ctx,
+                index,
+                "ply-profile-node-owner",
+            )?)),
+            &SOURCE_PROVENANCE,
+        ))?;
+    }
+    for index in 0..logical_meshes.len() {
+        owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+            ProfileOwner::LogicalMesh(canonical_u32(ctx, index, "ply-profile-logical-mesh-owner")?),
+            &SOURCE_PROVENANCE,
+        ))?;
+    }
+    for index in 0..primitives.len() {
+        owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+            ProfileOwner::Primitive(canonical_u32(ctx, index, "ply-profile-primitive-owner")?),
+            &SOURCE_PROVENANCE,
+        ))?;
+    }
+    for index in 0..attributes.len() {
+        owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+            ProfileOwner::Attribute(canonical_u32(ctx, index, "ply-profile-attribute-owner")?),
+            &SOURCE_PROVENANCE,
+        ))?;
+    }
+    for index in 0..mesh_instances.len() {
+        owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
+            ProfileOwner::MeshInstance(canonical_u32(
+                ctx,
+                index,
+                "ply-profile-mesh-instance-owner",
+            )?),
+            &SOURCE_PROVENANCE,
+        ))?;
+    }
+    let profile = ProfileAuthoringBatch::new(
+        LineageAuthoringBatch::new(
+            &resources,
+            &source_identities,
+            &provenance_nodes,
+            owner_provenance.as_slice(),
+        ),
+        MetadataAuthoringBatch::new(metadata_entries.as_slice()),
+    );
+    let scene_space = SceneSpace::UNKNOWN;
+    let input = SceneAuthoringBatch::new(
+        SpatialAuthoringBatch::new(&scene_space, &[], &[]),
+        node_batch,
+        AppearanceAuthoringBatch::empty(),
+        geometry,
+        deformation,
+        AnimationAuthoringBatch::empty(),
+        profile,
+    );
 
     ctx.with_work_group(
         [
@@ -1721,16 +1933,14 @@ fn scene_from_parsed<'scope>(
             (ImportWorkClass::GraphEdges, 1),
             (ImportWorkClass::GraphDepth, 2),
         ],
-        |work| -> ParseResult<_> {
-            let mut builder = ctx.scene_builder()?;
-            let mesh_id = work.run([1, 1, 0, 0, 0], || builder.add_prepared_mesh(mesh))?;
-            let node_id = work.run([0, 0, 2, 0, 2], || builder.add_prepared_node(node))?;
-            work.run([0, 0, 0, 1, 0], || {
-                builder.add_node_mesh_binding(node_id, MeshBinding::new(mesh_id))
-            })?;
-            builder.finish_draft()
+        |work| -> ParseResult<()> {
+            work.run([1, 1, 0, 0, 0], || Ok(()))?;
+            work.run([0, 0, 2, 0, 2], || Ok(()))?;
+            work.run([0, 0, 0, 1, 0], || Ok(()))?;
+            Ok(())
         },
-    )
+    )?;
+    ctx.submit_scene(input)
 }
 
 trait RowReader {
@@ -2002,7 +2212,7 @@ fn custom_accumulators<'scope>(
     custom_scalar_count: usize,
 ) -> ParseResult<MeteredVec<'scope, CustomAttributeAccumulator<'scope>>> {
     let mut attributes = ctx.metered_vec(
-        ImportStorageClass::SceneConstruction,
+        ImportStorageClass::FormatNormalization,
         "ply-custom-attributes",
     );
     attributes.try_reserve(custom_scalar_count)?;
@@ -2032,7 +2242,7 @@ fn custom_accumulators<'scope>(
         let data = match ty {
             ScalarType::F32 | ScalarType::F64 => {
                 let mut values = ctx.metered_vec(
-                    ImportStorageClass::SceneConstruction,
+                    ImportStorageClass::FormatNormalization,
                     "ply-custom-f32-values",
                 );
                 values.try_reserve(element.count)?;
@@ -2040,7 +2250,7 @@ fn custom_accumulators<'scope>(
             }
             ScalarType::U8 | ScalarType::U16 | ScalarType::U32 => {
                 let mut values = ctx.metered_vec(
-                    ImportStorageClass::SceneConstruction,
+                    ImportStorageClass::FormatNormalization,
                     "ply-custom-u32-values",
                 );
                 values.try_reserve(element.count)?;
@@ -2048,7 +2258,7 @@ fn custom_accumulators<'scope>(
             }
             ScalarType::I8 | ScalarType::I16 | ScalarType::I32 => {
                 let mut values = ctx.metered_vec(
-                    ImportStorageClass::SceneConstruction,
+                    ImportStorageClass::FormatNormalization,
                     "ply-custom-i32-values",
                 );
                 values.try_reserve(element.count)?;
@@ -2074,13 +2284,13 @@ fn custom_accumulators<'scope>(
             usize_amount(ctx, canonical_bytes, "ply-custom-attribute-name")?,
             |work| -> ParseResult<()> {
                 let mut attr_name = ctx.metered_string(
-                    ImportStorageClass::SceneConstruction,
+                    ImportStorageClass::FormatNormalization,
                     "ply-custom-attribute-name",
                 );
                 attr_name.try_push_str("ply:")?;
                 attr_name.try_push_str(name.as_str())?;
                 let mut semantic_name = ctx.metered_string(
-                    ImportStorageClass::SceneConstruction,
+                    ImportStorageClass::FormatNormalization,
                     "ply-custom-attribute-semantic",
                 );
                 semantic_name.try_push_str("ply:")?;
@@ -2097,38 +2307,58 @@ fn custom_accumulators<'scope>(
     Ok(attributes)
 }
 
-impl<'scope> CustomAttributeAccumulator<'scope> {
-    fn try_into_scene_parts(self) -> ParseResult<SceneValueParts<'scope, VertexAttribute>> {
-        let name = self.name.try_into_scene_parts()?;
-        let semantic = self
-            .semantic
-            .try_into_scene_parts()?
-            .into_custom_vertex_attribute_semantic();
-        let data = self.data.into_inner().try_into_scene_parts()?;
-        Ok(name.zip(semantic)?.zip(data)?.into_vertex_attribute())
-    }
-}
-
-impl<'scope> CustomAttributeData<'scope> {
-    fn try_into_scene_parts(self) -> ParseResult<SceneValueParts<'scope, VertexAttributeData>> {
-        match self {
-            Self::F32(values) => Ok(values.try_into_scene_parts()?.into_vertex_attribute_data()),
-            Self::U32(values) => Ok(values.try_into_scene_parts()?.into_vertex_attribute_data()),
-            Self::I32(values) => Ok(values.try_into_scene_parts()?.into_vertex_attribute_data()),
-        }
-    }
-}
-
 fn finish_custom_attributes<'scope>(
     ctx: &'scope ParseScope<'_>,
     attributes: MeteredVec<'scope, CustomAttributeAccumulator<'scope>>,
-) -> ParseResult<SceneValueParts<'scope, Vec<VertexAttribute>>> {
-    let mut canonical: MeteredSceneVec<'scope, VertexAttribute> =
-        ctx.metered_scene_vec("ply-custom-attributes");
+) -> ParseResult<MeteredVec<'scope, CustomAttributeStorage<'scope>>> {
+    let mut canonical = ctx.metered_vec(
+        ImportStorageClass::FormatNormalization,
+        "ply-complete-batch-custom-attributes",
+    );
+    canonical.try_reserve(attributes.len())?;
     attributes.try_for_each_owned(|attribute| {
-        canonical.try_push_parts(attribute.try_into_scene_parts()?)
+        let semantic = CustomAttributeSemantic::new(attribute.semantic.as_str()).map_err(|_| {
+            canonical_contract_failure(ctx, "ply-complete-batch-custom-attribute-semantic")
+        })?;
+        if attribute.name.as_str() != semantic.as_str() {
+            return Err(canonical_contract_failure(
+                ctx,
+                "ply-complete-batch-custom-attribute-name",
+            ));
+        }
+        canonical.try_push(CustomAttributeStorage {
+            semantic,
+            data: attribute.data.into_inner(),
+        })
     })?;
-    canonical.try_into_scene_parts()
+    Ok(canonical)
+}
+
+impl CustomAttributeStorage<'_> {
+    fn authoring(&self) -> GeometryAttributeAuthoring<'_> {
+        let semantic = AttributeSemantic::Custom(self.semantic.clone());
+        match &self.data {
+            CustomAttributeData::F32(values) => GeometryAttributeAuthoring::f32(
+                semantic,
+                AttributeDomain::Vertex,
+                1,
+                values.as_slice(),
+                Presence::Absent,
+            ),
+            CustomAttributeData::U32(values) => GeometryAttributeAuthoring::u32(
+                semantic,
+                AttributeDomain::Vertex,
+                1,
+                values.as_slice(),
+            ),
+            CustomAttributeData::I32(values) => GeometryAttributeAuthoring::i32(
+                semantic,
+                AttributeDomain::Vertex,
+                1,
+                values.as_slice(),
+            ),
+        }
+    }
 }
 
 fn validate_vertex_attribute_budget(
@@ -2500,21 +2730,10 @@ fn bounded_string<'scope>(
     )
 }
 
-fn optional_nested_stream<'scope, T>(
-    ctx: &'scope ParseScope<'_>,
-    values: MeteredVec<'scope, T>,
-    resource: &'static str,
-) -> ParseResult<SceneValueParts<'scope, Vec<Vec<T>>>> {
-    let mut nested: MeteredSceneVec<'scope, Vec<T>> = ctx.metered_scene_vec(resource);
-    if values.is_empty() {
-        drop(values);
-    } else {
-        nested.try_push_parts(values.try_into_scene_parts()?)?;
-    }
-    nested.try_into_scene_parts()
-}
-
-fn compute_bounds(ctx: &ParseScope<'_>, positions: &[Vec3]) -> ParseResult<Option<Aabb>> {
+fn compute_bounds(
+    ctx: &ParseScope<'_>,
+    positions: &[[f32; 3]],
+) -> ParseResult<Option<([f32; 3], [f32; 3])>> {
     let Some(first) = positions.first().copied() else {
         return Ok(None);
     };
@@ -2529,15 +2748,13 @@ fn compute_bounds(ctx: &ParseScope<'_>, positions: &[Vec3]) -> ParseResult<Optio
                 if index.is_multiple_of(4096) {
                     work.poll()?;
                 }
-                min.x = min.x.min(position.x);
-                min.y = min.y.min(position.y);
-                min.z = min.z.min(position.z);
-                max.x = max.x.max(position.x);
-                max.y = max.y.max(position.y);
-                max.z = max.z.max(position.z);
+                for component in 0..3 {
+                    min[component] = min[component].min(position[component]);
+                    max[component] = max[component].max(position[component]);
+                }
                 work.complete([1])?;
             }
-            Ok(Some(Aabb { min, max }))
+            Ok(Some((min, max)))
         },
     )
 }
@@ -2808,6 +3025,31 @@ fn usize_amount(ctx: &ParseScope<'_>, value: usize, resource: &'static str) -> P
     u64::try_from(value).map_err(|_| ctx.resource_limit_exceeded(resource, u64::MAX))
 }
 
+fn canonical_u32(ctx: &ParseScope<'_>, value: usize, resource: &'static str) -> ParseResult<u32> {
+    u32::try_from(value).map_err(|_| ctx.allocation_failure(resource))
+}
+
+fn canonical_contract_failure(ctx: &ParseScope<'_>, subject: &'static str) -> ParseFailure {
+    format_failure(
+        ctx,
+        PlyFailureCode::InternalInvariant,
+        "PLY complete-batch authoring violates its canonical contract",
+        None,
+        Some(subject),
+    )
+}
+
+fn profile_resource_identity(
+    ctx: &ParseScope<'_>,
+) -> ParseResult<(ResourceIdentity, SessionOpaqueReason)> {
+    match ResourceIdentity::new(ctx.source().as_str()) {
+        Ok(identity) => Ok((identity, SessionOpaqueReason::CallerLabel)),
+        Err(_) => ResourceIdentity::new(FALLBACK_RESOURCE_IDENTITY)
+            .map(|identity| (identity, SessionOpaqueReason::SessionFallback))
+            .map_err(|_| ctx.allocation_failure("ply-profile-resource-identity")),
+    }
+}
+
 fn decimal_digits(value: usize) -> usize {
     value
         .checked_ilog10()
@@ -2855,45 +3097,55 @@ fn metadata_insertion_work(ctx: &ParseScope<'_>, header: &Header<'_>) -> ParseRe
 
 fn insert_string_metadata<'scope>(
     ctx: &'scope ParseScope<'_>,
-    metadata: &mut MeteredMetadataMap<'scope>,
+    metadata: &mut MeteredVec<'scope, PendingMetadata<'scope>>,
     key: &str,
     value: &str,
     work: &mut ImportWorkScope<'_, '_, 2>,
 ) -> ParseResult<()> {
     let mut key_storage =
-        ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-metadata-key");
+        ctx.metered_string(ImportStorageClass::FormatNormalization, "ply-metadata-key");
     key_storage.try_push_str(key)?;
-    let mut value_storage =
-        ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-metadata-value");
+    let mut value_storage = ctx.metered_string(
+        ImportStorageClass::FormatNormalization,
+        "ply-metadata-value",
+    );
     value_storage.try_push_str(value)?;
     insert_metadata_parts(ctx, metadata, key_storage, value_storage, work)
 }
 
 fn insert_indexed_string_metadata<'scope>(
     ctx: &'scope ParseScope<'_>,
-    metadata: &mut MeteredMetadataMap<'scope>,
+    metadata: &mut MeteredVec<'scope, PendingMetadata<'scope>>,
     prefix: &str,
     index: usize,
     value: &str,
     work: &mut ImportWorkScope<'_, '_, 2>,
 ) -> ParseResult<()> {
-    let mut key = ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-metadata-key");
+    // Canonical NamespacedName local names do not admit dots; preserve the indexed
+    // source value while normalizing only this structural separator.
+    let mut key = ctx.metered_string(ImportStorageClass::FormatNormalization, "ply-metadata-key");
     key.try_push_str(prefix)?;
     key.try_push_usize(index)?;
-    let mut value_storage =
-        ctx.metered_string(ImportStorageClass::SceneConstruction, "ply-metadata-value");
+    let mut value_storage = ctx.metered_string(
+        ImportStorageClass::FormatNormalization,
+        "ply-metadata-value",
+    );
     value_storage.try_push_str(value)?;
     insert_metadata_parts(ctx, metadata, key, value_storage, work)
 }
 
 fn insert_metadata_parts<'scope>(
     ctx: &ParseScope<'_>,
-    metadata: &mut MeteredMetadataMap<'scope>,
+    metadata: &mut MeteredVec<'scope, PendingMetadata<'scope>>,
     key: MeteredString<'scope>,
     value: MeteredString<'scope>,
     work: &mut ImportWorkScope<'_, '_, 2>,
 ) -> ParseResult<()> {
-    if metadata.get(key.as_str()).is_some() {
+    if metadata
+        .as_slice()
+        .iter()
+        .any(|candidate| candidate.key.as_str() == key.as_str())
+    {
         return Err(format_failure(
             ctx,
             PlyFailureCode::InternalInvariant,
@@ -2905,11 +3157,7 @@ fn insert_metadata_parts<'scope>(
     let insertion_work = metadata.len().checked_add(1).ok_or_else(|| {
         ctx.resource_limit_exceeded("max_work_units", ctx.limits().max_work_units)
     })?;
-    let entry = key
-        .try_into_scene_parts()?
-        .zip(value.try_into_scene_parts()?)?
-        .into_metadata_string_entry();
-    metadata.try_insert_parts(entry)?;
+    metadata.try_push(PendingMetadata { key, value })?;
     work.complete([
         0,
         usize_amount(ctx, insertion_work, "ply-metadata-insertion-work")?,
@@ -2928,8 +3176,8 @@ fn canonical_string_bytes(ctx: &ParseScope<'_>, header: &Header<'_>) -> ParseRes
         .checked_add(format_len)
         .and_then(|value| value.checked_add("ply:source".len()))
         .and_then(|value| value.checked_add(ctx.source().as_str().len()))
-        .and_then(|value| value.checked_add("PLY Mesh".len()))
-        .and_then(|value| value.checked_add("PLY".len()))
+        .and_then(|value| value.checked_add(MESH_NAME.len()))
+        .and_then(|value| value.checked_add(NODE_NAME.len()))
         .ok_or_else(|| {
             resource_limit_failure(
                 ctx,
@@ -2939,7 +3187,7 @@ fn canonical_string_bytes(ctx: &ParseScope<'_>, header: &Header<'_>) -> ParseRes
         })?;
     for (index, comment) in header.comments.as_slice().iter().enumerate() {
         poll_collection(ctx, index)?;
-        let key_len = "ply:comment."
+        let key_len = "ply:comment_"
             .len()
             .checked_add(decimal_digits(index))
             .ok_or_else(|| {
@@ -2962,7 +3210,7 @@ fn canonical_string_bytes(ctx: &ParseScope<'_>, header: &Header<'_>) -> ParseRes
     }
     for (index, info) in header.obj_infos.as_slice().iter().enumerate() {
         poll_collection(ctx, index)?;
-        let key_len = "ply:obj_info."
+        let key_len = "ply:obj_info_"
             .len()
             .checked_add(decimal_digits(index))
             .ok_or_else(|| {
