@@ -344,36 +344,11 @@ impl Importer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use baozi_operation::LedgerCause;
 
     #[test]
     fn empty_registry_is_frozen_and_has_no_formats() {
         let importer = Importer::empty().expect("empty registry must freeze");
         assert_eq!(importer.formats().len(), 0);
-    }
-
-    #[test]
-    fn coordinator_initialization_survives_the_facade_conversion() {
-        let cause: LedgerCause<ImportDimension> = LedgerCause::DuplicatePhase;
-        let run_error = ImportRunError::Initialization {
-            source: ImportInitializationError::Coordinator {
-                source: cause.clone(),
-            },
-        };
-
-        let error = Error::from(run_error);
-        let Error::ImportInitialization(initialization) = &error else {
-            panic!("coordinator initialization must remain an initialization failure")
-        };
-        assert_eq!(initialization.coordinator_cause(), Some(&cause));
-        let initialization_source = std::error::Error::source(&error)
-            .and_then(|source| source.downcast_ref::<ImportInitializationError>())
-            .expect("facade error must retain the typed initialization source");
-        assert_eq!(initialization_source.coordinator_cause(), Some(&cause));
-        let coordinator_source = std::error::Error::source(initialization_source)
-            .and_then(|source| source.downcast_ref::<LedgerCause<ImportDimension>>())
-            .expect("facade initialization must retain the typed coordinator cause");
-        assert_eq!(coordinator_source, &cause);
     }
 
     #[test]

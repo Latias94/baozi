@@ -15,7 +15,7 @@ use crate::ledger::{
 };
 use crate::limits::ResourceLimits;
 use crate::loss::ImportLossEvidence;
-use crate::metered_storage::{AccountedReservationVec, AccountedVec};
+use crate::metered_storage::AccountedVec;
 use crate::outcome::{
     DetectionEvidence, ImportFailure, ImportFailureParts, ImportFailureStoreOwner, ImportPhase,
     ImportPhaseEvidence, ImportReport, ImportReportParts, ImportResult, ImportRunError,
@@ -215,7 +215,6 @@ struct ImportSession<'a> {
     primary_authority: Option<AuthorityDomain>,
     primary_backend_hard_limit: Option<u64>,
     primary_snapshot: Option<AccountedVec<u8>>,
-    draft_reservations: RefCell<AccountedReservationVec>,
     format_failure_storage: RefCell<Option<ImportStoreReservation>>,
     selected: Option<RegistryEntry>,
     effective_limits: Option<ResourceLimits>,
@@ -253,7 +252,6 @@ impl<'a> ImportSession<'a> {
             primary_authority: None,
             primary_backend_hard_limit: None,
             primary_snapshot: None,
-            draft_reservations: RefCell::new(AccountedReservationVec::new()),
             format_failure_storage: RefCell::new(None),
             selected: None,
             effective_limits: None,
@@ -768,7 +766,6 @@ impl<'a> ImportSession<'a> {
                 optional_dependency_evidence: &self.optional_dependency_evidence,
                 loss_evidence: &self.loss_evidence,
                 source_scope_record: &self.source_scope_record,
-                draft_reservations: &self.draft_reservations,
                 format_failure_storage: &self.format_failure_storage,
                 terminal: &self.terminal,
             });
@@ -834,13 +831,6 @@ impl<'a> ImportSession<'a> {
                 draft
             }
         };
-        if !self.draft_reservations.borrow().is_empty()
-            || self.draft_reservations.borrow().capacity_bytes() != 0
-        {
-            return Err(self.scope_cause(ScopeAbortCause::DescriptorContract {
-                code: "canonical-scene-returned-with-legacy-draft-storage",
-            }));
-        }
         debug_assert_eq!(self.last_completed.phase(), ImportPhase::Validated);
         Ok((draft, DraftBuiltProof::new()))
     }
@@ -866,7 +856,6 @@ impl<'a> ImportSession<'a> {
         };
         let staging = self.take_report_staging();
         self.release_transient_live();
-        self.release_draft_live();
         let staging = staging.into_terminal();
         let source = self.source;
         let mut last_completed = self.last_completed;
@@ -955,7 +944,6 @@ impl<'a> ImportSession<'a> {
         let staging = self.take_report_staging();
         let cause = self.take_failure_cause(cause).into_terminal().cause;
         self.release_transient_live();
-        self.release_draft_live();
         let staging = staging.into_terminal();
         let source = self.source;
         let last_completed = self.last_completed;
@@ -1020,10 +1008,6 @@ impl<'a> ImportSession<'a> {
         drop(self.primary_snapshot.take());
         drop(self.diagnostic_line_indexes.get_mut().take());
         drop(self.dependencies.take());
-    }
-
-    fn release_draft_live(&mut self) {
-        drop(self.draft_reservations.get_mut().take());
     }
 
     fn take_report_staging(&mut self) -> LiveReportStaging {

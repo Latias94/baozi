@@ -1,7 +1,7 @@
 use crate::error::ScopeAbortCause;
 use crate::scope::ImportStorageClass;
 use crate::store::{ImportStoreHost, ImportStoreReservation};
-use baozi_core::{MetadataValue, OrderedMap};
+use baozi_core::OrderedMap;
 use baozi_operation::{CapacityPlanError, ReplacementCapacityPlan};
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -18,21 +18,6 @@ pub(crate) struct AccountedVec<T> {
 }
 
 pub(crate) type AccountedReservationVec = AccountedVec<ImportStoreReservation>;
-
-/// Reservations grouped by the canonical allocation they cover.
-#[must_use = "scene value reservations must be coupled to a prepared value or dropped"]
-pub(crate) struct SceneValueReservations {
-    pub(crate) payload: AccountedReservationVec,
-}
-
-/// One canonical scene value coupled to every reservation covering its dynamic storage.
-///
-/// Field order is part of the contract: the value is dropped before its reservations.
-#[must_use = "a prepared scene value must be inserted or dropped with its reservations"]
-pub struct PreparedSceneValue<T> {
-    pub(crate) value: Option<T>,
-    pub(crate) reservations: SceneValueReservations,
-}
 
 /// Session-bound vector storage coupled to the reservation for its complete allocation.
 ///
@@ -89,84 +74,12 @@ pub struct MeteredOpaqueAllowance<'scope> {
     pub(crate) scope: std::marker::PhantomData<&'scope ()>,
 }
 
-/// A dynamic canonical collection that owns both its outer allocation and every element payload.
-///
-/// Field order drops values and their outer backing allocation before releasing element payload
-/// reservations.
-#[must_use = "scene collection storage must be finished into scene value parts"]
-pub struct MeteredSceneVec<'scope, T> {
-    pub(crate) values: MeteredVec<'scope, T>,
-    pub(crate) reservations: SceneValueReservations,
-}
-
-/// Canonical metadata storage coupled to each prepared entry's dynamic allocations.
-///
-/// The map drops every key and value before the parallel entry reservation owners.
-#[must_use = "metadata storage must be finished into scene value parts"]
-pub struct MeteredMetadataMap<'scope> {
-    pub(crate) values: MeteredOrderedMap<'scope, String, MetadataValue>,
-    pub(crate) entries: MeteredVec<'scope, SceneValueReservations>,
-}
-
-pub(crate) struct RetiredPreparedMetadataEntry {
-    pub(crate) value: (String, MetadataValue),
-    pub(crate) reservations: SceneValueReservations,
-}
-
-impl RetiredPreparedMetadataEntry {
-    pub(crate) fn drop_in_order(self) {
-        let Self {
-            value,
-            reservations,
-        } = self;
-        drop(value);
-        drop(reservations);
-    }
-}
-
-/// Opaque canonical construction parts that retain every storage reservation while composing.
-///
-/// Raw storage is available only to the terminal build closure and cannot be extracted directly.
-#[must_use = "scene value parts must be finished into a prepared canonical value"]
-pub struct SceneValueParts<'scope, T> {
-    pub(crate) value: Option<T>,
-    pub(crate) reservations: SceneValueReservations,
-    pub(crate) meter: StorageMeter<'scope>,
-}
-
 /// Minimal session capability retained by owning metered containers.
 #[derive(Clone, Copy)]
 pub(crate) struct StorageMeter<'scope> {
     pub(crate) host: ImportStoreHost<'scope>,
     pub(crate) callback_active: &'scope Cell<bool>,
     pub(crate) terminal: &'scope RefCell<Option<ScopeAbortCause>>,
-}
-
-impl SceneValueReservations {
-    /// Creates an empty canonical reservation bundle.
-    pub const fn new() -> Self {
-        Self {
-            payload: AccountedReservationVec::new(),
-        }
-    }
-}
-
-impl Default for SceneValueReservations {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> PreparedSceneValue<T> {
-    pub(crate) fn take_value(&mut self) -> T {
-        self.value
-            .take()
-            .expect("a prepared scene value is consumed exactly once")
-    }
-
-    pub(crate) fn take_reservations(&mut self) -> SceneValueReservations {
-        std::mem::take(&mut self.reservations)
-    }
 }
 
 impl<T> MeteredVec<'_, T> {
@@ -272,38 +185,6 @@ impl MeteredOpaqueAllowance<'_> {
     }
 }
 
-impl<T> MeteredSceneVec<'_, T> {
-    pub fn len(&self) -> usize {
-        self.values.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
-    }
-
-    pub fn as_slice(&self) -> &[T] {
-        self.values.as_slice()
-    }
-}
-
-impl MeteredMetadataMap<'_> {
-    pub fn len(&self) -> usize {
-        self.values.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
-    }
-
-    pub fn get(&self, key: &str) -> Option<&MetadataValue> {
-        self.values.value.get(key)
-    }
-
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&String, &MetadataValue)> {
-        self.values.iter()
-    }
-}
-
 impl<K, V> MeteredOrderedMap<'_, K, V> {
     pub fn len(&self) -> usize {
         self.value.len()
@@ -329,20 +210,6 @@ impl<K: Ord, V> MeteredOrderedMap<'_, K, V> {
 
     pub fn contains_key(&self, key: &K) -> bool {
         self.value.contains_key(key)
-    }
-}
-
-impl<'scope, T> SceneValueParts<'scope, T> {
-    pub(crate) fn map_owned<U>(mut self, build: impl FnOnce(T) -> U) -> SceneValueParts<'scope, U> {
-        let value = self
-            .value
-            .take()
-            .expect("scene value parts are transformed exactly once");
-        SceneValueParts {
-            value: Some(build(value)),
-            reservations: self.reservations,
-            meter: self.meter,
-        }
     }
 }
 
@@ -517,14 +384,6 @@ impl<T> AccountedVec<T> {
         self.values.push(value);
     }
 
-    pub(crate) fn try_insert_reserved(&mut self, index: usize, value: T) -> Result<(), T> {
-        if index > self.values.len() || !self.has_slots(1) {
-            return Err(value);
-        }
-        self.values.insert(index, value);
-        Ok(())
-    }
-
     pub(crate) fn try_extend_from_slice_reserved(&mut self, source: &[T]) -> Result<(), ()>
     where
         T: Copy,
@@ -533,14 +392,6 @@ impl<T> AccountedVec<T> {
             return Err(());
         }
         self.values.extend_from_slice(source);
-        Ok(())
-    }
-
-    pub(crate) fn try_append_accounted(&mut self, source: &mut Self) -> Result<(), ()> {
-        if !self.has_slots(source.len()) {
-            return Err(());
-        }
-        self.values.append(&mut source.values);
         Ok(())
     }
 
@@ -778,18 +629,6 @@ mod tests {
         }
     }
 
-    std::thread_local! {
-        static SCENE_COLLECTION_MERGE_OBSERVED_LIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    }
-
-    struct SceneCollectionMergeDropProbe;
-
-    impl Drop for SceneCollectionMergeDropProbe {
-        fn drop(&mut self) {
-            SCENE_COLLECTION_MERGE_OBSERVED_LIVE.with(|observed| observed.set(true));
-        }
-    }
-
     #[test]
     fn owner_drops_elements_before_releasing_capacity() {
         let store = StoreHarness::new();
@@ -845,108 +684,6 @@ mod tests {
 
         drop(values);
         assert_eq!(store.live_bytes(ImportDimension::CanonicalOutputBytes), 0);
-    }
-
-    #[test]
-    fn scene_collection_final_merge_failure_releases_element_and_payload_owners() {
-        let store = StoreHarness::new();
-        let callback_active = Cell::new(false);
-        let terminal = RefCell::new(None);
-        let meter = StorageMeter {
-            host: store.host(),
-            callback_active: &callback_active,
-            terminal: &terminal,
-        };
-        let mut values = MeteredVec {
-            values: Vec::new(),
-            capacity: None,
-            meter,
-            class: ImportStorageClass::SceneConstruction,
-            resource: "scene-collection-merge-values",
-        };
-        values
-            .try_push(SceneCollectionMergeDropProbe)
-            .expect("zero-sized scene payload admission");
-        assert!(
-            values.capacity.is_none(),
-            "the zero-sized probe must leave the final merge as the next accounted allocation"
-        );
-
-        let mut reservations = SceneValueReservations::new();
-        reservations
-            .payload
-            .try_reserve(1, "scene-collection-element-owner", |bytes| {
-                store.reserve_scratch(bytes)
-            })
-            .expect("element reservation inventory capacity");
-        let payload = store
-            .reserve(
-                ImportLedgerPhase::BackendDecode,
-                ImportDimension::DecodedTextBytes,
-                13,
-            )
-            .expect("element payload reservation");
-        reservations
-            .payload
-            .try_push_reserved(payload)
-            .unwrap_or_else(|_| panic!("element reservation inventory slot"));
-        let values = MeteredSceneVec {
-            values,
-            reservations,
-        };
-
-        SCENE_COLLECTION_MERGE_OBSERVED_LIVE.with(|observed| observed.set(false));
-        FAIL_NEXT_ALLOCATION.with(|fault| fault.set(true));
-
-        let result = values.try_into_scene_parts();
-
-        assert!(result.is_err(), "the final reservation merge must fail");
-        assert!(matches!(
-            terminal.borrow().as_ref(),
-            Some(ScopeAbortCause::Allocation {
-                resource: "scene-collection-final-reservations"
-            })
-        ));
-        assert!(
-            SCENE_COLLECTION_MERGE_OBSERVED_LIVE.with(std::cell::Cell::get),
-            "the scene element must be dropped on final reservation merge failure"
-        );
-        assert_eq!(store.live_bytes(ImportDimension::DecodedTextBytes), 0);
-        assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), 0);
-    }
-
-    #[test]
-    fn rejected_prepared_value_drops_value_before_releasing_its_reservations() {
-        fn reject<T>(_prepared: PreparedSceneValue<T>) -> Result<(), ()> {
-            Err(())
-        }
-
-        let store = StoreHarness::new();
-        let mut reservations = SceneValueReservations::new();
-        reservations
-            .payload
-            .try_reserve(1, "prepared-drop-order", |bytes| {
-                store.reserve_scratch(bytes)
-            })
-            .expect("reservation inventory capacity admission");
-        reservations
-            .payload
-            .try_push_reserved(
-                store
-                    .reserve_scratch(1)
-                    .expect("prepared payload reservation admission"),
-            )
-            .unwrap_or_else(|_| panic!("reserved inventory slot must accept the payload token"));
-        let prepared = PreparedSceneValue {
-            value: Some(DropProbe {
-                host: store.host(),
-                dimension: ImportDimension::ScratchBytes,
-            }),
-            reservations,
-        };
-
-        assert_eq!(reject(prepared), Err(()));
-        assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), 0);
     }
 
     #[test]

@@ -4,9 +4,8 @@ use crate::store::{
     ImportStoreTerminalFailureClass,
 };
 use baozi_operation::{
-    DimensionPolicy, LedgerCause, LedgerLimits, LedgerLimitsError, LiveReservation,
-    OperationControl, OperationCoordinator, OperationOwner, PendingPublication, ProgressPhase,
-    ProgressUnit, PublicationReservationBatch, PublicationReservationBatchError,
+    DimensionPolicy, LedgerLimits, LedgerLimitsError, OperationControl, OperationOwner,
+    ProgressPhase, ProgressUnit,
 };
 
 #[derive(Debug)]
@@ -458,21 +457,6 @@ impl ImportDimensionSnapshot {
     }
 }
 
-pub(crate) type ImportCoordinator = OperationCoordinator<
-    ImportOperationOwner,
-    ImportLedgerPhase,
-    ImportProgressPhase,
-    ImportProgressUnit,
-    ImportDimension,
->;
-
-pub(crate) fn try_import_coordinator(
-    control: ImportOperationControl,
-    ledger_limits: LedgerLimits<ImportDimension>,
-) -> Result<ImportCoordinator, LedgerCause<ImportDimension>> {
-    ImportCoordinator::try_new(control, ledger_limits, &ImportLedgerPhase::ALL)
-}
-
 pub(crate) fn tighten_selected_format_limits(
     host: ImportStoreHost<'_>,
     limits: &ResourceLimits,
@@ -488,15 +472,6 @@ pub(crate) fn tighten_selected_format_limits(
     }
     Ok(())
 }
-
-pub(crate) type ImportReservation =
-    LiveReservation<ImportOperationOwner, ImportLedgerPhase, ImportDimension>;
-pub(crate) type ImportPublicationBatch =
-    PublicationReservationBatch<ImportOperationOwner, ImportLedgerPhase, ImportDimension>;
-pub(crate) type ImportPublicationBatchError =
-    PublicationReservationBatchError<ImportOperationOwner, ImportLedgerPhase, ImportDimension>;
-pub(crate) type ImportPendingPublication =
-    PendingPublication<ImportOperationOwner, ImportLedgerPhase, ImportDimension>;
 
 #[cfg(test)]
 mod tests {

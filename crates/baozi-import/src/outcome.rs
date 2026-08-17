@@ -11,7 +11,7 @@ use baozi_core::__canonical_import::{
 };
 use baozi_core::FormatId;
 use baozi_io::AssetPath;
-use baozi_operation::{LedgerCause, LedgerLimitsError};
+use baozi_operation::LedgerLimitsError;
 use std::fmt;
 use std::sync::Arc;
 
@@ -26,11 +26,6 @@ pub enum ImportInitializationError {
         source: LedgerLimitsError<ImportDimension>,
     },
 
-    /// The coordinator could not retain the complete accounting-phase catalog.
-    Coordinator {
-        source: LedgerCause<ImportDimension>,
-    },
-
     /// The retained-store host could not be created before any import IO began.
     RetainedStore { code: &'static str },
 }
@@ -38,10 +33,6 @@ pub enum ImportInitializationError {
 impl ImportInitializationError {
     pub(crate) const fn ledger_limits(source: LedgerLimitsError<ImportDimension>) -> Self {
         Self::LedgerLimits { source }
-    }
-
-    pub(crate) const fn coordinator(source: LedgerCause<ImportDimension>) -> Self {
-        Self::Coordinator { source }
     }
 
     pub(crate) const fn retained_store(code: &'static str) -> Self {
@@ -52,15 +43,7 @@ impl ImportInitializationError {
     pub const fn ledger_limits_error(&self) -> Option<&LedgerLimitsError<ImportDimension>> {
         match self {
             Self::LedgerLimits { source } => Some(source),
-            Self::Coordinator { .. } | Self::RetainedStore { .. } => None,
-        }
-    }
-
-    /// Returns the coordinator cause when phase-catalog initialization failed.
-    pub const fn coordinator_cause(&self) -> Option<&LedgerCause<ImportDimension>> {
-        match self {
-            Self::LedgerLimits { .. } | Self::RetainedStore { .. } => None,
-            Self::Coordinator { source } => Some(source),
+            Self::RetainedStore { .. } => None,
         }
     }
 }
@@ -69,7 +52,6 @@ impl fmt::Display for ImportInitializationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LedgerLimits { source } => source.fmt(formatter),
-            Self::Coordinator { source } => source.fmt(formatter),
             Self::RetainedStore { code } => {
                 write!(
                     formatter,
@@ -84,7 +66,6 @@ impl std::error::Error for ImportInitializationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::LedgerLimits { source } => Some(source),
-            Self::Coordinator { source } => Some(source),
             Self::RetainedStore { .. } => None,
         }
     }
@@ -116,12 +97,6 @@ impl ImportRunError {
     pub(crate) const fn initialization(source: LedgerLimitsError<ImportDimension>) -> Self {
         Self::Initialization {
             source: ImportInitializationError::ledger_limits(source),
-        }
-    }
-
-    pub(crate) const fn coordinator_initialization(source: LedgerCause<ImportDimension>) -> Self {
-        Self::Initialization {
-            source: ImportInitializationError::coordinator(source),
         }
     }
 
