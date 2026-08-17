@@ -562,6 +562,31 @@ fn assert_u32_values(mut values: NodeSceneGeometryU32Cursor<'_>, expected: &[u32
 pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_probe(
     scene: &ValidatedNodeScene,
 ) -> ObjCapabilityCanonicalShapeObservation {
+    #[cfg(feature = "_u7-geometry")]
+    {
+        let mut inspection = scene
+            .semantic_geometry_inspection()
+            .expect("published OBJ geometry inspection");
+        let primitive = inspection
+            .next_primitive()
+            .expect("OBJ primitive facts")
+            .expect("OBJ primitive fact");
+        assert_eq!(primitive.topology(), TopologyKind::TriangleList);
+        assert_eq!(primitive.cardinality().vertex_count(), 3);
+        assert_eq!(primitive.cardinality().corner_count(), 6);
+        assert_eq!(primitive.cardinality().face_count(), 2);
+        assert!(primitive.has_normals());
+        assert!(
+            inspection
+                .next_primitive()
+                .expect("OBJ primitive facts exhaustion")
+                .is_none()
+        );
+        inspection
+            .finish()
+            .expect("complete OBJ geometry inspection");
+    }
+
     let view = scene
         .semantic_view()
         .expect("published OBJ Scene semantic view");

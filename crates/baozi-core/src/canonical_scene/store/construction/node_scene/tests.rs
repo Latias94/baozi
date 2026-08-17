@@ -954,6 +954,7 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
 #[test]
 fn scene_input_admission_exceeds_the_legacy_fixed_slot_bound() {
     const PRIMITIVE_COUNT: usize = 12;
+    const PRIMITIVES_PER_MESH: usize = PRIMITIVE_COUNT / 2;
 
     let factory = test_factory();
     let account = test_account(&factory, 256);
@@ -982,11 +983,20 @@ fn scene_input_admission_exceeds_the_legacy_fixed_slot_bound() {
             )
         })
         .collect::<Vec<_>>();
-    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(
-        0,
-        u32::try_from(PRIMITIVE_COUNT).expect("test primitive count"),
-    ))];
-    let logical_morphs = [LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[])];
+    let logical_meshes = [
+        GeometryLogicalMeshAuthoring::new(AuthoringRange::new(
+            0,
+            u32::try_from(PRIMITIVES_PER_MESH).expect("test primitive count"),
+        )),
+        GeometryLogicalMeshAuthoring::new(AuthoringRange::new(
+            u32::try_from(PRIMITIVES_PER_MESH).expect("test primitive offset"),
+            u32::try_from(PRIMITIVES_PER_MESH).expect("test primitive count"),
+        )),
+    ];
+    let logical_morphs = [
+        LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]),
+        LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]),
+    ];
     let primitive_deformations =
         vec![PrimitiveDeformationAuthoring::new(Presence::Absent, &[]); PRIMITIVE_COUNT];
     let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
@@ -1034,6 +1044,56 @@ fn scene_input_admission_exceeds_the_legacy_fixed_slot_bound() {
         parts.scene.canonical_block_count(),
         expected_canonical_block_count
     );
+    #[cfg(feature = "_u7-geometry")]
+    {
+        let super::NodeSceneSuccessParts { scene, report } = parts;
+        drop(report);
+        let scene = crate::__canonical_geometry::ValidatedScene::from_node_scene(scene);
+        let mut geometry = scene
+            .geometry_cursor()
+            .expect("validated geometry inspection cursor");
+        assert_eq!(geometry.primitive_count(), PRIMITIVE_COUNT);
+        let partial = scene
+            .geometry_cursor()
+            .expect("partial validated geometry inspection cursor");
+        assert!(partial.finish().is_err());
+        let mut first_owner = None;
+        let mut second_owner = None;
+        for primitive_index in 0..PRIMITIVE_COUNT {
+            let primitive = geometry
+                .next_primitive()
+                .expect("proof-qualified primitive facts")
+                .expect("expected primitive fact");
+            assert_eq!(
+                primitive.topology(),
+                crate::__canonical_geometry::TopologyKind::Points
+            );
+            assert_eq!(primitive.id().generation(), scene.generation());
+            let owner = primitive.id().logical_mesh();
+            let expected_owner = if primitive_index < PRIMITIVES_PER_MESH {
+                first_owner.get_or_insert(owner)
+            } else {
+                second_owner.get_or_insert(owner)
+            };
+            assert_eq!(owner, *expected_owner);
+            assert_eq!(primitive.cardinality().vertex_count(), 1);
+            assert_eq!(primitive.cardinality().corner_count(), 1);
+            assert_eq!(primitive.cardinality().face_count(), 1);
+            assert!(!primitive.has_normals());
+        }
+        assert_ne!(first_owner, second_owner);
+        assert!(
+            geometry
+                .next_primitive()
+                .expect("geometry cursor exhaustion")
+                .is_none()
+        );
+        geometry
+            .finish()
+            .expect("complete proof-qualified geometry inspection");
+        drop(scene);
+    }
+    #[cfg(not(feature = "_u7-geometry"))]
     drop(parts);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);

@@ -16,6 +16,7 @@ std = []
 mint = ["dep:mint"]
 tracing = ["dep:tracing"]
 _u4-import = []
+_u7-geometry = []
 
 [dependencies]
 baozi-operation = { workspace = true, features = ["_u4-activation"] }
