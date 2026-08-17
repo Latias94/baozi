@@ -36,7 +36,7 @@ use super::{
 };
 
 /// Exact validation-scratch capacity and initialization work derived from one sealed Scene plan.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
     node_transform_kinds: CapacityPlan,
     node_names: CapacityPlan,

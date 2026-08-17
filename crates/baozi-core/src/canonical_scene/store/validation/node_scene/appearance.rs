@@ -125,7 +125,7 @@ impl AppearanceCanonicalCounts {
 }
 
 /// Exact borrowed scratch shape required by typed appearance validation.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::canonical_scene::store) struct AppearanceValidationScratchRequirements {
     image_media_counts: usize,
     bindings: usize,

@@ -117,7 +117,7 @@ pub(super) struct AnimationMeteredShape<'session> {
 }
 
 /// Aggregate animation shape sealed before physical materialization begins.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::canonical_scene::store) struct AnimationMeteredCounts {
     pub(in crate::canonical_scene::store) clip_count: u32,
     pub(in crate::canonical_scene::store) channel_count: u32,

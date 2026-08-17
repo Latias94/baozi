@@ -531,6 +531,11 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     assert_ne!(output_generation, input_generation);
     assert_eq!(generation_source.load(Ordering::Relaxed), 2);
     assert!(output.scene.account().is_same_account(source.account()));
+    assert_eq!(
+        output.scene.proof.validation_scratch_plan(),
+        source.proof.validation_scratch_plan(),
+        "a shape-preserving transform edit must retain the sealed validation envelope",
+    );
     assert!(
         output
             .scene

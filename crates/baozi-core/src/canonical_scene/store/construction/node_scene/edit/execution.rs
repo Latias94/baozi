@@ -168,6 +168,7 @@ impl PendingNodeSceneEdit {
             pending.counts.evidence,
             pending.counts.canonical_blocks.as_u32(),
             pending.input.proof.deformation_uniqueness_mark_count(),
+            pending.input.proof.validation_scratch_plan(),
             pending.invalidations,
             reserve_generation,
         )

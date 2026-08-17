@@ -155,7 +155,7 @@ impl<'session> GeometryCanonicalValidationDependencies<'session> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::canonical_scene::store) struct GeometryValidationScratchRequirements {
     attributes: usize,
     primitives: usize,

@@ -213,7 +213,7 @@ pub(super) struct ProfileValidatedMembers<'session> {
 ///
 /// The descriptor contains no source values. It is derived from the sealed materialization plan
 /// and exists solely to bind scratch sizes and the exact central-validation work envelope.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::canonical_scene::store) struct ProfileMeteredCounts {
     pub(in crate::canonical_scene::store) resource_count: u32,
     pub(in crate::canonical_scene::store) source_count: u32,
