@@ -19,6 +19,7 @@ use crate::provenance::{DIGEST_LEN, OperationIdentity, OperationKind};
 use super::super::scratch::NodeSceneCentralValidationPlan;
 use super::super::{SceneEvidenceCounts, ValidatedNodeScene};
 use super::CanonicalInvalidations;
+use super::leaf_plan::NodeSceneInheritedLeafScanPlan;
 
 const NODE_TRANSFORM_PROFILE_CANONICAL_BLOCK_DELTA: u32 = 4;
 const NODE_TRANSFORM_PROFILE_PAYLOAD_LEAF_DELTA: u32 = 1;
@@ -76,8 +77,6 @@ pub(super) struct NodeSceneEvidenceLeafPlan {
     pub(super) added: CheckedCount,
     pub(super) deleted: CheckedCount,
     pub(super) output: CheckedCount,
-    /// Source rows that must be inspected to recover dynamic leaf references.
-    pub(super) inspection_work: CheckedCount,
 }
 
 impl NodeSceneEvidenceLeafPlan {
@@ -87,15 +86,12 @@ impl NodeSceneEvidenceLeafPlan {
         rewritten: usize,
         added: usize,
         deleted: usize,
-        inspection_work: usize,
     ) -> Result<Self, NodeSceneEditPlanError> {
         let source = CheckedCount::try_from_u32(source, "source shareable leaf count")?;
         let output = CheckedCount::try_from_u32(output, "output shareable leaf count")?;
         let rewritten = CheckedCount::try_from_usize(rewritten, "rewritten shareable leaf count")?;
         let added = CheckedCount::try_from_usize(added, "added shareable leaf count")?;
         let deleted = CheckedCount::try_from_usize(deleted, "deleted shareable leaf count")?;
-        let inspection_work =
-            CheckedCount::try_from_usize(inspection_work, "shareable leaf inspection work")?;
         let inherited_count = source
             .as_usize()
             .checked_sub(rewritten.as_usize())
@@ -125,7 +121,6 @@ impl NodeSceneEvidenceLeafPlan {
             added,
             deleted,
             output,
-            inspection_work,
         })
     }
 
@@ -316,6 +311,7 @@ pub(super) struct NodeSceneEditFixedCounts {
     /// Every target block that must be newly retained for the destination generation.
     pub(super) new_canonical_blocks: CheckedCount,
     pub(super) evidence_leaves: NodeSceneEvidenceLeafPlan,
+    pub(super) inherited_leaf_scan: NodeSceneInheritedLeafScanPlan,
     pub(super) canonical_attribution_slots: CheckedCount,
     pub(super) outcome_evidence_blocks: CheckedCount,
     pub(super) outcome_evidence_attribution_slots: CheckedCount,
@@ -520,20 +516,19 @@ impl NodeSceneEditFixedCounts {
                 quantity: "shareable leaf attribute inspection work",
             }
         })?;
-        let leaf_inspection_work = primitive_rows
-            .checked_add(attribute_rows)
-            .and_then(|count| count.checked_add(profile.source_segment_count.as_usize()))
-            .and_then(|count| count.checked_add(1))
-            .ok_or(NodeSceneEditPlanError::SizeOverflow {
-                quantity: "shareable leaf inspection work",
-            })?;
         let evidence_leaves = NodeSceneEvidenceLeafPlan::try_new(
             source_evidence.shareable_leaf_block_count,
             evidence.shareable_leaf_block_count,
             1,
             4,
             0,
-            leaf_inspection_work,
+        )?;
+        let inherited_leaf_scan = NodeSceneInheritedLeafScanPlan::try_new(
+            input,
+            primitive_rows,
+            attribute_rows,
+            profile.source_segment_count.as_usize(),
+            evidence_leaves,
         )?;
         let new_canonical_block_count = canonical_blocks
             .as_usize()
@@ -563,6 +558,7 @@ impl NodeSceneEditFixedCounts {
             canonical_blocks,
             new_canonical_blocks,
             evidence_leaves,
+            inherited_leaf_scan,
             canonical_attribution_slots,
             outcome_evidence_blocks: CheckedCount::try_from_u32(1, "outcome-evidence block count")?,
             outcome_evidence_attribution_slots: CheckedCount::try_from_u32(
@@ -1101,18 +1097,17 @@ mod tests {
 
     #[test]
     fn shareable_leaf_plan_requires_exact_source_and_output_partitions() {
-        let exact = NodeSceneEvidenceLeafPlan::try_new(5, 7, 1, 3, 1, 9)
+        let exact = NodeSceneEvidenceLeafPlan::try_new(5, 7, 1, 3, 1)
             .expect("exact leaf dispositions must seal");
 
         assert!(exact.is_exact());
         assert_eq!(exact.inherited.as_usize(), 3);
-        assert_eq!(exact.inspection_work.as_usize(), 9);
         assert!(matches!(
-            NodeSceneEvidenceLeafPlan::try_new(1, 1, 1, 0, 1, 0),
+            NodeSceneEvidenceLeafPlan::try_new(1, 1, 1, 0, 1),
             Err(NodeSceneEditPlanError::InvalidSource { .. })
         ));
         assert!(matches!(
-            NodeSceneEvidenceLeafPlan::try_new(5, 6, 1, 3, 1, 0),
+            NodeSceneEvidenceLeafPlan::try_new(5, 6, 1, 3, 1),
             Err(NodeSceneEditPlanError::InvalidSource { .. })
         ));
     }

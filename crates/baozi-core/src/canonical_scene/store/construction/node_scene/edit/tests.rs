@@ -1188,7 +1188,7 @@ fn physical_plan_rebuilds_every_record_and_inherits_each_unchanged_shareable_lea
     assert_eq!(leaf_plan.added.as_usize(), 4);
     assert_eq!(leaf_plan.deleted.as_usize(), 0);
     assert_eq!(
-        leaf_plan.inspection_work.as_usize(),
+        same_layout.counts.inherited_leaf_scan.inspection_work(),
         same_layout.counts.primitives.as_usize()
             + same_layout.counts.attributes.as_usize()
             + same_layout.counts.profile.source_segment_count.as_usize()
