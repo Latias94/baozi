@@ -5,7 +5,7 @@ use crate::identity::{NodeId, NodeIndex, SceneEntityKind, SceneLookupError, Scen
 use crate::provenance::{OperationIdentity, OperationKind, OptionsDigest};
 
 use super::super::{ValidatedNodeScene, semantic::NodeSceneSemanticError};
-use super::plan::{NodeTransformEditPlanError, PendingNodeTransformEdit};
+use super::plan::{NodeSceneEditPlanError, PendingNodeSceneEdit};
 
 /// The allocation-free result of classifying one transform-only edit request.
 #[must_use = "a node transform edit start must be consumed or deliberately dropped"]
@@ -17,7 +17,7 @@ pub(in crate::canonical_scene::store) enum NodeTransformEditStart<'scene> {
     /// The requested authored bits already exist; this is the exact input Scene.
     Unchanged(&'scene ValidatedNodeScene),
     /// The request changes authored bits and is ready for operation admission.
-    Changed(PendingNodeTransformEdit<'scene>),
+    Changed(PendingNodeSceneEdit<'scene>),
 }
 
 /// A rejected transform-edit request before any operation or generation reservation starts.
@@ -56,7 +56,7 @@ pub(in crate::canonical_scene::store) fn try_begin_node_transform_edit<'scene>(
         return Ok(NodeTransformEditStart::Unchanged(input));
     }
 
-    PendingNodeTransformEdit::try_new(
+    PendingNodeSceneEdit::try_new_node_transform(
         input,
         target.source_index,
         target.canonical_row,
@@ -118,13 +118,11 @@ fn semantic_read_error(error: NodeSceneSemanticError) -> NodeTransformEditStartE
     }
 }
 
-impl From<NodeTransformEditPlanError> for NodeTransformEditStartError {
-    fn from(error: NodeTransformEditPlanError) -> Self {
+impl From<NodeSceneEditPlanError> for NodeTransformEditStartError {
+    fn from(error: NodeSceneEditPlanError) -> Self {
         match error {
-            NodeTransformEditPlanError::InvalidSource { reason } => Self::InvalidSource { reason },
-            NodeTransformEditPlanError::SizeOverflow { quantity } => {
-                Self::SizeOverflow { quantity }
-            }
+            NodeSceneEditPlanError::InvalidSource { reason } => Self::InvalidSource { reason },
+            NodeSceneEditPlanError::SizeOverflow { quantity } => Self::SizeOverflow { quantity },
         }
     }
 }

@@ -11,7 +11,7 @@ use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_TRS_SCALAR_COUNT,
 };
 use crate::entity::{AuthoredTransform, AuthoredTransformKind};
-use crate::provenance::{DIGEST_LEN, OperationIdentity};
+use crate::provenance::{DIGEST_LEN, OperationIdentity, OperationKind};
 
 use super::super::{SceneEvidenceCounts, ValidatedNodeScene};
 use super::CanonicalInvalidations;
@@ -27,21 +27,18 @@ impl CheckedCount {
     fn try_from_usize(
         value: usize,
         quantity: &'static str,
-    ) -> Result<Self, NodeTransformEditPlanError> {
-        let u32_value = u32::try_from(value)
-            .map_err(|_| NodeTransformEditPlanError::SizeOverflow { quantity })?;
+    ) -> Result<Self, NodeSceneEditPlanError> {
+        let u32_value =
+            u32::try_from(value).map_err(|_| NodeSceneEditPlanError::SizeOverflow { quantity })?;
         Ok(Self {
             usize_value: value,
             u32_value,
         })
     }
 
-    fn try_from_u32(
-        value: u32,
-        quantity: &'static str,
-    ) -> Result<Self, NodeTransformEditPlanError> {
+    fn try_from_u32(value: u32, quantity: &'static str) -> Result<Self, NodeSceneEditPlanError> {
         let usize_value = usize::try_from(value)
-            .map_err(|_| NodeTransformEditPlanError::SizeOverflow { quantity })?;
+            .map_err(|_| NodeSceneEditPlanError::SizeOverflow { quantity })?;
         Ok(Self {
             usize_value,
             u32_value: value,
@@ -76,15 +73,15 @@ impl NodeTransformEditTarget {
         transform_offset: usize,
         old_transform: AuthoredTransform,
         replacement: AuthoredTransform,
-    ) -> Result<Self, NodeTransformEditPlanError> {
+    ) -> Result<Self, NodeSceneEditPlanError> {
         let expected_row =
             source_index
                 .checked_add(1)
-                .ok_or(NodeTransformEditPlanError::SizeOverflow {
+                .ok_or(NodeSceneEditPlanError::SizeOverflow {
                     quantity: "target canonical node row",
                 })?;
         if canonical_row != expected_row {
-            return Err(NodeTransformEditPlanError::InvalidSource {
+            return Err(NodeSceneEditPlanError::InvalidSource {
                 reason: "target source index does not map to the next canonical row",
             });
         }
@@ -115,12 +112,79 @@ impl NodeTransformEditTarget {
     }
 }
 
+/// The exact authored mutation consumed by one retained node-Scene edit transaction.
+///
+/// Keeping the program concrete and closed makes every new edit kind update planning,
+/// materialization, validation, remapping, and provenance together. It deliberately does not use
+/// a backend trait or an arbitrary payload.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum NodeSceneEditProgram {
+    NodeTransform(NodeTransformRewrite),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct NodeTransformRewrite {
+    target: NodeTransformEditTarget,
+    replacement: AuthoredTransform,
+}
+
+impl NodeTransformRewrite {
+    pub(super) const fn new(
+        target: NodeTransformEditTarget,
+        replacement: AuthoredTransform,
+    ) -> Self {
+        Self {
+            target,
+            replacement,
+        }
+    }
+
+    pub(super) const fn target(self) -> NodeTransformEditTarget {
+        self.target
+    }
+
+    pub(super) const fn replacement(self) -> AuthoredTransform {
+        self.replacement
+    }
+
+    pub(super) const fn requires_node_shape_rewrite(self) -> bool {
+        self.target.requires_node_shape_rewrite()
+    }
+}
+
+impl NodeSceneEditProgram {
+    pub(super) const fn node_transform(
+        target: NodeTransformEditTarget,
+        replacement: AuthoredTransform,
+    ) -> Self {
+        Self::NodeTransform(NodeTransformRewrite::new(target, replacement))
+    }
+
+    pub(super) const fn operation_kind(self) -> OperationKind {
+        match self {
+            Self::NodeTransform(_) => OperationKind::Transform,
+        }
+    }
+
+    pub(super) const fn node_transform_rewrite(self) -> NodeTransformRewrite {
+        match self {
+            Self::NodeTransform(rewrite) => rewrite,
+        }
+    }
+
+    pub(super) const fn requires_node_shape_rewrite(self) -> bool {
+        match self {
+            Self::NodeTransform(rewrite) => rewrite.requires_node_shape_rewrite(),
+        }
+    }
+}
+
 /// Every immutable cardinality needed to plan later operation-owned materialization.
 ///
 /// Counts are fixed before an operation starts, so admission never has to rediscover
 /// semantic shape or perform a fallible integer conversion after mutation begins.
 #[derive(Clone, Copy)]
-pub(super) struct NodeTransformEditFixedCounts {
+pub(super) struct NodeSceneEditFixedCounts {
     pub(super) evidence: SceneEvidenceCounts,
     pub(super) canonical_blocks: CheckedCount,
     /// Blocks whose domain values are directly affected by the transform edit.
@@ -160,12 +224,12 @@ pub(super) struct NodeTransformEditFixedCounts {
     pub(super) morph_deltas: CheckedCount,
     pub(super) animation_clips: CheckedCount,
     pub(super) animation_channels: CheckedCount,
-    pub(super) profile: NodeTransformEditProfilePlan,
+    pub(super) profile: NodeSceneEditProfilePlan,
 }
 
 /// Exact source coordinates and allocation plans for appending one transform lineage segment.
 #[derive(Clone, Copy)]
-pub(super) struct NodeTransformEditProfilePlan {
+pub(super) struct NodeSceneEditProfilePlan {
     pub(super) source_segment_count: CheckedCount,
     pub(super) output_segment_count: CheckedCount,
     pub(super) target_owner_row: CheckedCount,
@@ -184,8 +248,34 @@ pub(super) struct NodeTransformEditProfilePlan {
     pub(super) owners: RecordPlan,
 }
 
-impl NodeTransformEditFixedCounts {
-    fn try_new(
+#[derive(Debug, Clone, Copy)]
+struct NodeSceneEditProfileTarget {
+    owner_row: CheckedCount,
+    owner_kind: u8,
+    owner_index: CheckedCount,
+}
+
+impl NodeSceneEditProfileTarget {
+    fn try_for_node_transform(
+        target: NodeTransformEditTarget,
+    ) -> Result<Self, NodeSceneEditPlanError> {
+        Ok(Self {
+            owner_row: CheckedCount::try_from_usize(
+                target.canonical_row.as_usize().checked_add(1).ok_or(
+                    NodeSceneEditPlanError::SizeOverflow {
+                        quantity: "target profile owner row",
+                    },
+                )?,
+                "target profile owner row",
+            )?,
+            owner_kind: PROFILE_OWNER_NODE,
+            owner_index: target.canonical_row,
+        })
+    }
+}
+
+impl NodeSceneEditFixedCounts {
+    fn try_new_node_transform(
         input: &ValidatedNodeScene,
         target: NodeTransformEditTarget,
         source_node_rows: usize,
@@ -193,9 +283,10 @@ impl NodeTransformEditFixedCounts {
         source_edge_rows: usize,
         source_transform_scalars: usize,
         output_transform_scalars: usize,
-    ) -> Result<Self, NodeTransformEditPlanError> {
+    ) -> Result<Self, NodeSceneEditPlanError> {
         let source_evidence = input.proof.counts();
-        let profile = NodeTransformEditProfilePlan::try_new(input, target, source_evidence)?;
+        let profile_target = NodeSceneEditProfileTarget::try_for_node_transform(target)?;
+        let profile = NodeSceneEditProfilePlan::try_new(input, profile_target, source_evidence)?;
         let mut evidence = source_evidence;
         evidence.canonical_block_count = checked_add_u32(
             evidence.canonical_block_count,
@@ -258,7 +349,7 @@ impl NodeTransformEditFixedCounts {
         let canonical_node_rows =
             CheckedCount::try_from_u32(evidence.node_count, "canonical node row count")?;
         let expected_canonical_node_rows = source_node_rows.as_usize().checked_add(1).ok_or(
-            NodeTransformEditPlanError::SizeOverflow {
+            NodeSceneEditPlanError::SizeOverflow {
                 quantity: "canonical node row count",
             },
         )?;
@@ -270,7 +361,7 @@ impl NodeTransformEditFixedCounts {
         let partitioned_source_rows = source_root_rows
             .as_usize()
             .checked_add(source_edge_rows.as_usize())
-            .ok_or(NodeTransformEditPlanError::SizeOverflow {
+            .ok_or(NodeSceneEditPlanError::SizeOverflow {
                 quantity: "source root-edge partition",
             })?;
         require_count(
@@ -288,21 +379,21 @@ impl NodeTransformEditFixedCounts {
             source_evidence
                 .shareable_leaf_block_count
                 .checked_sub(1)
-                .ok_or(NodeTransformEditPlanError::InvalidSource {
+                .ok_or(NodeSceneEditPlanError::InvalidSource {
                     reason: "validated profile has no attachment leaf to rewrite",
                 })?,
         )
-        .map_err(|_| NodeTransformEditPlanError::SizeOverflow {
+        .map_err(|_| NodeSceneEditPlanError::SizeOverflow {
             quantity: "shareable canonical leaf block count",
         })?;
         let new_canonical_block_count = canonical_blocks
             .as_usize()
             .checked_sub(inherited_shareable_leaf_count)
-            .ok_or(NodeTransformEditPlanError::InvalidSource {
+            .ok_or(NodeSceneEditPlanError::InvalidSource {
                 reason: "inherited shareable leaf count exceeds the canonical output block count",
             })?;
         if custom_semantic_rewrite_block_count > new_canonical_block_count {
-            return Err(NodeTransformEditPlanError::InvalidSource {
+            return Err(NodeSceneEditPlanError::InvalidSource {
                 reason: "canonical source lacks the structural blocks required by a transform edit",
             });
         }
@@ -314,7 +405,7 @@ impl NodeTransformEditFixedCounts {
             CheckedCount::try_from_usize(new_canonical_block_count, "new canonical block count")?;
         let canonical_attribution_slots = CheckedCount::try_from_usize(
             new_canonical_block_count.checked_add(1).ok_or(
-                NodeTransformEditPlanError::SizeOverflow {
+                NodeSceneEditPlanError::SizeOverflow {
                     quantity: "canonical attribution slot count",
                 },
             )?,
@@ -409,54 +500,47 @@ impl NodeTransformEditFixedCounts {
     }
 }
 
-impl NodeTransformEditProfilePlan {
+impl NodeSceneEditProfilePlan {
     fn try_new(
         input: &ValidatedNodeScene,
-        target: NodeTransformEditTarget,
+        target: NodeSceneEditProfileTarget,
         evidence: SceneEvidenceCounts,
-    ) -> Result<Self, NodeTransformEditPlanError> {
+    ) -> Result<Self, NodeSceneEditPlanError> {
         let source_segment_count = CheckedCount::try_from_usize(
             input.proof.profile_segment_count(),
             "source profile segment count",
         )?;
         let output_segment_count = CheckedCount::try_from_usize(
             source_segment_count.as_usize().checked_add(1).ok_or(
-                NodeTransformEditPlanError::SizeOverflow {
+                NodeSceneEditPlanError::SizeOverflow {
                     quantity: "output profile segment count",
                 },
             )?,
             "output profile segment count",
         )?;
         let owner_count = usize::try_from(evidence.profile_owner_count).map_err(|_| {
-            NodeTransformEditPlanError::SizeOverflow {
+            NodeSceneEditPlanError::SizeOverflow {
                 quantity: "profile owner count",
             }
         })?;
-        let target_owner_row = CheckedCount::try_from_usize(
-            target.canonical_row.as_usize().checked_add(1).ok_or(
-                NodeTransformEditPlanError::SizeOverflow {
-                    quantity: "target profile owner row",
-                },
-            )?,
-            "target profile owner row",
-        )?;
+        let target_owner_row = target.owner_row;
         let owners = input
             .canonical
             .records(input.proof.profile_owners().into_store())
-            .ok_or(NodeTransformEditPlanError::InvalidSource {
+            .ok_or(NodeSceneEditPlanError::InvalidSource {
                 reason: "validated profile owner table is unavailable or mistyped",
             })?;
         if owners.rows() != owner_count
             || owners.fields() != PROFILE_OWNER_FIELD_COUNT
             || target_owner_row.as_usize() >= owner_count
             || owners.scalar::<u8>(target_owner_row.as_usize(), profile_owner_field::OWNER_KIND)
-                != Some(PROFILE_OWNER_NODE)
+                != Some(target.owner_kind)
             || owners.scalar::<u32>(
                 target_owner_row.as_usize(),
                 profile_owner_field::OWNER_INDEX,
-            ) != Some(target.canonical_row.as_u32())
+            ) != Some(target.owner_index.as_u32())
         {
-            return Err(NodeTransformEditPlanError::InvalidSource {
+            return Err(NodeSceneEditPlanError::InvalidSource {
                 reason: "target node does not map to its proof-qualified profile owner row",
             });
         }
@@ -466,7 +550,7 @@ impl NodeTransformEditProfilePlan {
                     target_owner_row.as_usize(),
                     profile_owner_field::ATTACHMENT_OFFSET,
                 )
-                .ok_or(NodeTransformEditPlanError::InvalidSource {
+                .ok_or(NodeSceneEditPlanError::InvalidSource {
                     reason: "target profile attachment offset is unreadable",
                 })?,
             "target profile attachment offset",
@@ -477,13 +561,13 @@ impl NodeTransformEditProfilePlan {
                     target_owner_row.as_usize(),
                     profile_owner_field::ATTACHMENT_COUNT,
                 )
-                .ok_or(NodeTransformEditPlanError::InvalidSource {
+                .ok_or(NodeSceneEditPlanError::InvalidSource {
                     reason: "target profile attachment count is unreadable",
                 })?,
             "target profile attachment count",
         )?;
         if target_attachment_count.as_usize() == 0 {
-            return Err(NodeTransformEditPlanError::InvalidSource {
+            return Err(NodeSceneEditPlanError::InvalidSource {
                 reason: "target profile owner has no provenance attachment",
             });
         }
@@ -493,13 +577,13 @@ impl NodeTransformEditProfilePlan {
                 profile_owner_field::ATTACHMENTS,
             )
             .map(CanonicalBlockRef::from_store)
-            .ok_or(NodeTransformEditPlanError::InvalidSource {
+            .ok_or(NodeSceneEditPlanError::InvalidSource {
                 reason: "target profile attachment reference is unreadable",
             })?;
         let attachments = input
             .canonical
             .sequence(source_attachments.into_store())
-            .ok_or(NodeTransformEditPlanError::InvalidSource {
+            .ok_or(NodeSceneEditPlanError::InvalidSource {
                 reason: "validated profile attachment leaf is unavailable or mistyped",
             })?;
         let source_attachment_count = CheckedCount::try_from_u32(
@@ -509,19 +593,19 @@ impl NodeTransformEditProfilePlan {
         let target_attachment_end = target_attachment_offset
             .as_usize()
             .checked_add(target_attachment_count.as_usize())
-            .ok_or(NodeTransformEditPlanError::SizeOverflow {
+            .ok_or(NodeSceneEditPlanError::SizeOverflow {
                 quantity: "target profile attachment range",
             })?;
         let source_attachment_scalars = source_attachment_count
             .as_usize()
             .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
-            .ok_or(NodeTransformEditPlanError::SizeOverflow {
+            .ok_or(NodeSceneEditPlanError::SizeOverflow {
                 quantity: "source profile attachment scalar count",
             })?;
         if attachments.as_slice().len() != source_attachment_scalars
             || target_attachment_end > source_attachment_count.as_usize()
         {
-            return Err(NodeTransformEditPlanError::InvalidSource {
+            return Err(NodeSceneEditPlanError::InvalidSource {
                 reason: "target profile attachment range disagrees with validation evidence",
             });
         }
@@ -530,7 +614,7 @@ impl NodeTransformEditProfilePlan {
                 .as_usize()
                 .checked_sub(target_attachment_count.as_usize())
                 .and_then(|count| count.checked_add(1))
-                .ok_or(NodeTransformEditPlanError::SizeOverflow {
+                .ok_or(NodeSceneEditPlanError::SizeOverflow {
                     quantity: "output profile attachment count",
                 })?,
             "output profile attachment count",
@@ -554,45 +638,45 @@ impl NodeTransformEditProfilePlan {
                 output_attachment_count
                     .as_usize()
                     .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
-                    .ok_or(NodeTransformEditPlanError::SizeOverflow {
+                    .ok_or(NodeSceneEditPlanError::SizeOverflow {
                         quantity: "output profile attachment scalar count",
                     })?,
             )
-            .map_err(|_| NodeTransformEditPlanError::SizeOverflow {
+            .map_err(|_| NodeSceneEditPlanError::SizeOverflow {
                 quantity: "output profile attachment allocation",
             })?,
             parents: SequencePlan::new(
                 target_attachment_count
                     .as_usize()
                     .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
-                    .ok_or(NodeTransformEditPlanError::SizeOverflow {
+                    .ok_or(NodeSceneEditPlanError::SizeOverflow {
                         quantity: "transform provenance parent scalar count",
                     })?,
             )
-            .map_err(|_| NodeTransformEditPlanError::SizeOverflow {
+            .map_err(|_| NodeSceneEditPlanError::SizeOverflow {
                 quantity: "transform provenance parent allocation",
             })?,
             provenance: SequencePlan::new(PROFILE_PROVENANCE_SCALAR_COUNT).map_err(|_| {
-                NodeTransformEditPlanError::SizeOverflow {
+                NodeSceneEditPlanError::SizeOverflow {
                     quantity: "transform provenance row allocation",
                 }
             })?,
             operation: SequencePlan::new(PROFILE_OPERATION_SCALAR_COUNT).map_err(|_| {
-                NodeTransformEditPlanError::SizeOverflow {
+                NodeSceneEditPlanError::SizeOverflow {
                     quantity: "transform operation row allocation",
                 }
             })?,
             digest: BytesPlan::new(DIGEST_LEN).map_err(|_| {
-                NodeTransformEditPlanError::SizeOverflow {
+                NodeSceneEditPlanError::SizeOverflow {
                     quantity: "transform options digest allocation",
                 }
             })?,
             segments: RecordPlan::new(output_segment_count.as_usize(), PROFILE_SEGMENT_FIELD_COUNT)
-                .map_err(|_| NodeTransformEditPlanError::SizeOverflow {
+                .map_err(|_| NodeSceneEditPlanError::SizeOverflow {
                     quantity: "output profile segment table",
                 })?,
             owners: RecordPlan::new(owner_count, PROFILE_OWNER_FIELD_COUNT).map_err(|_| {
-                NodeTransformEditPlanError::SizeOverflow {
+                NodeSceneEditPlanError::SizeOverflow {
                     quantity: "output profile owner table",
                 }
             })?,
@@ -600,20 +684,19 @@ impl NodeTransformEditProfilePlan {
     }
 }
 
-/// A changed transform edit whose source and immutable shape remain borrowed.
-#[must_use = "a changed node transform edit must be materialized or deliberately dropped"]
-pub(in crate::canonical_scene::store) struct PendingNodeTransformEdit<'scene> {
+/// A changed edit whose source and sealed execution program remain borrowed.
+#[must_use = "a changed node Scene edit must be materialized or deliberately dropped"]
+pub(in crate::canonical_scene::store) struct PendingNodeSceneEdit<'scene> {
     pub(super) input: &'scene ValidatedNodeScene,
-    pub(super) target: NodeTransformEditTarget,
-    pub(super) replacement: AuthoredTransform,
+    pub(super) program: NodeSceneEditProgram,
     pub(super) operation: OperationIdentity,
-    pub(super) counts: NodeTransformEditFixedCounts,
+    pub(super) counts: NodeSceneEditFixedCounts,
     pub(super) invalidations: CanonicalInvalidations,
 }
 
-impl<'scene> PendingNodeTransformEdit<'scene> {
+impl<'scene> PendingNodeSceneEdit<'scene> {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn try_new(
+    pub(super) fn try_new_node_transform(
         input: &'scene ValidatedNodeScene,
         target_source_index: usize,
         target_canonical_row: usize,
@@ -625,7 +708,7 @@ impl<'scene> PendingNodeTransformEdit<'scene> {
         source_root_rows: usize,
         source_edge_rows: usize,
         source_transform_scalars: usize,
-    ) -> Result<Self, NodeTransformEditPlanError> {
+    ) -> Result<Self, NodeSceneEditPlanError> {
         let target = NodeTransformEditTarget::try_new(
             target_source_index,
             target_canonical_row,
@@ -633,8 +716,14 @@ impl<'scene> PendingNodeTransformEdit<'scene> {
             old_transform,
             replacement,
         )?;
+        let program = NodeSceneEditProgram::node_transform(target, replacement);
+        if program.operation_kind() != *operation.kind() {
+            return Err(NodeSceneEditPlanError::InvalidSource {
+                reason: "sealed edit program disagrees with its operation identity",
+            });
+        }
         if target.source_index.as_usize() >= source_node_rows {
-            return Err(NodeTransformEditPlanError::InvalidSource {
+            return Err(NodeSceneEditPlanError::InvalidSource {
                 reason: "target source node index exceeds the proof-qualified source rows",
             });
         }
@@ -642,21 +731,21 @@ impl<'scene> PendingNodeTransformEdit<'scene> {
             .transform_offset
             .as_usize()
             .checked_add(target.old_transform_scalars.as_usize())
-            .ok_or(NodeTransformEditPlanError::SizeOverflow {
+            .ok_or(NodeSceneEditPlanError::SizeOverflow {
                 quantity: "target authored-transform range",
             })?;
         if target_end > source_transform_scalars {
-            return Err(NodeTransformEditPlanError::InvalidSource {
+            return Err(NodeSceneEditPlanError::InvalidSource {
                 reason: "target authored-transform range exceeds the source sequence",
             });
         }
         let output_transform_scalars = source_transform_scalars
             .checked_sub(target.old_transform_scalars.as_usize())
             .and_then(|count| count.checked_add(target.new_transform_scalars.as_usize()))
-            .ok_or(NodeTransformEditPlanError::SizeOverflow {
+            .ok_or(NodeSceneEditPlanError::SizeOverflow {
                 quantity: "output authored-transform scalar count",
             })?;
-        let counts = NodeTransformEditFixedCounts::try_new(
+        let counts = NodeSceneEditFixedCounts::try_new_node_transform(
             input,
             target,
             source_node_rows,
@@ -668,8 +757,7 @@ impl<'scene> PendingNodeTransformEdit<'scene> {
 
         Ok(Self {
             input,
-            target,
-            replacement,
+            program,
             operation,
             counts,
             invalidations: CanonicalInvalidations::scene_bounds_invalidated(),
@@ -678,10 +766,6 @@ impl<'scene> PendingNodeTransformEdit<'scene> {
 
     pub(in crate::canonical_scene::store) const fn input(&self) -> &'scene ValidatedNodeScene {
         self.input
-    }
-
-    pub(in crate::canonical_scene::store) const fn replacement(&self) -> AuthoredTransform {
-        self.replacement
     }
 
     pub(in crate::canonical_scene::store) const fn invalidations(&self) -> CanonicalInvalidations {
@@ -693,16 +777,16 @@ fn checked_add_u32(
     left: u32,
     right: u32,
     quantity: &'static str,
-) -> Result<u32, NodeTransformEditPlanError> {
+) -> Result<u32, NodeSceneEditPlanError> {
     left.checked_add(right)
-        .ok_or(NodeTransformEditPlanError::SizeOverflow { quantity })
+        .ok_or(NodeSceneEditPlanError::SizeOverflow { quantity })
 }
 
 #[derive(Debug, Error)]
-pub(super) enum NodeTransformEditPlanError {
-    #[error("validated node Scene cannot support a transform edit: {reason}")]
+pub(super) enum NodeSceneEditPlanError {
+    #[error("validated node Scene cannot support the requested edit: {reason}")]
     InvalidSource { reason: &'static str },
-    #[error("node transform edit size overflowed while computing {quantity}")]
+    #[error("node Scene edit size overflowed while computing {quantity}")]
     SizeOverflow { quantity: &'static str },
 }
 
@@ -717,11 +801,11 @@ fn require_count(
     actual: usize,
     expected: usize,
     reason: &'static str,
-) -> Result<(), NodeTransformEditPlanError> {
+) -> Result<(), NodeSceneEditPlanError> {
     if actual == expected {
         Ok(())
     } else {
-        Err(NodeTransformEditPlanError::InvalidSource { reason })
+        Err(NodeSceneEditPlanError::InvalidSource { reason })
     }
 }
 
@@ -730,7 +814,7 @@ mod tests {
     use crate::entity::AuthoredTransform;
     use crate::math::Mat4;
 
-    use super::{NodeTransformEditPlanError, NodeTransformEditTarget};
+    use super::{NodeSceneEditPlanError, NodeTransformEditTarget};
 
     #[test]
     fn matrix_to_trs_uses_checked_six_scalar_contraction() {
@@ -779,7 +863,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            NodeTransformEditPlanError::InvalidSource { .. }
+            NodeSceneEditPlanError::InvalidSource { .. }
         ));
     }
 }

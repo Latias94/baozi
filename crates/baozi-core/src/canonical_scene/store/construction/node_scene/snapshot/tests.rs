@@ -48,7 +48,7 @@ use crate::scene_space::{
 };
 
 use super::super::edit::{
-    NodeTransformEditStart, NodeTransformEditTerminal, try_begin_node_transform_edit,
+    NodeSceneEditTerminal, NodeTransformEditStart, try_begin_node_transform_edit,
 };
 use super::super::tests::profile_fixture;
 use super::{
@@ -1623,7 +1623,7 @@ pub(in crate::canonical_scene::store) fn collect_segment_partition_snapshot_obse
     let prepared = pending
         .prepare(operation_limits(), OperationControl::default())
         .expect("segment-partitioning transform edit must prepare");
-    let NodeTransformEditTerminal::Success(edited) = prepared.handoff() else {
+    let NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
         panic!("segment-partitioning transform edit must publish");
     };
 
@@ -1811,7 +1811,7 @@ fn profile_steps_bound_empty_segments_without_replaying_prior_domains() {
         let prepared = pending
             .prepare(operation_limits(), OperationControl::default())
             .expect("bounded profile edit preparation");
-        let NodeTransformEditTerminal::Success(edited) = prepared.handoff() else {
+        let NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
             panic!("bounded profile edit must publish");
         };
         let previous = scene;
@@ -2011,7 +2011,7 @@ fn changed_scene_edit_appends_snapshot_visible_profile_lineage() {
     let prepared = pending
         .prepare(operation_limits(), OperationControl::default())
         .expect("changed transform profile preparation");
-    let NodeTransformEditTerminal::Success(edited) = prepared.handoff() else {
+    let NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
         panic!("valid changed transform must publish an edited Scene");
     };
 

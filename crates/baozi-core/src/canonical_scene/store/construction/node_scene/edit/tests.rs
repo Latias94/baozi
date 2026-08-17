@@ -38,7 +38,7 @@ use super::super::tests::{
 };
 use super::super::{NodeSceneDraftBuild, NodeSceneSuccessParts};
 use super::CanonicalRemapSet;
-use super::execution::NodeTransformEditPrepareError;
+use super::execution::NodeSceneEditPrepareError;
 use super::source::{
     NodeTransformEditStart, NodeTransformEditStartError, try_begin_node_transform_edit,
 };
@@ -522,7 +522,7 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("valid exact-input transform edit must prepare");
-    let super::NodeTransformEditTerminal::Success(output) = prepared.handoff() else {
+    let super::NodeSceneEditTerminal::Success(output) = prepared.handoff() else {
         panic!("valid exact-input transform edit must publish success");
     };
 
@@ -589,7 +589,7 @@ fn chained_transform_edits_parent_each_new_segment_to_the_previous_attachment() 
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("first chained transform edit preparation");
-    let super::NodeTransformEditTerminal::Success(first) = first_prepared.handoff() else {
+    let super::NodeSceneEditTerminal::Success(first) = first_prepared.handoff() else {
         panic!("first chained transform edit must publish success");
     };
     assert_transform_edit_lineage(&original.scene, &first.scene, first_owner_row, first_digest);
@@ -608,7 +608,7 @@ fn chained_transform_edits_parent_each_new_segment_to_the_previous_attachment() 
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("second chained transform edit preparation");
-    let super::NodeTransformEditTerminal::Success(second) = second_prepared.handoff() else {
+    let super::NodeSceneEditTerminal::Success(second) = second_prepared.handoff() else {
         panic!("second chained transform edit must publish success");
     };
     assert_transform_edit_lineage(&first.scene, &second.scene, second_owner_row, second_digest);
@@ -642,7 +642,7 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("left sibling edit preparation");
-    let super::NodeTransformEditTerminal::Success(left) = left_prepared.handoff() else {
+    let super::NodeSceneEditTerminal::Success(left) = left_prepared.handoff() else {
         panic!("left sibling edit must publish success");
     };
 
@@ -660,7 +660,7 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("right sibling edit preparation");
-    let super::NodeTransformEditTerminal::Success(right) = right_prepared.handoff() else {
+    let super::NodeSceneEditTerminal::Success(right) = right_prepared.handoff() else {
         panic!("right sibling edit must publish success");
     };
 
@@ -696,7 +696,7 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("substituted sibling address must prepare rich failure");
-    let super::NodeTransformEditTerminal::RichFailure(substituted_failure) =
+    let super::NodeSceneEditTerminal::RichFailure(substituted_failure) =
         substituted_prepared.handoff()
     else {
         panic!("substituted sibling address must fail central validation");
@@ -741,7 +741,7 @@ fn central_validation_rejects_each_corrupted_parent_address_component() {
                 SceneGenerationId::reserve_from(&generation_source)
             })
             .expect("corrupted parent address must prepare rich failure");
-        let super::NodeTransformEditTerminal::RichFailure(failure) = prepared.handoff() else {
+        let super::NodeSceneEditTerminal::RichFailure(failure) = prepared.handoff() else {
             panic!("corrupted parent address must fail central validation");
         };
         assert_eq!(
@@ -779,7 +779,7 @@ fn trs_to_matrix_rewrites_node_offsets_and_directory_shape_before_publication() 
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("shape-changing exact-input transform edit must prepare");
-    let super::NodeTransformEditTerminal::Success(output) = prepared.handoff() else {
+    let super::NodeSceneEditTerminal::Success(output) = prepared.handoff() else {
         panic!("shape-changing exact-input transform edit must publish success");
     };
 
@@ -836,7 +836,7 @@ fn shape_changing_edit_preserves_spatial_values_and_attachment_closure() {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("shape-changing spatial edit preparation");
-    let super::NodeTransformEditTerminal::Success(output) = prepared.handoff() else {
+    let super::NodeSceneEditTerminal::Success(output) = prepared.handoff() else {
         panic!("shape-changing spatial edit must publish success");
     };
 
@@ -961,10 +961,7 @@ fn operation_start_rejection_does_not_consume_a_profile_segment_nonce() {
         SceneGenerationId::reserve_from(&generation_source)
     });
 
-    assert!(matches!(
-        rejected,
-        Err(NodeTransformEditPrepareError::Start(_))
-    ));
+    assert!(matches!(rejected, Err(NodeSceneEditPrepareError::Start(_))));
     assert_eq!(
         issued_profile_segment_nonce_count_for_test(),
         nonce_count_before,
@@ -1072,7 +1069,7 @@ fn cancellation_after_evidence_commit_preserves_rich_failure_and_the_input() {
             || SceneGenerationId::reserve_from(&generation_source),
         )
         .expect("cooperative cancellation must prepare an exact terminal");
-    let super::NodeTransformEditTerminal::RichFailure(failure) = prepared.handoff() else {
+    let super::NodeSceneEditTerminal::RichFailure(failure) = prepared.handoff() else {
         panic!("post-evidence cancellation must preserve rich failure evidence");
     };
 
@@ -1118,7 +1115,7 @@ fn generation_exhaustion_after_admission_leaves_one_invisible_nonce_gap() {
     let prepared = pending
         .prepare_with_generation_source(test_limits(), || Err(SceneGenerationError::Exhausted))
         .expect("generation exhaustion must prepare rich failure");
-    let super::NodeTransformEditTerminal::RichFailure(failure) = prepared.handoff() else {
+    let super::NodeSceneEditTerminal::RichFailure(failure) = prepared.handoff() else {
         panic!("generation exhaustion must preserve rich evidence");
     };
 
@@ -1167,7 +1164,7 @@ fn central_validation_rejection_preserves_rich_evidence_and_the_input() {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("central validation rejection must prepare rich failure");
-    let super::NodeTransformEditTerminal::RichFailure(failure) = prepared.handoff() else {
+    let super::NodeSceneEditTerminal::RichFailure(failure) = prepared.handoff() else {
         panic!("central validation rejection must preserve rich evidence");
     };
 
@@ -1264,7 +1261,7 @@ fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("input-first release transform edit must prepare");
-    let super::NodeTransformEditTerminal::Success(output) = prepared.handoff() else {
+    let super::NodeSceneEditTerminal::Success(output) = prepared.handoff() else {
         panic!("input-first release transform edit must publish success");
     };
 
@@ -1277,7 +1274,7 @@ fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
             .has_same_authored_bits(replacement),
     );
     assert_eq!(output.report.outcome_evidence_block_count(), 1);
-    let super::publication::NodeTransformEditSuccessParts { scene, report } = output;
+    let super::publication::NodeSceneEditSuccessParts { scene, report } = output;
     drop(report);
     assert!(
         scene
@@ -1311,10 +1308,10 @@ fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("output-first release transform edit must prepare");
-    let super::NodeTransformEditTerminal::Success(output) = prepared.handoff() else {
+    let super::NodeSceneEditTerminal::Success(output) = prepared.handoff() else {
         panic!("output-first release transform edit must publish success");
     };
-    let super::publication::NodeTransformEditSuccessParts { scene, report } = output;
+    let super::publication::NodeSceneEditSuccessParts { scene, report } = output;
 
     drop(scene);
     assert!(
@@ -1365,7 +1362,7 @@ fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
             SceneGenerationId::reserve_from(&generation_source)
         }) {
             match prepared.handoff() {
-                super::NodeTransformEditTerminal::RichFailure(failure)
+                super::NodeSceneEditTerminal::RichFailure(failure)
                     if terminal_failure_code(failure.ledger_evidence())
                         == super::super::NODE_SCENE_STORAGE_REJECTION_CODE =>
                 {

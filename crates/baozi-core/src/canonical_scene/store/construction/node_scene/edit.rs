@@ -9,7 +9,7 @@ mod source;
 mod tests;
 
 #[cfg(test)]
-pub(in crate::canonical_scene::store) use publication::NodeTransformEditTerminal;
+pub(in crate::canonical_scene::store) use publication::NodeSceneEditTerminal;
 #[cfg(test)]
 pub(crate) use report::CanonicalSubjectRemap;
 pub(crate) use report::{CanonicalInvalidations, CanonicalRemapSet, CanonicalRemapSetError};

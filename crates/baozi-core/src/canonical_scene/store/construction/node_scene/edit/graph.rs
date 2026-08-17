@@ -41,7 +41,7 @@ use super::super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneWorkMeter, SceneStoreAssembly, SceneStoreKeys,
     ValidatedNodeScene, process_slice_in_work_chunks,
 };
-use super::plan::PendingNodeTransformEdit;
+use super::plan::PendingNodeSceneEdit;
 
 pub(super) struct RewrittenNodeSceneGraph {
     pub(super) directory: CanonicalBlockRef<SceneDirectorySchema>,
@@ -59,7 +59,7 @@ pub(super) enum NodeSceneRewriteError {
 
 pub(super) fn try_rewrite_node_scene<'scene>(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
-    pending: &PendingNodeTransformEdit<'scene>,
+    pending: &PendingNodeSceneEdit<'scene>,
     keys: SceneStoreKeys,
 ) -> Result<RewrittenNodeSceneGraph, NodeSceneRewriteError> {
     let evidence =
@@ -89,7 +89,7 @@ pub(super) fn try_rewrite_node_scene<'scene>(
                 crate::canonical_scene::store::schema::NodeSceneChildReferenceTableSchema,
                 keys,
             )?;
-            let nodes = if pending.target.requires_node_shape_rewrite() {
+            let nodes = if pending.program.requires_node_shape_rewrite() {
                 rewrite_nodes_with_shape(
                     assembly,
                     pending,
@@ -157,7 +157,7 @@ pub(super) fn try_rewrite_node_scene<'scene>(
                 &mut work,
             )?;
 
-            let directory = if pending.target.requires_node_shape_rewrite() {
+            let directory = if pending.program.requires_node_shape_rewrite() {
                 let references = references.ok_or(StoreRuntimeError::InvalidSourceSlot)?;
                 rewrite_directory_with_shape(
                     assembly,
@@ -201,7 +201,7 @@ pub(super) fn try_rewrite_node_scene<'scene>(
 
 fn retain_edit_evidence(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
-    pending: &PendingNodeTransformEdit<'_>,
+    pending: &PendingNodeSceneEdit<'_>,
 ) -> Result<OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>, StoreRuntimeError> {
     let counts = pending.counts.evidence;
     assembly.try_retain_outcome_evidence_records(
@@ -250,10 +250,12 @@ fn retain_edit_evidence(
 
 fn rewrite_transforms(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
-    pending: &PendingNodeTransformEdit<'_>,
+    pending: &PendingNodeSceneEdit<'_>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
 ) -> Result<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>, StoreRuntimeError> {
+    let transform = pending.program.node_transform_rewrite();
+    let target = transform.target();
     let source_ref = pending
         .input
         .proof
@@ -268,9 +270,9 @@ fn rewrite_transforms(
     if source_values.len() != pending.counts.source_transform_scalars.as_usize() {
         return Err(StoreRuntimeError::InvalidSourceSlot);
     }
-    let start = pending.target.transform_offset.as_usize();
+    let start = target.transform_offset.as_usize();
     let end = start
-        .checked_add(pending.target.old_transform_scalars.as_usize())
+        .checked_add(target.old_transform_scalars.as_usize())
         .ok_or(StoreRuntimeError::AccountingOverflow)?;
     let prefix = source_values
         .get(..start)
@@ -278,7 +280,7 @@ fn rewrite_transforms(
     let suffix = source_values
         .get(end..)
         .ok_or(StoreRuntimeError::InvalidSourceSlot)?;
-    let replacement = pending.replacement;
+    let replacement = transform.replacement();
     let failure = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)
         .map_err(StoreRuntimeError::Plan)?;
     let plan = SequencePlan::<f32>::new(pending.counts.output_transform_scalars.as_usize())
@@ -364,13 +366,15 @@ fn write_authored_transform(
 
 fn rewrite_nodes_with_shape(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
-    pending: &PendingNodeTransformEdit<'_>,
+    pending: &PendingNodeSceneEdit<'_>,
     transforms: CanonicalBlockRef<NodeSceneAuthoredTransformSchema>,
     spatial: RewrittenSpatialRefs,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<NodeSceneNodeTableSchema>, StoreRuntimeError> {
+    let transform = pending.program.node_transform_rewrite();
+    let target = transform.target();
     let source_ref = pending.input.proof.nodes();
     let source = required_record_view(pending.input, source_ref)?;
     if source.rows() != pending.counts.canonical_node_rows.as_usize()
@@ -378,10 +382,10 @@ fn rewrite_nodes_with_shape(
     {
         return Err(StoreRuntimeError::InvalidSourceSlot);
     }
-    let target_row = pending.target.canonical_row.as_usize();
-    let target_kind = transform_kind(pending.replacement);
-    let target_length = pending.target.new_transform_scalars.as_u32();
-    let old_length = pending.target.old_transform_scalars.as_u32();
+    let target_row = target.canonical_row.as_usize();
+    let target_kind = transform_kind(transform.replacement());
+    let target_length = target.new_transform_scalars.as_u32();
+    let old_length = target.old_transform_scalars.as_u32();
     let plan = RecordPlan::new(source.rows(), source.fields()).map_err(StoreRuntimeError::Plan)?;
     assembly
         .try_rewrite_canonical_records_with_controlled(
@@ -541,7 +545,7 @@ struct NodeSceneDirectoryRefs {
 
 fn rewrite_directory_with_shape(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
-    pending: &PendingNodeTransformEdit<'_>,
+    pending: &PendingNodeSceneEdit<'_>,
     refs: NodeSceneDirectoryRefs,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
@@ -595,7 +599,7 @@ struct RewrittenSpatialRefs {
 
 fn rewrite_spatial(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
-    pending: &PendingNodeTransformEdit<'_>,
+    pending: &PendingNodeSceneEdit<'_>,
     keys: SceneStoreKeys,
 ) -> Result<RewrittenSpatialRefs, StoreRuntimeError> {
     let input = pending.input;
@@ -633,7 +637,7 @@ fn rewrite_spatial(
 
 fn rewrite_appearance(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
-    pending: &PendingNodeTransformEdit<'_>,
+    pending: &PendingNodeSceneEdit<'_>,
     keys: SceneStoreKeys,
 ) -> Result<(), StoreRuntimeError> {
     let input = pending.input;
@@ -683,7 +687,7 @@ fn rewrite_appearance(
 
 fn rewrite_geometry(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
-    pending: &PendingNodeTransformEdit<'_>,
+    pending: &PendingNodeSceneEdit<'_>,
     keys: SceneStoreKeys,
 ) -> Result<(), StoreRuntimeError> {
     let input = pending.input;
@@ -725,7 +729,7 @@ fn rewrite_geometry(
 
 fn rewrite_deformation(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
-    pending: &PendingNodeTransformEdit<'_>,
+    pending: &PendingNodeSceneEdit<'_>,
     keys: SceneStoreKeys,
 ) -> Result<(), StoreRuntimeError> {
     let input = pending.input;
@@ -791,7 +795,7 @@ fn rewrite_deformation(
 
 fn rewrite_animation(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
-    pending: &PendingNodeTransformEdit<'_>,
+    pending: &PendingNodeSceneEdit<'_>,
     keys: SceneStoreKeys,
 ) -> Result<(), StoreRuntimeError> {
     let input = pending.input;

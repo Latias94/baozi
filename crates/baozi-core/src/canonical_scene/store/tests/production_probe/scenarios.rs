@@ -12,8 +12,7 @@ use crate::remap::RemapChange;
 
 use super::super::super::construction::activation::SceneActivationTransition;
 use super::super::super::construction::node_scene::edit::{
-    CanonicalRemapSet, NodeTransformEditStart, NodeTransformEditTerminal,
-    try_begin_node_transform_edit,
+    CanonicalRemapSet, NodeSceneEditTerminal, NodeTransformEditStart, try_begin_node_transform_edit,
 };
 use super::super::super::construction::node_scene::snapshot::{
     NodeSceneSnapshotAlgorithm, NodeSceneSnapshotLimits,
@@ -921,7 +920,7 @@ pub(super) fn collect_gltf_capability() -> GltfCapabilityReport {
     let edit_measurement = edit_session
         .finish()
         .expect("glTF changed edit measurement must finish");
-    let NodeTransformEditTerminal::Success(output) =
+    let NodeSceneEditTerminal::Success(output) =
         edit_terminal.expect("glTF changed edit closure must publish a terminal")
     else {
         panic!("valid exact-source glTF node transform edit must publish success");

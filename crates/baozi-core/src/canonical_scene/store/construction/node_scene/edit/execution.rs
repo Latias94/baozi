@@ -15,27 +15,27 @@ use super::super::publication::node_scene_failure_code;
 use super::super::scratch::NodeSceneValidationScratchOwner;
 use super::super::{SceneStoreKeys, SceneStoreOperation};
 use super::graph::{NodeSceneRewriteError, try_rewrite_node_scene};
-use super::plan::PendingNodeTransformEdit;
+use super::plan::PendingNodeSceneEdit;
 use super::publication::{
-    PreparedNodeTransformEdit, prepare_edit_candidate, prepare_edit_minimal_from_assembly,
+    PreparedNodeSceneEdit, prepare_edit_candidate, prepare_edit_minimal_from_assembly,
     prepare_edit_minimal_from_open_recovery, prepare_edit_post_evidence_failure,
     prepare_edit_post_evidence_invariant,
 };
 
 #[derive(Debug, Error)]
-pub(in crate::canonical_scene::store) enum NodeTransformEditPrepareError {
-    #[error("node transform edit operation could not start")]
+pub(in crate::canonical_scene::store) enum NodeSceneEditPrepareError {
+    #[error("node Scene edit operation could not start")]
     Start(#[from] SceneConstructionStartError),
-    #[error("node transform edit construction failed closed")]
+    #[error("node Scene edit construction failed closed")]
     Construction(#[from] SceneConstructionError),
 }
 
-impl PendingNodeTransformEdit<'_> {
+impl PendingNodeSceneEdit<'_> {
     pub(in crate::canonical_scene::store) fn prepare(
         self,
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
-    ) -> Result<PreparedNodeTransformEdit, NodeTransformEditPrepareError> {
+    ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
         self.prepare_with_control_and_generation_source(limits, control, SceneGenerationId::reserve)
     }
 
@@ -44,7 +44,7 @@ impl PendingNodeTransformEdit<'_> {
         self,
         limits: SceneConstructionLimits,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-    ) -> Result<PreparedNodeTransformEdit, NodeTransformEditPrepareError> {
+    ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
         self.prepare_with_control_and_generation_source(
             limits,
             OperationControl::default(),
@@ -57,7 +57,7 @@ impl PendingNodeTransformEdit<'_> {
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-    ) -> Result<PreparedNodeTransformEdit, NodeTransformEditPrepareError> {
+    ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
         let terminal_attribution_slots = self
             .counts
             .canonical_attribution_slots
@@ -168,16 +168,16 @@ impl PendingNodeTransformEdit<'_> {
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-    ) -> Result<PreparedNodeTransformEdit, NodeTransformEditPrepareError> {
+    ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
         self.prepare_with_control_and_generation_source(limits, control, reserve_generation)
     }
 }
 
 fn edit_publication_plan(
     keys: SceneStoreKeys,
-    pending: &PendingNodeTransformEdit<'_>,
+    pending: &PendingNodeSceneEdit<'_>,
 ) -> Result<RetainedStorePublicationPlan, StorePlanError> {
-    let expected_custom_rewrites = if pending.target.requires_node_shape_rewrite() {
+    let expected_custom_rewrites = if pending.program.requires_node_shape_rewrite() {
         3
     } else {
         1

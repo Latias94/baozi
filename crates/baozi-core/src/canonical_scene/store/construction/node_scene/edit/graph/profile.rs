@@ -18,13 +18,13 @@ use crate::canonical_scene::store::schema::profile::{
     ProfileMetadataEntryTableSchema, ProfileOwnerTableSchema, ProfileSegmentTableSchema,
     profile_directory_field, profile_owner_field, profile_provenance_scalar, profile_segment_field,
 };
-use crate::provenance::{DIGEST_LEN, DigestAlgorithm, OperationKind};
+use crate::provenance::{DIGEST_LEN, DigestAlgorithm};
 
 use super::super::super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneWorkMeter, SceneStoreAssembly, SceneStoreKeys,
     process_slice_in_work_chunks,
 };
-use super::super::plan::PendingNodeTransformEdit;
+use super::super::plan::PendingNodeSceneEdit;
 
 #[derive(Clone, Copy)]
 pub(super) struct RewrittenProfileLineageLeaves {
@@ -38,14 +38,14 @@ pub(super) struct RewrittenProfileLineageLeaves {
 
 pub(super) fn rewrite_lineage_leaves<'scene>(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
-    pending: &PendingNodeTransformEdit<'scene>,
+    pending: &PendingNodeSceneEdit<'scene>,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
 ) -> Result<RewrittenProfileLineageLeaves, StoreRuntimeError> {
     let plan = pending.counts.profile;
     let failure = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)
         .map_err(StoreRuntimeError::Plan)?;
-    if !matches!(pending.operation.kind(), OperationKind::Transform)
+    if *pending.operation.kind() != pending.program.operation_kind()
         || pending.operation.evidence().len() != 0
     {
         return Err(StoreRuntimeError::InvalidSourceSlot);
@@ -217,7 +217,7 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
 
 pub(super) fn rewrite_profile_records<'scene>(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
-    pending: &PendingNodeTransformEdit<'scene>,
+    pending: &PendingNodeSceneEdit<'scene>,
     segments: CanonicalBlockRef<ProfileSegmentTableSchema>,
     leaves: RewrittenProfileLineageLeaves,
     keys: SceneStoreKeys,
@@ -342,7 +342,7 @@ pub(super) fn rewrite_profile_records<'scene>(
 
 pub(super) fn rewrite_segments<'scene>(
     assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
-    pending: &PendingNodeTransformEdit<'scene>,
+    pending: &PendingNodeSceneEdit<'scene>,
     leaves: RewrittenProfileLineageLeaves,
     keys: SceneStoreKeys,
     work: &mut NodeSceneWorkMeter,
@@ -394,7 +394,7 @@ pub(super) fn rewrite_segments<'scene>(
 }
 
 fn required_segment_view<'scene>(
-    pending: &'scene PendingNodeTransformEdit<'_>,
+    pending: &'scene PendingNodeSceneEdit<'_>,
 ) -> Result<CanonicalRecordView<'scene>, StoreRuntimeError> {
     let segments = pending
         .input
@@ -410,7 +410,7 @@ fn required_segment_view<'scene>(
 }
 
 fn resolve_qualified_depth(
-    pending: &PendingNodeTransformEdit<'_>,
+    pending: &PendingNodeSceneEdit<'_>,
     segments: &CanonicalRecordView<'_>,
     address: QualifiedProvenanceAddress,
     control: &mut baozi_operation::RetainedStoreWorkControl<

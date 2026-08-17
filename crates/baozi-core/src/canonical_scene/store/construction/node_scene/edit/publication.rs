@@ -33,7 +33,7 @@ type PreparedEditStoreSuccess = PreparedStoreSuccess<
 >;
 type PreparedEditStoreFailure = PreparedStoreFailure<RecordBlock, NodeSceneOutcomeEvidenceSchema>;
 
-pub(super) struct PreparedNodeTransformEditSuccess {
+pub(super) struct PreparedNodeSceneEditSuccess {
     generation: ReservedSceneGeneration,
     store: PreparedEditStoreSuccess,
     proof: crate::canonical_scene::store::validation::NodeSceneValidationProof,
@@ -41,48 +41,48 @@ pub(super) struct PreparedNodeTransformEditSuccess {
     remaps: CanonicalRemapSet,
 }
 
-pub(super) struct PreparedNodeTransformEditRichFailure {
+pub(super) struct PreparedNodeSceneEditRichFailure {
     store: PreparedEditStoreFailure,
 }
 
-pub(super) struct PreparedNodeTransformEditMinimalFallback {
+pub(super) struct PreparedNodeSceneEditMinimalFallback {
     store: PreparedStoreFallback,
 }
 
-#[must_use = "every prepared node transform edit owns an exact frozen publication"]
-pub(in crate::canonical_scene::store) struct PreparedNodeTransformEdit {
-    state: PreparedNodeTransformEditState,
+#[must_use = "every prepared node Scene edit owns an exact frozen publication"]
+pub(in crate::canonical_scene::store) struct PreparedNodeSceneEdit {
+    state: PreparedNodeSceneEditState,
 }
 
 #[allow(
     clippy::large_enum_variant,
     reason = "prepared publication owners remain inline so terminal handoff is allocation-free"
 )]
-enum PreparedNodeTransformEditState {
-    Success(PreparedNodeTransformEditSuccess),
-    RichFailure(PreparedNodeTransformEditRichFailure),
-    MinimalFallback(PreparedNodeTransformEditMinimalFallback),
+enum PreparedNodeSceneEditState {
+    Success(PreparedNodeSceneEditSuccess),
+    RichFailure(PreparedNodeSceneEditRichFailure),
+    MinimalFallback(PreparedNodeSceneEditMinimalFallback),
 }
 
-pub(in crate::canonical_scene::store) struct NodeTransformEditReport {
+pub(in crate::canonical_scene::store) struct NodeSceneEditReport {
     invalidations: CanonicalInvalidations,
     remaps: CanonicalRemapSet,
     outcome_evidence: PublishedOutcomeEvidenceStore<RecordBlock, NodeSceneOutcomeEvidenceSchema>,
     ledger_evidence: StoreLedgerEvidence,
 }
 
-pub(in crate::canonical_scene::store) struct NodeTransformEditSuccessParts {
+pub(in crate::canonical_scene::store) struct NodeSceneEditSuccessParts {
     pub(in crate::canonical_scene::store) scene: ValidatedNodeScene,
-    pub(in crate::canonical_scene::store) report: NodeTransformEditReport,
+    pub(in crate::canonical_scene::store) report: NodeSceneEditReport,
 }
 
-#[must_use = "the terminal owns the exact node transform edit outcome"]
+#[must_use = "the terminal owns the exact node Scene edit outcome"]
 #[allow(
     clippy::large_enum_variant,
     reason = "published Scene and evidence owners remain inline so handoff is a pure ownership move"
 )]
-pub(in crate::canonical_scene::store) enum NodeTransformEditTerminal {
-    Success(NodeTransformEditSuccessParts),
+pub(in crate::canonical_scene::store) enum NodeSceneEditTerminal {
+    Success(NodeSceneEditSuccessParts),
     RichFailure(NodeSceneRichFailure),
     MinimalFallback(TracerSceneFallback),
 }
@@ -99,7 +99,7 @@ pub(super) fn prepare_edit_candidate<'scene>(
     deformation_uniqueness_mark_count: usize,
     invalidations: CanonicalInvalidations,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     let RewrittenNodeSceneGraph {
         directory,
         evidence,
@@ -160,8 +160,8 @@ pub(super) fn prepare_edit_candidate<'scene>(
         }
         StoreControlledSuccessValidation::FallbackOnly(fallback) => {
             let store = fallback.prepare_minimal_fallback()?;
-            Ok(PreparedNodeTransformEdit::minimal_fallback(
-                PreparedNodeTransformEditMinimalFallback { store },
+            Ok(PreparedNodeSceneEdit::minimal_fallback(
+                PreparedNodeSceneEditMinimalFallback { store },
             ))
         }
     }
@@ -173,7 +173,7 @@ fn prepare_validated_edit(
     input_generation: SceneGenerationId,
     invalidations: CanonicalInvalidations,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     let generation = match reserve_generation() {
         Ok(generation) => generation,
         Err(SceneGenerationError::Exhausted) => {
@@ -197,8 +197,8 @@ fn prepare_validated_edit(
     };
 
     match store.try_prepare(final_progress())? {
-        PreparedStoreSuccessOutcome::Success(store) => Ok(PreparedNodeTransformEdit::success(
-            PreparedNodeTransformEditSuccess {
+        PreparedStoreSuccessOutcome::Success(store) => Ok(PreparedNodeSceneEdit::success(
+            PreparedNodeSceneEditSuccess {
                 generation,
                 store,
                 proof,
@@ -208,14 +208,14 @@ fn prepare_validated_edit(
         )),
         PreparedStoreSuccessOutcome::RichFailure(store) => {
             burn_generation_reservation(generation);
-            Ok(PreparedNodeTransformEdit::rich_failure(
-                PreparedNodeTransformEditRichFailure { store },
+            Ok(PreparedNodeSceneEdit::rich_failure(
+                PreparedNodeSceneEditRichFailure { store },
             ))
         }
         PreparedStoreSuccessOutcome::MinimalFallback(store) => {
             burn_generation_reservation(generation);
-            Ok(PreparedNodeTransformEdit::minimal_fallback(
-                PreparedNodeTransformEditMinimalFallback { store },
+            Ok(PreparedNodeSceneEdit::minimal_fallback(
+                PreparedNodeSceneEditMinimalFallback { store },
             ))
         }
     }
@@ -225,7 +225,7 @@ fn prepare_edit_rich_failure(
     failure: super::super::NodeSceneStoreFailureAssembly,
     counts: SceneEvidenceCounts,
     cause: u32,
-) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     let evidence = failure.evidence_root();
     finish_edit_rich_failure_validation(
         failure.validate_rich_failure(evidence, |session, evidence| {
@@ -240,7 +240,7 @@ pub(super) fn prepare_edit_post_evidence_failure<L>(
     evidence: baozi_operation::OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     counts: SceneEvidenceCounts,
     cause: StoreRuntimeError,
-) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     match super::super::publication::post_evidence_failure_code(&cause) {
         Some(cause) => prepare_edit_rich_failure_from_assembly(assembly, evidence, counts, cause),
         None => prepare_edit_minimal_from_assembly(
@@ -254,7 +254,7 @@ pub(super) fn prepare_edit_post_evidence_invariant<L>(
     assembly: SceneStoreAssembly<L>,
     evidence: baozi_operation::OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     counts: SceneEvidenceCounts,
-) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     prepare_edit_rich_failure_from_assembly(
         assembly,
         evidence,
@@ -268,7 +268,7 @@ fn prepare_edit_rich_failure_from_assembly<L>(
     evidence: baozi_operation::OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
     counts: SceneEvidenceCounts,
     cause: u32,
-) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     finish_edit_rich_failure_validation(
         assembly.validate_rich_failure(evidence, |session, evidence| {
             validate_node_scene_evidence_graph(session, evidence, counts)
@@ -280,21 +280,21 @@ fn prepare_edit_rich_failure_from_assembly<L>(
 fn finish_edit_rich_failure_validation(
     validation: NodeSceneStoreFailureValidation,
     cause: u32,
-) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     match validation {
         StoreFailureValidation::Valid(validated) => {
             map_prepared_failure(validated.try_prepare(cause, final_progress())?)
         }
         StoreFailureValidation::Rejected(rejected) => {
             let store = rejected.prepare_minimal_fallback_with(cause)?;
-            Ok(PreparedNodeTransformEdit::minimal_fallback(
-                PreparedNodeTransformEditMinimalFallback { store },
+            Ok(PreparedNodeSceneEdit::minimal_fallback(
+                PreparedNodeSceneEditMinimalFallback { store },
             ))
         }
         StoreFailureValidation::FallbackOnly(fallback) => {
             let store = fallback.prepare_minimal_fallback()?;
-            Ok(PreparedNodeTransformEdit::minimal_fallback(
-                PreparedNodeTransformEditMinimalFallback { store },
+            Ok(PreparedNodeSceneEdit::minimal_fallback(
+                PreparedNodeSceneEditMinimalFallback { store },
             ))
         }
     }
@@ -302,35 +302,33 @@ fn finish_edit_rich_failure_validation(
 
 fn map_prepared_failure(
     prepared: PreparedStoreFailureOutcome<RecordBlock, NodeSceneOutcomeEvidenceSchema>,
-) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     Ok(match prepared {
         PreparedStoreFailureOutcome::RichFailure(store) => {
-            PreparedNodeTransformEdit::rich_failure(PreparedNodeTransformEditRichFailure { store })
+            PreparedNodeSceneEdit::rich_failure(PreparedNodeSceneEditRichFailure { store })
         }
         PreparedStoreFailureOutcome::MinimalFallback(store) => {
-            PreparedNodeTransformEdit::minimal_fallback(PreparedNodeTransformEditMinimalFallback {
-                store,
-            })
+            PreparedNodeSceneEdit::minimal_fallback(PreparedNodeSceneEditMinimalFallback { store })
         }
     })
 }
 
 pub(super) fn prepare_edit_minimal_from_open_recovery<L>(
     recovery: SceneStoreOpenRecovery<L>,
-) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     let store = recovery.prepare_minimal_fallback_with(node_scene_failure_code)?;
-    Ok(PreparedNodeTransformEdit::minimal_fallback(
-        PreparedNodeTransformEditMinimalFallback { store },
+    Ok(PreparedNodeSceneEdit::minimal_fallback(
+        PreparedNodeSceneEditMinimalFallback { store },
     ))
 }
 
 pub(super) fn prepare_edit_minimal_from_assembly<L>(
     assembly: SceneStoreAssembly<L>,
     cause: u32,
-) -> Result<PreparedNodeTransformEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     let store = assembly.prepare_minimal_fallback_with(cause)?;
-    Ok(PreparedNodeTransformEdit::minimal_fallback(
-        PreparedNodeTransformEditMinimalFallback { store },
+    Ok(PreparedNodeSceneEdit::minimal_fallback(
+        PreparedNodeSceneEditMinimalFallback { store },
     ))
 }
 
@@ -344,31 +342,31 @@ fn interruption_code(cause: &StoreWorkError) -> u32 {
     }
 }
 
-impl PreparedNodeTransformEdit {
-    fn success(prepared: PreparedNodeTransformEditSuccess) -> Self {
+impl PreparedNodeSceneEdit {
+    fn success(prepared: PreparedNodeSceneEditSuccess) -> Self {
         Self {
-            state: PreparedNodeTransformEditState::Success(prepared),
+            state: PreparedNodeSceneEditState::Success(prepared),
         }
     }
 
-    fn rich_failure(prepared: PreparedNodeTransformEditRichFailure) -> Self {
+    fn rich_failure(prepared: PreparedNodeSceneEditRichFailure) -> Self {
         Self {
-            state: PreparedNodeTransformEditState::RichFailure(prepared),
+            state: PreparedNodeSceneEditState::RichFailure(prepared),
         }
     }
 
-    fn minimal_fallback(prepared: PreparedNodeTransformEditMinimalFallback) -> Self {
+    fn minimal_fallback(prepared: PreparedNodeSceneEditMinimalFallback) -> Self {
         Self {
-            state: PreparedNodeTransformEditState::MinimalFallback(prepared),
+            state: PreparedNodeSceneEditState::MinimalFallback(prepared),
         }
     }
 
-    pub(in crate::canonical_scene::store) fn handoff(self) -> NodeTransformEditTerminal {
+    pub(in crate::canonical_scene::store) fn handoff(self) -> NodeSceneEditTerminal {
         match self.state {
-            PreparedNodeTransformEditState::Success(prepared) => {
+            PreparedNodeSceneEditState::Success(prepared) => {
                 let generation = prepared.generation.into_id();
                 let published = prepared.store.handoff();
-                NodeTransformEditTerminal::Success(NodeTransformEditSuccessParts {
+                NodeSceneEditTerminal::Success(NodeSceneEditSuccessParts {
                     scene: ValidatedNodeScene {
                         generation,
                         canonical: published.canonical,
@@ -376,7 +374,7 @@ impl PreparedNodeTransformEdit {
                         #[cfg(test)]
                         semantic_read_fault: None,
                     },
-                    report: NodeTransformEditReport {
+                    report: NodeSceneEditReport {
                         invalidations: prepared.invalidations,
                         remaps: prepared.remaps,
                         outcome_evidence: published.outcome_evidence,
@@ -384,16 +382,16 @@ impl PreparedNodeTransformEdit {
                     },
                 })
             }
-            PreparedNodeTransformEditState::RichFailure(prepared) => {
+            PreparedNodeSceneEditState::RichFailure(prepared) => {
                 let published = prepared.store.handoff();
-                NodeTransformEditTerminal::RichFailure(NodeSceneRichFailure {
+                NodeSceneEditTerminal::RichFailure(NodeSceneRichFailure {
                     outcome_evidence: published.outcome_evidence,
                     ledger_evidence: published.ledger_evidence,
                 })
             }
-            PreparedNodeTransformEditState::MinimalFallback(prepared) => {
+            PreparedNodeSceneEditState::MinimalFallback(prepared) => {
                 let published = prepared.store.handoff();
-                NodeTransformEditTerminal::MinimalFallback(TracerSceneFallback {
+                NodeSceneEditTerminal::MinimalFallback(TracerSceneFallback {
                     fallback: published.fallback,
                     ledger_evidence: published.ledger_evidence,
                 })
@@ -402,7 +400,7 @@ impl PreparedNodeTransformEdit {
     }
 }
 
-impl NodeTransformEditReport {
+impl NodeSceneEditReport {
     pub(in crate::canonical_scene::store) const fn invalidations(&self) -> CanonicalInvalidations {
         self.invalidations
     }
