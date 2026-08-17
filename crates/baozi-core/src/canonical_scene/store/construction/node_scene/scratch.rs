@@ -29,6 +29,7 @@ use crate::canonical_scene::store::validation::{
     GeometryPrimitiveValidationProjection, GeometryPrimitiveValidationScratch,
     GeometryValidationScratch, GeometryValidationScratchRequirements, NodeNameValidationScratch,
     NodeSceneValidationScratch, ProfileMeteredCounts, ProfileMeteredScratch,
+    ProfileSegmentValidationScratch,
 };
 
 use super::super::SceneConstructionOwner;
@@ -135,6 +136,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
     animation_clip_descriptors: CapacityPlan,
     animation_channel_descriptors: CapacityPlan,
     animation_target_marks: CapacityPlan,
+    profile_segments: CapacityPlan,
     profile_resources: CapacityPlan,
     profile_sources: CapacityPlan,
     profile_provenance: CapacityPlan,
@@ -283,6 +285,9 @@ impl NodeSceneValidationScratchPlan {
         >(animation_requirements.channel_descriptors)?;
         let animation_target_marks =
             scratch_capacity_plan::<u32>(animation_requirements.target_marks)?;
+        let profile_segments = scratch_capacity_plan::<ProfileSegmentValidationScratch<'static>>(
+            profile_count(profile_counts.segment_count)?,
+        )?;
         let profile_resources = scratch_capacity_plan::<u32>(profile_physical_count(
             profile_counts.resource_count,
             PROFILE_RESOURCE_SCALAR_COUNT,
@@ -366,6 +371,7 @@ impl NodeSceneValidationScratchPlan {
             animation_clip_descriptors,
             animation_channel_descriptors,
             animation_target_marks,
+            profile_segments,
             profile_resources,
             profile_sources,
             profile_provenance,
@@ -476,6 +482,7 @@ impl NodeSceneValidationScratchPlan {
             animation_clip_descriptors,
             animation_channel_descriptors,
             animation_target_marks,
+            profile_segments,
             profile_resources,
             profile_sources,
             profile_provenance,
@@ -618,6 +625,7 @@ pub(in crate::canonical_scene::store) struct ScopedNodeSceneValidationScratchOwn
     animation_clip_descriptors: Vec<AnimationClipValidationDescriptor>,
     animation_channel_descriptors: Vec<AnimationChannelValidationDescriptor>,
     animation_target_marks: Vec<u32>,
+    profile_segments: Vec<ProfileSegmentValidationScratch<'session>>,
     profile_resources: Vec<u32>,
     profile_sources: Vec<u32>,
     profile_provenance: Vec<u32>,
@@ -650,7 +658,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneMeteredValidationScratch<'
     pub(in crate::canonical_scene::store) geometry: GeometryValidationScratch<'scratch, 'session>,
     pub(in crate::canonical_scene::store) deformation: DeformationValidationScratch<'scratch>,
     pub(in crate::canonical_scene::store) animation: AnimationValidationScratch<'scratch>,
-    pub(in crate::canonical_scene::store) profile: ProfileMeteredScratch<'scratch>,
+    pub(in crate::canonical_scene::store) profile: ProfileMeteredScratch<'scratch, 'session>,
 }
 
 impl<'session, 'scope, O> ScopedNodeSceneValidationScratchOwner<'session, 'scope, O>
@@ -711,6 +719,7 @@ where
         let animation_clip_descriptors = allocate!(animation_clip_descriptors);
         let animation_channel_descriptors = allocate!(animation_channel_descriptors);
         let animation_target_marks = allocate!(animation_target_marks);
+        let profile_segments = allocate!(profile_segments);
         let profile_resources = allocate!(profile_resources);
         let profile_sources = allocate!(profile_sources);
         let profile_provenance = allocate!(profile_provenance);
@@ -761,6 +770,7 @@ where
             animation_clip_descriptors,
             animation_channel_descriptors,
             animation_target_marks,
+            profile_segments,
             profile_resources,
             profile_sources,
             profile_provenance,
@@ -877,6 +887,7 @@ where
             AnimationChannelValidationDescriptor::EMPTY
         );
         initialize!(animation_target_marks, 0);
+        initialize!(profile_segments, ProfileSegmentValidationScratch::EMPTY);
         initialize!(profile_resources, 0);
         initialize!(profile_sources, 0);
         initialize!(profile_provenance, 0);
@@ -940,6 +951,7 @@ where
                 &mut self.animation_target_marks,
             ),
             profile: ProfileMeteredScratch {
+                segments: &mut self.profile_segments,
                 resources: &mut self.profile_resources,
                 sources: &mut self.profile_sources,
                 provenance: &mut self.profile_provenance,
@@ -1064,8 +1076,11 @@ where
         plan.profile_counts
     }
 
-    pub(in crate::canonical_scene::store) fn profile_view(&mut self) -> ProfileMeteredScratch<'_> {
+    pub(in crate::canonical_scene::store) fn profile_view(
+        &mut self,
+    ) -> ProfileMeteredScratch<'_, 'session> {
         ProfileMeteredScratch {
+            segments: &mut self.profile_segments,
             resources: &mut self.profile_resources,
             sources: &mut self.profile_sources,
             provenance: &mut self.profile_provenance,

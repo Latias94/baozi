@@ -1025,6 +1025,7 @@ fn try_node_transform_profile_counts(
         }
     })?;
     Ok(ProfileMeteredCounts {
+        segment_count: output_evidence.profile_segment_count,
         resource_count: source.resource_count,
         source_count: source.source_count,
         provenance_count: output_evidence.profile_provenance_count,

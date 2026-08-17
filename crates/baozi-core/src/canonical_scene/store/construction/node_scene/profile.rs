@@ -333,6 +333,7 @@ impl ProfileMaterializationPlans {
 
     pub(super) fn metered_counts(&self) -> Result<ProfileMeteredCounts, StorePlanError> {
         Ok(ProfileMeteredCounts {
+            segment_count: 1,
             resource_count: self.evidence_counts.resources,
             source_count: self.evidence_counts.sources,
             provenance_count: self.evidence_counts.provenance,
@@ -424,7 +425,7 @@ pub(in crate::canonical_scene::store) struct RetainedProfileRefs {
     pub(in crate::canonical_scene::store) directory: CanonicalBlockRef<ProfileDirectorySchema>,
     pub(in crate::canonical_scene::store) segments: CanonicalBlockRef<ProfileSegmentTableSchema>,
     pub(in crate::canonical_scene::store) owners: CanonicalBlockRef<ProfileOwnerTableSchema>,
-    pub(in crate::canonical_scene::store) lineage: ProfileLeafRefs,
+    pub(in crate::canonical_scene::store) lineage: ProfileLineageMaterializedRefs,
     pub(in crate::canonical_scene::store) metadata: metadata::RetainedMetadataRefs,
 }
 
@@ -470,7 +471,7 @@ where
         directory,
         segments,
         owners,
-        lineage,
+        lineage: ProfileLineageMaterializedRefs::ExactSingle(lineage),
         metadata,
     })
 }
@@ -583,6 +584,31 @@ pub(in crate::canonical_scene::store) struct ProfileLeafRefs {
         Option<CanonicalBlockRef<ProfileLineageDigestSchema>>,
     pub(in crate::canonical_scene::store) attachments:
         Option<CanonicalBlockRef<ProfileLineageAttachmentSchema>>,
+}
+
+/// Independently retained lineage members expected from one materialized profile graph.
+///
+/// Fresh construction owns one exact segment. Derived edits map an already validated prefix and
+/// append one exact segment while replacing the generation-wide attachment member.
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) enum ProfileLineageMaterializedRefs {
+    ExactSingle(ProfileLeafRefs),
+    MappedPrefixAndAppend {
+        prefix_segment_count: u32,
+        appended: ProfileLeafRefs,
+    },
+}
+
+impl ProfileLineageMaterializedRefs {
+    pub(in crate::canonical_scene::store) const fn attachments(
+        self,
+    ) -> Option<CanonicalBlockRef<ProfileLineageAttachmentSchema>> {
+        match self {
+            Self::ExactSingle(refs) | Self::MappedPrefixAndAppend { appended: refs, .. } => {
+                refs.attachments
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

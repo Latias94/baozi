@@ -8,6 +8,9 @@ use baozi_operation::{
 };
 
 use crate::SCENE_VALIDATION_POLL_INTERVAL;
+use crate::canonical_scene::store::construction::node_scene::{
+    ProfileLeafRefs, ProfileLineageMaterializedRefs,
+};
 use crate::canonical_scene::store::production::{
     CanonicalProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ResourceIdentityStability,
     SessionOpaqueReason, ValidatedProfileBatch,
@@ -137,30 +140,6 @@ pub(super) struct ProfileValidatedMembers<'session> {
     pub(super) directory: CanonicalValidationMember<'session, RecordBlock, ProfileDirectorySchema>,
     pub(super) segments:
         CanonicalValidationMember<'session, RecordBlock, ProfileSegmentTableSchema>,
-    pub(super) resources: Option<
-        CanonicalValidationMember<'session, ScalarSequence<u32>, ProfileLineageResourceSchema>,
-    >,
-    pub(super) sources: Option<
-        CanonicalValidationMember<'session, ScalarSequence<u32>, ProfileLineageSourceSchema>,
-    >,
-    pub(super) provenance: Option<
-        CanonicalValidationMember<'session, ScalarSequence<u32>, ProfileLineageProvenanceSchema>,
-    >,
-    pub(super) operations: Option<
-        CanonicalValidationMember<'session, ScalarSequence<u32>, ProfileLineageOperationSchema>,
-    >,
-    pub(super) evidence: Option<
-        CanonicalValidationMember<'session, ScalarSequence<u32>, ProfileLineageEvidenceSchema>,
-    >,
-    pub(super) parents: Option<
-        CanonicalValidationMember<'session, ScalarSequence<u64>, ProfileLineageParentSchema>,
-    >,
-    pub(super) wide:
-        Option<CanonicalValidationMember<'session, ScalarSequence<u64>, ProfileLineageWideSchema>>,
-    pub(super) lineage_text:
-        Option<CanonicalValidationMember<'session, Utf8Block, ProfileLineageTextSchema>>,
-    pub(super) lineage_digests:
-        Option<CanonicalValidationMember<'session, ByteBlock, ProfileLineageDigestSchema>>,
     pub(super) owners: CanonicalValidationMember<'session, RecordBlock, ProfileOwnerTableSchema>,
     pub(super) attachments:
         CanonicalValidationMember<'session, ScalarSequence<u64>, ProfileLineageAttachmentSchema>,
@@ -215,6 +194,7 @@ pub(super) struct ProfileValidatedMembers<'session> {
 /// and exists solely to bind scratch sizes and the exact central-validation work envelope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::canonical_scene::store) struct ProfileMeteredCounts {
+    pub(in crate::canonical_scene::store) segment_count: u32,
     pub(in crate::canonical_scene::store) resource_count: u32,
     pub(in crate::canonical_scene::store) source_count: u32,
     pub(in crate::canonical_scene::store) provenance_count: u32,
@@ -248,6 +228,10 @@ impl ProfileMeteredCounts {
         let f32_bytes = u64::try_from(std::mem::size_of::<f32>()).ok()?;
         let address_scalars = u64::try_from(PROFILE_PROVENANCE_ADDRESS_SCALARS).ok()?;
         [
+            u64::from(self.segment_count).checked_mul(
+                u64::try_from(std::mem::size_of::<ProfileSegmentValidationScratch<'static>>())
+                    .ok()?,
+            )?,
             u64::from(self.resource_count)
                 .checked_mul(u64::try_from(PROFILE_RESOURCE_SCALAR_COUNT).ok()?)?
                 .checked_mul(u32_bytes)?,
@@ -295,7 +279,8 @@ impl ProfileMeteredCounts {
         let address_scalars = u64::try_from(PROFILE_PROVENANCE_ADDRESS_SCALARS).ok()?;
         [
             u64::try_from(PROFILE_DIRECTORY_FIELD_COUNT).ok()?,
-            u64::try_from(PROFILE_SEGMENT_FIELD_COUNT).ok()?,
+            u64::from(self.segment_count)
+                .checked_mul(u64::try_from(PROFILE_SEGMENT_FIELD_COUNT).ok()?)?,
             u64::from(self.resource_count)
                 .checked_mul(u64::try_from(PROFILE_RESOURCE_SCALAR_COUNT).ok()?)?,
             u64::from(self.source_count)
@@ -331,6 +316,7 @@ impl ProfileMeteredCounts {
     pub(in crate::canonical_scene::store) fn scratch_initialization_work(self) -> Option<u64> {
         let address_scalars = u64::try_from(PROFILE_PROVENANCE_ADDRESS_SCALARS).ok()?;
         [
+            u64::from(self.segment_count),
             u64::from(self.resource_count)
                 .checked_mul(u64::try_from(PROFILE_RESOURCE_SCALAR_COUNT).ok()?)?,
             u64::from(self.source_count)
@@ -385,7 +371,9 @@ impl ProfileMeteredCounts {
 }
 
 /// Reservation-backed projection used while canonical profile members are visited exactly once.
-pub(in crate::canonical_scene::store) struct ProfileMeteredScratch<'scratch> {
+pub(in crate::canonical_scene::store) struct ProfileMeteredScratch<'scratch, 'session> {
+    pub(in crate::canonical_scene::store) segments:
+        &'scratch mut [ProfileSegmentValidationScratch<'session>],
     pub(in crate::canonical_scene::store) resources: &'scratch mut [u32],
     pub(in crate::canonical_scene::store) sources: &'scratch mut [u32],
     pub(in crate::canonical_scene::store) provenance: &'scratch mut [u32],
@@ -448,7 +436,7 @@ struct ProfileTotals {
     payload_leaves: u32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct SegmentCounts {
     resources: u32,
     sources: u32,
@@ -459,6 +447,79 @@ struct SegmentCounts {
     wide: u32,
     text: u32,
     digests: u32,
+}
+
+/// Reservation-backed descriptor for one typed profile segment.
+///
+/// The descriptor keeps each segment's address domain and typed members adjacent to the
+/// aggregate scratch ranges populated from those members. It is initialized inside the exact
+/// validation permit and cannot outlive that validation session.
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct ProfileSegmentValidationScratch<'session> {
+    counts: SegmentCounts,
+    prefixes: ProfileTotals,
+    domain: Option<ProfileSegmentAddressDomain>,
+    resources: Option<
+        CanonicalValidationMember<'session, ScalarSequence<u32>, ProfileLineageResourceSchema>,
+    >,
+    sources: Option<
+        CanonicalValidationMember<'session, ScalarSequence<u32>, ProfileLineageSourceSchema>,
+    >,
+    provenance: Option<
+        CanonicalValidationMember<'session, ScalarSequence<u32>, ProfileLineageProvenanceSchema>,
+    >,
+    operations: Option<
+        CanonicalValidationMember<'session, ScalarSequence<u32>, ProfileLineageOperationSchema>,
+    >,
+    evidence: Option<
+        CanonicalValidationMember<'session, ScalarSequence<u32>, ProfileLineageEvidenceSchema>,
+    >,
+    parents: Option<
+        CanonicalValidationMember<'session, ScalarSequence<u64>, ProfileLineageParentSchema>,
+    >,
+    wide:
+        Option<CanonicalValidationMember<'session, ScalarSequence<u64>, ProfileLineageWideSchema>>,
+    text: Option<CanonicalValidationMember<'session, Utf8Block, ProfileLineageTextSchema>>,
+    digests: Option<CanonicalValidationMember<'session, ByteBlock, ProfileLineageDigestSchema>>,
+}
+
+impl ProfileSegmentValidationScratch<'static> {
+    pub(in crate::canonical_scene::store) const EMPTY: Self = Self {
+        counts: SegmentCounts {
+            resources: 0,
+            sources: 0,
+            provenance: 0,
+            operations: 0,
+            evidence: 0,
+            parents: 0,
+            wide: 0,
+            text: 0,
+            digests: 0,
+        },
+        prefixes: ProfileTotals {
+            resources: 0,
+            sources: 0,
+            provenance: 0,
+            operations: 0,
+            evidence: 0,
+            parents: 0,
+            wide: 0,
+            text: 0,
+            digests: 0,
+            shareable_leaves: 0,
+            payload_leaves: 0,
+        },
+        domain: None,
+        resources: None,
+        sources: None,
+        provenance: None,
+        operations: None,
+        evidence: None,
+        parents: None,
+        wide: None,
+        text: None,
+        digests: None,
+    };
 }
 
 impl SegmentCounts {
@@ -521,12 +582,13 @@ fn metered_physical_len(count: u32, stride: usize) -> Option<usize> {
 
 fn metered_scratch_matches(
     counts: ProfileMeteredCounts,
-    scratch: &ProfileMeteredScratch<'_>,
+    scratch: &ProfileMeteredScratch<'_, '_>,
 ) -> bool {
     let address_stride = PROFILE_PROVENANCE_ADDRESS_SCALARS;
-    scratch.resources.len()
-        == metered_physical_len(counts.resource_count, PROFILE_RESOURCE_SCALAR_COUNT)
-            .unwrap_or(usize::MAX)
+    scratch.segments.len() == usize::try_from(counts.segment_count).unwrap_or(usize::MAX)
+        && scratch.resources.len()
+            == metered_physical_len(counts.resource_count, PROFILE_RESOURCE_SCALAR_COUNT)
+                .unwrap_or(usize::MAX)
         && scratch.sources.len()
             == metered_physical_len(counts.source_count, PROFILE_SOURCE_SCALAR_COUNT)
                 .unwrap_or(usize::MAX)
@@ -781,12 +843,360 @@ fn metered_metadata_shape(
     })
 }
 
+fn optional_lineage_member_identifies<Kind, Tag>(
+    member: Option<CanonicalValidationMember<'_, Kind, Tag>>,
+    slot: Option<CanonicalBlockRef<Tag>>,
+) -> bool
+where
+    Tag: CanonicalSchema<StoreKind = Kind>,
+{
+    match (member, slot) {
+        (Some(member), Some(slot)) => member.identifies(slot.into_store()),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn segment_lineage_identifies(
+    segment: ProfileSegmentValidationScratch<'_>,
+    expected: ProfileLeafRefs,
+) -> bool {
+    optional_lineage_member_identifies(segment.resources, expected.resources)
+        && optional_lineage_member_identifies(segment.sources, expected.sources)
+        && optional_lineage_member_identifies(segment.provenance, expected.provenance)
+        && optional_lineage_member_identifies(segment.operations, expected.operations)
+        && optional_lineage_member_identifies(segment.evidence, expected.evidence)
+        && optional_lineage_member_identifies(segment.parents, expected.parents)
+        && optional_lineage_member_identifies(segment.wide, expected.wide)
+        && optional_lineage_member_identifies(segment.text, expected.text)
+        && optional_lineage_member_identifies(segment.digests, expected.digests)
+}
+
+fn materialized_lineage_identifies(
+    segments: &[ProfileSegmentValidationScratch<'_>],
+    expected: ProfileLineageMaterializedRefs,
+) -> bool {
+    match expected {
+        ProfileLineageMaterializedRefs::ExactSingle(expected) => {
+            let [segment] = segments else {
+                return false;
+            };
+            segment_lineage_identifies(*segment, expected)
+        }
+        ProfileLineageMaterializedRefs::MappedPrefixAndAppend {
+            prefix_segment_count,
+            appended,
+        } => usize::try_from(prefix_segment_count)
+            .ok()
+            .and_then(|prefix| {
+                (segments.len() == prefix.checked_add(1)?)
+                    .then(|| segments.get(prefix).copied())
+                    .flatten()
+            })
+            .is_some_and(|segment| segment_lineage_identifies(segment, appended)),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn read_profile_segments_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    segments: CanonicalValidationMember<'session, RecordBlock, ProfileSegmentTableSchema>,
+    counts: ProfileMeteredCounts,
+    output: &mut [ProfileSegmentValidationScratch<'session>],
+) -> Result<Option<ProfileTotals>, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let mut totals = ProfileTotals::default();
+    let mut previous_nonce = None;
+    let complete = session.visit_canonical_records(
+        segments,
+        usize::try_from(counts.segment_count).unwrap_or(usize::MAX),
+        PROFILE_SEGMENT_FIELD_COUNT,
+        |row_index, row| {
+            let ordinal = row.scalar(profile_segment_field::SEGMENT, |value: u32| value)?;
+            let resources_count =
+                row.scalar(profile_segment_field::RESOURCE_COUNT, |value: u32| value)?;
+            let sources_count =
+                row.scalar(profile_segment_field::SOURCE_COUNT, |value: u32| value)?;
+            let provenance_count =
+                row.scalar(profile_segment_field::PROVENANCE_COUNT, |value: u32| value)?;
+            let operations_count =
+                row.scalar(profile_segment_field::OPERATION_COUNT, |value: u32| value)?;
+            let evidence_count =
+                row.scalar(profile_segment_field::EVIDENCE_COUNT, |value: u32| value)?;
+            let parents_count =
+                row.scalar(profile_segment_field::PARENT_COUNT, |value: u32| value)?;
+            let wide_count = row.scalar(profile_segment_field::WIDE_COUNT, |value: u32| value)?;
+            let text_count = row.scalar(profile_segment_field::TEXT_COUNT, |value: u32| value)?;
+            let digest_count =
+                row.scalar(profile_segment_field::DIGEST_COUNT, |value: u32| value)?;
+            let nonce = row.scalar(profile_segment_field::NONCE, |value: u64| value)?;
+            let provenance_base =
+                row.scalar(profile_segment_field::PROVENANCE_BASE, |value: u32| value)?;
+            let (
+                Some(ordinal),
+                Some(resources_count),
+                Some(sources_count),
+                Some(provenance_count),
+                Some(operations_count),
+                Some(evidence_count),
+                Some(parents_count),
+                Some(wide_count),
+                Some(text_count),
+                Some(digest_count),
+                Some(nonce),
+                Some(provenance_base),
+            ) = (
+                ordinal,
+                resources_count,
+                sources_count,
+                provenance_count,
+                operations_count,
+                evidence_count,
+                parents_count,
+                wide_count,
+                text_count,
+                digest_count,
+                nonce,
+                provenance_base,
+            )
+            else {
+                return Ok(false);
+            };
+
+            let mut valid = true;
+            macro_rules! sequence_member {
+                ($count:expr, $field:expr, $scalar:ty, $schema:ty) => {{
+                    if $count == 0 {
+                        let absent = row.scalar($field, |value: u8| value)?;
+                        valid &= absent == Some(PROFILE_ABSENT_REFERENCE);
+                        None
+                    } else {
+                        row.sequence_ref::<$scalar, $schema, _>($field, |value| value)?
+                    }
+                }};
+            }
+            macro_rules! utf8_member {
+                ($count:expr, $field:expr, $schema:ty) => {{
+                    if $count == 0 {
+                        let absent = row.scalar($field, |value: u8| value)?;
+                        valid &= absent == Some(PROFILE_ABSENT_REFERENCE);
+                        None
+                    } else {
+                        row.utf8_ref::<$schema, _>($field, |value| value)?
+                    }
+                }};
+            }
+            macro_rules! bytes_member {
+                ($count:expr, $field:expr, $schema:ty) => {{
+                    if $count == 0 {
+                        let absent = row.scalar($field, |value: u8| value)?;
+                        valid &= absent == Some(PROFILE_ABSENT_REFERENCE);
+                        None
+                    } else {
+                        row.bytes_ref::<$schema, _>($field, |value| value)?
+                    }
+                }};
+            }
+
+            let resources = sequence_member!(
+                resources_count,
+                profile_segment_field::RESOURCES,
+                u32,
+                ProfileLineageResourceSchema
+            );
+            let sources = sequence_member!(
+                sources_count,
+                profile_segment_field::SOURCES,
+                u32,
+                ProfileLineageSourceSchema
+            );
+            let provenance = sequence_member!(
+                provenance_count,
+                profile_segment_field::PROVENANCE_NODES,
+                u32,
+                ProfileLineageProvenanceSchema
+            );
+            let operations = sequence_member!(
+                operations_count,
+                profile_segment_field::OPERATIONS,
+                u32,
+                ProfileLineageOperationSchema
+            );
+            let evidence = sequence_member!(
+                evidence_count,
+                profile_segment_field::EVIDENCE,
+                u32,
+                ProfileLineageEvidenceSchema
+            );
+            let parents = sequence_member!(
+                parents_count,
+                profile_segment_field::PARENTS,
+                u64,
+                ProfileLineageParentSchema
+            );
+            let wide = sequence_member!(
+                wide_count,
+                profile_segment_field::WIDE_VALUES,
+                u64,
+                ProfileLineageWideSchema
+            );
+            let text = utf8_member!(
+                text_count,
+                profile_segment_field::TEXTS,
+                ProfileLineageTextSchema
+            );
+            let digests = bytes_member!(
+                digest_count,
+                profile_segment_field::DIGESTS,
+                ProfileLineageDigestSchema
+            );
+            let Some(nonce) = ProfileSegmentNonce::from_stored(nonce) else {
+                return Ok(false);
+            };
+            let segment_counts = SegmentCounts {
+                resources: resources_count,
+                sources: sources_count,
+                provenance: provenance_count,
+                operations: operations_count,
+                evidence: evidence_count,
+                parents: parents_count,
+                wide: wide_count,
+                text: text_count,
+                digests: digest_count,
+            };
+            let expected_ordinal = match u32::try_from(row_index) {
+                Ok(value) => value,
+                Err(_) => return Ok(false),
+            };
+            if !valid
+                || ordinal != expected_ordinal
+                || provenance_base != totals.provenance
+                || previous_nonce.is_some_and(|previous| nonce <= previous)
+                || segment_counts.is_empty()
+            {
+                return Ok(false);
+            }
+            let Some(destination) = output.get_mut(row_index) else {
+                return Ok(false);
+            };
+            *destination = ProfileSegmentValidationScratch {
+                counts: segment_counts,
+                prefixes: totals,
+                domain: Some(ProfileSegmentAddressDomain::new(
+                    ordinal,
+                    nonce,
+                    provenance_base,
+                    provenance_count,
+                )),
+                resources,
+                sources,
+                provenance,
+                operations,
+                evidence,
+                parents,
+                wide,
+                text,
+                digests,
+            };
+            previous_nonce = Some(nonce);
+            Ok(totals.append(segment_counts).is_some())
+        },
+    )?;
+    if !complete
+        || totals.resources != counts.resource_count
+        || totals.sources != counts.source_count
+        || totals.provenance != counts.provenance_count
+        || totals.operations != counts.operation_count
+        || totals.evidence != counts.evidence_count
+        || totals.parents != counts.parent_count
+        || totals.wide != counts.wide_count
+        || totals.text != counts.lineage_text_bytes
+        || totals.digests != counts.lineage_digest_bytes
+    {
+        return Ok(None);
+    }
+    Ok(Some(totals))
+}
+
+fn metered_segment_range(prefix: u32, count: u32, stride: usize) -> Option<std::ops::Range<usize>> {
+    let start = usize::try_from(prefix).ok()?.checked_mul(stride)?;
+    let len = usize::try_from(count).ok()?.checked_mul(stride)?;
+    Some(start..start.checked_add(len)?)
+}
+
+fn visit_profile_segment_members<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    scratch: &mut ProfileMeteredScratch<'_, 'session>,
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    for index in 0..scratch.segments.len() {
+        let segment = scratch.segments[index];
+        macro_rules! output_range {
+            ($field:ident, $count:ident, $stride:expr) => {{
+                let Some(range) =
+                    metered_segment_range(segment.prefixes.$count, segment.counts.$count, $stride)
+                else {
+                    return Ok(false);
+                };
+                let Some(output) = scratch.$field.get_mut(range) else {
+                    return Ok(false);
+                };
+                output
+            }};
+        }
+        if !visit_sequence_into(
+            session,
+            segment.resources,
+            output_range!(resources, resources, PROFILE_RESOURCE_SCALAR_COUNT),
+        )? || !visit_sequence_into(
+            session,
+            segment.sources,
+            output_range!(sources, sources, PROFILE_SOURCE_SCALAR_COUNT),
+        )? || !visit_sequence_into(
+            session,
+            segment.provenance,
+            output_range!(provenance, provenance, PROFILE_PROVENANCE_SCALAR_COUNT),
+        )? || !visit_sequence_into(
+            session,
+            segment.operations,
+            output_range!(operations, operations, PROFILE_OPERATION_SCALAR_COUNT),
+        )? || !visit_sequence_into(
+            session,
+            segment.evidence,
+            output_range!(evidence, evidence, PROFILE_EVIDENCE_SCALAR_COUNT),
+        )? || !visit_sequence_into(
+            session,
+            segment.parents,
+            output_range!(parents, parents, PROFILE_PROVENANCE_ADDRESS_SCALARS),
+        )? || !visit_sequence_into(session, segment.wide, output_range!(wide, wide, 1))?
+            || !visit_utf8_into(session, segment.text, output_range!(lineage_text, text, 1))?
+            || !visit_bytes_into(
+                session,
+                segment.digests,
+                output_range!(lineage_digests, digests, 1),
+            )?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn validate_profile_graph_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     directory: CanonicalValidationMember<'session, RecordBlock, ProfileDirectorySchema>,
     counts: ProfileMeteredCounts,
-    scratch: &mut ProfileMeteredScratch<'_>,
+    expected_lineage: ProfileLineageMaterializedRefs,
+    scratch: &mut ProfileMeteredScratch<'_, 'session>,
 ) -> Result<Option<ProfileValidatedMembers<'session>>, StoreWorkError>
 where
     O: OperationOwner,
@@ -833,178 +1243,21 @@ where
     else {
         return Ok(None);
     };
-    if !directory_complete
+    if counts.segment_count == 0
+        || !directory_complete
         || schema_revision != Some(PROFILE_SCHEMA_REVISION)
-        || segment_count != Some(1)
+        || segment_count != Some(counts.segment_count)
         || owner_count != Some(counts.owner_count)
     {
         return Ok(None);
     }
 
-    let mut segment_ordinal = None;
-    let mut resource_count = None;
-    let mut resources = None;
-    let mut source_count = None;
-    let mut sources = None;
-    let mut provenance_count = None;
-    let mut provenance = None;
-    let mut operation_count = None;
-    let mut operations = None;
-    let mut evidence_count = None;
-    let mut evidence = None;
-    let mut parent_count = None;
-    let mut parents = None;
-    let mut wide_count = None;
-    let mut wide = None;
-    let mut lineage_text_bytes = None;
-    let mut lineage_text = None;
-    let mut lineage_digest_bytes = None;
-    let mut lineage_digests = None;
-    let mut segment_nonce = None;
-    let mut provenance_base = None;
-    let mut segment_valid = true;
-    let segments_complete = session.visit_canonical_records(
-        segments,
-        1,
-        PROFILE_SEGMENT_FIELD_COUNT,
-        |_row_index, row| {
-            segment_ordinal = row.scalar(profile_segment_field::SEGMENT, |value: u32| value)?;
-            resource_count =
-                row.scalar(profile_segment_field::RESOURCE_COUNT, |value: u32| value)?;
-            source_count = row.scalar(profile_segment_field::SOURCE_COUNT, |value: u32| value)?;
-            provenance_count =
-                row.scalar(profile_segment_field::PROVENANCE_COUNT, |value: u32| value)?;
-            operation_count =
-                row.scalar(profile_segment_field::OPERATION_COUNT, |value: u32| value)?;
-            evidence_count =
-                row.scalar(profile_segment_field::EVIDENCE_COUNT, |value: u32| value)?;
-            parent_count = row.scalar(profile_segment_field::PARENT_COUNT, |value: u32| value)?;
-            wide_count = row.scalar(profile_segment_field::WIDE_COUNT, |value: u32| value)?;
-            lineage_text_bytes =
-                row.scalar(profile_segment_field::TEXT_COUNT, |value: u32| value)?;
-            lineage_digest_bytes =
-                row.scalar(profile_segment_field::DIGEST_COUNT, |value: u32| value)?;
-            segment_nonce = row.scalar(profile_segment_field::NONCE, |value: u64| value)?;
-            provenance_base =
-                row.scalar(profile_segment_field::PROVENANCE_BASE, |value: u32| value)?;
-
-            macro_rules! sequence_member {
-                ($count:expr, $field:expr, $scalar:ty, $schema:ty) => {{
-                    if $count == 0 {
-                        let absent = row.scalar($field, |value: u8| value)?;
-                        segment_valid &= absent == Some(PROFILE_ABSENT_REFERENCE);
-                        None
-                    } else {
-                        row.sequence_ref::<$scalar, $schema, _>($field, |value| value)?
-                    }
-                }};
-            }
-            macro_rules! utf8_member {
-                ($count:expr, $field:expr, $schema:ty) => {{
-                    if $count == 0 {
-                        let absent = row.scalar($field, |value: u8| value)?;
-                        segment_valid &= absent == Some(PROFILE_ABSENT_REFERENCE);
-                        None
-                    } else {
-                        row.utf8_ref::<$schema, _>($field, |value| value)?
-                    }
-                }};
-            }
-            macro_rules! bytes_member {
-                ($count:expr, $field:expr, $schema:ty) => {{
-                    if $count == 0 {
-                        let absent = row.scalar($field, |value: u8| value)?;
-                        segment_valid &= absent == Some(PROFILE_ABSENT_REFERENCE);
-                        None
-                    } else {
-                        row.bytes_ref::<$schema, _>($field, |value| value)?
-                    }
-                }};
-            }
-            resources = sequence_member!(
-                counts.resource_count,
-                profile_segment_field::RESOURCES,
-                u32,
-                ProfileLineageResourceSchema
-            );
-            sources = sequence_member!(
-                counts.source_count,
-                profile_segment_field::SOURCES,
-                u32,
-                ProfileLineageSourceSchema
-            );
-            provenance = sequence_member!(
-                counts.provenance_count,
-                profile_segment_field::PROVENANCE_NODES,
-                u32,
-                ProfileLineageProvenanceSchema
-            );
-            operations = sequence_member!(
-                counts.operation_count,
-                profile_segment_field::OPERATIONS,
-                u32,
-                ProfileLineageOperationSchema
-            );
-            evidence = sequence_member!(
-                counts.evidence_count,
-                profile_segment_field::EVIDENCE,
-                u32,
-                ProfileLineageEvidenceSchema
-            );
-            parents = sequence_member!(
-                counts.parent_count,
-                profile_segment_field::PARENTS,
-                u64,
-                ProfileLineageParentSchema
-            );
-            wide = sequence_member!(
-                counts.wide_count,
-                profile_segment_field::WIDE_VALUES,
-                u64,
-                ProfileLineageWideSchema
-            );
-            lineage_text = utf8_member!(
-                counts.lineage_text_bytes,
-                profile_segment_field::TEXTS,
-                ProfileLineageTextSchema
-            );
-            lineage_digests = bytes_member!(
-                counts.lineage_digest_bytes,
-                profile_segment_field::DIGESTS,
-                ProfileLineageDigestSchema
-            );
-            Ok(segment_valid)
-        },
-    )?;
-    let Some(segment_nonce) = segment_nonce.and_then(ProfileSegmentNonce::from_stored) else {
+    let Some(profile_totals) =
+        read_profile_segments_metered(session, segments, counts, scratch.segments)?
+    else {
         return Ok(None);
     };
-    let segment_counts = SegmentCounts {
-        resources: counts.resource_count,
-        sources: counts.source_count,
-        provenance: counts.provenance_count,
-        operations: counts.operation_count,
-        evidence: counts.evidence_count,
-        parents: counts.parent_count,
-        wide: counts.wide_count,
-        text: counts.lineage_text_bytes,
-        digests: counts.lineage_digest_bytes,
-    };
-    if !segments_complete
-        || !segment_valid
-        || segment_ordinal != Some(0)
-        || provenance_base != Some(0)
-        || segment_counts.is_empty()
-        || resource_count != Some(counts.resource_count)
-        || source_count != Some(counts.source_count)
-        || provenance_count != Some(counts.provenance_count)
-        || operation_count != Some(counts.operation_count)
-        || evidence_count != Some(counts.evidence_count)
-        || parent_count != Some(counts.parent_count)
-        || wide_count != Some(counts.wide_count)
-        || lineage_text_bytes != Some(counts.lineage_text_bytes)
-        || lineage_digest_bytes != Some(counts.lineage_digest_bytes)
-    {
+    if !materialized_lineage_identifies(scratch.segments, expected_lineage) {
         return Ok(None);
     }
 
@@ -1219,7 +1472,12 @@ where
     let Some(attachments) = attachments else {
         return Ok(None);
     };
-    if !owners_complete || !owner_refs_valid {
+    if !owners_complete
+        || !owner_refs_valid
+        || !expected_lineage
+            .attachments()
+            .is_some_and(|slot| attachments.identifies(slot.into_store()))
+    {
         return Ok(None);
     }
 
@@ -1414,15 +1672,7 @@ where
         return Ok(None);
     }
 
-    if !visit_sequence_into(session, resources, scratch.resources)?
-        || !visit_sequence_into(session, sources, scratch.sources)?
-        || !visit_sequence_into(session, provenance, scratch.provenance)?
-        || !visit_sequence_into(session, operations, scratch.operations)?
-        || !visit_sequence_into(session, evidence, scratch.evidence)?
-        || !visit_sequence_into(session, parents, scratch.parents)?
-        || !visit_sequence_into(session, wide, scratch.wide)?
-        || !visit_utf8_into(session, lineage_text, scratch.lineage_text)?
-        || !visit_bytes_into(session, lineage_digests, scratch.lineage_digests)?
+    if !visit_profile_segment_members(session, scratch)?
         || !visit_sequence_into(session, Some(attachments), scratch.attachments)?
         || !visit_utf8_into(session, metadata_members.text, scratch.metadata_text)?
         || !visit_bytes_into(session, metadata_members.bytes, scratch.metadata_bytes)?
@@ -1450,8 +1700,7 @@ where
         return Ok(None);
     }
 
-    let domain = ProfileSegmentAddressDomain::new(0, segment_nonce, 0, counts.provenance_count);
-    let semantic = validate_metered_profile_semantics(session, counts, domain, scratch)?;
+    let semantic = validate_metered_profile_semantics(session, counts, scratch)?;
     let Some((owner_classes, maximum_provenance_depth)) = semantic else {
         return Ok(None);
     };
@@ -1471,21 +1720,17 @@ where
         .count(),
     )
     .ok();
-    let mut totals = ProfileTotals::default();
-    let Some(()) = totals.append(segment_counts) else {
-        return Ok(None);
-    };
     let Some(metadata_shareable_leaf_count) = metadata_shareable_leaf_count else {
         return Ok(None);
     };
-    let Some(shareable_leaf_count) = totals
+    let Some(shareable_leaf_count) = profile_totals
         .shareable_leaves
         .checked_add(1)
         .and_then(|value| value.checked_add(metadata_shareable_leaf_count))
     else {
         return Ok(None);
     };
-    let Some(payload_leaf_count) = totals
+    let Some(payload_leaf_count) = profile_totals
         .payload_leaves
         .checked_add(metadata_shareable_leaf_count)
     else {
@@ -1507,15 +1752,6 @@ where
     Ok(Some(ProfileValidatedMembers {
         directory,
         segments,
-        resources,
-        sources,
-        provenance,
-        operations,
-        evidence,
-        parents,
-        wide,
-        lineage_text,
-        lineage_digests,
         owners,
         attachments,
         metadata_directory,
@@ -1527,7 +1763,7 @@ where
         metadata_u64s: metadata_members.u64s,
         metadata_f64s: metadata_members.f64s,
         metadata_f32s: metadata_members.f32s,
-        segment_count: 1,
+        segment_count: counts.segment_count,
         resource_count: counts.resource_count,
         source_count: counts.source_count,
         provenance_count: counts.provenance_count,
@@ -1570,79 +1806,147 @@ where
 fn validate_metered_profile_semantics<'session, 'storage, 'control, 'operation, O, PP, U>(
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     counts: ProfileMeteredCounts,
-    domain: ProfileSegmentAddressDomain,
-    scratch: &mut ProfileMeteredScratch<'_>,
+    scratch: &mut ProfileMeteredScratch<'_, 'session>,
 ) -> Result<Option<(ProfileOwnerClassCounts, u32)>, StoreWorkError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let Some(lineage_text) = std::str::from_utf8(scratch.lineage_text).ok() else {
-        return Ok(None);
-    };
-    let mut text_cursor = 0_u32;
-    for row in scratch
-        .resources
-        .chunks_exact(PROFILE_RESOURCE_SCALAR_COUNT)
-    {
-        let Some(()) = run_profile_semantic_unit(session, || {
-            let mut no_work = |_units| Some(());
-            validate_resources::<()>(row, lineage_text, &mut text_cursor, None, &mut no_work)
-        })?
-        else {
-            return Ok(None);
-        };
-    }
-    let mut digest_cursor = 0_u32;
-    let mut wide_cursor = 0_u32;
-    for row in scratch.sources.chunks_exact(PROFILE_SOURCE_SCALAR_COUNT) {
-        let Some(()) = run_profile_semantic_unit(session, || {
-            let mut no_work = |_units| Some(());
-            validate_sources::<()>(
-                row,
-                lineage_text,
-                scratch.lineage_digests,
-                scratch.wide,
-                &mut text_cursor,
-                &mut digest_cursor,
-                &mut wide_cursor,
-                counts.resource_count,
-                0,
-                None,
-                &mut no_work,
+    let mut maximum_depth = 0_u32;
+    for segment_index in 0..scratch.segments.len() {
+        let segment = scratch.segments[segment_index];
+        let (Some(lineage_text), Some(lineage_digests), Some(wide_values)) = (
+            metered_segment_slice(
+                scratch.lineage_text,
+                segment.prefixes.text,
+                segment.counts.text,
+                1,
             )
-        })?
+            .and_then(|bytes| std::str::from_utf8(bytes).ok()),
+            metered_segment_slice(
+                scratch.lineage_digests,
+                segment.prefixes.digests,
+                segment.counts.digests,
+                1,
+            ),
+            metered_segment_slice(scratch.wide, segment.prefixes.wide, segment.counts.wide, 1),
+        ) else {
+            return Ok(None);
+        };
+        let mut text_cursor = 0_u32;
+        let mut digest_cursor = 0_u32;
+        let mut wide_cursor = 0_u32;
+        let Some(resources) = metered_segment_slice(
+            scratch.resources,
+            segment.prefixes.resources,
+            segment.counts.resources,
+            PROFILE_RESOURCE_SCALAR_COUNT,
+        ) else {
+            return Ok(None);
+        };
+        for row in resources.chunks_exact(PROFILE_RESOURCE_SCALAR_COUNT) {
+            let Some(()) = run_profile_semantic_unit(session, || {
+                let mut no_work = |_units| Some(());
+                validate_resources::<()>(row, lineage_text, &mut text_cursor, None, &mut no_work)
+            })?
+            else {
+                return Ok(None);
+            };
+        }
+        let Some(sources) = metered_segment_slice(
+            scratch.sources,
+            segment.prefixes.sources,
+            segment.counts.sources,
+            PROFILE_SOURCE_SCALAR_COUNT,
+        ) else {
+            return Ok(None);
+        };
+        let Some(visible_resource_end) = segment
+            .prefixes
+            .resources
+            .checked_add(segment.counts.resources)
         else {
             return Ok(None);
         };
+        for row in sources.chunks_exact(PROFILE_SOURCE_SCALAR_COUNT) {
+            let Some(()) = run_profile_semantic_unit(session, || {
+                let mut no_work = |_units| Some(());
+                validate_sources::<()>(
+                    row,
+                    lineage_text,
+                    lineage_digests,
+                    wide_values,
+                    &mut text_cursor,
+                    &mut digest_cursor,
+                    &mut wide_cursor,
+                    visible_resource_end,
+                    segment.prefixes.resources,
+                    None,
+                    &mut no_work,
+                )
+            })?
+            else {
+                return Ok(None);
+            };
+        }
+        let (Some(provenance), Some(operations), Some(evidence), Some(parents)) = (
+            metered_segment_slice(
+                scratch.provenance,
+                segment.prefixes.provenance,
+                segment.counts.provenance,
+                PROFILE_PROVENANCE_SCALAR_COUNT,
+            ),
+            metered_segment_slice(
+                scratch.operations,
+                segment.prefixes.operations,
+                segment.counts.operations,
+                PROFILE_OPERATION_SCALAR_COUNT,
+            ),
+            metered_segment_slice(
+                scratch.evidence,
+                segment.prefixes.evidence,
+                segment.counts.evidence,
+                PROFILE_EVIDENCE_SCALAR_COUNT,
+            ),
+            metered_segment_slice(
+                scratch.parents,
+                segment.prefixes.parents,
+                segment.counts.parents,
+                PROFILE_PROVENANCE_ADDRESS_SCALARS,
+            ),
+        ) else {
+            return Ok(None);
+        };
+        let Some(segment_depth) = validate_metered_provenance_semantics(
+            session,
+            segment,
+            scratch.segments,
+            provenance,
+            operations,
+            evidence,
+            parents,
+            wide_values,
+            lineage_digests,
+            scratch.provenance_depths,
+            lineage_text,
+            &mut text_cursor,
+            &mut digest_cursor,
+            &mut wide_cursor,
+        )?
+        else {
+            return Ok(None);
+        };
+        if text_cursor != segment.counts.text
+            || digest_cursor != segment.counts.digests
+            || wide_cursor != segment.counts.wide
+        {
+            return Ok(None);
+        }
+        maximum_depth = maximum_depth.max(segment_depth);
     }
-    let Some(maximum_depth) = validate_metered_provenance_semantics(
-        session,
-        counts,
-        domain,
-        scratch.provenance,
-        scratch.operations,
-        scratch.evidence,
-        scratch.parents,
-        scratch.wide,
-        scratch.lineage_digests,
-        scratch.provenance_depths,
-        lineage_text,
-        &mut text_cursor,
-        &mut digest_cursor,
-        &mut wide_cursor,
-    )?
-    else {
-        return Ok(None);
-    };
-    if text_cursor != counts.lineage_text_bytes
-        || digest_cursor != counts.lineage_digest_bytes
-        || wide_cursor != counts.wide_count
-    {
-        return Ok(None);
-    }
-    let Some(owner_classes) = validate_metered_owner_semantics(session, counts, domain, scratch)?
+    let Some(owner_classes) =
+        validate_metered_owner_semantics(session, counts, scratch.segments, scratch)?
     else {
         return Ok(None);
     };
@@ -1653,6 +1957,10 @@ where
     Ok(Some((owner_classes, maximum_depth)))
 }
 
+fn metered_segment_slice<T>(values: &[T], prefix: u32, count: u32, stride: usize) -> Option<&[T]> {
+    values.get(metered_segment_range(prefix, count, stride)?)
+}
+
 enum MeteredProvenanceStep {
     Source,
     Operation { parent_count: u32 },
@@ -1661,8 +1969,8 @@ enum MeteredProvenanceStep {
 #[allow(clippy::too_many_arguments)]
 fn validate_metered_provenance_semantics<'session, 'storage, 'control, 'operation, O, PP, U>(
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
-    counts: ProfileMeteredCounts,
-    domain: ProfileSegmentAddressDomain,
+    segment: ProfileSegmentValidationScratch<'session>,
+    segments: &[ProfileSegmentValidationScratch<'session>],
     provenance: &[u32],
     operations: &[u32],
     evidence: &[u32],
@@ -1682,7 +1990,7 @@ where
 {
     let Some(parents) = QualifiedProvenanceAddressSlice::from_scalars(
         parent_scalars,
-        usize::try_from(counts.parent_count).unwrap_or(usize::MAX),
+        usize::try_from(segment.counts.parents).unwrap_or(usize::MAX),
     ) else {
         return Ok(None);
     };
@@ -1697,10 +2005,17 @@ where
         let Some(local_index) = u32::try_from(local_index).ok() else {
             return Ok(None);
         };
+        let Some(global_index) = segment.prefixes.provenance.checked_add(local_index) else {
+            return Ok(None);
+        };
         let Some(step) =
             run_profile_semantic_unit(session, || match row[profile_provenance_scalar::KIND] {
                 value if value == u32::from(PROFILE_PROVENANCE_SOURCE) => {
-                    if row[profile_provenance_scalar::VARIANT_INDEX] >= counts.source_count
+                    if row[profile_provenance_scalar::VARIANT_INDEX]
+                        >= segment
+                            .prefixes
+                            .sources
+                            .checked_add(segment.counts.sources)?
                         || row[profile_provenance_scalar::DEPTH] != 1
                         || require_range(
                             parent_cursor,
@@ -1712,7 +2027,7 @@ where
                     {
                         return None;
                     }
-                    *depths.get_mut(usize::try_from(local_index).ok()?)? = 1;
+                    *depths.get_mut(usize::try_from(global_index).ok()?)? = 1;
                     Some(MeteredProvenanceStep::Source)
                 }
                 value if value == u32::from(PROFILE_PROVENANCE_OPERATION) => {
@@ -1745,8 +2060,8 @@ where
                 let mut maximum_parent_depth = 0_u32;
                 for address in parent_values.iter() {
                     let Some((parent, parent_depth)) = run_profile_semantic_unit(session, || {
-                        let parent = address?.validate_against(domain)?;
-                        if parent >= local_index
+                        let parent = validate_metered_qualified_address(segments, address?)?;
+                        if parent >= global_index
                             || previous.is_some_and(|previous| parent <= previous)
                         {
                             return None;
@@ -1778,7 +2093,7 @@ where
                         None,
                         &mut no_work,
                     )?;
-                    *depths.get_mut(usize::try_from(local_index).ok()?)? = depth;
+                    *depths.get_mut(usize::try_from(global_index).ok()?)? = depth;
                     Some(())
                 })?
                 else {
@@ -1796,9 +2111,9 @@ where
             }
         }
     }
-    if operation_cursor != counts.operation_count
-        || evidence_cursor != counts.evidence_count
-        || parent_cursor != counts.parent_count
+    if operation_cursor != segment.counts.operations
+        || evidence_cursor != segment.counts.evidence
+        || parent_cursor != segment.counts.parents
     {
         return Ok(None);
     }
@@ -1862,17 +2177,25 @@ where
             None => return Ok(None),
         };
     }
-    Ok(
-        (operation_cursor == counts.operation_count && evidence_cursor == counts.evidence_count)
-            .then_some(maximum_depth),
-    )
+    Ok((operation_cursor == segment.counts.operations
+        && evidence_cursor == segment.counts.evidence)
+        .then_some(maximum_depth))
+}
+
+fn validate_metered_qualified_address(
+    segments: &[ProfileSegmentValidationScratch<'_>],
+    address: QualifiedProvenanceAddress,
+) -> Option<u32> {
+    let ordinal = address.segment_ordinal()?;
+    let segment = segments.get(usize::try_from(ordinal).ok()?)?;
+    address.validate_against(segment.domain?)
 }
 
 fn validate_metered_owner_semantics<'session, 'storage, 'control, 'operation, O, PP, U>(
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     counts: ProfileMeteredCounts,
-    domain: ProfileSegmentAddressDomain,
-    scratch: &ProfileMeteredScratch<'_>,
+    segments: &[ProfileSegmentValidationScratch<'_>],
+    scratch: &ProfileMeteredScratch<'_, '_>,
 ) -> Result<Option<ProfileOwnerClassCounts>, StoreWorkError>
 where
     O: OperationOwner,
@@ -1908,7 +2231,7 @@ where
         let mut previous_provenance = None;
         for address in values.iter() {
             let Some(provenance) = run_profile_semantic_unit(session, || {
-                let provenance = address?.validate_against(domain)?;
+                let provenance = validate_metered_qualified_address(segments, address?)?;
                 (provenance < counts.provenance_count
                     && previous_provenance.is_none_or(|previous| provenance > previous))
                 .then_some(provenance)
@@ -1930,7 +2253,7 @@ fn validate_metered_metadata_semantics<'session, 'storage, 'control, 'operation,
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     counts: ProfileMeteredCounts,
     owner_classes: ProfileOwnerClassCounts,
-    scratch: &ProfileMeteredScratch<'_>,
+    scratch: &ProfileMeteredScratch<'_, '_>,
 ) -> Result<Option<()>, StoreWorkError>
 where
     O: OperationOwner,

@@ -48,6 +48,9 @@ pub(in crate::canonical_scene::store) use materialization::{
     NodeSceneActivationRoles, NodeSceneWriterRoles,
 };
 mod profile;
+pub(in crate::canonical_scene::store) use profile::{
+    ProfileLeafRefs, ProfileLineageMaterializedRefs,
+};
 mod publication;
 mod scratch;
 pub(in crate::canonical_scene::store) use scratch::{

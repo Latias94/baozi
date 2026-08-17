@@ -116,7 +116,9 @@ use geometry::{
     GeometryValidatedShape, validate_geometry_canonical_structure,
     validate_geometry_canonical_structure_metered, validate_geometry_graph,
 };
-pub(in crate::canonical_scene::store) use profile::{ProfileMeteredCounts, ProfileMeteredScratch};
+pub(in crate::canonical_scene::store) use profile::{
+    ProfileMeteredCounts, ProfileMeteredScratch, ProfileSegmentValidationScratch,
+};
 use profile::{
     ProfileValidatedRefs, ProfileValidationScratch, validate_profile_canonical_structure,
     validate_profile_graph, validate_profile_graph_metered,
@@ -2405,6 +2407,7 @@ where
         session,
         node.profile_directory,
         profile_counts,
+        expected_refs.profile.lineage,
         &mut scratch.profile,
     )?
     else {
@@ -2857,23 +2860,6 @@ where
         && profile
             .owners
             .identifies(expected_refs.profile.owners.into_store())
-        && optional_member_identifies(profile.resources, expected_refs.profile.lineage.resources)
-        && optional_member_identifies(profile.sources, expected_refs.profile.lineage.sources)
-        && optional_member_identifies(profile.provenance, expected_refs.profile.lineage.provenance)
-        && optional_member_identifies(profile.operations, expected_refs.profile.lineage.operations)
-        && optional_member_identifies(profile.evidence, expected_refs.profile.lineage.evidence)
-        && optional_member_identifies(profile.parents, expected_refs.profile.lineage.parents)
-        && optional_member_identifies(profile.wide, expected_refs.profile.lineage.wide)
-        && optional_member_identifies(profile.lineage_text, expected_refs.profile.lineage.text)
-        && optional_member_identifies(
-            profile.lineage_digests,
-            expected_refs.profile.lineage.digests,
-        )
-        && expected_refs
-            .profile
-            .lineage
-            .attachments
-            .is_some_and(|slot| profile.attachments.identifies(slot.into_store()))
         && profile
             .metadata_directory
             .identifies(expected_refs.profile.metadata.directory.into_store())
@@ -2912,7 +2898,7 @@ where
     if !identities_match {
         return Ok(None);
     }
-    let Some(profile_attachments) = expected_refs.profile.lineage.attachments else {
+    let Some(profile_attachments) = expected_refs.profile.lineage.attachments() else {
         return Ok(None);
     };
 

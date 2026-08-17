@@ -31,7 +31,7 @@ pub(in crate::canonical_scene::store) use node_scene::{
     GeometryPrimitiveValidationProjection, GeometryPrimitiveValidationScratch,
     GeometryValidationScratch, GeometryValidationScratchRequirements, NodeNameValidationScratch,
     NodeSceneValidationProof, NodeSceneValidationScratch, ProfileMeteredCounts,
-    ProfileMeteredScratch, validate_node_scene_canonical_graph,
+    ProfileMeteredScratch, ProfileSegmentValidationScratch, validate_node_scene_canonical_graph,
     validate_node_scene_canonical_graph_metered, validate_node_scene_evidence_graph,
 };
 
