@@ -1,28 +1,30 @@
+use baozi_operation::__canonical_activation::{CanonicalBuildControl, CanonicalLane};
 use baozi_operation::{
-    CanonicalInheritanceSource, CanonicalRecordView, StoreBuildError, StoreControlledError,
-    StoreRuntimeError,
+    CanonicalInheritanceSource, CanonicalRecordView, OperationOwner, ProgressPhase, ProgressUnit,
+    SequenceWriter, StoreBuildError, StoreControlledError, StoreRuntimeError,
 };
 
 use crate::canonical_scene::store::profile_provenance::{
-    PROFILE_PROVENANCE_ADDRESS_SCALARS, ProfileSegmentAddressDomain, ProfileSegmentNonce,
-    QualifiedProvenanceAddress, QualifiedProvenanceAddressSlice, issue_profile_segment_nonce,
+    ProfileSegmentAddressDomain, ProfileSegmentNonce, QualifiedProvenanceAddress,
+    QualifiedProvenanceAddressSlice, issue_profile_segment_nonce,
 };
 use crate::canonical_scene::store::schema::CanonicalBlockRef;
 use crate::canonical_scene::store::schema::profile::{
     PROFILE_ABSENT_REFERENCE, PROFILE_DIGEST_BLAKE3, PROFILE_DIGEST_SHA256,
-    PROFILE_DIRECTORY_FIELD_COUNT, PROFILE_OPERATION_SCALAR_COUNT, PROFILE_OWNER_FIELD_COUNT,
-    PROFILE_PROVENANCE_OPERATION, PROFILE_PROVENANCE_SCALAR_COUNT, PROFILE_SCHEMA_REVISION,
-    PROFILE_SEGMENT_FIELD_COUNT, ProfileDirectorySchema, ProfileLineageAttachmentSchema,
-    ProfileLineageDigestSchema, ProfileLineageOperationSchema, ProfileLineageParentSchema,
-    ProfileLineageProvenanceSchema, ProfileMetadataDirectorySchema,
-    ProfileMetadataEntryTableSchema, ProfileOwnerTableSchema, ProfileSegmentTableSchema,
-    profile_directory_field, profile_owner_field, profile_provenance_scalar, profile_segment_field,
+    PROFILE_DIRECTORY_FIELD_COUNT, PROFILE_OWNER_FIELD_COUNT, PROFILE_PROVENANCE_OPERATION,
+    PROFILE_PROVENANCE_SCALAR_COUNT, PROFILE_SCHEMA_REVISION, PROFILE_SEGMENT_FIELD_COUNT,
+    ProfileDirectorySchema, ProfileLineageAttachmentSchema, ProfileLineageDigestSchema,
+    ProfileLineageOperationSchema, ProfileLineageParentSchema, ProfileLineageProvenanceSchema,
+    ProfileMetadataDirectorySchema, ProfileMetadataEntryTableSchema, ProfileOwnerTableSchema,
+    ProfileSegmentTableSchema, profile_directory_field, profile_owner_field,
+    profile_provenance_scalar, profile_segment_field,
 };
 use crate::provenance::{DIGEST_LEN, DigestAlgorithm};
 
-use super::super::super::{
-    NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneWorkMeter, SceneStoreAssembly, SceneStoreKeys,
-    process_slice_in_work_chunks,
+use super::super::super::NODE_SCENE_BUILD_INVARIANT_CODE;
+use super::super::super::profile::{
+    MetadataLeafRefs, ProfileLeafRefs, ProfileLineageMaterializedRefs, RetainedMetadataRefs,
+    RetainedProfileRefs,
 };
 use super::super::plan::BoundPendingNodeSceneEdit;
 
@@ -36,12 +38,15 @@ pub(super) struct RewrittenProfileLineageLeaves {
     pub(super) segment_nonce: ProfileSegmentNonce,
 }
 
-pub(super) fn rewrite_lineage_leaves<'scene>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
+pub(super) fn rewrite_lineage_leaves<'lane, 'scene, O, PP, U>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
     pending: &BoundPendingNodeSceneEdit<'scene>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
-) -> Result<RewrittenProfileLineageLeaves, StoreRuntimeError> {
+) -> Result<RewrittenProfileLineageLeaves, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let plan = pending.counts.profile;
     let failure = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)
         .map_err(StoreRuntimeError::Plan)?;
@@ -80,130 +85,81 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
 
     // This exact source leaf must be mapped before explicit unchanged-leaf inheritance so the
     // old attachment storage is not retained into the edited generation.
-    let attachments = assembly
-        .try_rewrite_canonical_sequence_controlled(
+    let attachments = lane
+        .try_rewrite_sequence(
             &pending.input.canonical,
             plan.source_attachments.into_store(),
             plan.attachments,
-            keys.dimension,
             ProfileLineageAttachmentSchema,
-            |writer, control| {
+            |control| {
                 let prefix = source_addresses.raw_prefix(target_start).ok_or(failure)?;
                 let suffix = source_addresses.raw_suffix(target_end).ok_or(failure)?;
-                process_slice_in_work_chunks(prefix, control, work, failure, |chunk| {
-                    writer.extend_from_slice(chunk)
-                })?;
-                work.observe(
-                    control,
-                    u64::try_from(PROFILE_PROVENANCE_ADDRESS_SCALARS).map_err(|_| failure)?,
-                )?;
-                writer.extend_from_slice(&fresh_address.into_scalars())?;
-                process_slice_in_work_chunks(suffix, control, work, failure, |chunk| {
-                    writer.extend_from_slice(chunk)
-                })
+                control.extend_from_slice(prefix)?;
+                control.extend_from_slice(&fresh_address.into_scalars())?;
+                control.extend_from_slice(suffix)
             },
         )
         .map(CanonicalBlockRef::from_store)?;
 
     let segments = required_segment_view(pending)?;
     let mut fresh_depth = None;
-    let parents = assembly
-        .try_retain_canonical_sequence_controlled(
-            plan.parents,
-            keys.dimension,
-            ProfileLineageParentSchema,
-            |writer, control| {
-                let mut previous = None;
-                let mut maximum_depth = 0_u32;
-                for parent in target_parents.iter() {
-                    work.observe(control, 1)?;
-                    let parent = parent.ok_or(failure)?;
-                    let (global, depth) = resolve_qualified_depth(
-                        pending, &segments, parent, control, work, failure,
-                    )?;
-                    if global >= plan.fresh_provenance_index.as_u32()
-                        || previous.is_some_and(|previous| previous >= global)
-                    {
-                        return Err(failure.into());
-                    }
-                    work.observe(
-                        control,
-                        u64::try_from(PROFILE_PROVENANCE_ADDRESS_SCALARS).map_err(|_| failure)?,
-                    )?;
-                    writer.extend_from_slice(&parent.into_scalars())?;
-                    maximum_depth = maximum_depth.max(depth);
-                    previous = Some(global);
+    let parents = lane
+        .try_retain_sequence(plan.parents, ProfileLineageParentSchema, |control| {
+            let mut previous = None;
+            let mut maximum_depth = 0_u32;
+            for parent in target_parents.iter() {
+                control.poll()?;
+                let parent = parent.ok_or(failure)?;
+                let (global, depth) =
+                    resolve_qualified_depth(pending, &segments, parent, control, failure)?;
+                if global >= plan.fresh_provenance_index.as_u32()
+                    || previous.is_some_and(|previous| previous >= global)
+                {
+                    return Err(failure.into());
                 }
-                fresh_depth = Some(maximum_depth.checked_add(1).ok_or(failure)?);
-                Ok(())
-            },
-        )
+                control.extend_from_slice(&parent.into_scalars())?;
+                maximum_depth = maximum_depth.max(depth);
+                previous = Some(global);
+            }
+            fresh_depth = Some(maximum_depth.checked_add(1).ok_or(failure)?);
+            Ok(())
+        })
         .map(CanonicalBlockRef::from_store)?;
     let fresh_depth = fresh_depth.ok_or(StoreRuntimeError::InvalidSourceSlot)?;
 
-    let digest = assembly
-        .try_retain_canonical_bytes_controlled(
-            plan.digest,
-            keys.dimension,
-            ProfileLineageDigestSchema,
-            |writer, control| {
-                work.observe(control, u64::try_from(DIGEST_LEN).map_err(|_| failure)?)?;
-                writer
-                    .write_bytes(pending.operation.options_digest().as_bytes())
-                    .map_err(Into::into)
-            },
-        )
+    let digest = lane
+        .try_retain_bytes(plan.digest, ProfileLineageDigestSchema, |control| {
+            control.write_bytes(pending.operation.options_digest().as_bytes())
+        })
         .map(CanonicalBlockRef::from_store)?;
 
-    let operation = assembly
-        .try_retain_canonical_sequence_controlled(
-            plan.operation,
-            keys.dimension,
-            ProfileLineageOperationSchema,
-            |writer, control| {
-                work.observe(
-                    control,
-                    u64::try_from(PROFILE_OPERATION_SCALAR_COUNT).map_err(|_| failure)?,
-                )?;
-                writer
-                    .extend_from_slice(&[
-                        u32::from(pending.program.shape().profile_operation_code()),
-                        0,
-                        0,
-                        u32::from(encode_digest_algorithm(
-                            pending.operation.options_digest().algorithm(),
-                        )),
-                        0,
-                        u32::try_from(DIGEST_LEN).map_err(|_| failure)?,
-                        0,
-                        0,
-                    ])
-                    .map_err(Into::into)
-            },
-        )
+    let operation = lane
+        .try_retain_sequence(plan.operation, ProfileLineageOperationSchema, |control| {
+            control.extend_from_slice(&[
+                u32::from(pending.program.shape().profile_operation_code()),
+                0,
+                0,
+                u32::from(encode_digest_algorithm(
+                    pending.operation.options_digest().algorithm(),
+                )),
+                0,
+                u32::try_from(DIGEST_LEN).map_err(|_| failure)?,
+                0,
+                0,
+            ])
+        })
         .map(CanonicalBlockRef::from_store)?;
 
-    let provenance = assembly
-        .try_retain_canonical_sequence_controlled(
-            plan.provenance,
-            keys.dimension,
-            ProfileLineageProvenanceSchema,
-            |writer, control| {
-                work.observe(
-                    control,
-                    u64::try_from(PROFILE_PROVENANCE_SCALAR_COUNT).map_err(|_| failure)?,
-                )?;
-                writer
-                    .extend_from_slice(&[
-                        u32::from(PROFILE_PROVENANCE_OPERATION),
-                        0,
-                        fresh_depth,
-                        0,
-                        plan.target_attachment_count.as_u32(),
-                    ])
-                    .map_err(Into::into)
-            },
-        )
+    let provenance = lane
+        .try_retain_sequence(plan.provenance, ProfileLineageProvenanceSchema, |control| {
+            control.extend_from_slice(&[
+                u32::from(PROFILE_PROVENANCE_OPERATION),
+                0,
+                fresh_depth,
+                0,
+                plan.target_attachment_count.as_u32(),
+            ])
+        })
         .map(CanonicalBlockRef::from_store)?;
 
     Ok(RewrittenProfileLineageLeaves {
@@ -216,14 +172,18 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
     })
 }
 
-pub(super) fn rewrite_profile_records<'scene>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
+pub(super) fn rewrite_profile_records<'lane, 'scene, O, PP, U>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
     pending: &BoundPendingNodeSceneEdit<'scene>,
     segments: CanonicalBlockRef<ProfileSegmentTableSchema>,
     leaves: RewrittenProfileLineageLeaves,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
-) -> Result<CanonicalBlockRef<ProfileDirectorySchema>, StoreRuntimeError> {
+    mut metadata_leaves: MetadataLeafRefs,
+) -> Result<RetainedProfileRefs, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let failure = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)
         .map_err(StoreRuntimeError::Plan)?;
     let input = pending.input;
@@ -243,16 +203,14 @@ pub(super) fn rewrite_profile_records<'scene>(
         .as_u32()
         .checked_sub(1)
         .ok_or(StoreRuntimeError::AccountingOverflow)?;
-    let owners = assembly
-        .try_rewrite_canonical_records_with_controlled(
+    let owners = lane
+        .try_rewrite_records(
             &input.canonical,
             input.proof.profile_owners().into_store(),
             pending.counts.profile.owners,
-            keys.dimension,
             ProfileOwnerTableSchema,
-            |writer, control| {
+            |control| {
                 for row_index in 0..source_owners.rows() {
-                    work.observe(control, 1)?;
                     let owner_kind = source_owners
                         .scalar::<u8>(row_index, profile_owner_field::OWNER_KIND)
                         .ok_or(failure)?;
@@ -276,7 +234,7 @@ pub(super) fn rewrite_profile_records<'scene>(
                                 source_count,
                             ),
                         };
-                    writer.write_row(|row| {
+                    control.write_row(|row| {
                         row.write_scalar(owner_kind)?;
                         row.write_scalar(owner_index)?;
                         row.write_scalar(attachment_offset)?;
@@ -289,22 +247,24 @@ pub(super) fn rewrite_profile_records<'scene>(
         )
         .map(CanonicalBlockRef::from_store)?;
 
-    super::rewrite_optional_record(
-        assembly,
+    let entries = super::rewrite_optional_record(
+        lane,
         input,
         input.proof.profile_metadata_entries(),
         usize::try_from(pending.counts.evidence.profile_metadata_entry_count)
             .map_err(|_| StoreRuntimeError::AccountingOverflow)?,
         ProfileMetadataEntryTableSchema,
-        keys,
     )?;
-    let metadata = super::rewrite_required_record(
-        assembly,
+    if metadata_leaves.entries.is_some() {
+        return Err(StoreRuntimeError::InvalidSourceSlot);
+    }
+    metadata_leaves.entries = entries;
+    let metadata_directory = super::rewrite_required_record(
+        lane,
         input,
         input.proof.profile_metadata_directory(),
         1,
         ProfileMetadataDirectorySchema,
-        keys,
     )?;
 
     let source_directory = input
@@ -318,38 +278,62 @@ pub(super) fn rewrite_profile_records<'scene>(
     {
         return Err(StoreRuntimeError::InvalidSourceSlot);
     }
-    assembly
-        .try_rewrite_canonical_records_with_controlled(
+    let directory = lane
+        .try_rewrite_records(
             &input.canonical,
             input.proof.profile_directory().into_store(),
             baozi_operation::RecordPlan::new(1, PROFILE_DIRECTORY_FIELD_COUNT)
                 .map_err(StoreRuntimeError::Plan)?,
-            keys.dimension,
             ProfileDirectorySchema,
-            |writer, control| {
-                work.observe(control, 1)?;
-                writer
-                    .write_row(|row| {
-                        row.write_scalar(PROFILE_SCHEMA_REVISION)?;
-                        row.write_scalar(pending.counts.profile.output_segment_count.as_u32())?;
-                        row.write_record_ref(segments.into_store())?;
-                        row.write_scalar(pending.counts.evidence.profile_owner_count)?;
-                        row.write_record_ref(owners.into_store())?;
-                        row.write_record_ref(metadata.into_store())
-                    })
-                    .map_err(Into::into)
+            |control| {
+                control.write_row(|row| {
+                    row.write_scalar(PROFILE_SCHEMA_REVISION)?;
+                    row.write_scalar(pending.counts.profile.output_segment_count.as_u32())?;
+                    row.write_record_ref(segments.into_store())?;
+                    row.write_scalar(pending.counts.evidence.profile_owner_count)?;
+                    row.write_record_ref(owners.into_store())?;
+                    row.write_record_ref(metadata_directory.into_store())
+                })
             },
         )
-        .map(CanonicalBlockRef::from_store)
+        .map(CanonicalBlockRef::from_store)?;
+
+    Ok(RetainedProfileRefs {
+        directory,
+        segments,
+        owners,
+        lineage: ProfileLineageMaterializedRefs::MappedPrefixAndAppend {
+            prefix_segment_count: pending.counts.profile.source_segment_count.as_u32(),
+            appended: ProfileLeafRefs {
+                resources: None,
+                sources: None,
+                provenance: Some(leaves.provenance),
+                operations: Some(leaves.operation),
+                evidence: None,
+                parents: Some(leaves.parents),
+                wide: None,
+                text: None,
+                digests: Some(leaves.digest),
+                attachments: Some(leaves.attachments),
+            },
+        },
+        metadata: RetainedMetadataRefs {
+            directory: metadata_directory,
+            leaves: metadata_leaves,
+        },
+    })
 }
 
-pub(super) fn rewrite_segments<'scene>(
-    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource>,
+pub(super) fn rewrite_segments<'lane, 'scene, O, PP, U>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
     pending: &BoundPendingNodeSceneEdit<'scene>,
     leaves: RewrittenProfileLineageLeaves,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
-) -> Result<CanonicalBlockRef<ProfileSegmentTableSchema>, StoreRuntimeError> {
+) -> Result<CanonicalBlockRef<ProfileSegmentTableSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let failure = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)
         .map_err(StoreRuntimeError::Plan)?;
     let source_plan = baozi_operation::RecordPlan::new(
@@ -357,44 +341,39 @@ pub(super) fn rewrite_segments<'scene>(
         PROFILE_SEGMENT_FIELD_COUNT,
     )
     .map_err(StoreRuntimeError::Plan)?;
-    assembly
-        .try_rewrite_canonical_records_with_mapped_prefix_controlled(
-            &pending.input.canonical,
-            pending.input.proof.profile_segments().into_store(),
-            source_plan,
-            pending.counts.profile.segments,
-            keys.dimension,
-            ProfileSegmentTableSchema,
-            |writer, control| {
-                work.observe(control, 1)?;
-                writer
-                    .write_row(|row| {
-                        row.write_scalar(pending.counts.profile.source_segment_count.as_u32())?;
-                        row.write_scalar(0_u32)?;
-                        row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
-                        row.write_scalar(0_u32)?;
-                        row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
-                        row.write_scalar(1_u32)?;
-                        row.write_sequence_ref(leaves.provenance.into_store())?;
-                        row.write_scalar(1_u32)?;
-                        row.write_sequence_ref(leaves.operation.into_store())?;
-                        row.write_scalar(0_u32)?;
-                        row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
-                        row.write_scalar(pending.counts.profile.target_attachment_count.as_u32())?;
-                        row.write_sequence_ref(leaves.parents.into_store())?;
-                        row.write_scalar(0_u32)?;
-                        row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
-                        row.write_scalar(0_u32)?;
-                        row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
-                        row.write_scalar(u32::try_from(DIGEST_LEN).map_err(|_| failure)?)?;
-                        row.write_bytes_ref(leaves.digest.into_store())?;
-                        row.write_scalar(leaves.segment_nonce.get())?;
-                        row.write_scalar(pending.counts.profile.fresh_provenance_index.as_u32())
-                    })
-                    .map_err(Into::into)
-            },
-        )
-        .map(CanonicalBlockRef::from_store)
+    lane.try_copy_mapped_records_with_append(
+        &pending.input.canonical,
+        pending.input.proof.profile_segments().into_store(),
+        source_plan,
+        pending.counts.profile.segments,
+        ProfileSegmentTableSchema,
+        |control| {
+            control.write_row(|row| {
+                row.write_scalar(pending.counts.profile.source_segment_count.as_u32())?;
+                row.write_scalar(0_u32)?;
+                row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
+                row.write_scalar(0_u32)?;
+                row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
+                row.write_scalar(1_u32)?;
+                row.write_sequence_ref(leaves.provenance.into_store())?;
+                row.write_scalar(1_u32)?;
+                row.write_sequence_ref(leaves.operation.into_store())?;
+                row.write_scalar(0_u32)?;
+                row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
+                row.write_scalar(pending.counts.profile.target_attachment_count.as_u32())?;
+                row.write_sequence_ref(leaves.parents.into_store())?;
+                row.write_scalar(0_u32)?;
+                row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
+                row.write_scalar(0_u32)?;
+                row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
+                row.write_scalar(u32::try_from(DIGEST_LEN).map_err(|_| failure)?)?;
+                row.write_bytes_ref(leaves.digest.into_store())?;
+                row.write_scalar(leaves.segment_nonce.get())?;
+                row.write_scalar(pending.counts.profile.fresh_provenance_index.as_u32())
+            })
+        },
+    )
+    .map(CanonicalBlockRef::from_store)
 }
 
 fn required_segment_view<'scene>(
@@ -413,25 +392,24 @@ fn required_segment_view<'scene>(
     Ok(segments)
 }
 
-fn resolve_qualified_depth(
+fn resolve_qualified_depth<O, PP, U>(
     pending: &BoundPendingNodeSceneEdit<'_>,
     segments: &CanonicalRecordView<'_>,
     address: QualifiedProvenanceAddress,
-    control: &mut baozi_operation::RetainedStoreWorkControl<
-        '_,
-        super::super::super::super::SceneConstructionOwner,
-        super::super::super::super::SceneConstructionPhase,
-        super::super::super::super::SceneConstructionUnit,
-    >,
-    work: &mut NodeSceneWorkMeter,
+    control: &mut CanonicalBuildControl<'_, '_, '_, O, PP, U, SequenceWriter<u64>>,
     failure: StoreBuildError,
-) -> Result<(u32, u32), StoreControlledError> {
+) -> Result<(u32, u32), StoreControlledError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let segment_ordinal = address.segment_ordinal().ok_or(failure)?;
     let segment_row = usize::try_from(segment_ordinal).map_err(|_| failure)?;
     if segment_row >= pending.counts.profile.source_segment_count.as_usize() {
         return Err(failure.into());
     }
-    work.observe(control, 1)?;
+    control.poll()?;
     if segments
         .scalar::<u32>(segment_row, profile_segment_field::SEGMENT)
         .ok_or(failure)?
@@ -481,7 +459,7 @@ fn resolve_qualified_depth(
         .and_then(|row| row.checked_mul(PROFILE_PROVENANCE_SCALAR_COUNT))
         .and_then(|offset| offset.checked_add(profile_provenance_scalar::DEPTH))
         .ok_or(failure)?;
-    work.observe(control, 1)?;
+    control.poll()?;
     let depth = *provenance.as_slice().get(scalar).ok_or(failure)?;
     Ok((global, depth))
 }

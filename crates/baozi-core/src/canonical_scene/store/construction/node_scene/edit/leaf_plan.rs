@@ -1,5 +1,9 @@
+use baozi_operation::__canonical_activation::{
+    CanonicalLane, CanonicalReservation, CanonicalSemanticWorkSession,
+};
 use baozi_operation::{
-    CapacityPlan, RetainedStoreReservation, ShareableStoreKind, StoreRuntimeError,
+    CanonicalInheritanceSource, CapacityPlan, OperationOwner, ProgressPhase, ProgressUnit,
+    ShareableStoreKind, StoreRuntimeError,
 };
 
 use crate::canonical_scene::store::schema::geometry::{
@@ -20,10 +24,8 @@ use crate::canonical_scene::store::schema::profile::{
 };
 use crate::canonical_scene::store::schema::{CanonicalBlockRef, CanonicalSchema};
 
-use super::super::{
-    NodeSceneWorkMeter, SceneConstructionOwner, SceneStoreAssembly, SceneStoreKeys,
-    ValidatedNodeScene,
-};
+use super::super::ValidatedNodeScene;
+use super::super::profile::MetadataLeafRefs;
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditPlanError, NodeSceneEvidenceLeafPlan};
 use super::required_record_view;
 
@@ -167,25 +169,38 @@ impl NodeSceneInheritedLeafScanPlan {
 /// The vector is bounded by the sealed inherited-leaf count and drops before the reservation that
 /// accounts for its allocator capacity. Materialization consumes this list without rescanning the
 /// source tables or rediscovering physical shape.
-pub(super) struct NodeSceneInheritedLeafPlan<R> {
+pub(super) struct NodeSceneInheritedLeafPlan<'scope, O>
+where
+    O: OperationOwner,
+{
     leaves: Vec<NodeSceneInheritedLeaf>,
-    _reservation: R,
+    _reservation: CanonicalReservation<'scope, O>,
 }
 
-impl NodeSceneInheritedLeafPlan<RetainedStoreReservation<SceneConstructionOwner>> {
-    pub(super) fn try_collect(
-        assembly: &mut SceneStoreAssembly<baozi_operation::CanonicalInheritanceSource>,
+impl<'scope, O> NodeSceneInheritedLeafPlan<'scope, O>
+where
+    O: OperationOwner,
+{
+    pub(super) fn try_collect<'borrow, PP, U>(
         pending: &BoundPendingNodeSceneEdit<'_>,
-        keys: SceneStoreKeys,
-        work: &mut NodeSceneWorkMeter,
-    ) -> Result<Self, StoreRuntimeError> {
+        semantic: &mut CanonicalSemanticWorkSession<
+            'borrow,
+            'scope,
+            O,
+            PP,
+            U,
+            CanonicalInheritanceSource,
+        >,
+    ) -> Result<Self, StoreRuntimeError>
+    where
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
         let scan = pending.counts.inherited_leaf_scan;
         let expected_dynamic = scan.expected_dynamic();
         let capacity = scan.capacity();
-        let mut checkpoint = assembly.try_control_checkpoint()?;
-        let mut reservation =
-            checkpoint.reserve(keys.phase, keys.dimension, scan.envelope_bytes())?;
-        checkpoint.validate_live_owner(&reservation)?;
+        let mut reservation = semantic.reserve(scan.envelope_bytes())?;
+        semantic.validate_live_owner(&reservation)?;
         capacity
             .verify_preflight(0, 0)
             .map_err(|_| StoreRuntimeError::AccountingOverflow)?;
@@ -196,16 +211,15 @@ impl NodeSceneInheritedLeafPlan<RetainedStoreReservation<SceneConstructionOwner>
         let actual = capacity
             .finish(leaves.len(), leaves.capacity())
             .map_err(|_| StoreRuntimeError::AccountingOverflow)?;
-        checkpoint.resize(&mut reservation, actual)?;
-        drop(checkpoint);
+        semantic.resize(&mut reservation, actual)?;
 
         let mut collector = InheritedLeafCollector {
             leaves: &mut leaves,
             expected_dynamic,
             inspected: 0,
         };
-        collect_geometry_leaves(assembly, pending, keys, work, &mut collector)?;
-        collect_profile_leaves(assembly, pending, keys, work, &mut collector)?;
+        collect_geometry_leaves(pending, semantic, &mut collector)?;
+        collect_profile_leaves(pending, semantic, &mut collector)?;
         if collector.leaves.len() != expected_dynamic
             || collector.leaves.len() > scan.structural_upper()
             || collector.inspected != scan.inspection_work()
@@ -218,127 +232,185 @@ impl NodeSceneInheritedLeafPlan<RetainedStoreReservation<SceneConstructionOwner>
             _reservation: reservation,
         })
     }
-}
 
-impl<R> NodeSceneInheritedLeafPlan<R> {
-    pub(super) fn inherit(
+    pub(super) fn inherit<'lane, PP, U>(
         &self,
-        assembly: &mut SceneStoreAssembly<baozi_operation::CanonicalInheritanceSource>,
+        lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
         input: &ValidatedNodeScene,
         inherited: &mut usize,
-    ) -> Result<(), StoreRuntimeError> {
+    ) -> Result<MetadataLeafRefs, StoreRuntimeError>
+    where
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        let mut metadata = MetadataLeafRefs {
+            entries: None,
+            text: None,
+            bytes: None,
+            bools: None,
+            i64s: None,
+            u64s: None,
+            f64s: None,
+            f32s: None,
+        };
         for leaf in &self.leaves {
-            leaf.inherit(assembly, input, inherited)?;
+            leaf.inherit(lane, input, inherited, &mut metadata)?;
         }
-        Ok(())
+        Ok(metadata)
     }
 }
 
 impl NodeSceneInheritedLeaf {
-    fn inherit(
+    fn inherit<'lane, O, PP, U>(
         self,
-        assembly: &mut SceneStoreAssembly<baozi_operation::CanonicalInheritanceSource>,
+        lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
         input: &ValidatedNodeScene,
         inherited: &mut usize,
-    ) -> Result<(), StoreRuntimeError> {
+        metadata: &mut MetadataLeafRefs,
+    ) -> Result<(), StoreRuntimeError>
+    where
+        O: OperationOwner,
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
         match self {
             Self::GeometryPolygonBoundaries(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::GeometryPrimitiveIndices(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::GeometryF32Values(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::GeometryU32Values(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::GeometryI32Values(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::GeometrySparseIndices(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::GeometrySparseF32Defaults(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::GeometrySparseU32Defaults(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::GeometrySparseI32Defaults(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::ProfileResources(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::ProfileSources(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::ProfileProvenance(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::ProfileOperations(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::ProfileEvidence(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::ProfileParents(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::ProfileWide(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::ProfileText(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
             Self::ProfileDigests(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
+                inherit_discarded_leaf(lane, input, reference, inherited)
             }
-            Self::MetadataText(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
-            }
-            Self::MetadataBytes(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
-            }
-            Self::MetadataBool(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
-            }
-            Self::MetadataI64(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
-            }
-            Self::MetadataU64(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
-            }
-            Self::MetadataF64(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
-            }
-            Self::MetadataF32(reference) => {
-                inherit_optional_leaf(assembly, input, Some(reference), inherited)
-            }
+            Self::MetadataText(reference) => assign_inherited_leaf(
+                &mut metadata.text,
+                inherit_optional_leaf(lane, input, Some(reference), inherited)?,
+            ),
+            Self::MetadataBytes(reference) => assign_inherited_leaf(
+                &mut metadata.bytes,
+                inherit_optional_leaf(lane, input, Some(reference), inherited)?,
+            ),
+            Self::MetadataBool(reference) => assign_inherited_leaf(
+                &mut metadata.bools,
+                inherit_optional_leaf(lane, input, Some(reference), inherited)?,
+            ),
+            Self::MetadataI64(reference) => assign_inherited_leaf(
+                &mut metadata.i64s,
+                inherit_optional_leaf(lane, input, Some(reference), inherited)?,
+            ),
+            Self::MetadataU64(reference) => assign_inherited_leaf(
+                &mut metadata.u64s,
+                inherit_optional_leaf(lane, input, Some(reference), inherited)?,
+            ),
+            Self::MetadataF64(reference) => assign_inherited_leaf(
+                &mut metadata.f64s,
+                inherit_optional_leaf(lane, input, Some(reference), inherited)?,
+            ),
+            Self::MetadataF32(reference) => assign_inherited_leaf(
+                &mut metadata.f32s,
+                inherit_optional_leaf(lane, input, Some(reference), inherited)?,
+            ),
         }
     }
 }
 
-pub(super) fn inherit_optional_leaf<Schema>(
-    assembly: &mut SceneStoreAssembly<baozi_operation::CanonicalInheritanceSource>,
+fn inherit_discarded_leaf<'lane, O, PP, U, Schema>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
     input: &ValidatedNodeScene,
-    source: Option<CanonicalBlockRef<Schema>>,
+    source: CanonicalBlockRef<Schema>,
     inherited: &mut usize,
 ) -> Result<(), StoreRuntimeError>
 where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    Schema: CanonicalSchema,
+    Schema::StoreKind: ShareableStoreKind,
+{
+    inherit_optional_leaf(lane, input, Some(source), inherited).map(|_| ())
+}
+
+fn assign_inherited_leaf<Schema>(
+    slot: &mut Option<CanonicalBlockRef<Schema>>,
+    inherited: Option<CanonicalBlockRef<Schema>>,
+) -> Result<(), StoreRuntimeError>
+where
+    Schema: CanonicalSchema,
+{
+    let inherited = inherited.ok_or(StoreRuntimeError::InvalidSourceSlot)?;
+    if slot.replace(inherited).is_some() {
+        return Err(StoreRuntimeError::InvalidSourceSlot);
+    }
+    Ok(())
+}
+
+pub(super) fn inherit_optional_leaf<'lane, O, PP, U, Schema>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
+    input: &ValidatedNodeScene,
+    source: Option<CanonicalBlockRef<Schema>>,
+    inherited: &mut usize,
+) -> Result<Option<CanonicalBlockRef<Schema>>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
     Schema: CanonicalSchema,
     Schema::StoreKind: ShareableStoreKind,
 {
     let Some(source) = source else {
-        return Ok(());
+        return Ok(None);
     };
-    let _ = assembly.try_share_canonical(&input.canonical, source.into_store())?;
+    let mapped = lane.try_share_canonical(&input.canonical, source.into_store())?;
     *inherited = inherited
         .checked_add(1)
         .ok_or(StoreRuntimeError::AccountingOverflow)?;
-    Ok(())
+    Ok(Some(CanonicalBlockRef::from_store(mapped)))
 }
 
 struct InheritedLeafCollector<'a> {
@@ -359,14 +431,7 @@ impl InheritedLeafCollector<'_> {
         Ok(())
     }
 
-    fn observe(
-        &mut self,
-        assembly: &mut SceneStoreAssembly<baozi_operation::CanonicalInheritanceSource>,
-        keys: SceneStoreKeys,
-        work: &mut NodeSceneWorkMeter,
-    ) -> Result<(), StoreRuntimeError> {
-        let mut checkpoint = assembly.try_control_checkpoint()?;
-        work.observe_checkpoint(&mut checkpoint, keys, 1)?;
+    fn note_inspected(&mut self) -> Result<(), StoreRuntimeError> {
         self.inspected = self
             .inspected
             .checked_add(1)
@@ -375,13 +440,23 @@ impl InheritedLeafCollector<'_> {
     }
 }
 
-fn collect_geometry_leaves(
-    assembly: &mut SceneStoreAssembly<baozi_operation::CanonicalInheritanceSource>,
+fn collect_geometry_leaves<'borrow, 'scope, O, PP, U>(
     pending: &BoundPendingNodeSceneEdit<'_>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
+    semantic: &mut CanonicalSemanticWorkSession<
+        'borrow,
+        'scope,
+        O,
+        PP,
+        U,
+        CanonicalInheritanceSource,
+    >,
     collector: &mut InheritedLeafCollector<'_>,
-) -> Result<(), StoreRuntimeError> {
+) -> Result<(), StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     match pending.input.proof.primitives() {
         None if pending.counts.primitives.as_usize() == 0 => {}
         Some(reference) => {
@@ -392,25 +467,27 @@ fn collect_geometry_leaves(
                 return Err(StoreRuntimeError::InvalidSourceSlot);
             }
             for row in 0..primitives.rows() {
-                collector.observe(assembly, keys, work)?;
-                collector.push(
-                    primitives
-                        .sequence_ref::<u32, GeometryPolygonBoundariesSchema>(
-                            row,
-                            geometry_primitive_field::POLYGON_BOUNDARIES,
-                        )
-                        .map(CanonicalBlockRef::from_store)
-                        .map(NodeSceneInheritedLeaf::GeometryPolygonBoundaries),
-                )?;
-                collector.push(
-                    primitives
-                        .sequence_ref::<u32, GeometryPrimitiveIndicesSchema>(
-                            row,
-                            geometry_primitive_field::INDICES,
-                        )
-                        .map(CanonicalBlockRef::from_store)
-                        .map(NodeSceneInheritedLeaf::GeometryPrimitiveIndices),
-                )?;
+                semantic.run_unit(|| -> Result<(), StoreRuntimeError> {
+                    collector.push(
+                        primitives
+                            .sequence_ref::<u32, GeometryPolygonBoundariesSchema>(
+                                row,
+                                geometry_primitive_field::POLYGON_BOUNDARIES,
+                            )
+                            .map(CanonicalBlockRef::from_store)
+                            .map(NodeSceneInheritedLeaf::GeometryPolygonBoundaries),
+                    )?;
+                    collector.push(
+                        primitives
+                            .sequence_ref::<u32, GeometryPrimitiveIndicesSchema>(
+                                row,
+                                geometry_primitive_field::INDICES,
+                            )
+                            .map(CanonicalBlockRef::from_store)
+                            .map(NodeSceneInheritedLeaf::GeometryPrimitiveIndices),
+                    )?;
+                    collector.note_inspected()
+                })??;
             }
         }
         None => return Err(StoreRuntimeError::InvalidSourceSlot),
@@ -426,70 +503,72 @@ fn collect_geometry_leaves(
                 return Err(StoreRuntimeError::InvalidSourceSlot);
             }
             for row in 0..attributes.rows() {
-                collector.observe(assembly, keys, work)?;
-                collector.push(
-                    attributes
-                        .sequence_ref::<f32, GeometryF32ValuesSchema>(
-                            row,
-                            geometry_attribute_field::VALUES,
-                        )
-                        .map(CanonicalBlockRef::from_store)
-                        .map(NodeSceneInheritedLeaf::GeometryF32Values),
-                )?;
-                collector.push(
-                    attributes
-                        .sequence_ref::<u32, GeometryU32ValuesSchema>(
-                            row,
-                            geometry_attribute_field::VALUES,
-                        )
-                        .map(CanonicalBlockRef::from_store)
-                        .map(NodeSceneInheritedLeaf::GeometryU32Values),
-                )?;
-                collector.push(
-                    attributes
-                        .sequence_ref::<i32, GeometryI32ValuesSchema>(
-                            row,
-                            geometry_attribute_field::VALUES,
-                        )
-                        .map(CanonicalBlockRef::from_store)
-                        .map(NodeSceneInheritedLeaf::GeometryI32Values),
-                )?;
-                collector.push(
-                    attributes
-                        .sequence_ref::<u32, GeometrySparseIndicesSchema>(
-                            row,
-                            geometry_attribute_field::SPARSE_INDICES,
-                        )
-                        .map(CanonicalBlockRef::from_store)
-                        .map(NodeSceneInheritedLeaf::GeometrySparseIndices),
-                )?;
-                collector.push(
-                    attributes
-                        .sequence_ref::<f32, GeometrySparseF32DefaultsSchema>(
-                            row,
-                            geometry_attribute_field::SPARSE_DEFAULT,
-                        )
-                        .map(CanonicalBlockRef::from_store)
-                        .map(NodeSceneInheritedLeaf::GeometrySparseF32Defaults),
-                )?;
-                collector.push(
-                    attributes
-                        .sequence_ref::<u32, GeometrySparseU32DefaultsSchema>(
-                            row,
-                            geometry_attribute_field::SPARSE_DEFAULT,
-                        )
-                        .map(CanonicalBlockRef::from_store)
-                        .map(NodeSceneInheritedLeaf::GeometrySparseU32Defaults),
-                )?;
-                collector.push(
-                    attributes
-                        .sequence_ref::<i32, GeometrySparseI32DefaultsSchema>(
-                            row,
-                            geometry_attribute_field::SPARSE_DEFAULT,
-                        )
-                        .map(CanonicalBlockRef::from_store)
-                        .map(NodeSceneInheritedLeaf::GeometrySparseI32Defaults),
-                )?;
+                semantic.run_unit(|| -> Result<(), StoreRuntimeError> {
+                    collector.push(
+                        attributes
+                            .sequence_ref::<f32, GeometryF32ValuesSchema>(
+                                row,
+                                geometry_attribute_field::VALUES,
+                            )
+                            .map(CanonicalBlockRef::from_store)
+                            .map(NodeSceneInheritedLeaf::GeometryF32Values),
+                    )?;
+                    collector.push(
+                        attributes
+                            .sequence_ref::<u32, GeometryU32ValuesSchema>(
+                                row,
+                                geometry_attribute_field::VALUES,
+                            )
+                            .map(CanonicalBlockRef::from_store)
+                            .map(NodeSceneInheritedLeaf::GeometryU32Values),
+                    )?;
+                    collector.push(
+                        attributes
+                            .sequence_ref::<i32, GeometryI32ValuesSchema>(
+                                row,
+                                geometry_attribute_field::VALUES,
+                            )
+                            .map(CanonicalBlockRef::from_store)
+                            .map(NodeSceneInheritedLeaf::GeometryI32Values),
+                    )?;
+                    collector.push(
+                        attributes
+                            .sequence_ref::<u32, GeometrySparseIndicesSchema>(
+                                row,
+                                geometry_attribute_field::SPARSE_INDICES,
+                            )
+                            .map(CanonicalBlockRef::from_store)
+                            .map(NodeSceneInheritedLeaf::GeometrySparseIndices),
+                    )?;
+                    collector.push(
+                        attributes
+                            .sequence_ref::<f32, GeometrySparseF32DefaultsSchema>(
+                                row,
+                                geometry_attribute_field::SPARSE_DEFAULT,
+                            )
+                            .map(CanonicalBlockRef::from_store)
+                            .map(NodeSceneInheritedLeaf::GeometrySparseF32Defaults),
+                    )?;
+                    collector.push(
+                        attributes
+                            .sequence_ref::<u32, GeometrySparseU32DefaultsSchema>(
+                                row,
+                                geometry_attribute_field::SPARSE_DEFAULT,
+                            )
+                            .map(CanonicalBlockRef::from_store)
+                            .map(NodeSceneInheritedLeaf::GeometrySparseU32Defaults),
+                    )?;
+                    collector.push(
+                        attributes
+                            .sequence_ref::<i32, GeometrySparseI32DefaultsSchema>(
+                                row,
+                                geometry_attribute_field::SPARSE_DEFAULT,
+                            )
+                            .map(CanonicalBlockRef::from_store)
+                            .map(NodeSceneInheritedLeaf::GeometrySparseI32Defaults),
+                    )?;
+                    collector.note_inspected()
+                })??;
             }
         }
         None => return Err(StoreRuntimeError::InvalidSourceSlot),
@@ -497,13 +576,23 @@ fn collect_geometry_leaves(
     Ok(())
 }
 
-fn collect_profile_leaves(
-    assembly: &mut SceneStoreAssembly<baozi_operation::CanonicalInheritanceSource>,
+fn collect_profile_leaves<'borrow, 'scope, O, PP, U>(
     pending: &BoundPendingNodeSceneEdit<'_>,
-    keys: SceneStoreKeys,
-    work: &mut NodeSceneWorkMeter,
+    semantic: &mut CanonicalSemanticWorkSession<
+        'borrow,
+        'scope,
+        O,
+        PP,
+        U,
+        CanonicalInheritanceSource,
+    >,
     collector: &mut InheritedLeafCollector<'_>,
-) -> Result<(), StoreRuntimeError> {
+) -> Result<(), StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let segments = required_record_view(pending.input, pending.input.proof.profile_segments())?;
     if segments.rows() != pending.counts.profile.source_segment_count.as_usize()
         || segments.fields() != PROFILE_SEGMENT_FIELD_COUNT
@@ -511,82 +600,84 @@ fn collect_profile_leaves(
         return Err(StoreRuntimeError::InvalidSourceSlot);
     }
     for row in 0..segments.rows() {
-        collector.observe(assembly, keys, work)?;
-        collector.push(
-            segments
-                .sequence_ref::<u32, ProfileLineageResourceSchema>(
-                    row,
-                    profile_segment_field::RESOURCES,
-                )
-                .map(CanonicalBlockRef::from_store)
-                .map(NodeSceneInheritedLeaf::ProfileResources),
-        )?;
-        collector.push(
-            segments
-                .sequence_ref::<u32, ProfileLineageSourceSchema>(
-                    row,
-                    profile_segment_field::SOURCES,
-                )
-                .map(CanonicalBlockRef::from_store)
-                .map(NodeSceneInheritedLeaf::ProfileSources),
-        )?;
-        collector.push(
-            segments
-                .sequence_ref::<u32, ProfileLineageProvenanceSchema>(
-                    row,
-                    profile_segment_field::PROVENANCE_NODES,
-                )
-                .map(CanonicalBlockRef::from_store)
-                .map(NodeSceneInheritedLeaf::ProfileProvenance),
-        )?;
-        collector.push(
-            segments
-                .sequence_ref::<u32, ProfileLineageOperationSchema>(
-                    row,
-                    profile_segment_field::OPERATIONS,
-                )
-                .map(CanonicalBlockRef::from_store)
-                .map(NodeSceneInheritedLeaf::ProfileOperations),
-        )?;
-        collector.push(
-            segments
-                .sequence_ref::<u32, ProfileLineageEvidenceSchema>(
-                    row,
-                    profile_segment_field::EVIDENCE,
-                )
-                .map(CanonicalBlockRef::from_store)
-                .map(NodeSceneInheritedLeaf::ProfileEvidence),
-        )?;
-        collector.push(
-            segments
-                .sequence_ref::<u64, ProfileLineageParentSchema>(
-                    row,
-                    profile_segment_field::PARENTS,
-                )
-                .map(CanonicalBlockRef::from_store)
-                .map(NodeSceneInheritedLeaf::ProfileParents),
-        )?;
-        collector.push(
-            segments
-                .sequence_ref::<u64, ProfileLineageWideSchema>(
-                    row,
-                    profile_segment_field::WIDE_VALUES,
-                )
-                .map(CanonicalBlockRef::from_store)
-                .map(NodeSceneInheritedLeaf::ProfileWide),
-        )?;
-        collector.push(
-            segments
-                .utf8_ref::<ProfileLineageTextSchema>(row, profile_segment_field::TEXTS)
-                .map(CanonicalBlockRef::from_store)
-                .map(NodeSceneInheritedLeaf::ProfileText),
-        )?;
-        collector.push(
-            segments
-                .bytes_ref::<ProfileLineageDigestSchema>(row, profile_segment_field::DIGESTS)
-                .map(CanonicalBlockRef::from_store)
-                .map(NodeSceneInheritedLeaf::ProfileDigests),
-        )?;
+        semantic.run_unit(|| -> Result<(), StoreRuntimeError> {
+            collector.push(
+                segments
+                    .sequence_ref::<u32, ProfileLineageResourceSchema>(
+                        row,
+                        profile_segment_field::RESOURCES,
+                    )
+                    .map(CanonicalBlockRef::from_store)
+                    .map(NodeSceneInheritedLeaf::ProfileResources),
+            )?;
+            collector.push(
+                segments
+                    .sequence_ref::<u32, ProfileLineageSourceSchema>(
+                        row,
+                        profile_segment_field::SOURCES,
+                    )
+                    .map(CanonicalBlockRef::from_store)
+                    .map(NodeSceneInheritedLeaf::ProfileSources),
+            )?;
+            collector.push(
+                segments
+                    .sequence_ref::<u32, ProfileLineageProvenanceSchema>(
+                        row,
+                        profile_segment_field::PROVENANCE_NODES,
+                    )
+                    .map(CanonicalBlockRef::from_store)
+                    .map(NodeSceneInheritedLeaf::ProfileProvenance),
+            )?;
+            collector.push(
+                segments
+                    .sequence_ref::<u32, ProfileLineageOperationSchema>(
+                        row,
+                        profile_segment_field::OPERATIONS,
+                    )
+                    .map(CanonicalBlockRef::from_store)
+                    .map(NodeSceneInheritedLeaf::ProfileOperations),
+            )?;
+            collector.push(
+                segments
+                    .sequence_ref::<u32, ProfileLineageEvidenceSchema>(
+                        row,
+                        profile_segment_field::EVIDENCE,
+                    )
+                    .map(CanonicalBlockRef::from_store)
+                    .map(NodeSceneInheritedLeaf::ProfileEvidence),
+            )?;
+            collector.push(
+                segments
+                    .sequence_ref::<u64, ProfileLineageParentSchema>(
+                        row,
+                        profile_segment_field::PARENTS,
+                    )
+                    .map(CanonicalBlockRef::from_store)
+                    .map(NodeSceneInheritedLeaf::ProfileParents),
+            )?;
+            collector.push(
+                segments
+                    .sequence_ref::<u64, ProfileLineageWideSchema>(
+                        row,
+                        profile_segment_field::WIDE_VALUES,
+                    )
+                    .map(CanonicalBlockRef::from_store)
+                    .map(NodeSceneInheritedLeaf::ProfileWide),
+            )?;
+            collector.push(
+                segments
+                    .utf8_ref::<ProfileLineageTextSchema>(row, profile_segment_field::TEXTS)
+                    .map(CanonicalBlockRef::from_store)
+                    .map(NodeSceneInheritedLeaf::ProfileText),
+            )?;
+            collector.push(
+                segments
+                    .bytes_ref::<ProfileLineageDigestSchema>(row, profile_segment_field::DIGESTS)
+                    .map(CanonicalBlockRef::from_store)
+                    .map(NodeSceneInheritedLeaf::ProfileDigests),
+            )?;
+            collector.note_inspected()
+        })??;
     }
 
     let metadata = required_record_view(
@@ -596,64 +687,66 @@ fn collect_profile_leaves(
     if metadata.rows() != 1 || metadata.fields() != PROFILE_METADATA_DIRECTORY_FIELD_COUNT {
         return Err(StoreRuntimeError::InvalidSourceSlot);
     }
-    collector.observe(assembly, keys, work)?;
-    collector.push(
-        metadata
-            .utf8_ref::<ProfileMetadataTextSchema>(0, profile_metadata_directory_field::TEXTS)
-            .map(CanonicalBlockRef::from_store)
-            .map(NodeSceneInheritedLeaf::MetadataText),
-    )?;
-    collector.push(
-        metadata
-            .bytes_ref::<ProfileMetadataBytesSchema>(0, profile_metadata_directory_field::BYTES)
-            .map(CanonicalBlockRef::from_store)
-            .map(NodeSceneInheritedLeaf::MetadataBytes),
-    )?;
-    collector.push(
-        metadata
-            .sequence_ref::<u8, ProfileMetadataBoolSchema>(
-                0,
-                profile_metadata_directory_field::BOOL_VALUES,
-            )
-            .map(CanonicalBlockRef::from_store)
-            .map(NodeSceneInheritedLeaf::MetadataBool),
-    )?;
-    collector.push(
-        metadata
-            .sequence_ref::<i64, ProfileMetadataI64Schema>(
-                0,
-                profile_metadata_directory_field::I64_VALUES,
-            )
-            .map(CanonicalBlockRef::from_store)
-            .map(NodeSceneInheritedLeaf::MetadataI64),
-    )?;
-    collector.push(
-        metadata
-            .sequence_ref::<u64, ProfileMetadataU64Schema>(
-                0,
-                profile_metadata_directory_field::U64_VALUES,
-            )
-            .map(CanonicalBlockRef::from_store)
-            .map(NodeSceneInheritedLeaf::MetadataU64),
-    )?;
-    collector.push(
-        metadata
-            .sequence_ref::<f64, ProfileMetadataF64Schema>(
-                0,
-                profile_metadata_directory_field::F64_VALUES,
-            )
-            .map(CanonicalBlockRef::from_store)
-            .map(NodeSceneInheritedLeaf::MetadataF64),
-    )?;
-    collector.push(
-        metadata
-            .sequence_ref::<f32, ProfileMetadataF32Schema>(
-                0,
-                profile_metadata_directory_field::F32_VALUES,
-            )
-            .map(CanonicalBlockRef::from_store)
-            .map(NodeSceneInheritedLeaf::MetadataF32),
-    )?;
+    semantic.run_unit(|| -> Result<(), StoreRuntimeError> {
+        collector.push(
+            metadata
+                .utf8_ref::<ProfileMetadataTextSchema>(0, profile_metadata_directory_field::TEXTS)
+                .map(CanonicalBlockRef::from_store)
+                .map(NodeSceneInheritedLeaf::MetadataText),
+        )?;
+        collector.push(
+            metadata
+                .bytes_ref::<ProfileMetadataBytesSchema>(0, profile_metadata_directory_field::BYTES)
+                .map(CanonicalBlockRef::from_store)
+                .map(NodeSceneInheritedLeaf::MetadataBytes),
+        )?;
+        collector.push(
+            metadata
+                .sequence_ref::<u8, ProfileMetadataBoolSchema>(
+                    0,
+                    profile_metadata_directory_field::BOOL_VALUES,
+                )
+                .map(CanonicalBlockRef::from_store)
+                .map(NodeSceneInheritedLeaf::MetadataBool),
+        )?;
+        collector.push(
+            metadata
+                .sequence_ref::<i64, ProfileMetadataI64Schema>(
+                    0,
+                    profile_metadata_directory_field::I64_VALUES,
+                )
+                .map(CanonicalBlockRef::from_store)
+                .map(NodeSceneInheritedLeaf::MetadataI64),
+        )?;
+        collector.push(
+            metadata
+                .sequence_ref::<u64, ProfileMetadataU64Schema>(
+                    0,
+                    profile_metadata_directory_field::U64_VALUES,
+                )
+                .map(CanonicalBlockRef::from_store)
+                .map(NodeSceneInheritedLeaf::MetadataU64),
+        )?;
+        collector.push(
+            metadata
+                .sequence_ref::<f64, ProfileMetadataF64Schema>(
+                    0,
+                    profile_metadata_directory_field::F64_VALUES,
+                )
+                .map(CanonicalBlockRef::from_store)
+                .map(NodeSceneInheritedLeaf::MetadataF64),
+        )?;
+        collector.push(
+            metadata
+                .sequence_ref::<f32, ProfileMetadataF32Schema>(
+                    0,
+                    profile_metadata_directory_field::F32_VALUES,
+                )
+                .map(CanonicalBlockRef::from_store)
+                .map(NodeSceneInheritedLeaf::MetadataF32),
+        )?;
+        collector.note_inspected()
+    })??;
     Ok(())
 }
 

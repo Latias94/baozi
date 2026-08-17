@@ -40,6 +40,7 @@ use super::{
 
 mod lineage;
 mod metadata;
+pub(in crate::canonical_scene::store) use metadata::RetainedMetadataRefs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProfileBuildFault {

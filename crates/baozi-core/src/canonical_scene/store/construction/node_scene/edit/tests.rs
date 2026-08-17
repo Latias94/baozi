@@ -1498,7 +1498,7 @@ fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
 }
 
 #[test]
-fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
+fn post_materialization_product_graph_rejection_preserves_rich_failure_evidence() {
     let factory = test_factory();
     let mut observed_rich_storage_rejection = false;
     let mut observed_post_nonce_storage_rejection = false;
@@ -1527,8 +1527,8 @@ fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
         }) {
             match prepared.handoff() {
                 super::NodeSceneEditTerminal::RichFailure(failure)
-                    if terminal_failure_code(failure.ledger_evidence())
-                        == super::super::NODE_SCENE_STORAGE_REJECTION_CODE =>
+                    if terminal_failure_class(failure.ledger_evidence())
+                        == StorePreparationFailureClass::ProductGraph =>
                 {
                     assert_eq!(failure.outcome_evidence_block_count(), 1);
                     let issued_nonce_count = issued_profile_segment_nonce_count_for_test();
@@ -1560,11 +1560,11 @@ fn post_evidence_storage_rejection_preserves_rich_failure_evidence() {
 
     assert!(
         observed_rich_storage_rejection,
-        "a storage budget that admits edit evidence but rejects canonical output must preserve rich evidence",
+        "a bounded materialization failure must preserve rich evidence once the failure graph fits",
     );
     assert!(
         observed_post_nonce_storage_rejection,
-        "a storage rejection after profile rewrite starts must leave one invisible nonce gap",
+        "a product-graph rejection after profile rewrite starts must leave one invisible nonce gap",
     );
 }
 

@@ -82,7 +82,8 @@ use super::{
     NodeSceneConstructionRejection, NodeSceneDraft, NodeSceneDraftBuild, PendingNodeSceneDraft,
     PendingNodeSceneFailure, SceneEvidenceCounts,
 };
-use spatial::{RetainedSpatialRefs, SpatialMaterializationPlans, retain_spatial};
+pub(in crate::canonical_scene::store) use spatial::RetainedSpatialRefs;
+use spatial::{SpatialMaterializationPlans, retain_spatial};
 
 use crate::canonical_scene::store::validation::validate_node_scene_canonical_graph_metered;
 
@@ -263,7 +264,7 @@ impl NodeSceneActivationRoles {
         self
     }
 
-    const fn bind(
+    pub(super) const fn bind(
         self,
         canonical_writer_limits: RetainedStoreBatchLimits,
         outcome_evidence_writer_limits: RetainedStoreBatchLimits,
@@ -630,24 +631,24 @@ struct NodeSceneExecutionPlan<'input, R> {
 }
 
 #[derive(Clone, Copy)]
-struct NodeSceneFailureEvidencePlan {
-    records: RecordPlan,
+pub(super) struct NodeSceneFailureEvidencePlan {
+    pub(super) records: RecordPlan,
 }
 
 impl NodeSceneFailureEvidencePlan {
-    fn try_new() -> Result<Self, StorePlanError> {
+    pub(super) fn try_new() -> Result<Self, StorePlanError> {
         Ok(Self {
             records: RecordPlan::new(1, NODE_SCENE_EVIDENCE_FIELD_COUNT)?,
         })
     }
 
-    fn requirements(self) -> Result<CanonicalFailureRequirements, StorePlanError> {
+    pub(super) fn requirements(self) -> Result<CanonicalFailureRequirements, StorePlanError> {
         Ok(CanonicalFailureRequirements::new(CanonicalTableShape::new(
             1, 1,
         )?))
     }
 
-    fn validation_work_units(self) -> Result<u64, StorePlanError> {
+    pub(super) fn validation_work_units(self) -> Result<u64, StorePlanError> {
         record_validation_work(self.records)
     }
 }

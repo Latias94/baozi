@@ -29,7 +29,7 @@ use super::super::validation::NodeSceneValidationProof;
 use super::{
     ConstructionBrand, PreparedTracerSceneFallback, SceneConstructionError, SceneConstructionOwner,
     SceneConstructionPhase, SceneConstructionUnit, SceneStoreAssembly, SceneStoreControlCheckpoint,
-    SceneStoreKeys, SceneStoreOperation, TracerSceneFallback,
+    SceneStoreKeys, TracerSceneFallback,
 };
 
 mod animation;

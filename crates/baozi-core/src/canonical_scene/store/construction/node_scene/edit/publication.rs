@@ -1,28 +1,26 @@
+use baozi_operation::__canonical_activation::{
+    CanonicalFreezePermitIssue, CanonicalJointSeal, RootedFailureValidation,
+};
 use baozi_operation::{
-    CanonicalInheritanceSource, PreparedStoreFailure, PreparedStoreFailureOutcome,
-    PreparedStoreFallback, PreparedStoreSuccess, PreparedStoreSuccessOutcome,
-    PublishedOutcomeEvidenceStore, RecordBlock, StoreControlledSuccessValidation,
-    StoreFailureValidation, StoreLedgerEvidence, StoreRuntimeError, StoreWorkError,
+    CanonicalInheritanceSource, FinalProgress, PreparedStoreFailureOutcome, PreparedStoreFallback,
+    PreparedStoreSuccess, PreparedStoreSuccessOutcome, PublishedOutcomeEvidenceStore, RecordBlock,
+    StoreLedgerEvidence,
 };
 
 use crate::canonical_scene::store::schema::{NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema};
-use crate::canonical_scene::store::validation::{
-    validate_node_scene_canonical_graph, validate_node_scene_evidence_graph,
-};
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 
 use super::super::super::{
-    GENERATION_EXHAUSTED_CODE, SceneConstructionError, SceneStoreAssembly, SceneStoreKeys,
-    SceneStoreOpenRecovery, TracerSceneFallback, burn_generation_reservation, final_progress,
+    GENERATION_EXHAUSTED_CODE, PreparedTracerSceneFallback, SceneConstructionError,
+    SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit, TracerSceneFallback,
+    burn_generation_reservation,
 };
-use super::super::publication::node_scene_failure_code;
-use super::super::scratch::{NodeSceneCentralValidationPlan, NodeSceneValidationScratchOwner};
+use super::super::publication::validate_node_scene_failure_evidence;
 use super::super::{
-    NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_CONTROL_INTERRUPTION_CODE,
-    NODE_SCENE_WORK_INTERRUPTION_CODE, NodeSceneRichFailure, NodeSceneStoreFailureValidation,
-    SceneEvidenceCounts, ValidatedNodeScene,
+    ActivatedNodeSceneCandidate, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneCanonicalJointCommit,
+    NodeSceneRichFailure, PendingNodeSceneFailure, PreparedNodeSceneConstruction,
+    PreparedNodeSceneRichFailure, ValidatedNodeScene,
 };
-use super::graph::RewrittenNodeSceneGraph;
 use super::report::{CanonicalInvalidations, CanonicalRemapSet};
 
 type PreparedEditStoreSuccess = PreparedStoreSuccess<
@@ -31,7 +29,8 @@ type PreparedEditStoreSuccess = PreparedStoreSuccess<
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
-type PreparedEditStoreFailure = PreparedStoreFailure<RecordBlock, NodeSceneOutcomeEvidenceSchema>;
+type PreparedEditStoreFailure =
+    baozi_operation::PreparedStoreFailure<RecordBlock, NodeSceneOutcomeEvidenceSchema>;
 
 pub(super) struct PreparedNodeSceneEditSuccess {
     generation: ReservedSceneGeneration,
@@ -87,214 +86,193 @@ pub(in crate::canonical_scene::store) enum NodeSceneEditTerminal {
     MinimalFallback(TracerSceneFallback),
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn prepare_edit_candidate(
-    assembly: SceneStoreAssembly<CanonicalInheritanceSource>,
-    graph: RewrittenNodeSceneGraph,
-    mut scratch: NodeSceneValidationScratchOwner,
-    keys: SceneStoreKeys,
-    input_generation: SceneGenerationId,
-    counts: SceneEvidenceCounts,
-    canonical_unique_block_count: u32,
-    deformation_uniqueness_mark_count: usize,
-    central_validation_plan: NodeSceneCentralValidationPlan,
-    invalidations: CanonicalInvalidations,
-    reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
-    let RewrittenNodeSceneGraph {
-        directory,
-        evidence,
-        mut work,
-    } = graph;
-    let mut proof = None;
-    let validation = {
-        let mut scratch_view = scratch.validation_view();
-        assembly.validate_success_controlled(
-            keys.dimension,
-            keys.dimension,
-            directory.into_store(),
-            evidence,
-            |session, directory, evidence, control| {
-                proof = validate_node_scene_canonical_graph(
-                    session,
-                    directory,
-                    evidence,
-                    counts,
-                    canonical_unique_block_count,
-                    deformation_uniqueness_mark_count,
-                    central_validation_plan,
-                    &mut scratch_view,
-                    |amount| work.observe(control, amount),
-                )?;
-                work.finish(control)?;
-                Ok(proof.is_some())
-            },
-        )
-    };
-    drop(scratch);
-
-    match validation {
-        StoreControlledSuccessValidation::InvalidWorkDimension { assembly, cause } => {
-            prepare_edit_minimal_from_assembly(
-                assembly,
-                super::super::publication::node_scene_failure_code(&cause),
-            )
-        }
-        StoreControlledSuccessValidation::Valid(store) => match proof {
-            Some(proof) => prepare_validated_edit(
-                store,
-                proof,
-                input_generation,
-                invalidations,
-                reserve_generation,
-            ),
-            None => prepare_edit_rich_failure(
-                store.downgrade_to_rich_failure(NODE_SCENE_BUILD_INVARIANT_CODE),
-                counts,
-                NODE_SCENE_BUILD_INVARIANT_CODE,
-            ),
-        },
-        StoreControlledSuccessValidation::Rejected(failure) => {
-            prepare_edit_rich_failure(failure, counts, NODE_SCENE_BUILD_INVARIANT_CODE)
-        }
-        StoreControlledSuccessValidation::Interrupted { failure, cause } => {
-            prepare_edit_rich_failure(failure, counts, interruption_code(&cause))
-        }
-        StoreControlledSuccessValidation::FallbackOnly(fallback) => {
-            let store = fallback.prepare_minimal_fallback()?;
-            Ok(PreparedNodeSceneEdit::minimal_fallback(
-                PreparedNodeSceneEditMinimalFallback { store },
-            ))
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+enum NodeSceneEditGenerationRejection {
+    Exhausted,
+    RemapInvariant,
 }
 
-fn prepare_validated_edit(
-    store: super::super::ValidatedNodeStoreSuccess,
+macro_rules! prepare_frozen_edit_failure {
+    ($rooted:expr, $counts:expr) => {{
+        let validation = $rooted.validate_rich_failure(|session, root| {
+            validate_node_scene_failure_evidence(session, root, $counts)
+        })?;
+        match validation {
+            RootedFailureValidation::Valid(validated) => {
+                let (prepared, _cause) = validated.try_prepare_frozen()?.into_parts();
+                map_prepared_failure(prepared)
+            }
+            RootedFailureValidation::Rejected(rejected) => {
+                let (store, _cause) = rejected.prepare_minimal_fallback()?.into_parts();
+                Ok(PreparedNodeSceneEdit::minimal_fallback(
+                    PreparedNodeSceneEditMinimalFallback { store },
+                ))
+            }
+            RootedFailureValidation::Fallback(fallback) => {
+                let (store, _cause) = fallback.into_parts();
+                Ok(PreparedNodeSceneEdit::minimal_fallback(
+                    PreparedNodeSceneEditMinimalFallback { store },
+                ))
+            }
+        }
+    }};
+}
+
+struct ScopedNodeSceneEditJointCommit<'joint> {
+    generation: ReservedSceneGeneration,
     proof: crate::canonical_scene::store::validation::NodeSceneValidationProof,
+    invalidations: CanonicalInvalidations,
+    remaps: CanonicalRemapSet,
+    seal: CanonicalJointSeal<'joint>,
+    joint: NodeSceneCanonicalJointCommit<'joint>,
+}
+
+impl ScopedNodeSceneEditJointCommit<'_> {
+    fn prepare(self) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
+        let Self {
+            generation,
+            proof,
+            invalidations,
+            remaps,
+            seal,
+            joint,
+        } = self;
+        match joint.prepare(seal)? {
+            PreparedStoreSuccessOutcome::Success(store) => Ok(PreparedNodeSceneEdit::success(
+                PreparedNodeSceneEditSuccess {
+                    generation,
+                    store,
+                    proof,
+                    invalidations,
+                    remaps,
+                },
+            )),
+            PreparedStoreSuccessOutcome::RichFailure(store) => {
+                burn_generation_reservation(generation);
+                Ok(PreparedNodeSceneEdit::rich_failure(
+                    PreparedNodeSceneEditRichFailure { store },
+                ))
+            }
+            PreparedStoreSuccessOutcome::MinimalFallback(store) => {
+                burn_generation_reservation(generation);
+                Ok(PreparedNodeSceneEdit::minimal_fallback(
+                    PreparedNodeSceneEditMinimalFallback { store },
+                ))
+            }
+        }
+    }
+}
+
+pub(super) fn prepare_edit_candidate(
+    candidate: ActivatedNodeSceneCandidate,
     input_generation: SceneGenerationId,
     invalidations: CanonicalInvalidations,
+    final_progress: FinalProgress<SceneConstructionPhase, SceneConstructionUnit>,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
-    let generation = match reserve_generation() {
-        Ok(generation) => generation,
-        Err(SceneGenerationError::Exhausted) => {
-            return prepare_edit_rich_failure(
-                store.downgrade_to_rich_failure(GENERATION_EXHAUSTED_CODE),
-                proof.counts(),
-                GENERATION_EXHAUSTED_CODE,
-            );
+    let evidence_counts = candidate.output().evidence_counts;
+    match candidate.try_issue_freeze_permit(final_progress)? {
+        CanonicalFreezePermitIssue::Ready(permit) => {
+            let generation = match reserve_generation() {
+                Ok(generation) => generation,
+                Err(SceneGenerationError::Exhausted) => {
+                    let rejected = permit.reject_generation(
+                        NodeSceneEditGenerationRejection::Exhausted,
+                        GENERATION_EXHAUSTED_CODE,
+                    )?;
+                    return prepare_frozen_edit_failure!(rejected, evidence_counts);
+                }
+            };
+            let remaps =
+                match CanonicalRemapSet::try_all_unchanged(input_generation, generation.id()) {
+                    Ok(remaps) => remaps,
+                    Err(_) => {
+                        burn_generation_reservation(generation);
+                        let rejected = permit.reject_generation(
+                            NodeSceneEditGenerationRejection::RemapInvariant,
+                            NODE_SCENE_BUILD_INVARIANT_CODE,
+                        )?;
+                        return prepare_frozen_edit_failure!(rejected, evidence_counts);
+                    }
+                };
+            permit.bind_joint_commit(|_output, proof, joint, seal| {
+                ScopedNodeSceneEditJointCommit {
+                    generation,
+                    proof,
+                    invalidations,
+                    remaps,
+                    seal,
+                    joint,
+                }
+                .prepare()
+            })
         }
-    };
-    let remaps = match CanonicalRemapSet::try_all_unchanged(input_generation, generation.id()) {
-        Ok(remaps) => remaps,
-        Err(_) => {
-            burn_generation_reservation(generation);
-            return prepare_edit_rich_failure(
-                store.downgrade_to_rich_failure(NODE_SCENE_BUILD_INVARIANT_CODE),
-                proof.counts(),
-                NODE_SCENE_BUILD_INVARIANT_CODE,
-            );
+        CanonicalFreezePermitIssue::Interrupted(interrupted) => {
+            prepare_frozen_edit_failure!(interrupted, evidence_counts)
         }
-    };
-
-    match store.try_prepare(final_progress())? {
-        PreparedStoreSuccessOutcome::Success(store) => Ok(PreparedNodeSceneEdit::success(
-            PreparedNodeSceneEditSuccess {
-                generation,
-                store,
-                proof,
-                invalidations,
-                remaps,
-            },
-        )),
-        PreparedStoreSuccessOutcome::RichFailure(store) => {
-            burn_generation_reservation(generation);
-            Ok(PreparedNodeSceneEdit::rich_failure(
-                PreparedNodeSceneEditRichFailure { store },
-            ))
-        }
-        PreparedStoreSuccessOutcome::MinimalFallback(store) => {
-            burn_generation_reservation(generation);
-            Ok(PreparedNodeSceneEdit::minimal_fallback(
-                PreparedNodeSceneEditMinimalFallback { store },
-            ))
+        CanonicalFreezePermitIssue::DestinationRejected(rejected) => {
+            let validation = rejected.validate_rich_failure(|session, root| {
+                validate_node_scene_failure_evidence(session, root, evidence_counts)
+            })?;
+            prepare_ordinary_failure_validation(validation, final_progress)
         }
     }
 }
 
-fn prepare_edit_rich_failure(
-    failure: super::super::NodeSceneStoreFailureAssembly,
-    counts: SceneEvidenceCounts,
-    cause: u32,
+pub(super) fn prepare_pending_edit_failure(
+    pending: PendingNodeSceneFailure<
+        SceneConstructionOwner,
+        SceneConstructionPhase,
+        SceneConstructionUnit,
+        CanonicalInheritanceSource,
+    >,
 ) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
-    let evidence = failure.evidence_root();
-    finish_edit_rich_failure_validation(
-        failure.validate_rich_failure(evidence, |session, evidence| {
-            validate_node_scene_evidence_graph(session, evidence, counts)
-        }),
-        cause,
-    )
+    let (prepared, _authoring_rejection, _control_cause) = pending.prepare()?;
+    map_prepared_construction_failure(prepared)
 }
 
-pub(super) fn prepare_edit_post_evidence_failure<L>(
-    assembly: SceneStoreAssembly<L>,
-    evidence: baozi_operation::OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-    counts: SceneEvidenceCounts,
-    cause: StoreRuntimeError,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
-    match super::super::publication::post_evidence_failure_code(&cause) {
-        Some(cause) => prepare_edit_rich_failure_from_assembly(assembly, evidence, counts, cause),
-        None => prepare_edit_minimal_from_assembly(
-            assembly,
-            super::super::publication::node_scene_failure_code(&cause),
-        ),
-    }
-}
-
-pub(super) fn prepare_edit_post_evidence_invariant<L>(
-    assembly: SceneStoreAssembly<L>,
-    evidence: baozi_operation::OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-    counts: SceneEvidenceCounts,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
-    prepare_edit_rich_failure_from_assembly(
-        assembly,
-        evidence,
-        counts,
-        NODE_SCENE_BUILD_INVARIANT_CODE,
-    )
-}
-
-fn prepare_edit_rich_failure_from_assembly<L>(
-    assembly: SceneStoreAssembly<L>,
-    evidence: baozi_operation::OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-    counts: SceneEvidenceCounts,
-    cause: u32,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
-    finish_edit_rich_failure_validation(
-        assembly.validate_rich_failure(evidence, |session, evidence| {
-            validate_node_scene_evidence_graph(session, evidence, counts)
-        }),
-        cause,
-    )
-}
-
-fn finish_edit_rich_failure_validation(
-    validation: NodeSceneStoreFailureValidation,
-    cause: u32,
+fn prepare_ordinary_failure_validation<Cause>(
+    validation: RootedFailureValidation<
+        SceneConstructionOwner,
+        SceneConstructionPhase,
+        SceneConstructionUnit,
+        Cause,
+        RecordBlock,
+        NodeSceneOutcomeEvidenceSchema,
+    >,
+    final_progress: FinalProgress<SceneConstructionPhase, SceneConstructionUnit>,
 ) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     match validation {
-        StoreFailureValidation::Valid(validated) => {
-            map_prepared_failure(validated.try_prepare(cause, final_progress())?)
+        RootedFailureValidation::Valid(validated) => {
+            let (prepared, _cause) = validated.try_prepare(final_progress)?.into_parts();
+            map_prepared_failure(prepared)
         }
-        StoreFailureValidation::Rejected(rejected) => {
-            let store = rejected.prepare_minimal_fallback_with(cause)?;
+        RootedFailureValidation::Rejected(rejected) => {
+            let (store, _cause) = rejected.prepare_minimal_fallback()?.into_parts();
             Ok(PreparedNodeSceneEdit::minimal_fallback(
                 PreparedNodeSceneEditMinimalFallback { store },
             ))
         }
-        StoreFailureValidation::FallbackOnly(fallback) => {
-            let store = fallback.prepare_minimal_fallback()?;
+        RootedFailureValidation::Fallback(fallback) => {
+            let (store, _cause) = fallback.into_parts();
+            Ok(PreparedNodeSceneEdit::minimal_fallback(
+                PreparedNodeSceneEditMinimalFallback { store },
+            ))
+        }
+    }
+}
+
+fn map_prepared_construction_failure(
+    prepared: PreparedNodeSceneConstruction,
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
+    match prepared {
+        PreparedNodeSceneConstruction::Success(_) => {
+            Err(SceneConstructionError::JointCommitInvariant)
+        }
+        PreparedNodeSceneConstruction::RichFailure(PreparedNodeSceneRichFailure { store }) => Ok(
+            PreparedNodeSceneEdit::rich_failure(PreparedNodeSceneEditRichFailure { store }),
+        ),
+        PreparedNodeSceneConstruction::MinimalFallback(PreparedTracerSceneFallback { store }) => {
             Ok(PreparedNodeSceneEdit::minimal_fallback(
                 PreparedNodeSceneEditMinimalFallback { store },
             ))
@@ -313,35 +291,6 @@ fn map_prepared_failure(
             PreparedNodeSceneEdit::minimal_fallback(PreparedNodeSceneEditMinimalFallback { store })
         }
     })
-}
-
-pub(super) fn prepare_edit_minimal_from_open_recovery<L>(
-    recovery: SceneStoreOpenRecovery<L>,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
-    let store = recovery.prepare_minimal_fallback_with(node_scene_failure_code)?;
-    Ok(PreparedNodeSceneEdit::minimal_fallback(
-        PreparedNodeSceneEditMinimalFallback { store },
-    ))
-}
-
-pub(super) fn prepare_edit_minimal_from_assembly<L>(
-    assembly: SceneStoreAssembly<L>,
-    cause: u32,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
-    let store = assembly.prepare_minimal_fallback_with(cause)?;
-    Ok(PreparedNodeSceneEdit::minimal_fallback(
-        PreparedNodeSceneEditMinimalFallback { store },
-    ))
-}
-
-fn interruption_code(cause: &StoreWorkError) -> u32 {
-    if cause.control_cause().is_some() {
-        NODE_SCENE_CONTROL_INTERRUPTION_CODE
-    } else if cause.ledger_cause().is_some() {
-        NODE_SCENE_WORK_INTERRUPTION_CODE
-    } else {
-        NODE_SCENE_BUILD_INVARIANT_CODE
-    }
 }
 
 impl PreparedNodeSceneEdit {

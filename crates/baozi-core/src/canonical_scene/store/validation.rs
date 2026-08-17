@@ -31,8 +31,8 @@ pub(in crate::canonical_scene::store) use node_scene::{
     GeometryPrimitiveValidationProjection, GeometryPrimitiveValidationScratch,
     GeometryValidationScratch, GeometryValidationScratchRequirements, NodeNameValidationScratch,
     NodeSceneValidationProof, NodeSceneValidationScratch, ProfileMeteredCounts,
-    ProfileMeteredScratch, ProfileSegmentValidationScratch, validate_node_scene_canonical_graph,
-    validate_node_scene_canonical_graph_metered, validate_node_scene_evidence_graph,
+    ProfileMeteredScratch, ProfileSegmentValidationScratch,
+    validate_node_scene_canonical_graph_metered,
 };
 
 pub(super) fn authored_matrix_scalar_is_valid(values: &[f32], index: usize) -> bool {

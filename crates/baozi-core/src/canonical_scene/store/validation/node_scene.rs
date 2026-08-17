@@ -3636,6 +3636,10 @@ fn present_count(present: &[bool]) -> Option<u32> {
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the sealed proof pairs every canonical domain with one shared evidence shape"
+)]
 fn assemble_node_scene_validation_proof(
     node: NodeCanonicalStructure,
     appearance: AppearanceValidatedRefs,

@@ -1,25 +1,37 @@
+use baozi_operation::__canonical_activation::{
+    CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
+    CanonicalMaterialization, CanonicalSuccessRequirements, CanonicalTableShape,
+    CanonicalValidationDecision, CanonicalValidationProgress,
+};
 use baozi_operation::{
-    OperationControl, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
-    RetainedStorePublicationPlan, RetainedStoreWriterPlan, StorePlanError,
+    CanonicalInheritanceSource, OperationControl, RecordBlock, RetainedStoreBatchLimits,
+    StorePlanError, StoreRuntimeError,
 };
 use thiserror::Error;
 
+use crate::canonical_scene::store::schema::{NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema};
+use crate::canonical_scene::store::validation::validate_node_scene_canonical_graph_metered;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 
 use super::super::super::{
     SceneConstructionError, SceneConstructionLimits, SceneConstructionPhase,
     SceneConstructionStartError, SceneConstructionUnit, SceneFailureEvidenceWork,
-    try_plan_scene_operation,
+    SceneStoreOperation, final_progress, try_plan_scene_operation,
 };
-use super::super::publication::node_scene_failure_code;
-use super::super::scratch::NodeSceneValidationScratchOwner;
-use super::super::{SceneStoreKeys, SceneStoreOperation};
-use super::graph::{NodeSceneRewriteError, try_rewrite_node_scene};
+use super::super::materialization::{
+    NodeSceneActivationOutput, NodeSceneFailureEvidencePlan, node_scene_activation_roles,
+    write_node_scene_evidence_row,
+};
+use super::super::scratch::ScopedNodeSceneValidationScratchOwner;
+use super::super::{
+    NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneConstructionRejection, NodeSceneDraft,
+    PendingNodeSceneFailure,
+};
+use super::graph::try_rewrite_node_scene;
+use super::leaf_plan::NodeSceneInheritedLeafPlan;
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditPlanError, PendingNodeSceneEdit};
 use super::publication::{
-    PreparedNodeSceneEdit, prepare_edit_candidate, prepare_edit_minimal_from_assembly,
-    prepare_edit_minimal_from_open_recovery, prepare_edit_post_evidence_failure,
-    prepare_edit_post_evidence_invariant,
+    PreparedNodeSceneEdit, prepare_edit_candidate, prepare_pending_edit_failure,
 };
 
 #[derive(Debug, Error)]
@@ -30,6 +42,11 @@ pub(in crate::canonical_scene::store) enum NodeSceneEditPrepareError {
     Start(#[from] SceneConstructionStartError),
     #[error("node Scene edit construction failed closed")]
     Construction(#[from] SceneConstructionError),
+}
+
+struct NodeSceneEditExecutionPlan<'scope, 'scene> {
+    pending: BoundPendingNodeSceneEdit<'scene>,
+    inherited: NodeSceneInheritedLeafPlan<'scope, super::super::super::SceneConstructionOwner>,
 }
 
 impl PendingNodeSceneEdit {
@@ -70,19 +87,31 @@ impl PendingNodeSceneEdit {
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
         let pending = self.bind(input)?;
-        let terminal_attribution_slots = pending
-            .counts
-            .canonical_attribution_slots
-            .as_usize()
-            .max(pending.counts.outcome_evidence_attribution_slots.as_usize());
+        let failure_evidence =
+            NodeSceneFailureEvidencePlan::try_new().map_err(SceneConstructionStartError::from)?;
+        let failure_requirements = failure_evidence
+            .requirements()
+            .map_err(SceneConstructionStartError::from)?;
+        let canonical_writer_limits =
+            RetainedStoreBatchLimits::new(pending.counts.canonical_attribution_slots.as_usize(), 4)
+                .map_err(SceneConstructionStartError::from)?;
+        let outcome_evidence_writer_limits = RetainedStoreBatchLimits::new(
+            pending.counts.outcome_evidence_attribution_slots.as_usize(),
+            4,
+        )
+        .map_err(SceneConstructionStartError::from)?;
+        let terminal_attribution_slots = canonical_writer_limits
+            .attribution_slots()
+            .max(outcome_evidence_writer_limits.attribution_slots());
         let start = try_plan_scene_operation(
             limits,
             control,
             terminal_attribution_slots,
-            SceneFailureEvidenceWork::legacy(),
+            SceneFailureEvidenceWork::exact_single_record(
+                crate::canonical_scene::store::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT,
+            ),
         )?;
-        let publication =
-            edit_publication_plan(start.keys, &pending).map_err(SceneConstructionError::from)?;
+        let brand = super::super::super::ConstructionBrand::reserve()?;
         let raw = SceneStoreOperation::try_start_derived(
             start.control,
             start.ledger_plan,
@@ -90,89 +119,14 @@ impl PendingNodeSceneEdit {
             start.start_plan,
         )
         .map_err(SceneConstructionStartError::from)?;
-        let mut assembly = match raw.try_publication_assembly(publication) {
-            Ok(assembly) => assembly,
-            Err(error) => {
-                let recovery = error
-                    .into_disposition()
-                    .map_err(SceneConstructionError::from)?;
-                return prepare_edit_minimal_from_open_recovery(recovery).map_err(Into::into);
-            }
-        };
+        let policy = node_scene_activation_roles(start.keys)
+            .bind(canonical_writer_limits, outcome_evidence_writer_limits);
+        let owner = raw
+            .into_scoped_session_outcome_owner(policy, failure_requirements)
+            .map_err(SceneConstructionError::from)?;
 
-        let graph = match try_rewrite_node_scene(&mut assembly, &pending, start.keys) {
-            Ok(graph) => graph,
-            Err(NodeSceneRewriteError::BeforeEvidence(cause)) => {
-                return prepare_edit_minimal_from_assembly(
-                    assembly,
-                    node_scene_failure_code(&cause),
-                )
-                .map_err(Into::into);
-            }
-            Err(NodeSceneRewriteError::AfterEvidence { evidence, cause }) => {
-                return prepare_edit_post_evidence_failure(
-                    assembly,
-                    evidence,
-                    pending.counts.evidence,
-                    cause,
-                )
-                .map_err(Into::into);
-            }
-        };
-        if assembly.canonical_len() != pending.counts.canonical_blocks.as_usize()
-            || assembly.outcome_evidence_len() != pending.counts.outcome_evidence_blocks.as_usize()
-        {
-            return prepare_edit_post_evidence_invariant(
-                assembly,
-                graph.evidence,
-                pending.counts.evidence,
-            )
-            .map_err(Into::into);
-        }
-        if let Err(cause) = assembly.try_commit_canonical(
-            start.keys.dimension,
-            u64::from(pending.counts.canonical_blocks.as_u32()),
-        ) {
-            return prepare_edit_post_evidence_failure(
-                assembly,
-                graph.evidence,
-                pending.counts.evidence,
-                cause,
-            )
-            .map_err(Into::into);
-        }
-        let scratch = match NodeSceneValidationScratchOwner::try_new(
-            &mut assembly,
-            start.keys,
-            pending.counts.evidence,
-            pending.input.proof.deformation_uniqueness_mark_count(),
-        ) {
-            Ok(scratch) => scratch,
-            Err(cause) => {
-                return prepare_edit_post_evidence_failure(
-                    assembly,
-                    graph.evidence,
-                    pending.counts.evidence,
-                    cause,
-                )
-                .map_err(Into::into);
-            }
-        };
-
-        prepare_edit_candidate(
-            assembly,
-            graph,
-            scratch,
-            start.keys,
-            pending.input.generation(),
-            pending.counts.evidence,
-            pending.counts.canonical_blocks.as_u32(),
-            pending.input.proof.deformation_uniqueness_mark_count(),
-            pending.counts.central_validation_plan,
-            pending.invalidations,
-            reserve_generation,
-        )
-        .map_err(Into::into)
+        prepare_scoped_edit(owner, pending, failure_evidence, brand, reserve_generation)
+            .map_err(Into::into)
     }
 
     #[cfg(test)]
@@ -187,63 +141,226 @@ impl PendingNodeSceneEdit {
     }
 }
 
-fn edit_publication_plan(
-    keys: SceneStoreKeys,
-    pending: &BoundPendingNodeSceneEdit<'_>,
-) -> Result<RetainedStorePublicationPlan, StorePlanError> {
-    let shape = pending.program.shape();
-    let source_partition = pending
-        .counts
-        .source_root_rows
-        .as_usize()
-        .checked_add(pending.counts.source_edge_rows.as_usize())
-        .ok_or(StorePlanError::SizeOverflow)?;
-    let physical_partition = pending
-        .counts
-        .new_canonical_blocks
-        .as_usize()
-        .checked_add(pending.counts.evidence_leaves.inherited.as_usize())
-        .ok_or(StorePlanError::SizeOverflow)?;
-    if shape.operation_specific_rewrite_blocks() > pending.counts.new_canonical_blocks.as_usize()
-        || !pending.counts.evidence_leaves.is_exact()
-        || pending.counts.evidence_leaves.source.as_u32()
-            != pending.input.proof.counts().shareable_leaf_block_count
-        || pending.counts.evidence_leaves.output.as_u32()
-            != pending.counts.evidence.shareable_leaf_block_count
-        || source_partition != pending.counts.source_node_rows.as_usize()
-        || pending.counts.source_reference_rows.as_usize()
-            != pending.counts.source_node_rows.as_usize()
-        || physical_partition != pending.counts.canonical_blocks.as_usize()
-    {
-        return Err(StorePlanError::InvalidBlockTable);
+fn prepare_scoped_edit(
+    owner: baozi_operation::__canonical_activation::ScopedRetainedStoreSessionOutcomeOwner<
+        super::super::super::SceneConstructionOwner,
+        SceneConstructionPhase,
+        SceneConstructionUnit,
+        CanonicalInheritanceSource,
+    >,
+    pending: BoundPendingNodeSceneEdit<'_>,
+    failure_evidence: NodeSceneFailureEvidencePlan,
+    brand: super::super::super::ConstructionBrand,
+    reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
+    let evidence_plan = failure_evidence.records;
+    let evidence_counts = pending.counts.evidence;
+    let input_generation = pending.input.generation();
+    let invalidations = pending.invalidations;
+    let success_requirements = edit_success_requirements(&pending)?;
+    let mut pending = Some(pending);
+
+    let outcome = owner.plan_and_activate_scoped(move |mut planning| {
+        let pending = match pending.take() {
+            Some(pending) => pending,
+            None => {
+                let rejection = NodeSceneConstructionRejection::Materialization(
+                    StoreRuntimeError::ConstructionInvariantUnverified,
+                );
+                let stable_code = rejection.stable_code();
+                return planning.reject(rejection, stable_code);
+            }
+        };
+        let planned = match planning.begin_semantic_work() {
+            Ok(mut semantic) => {
+                match NodeSceneInheritedLeafPlan::try_collect(&pending, &mut semantic) {
+                    Ok(inherited) => match semantic.finish_exact() {
+                        Ok(completion) => Ok((inherited, completion)),
+                        Err(cause) => {
+                            drop(inherited);
+                            Err(cause)
+                        }
+                    },
+                    Err(cause) => {
+                        let _ = semantic.finish_rejected();
+                        Err(cause)
+                    }
+                }
+            }
+            Err(cause) => Err(cause),
+        };
+        let (inherited, completion) = match planned {
+            Ok(planned) => planned,
+            Err(cause) => {
+                let rejection = NodeSceneConstructionRejection::Materialization(cause);
+                let stable_code = rejection.stable_code();
+                return planning.reject(rejection, stable_code);
+            }
+        };
+        let execution = NodeSceneEditExecutionPlan { pending, inherited };
+        let permit = match planning.seal_activation(success_requirements, completion) {
+            CanonicalActivationSeal::Sealed(permit) => permit,
+            CanonicalActivationSeal::Unsealed(failure) => {
+                drop(execution);
+                return failure.finish_after_plan_drop();
+            }
+        };
+        permit.activate(execution, move |lane, execution| {
+            materialize_edit(lane, execution, brand)
+        })
+    })?;
+
+    let validation_progress = CanonicalValidationProgress::new(
+        SceneConstructionPhase::Validation,
+        SceneConstructionUnit::WorkUnits,
+    );
+    let final_progress = final_progress();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(activated) => activated,
+        CanonicalActivationOutcome::Rejected(rejected) => {
+            return prepare_pending_edit_failure(PendingNodeSceneFailure::ActivationRejected {
+                owner: rejected,
+                evidence_plan,
+                evidence_counts,
+                final_progress,
+            });
+        }
+        CanonicalActivationOutcome::NeverActivated(never_activated) => {
+            return prepare_pending_edit_failure(PendingNodeSceneFailure::NeverActivated {
+                owner: never_activated,
+                evidence_plan,
+                evidence_counts,
+                final_progress,
+            });
+        }
+        CanonicalActivationOutcome::Fallback(fallback) => {
+            return prepare_pending_edit_failure(PendingNodeSceneFailure::PreparedFallback(
+                fallback,
+            ));
+        }
+    };
+
+    let central_counts = activated.output().evidence_counts;
+    let outcome = activated.validate_centrally(
+        validation_progress,
+        |lane, output| match lane.try_retain_records(
+            evidence_plan,
+            NodeSceneOutcomeEvidenceSchema,
+            |control| {
+                control.write_row(|row| write_node_scene_evidence_row(row, output.evidence_counts))
+            },
+        ) {
+            Ok(evidence) => lane.complete(evidence),
+            Err(_) => lane.abort(),
+        },
+        |planning, output| {
+            let validation_plan = output.central_validation;
+            let scratch_plan = validation_plan.scratch_plan();
+            planning.validate_with(
+                |checkpoint| {
+                    ScopedNodeSceneValidationScratchOwner::try_allocate(checkpoint, scratch_plan)
+                },
+                |session, directory, evidence, scratch| {
+                    let initialized = scratch.initialize(session, scratch_plan)?;
+                    let proof = if initialized && output.draft.brand == brand {
+                        let mut scratch = scratch.metered_view();
+                        validate_node_scene_canonical_graph_metered(
+                            session,
+                            directory,
+                            evidence,
+                            output.evidence_counts,
+                            output.refs,
+                            validation_plan,
+                            &mut scratch,
+                        )?
+                    } else {
+                        None
+                    };
+                    Ok(match proof {
+                        Some(proof) => CanonicalValidationDecision::accept(proof),
+                        None => CanonicalValidationDecision::reject(
+                            NodeSceneConstructionRejection::<StoreRuntimeError>::Materialization(
+                                StoreRuntimeError::ConstructionInvariantUnverified,
+                            ),
+                            NODE_SCENE_BUILD_INVARIANT_CODE,
+                        ),
+                    })
+                },
+            )
+        },
+    )?;
+    match outcome {
+        CanonicalCentralValidationOutcome::Candidate(candidate) => prepare_edit_candidate(
+            candidate,
+            input_generation,
+            invalidations,
+            final_progress,
+            reserve_generation,
+        ),
+        CanonicalCentralValidationOutcome::Rejected(rejected) => {
+            prepare_pending_edit_failure(PendingNodeSceneFailure::CentralRejected {
+                owner: rejected,
+                evidence_counts: central_counts,
+                final_progress,
+            })
+        }
+        CanonicalCentralValidationOutcome::Interrupted(interrupted) => {
+            prepare_pending_edit_failure(PendingNodeSceneFailure::CentralInterrupted {
+                owner: interrupted,
+                evidence_counts: central_counts,
+                final_progress,
+            })
+        }
+        CanonicalCentralValidationOutcome::Fallback(fallback) => {
+            prepare_pending_edit_failure(PendingNodeSceneFailure::PreparedFallback(fallback))
+        }
     }
-    let canonical_writer =
-        edit_writer_plan(keys, pending.counts.canonical_attribution_slots.as_usize())?;
-    let evidence_writer = edit_writer_plan(
-        keys,
-        pending.counts.outcome_evidence_attribution_slots.as_usize(),
-    )?;
-    let canonical = RetainedStoreBlockTablePlan::new(
-        canonical_writer,
-        pending.counts.canonical_blocks.as_usize(),
-        pending.counts.new_canonical_blocks.as_usize(),
-    )?;
-    let evidence = RetainedStoreBlockTablePlan::new(
-        evidence_writer,
-        pending.counts.outcome_evidence_blocks.as_usize(),
-        pending.counts.outcome_evidence_blocks.as_usize(),
-    )?;
-    Ok(RetainedStorePublicationPlan::success(canonical, evidence))
 }
 
-fn edit_writer_plan(
-    keys: SceneStoreKeys,
-    attribution_slots: usize,
-) -> Result<RetainedStoreWriterPlan, StorePlanError> {
-    Ok(RetainedStoreWriterPlan::new(
-        keys.phase,
-        keys.dimension,
-        keys.dimension,
-        RetainedStoreBatchLimits::new(attribution_slots, 4)?,
-    ))
+fn edit_success_requirements(
+    pending: &BoundPendingNodeSceneEdit<'_>,
+) -> Result<CanonicalSuccessRequirements, StorePlanError> {
+    let total = pending.counts.canonical_blocks.as_usize();
+    CanonicalSuccessRequirements::new(
+        CanonicalTableShape::new(total, pending.counts.new_canonical_blocks.as_usize())?,
+        total,
+        pending.counts.central_validation_plan.work(),
+    )
+}
+
+fn materialize_edit<'lane, 'scope>(
+    mut lane: baozi_operation::__canonical_activation::CanonicalLane<
+        'lane,
+        super::super::super::SceneConstructionOwner,
+        SceneConstructionPhase,
+        SceneConstructionUnit,
+        CanonicalInheritanceSource,
+    >,
+    execution: &NodeSceneEditExecutionPlan<'scope, '_>,
+    brand: super::super::super::ConstructionBrand,
+) -> CanonicalMaterialization<
+    'lane,
+    NodeSceneActivationOutput,
+    NodeSceneConstructionRejection<StoreRuntimeError>,
+    RecordBlock,
+    SceneDirectorySchema,
+> {
+    let graph = match try_rewrite_node_scene(&mut lane, &execution.pending, &execution.inherited) {
+        Ok(graph) => graph,
+        Err(cause) => {
+            let rejection = NodeSceneConstructionRejection::Materialization(cause);
+            let stable_code = rejection.stable_code();
+            return lane.reject(rejection, stable_code);
+        }
+    };
+    let output = NodeSceneActivationOutput {
+        draft: NodeSceneDraft {
+            brand,
+            directory: graph.directory,
+        },
+        refs: graph.refs,
+        evidence_counts: execution.pending.counts.evidence,
+        central_validation: execution.pending.counts.central_validation_plan,
+    };
+    lane.complete(graph.directory.into_store(), output)
 }
