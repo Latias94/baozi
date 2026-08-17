@@ -1348,15 +1348,15 @@ where
         }
         Ok(Ok(())) => {}
     }
-    if plan.is_success_capable() {
-        if let Some(failure_code) = operation.activation_terminal_cause() {
-            return Err(ActivationOpenFailure::Recoverable {
-                operation,
-                cause: StoreRuntimeError::SuccessOutcomeRejected,
-                failure_code,
-                fallback_only: false,
-            });
-        }
+    if plan.is_success_capable()
+        && let Some(failure_code) = operation.activation_terminal_cause()
+    {
+        return Err(ActivationOpenFailure::Recoverable {
+            operation,
+            cause: StoreRuntimeError::SuccessOutcomeRejected,
+            failure_code,
+            fallback_only: false,
+        });
     }
     let RetainedStoreOperation {
         raw,

@@ -264,9 +264,8 @@ where
 {
     /// Builds, validates, and freezes the terminal failure after parser storage is quiescent.
     pub fn prepare(self) -> Result<PreparedSceneConstruction, SceneActivationError> {
-        let (prepared, authoring_rejection, control_cause) =
+        let (prepared, _authoring_rejection, control_cause) =
             self.0.prepare().map_err(SceneActivationError)?;
-        drop(authoring_rejection);
         Ok(PreparedSceneConstruction(prepared, control_cause))
     }
 }

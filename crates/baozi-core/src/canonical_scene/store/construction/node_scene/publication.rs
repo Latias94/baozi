@@ -330,6 +330,12 @@ impl NodeActivationFailureCause
     }
 }
 
+type PreparedNodeSceneFailureParts = (
+    PreparedNodeSceneConstruction,
+    Option<NodeSceneConstructionRejection<StoreRuntimeError>>,
+    Option<ControlCause>,
+);
+
 impl<O, PP, U, L> PendingNodeSceneFailure<O, PP, U, L>
 where
     O: OperationOwner,
@@ -338,14 +344,7 @@ where
 {
     pub(in crate::canonical_scene::store) fn prepare(
         self,
-    ) -> Result<
-        (
-            PreparedNodeSceneConstruction,
-            Option<NodeSceneConstructionRejection<StoreRuntimeError>>,
-            Option<ControlCause>,
-        ),
-        SceneConstructionError,
-    > {
+    ) -> Result<PreparedNodeSceneFailureParts, SceneConstructionError> {
         let mut control_cause = None;
         let build = match self {
             Self::ActivationRejected {
