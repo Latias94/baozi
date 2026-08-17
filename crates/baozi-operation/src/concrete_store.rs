@@ -291,7 +291,9 @@ mod sealed {
         ) -> Option<Self>;
     }
 
-    pub trait ShareableStoreKind {}
+    pub trait ShareableStoreKind {
+        fn matches_block_kind(kind: u8, is_bytes: bool, is_utf8: bool) -> bool;
+    }
 }
 
 /// A scalar type supported by the concrete retained store.
@@ -1115,9 +1117,21 @@ pub enum RecordBlock {}
 /// amendment; it must not widen this marker for `RecordBlock`.
 pub trait ShareableStoreKind: sealed::ShareableStoreKind {}
 
-impl<T: StoredScalar> sealed::ShareableStoreKind for ScalarSequence<T> {}
-impl sealed::ShareableStoreKind for ByteBlock {}
-impl sealed::ShareableStoreKind for Utf8Block {}
+impl<T: StoredScalar> sealed::ShareableStoreKind for ScalarSequence<T> {
+    fn matches_block_kind(kind: u8, is_bytes: bool, is_utf8: bool) -> bool {
+        !is_bytes && !is_utf8 && kind == <T as sealed::StoredScalar>::KIND
+    }
+}
+impl sealed::ShareableStoreKind for ByteBlock {
+    fn matches_block_kind(_kind: u8, is_bytes: bool, _is_utf8: bool) -> bool {
+        is_bytes
+    }
+}
+impl sealed::ShareableStoreKind for Utf8Block {
+    fn matches_block_kind(_kind: u8, _is_bytes: bool, is_utf8: bool) -> bool {
+        is_utf8
+    }
+}
 
 impl<T: StoredScalar> ShareableStoreKind for ScalarSequence<T> {}
 impl ShareableStoreKind for ByteBlock {}
@@ -1128,6 +1142,27 @@ impl ShareableStoreKind for Utf8Block {}
 pub struct CanonicalStoreRef<Kind, Tag> {
     raw: CanonicalRetainedSlot<StoredBlock, Tag>,
     marker: PhantomData<fn(Kind) -> Kind>,
+}
+
+fn canonical_source_slot_matches_kind<Kind, Tag>(
+    source: &PublishedCanonicalOutput<StoredBlock>,
+    source_ref: CanonicalStoreRef<Kind, Tag>,
+) -> bool
+where
+    Kind: ShareableStoreKind,
+    Tag: Copy + Send + Sync + 'static,
+{
+    let Some(member) = source.aggregate().lookup_member(source_ref.raw) else {
+        return false;
+    };
+    let (kind, is_bytes, is_utf8) = match member.block() {
+        StoredBlock::Sequence(storage) => (storage.kind(), false, false),
+        StoredBlock::Bytes(_) => (0, true, false),
+        StoredBlock::Utf8(_) => (0, false, true),
+        StoredBlock::Records(_) => (0, false, false),
+    };
+    member.schema_tag_matches()
+        && <Kind as sealed::ShareableStoreKind>::matches_block_kind(kind, is_bytes, is_utf8)
 }
 
 impl<Kind, Tag> Copy for CanonicalStoreRef<Kind, Tag> {}
@@ -3411,6 +3446,23 @@ where
         self.ensure_writable()?;
         let result = self.raw.require_canonical_source(source.aggregate());
         self.map_pure_preflight(result)
+    }
+
+    fn validate_canonical_share_source_from<SlotKind, SlotTag>(
+        &mut self,
+        source: &PublishedCanonicalOutput<StoredBlock>,
+        source_ref: CanonicalStoreRef<SlotKind, SlotTag>,
+    ) -> Result<(), StoreRuntimeError>
+    where
+        SlotKind: ShareableStoreKind,
+        SlotTag: Copy + Send + Sync + 'static,
+    {
+        self.require_canonical_source_from(source)?;
+        if canonical_source_slot_matches_kind(source, source_ref) {
+            Ok(())
+        } else {
+            Err(StoreRuntimeError::InvalidSourceSlot)
+        }
     }
 
     /// Inherits every eligible immutable leaf from the exact bound canonical source.

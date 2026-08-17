@@ -289,6 +289,160 @@ fn derived_scoped_activation_contains_a_same_shape_sibling_source() {
 }
 
 #[test]
+fn recoverable_materialization_fault_then_sibling_bind_is_contained() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let source = publish_sequence_source(&account);
+    let sibling = publish_sequence_source(&account);
+    let (operation, keys) = derived_operation_for_scoped_activation(&source.canonical);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+
+    let result: Result<DerivedScopedOutcome<MaterializationRejection>, _> = owner
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work().unwrap();
+            semantic.run_unit(|| ()).unwrap();
+            let completion = semantic.finish_exact().unwrap();
+            let permit = match planning.seal_activation(success, completion) {
+                CanonicalActivationSeal::Sealed(permit) => permit,
+                CanonicalActivationSeal::Unsealed(failure) => {
+                    return failure.finish_after_plan_drop();
+                }
+            };
+            permit.activate((), |mut lane, _plan| {
+                let _ = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        SequenceTag,
+                        |writer| {
+                            writer.push(1)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    lane.try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        SequenceTag,
+                        |writer| {
+                            writer.push(2)?;
+                            Ok(())
+                        },
+                    ),
+                    Err(StoreRuntimeError::SlotLimit {
+                        destination: StoreDestination::Canonical,
+                    })
+                ));
+                assert!(matches!(
+                    lane.try_bind_canonical_source(&sibling.canonical),
+                    Err(StoreRuntimeError::SlotLimit {
+                        destination: StoreDestination::Canonical,
+                    })
+                ));
+                lane.reject::<(), _, ScalarSequence<u32>, SequenceTag>(
+                    MaterializationRejection::Semantic,
+                    21,
+                )
+            })
+        });
+
+    let containment = match result {
+        Err(containment) => containment,
+        Ok(_) => panic!("a sibling source after a recoverable fault must be containment"),
+    };
+    assert_eq!(
+        containment.cause().reason(),
+        AccountPoisonReason::OwnershipGraphUnverified
+    );
+    assert_fail_closed_containment(&account);
+    drop(source);
+    drop(sibling);
+}
+
+#[test]
+fn recoverable_materialization_fault_then_sibling_share_is_contained() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let source = publish_sequence_source(&account);
+    let sibling = publish_sequence_source(&account);
+    let (operation, keys) = derived_operation_for_scoped_activation(&source.canonical);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .unwrap();
+
+    let result: Result<DerivedScopedOutcome<MaterializationRejection>, _> = owner
+        .plan_and_activate_scoped(|mut planning| {
+            let mut semantic = planning.begin_semantic_work().unwrap();
+            semantic.run_unit(|| ()).unwrap();
+            let completion = semantic.finish_exact().unwrap();
+            let permit = match planning.seal_activation(success, completion) {
+                CanonicalActivationSeal::Sealed(permit) => permit,
+                CanonicalActivationSeal::Unsealed(failure) => {
+                    return failure.finish_after_plan_drop();
+                }
+            };
+            permit.activate((), |mut lane, _plan| {
+                let _ = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        SequenceTag,
+                        |writer| {
+                            writer.push(1)?;
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    lane.try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        SequenceTag,
+                        |writer| {
+                            writer.push(2)?;
+                            Ok(())
+                        },
+                    ),
+                    Err(StoreRuntimeError::SlotLimit {
+                        destination: StoreDestination::Canonical,
+                    })
+                ));
+                assert!(matches!(
+                    lane.try_share_canonical(&source.canonical, sibling.canonical_sequence),
+                    Err(StoreRuntimeError::SlotLimit {
+                        destination: StoreDestination::Canonical,
+                    })
+                ));
+                lane.reject::<(), _, ScalarSequence<u32>, SequenceTag>(
+                    MaterializationRejection::Semantic,
+                    21,
+                )
+            })
+        });
+
+    let containment = match result {
+        Err(containment) => containment,
+        Ok(_) => panic!("a sibling source ref after a recoverable fault must be containment"),
+    };
+    assert_eq!(
+        containment.cause().reason(),
+        AccountPoisonReason::OwnershipGraphUnverified
+    );
+    assert_fail_closed_containment(&account);
+    drop(source);
+    drop(sibling);
+}
+
+#[test]
 fn scoped_activation_permit_retains_the_core_plan_through_activation() {
     let factory = factory(1);
     let account = account(&factory);

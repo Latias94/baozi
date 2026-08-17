@@ -1834,6 +1834,11 @@ where
         source: &PublishedCanonicalStore<SourceRootKind, SourceRootTag>,
     ) -> Result<(), StoreRuntimeError> {
         if let Some(cause) = preserved_fault(self.first_fault) {
+            note_later_contract(
+                self.first_fault,
+                self.assembly
+                    .require_canonical_source_from(source.share_source()),
+            );
             return Err(cause);
         }
         preserve_first_fault(
@@ -1854,6 +1859,11 @@ where
         SlotTag: Copy + Send + Sync + 'static,
     {
         if let Some(cause) = preserved_fault(self.first_fault) {
+            note_later_contract(
+                self.first_fault,
+                self.assembly
+                    .validate_canonical_share_source_from(source.share_source(), source_ref),
+            );
             return Err(cause);
         }
         preserve_first_fault(
