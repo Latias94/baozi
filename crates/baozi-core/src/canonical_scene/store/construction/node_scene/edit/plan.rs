@@ -1,4 +1,4 @@
-use baozi_operation::{BytesPlan, RecordPlan, SequencePlan};
+use baozi_operation::{BytesPlan, RecordPlan, SequencePlan, StorePlanError};
 use thiserror::Error;
 
 use crate::canonical_scene::store::profile_provenance::PROFILE_PROVENANCE_ADDRESS_SCALARS;
@@ -11,12 +11,18 @@ use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_TRS_SCALAR_COUNT,
     SceneDirectorySchema,
 };
+use crate::canonical_scene::store::validation::ProfileMeteredCounts;
 use crate::entity::{AuthoredTransform, AuthoredTransformKind};
 use crate::identity::SceneGenerationId;
 use crate::provenance::{DIGEST_LEN, OperationIdentity, OperationKind};
 
+use super::super::scratch::NodeSceneValidationScratchPlan;
 use super::super::{SceneEvidenceCounts, ValidatedNodeScene};
 use super::CanonicalInvalidations;
+
+const NODE_TRANSFORM_PROFILE_CANONICAL_BLOCK_DELTA: u32 = 4;
+const NODE_TRANSFORM_PROFILE_PAYLOAD_LEAF_DELTA: u32 = 1;
+const NODE_TRANSFORM_PROFILE_SHAREABLE_LEAF_DELTA: u32 = 4;
 
 /// A count proven to fit both retained-store plans and canonical `u32` fields.
 #[derive(Debug, Clone, Copy)]
@@ -305,6 +311,7 @@ impl NodeSceneEditProgram {
 #[derive(Clone, Copy)]
 pub(super) struct NodeSceneEditFixedCounts {
     pub(super) evidence: SceneEvidenceCounts,
+    pub(super) validation_scratch_plan: NodeSceneValidationScratchPlan,
     pub(super) canonical_blocks: CheckedCount,
     /// Every target block that must be newly retained for the destination generation.
     pub(super) new_canonical_blocks: CheckedCount,
@@ -407,12 +414,12 @@ impl NodeSceneEditFixedCounts {
         let mut evidence = source_evidence;
         evidence.canonical_block_count = checked_add_u32(
             evidence.canonical_block_count,
-            4,
+            NODE_TRANSFORM_PROFILE_CANONICAL_BLOCK_DELTA,
             "canonical output block count",
         )?;
         evidence.payload_block_count = checked_add_u32(
             evidence.payload_block_count,
-            1,
+            NODE_TRANSFORM_PROFILE_PAYLOAD_LEAF_DELTA,
             "canonical payload block count",
         )?;
         evidence.profile_segment_count =
@@ -435,9 +442,18 @@ impl NodeSceneEditFixedCounts {
         evidence.profile_attachment_count = profile.output_attachment_count.as_u32();
         evidence.shareable_leaf_block_count = checked_add_u32(
             evidence.shareable_leaf_block_count,
-            4,
+            NODE_TRANSFORM_PROFILE_SHAREABLE_LEAF_DELTA,
             "shareable canonical leaf block count",
         )?;
+        let source_validation_scratch = input.proof.validation_scratch_plan();
+        let profile_counts = try_node_transform_profile_counts(
+            source_validation_scratch.profile_counts(),
+            source_evidence,
+            evidence,
+            profile,
+        )?;
+        let validation_scratch_plan =
+            source_validation_scratch.try_rebind_profile_edit(evidence, profile_counts)?;
 
         let source_canonical_blocks = CheckedCount::try_from_usize(
             input.canonical_block_count(),
@@ -538,6 +554,7 @@ impl NodeSceneEditFixedCounts {
 
         Ok(Self {
             evidence,
+            validation_scratch_plan,
             canonical_blocks,
             new_canonical_blocks,
             evidence_leaves,
@@ -978,6 +995,74 @@ pub(in crate::canonical_scene::store) enum NodeSceneEditPlanError {
     InvalidSource { reason: &'static str },
     #[error("node Scene edit size overflowed while computing {quantity}")]
     SizeOverflow { quantity: &'static str },
+    #[error("node Scene edit could not seal its output validation plan")]
+    ValidationPlan(#[from] StorePlanError),
+}
+
+fn try_node_transform_profile_counts(
+    source: ProfileMeteredCounts,
+    source_evidence: SceneEvidenceCounts,
+    output_evidence: SceneEvidenceCounts,
+    profile: NodeSceneEditProfilePlan,
+) -> Result<ProfileMeteredCounts, NodeSceneEditPlanError> {
+    if source.resource_count != source_evidence.profile_resource_count
+        || source.source_count != source_evidence.profile_source_count
+        || source.provenance_count != source_evidence.profile_provenance_count
+        || source.operation_count != source_evidence.profile_operation_count
+        || source.parent_count != source_evidence.profile_parent_count
+        || source.owner_count != source_evidence.profile_owner_count
+        || source.attachment_count != source_evidence.profile_attachment_count
+        || source.metadata_entry_count != source_evidence.profile_metadata_entry_count
+    {
+        return Err(NodeSceneEditPlanError::InvalidSource {
+            reason: "sealed profile validation counts disagree with source evidence",
+        });
+    }
+    let digest_bytes = u32::try_from(profile.digest.bytes()).map_err(|_| {
+        NodeSceneEditPlanError::SizeOverflow {
+            quantity: "profile lineage digest bytes",
+        }
+    })?;
+    Ok(ProfileMeteredCounts {
+        resource_count: source.resource_count,
+        source_count: source.source_count,
+        provenance_count: output_evidence.profile_provenance_count,
+        operation_count: output_evidence.profile_operation_count,
+        evidence_count: source.evidence_count,
+        parent_count: output_evidence.profile_parent_count,
+        wide_count: source.wide_count,
+        lineage_text_bytes: source.lineage_text_bytes,
+        lineage_digest_bytes: checked_add_u32(
+            source.lineage_digest_bytes,
+            digest_bytes,
+            "profile lineage digest bytes",
+        )?,
+        owner_count: output_evidence.profile_owner_count,
+        attachment_count: output_evidence.profile_attachment_count,
+        metadata_entry_count: output_evidence.profile_metadata_entry_count,
+        metadata_text_bytes: source.metadata_text_bytes,
+        metadata_payload_bytes: source.metadata_payload_bytes,
+        metadata_bool_count: source.metadata_bool_count,
+        metadata_i64_count: source.metadata_i64_count,
+        metadata_u64_count: source.metadata_u64_count,
+        metadata_f64_count: source.metadata_f64_count,
+        metadata_f32_count: source.metadata_f32_count,
+        canonical_block_count: checked_add_u32(
+            source.canonical_block_count,
+            NODE_TRANSFORM_PROFILE_CANONICAL_BLOCK_DELTA,
+            "profile canonical block count",
+        )?,
+        payload_leaf_count: checked_add_u32(
+            source.payload_leaf_count,
+            NODE_TRANSFORM_PROFILE_PAYLOAD_LEAF_DELTA,
+            "profile payload leaf count",
+        )?,
+        shareable_leaf_count: checked_add_u32(
+            source.shareable_leaf_count,
+            NODE_TRANSFORM_PROFILE_SHAREABLE_LEAF_DELTA,
+            "profile shareable leaf count",
+        )?,
+    })
 }
 
 pub(super) const fn authored_transform_scalar_count(transform: AuthoredTransform) -> usize {

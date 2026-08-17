@@ -28,7 +28,7 @@ use crate::identity::{
     NodeId, SceneEntityKind, SceneGenerationError, SceneGenerationId, SceneLookupError,
 };
 use crate::math::{Color, Mat4, Quat, Vec3};
-use crate::provenance::OptionsDigest;
+use crate::provenance::{DIGEST_LEN, OptionsDigest};
 use crate::remap::RemapChange;
 use crate::scene_space::SceneSpace;
 
@@ -516,6 +516,8 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         .checked_add(pending.counts.outcome_evidence_attribution_slots.as_u32())
         .expect("test allocation delta");
     let target_owner_row = pending.counts.profile.target_owner_row.as_usize();
+    let expected_parent_delta = pending.counts.profile.target_attachment_count.as_u32();
+    let expected_attachment_count = pending.counts.profile.output_attachment_count.as_u32();
     let physical_before = account.snapshot();
 
     let prepared = pending
@@ -531,10 +533,58 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     assert_ne!(output_generation, input_generation);
     assert_eq!(generation_source.load(Ordering::Relaxed), 2);
     assert!(output.scene.account().is_same_account(source.account()));
+    let source_validation = source.proof.validation_scratch_plan();
+    let output_validation = output.scene.proof.validation_scratch_plan();
+    assert_ne!(
+        output_validation, source_validation,
+        "the appended lineage segment must grow the sealed validation envelope",
+    );
     assert_eq!(
-        output.scene.proof.validation_scratch_plan(),
-        source.proof.validation_scratch_plan(),
-        "a shape-preserving transform edit must retain the sealed validation envelope",
+        output_validation.appearance_requirements(),
+        source_validation.appearance_requirements(),
+    );
+    assert_eq!(
+        output_validation.geometry_requirements(),
+        source_validation.geometry_requirements(),
+    );
+    assert_eq!(
+        output_validation.deformation_requirements(),
+        source_validation.deformation_requirements(),
+    );
+    assert_eq!(
+        output_validation.animation_counts(),
+        source_validation.animation_counts(),
+    );
+    let source_profile = source_validation.profile_counts();
+    let output_profile = output_validation.profile_counts();
+    assert_eq!(
+        output_profile.provenance_count,
+        source_profile.provenance_count + 1
+    );
+    assert_eq!(
+        output_profile.operation_count,
+        source_profile.operation_count + 1
+    );
+    assert_eq!(
+        output_profile.parent_count,
+        source_profile.parent_count + expected_parent_delta
+    );
+    assert_eq!(output_profile.attachment_count, expected_attachment_count);
+    assert_eq!(
+        output_profile.lineage_digest_bytes,
+        source_profile.lineage_digest_bytes + u32::try_from(DIGEST_LEN).expect("digest length"),
+    );
+    assert_eq!(
+        output_profile.canonical_block_count,
+        source_profile.canonical_block_count + 4
+    );
+    assert_eq!(
+        output_profile.payload_leaf_count,
+        source_profile.payload_leaf_count + 1
+    );
+    assert_eq!(
+        output_profile.shareable_leaf_count,
+        source_profile.shareable_leaf_count + 4
     );
     assert!(
         output

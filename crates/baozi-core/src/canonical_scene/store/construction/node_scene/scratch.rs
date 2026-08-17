@@ -438,6 +438,31 @@ impl NodeSceneValidationScratchPlan {
         })
     }
 
+    pub(super) fn try_rebind_profile_edit(
+        self,
+        counts: SceneEvidenceCounts,
+        profile_counts: ProfileMeteredCounts,
+    ) -> Result<Self, StorePlanError> {
+        let influence_row_offset_count =
+            u32::try_from(self.deformation_requirements.influence_row_offsets)
+                .map_err(|_| StorePlanError::SizeOverflow)?;
+        let influence_count = u32::try_from(self.deformation_requirements.influence_joints)
+            .map_err(|_| StorePlanError::SizeOverflow)?;
+        if self.deformation_requirements.influence_source_orders
+            != self.deformation_requirements.influence_joints
+        {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
+        Self::try_new(
+            counts,
+            self.deformation_uniqueness_marks.desired_capacity(),
+            influence_row_offset_count,
+            influence_count,
+            self.animation_counts,
+            profile_counts,
+        )
+    }
+
     pub(super) const fn initialization_work_units(self) -> u64 {
         self.initialization_work
     }
