@@ -7,7 +7,7 @@ use baozi_import::{
     DetectionOutcome, DetectionResult, DetectionScope, FormatCapability, FormatDescriptor,
     FormatEncoding, FormatImporter, FormatSelection, GeometryAuthoringBatch, ImportConfigOverlay,
     ImportOperationControl, ImportRequest, ImportRequestLayer, ImportResult, LineageAuthoringBatch,
-    MetadataAuthoringBatch, NodeAuthoringBatch, OperationKind, OptionsDigest,
+    MetadataAuthoringBatch, NodeAuthoringBatch, OperationKind, OptionCompileLimits, OptionsDigest,
     OwnerProvenanceAuthoring, ParseResult, ParseScope, PreparedImportRequest, Presence,
     Probe, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
     ProvenanceOperationAuthoring, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,

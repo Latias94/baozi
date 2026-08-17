@@ -40,7 +40,9 @@ Status values: `Supported`, `Partial`, `ParsedLossy`, `IgnoredWithDiagnostic`, `
 - Unit handling: OBJ is treated as unitless; Baozi does not infer meters, centimeters, or inches.
 - Winding handling: face order is preserved as-authored.
 - Topology handling: all-triangle mesh segments use `PrimitiveTopology::Triangles`; quads and N-gons use `PrimitiveTopology::Polygons` with `face_vertex_counts`.
-- Post-process boundary: triangulation is performed by `baozi-postprocess`, not by raw OBJ parsing.
+- Post-process boundary: raw OBJ parsing preserves polygon topology. Canonical triangulation belongs
+  in `baozi-postprocess`, but no transformation request is currently admitted while the retained
+  edit, remap, and evidence rail is being completed.
 - Attribute remapping: OBJ's separate position/UV/normal indices are remapped into Baozi's vertex-indexed SoA mesh streams by unique `(position, texcoord, normal)` tuples.
 - Mesh splitting: material, object/group, and topology boundaries may split one OBJ file into multiple Baozi meshes to preserve the one-material-per-mesh contract.
 

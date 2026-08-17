@@ -26,7 +26,7 @@ mod source_scope;
 mod store;
 
 pub use baozi_core::__canonical_import::{
-    SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
+    SceneGenerationId, SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
 };
 
 #[doc(hidden)]
@@ -115,8 +115,8 @@ pub use options::{
     RegistryBuildLimits, RegistryBuildScope,
 };
 pub use outcome::{
-    DetectionEvidence, ImportFailure, ImportInitializationError, ImportPhase, ImportPhaseEvidence,
-    ImportReport, ImportResult, ImportRunError,
+    DetectionEvidence, ImportEvidence, ImportFailure, ImportInitializationError, ImportPhase,
+    ImportPhaseEvidence, ImportReport, ImportResult, ImportRunError,
 };
 pub use registry::{
     FormatUnavailability, RegistryBuildError, RegistryBuilder, RegistryRegistrationError,

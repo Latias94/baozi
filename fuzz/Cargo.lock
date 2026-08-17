@@ -64,7 +64,6 @@ dependencies = [
  "baozi-format-stl",
  "baozi-import",
  "baozi-io",
- "baozi-postprocess",
  "libfuzzer-sys",
 ]
 
@@ -91,15 +90,6 @@ version = "0.1.0"
 dependencies = [
  "scopeguard",
  "triomphe",
-]
-
-[[package]]
-name = "baozi-postprocess"
-version = "0.1.0"
-dependencies = [
- "baozi-core",
- "baozi-operation",
- "thiserror",
 ]
 
 [[package]]

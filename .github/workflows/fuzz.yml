@@ -27,7 +27,6 @@ jobs:
         target:
           - stl_import
           - obj_import
-          - obj_postprocess
           - ply_import
           - registry_detection
           - scene_validation

@@ -193,15 +193,24 @@ gate_id = "postprocess-current-behavior-tests"
 tracer_class = "test"
 executor = "command"
 success_condition = "process-exit-zero"
-evidence_identity = "baozi.postprocess.current-behavior-tests/v1"
+evidence_identity = "baozi.postprocess.owning-empty-plan-tests/v2"
 evidence_paths = [
+  "crates/baozi-import/src/outcome.rs",
+  "crates/baozi-postprocess/src/error.rs",
   "crates/baozi-postprocess/src/pipeline.rs",
-  "crates/baozi-postprocess/tests/pipeline.rs",
   "crates/baozi-postprocess/tests/operation_boundary.rs",
+  "crates/baozi-postprocess/tests/tracing.rs",
 ]
 applicable_contracts = ["postprocess-pipeline-semantics"]
 program = "cargo"
-args = ["nextest", "run", "--locked", "-p", "baozi-postprocess"]
+args = [
+  "nextest",
+  "run",
+  "--locked",
+  "-p",
+  "baozi-postprocess",
+  "--all-features",
+]
 
 [[gates]]
 gate_id = "obj-resource-current-behavior-tests"

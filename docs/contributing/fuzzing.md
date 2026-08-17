@@ -28,8 +28,6 @@ cargo +nightly-2026-05-27 fuzz check stl_import
 cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz check obj_import
 cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
-cargo +nightly-2026-05-27 fuzz check obj_postprocess
-cargo +nightly-2026-05-27 fuzz run obj_postprocess -- -runs=256
 cargo +nightly-2026-05-27 fuzz check ply_import
 cargo +nightly-2026-05-27 fuzz run ply_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz check registry_detection
@@ -64,7 +62,6 @@ Start-Process -FilePath $installerPath -ArgumentList @('/S', "/D=$installRoot") 
 $env:PATH = "$installRoot\bin;$installRoot\lib\clang\22\lib\windows;$env:PATH"
 cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
-cargo +nightly-2026-05-27 fuzz run obj_postprocess -- -runs=256
 cargo +nightly-2026-05-27 fuzz run ply_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz run registry_detection -- -runs=256 -max_len=4106
 cargo +nightly-2026-05-27 fuzz run scene_validation -- -runs=256 -max_len=4096
@@ -118,7 +115,6 @@ infrastructure or promoting a parser support tier. Broader CI policy lives in [C
 | --- | --- | --- |
 | `stl_import` | `baozi-format-stl` | Sanitizer-run target for binary and ASCII STL facade import. |
 | `obj_import` | `baozi-format-obj` | Sanitizer-run target for OBJ facade import plus optional MTL sidecar bytes split by the first NUL byte. |
-| `obj_postprocess` | `baozi-format-obj` | Sanitizer-run target for OBJ facade import followed by triangulation and bounding-box postprocess. |
 | `ply_import` | `baozi-format-ply` | Sanitizer-run target for PLY ASCII and binary facade import. |
 | `registry_detection` | `baozi-import` | Sanitizer-run contract target for bounded Automatic, Preferred, and Forced detection through compiled requests and the public import session. It checks that registration order cannot change selection or detection evidence. |
 | `scene_validation` | `baozi-core` | Sanitizer-run contract target for bounded valid, singly corrupted, and tight-limit Scene drafts through central validation and publication. |

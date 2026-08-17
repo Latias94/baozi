@@ -1,297 +1,171 @@
-use crate::{
-    PostProcessDimension, PostProcessLedgerPhase, PostProcessLedgerSnapshot, PostProcessStep,
+use crate::CompiledPostProcessPlan;
+use crate::operation::{
+    PostProcessDimension, PostProcessResourceEvidence, RuntimePostProcessLedger,
 };
-use baozi_core::{PrimitiveTopology, SceneValidationError, ValidatedScene};
-use baozi_operation::{
-    ControlCause, LedgerCause, LedgerFinishError, LedgerLimitsError, PublicationCause,
-};
+use baozi_core::__canonical_geometry::{SceneGenerationId, ValidatedScene};
+use baozi_operation::{CancellationOrigin, ControlCause, LedgerCause, LedgerFinishError};
 use std::error::Error;
 use std::fmt;
 use thiserror::Error;
 
-/// A bounded failure while compiling a post-process step request.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum PostProcessPlanError {
-    /// The request kept producing duplicate or otherwise redundant entries past the hard bound.
-    #[error("post-process plan contains more than {maximum} requested entries")]
-    TooManyRequestedEntries { maximum: usize },
+/// Identifies the mechanism that requested post-process cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PostProcessCancellationOrigin {
+    /// The configured cancellation token was triggered.
+    Signal,
+    /// A progress observer requested cancellation.
+    Observer,
 }
 
-/// Allocation-free context for a failed post-process transformation.
+/// A post-process-owned projection of cooperative control failure.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum PostProcessStepIssue {
-    /// A mesh disappeared while an edit was being applied.
-    #[error("mesh {mesh} disappeared while applying the step")]
-    MeshMissing { mesh: usize },
-
-    /// An implicit polygon index cannot be represented by the scene index type.
-    #[error("mesh {mesh} implicit polygon index {index} exceeds u32 range")]
-    ImplicitIndexOutOfRange { mesh: usize, index: usize },
-
-    /// A polygon corner count cannot be represented by the host collection index type.
-    #[error("mesh {mesh} face {face} corner count exceeds usize range")]
-    PolygonCornerCountOutOfRange { mesh: usize, face: usize },
-
-    /// The number of indices required by triangulation overflowed.
-    #[error("mesh {mesh} triangle index count overflowed")]
-    TriangleIndexCountOverflow { mesh: usize },
-
-    /// A polygon face range overflowed while its end offset was computed.
-    #[error("mesh {mesh} face {face} range overflowed")]
-    PolygonFaceRangeOverflow { mesh: usize, face: usize },
-
-    /// A polygon face range extends beyond the available source elements.
-    #[error("mesh {mesh} face {face} ends at element {end}, beyond {available} source elements")]
-    PolygonFaceRangeInvalid {
-        mesh: usize,
-        face: usize,
-        end: usize,
-        available: usize,
+pub enum PostProcessControlCause {
+    /// Cooperative cancellation was observed.
+    #[error("post-process operation was cancelled")]
+    Cancelled {
+        /// The mechanism that requested cancellation.
+        origin: PostProcessCancellationOrigin,
     },
 
-    /// A polygon face contains no anchor corner.
-    #[error("mesh {mesh} face {face} is empty")]
-    PolygonFaceEmpty { mesh: usize, face: usize },
+    /// The configured deadline elapsed.
+    #[error("post-process operation deadline elapsed")]
+    DeadlineExceeded,
 
-    /// A declared polygon corner is absent from the source elements.
-    #[error("mesh {mesh} face {face} corner {corner} is missing")]
-    PolygonCornerMissing {
-        mesh: usize,
-        face: usize,
-        corner: usize,
-    },
+    /// A host-provided control extension failed while being polled.
+    #[error("post-process control extension failed")]
+    ExtensionFailed,
 
-    /// Polygon face counts did not consume the complete source-element sequence.
-    #[error("mesh {mesh} face counts consume {consumed} of {available} source elements")]
-    PolygonFaceCountsMismatch {
-        mesh: usize,
-        consumed: usize,
-        available: usize,
-    },
+    /// Progress reporting violated its monotonic contract.
+    #[error("post-process progress contract was violated")]
+    ProgressContract,
 
-    /// Normal generation requires triangle topology.
-    #[error("mesh {mesh} has {topology:?} topology; triangulate before generating normals")]
-    RequiresTriangles {
-        mesh: usize,
-        topology: PrimitiveTopology,
-    },
+    /// Bounded progress evidence could not be retained.
+    #[error("post-process progress evidence could not be retained")]
+    EvidenceUnavailable,
 
-    /// A triangle did not contain exactly three positions or indices.
-    #[error("mesh {mesh} triangle {triangle} has invalid arity (indexed={indexed})")]
-    TriangleArityMismatch {
-        mesh: usize,
-        triangle: usize,
-        indexed: bool,
-    },
-
-    /// A generated-normal vertex offset overflowed.
-    #[error("mesh {mesh} triangle {triangle} vertex index overflowed")]
-    VertexIndexOverflow { mesh: usize, triangle: usize },
-
-    /// A triangle references a vertex outside the available vertex sequence.
-    #[error(
-        "mesh {mesh} triangle {triangle} vertex {vertex} is outside the {upper_bound}-vertex range"
-    )]
-    VertexIndexOutOfRange {
-        mesh: usize,
-        triangle: usize,
-        vertex: usize,
-        upper_bound: usize,
-    },
-
-    /// A triangle cannot produce a finite, non-zero normal.
-    #[error("mesh {mesh} triangle {triangle} is degenerate")]
-    DegenerateTriangle { mesh: usize, triangle: usize },
-
-    /// A vertex is not referenced by any triangle.
-    #[error("mesh {mesh} vertex {vertex} is not referenced by any triangle")]
-    UnreferencedVertex { mesh: usize, vertex: usize },
-
-    /// A shared vertex would require incompatible generated normals.
-    #[error("mesh {mesh} shared vertex {vertex} needs multiple generated normals")]
-    ConflictingGeneratedNormal { mesh: usize, vertex: usize },
-
-    /// The byte count required for a staging allocation overflowed `usize`.
-    #[error(
-        "{element_count} staging elements of {element_size} bytes overflow the capacity byte count"
-    )]
-    CapacityByteCountOverflow {
-        element_count: usize,
-        element_size: usize,
-    },
-
-    /// A staging byte count cannot be represented by operation accounting.
-    #[error("staging capacity {bytes} exceeds u64 range")]
-    CapacityExceedsU64 { bytes: usize },
+    /// The shared runtime reported an unrecognized fail-closed control cause.
+    #[error("post-process control failed closed")]
+    RuntimeContract,
 }
 
-/// A typed post-process domain error.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+/// A post-process-owned projection of terminal ledger failure.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PostProcessFinalizationError {
+    /// Retained storage or reservation capabilities remained live.
+    #[error("post-process resources remained live during finalization")]
+    OutstandingResources,
+
+    /// A linear work permit remained unresolved.
+    #[error("post-process work remained outstanding during finalization")]
+    OutstandingWork,
+
+    /// A publication transaction remained in an invalid terminal state.
+    #[error("post-process publication state prevented finalization")]
+    PublicationState,
+
+    /// Bounded terminal evidence could not be retained.
+    #[error("post-process terminal evidence could not be retained")]
+    EvidenceUnavailable,
+
+    /// The private ledger shape or accounting contract was inconsistent.
+    #[error("post-process accounting contract prevented finalization")]
+    AccountingContract,
+}
+
+/// A typed failure during compilation or execution of a requested run.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PostProcessError {
-    /// A requested transformation could not produce a valid result.
-    #[error("post-process step {step:?} failed: {issue}")]
-    StepFailed {
-        step: PostProcessStep,
-        #[source]
-        issue: PostProcessStepIssue,
-    },
-
-    /// Final central Scene validation rejected the staged edit.
-    #[error("post-process output validation failed")]
-    Validation {
-        #[source]
-        source: SceneValidationError,
-    },
-
     /// Cooperative operation control stopped the invocation.
-    #[error("post-process operation stopped")]
+    #[error("post-process operation stopped: {cause}")]
     Control {
+        /// The post-process-owned control cause.
         #[source]
-        source: ControlCause,
+        cause: PostProcessControlCause,
     },
 
-    /// Checked operation accounting rejected work or staging capacity.
-    #[error("post-process resource accounting failed")]
-    Accounting {
+    /// Operation finalization could not produce a clean terminal state.
+    #[error("post-process operation finalization failed: {cause}")]
+    Finalization {
+        /// The post-process-owned finalization cause.
         #[source]
-        source: LedgerCause<PostProcessDimension>,
+        cause: PostProcessFinalizationError,
     },
-
-    /// A future owner-neutral publication failure not covered by a known category.
-    #[error("post-process publication failed")]
-    Publication {
-        #[source]
-        source: PublicationCause<PostProcessDimension>,
-    },
-
-    /// Operation-ledger finalization failed after the pipeline reached a terminal state.
-    #[error("post-process ledger finalization failed")]
-    LedgerFinalization,
-
-    /// A staging allocation could not be reserved.
-    #[error("post-process {context} could not reserve {resource}")]
-    CapacityExceeded {
-        context: &'static str,
-        resource: &'static str,
-    },
-
-    /// Core supplied an invalid reservation transition to the owner adapter.
-    #[error("post-process validation-control invariant failed: {message}")]
-    ValidationControlInvariant { message: &'static str },
 }
 
-impl PostProcessError {
-    pub(crate) const fn step(step: PostProcessStep, issue: PostProcessStepIssue) -> Self {
-        Self::StepFailed { step, issue }
-    }
-}
-
-/// Borrowed evidence for a ledger failure observed during post-process finalization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PostProcessFinalizationError<'a> {
-    cause: &'a LedgerCause<PostProcessDimension>,
-    snapshot: &'a PostProcessLedgerSnapshot,
-}
-
-impl<'a> PostProcessFinalizationError<'a> {
-    const fn new(
-        cause: &'a LedgerCause<PostProcessDimension>,
-        snapshot: &'a PostProcessLedgerSnapshot,
-    ) -> Self {
-        Self { cause, snapshot }
-    }
-
-    /// Returns the invariant that prevented clean finalization.
-    pub const fn cause(self) -> &'a LedgerCause<PostProcessDimension> {
-        self.cause
-    }
-
-    /// Returns the exact non-normalized evidence observed at finalization.
-    pub const fn snapshot(self) -> &'a PostProcessLedgerSnapshot {
-        self.snapshot
-    }
-}
-
-impl fmt::Display for PostProcessFinalizationError<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "post-process ledger finalization failed: {}",
-            self.cause
-        )
-    }
-}
-
-impl Error for PostProcessFinalizationError<'_> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.cause)
-    }
-}
-
-/// A failed post-process invocation with immutable resource evidence.
-///
-/// The input scene is borrowed by the pipeline and therefore remains usable by
-/// the caller. Clean finalization retains the finalized snapshot; an invariant
-/// failure retains the exact finalization cause and its owned snapshot without
-/// duplicating either value.
+/// Terminal operation evidence for a failed compilation or execution.
 #[derive(Debug, PartialEq, Eq)]
 pub struct PostProcessFailure {
     error: PostProcessError,
-    ledger: PostProcessLedgerSnapshot,
-    finalization_cause: Option<LedgerCause<PostProcessDimension>>,
+    resources: PostProcessResourceEvidence,
+    cleanup_failure: Option<PostProcessFinalizationError>,
 }
 
 impl PostProcessFailure {
-    pub(crate) fn new(error: PostProcessError, ledger: PostProcessLedgerSnapshot) -> Self {
+    pub(crate) fn new(error: PostProcessError, ledger: RuntimePostProcessLedger) -> Self {
         Self {
             error,
-            ledger,
-            finalization_cause: None,
+            resources: PostProcessResourceEvidence::from_runtime(ledger),
+            cleanup_failure: None,
         }
     }
 
-    pub(crate) fn with_finalization_error(
+    pub(crate) fn with_cleanup_failure(
         error: PostProcessError,
-        finalization_error: LedgerFinishError<PostProcessLedgerPhase, PostProcessDimension>,
+        finalization_error: LedgerFinishError<
+            crate::operation::PostProcessLedgerPhase,
+            PostProcessDimension,
+        >,
     ) -> Self {
-        let (finalization_cause, ledger) = finalization_error.into_parts();
+        let (cause, ledger) = finalization_error.into_parts();
         Self {
             error,
-            ledger,
-            finalization_cause: Some(finalization_cause),
+            resources: PostProcessResourceEvidence::from_runtime(ledger),
+            cleanup_failure: Some(project_finalization_cause(cause)),
+        }
+    }
+
+    pub(crate) fn from_finalization_failure(
+        finalization_error: LedgerFinishError<
+            crate::operation::PostProcessLedgerPhase,
+            PostProcessDimension,
+        >,
+    ) -> Self {
+        let (cause, ledger) = finalization_error.into_parts();
+        let cause = project_finalization_cause(cause);
+        Self {
+            error: PostProcessError::Finalization { cause },
+            resources: PostProcessResourceEvidence::from_runtime(ledger),
+            cleanup_failure: None,
         }
     }
 
     /// Returns the typed domain error.
-    pub fn error(&self) -> &PostProcessError {
+    pub const fn error(&self) -> &PostProcessError {
         &self.error
     }
 
-    /// Returns immutable operation-ledger evidence.
-    pub fn ledger(&self) -> &PostProcessLedgerSnapshot {
-        &self.ledger
+    /// Returns bounded resource evidence without exposing ledger keys or phases.
+    pub const fn resources(&self) -> &PostProcessResourceEvidence {
+        &self.resources
     }
 
-    /// Returns borrowed finalization cause and snapshot evidence, when cleanup itself failed.
-    pub fn finalization_error(&self) -> Option<PostProcessFinalizationError<'_>> {
-        self.finalization_cause
-            .as_ref()
-            .map(|cause| PostProcessFinalizationError::new(cause, &self.ledger))
+    /// Returns a later cleanup failure when finalization also failed after the primary error.
+    pub const fn cleanup_failure(&self) -> Option<PostProcessFinalizationError> {
+        self.cleanup_failure
     }
 
-    /// Consumes the failure and returns the domain error, final snapshot, and
-    /// optional ledger-finalization cause.
+    /// Consumes the failure into its error, resource evidence, and optional cleanup failure.
     pub fn into_parts(
         self,
     ) -> (
         PostProcessError,
-        PostProcessLedgerSnapshot,
-        Option<LedgerCause<PostProcessDimension>>,
+        PostProcessResourceEvidence,
+        Option<PostProcessFinalizationError>,
     ) {
-        (self.error, self.ledger, self.finalization_cause)
+        (self.error, self.resources, self.cleanup_failure)
     }
 }
 
@@ -303,93 +177,54 @@ impl fmt::Display for PostProcessFailure {
 
 impl Error for PostProcessFailure {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match (&self.error, self.finalization_cause.as_ref()) {
-            (PostProcessError::LedgerFinalization, Some(cause)) => Some(cause),
-            _ => Some(&self.error),
-        }
+        Some(&self.error)
     }
 }
 
 /// A typed failure before a post-process coordinator exists.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PostProcessInitializationError {
-    /// The owner-defined ledger limits could not be frozen.
-    #[error("post-process ledger limits could not be frozen: {source}")]
-    LedgerLimits {
-        #[source]
-        source: LedgerLimitsError<PostProcessDimension>,
-    },
+    /// The internal bounded resource policy could not be frozen.
+    #[error("post-process resource policy could not be initialized")]
+    ResourcePolicy,
 
-    /// The coordinator could not retain the complete accounting-phase catalog.
-    #[error("post-process coordinator could not be initialized: {source}")]
-    Coordinator {
-        #[source]
-        source: LedgerCause<PostProcessDimension>,
-    },
+    /// The operation coordinator could not retain its complete private vocabulary.
+    #[error("post-process operation coordinator could not be initialized")]
+    Coordinator,
 }
 
-impl PostProcessInitializationError {
-    pub(crate) const fn ledger_limits(source: LedgerLimitsError<PostProcessDimension>) -> Self {
-        Self::LedgerLimits { source }
-    }
-
-    pub(crate) const fn coordinator(source: LedgerCause<PostProcessDimension>) -> Self {
-        Self::Coordinator { source }
-    }
-
-    /// Returns the limits error when policy freezing failed.
-    pub const fn ledger_limits_error(&self) -> Option<&LedgerLimitsError<PostProcessDimension>> {
-        match self {
-            Self::LedgerLimits { source } => Some(source),
-            Self::Coordinator { .. } => None,
-        }
-    }
-
-    /// Returns the coordinator cause when phase-catalog initialization failed.
-    pub const fn coordinator_cause(&self) -> Option<&LedgerCause<PostProcessDimension>> {
-        match self {
-            Self::LedgerLimits { .. } => None,
-            Self::Coordinator { source } => Some(source),
-        }
-    }
-}
-
-/// A failure before or during one post-process invocation.
-///
-/// Initialization failures occur before an operation coordinator exists and
-/// therefore cannot carry a ledger snapshot. Once initialization succeeds,
-/// every failure is retained as a complete [`PostProcessFailure`].
+/// Initialization or metered compilation failure before a compiled run exists.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PostProcessRunError {
     /// The post-process operation could not be initialized.
     #[error("post-process operation initialization failed: {source}")]
     Initialization {
+        /// The post-process-owned initialization cause.
         #[source]
         source: PostProcessInitializationError,
     },
 
-    /// The initialized operation failed and retained its terminal evidence.
+    /// The initialized operation failed and retained terminal evidence.
     #[error("post-process operation failed: {failure}")]
     Operation {
+        /// Complete terminal evidence for the failed operation.
         #[source]
         failure: PostProcessFailure,
     },
 }
 
 impl PostProcessRunError {
-    pub(crate) const fn initialization(source: LedgerLimitsError<PostProcessDimension>) -> Self {
+    pub(crate) const fn resource_policy_initialization() -> Self {
         Self::Initialization {
-            source: PostProcessInitializationError::ledger_limits(source),
+            source: PostProcessInitializationError::ResourcePolicy,
         }
     }
 
-    pub(crate) const fn coordinator_initialization(
-        source: LedgerCause<PostProcessDimension>,
-    ) -> Self {
+    pub(crate) const fn coordinator_initialization() -> Self {
         Self::Initialization {
-            source: PostProcessInitializationError::coordinator(source),
+            source: PostProcessInitializationError::Coordinator,
         }
     }
 
@@ -397,11 +232,10 @@ impl PostProcessRunError {
         Self::Operation { failure }
     }
 
-    /// Extracts the complete operation failure without discarding an
-    /// initialization error on mismatch.
+    /// Extracts operation evidence without discarding an initialization error.
     pub fn into_operation_failure(
         self,
-    ) -> std::result::Result<PostProcessFailure, PostProcessInitializationError> {
+    ) -> Result<PostProcessFailure, PostProcessInitializationError> {
         match self {
             Self::Operation { failure } => Ok(failure),
             Self::Initialization { source } => Err(source),
@@ -415,160 +249,309 @@ impl PostProcessRunError {
 pub enum PostProcessRunDisposition {
     /// Requests were evaluated but required no canonical write.
     Unchanged,
-    /// At least one canonical write committed a newly validated Scene.
-    Changed,
 }
 
-/// Immutable evidence for one requested post-process invocation.
+/// One compiled-step outcome retained by a post-process report.
+///
+/// The empty-only U7 slice produces no values. Future operations extend this
+/// opaque type together with their descriptors and report schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostProcessStepOutcome {
+    _private: (),
+}
+
+/// One bounded post-process diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostProcessDiagnostic {
+    _private: (),
+}
+
+/// One structured post-process loss record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostProcessLoss {
+    _private: (),
+}
+
+/// Immutable evidence for one requested invocation.
 #[derive(Debug, PartialEq, Eq)]
 pub struct PostProcessReport {
     disposition: PostProcessRunDisposition,
-    ledger: PostProcessLedgerSnapshot,
+    plan: CompiledPostProcessPlan,
+    resources: PostProcessResourceEvidence,
+    step_outcomes: Vec<PostProcessStepOutcome>,
+    diagnostics: Vec<PostProcessDiagnostic>,
+    losses: Vec<PostProcessLoss>,
 }
 
 impl PostProcessReport {
-    pub(crate) const fn new(
-        disposition: PostProcessRunDisposition,
-        ledger: PostProcessLedgerSnapshot,
+    pub(crate) fn unchanged(
+        plan: CompiledPostProcessPlan,
+        ledger: RuntimePostProcessLedger,
     ) -> Self {
         Self {
-            disposition,
-            ledger,
+            disposition: PostProcessRunDisposition::Unchanged,
+            plan,
+            resources: PostProcessResourceEvidence::from_runtime(ledger),
+            step_outcomes: Vec::new(),
+            diagnostics: Vec::new(),
+            losses: Vec::new(),
         }
     }
 
-    /// Returns whether the requested run changed the canonical Scene.
+    /// Returns the successful disposition.
     pub const fn disposition(&self) -> PostProcessRunDisposition {
         self.disposition
     }
 
-    /// Returns immutable operation-ledger evidence.
-    pub const fn ledger(&self) -> &PostProcessLedgerSnapshot {
-        &self.ledger
+    /// Returns the exact plan compiled against the returned Scene.
+    pub const fn plan(&self) -> &CompiledPostProcessPlan {
+        &self.plan
+    }
+
+    /// Returns the generation preserved by this unchanged invocation.
+    pub const fn preserved_generation(&self) -> SceneGenerationId {
+        self.plan.input_generation()
+    }
+
+    /// Returns whether the report is generation-bound to the provided Scene.
+    pub fn matches_scene(&self, scene: &ValidatedScene) -> bool {
+        self.preserved_generation() == scene.generation()
+    }
+
+    /// Returns bounded resource evidence without exposing ledger keys or phases.
+    pub const fn resources(&self) -> &PostProcessResourceEvidence {
+        &self.resources
+    }
+
+    /// Returns source-ordered outcomes for every compiled step.
+    pub fn step_outcomes(&self) -> &[PostProcessStepOutcome] {
+        &self.step_outcomes
+    }
+
+    /// Returns bounded post-process diagnostics.
+    pub fn diagnostics(&self) -> &[PostProcessDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// Returns structured post-process loss evidence.
+    pub fn losses(&self) -> &[PostProcessLoss] {
+        &self.losses
     }
 }
 
-/// The complete successful result of one post-process invocation.
-///
-/// `Unchanged` borrows the already validated input. Only `Changed` owns a new generation. Its
-/// state is intentionally opaque so a Scene cannot be paired with evidence from another
-/// invocation.
-#[derive(Debug, PartialEq)]
-#[must_use = "the post-process outcome carries the preserved or newly published Scene"]
-pub struct PostProcessRunOutcome<'scene> {
-    scene: PostProcessScene<'scene>,
+/// The complete successful result of one requested invocation.
+#[must_use = "the post-process success carries the preserved or newly published Scene"]
+pub struct PostProcessRunOutcome {
+    scene: ValidatedScene,
     report: PostProcessReport,
 }
 
-#[derive(Debug, PartialEq)]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "boxing a published Scene would add a fallible allocation after the atomic publication boundary"
-)]
-enum PostProcessScene<'scene> {
-    Unchanged(&'scene ValidatedScene),
-    Changed(ValidatedScene),
-}
-
-impl<'scene> PostProcessRunOutcome<'scene> {
-    pub(crate) const fn unchanged(
-        scene: &'scene ValidatedScene,
-        report: PostProcessReport,
-    ) -> Self {
-        Self {
-            scene: PostProcessScene::Unchanged(scene),
-            report,
-        }
+impl PostProcessRunOutcome {
+    pub(crate) const fn new(scene: ValidatedScene, report: PostProcessReport) -> Self {
+        Self { scene, report }
     }
 
-    pub(crate) const fn changed(scene: ValidatedScene, report: PostProcessReport) -> Self {
-        Self {
-            scene: PostProcessScene::Changed(scene),
-            report,
-        }
-    }
-
-    /// Returns the successful invocation disposition.
+    /// Returns the successful disposition.
     pub const fn disposition(&self) -> PostProcessRunDisposition {
         self.report.disposition()
     }
 
     /// Returns the preserved input or newly published Scene.
     pub const fn scene(&self) -> &ValidatedScene {
-        match &self.scene {
-            PostProcessScene::Unchanged(scene) => scene,
-            PostProcessScene::Changed(scene) => scene,
-        }
+        &self.scene
     }
 
-    /// Returns immutable evidence for the requested invocation.
+    /// Returns immutable invocation evidence.
     pub const fn report(&self) -> &PostProcessReport {
         &self.report
     }
 
-    /// Consumes an unchanged run and returns its owned report.
-    ///
-    /// This releases the borrow of the input Scene so an owning caller can move that Scene into a
-    /// higher-level composed outcome without cloning it.
-    #[allow(
-        clippy::result_large_err,
-        reason = "the mismatch must return the original linear outcome without allocation or information loss"
-    )]
-    pub fn into_unchanged_report(self) -> std::result::Result<PostProcessReport, Self> {
-        match self.scene {
-            PostProcessScene::Unchanged(_) => Ok(self.report),
-            scene => Err(Self {
-                scene,
-                report: self.report,
-            }),
-        }
-    }
-
-    /// Consumes a changed outcome and returns the newly published Scene and report.
-    ///
-    /// Borrowing outcomes are returned unchanged so callers cannot mistake a preserved input for
-    /// a newly owned generation.
-    #[allow(
-        clippy::result_large_err,
-        reason = "the mismatch must return the original linear outcome without allocation or information loss"
-    )]
-    pub fn into_changed(self) -> std::result::Result<(ValidatedScene, PostProcessReport), Self> {
-        match self.scene {
-            PostProcessScene::Changed(scene) => Ok((scene, self.report)),
-            scene => Err(Self {
-                scene,
-                report: self.report,
-            }),
-        }
+    /// Consumes the success into the Scene owner and invocation report.
+    pub fn into_parts(self) -> (ValidatedScene, PostProcessReport) {
+        (self.scene, self.report)
     }
 }
 
-/// The result of a post-process invocation.
-pub type Result<T> = std::result::Result<T, PostProcessRunError>;
+impl fmt::Debug for PostProcessRunOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PostProcessRunOutcome")
+            .field("scene_generation", &self.scene.generation())
+            .field(
+                "scene_canonical_block_count",
+                &self.scene.canonical_block_count(),
+            )
+            .field("report", &self.report)
+            .finish()
+    }
+}
 
-pub(crate) type StepResult<T> = std::result::Result<T, PostProcessError>;
+/// A compile failure that returns the unchanged input Scene.
+pub struct PostProcessCompileFailure {
+    input: ValidatedScene,
+    error: PostProcessRunError,
+}
+
+impl fmt::Debug for PostProcessCompileFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PostProcessCompileFailure")
+            .field("input_generation", &self.input.generation())
+            .field(
+                "input_canonical_block_count",
+                &self.input.canonical_block_count(),
+            )
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+impl PostProcessCompileFailure {
+    pub(crate) const fn new(input: ValidatedScene, error: PostProcessRunError) -> Self {
+        Self { input, error }
+    }
+
+    /// Returns the unchanged input Scene.
+    pub const fn input(&self) -> &ValidatedScene {
+        &self.input
+    }
+
+    /// Returns the typed initialization or compilation error.
+    pub const fn error(&self) -> &PostProcessRunError {
+        &self.error
+    }
+
+    /// Consumes the failure into the unchanged input and typed error.
+    pub fn into_parts(self) -> (ValidatedScene, PostProcessRunError) {
+        (self.input, self.error)
+    }
+}
+
+impl fmt::Display for PostProcessCompileFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "post-process compilation failed: {}", self.error)
+    }
+}
+
+impl Error for PostProcessCompileFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// An execution failure that returns the unchanged input Scene.
+pub struct PostProcessExecutionFailure {
+    input: ValidatedScene,
+    failure: PostProcessFailure,
+}
+
+impl fmt::Debug for PostProcessExecutionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PostProcessExecutionFailure")
+            .field("input_generation", &self.input.generation())
+            .field(
+                "input_canonical_block_count",
+                &self.input.canonical_block_count(),
+            )
+            .field("failure", &self.failure)
+            .finish()
+    }
+}
+
+impl PostProcessExecutionFailure {
+    pub(crate) const fn new(input: ValidatedScene, failure: PostProcessFailure) -> Self {
+        Self { input, failure }
+    }
+
+    /// Returns the unchanged input Scene.
+    pub const fn input(&self) -> &ValidatedScene {
+        &self.input
+    }
+
+    /// Returns terminal operation evidence for the failed execution.
+    pub const fn failure(&self) -> &PostProcessFailure {
+        &self.failure
+    }
+
+    /// Consumes the failure into the unchanged input and terminal evidence.
+    pub fn into_parts(self) -> (ValidatedScene, PostProcessFailure) {
+        (self.input, self.failure)
+    }
+}
+
+impl fmt::Display for PostProcessExecutionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "post-process execution failed: {}", self.failure)
+    }
+}
+
+impl Error for PostProcessExecutionFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.failure)
+    }
+}
+
+pub(crate) fn project_control_cause(cause: ControlCause) -> PostProcessControlCause {
+    match cause {
+        ControlCause::Cancelled { origin } => PostProcessControlCause::Cancelled {
+            origin: match origin {
+                CancellationOrigin::Signal => PostProcessCancellationOrigin::Signal,
+                CancellationOrigin::Observer => PostProcessCancellationOrigin::Observer,
+            },
+        },
+        ControlCause::DeadlineExceeded => PostProcessControlCause::DeadlineExceeded,
+        ControlCause::ObserverPanicked | ControlCause::CancellationSignalPanicked => {
+            PostProcessControlCause::ExtensionFailed
+        }
+        ControlCause::InvalidProgress { .. } => PostProcessControlCause::ProgressContract,
+        ControlCause::ProgressStorage { .. } => PostProcessControlCause::EvidenceUnavailable,
+        _ => PostProcessControlCause::RuntimeContract,
+    }
+}
+
+fn project_finalization_cause(
+    cause: LedgerCause<PostProcessDimension>,
+) -> PostProcessFinalizationError {
+    match cause {
+        LedgerCause::LiveReservationsRemain { .. }
+        | LedgerCause::ActiveReservationsRemain { .. } => {
+            PostProcessFinalizationError::OutstandingResources
+        }
+        LedgerCause::OutstandingLinearWorkPermits { .. } => {
+            PostProcessFinalizationError::OutstandingWork
+        }
+        LedgerCause::PendingPublicationsRemain
+        | LedgerCause::PublicationAlreadyPending
+        | LedgerCause::PublicationAlreadyCompleted
+        | LedgerCause::InactivePublication
+        | LedgerCause::PublicationLiveMismatch { .. } => {
+            PostProcessFinalizationError::PublicationState
+        }
+        LedgerCause::Evidence { .. } => PostProcessFinalizationError::EvidenceUnavailable,
+        _ => PostProcessFinalizationError::AccountingContract,
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn coordinator_initialization_retains_its_typed_source_on_mismatch() {
-        let cause: LedgerCause<PostProcessDimension> = LedgerCause::DuplicatePhase;
-        let run_error = PostProcessRunError::coordinator_initialization(cause.clone());
+    fn initialization_mismatch_keeps_a_postprocess_owned_cause() {
+        let run_error = PostProcessRunError::coordinator_initialization();
 
         let initialization_source = Error::source(&run_error)
             .and_then(|source| source.downcast_ref::<PostProcessInitializationError>())
             .expect("run error must retain the typed initialization source");
-        assert_eq!(initialization_source.coordinator_cause(), Some(&cause));
-        let coordinator_source = Error::source(initialization_source)
-            .and_then(|source| source.downcast_ref::<LedgerCause<PostProcessDimension>>())
-            .expect("initialization error must retain the typed coordinator cause");
-        assert_eq!(coordinator_source, &cause);
+        assert_eq!(
+            initialization_source,
+            &PostProcessInitializationError::Coordinator
+        );
 
         let initialization = run_error
             .into_operation_failure()
             .expect_err("coordinator initialization cannot be an operation failure");
-        assert_eq!(initialization.coordinator_cause(), Some(&cause));
+        assert_eq!(initialization, PostProcessInitializationError::Coordinator);
     }
 }

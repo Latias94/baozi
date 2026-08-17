@@ -7,7 +7,7 @@ use crate::ledger::{ImportDimension, ImportLedgerSnapshot};
 use crate::loss::ImportLossEvidence;
 use crate::source_scope::SourceScopeRecord;
 use baozi_core::__canonical_import::{
-    SceneMinimalFallback, SceneRichFailure, SceneSuccessReport, ValidatedScene,
+    SceneGenerationId, SceneMinimalFallback, SceneRichFailure, SceneSuccessReport, ValidatedScene,
 };
 use baozi_core::FormatId;
 use baozi_io::AssetPath;
@@ -206,7 +206,18 @@ impl DetectionEvidence {
 
 pub struct ImportReport {
     scene: ValidatedScene,
-    scene_report: SceneSuccessReport,
+    evidence: ImportEvidence,
+}
+
+/// Import evidence retained independently from the published Scene owner.
+///
+/// The value keeps the success publication, source identity, diagnostics, losses,
+/// dependency evidence, and terminal ledger coupled after a caller moves the Scene
+/// into a later owning pipeline.
+#[must_use = "import evidence retains the successful publication and terminal ledger"]
+pub struct ImportEvidence {
+    scene_generation: SceneGenerationId,
+    _scene_report: SceneSuccessReport,
     source: AssetPath,
     format: Arc<FormatDescriptor>,
     detection: Vec<DetectionEvidence>,
@@ -236,19 +247,23 @@ pub(crate) struct ImportReportParts {
 
 impl ImportReport {
     pub(crate) fn from_parts(parts: ImportReportParts) -> Self {
+        let scene_generation = parts.scene.generation();
         Self {
             scene: parts.scene,
-            scene_report: parts.scene_report,
-            source: parts.source,
-            format: parts.format,
-            detection: parts.detection,
-            diagnostics: parts.diagnostics,
-            diagnostic_summary: parts.diagnostic_summary,
-            optional_dependency_evidence: parts.optional_dependency_evidence,
-            loss_evidence: parts.loss_evidence,
-            source_scope_record: parts.source_scope_record,
-            ledger: parts.ledger,
-            last_completed: parts.last_completed,
+            evidence: ImportEvidence {
+                scene_generation,
+                _scene_report: parts.scene_report,
+                source: parts.source,
+                format: parts.format,
+                detection: parts.detection,
+                diagnostics: parts.diagnostics,
+                diagnostic_summary: parts.diagnostic_summary,
+                optional_dependency_evidence: parts.optional_dependency_evidence,
+                loss_evidence: parts.loss_evidence,
+                source_scope_record: parts.source_scope_record,
+                ledger: parts.ledger,
+                last_completed: parts.last_completed,
+            },
         }
     }
 
@@ -256,42 +271,114 @@ impl ImportReport {
         &self.scene
     }
 
+    /// Borrows the evidence jointly retained with the successful import.
+    pub const fn evidence(&self) -> &ImportEvidence {
+        &self.evidence
+    }
+
+    /// Consumes the report into the unique Scene owner and its independent evidence.
+    pub fn into_parts(self) -> (ValidatedScene, ImportEvidence) {
+        (self.scene, self.evidence)
+    }
+
+    pub const fn source(&self) -> &AssetPath {
+        self.evidence.source()
+    }
+
+    pub fn format(&self) -> &FormatDescriptor {
+        self.evidence.format()
+    }
+
+    pub fn detection_evidence(&self) -> &[DetectionEvidence] {
+        self.evidence.detection_evidence()
+    }
+
+    pub fn diagnostics(&self) -> &[ImportDiagnostic] {
+        self.evidence.diagnostics()
+    }
+
+    pub const fn diagnostic_summary(&self) -> DiagnosticSummary {
+        self.evidence.diagnostic_summary()
+    }
+
+    pub fn optional_dependency_evidence(&self) -> &[OptionalDependencyEvidence] {
+        self.evidence.optional_dependency_evidence()
+    }
+
+    pub fn loss_evidence(&self) -> &[ImportLossEvidence] {
+        self.evidence.loss_evidence()
+    }
+
+    pub const fn source_scope_record(&self) -> Option<&SourceScopeRecord> {
+        self.evidence.source_scope_record()
+    }
+
+    pub const fn ledger(&self) -> &ImportLedgerSnapshot {
+        self.evidence.ledger()
+    }
+
+    pub const fn last_completed(&self) -> ImportPhaseEvidence {
+        self.evidence.last_completed()
+    }
+}
+
+impl ImportEvidence {
+    /// Returns the canonical generation jointly published with this evidence.
+    pub const fn scene_generation(&self) -> SceneGenerationId {
+        self.scene_generation
+    }
+
+    /// Returns whether this evidence belongs to the provided canonical Scene.
+    pub fn matches_scene(&self, scene: &ValidatedScene) -> bool {
+        self.scene_generation == scene.generation()
+    }
+
+    /// Returns the primary source identity retained by the import session.
     pub const fn source(&self) -> &AssetPath {
         &self.source
     }
 
+    /// Returns the selected format descriptor.
     pub fn format(&self) -> &FormatDescriptor {
         self.format.as_ref()
     }
 
+    /// Returns ordered detection evidence.
     pub fn detection_evidence(&self) -> &[DetectionEvidence] {
         &self.detection
     }
 
+    /// Returns retained diagnostics.
     pub fn diagnostics(&self) -> &[ImportDiagnostic] {
         &self.diagnostics
     }
 
+    /// Returns the precomputed diagnostic summary.
     pub const fn diagnostic_summary(&self) -> DiagnosticSummary {
         self.diagnostic_summary
     }
 
+    /// Returns optional dependency evidence.
     pub fn optional_dependency_evidence(&self) -> &[OptionalDependencyEvidence] {
         &self.optional_dependency_evidence
     }
 
+    /// Returns structured loss evidence.
     pub fn loss_evidence(&self) -> &[ImportLossEvidence] {
         &self.loss_evidence
     }
 
+    /// Returns the bounded source-scope record, when one was published.
     pub const fn source_scope_record(&self) -> Option<&SourceScopeRecord> {
         self.source_scope_record.as_ref()
     }
 
+    /// Returns immutable terminal ledger evidence.
     pub const fn ledger(&self) -> &ImportLedgerSnapshot {
         &self.ledger
     }
 
+    /// Returns the final completed import lifecycle phase.
     pub const fn last_completed(&self) -> ImportPhaseEvidence {
         self.last_completed
     }
@@ -301,6 +388,16 @@ impl fmt::Debug for ImportReport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ImportReport")
+            .field("evidence", &self.evidence)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ImportEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportEvidence")
+            .field("scene_generation", &self.scene_generation)
             .field("source", &self.source)
             .field("format", &self.format.id())
             .field("detection", &self.detection)

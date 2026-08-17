@@ -175,14 +175,16 @@ contract_id = "postprocess-pipeline-semantics"
 authority_adr = "docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md"
 conformance_status = "nonconforming"
 evidence_subject = "baozi.postprocess.pipeline-semantics"
-evidence_revision = 1
+evidence_revision = 2
 implementation_tracers = [
+  "crates/baozi-import/src/outcome.rs",
+  "crates/baozi-postprocess/src/error.rs",
   "crates/baozi-postprocess/src/pipeline.rs",
   "crates/baozi-postprocess/src/operation.rs",
 ]
 test_tracers = [
-  "crates/baozi-postprocess/tests/pipeline.rs",
   "crates/baozi-postprocess/tests/operation_boundary.rs",
+  "crates/baozi-postprocess/tests/tracing.rs",
 ]
 ci_tracers = [".github/workflows/ci.yml"]
 gate_ids = [

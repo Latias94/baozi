@@ -24,7 +24,7 @@ and resource-admission gates pass.
 | `baozi-core` | Scene IR, IDs, diagnostics, errors, math, materials |
 | `baozi-io` | Asset IO, URI/path policy, resource limits |
 | `baozi-import` | Format importer traits, registry, capability metadata |
-| `baozi-postprocess` | Post-process pipeline contracts and presets |
+| `baozi-postprocess` | Owning canonical post-process compilation and outcome contracts; transformations are not yet admitted |
 | `baozi-format-stl` | STL importer |
 | `baozi-format-obj` | OBJ/MTL importer |
 | `baozi-format-ply` | PLY importer; admitted for source builds but not yet published |

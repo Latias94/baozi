@@ -2,9 +2,8 @@
 
 mod support;
 
-use baozi_core::ValidatedScene;
 use baozi_format_stl::{FORMAT_ID, StlImporter};
-use baozi_import::{ImportOperationControl, PreparedImportRequest, import_asset};
+use baozi_import::{ImportOperationControl, PreparedImportRequest, ValidatedScene, import_asset};
 use baozi_io::{AssetPath, MemoryAssetIo};
 use libfuzzer_sys::fuzz_target;
 use std::sync::{Arc, OnceLock};

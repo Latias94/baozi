@@ -2,10 +2,9 @@
 
 mod support;
 
-use baozi_core::ValidatedScene;
 use baozi_format_obj::{FORMAT_ID, ObjImporter};
 use baozi_import::{
-    ImportOperationControl, PreparedImportRequest, SameAuthorityResolver,
+    ImportOperationControl, PreparedImportRequest, SameAuthorityResolver, ValidatedScene,
     import_asset_with_resolver,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};

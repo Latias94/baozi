@@ -1,7 +1,9 @@
 #![cfg(feature = "tracing")]
 
-use baozi_core::{SceneBuilder, ValidatedScene, validate_scene};
-use baozi_postprocess::{PostProcessPipeline, PostProcessRunDisposition};
+mod common;
+
+use baozi_postprocess::{PostProcessRequests, PostProcessRunDisposition};
+use common::canonical_triangle_scene;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::span::{Attributes, Id, Record};
@@ -65,28 +67,48 @@ impl Subscriber for CapturingSubscriber {
 
 #[test]
 fn tracing_is_fieldless_and_does_not_change_postprocess_results() {
-    let input = root_only_scene();
-    let pipeline = PostProcessPipeline::new([]).expect("empty pipeline should compile");
+    let scene_without_subscriber = canonical_triangle_scene();
+    let scene_with_subscriber = canonical_triangle_scene();
 
-    let without_subscriber = with_default(NoSubscriber::default(), || {
-        pipeline
-            .run(&input)
-            .expect("pipeline should succeed without a subscriber")
+    let without_subscriber = with_default(NoSubscriber::default(), move || {
+        let scene = scene_without_subscriber;
+        let generation = scene.generation();
+        let canonical_block_count = scene.canonical_block_count();
+        let outcome = PostProcessRequests::empty()
+            .compile(scene)
+            .expect("requests should compile without a subscriber")
+            .execute()
+            .expect("requests should succeed without a subscriber");
+        (outcome, generation, canonical_block_count)
     });
 
     let subscriber = CapturingSubscriber::default();
-    let with_subscriber = with_default(subscriber.clone(), || {
-        pipeline
-            .run(&input)
-            .expect("pipeline should succeed with a subscriber")
+    let with_subscriber = with_default(subscriber.clone(), move || {
+        let scene = scene_with_subscriber;
+        let generation = scene.generation();
+        let canonical_block_count = scene.canonical_block_count();
+        let outcome = PostProcessRequests::empty()
+            .compile(scene)
+            .expect("requests should compile with a subscriber")
+            .execute()
+            .expect("requests should succeed with a subscriber");
+        (outcome, generation, canonical_block_count)
     });
+    let (without_subscriber, without_generation, without_blocks) = without_subscriber;
+    let (with_subscriber, with_generation, with_blocks) = with_subscriber;
 
     assert_eq!(
         subscriber.captured_spans(),
-        [CapturedSpan {
-            name: "baozi.postprocess",
-            fields: Vec::new(),
-        }]
+        [
+            CapturedSpan {
+                name: "baozi.postprocess.compile",
+                fields: Vec::new(),
+            },
+            CapturedSpan {
+                name: "baozi.postprocess.execute",
+                fields: Vec::new(),
+            },
+        ]
     );
     assert_eq!(
         without_subscriber.disposition(),
@@ -96,29 +118,15 @@ fn tracing_is_fieldless_and_does_not_change_postprocess_results() {
         with_subscriber.disposition(),
         PostProcessRunDisposition::Unchanged
     );
-    assert_scene_content_eq(without_subscriber.scene(), with_subscriber.scene());
+    assert_eq!(without_subscriber.scene().generation(), without_generation);
+    assert_eq!(with_subscriber.scene().generation(), with_generation);
     assert_eq!(
-        without_subscriber.report().ledger(),
-        with_subscriber.report().ledger()
+        without_subscriber.scene().canonical_block_count(),
+        without_blocks
     );
-}
-
-fn root_only_scene() -> ValidatedScene {
-    let builder = SceneBuilder::try_new().expect("test scene builder allocation should succeed");
-    validate_scene(builder.finish_draft()).expect("root-only test scene should be valid")
-}
-
-fn assert_scene_content_eq(left: &ValidatedScene, right: &ValidatedScene) {
-    assert_eq!(left.root(), right.root());
-    assert_eq!(left.nodes(), right.nodes());
-    assert_eq!(left.meshes(), right.meshes());
-    assert_eq!(left.materials(), right.materials());
-    assert_eq!(left.textures(), right.textures());
-    assert_eq!(left.animations(), right.animations());
-    assert_eq!(left.cameras(), right.cameras());
-    assert_eq!(left.lights(), right.lights());
-    assert_eq!(left.skins(), right.skins());
-    assert_eq!(left.metadata(), right.metadata());
-    assert_eq!(left.space(), right.space());
-    assert_eq!(left.validation_stats(), right.validation_stats());
+    assert_eq!(with_subscriber.scene().canonical_block_count(), with_blocks);
+    assert_eq!(
+        without_subscriber.report().resources(),
+        with_subscriber.report().resources()
+    );
 }

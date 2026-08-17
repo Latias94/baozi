@@ -13,7 +13,7 @@ use baozi_operation::{
     StoreLedgerEvidence, StorePhaseKey,
 };
 
-use crate::identity::SceneGenerationId;
+pub use crate::identity::SceneGenerationId;
 
 use super::super::construction::node_scene::snapshot::{
     NodeSceneSnapshot, NodeSceneSnapshotError, NodeSceneSnapshotLimits,

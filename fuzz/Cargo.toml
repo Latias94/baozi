@@ -17,7 +17,6 @@ baozi-format-ply = { path = "../crates/baozi-format-ply" }
 baozi-format-stl = { path = "../crates/baozi-format-stl" }
 baozi-import = { path = "../crates/baozi-import" }
 baozi-io = { path = "../crates/baozi-io" }
-baozi-postprocess = { path = "../crates/baozi-postprocess" }
 libfuzzer-sys = "0.4"
 
 [[bin]]
@@ -30,13 +29,6 @@ bench = false
 [[bin]]
 name = "obj_import"
 path = "fuzz_targets/obj_import.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "obj_postprocess"
-path = "fuzz_targets/obj_postprocess.rs"
 test = false
 doc = false
 bench = false

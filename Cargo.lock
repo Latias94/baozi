@@ -154,6 +154,9 @@ name = "baozi-postprocess"
 version = "0.1.0"
 dependencies = [
  "baozi-core",
+ "baozi-format-obj",
+ "baozi-import",
+ "baozi-io",
  "baozi-operation",
  "thiserror",
  "tracing",

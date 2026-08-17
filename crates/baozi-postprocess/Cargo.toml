@@ -15,7 +15,12 @@ default = []
 tracing = ["dep:tracing", "baozi-core/tracing"]
 
 [dependencies]
-baozi-core.workspace = true
+baozi-core = { workspace = true, features = ["_u7-geometry"] }
 baozi-operation.workspace = true
 thiserror.workspace = true
 tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+baozi-format-obj.workspace = true
+baozi-import.workspace = true
+baozi-io.workspace = true
