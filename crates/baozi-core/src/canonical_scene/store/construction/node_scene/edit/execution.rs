@@ -192,9 +192,14 @@ fn edit_publication_plan(
         .counts
         .new_canonical_blocks
         .as_usize()
-        .checked_add(pending.counts.inherited_shareable_leaves.as_usize())
+        .checked_add(pending.counts.evidence_leaves.inherited.as_usize())
         .ok_or(StorePlanError::SizeOverflow)?;
-    if pending.counts.custom_semantic_rewrite_blocks.as_usize() != expected_custom_rewrites
+    if pending.counts.operation_specific_rewrite_blocks.as_usize() != expected_custom_rewrites
+        || !pending.counts.evidence_leaves.is_exact()
+        || pending.counts.evidence_leaves.source.as_u32()
+            != pending.input.proof.counts().shareable_leaf_block_count
+        || pending.counts.evidence_leaves.output.as_u32()
+            != pending.counts.evidence.shareable_leaf_block_count
         || source_partition != pending.counts.source_node_rows.as_usize()
         || pending.counts.source_reference_rows.as_usize()
             != pending.counts.source_node_rows.as_usize()

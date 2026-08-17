@@ -54,6 +54,88 @@ impl CheckedCount {
     }
 }
 
+/// Exact disposition of every evidence-counted shareable leaf across one node-Scene edit.
+///
+/// `SceneEvidenceCounts::shareable_leaf_block_count` covers payload and profile leaves. Record
+/// blocks are always rebuilt, while operation-specific leaves such as authored transforms are
+/// tracked by their operation plan. Keeping this boundary explicit makes deletion a core concern
+/// instead of relying on a storage-wide "inherit everything else" operation.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct NodeSceneEvidenceLeafPlan {
+    pub(super) source: CheckedCount,
+    pub(super) inherited: CheckedCount,
+    pub(super) rewritten: CheckedCount,
+    pub(super) added: CheckedCount,
+    pub(super) deleted: CheckedCount,
+    pub(super) output: CheckedCount,
+    /// Source rows that must be inspected to recover dynamic leaf references.
+    pub(super) inspection_work: CheckedCount,
+}
+
+impl NodeSceneEvidenceLeafPlan {
+    fn try_new(
+        source: u32,
+        output: u32,
+        rewritten: usize,
+        added: usize,
+        deleted: usize,
+        inspection_work: usize,
+    ) -> Result<Self, NodeSceneEditPlanError> {
+        let source = CheckedCount::try_from_u32(source, "source shareable leaf count")?;
+        let output = CheckedCount::try_from_u32(output, "output shareable leaf count")?;
+        let rewritten = CheckedCount::try_from_usize(rewritten, "rewritten shareable leaf count")?;
+        let added = CheckedCount::try_from_usize(added, "added shareable leaf count")?;
+        let deleted = CheckedCount::try_from_usize(deleted, "deleted shareable leaf count")?;
+        let inspection_work =
+            CheckedCount::try_from_usize(inspection_work, "shareable leaf inspection work")?;
+        let inherited_count = source
+            .as_usize()
+            .checked_sub(rewritten.as_usize())
+            .and_then(|count| count.checked_sub(deleted.as_usize()))
+            .ok_or(NodeSceneEditPlanError::InvalidSource {
+                reason: "shareable leaf rewrites and deletions exceed the source leaf set",
+            })?;
+        let expected_output = inherited_count
+            .checked_add(rewritten.as_usize())
+            .and_then(|count| count.checked_add(added.as_usize()))
+            .ok_or(NodeSceneEditPlanError::SizeOverflow {
+                quantity: "output shareable leaf count",
+            })?;
+        require_count(
+            output.as_usize(),
+            expected_output,
+            "output shareable leaf count disagrees with the sealed leaf dispositions",
+        )?;
+
+        Ok(Self {
+            source,
+            inherited: CheckedCount::try_from_usize(
+                inherited_count,
+                "inherited shareable leaf count",
+            )?,
+            rewritten,
+            added,
+            deleted,
+            output,
+            inspection_work,
+        })
+    }
+
+    pub(super) fn is_exact(self) -> bool {
+        self.inherited
+            .as_usize()
+            .checked_add(self.rewritten.as_usize())
+            .and_then(|count| count.checked_add(self.deleted.as_usize()))
+            == Some(self.source.as_usize())
+            && self
+                .inherited
+                .as_usize()
+                .checked_add(self.rewritten.as_usize())
+                .and_then(|count| count.checked_add(self.added.as_usize()))
+                == Some(self.output.as_usize())
+    }
+}
+
 /// Logical target coordinates and the exact transform replacement interval.
 ///
 /// `canonical_row` is a logical node-table row, not a retained-store slot identity.
@@ -187,14 +269,13 @@ impl NodeSceneEditProgram {
 pub(super) struct NodeSceneEditFixedCounts {
     pub(super) evidence: SceneEvidenceCounts,
     pub(super) canonical_blocks: CheckedCount,
-    /// Blocks whose domain values are directly affected by the transform edit.
+    /// Blocks whose domain values are directly affected by the sealed edit program.
     ///
     /// This is a semantic rewrite count, not physical new-allocation authority.
-    pub(super) custom_semantic_rewrite_blocks: CheckedCount,
+    pub(super) operation_specific_rewrite_blocks: CheckedCount,
     /// Every target block that must be newly retained for the destination generation.
     pub(super) new_canonical_blocks: CheckedCount,
-    /// The only source blocks admitted for cross-generation sharing.
-    pub(super) inherited_shareable_leaves: CheckedCount,
+    pub(super) evidence_leaves: NodeSceneEvidenceLeafPlan,
     pub(super) canonical_attribution_slots: CheckedCount,
     pub(super) outcome_evidence_blocks: CheckedCount,
     pub(super) outcome_evidence_attribution_slots: CheckedCount,
@@ -375,20 +456,34 @@ impl NodeSceneEditFixedCounts {
         } else {
             1
         };
-        let inherited_shareable_leaf_count = usize::try_from(
-            source_evidence
-                .shareable_leaf_block_count
-                .checked_sub(1)
-                .ok_or(NodeSceneEditPlanError::InvalidSource {
-                    reason: "validated profile has no attachment leaf to rewrite",
-                })?,
-        )
-        .map_err(|_| NodeSceneEditPlanError::SizeOverflow {
-            quantity: "shareable canonical leaf block count",
+        let primitive_rows = usize::try_from(source_evidence.primitive_count).map_err(|_| {
+            NodeSceneEditPlanError::SizeOverflow {
+                quantity: "shareable leaf primitive inspection work",
+            }
         })?;
+        let attribute_rows = usize::try_from(source_evidence.attribute_count).map_err(|_| {
+            NodeSceneEditPlanError::SizeOverflow {
+                quantity: "shareable leaf attribute inspection work",
+            }
+        })?;
+        let leaf_inspection_work = primitive_rows
+            .checked_add(attribute_rows)
+            .and_then(|count| count.checked_add(profile.source_segment_count.as_usize()))
+            .and_then(|count| count.checked_add(1))
+            .ok_or(NodeSceneEditPlanError::SizeOverflow {
+                quantity: "shareable leaf inspection work",
+            })?;
+        let evidence_leaves = NodeSceneEvidenceLeafPlan::try_new(
+            source_evidence.shareable_leaf_block_count,
+            evidence.shareable_leaf_block_count,
+            1,
+            4,
+            0,
+            leaf_inspection_work,
+        )?;
         let new_canonical_block_count = canonical_blocks
             .as_usize()
-            .checked_sub(inherited_shareable_leaf_count)
+            .checked_sub(evidence_leaves.inherited.as_usize())
             .ok_or(NodeSceneEditPlanError::InvalidSource {
                 reason: "inherited shareable leaf count exceeds the canonical output block count",
             })?;
@@ -397,9 +492,9 @@ impl NodeSceneEditFixedCounts {
                 reason: "canonical source lacks the structural blocks required by a transform edit",
             });
         }
-        let custom_semantic_rewrite_blocks = CheckedCount::try_from_usize(
+        let operation_specific_rewrite_blocks = CheckedCount::try_from_usize(
             custom_semantic_rewrite_block_count,
-            "custom semantic rewrite block count",
+            "operation-specific rewrite block count",
         )?;
         let new_canonical_blocks =
             CheckedCount::try_from_usize(new_canonical_block_count, "new canonical block count")?;
@@ -415,12 +510,9 @@ impl NodeSceneEditFixedCounts {
         Ok(Self {
             evidence,
             canonical_blocks,
-            custom_semantic_rewrite_blocks,
+            operation_specific_rewrite_blocks,
             new_canonical_blocks,
-            inherited_shareable_leaves: CheckedCount::try_from_usize(
-                inherited_shareable_leaf_count,
-                "inherited shareable leaf count",
-            )?,
+            evidence_leaves,
             canonical_attribution_slots,
             outcome_evidence_blocks: CheckedCount::try_from_u32(1, "outcome-evidence block count")?,
             outcome_evidence_attribution_slots: CheckedCount::try_from_u32(
@@ -814,7 +906,25 @@ mod tests {
     use crate::entity::AuthoredTransform;
     use crate::math::Mat4;
 
-    use super::{NodeSceneEditPlanError, NodeTransformEditTarget};
+    use super::{NodeSceneEditPlanError, NodeSceneEvidenceLeafPlan, NodeTransformEditTarget};
+
+    #[test]
+    fn shareable_leaf_plan_requires_exact_source_and_output_partitions() {
+        let exact = NodeSceneEvidenceLeafPlan::try_new(5, 7, 1, 3, 1, 9)
+            .expect("exact leaf dispositions must seal");
+
+        assert!(exact.is_exact());
+        assert_eq!(exact.inherited.as_usize(), 3);
+        assert_eq!(exact.inspection_work.as_usize(), 9);
+        assert!(matches!(
+            NodeSceneEvidenceLeafPlan::try_new(1, 1, 1, 0, 1, 0),
+            Err(NodeSceneEditPlanError::InvalidSource { .. })
+        ));
+        assert!(matches!(
+            NodeSceneEvidenceLeafPlan::try_new(5, 6, 1, 3, 1, 0),
+            Err(NodeSceneEditPlanError::InvalidSource { .. })
+        ));
+    }
 
     #[test]
     fn matrix_to_trs_uses_checked_six_scalar_contraction() {

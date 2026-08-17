@@ -2,8 +2,8 @@ mod profile;
 
 use baozi_operation::{
     CanonicalInheritanceSource, CanonicalRecordView, OutcomeEvidenceRecordRef, RecordBlock,
-    RecordPlan, RetainedStoreWorkControl, SequencePlan, SequenceWriter, StoreBuildError,
-    StoreControlledError, StoreRuntimeError,
+    RecordPlan, RetainedStoreWorkControl, SequencePlan, SequenceWriter, ShareableStoreKind,
+    StoreBuildError, StoreControlledError, StoreRuntimeError,
 };
 
 use crate::canonical_scene::store::schema::animation::{
@@ -20,8 +20,12 @@ use crate::canonical_scene::store::schema::deformation::{
     DeformationPrimitiveTableSchema, DeformationSkinTableSchema,
 };
 use crate::canonical_scene::store::schema::geometry::{
-    GeometryAttributeTableSchema, GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
-    GeometryPrimitiveTableSchema,
+    GEOMETRY_ATTRIBUTE_FIELD_COUNT, GEOMETRY_PRIMITIVE_FIELD_COUNT, GeometryAttributeTableSchema,
+    GeometryF32ValuesSchema, GeometryI32ValuesSchema, GeometryLogicalMeshTableSchema,
+    GeometryMeshInstanceTableSchema, GeometryPolygonBoundariesSchema,
+    GeometryPrimitiveIndicesSchema, GeometryPrimitiveTableSchema, GeometrySparseF32DefaultsSchema,
+    GeometrySparseI32DefaultsSchema, GeometrySparseIndicesSchema, GeometrySparseU32DefaultsSchema,
+    GeometryU32ValuesSchema, geometry_attribute_field, geometry_primitive_field,
 };
 use crate::canonical_scene::store::schema::profile::ProfileDirectorySchema;
 use crate::canonical_scene::store::schema::spatial::{
@@ -77,7 +81,7 @@ pub(super) fn try_rewrite_node_scene<'scene>(
             let transforms = rewrite_transforms(assembly, pending, keys, &mut work)?;
             let profile_leaves =
                 profile::rewrite_lineage_leaves(assembly, pending, keys, &mut work)?;
-            assembly.try_inherit_all_canonical_leaves(keys.dimension)?;
+            inherit_unchanged_evidence_leaves(assembly, pending, keys, &mut work)?;
 
             let proof = pending.input.proof;
             let spatial = rewrite_spatial(assembly, pending, keys)?;
@@ -588,6 +592,284 @@ fn rewrite_directory_with_shape(
             },
         )
         .map(CanonicalBlockRef::from_store)
+}
+
+fn inherit_unchanged_evidence_leaves<'scene>(
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
+    pending: &PendingNodeSceneEdit<'scene>,
+    keys: SceneStoreKeys,
+    work: &mut NodeSceneWorkMeter,
+) -> Result<(), StoreRuntimeError> {
+    let proof = pending.input.proof;
+    let mut inherited = 0_usize;
+    let mut inspected = 0_usize;
+
+    inherit_optional_leaf(assembly, proof.node_names(), &mut inherited)?;
+    inherit_optional_leaf(assembly, proof.tangent_basis_schema_name(), &mut inherited)?;
+    inherit_optional_leaf(
+        assembly,
+        proof.tangent_encoding_schema_name(),
+        &mut inherited,
+    )?;
+
+    inherit_optional_leaf(assembly, proof.appearance_image_payloads(), &mut inherited)?;
+    inherit_optional_leaf(assembly, proof.appearance_media_types(), &mut inherited)?;
+    inherit_optional_leaf(assembly, proof.appearance_source_keys(), &mut inherited)?;
+    inherit_optional_leaf(
+        assembly,
+        proof.appearance_binding_semantic_scalars(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        proof.appearance_material_factor_scalars(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(assembly, proof.appearance_material_names(), &mut inherited)?;
+
+    inherit_geometry_leaves(
+        assembly,
+        pending,
+        keys,
+        work,
+        &mut inherited,
+        &mut inspected,
+    )?;
+
+    inherit_optional_leaf(assembly, proof.deformation_joint_nodes(), &mut inherited)?;
+    inherit_optional_leaf(
+        assembly,
+        proof.deformation_inverse_bind_matrices(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        proof.deformation_skin_correction_matrices(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(assembly, proof.deformation_skin_names(), &mut inherited)?;
+    inherit_optional_leaf(
+        assembly,
+        proof.deformation_influence_row_offsets(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        proof.deformation_influence_joints(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        proof.deformation_influence_weights(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        proof.deformation_influence_source_orders(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(assembly, proof.deformation_morph_defaults(), &mut inherited)?;
+    inherit_optional_leaf(assembly, proof.deformation_morph_names(), &mut inherited)?;
+    inherit_optional_leaf(assembly, proof.deformation_morph_values(), &mut inherited)?;
+    inherit_optional_leaf(
+        assembly,
+        proof.deformation_morph_sparse_indices(),
+        &mut inherited,
+    )?;
+    inherit_optional_leaf(
+        assembly,
+        proof.deformation_instance_morph_weights(),
+        &mut inherited,
+    )?;
+
+    inherit_optional_leaf(assembly, proof.animation_times(), &mut inherited)?;
+    inherit_optional_leaf(assembly, proof.animation_values(), &mut inherited)?;
+    inherit_optional_leaf(assembly, proof.animation_in_tangents(), &mut inherited)?;
+    inherit_optional_leaf(assembly, proof.animation_out_tangents(), &mut inherited)?;
+
+    let (profile_inherited, profile_inspected) =
+        profile::inherit_unchanged_lineage_leaves(assembly, pending, keys, work)?;
+    inherited = inherited
+        .checked_add(profile_inherited)
+        .ok_or(StoreRuntimeError::AccountingOverflow)?;
+    inspected = inspected
+        .checked_add(profile_inspected)
+        .ok_or(StoreRuntimeError::AccountingOverflow)?;
+    if inherited != pending.counts.evidence_leaves.inherited.as_usize()
+        || inspected != pending.counts.evidence_leaves.inspection_work.as_usize()
+    {
+        return Err(StoreRuntimeError::InvalidSourceSlot);
+    }
+    Ok(())
+}
+
+fn inherit_geometry_leaves<'scene>(
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
+    pending: &PendingNodeSceneEdit<'scene>,
+    keys: SceneStoreKeys,
+    work: &mut NodeSceneWorkMeter,
+    inherited: &mut usize,
+    inspected: &mut usize,
+) -> Result<(), StoreRuntimeError> {
+    let proof = pending.input.proof;
+    inherit_optional_leaf(assembly, proof.logical_mesh_names(), inherited)?;
+    inherit_optional_leaf(assembly, proof.attribute_semantic_names(), inherited)?;
+
+    match proof.primitives() {
+        None if pending.counts.primitives.as_usize() == 0 => {}
+        Some(reference) => {
+            let primitives = required_record_view(pending.input, reference)?;
+            if primitives.rows() != pending.counts.primitives.as_usize()
+                || primitives.fields() != GEOMETRY_PRIMITIVE_FIELD_COUNT
+            {
+                return Err(StoreRuntimeError::InvalidSourceSlot);
+            }
+            for row in 0..primitives.rows() {
+                observe_leaf_inspection(assembly, keys, work, inspected)?;
+                inherit_optional_leaf(
+                    assembly,
+                    primitives
+                        .sequence_ref::<u32, GeometryPolygonBoundariesSchema>(
+                            row,
+                            geometry_primitive_field::POLYGON_BOUNDARIES,
+                        )
+                        .map(CanonicalBlockRef::from_store),
+                    inherited,
+                )?;
+                inherit_optional_leaf(
+                    assembly,
+                    primitives
+                        .sequence_ref::<u32, GeometryPrimitiveIndicesSchema>(
+                            row,
+                            geometry_primitive_field::INDICES,
+                        )
+                        .map(CanonicalBlockRef::from_store),
+                    inherited,
+                )?;
+            }
+        }
+        None => return Err(StoreRuntimeError::InvalidSourceSlot),
+    }
+
+    match proof.attributes() {
+        None if pending.counts.attributes.as_usize() == 0 => {}
+        Some(reference) => {
+            let attributes = required_record_view(pending.input, reference)?;
+            if attributes.rows() != pending.counts.attributes.as_usize()
+                || attributes.fields() != GEOMETRY_ATTRIBUTE_FIELD_COUNT
+            {
+                return Err(StoreRuntimeError::InvalidSourceSlot);
+            }
+            for row in 0..attributes.rows() {
+                observe_leaf_inspection(assembly, keys, work, inspected)?;
+                inherit_optional_leaf(
+                    assembly,
+                    attributes
+                        .sequence_ref::<f32, GeometryF32ValuesSchema>(
+                            row,
+                            geometry_attribute_field::VALUES,
+                        )
+                        .map(CanonicalBlockRef::from_store),
+                    inherited,
+                )?;
+                inherit_optional_leaf(
+                    assembly,
+                    attributes
+                        .sequence_ref::<u32, GeometryU32ValuesSchema>(
+                            row,
+                            geometry_attribute_field::VALUES,
+                        )
+                        .map(CanonicalBlockRef::from_store),
+                    inherited,
+                )?;
+                inherit_optional_leaf(
+                    assembly,
+                    attributes
+                        .sequence_ref::<i32, GeometryI32ValuesSchema>(
+                            row,
+                            geometry_attribute_field::VALUES,
+                        )
+                        .map(CanonicalBlockRef::from_store),
+                    inherited,
+                )?;
+                inherit_optional_leaf(
+                    assembly,
+                    attributes
+                        .sequence_ref::<u32, GeometrySparseIndicesSchema>(
+                            row,
+                            geometry_attribute_field::SPARSE_INDICES,
+                        )
+                        .map(CanonicalBlockRef::from_store),
+                    inherited,
+                )?;
+                inherit_optional_leaf(
+                    assembly,
+                    attributes
+                        .sequence_ref::<f32, GeometrySparseF32DefaultsSchema>(
+                            row,
+                            geometry_attribute_field::SPARSE_DEFAULT,
+                        )
+                        .map(CanonicalBlockRef::from_store),
+                    inherited,
+                )?;
+                inherit_optional_leaf(
+                    assembly,
+                    attributes
+                        .sequence_ref::<u32, GeometrySparseU32DefaultsSchema>(
+                            row,
+                            geometry_attribute_field::SPARSE_DEFAULT,
+                        )
+                        .map(CanonicalBlockRef::from_store),
+                    inherited,
+                )?;
+                inherit_optional_leaf(
+                    assembly,
+                    attributes
+                        .sequence_ref::<i32, GeometrySparseI32DefaultsSchema>(
+                            row,
+                            geometry_attribute_field::SPARSE_DEFAULT,
+                        )
+                        .map(CanonicalBlockRef::from_store),
+                    inherited,
+                )?;
+            }
+        }
+        None => return Err(StoreRuntimeError::InvalidSourceSlot),
+    }
+    Ok(())
+}
+
+fn observe_leaf_inspection(
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    keys: SceneStoreKeys,
+    work: &mut NodeSceneWorkMeter,
+    inspected: &mut usize,
+) -> Result<(), StoreRuntimeError> {
+    let mut checkpoint = assembly.try_control_checkpoint()?;
+    work.observe_checkpoint(&mut checkpoint, keys, 1)?;
+    *inspected = inspected
+        .checked_add(1)
+        .ok_or(StoreRuntimeError::AccountingOverflow)?;
+    Ok(())
+}
+
+fn inherit_optional_leaf<Schema>(
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'_>>,
+    source: Option<CanonicalBlockRef<Schema>>,
+    inherited: &mut usize,
+) -> Result<(), StoreRuntimeError>
+where
+    Schema: CanonicalSchema,
+    Schema::StoreKind: ShareableStoreKind,
+{
+    let Some(source) = source else {
+        return Ok(());
+    };
+    let _ = assembly.try_share_canonical(source.into_store())?;
+    *inherited = inherited
+        .checked_add(1)
+        .ok_or(StoreRuntimeError::AccountingOverflow)?;
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

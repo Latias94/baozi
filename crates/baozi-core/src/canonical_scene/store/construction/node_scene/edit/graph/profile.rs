@@ -10,13 +10,19 @@ use crate::canonical_scene::store::profile_provenance::{
 use crate::canonical_scene::store::schema::CanonicalBlockRef;
 use crate::canonical_scene::store::schema::profile::{
     PROFILE_ABSENT_REFERENCE, PROFILE_DIGEST_BLAKE3, PROFILE_DIGEST_SHA256,
-    PROFILE_DIRECTORY_FIELD_COUNT, PROFILE_OPERATION_SCALAR_COUNT, PROFILE_OPERATION_TRANSFORM,
-    PROFILE_OWNER_FIELD_COUNT, PROFILE_PROVENANCE_OPERATION, PROFILE_PROVENANCE_SCALAR_COUNT,
-    PROFILE_SCHEMA_REVISION, PROFILE_SEGMENT_FIELD_COUNT, ProfileDirectorySchema,
-    ProfileLineageAttachmentSchema, ProfileLineageDigestSchema, ProfileLineageOperationSchema,
-    ProfileLineageParentSchema, ProfileLineageProvenanceSchema, ProfileMetadataDirectorySchema,
-    ProfileMetadataEntryTableSchema, ProfileOwnerTableSchema, ProfileSegmentTableSchema,
-    profile_directory_field, profile_owner_field, profile_provenance_scalar, profile_segment_field,
+    PROFILE_DIRECTORY_FIELD_COUNT, PROFILE_METADATA_DIRECTORY_FIELD_COUNT,
+    PROFILE_OPERATION_SCALAR_COUNT, PROFILE_OPERATION_TRANSFORM, PROFILE_OWNER_FIELD_COUNT,
+    PROFILE_PROVENANCE_OPERATION, PROFILE_PROVENANCE_SCALAR_COUNT, PROFILE_SCHEMA_REVISION,
+    PROFILE_SEGMENT_FIELD_COUNT, ProfileDirectorySchema, ProfileLineageAttachmentSchema,
+    ProfileLineageDigestSchema, ProfileLineageEvidenceSchema, ProfileLineageOperationSchema,
+    ProfileLineageParentSchema, ProfileLineageProvenanceSchema, ProfileLineageResourceSchema,
+    ProfileLineageSourceSchema, ProfileLineageTextSchema, ProfileLineageWideSchema,
+    ProfileMetadataBoolSchema, ProfileMetadataBytesSchema, ProfileMetadataDirectorySchema,
+    ProfileMetadataEntryTableSchema, ProfileMetadataF32Schema, ProfileMetadataF64Schema,
+    ProfileMetadataI64Schema, ProfileMetadataTextSchema, ProfileMetadataU64Schema,
+    ProfileOwnerTableSchema, ProfileSegmentTableSchema, profile_directory_field,
+    profile_metadata_directory_field, profile_owner_field, profile_provenance_scalar,
+    profile_segment_field,
 };
 use crate::provenance::{DIGEST_LEN, DigestAlgorithm};
 
@@ -78,8 +84,8 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
     )
     .ok_or(StoreRuntimeError::AccountingOverflow)?;
 
-    // This exact source leaf must be mapped before bulk inheritance so the old attachment
-    // storage is not retained into the edited generation.
+    // This exact source leaf must be mapped before explicit unchanged-leaf inheritance so the
+    // old attachment storage is not retained into the edited generation.
     let attachments = assembly
         .try_rewrite_canonical_sequence_controlled(
             plan.source_attachments.into_store(),
@@ -213,6 +219,185 @@ pub(super) fn rewrite_lineage_leaves<'scene>(
         digest,
         segment_nonce,
     })
+}
+
+pub(super) fn inherit_unchanged_lineage_leaves<'scene>(
+    assembly: &mut SceneStoreAssembly<CanonicalInheritanceSource<'scene>>,
+    pending: &PendingNodeSceneEdit<'scene>,
+    keys: SceneStoreKeys,
+    work: &mut NodeSceneWorkMeter,
+) -> Result<(usize, usize), StoreRuntimeError> {
+    let segments = required_segment_view(pending)?;
+    let mut inherited = 0_usize;
+    let mut inspected = 0_usize;
+    for row in 0..segments.rows() {
+        super::observe_leaf_inspection(assembly, keys, work, &mut inspected)?;
+        super::inherit_optional_leaf(
+            assembly,
+            segments
+                .sequence_ref::<u32, ProfileLineageResourceSchema>(
+                    row,
+                    profile_segment_field::RESOURCES,
+                )
+                .map(CanonicalBlockRef::from_store),
+            &mut inherited,
+        )?;
+        super::inherit_optional_leaf(
+            assembly,
+            segments
+                .sequence_ref::<u32, ProfileLineageSourceSchema>(
+                    row,
+                    profile_segment_field::SOURCES,
+                )
+                .map(CanonicalBlockRef::from_store),
+            &mut inherited,
+        )?;
+        super::inherit_optional_leaf(
+            assembly,
+            segments
+                .sequence_ref::<u32, ProfileLineageProvenanceSchema>(
+                    row,
+                    profile_segment_field::PROVENANCE_NODES,
+                )
+                .map(CanonicalBlockRef::from_store),
+            &mut inherited,
+        )?;
+        super::inherit_optional_leaf(
+            assembly,
+            segments
+                .sequence_ref::<u32, ProfileLineageOperationSchema>(
+                    row,
+                    profile_segment_field::OPERATIONS,
+                )
+                .map(CanonicalBlockRef::from_store),
+            &mut inherited,
+        )?;
+        super::inherit_optional_leaf(
+            assembly,
+            segments
+                .sequence_ref::<u32, ProfileLineageEvidenceSchema>(
+                    row,
+                    profile_segment_field::EVIDENCE,
+                )
+                .map(CanonicalBlockRef::from_store),
+            &mut inherited,
+        )?;
+        super::inherit_optional_leaf(
+            assembly,
+            segments
+                .sequence_ref::<u64, ProfileLineageParentSchema>(
+                    row,
+                    profile_segment_field::PARENTS,
+                )
+                .map(CanonicalBlockRef::from_store),
+            &mut inherited,
+        )?;
+        super::inherit_optional_leaf(
+            assembly,
+            segments
+                .sequence_ref::<u64, ProfileLineageWideSchema>(
+                    row,
+                    profile_segment_field::WIDE_VALUES,
+                )
+                .map(CanonicalBlockRef::from_store),
+            &mut inherited,
+        )?;
+        super::inherit_optional_leaf(
+            assembly,
+            segments
+                .utf8_ref::<ProfileLineageTextSchema>(row, profile_segment_field::TEXTS)
+                .map(CanonicalBlockRef::from_store),
+            &mut inherited,
+        )?;
+        super::inherit_optional_leaf(
+            assembly,
+            segments
+                .bytes_ref::<ProfileLineageDigestSchema>(row, profile_segment_field::DIGESTS)
+                .map(CanonicalBlockRef::from_store),
+            &mut inherited,
+        )?;
+    }
+
+    let metadata = pending
+        .input
+        .canonical
+        .records(
+            pending
+                .input
+                .proof
+                .profile_metadata_directory()
+                .into_store(),
+        )
+        .ok_or(StoreRuntimeError::InvalidSourceSlot)?;
+    if metadata.rows() != 1 || metadata.fields() != PROFILE_METADATA_DIRECTORY_FIELD_COUNT {
+        return Err(StoreRuntimeError::InvalidSourceSlot);
+    }
+    super::observe_leaf_inspection(assembly, keys, work, &mut inspected)?;
+    super::inherit_optional_leaf(
+        assembly,
+        metadata
+            .utf8_ref::<ProfileMetadataTextSchema>(0, profile_metadata_directory_field::TEXTS)
+            .map(CanonicalBlockRef::from_store),
+        &mut inherited,
+    )?;
+    super::inherit_optional_leaf(
+        assembly,
+        metadata
+            .bytes_ref::<ProfileMetadataBytesSchema>(0, profile_metadata_directory_field::BYTES)
+            .map(CanonicalBlockRef::from_store),
+        &mut inherited,
+    )?;
+    super::inherit_optional_leaf(
+        assembly,
+        metadata
+            .sequence_ref::<u8, ProfileMetadataBoolSchema>(
+                0,
+                profile_metadata_directory_field::BOOL_VALUES,
+            )
+            .map(CanonicalBlockRef::from_store),
+        &mut inherited,
+    )?;
+    super::inherit_optional_leaf(
+        assembly,
+        metadata
+            .sequence_ref::<i64, ProfileMetadataI64Schema>(
+                0,
+                profile_metadata_directory_field::I64_VALUES,
+            )
+            .map(CanonicalBlockRef::from_store),
+        &mut inherited,
+    )?;
+    super::inherit_optional_leaf(
+        assembly,
+        metadata
+            .sequence_ref::<u64, ProfileMetadataU64Schema>(
+                0,
+                profile_metadata_directory_field::U64_VALUES,
+            )
+            .map(CanonicalBlockRef::from_store),
+        &mut inherited,
+    )?;
+    super::inherit_optional_leaf(
+        assembly,
+        metadata
+            .sequence_ref::<f64, ProfileMetadataF64Schema>(
+                0,
+                profile_metadata_directory_field::F64_VALUES,
+            )
+            .map(CanonicalBlockRef::from_store),
+        &mut inherited,
+    )?;
+    super::inherit_optional_leaf(
+        assembly,
+        metadata
+            .sequence_ref::<f32, ProfileMetadataF32Schema>(
+                0,
+                profile_metadata_directory_field::F32_VALUES,
+            )
+            .map(CanonicalBlockRef::from_store),
+        &mut inherited,
+    )?;
+    Ok((inherited, inspected))
 }
 
 pub(super) fn rewrite_profile_records<'scene>(

@@ -1003,7 +1003,8 @@ fn physical_plan_rebuilds_every_record_and_inherits_each_unchanged_shareable_lea
     let total = same_layout.counts.canonical_blocks.as_usize();
     let payload = usize::try_from(same_layout.counts.evidence.payload_block_count)
         .expect("payload block count must fit the platform");
-    let shareable = same_layout.counts.inherited_shareable_leaves.as_usize();
+    let leaf_plan = same_layout.counts.evidence_leaves;
+    let shareable = leaf_plan.inherited.as_usize();
     assert!(payload > 0, "fixture must contain shareable payload leaves");
     assert!(
         shareable > payload,
@@ -1024,13 +1025,16 @@ fn physical_plan_rebuilds_every_record_and_inherits_each_unchanged_shareable_lea
         "the destination table root and every actual new block require attribution",
     );
     assert_eq!(
-        same_layout.counts.custom_semantic_rewrite_blocks.as_usize(),
+        same_layout
+            .counts
+            .operation_specific_rewrite_blocks
+            .as_usize(),
         1,
     );
     assert_eq!(
         shape_change
             .counts
-            .custom_semantic_rewrite_blocks
+            .operation_specific_rewrite_blocks
             .as_usize(),
         3,
     );
@@ -1040,8 +1044,29 @@ fn physical_plan_rebuilds_every_record_and_inherits_each_unchanged_shareable_lea
         "the one/three custom rewrite distinction must not undercount physical new blocks",
     );
     assert_eq!(
-        shape_change.counts.inherited_shareable_leaves.as_usize(),
+        shape_change.counts.evidence_leaves.inherited.as_usize(),
         shareable,
+    );
+    assert!(leaf_plan.is_exact());
+    assert_eq!(leaf_plan.rewritten.as_usize(), 1);
+    assert_eq!(leaf_plan.added.as_usize(), 4);
+    assert_eq!(leaf_plan.deleted.as_usize(), 0);
+    assert_eq!(
+        leaf_plan.inspection_work.as_usize(),
+        same_layout.counts.primitives.as_usize()
+            + same_layout.counts.attributes.as_usize()
+            + same_layout.counts.profile.source_segment_count.as_usize()
+            + 1,
+    );
+    assert_eq!(
+        leaf_plan.source.as_usize(),
+        leaf_plan.inherited.as_usize() + leaf_plan.rewritten.as_usize(),
+    );
+    assert_eq!(
+        leaf_plan.output.as_usize(),
+        leaf_plan.inherited.as_usize()
+            + leaf_plan.rewritten.as_usize()
+            + leaf_plan.added.as_usize(),
     );
 }
 
