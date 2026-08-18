@@ -349,6 +349,7 @@ impl PreparedNodeSceneEdit {
     }
 }
 
+#[cfg(test)]
 impl NodeSceneEditReport {
     pub(in crate::canonical_scene::store) const fn invalidations(&self) -> CanonicalInvalidations {
         self.invalidations

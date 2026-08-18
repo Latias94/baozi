@@ -1,14 +1,18 @@
+#[cfg(test)]
 use baozi_operation::{PhysicalStorageAccount, StoreLedgerEvidence};
 
 use crate::identity::SceneGenerationId;
 
-use super::{NodeSceneRichFailure, NodeSceneSuccessReport, ValidatedNodeScene};
+use super::ValidatedNodeScene;
+#[cfg(test)]
+use super::{NodeSceneRichFailure, NodeSceneSuccessReport};
 
 impl ValidatedNodeScene {
     pub(in crate::canonical_scene::store) const fn generation(&self) -> SceneGenerationId {
         self.generation
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn account(&self) -> &PhysicalStorageAccount {
         self.canonical.account()
     }
@@ -18,6 +22,7 @@ impl ValidatedNodeScene {
     }
 }
 
+#[cfg(test)]
 impl NodeSceneSuccessReport {
     pub(in crate::canonical_scene::store) fn outcome_evidence_block_count(&self) -> usize {
         self.outcome_evidence.len()
@@ -28,6 +33,7 @@ impl NodeSceneSuccessReport {
     }
 }
 
+#[cfg(test)]
 impl NodeSceneRichFailure {
     pub(in crate::canonical_scene::store) fn account(&self) -> &PhysicalStorageAccount {
         self.outcome_evidence.account()

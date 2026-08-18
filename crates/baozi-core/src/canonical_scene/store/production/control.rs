@@ -55,10 +55,6 @@ pub(in crate::canonical_scene::store) enum OperationAuthoringControlError {
 /// Explicit validator polls delegate to the operation-owned checkpoint cadence. Validators retain
 /// their scheduling shape without introducing a second work counter or permitting scratch work to
 /// cross a pending cancellation checkpoint.
-#[allow(
-    dead_code,
-    reason = "consumed by the complete-batch scoped activation cutover in U4e"
-)]
 pub(in crate::canonical_scene::store) struct ScopedAuthoringControl<
     'session,
     'borrow,

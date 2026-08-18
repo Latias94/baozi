@@ -1,7 +1,5 @@
 use std::fmt;
 
-use baozi_operation::PhysicalStorageAccount;
-
 use crate::identity::SceneGenerationId;
 
 use super::super::construction::node_scene::ValidatedNodeScene;
@@ -28,10 +26,6 @@ impl ValidatedScene {
     /// Returns the number of retained canonical blocks owned by this Scene.
     pub fn canonical_block_count(&self) -> usize {
         self.0.canonical_block_count()
-    }
-
-    pub(crate) fn account(&self) -> &PhysicalStorageAccount {
-        self.0.account()
     }
 
     /// Restricts access to the sealed retained rail so semantic views and SceneEdit can project
