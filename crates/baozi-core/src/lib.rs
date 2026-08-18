@@ -2,36 +2,16 @@
 
 //! Canonical Baozi scene, math, diagnostic, and domain types.
 
-#[allow(
-    dead_code,
-    reason = "canonical domain implementation is exposed through sealed views"
-)]
 mod appearance;
-#[allow(
-    dead_code,
-    reason = "canonical domain implementation is exposed through sealed views"
-)]
 mod attribute;
 #[allow(
     dead_code,
     reason = "sealed canonical storage is reached through feature-scoped crate adapters"
 )]
 mod canonical_scene;
-#[allow(
-    dead_code,
-    reason = "canonical domain implementation is exposed through sealed views"
-)]
 mod deform;
 pub mod diagnostic;
-#[allow(
-    dead_code,
-    reason = "canonical domain implementation is exposed through sealed views"
-)]
 mod entity;
-#[allow(
-    dead_code,
-    reason = "canonical domain implementation is exposed through sealed views"
-)]
 mod extension;
 mod format_id;
 #[allow(
@@ -44,10 +24,6 @@ mod geometry;
     reason = "canonical domain implementation is exposed through sealed views"
 )]
 mod identity;
-#[allow(
-    dead_code,
-    reason = "canonical domain implementation is exposed through sealed views"
-)]
 mod image;
 pub mod math;
 #[allow(
@@ -56,21 +32,12 @@ pub mod math;
 )]
 mod namespaced;
 mod ordered_map;
-#[allow(
-    dead_code,
-    reason = "canonical domain implementation is exposed through sealed views"
-)]
 mod provenance;
 #[allow(
     dead_code,
     reason = "canonical domain implementation is exposed through sealed views"
 )]
 mod scene_space;
-#[allow(
-    dead_code,
-    reason = "canonical domain values still own retained nested payloads"
-)]
-mod shared_storage;
 mod validation_control;
 
 #[cfg(not(feature = "_u4-import"))]

@@ -63,7 +63,7 @@ pub(in crate::canonical_scene::store) fn try_begin_node_transform_edit<'scene>(
         target_transform.transform_offset(),
         old_transform,
         replacement,
-        OperationIdentity::without_evidence(OperationKind::Transform, options_digest),
+        OperationIdentity::new(OperationKind::Transform, options_digest),
         source_node_count,
         proof.source_root_count(),
         proof.source_edge_count(),

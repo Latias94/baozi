@@ -70,7 +70,6 @@ dependencies = [
  "sha2",
  "thiserror",
  "tracing",
- "triomphe",
 ]
 
 [[package]]

@@ -50,9 +50,7 @@ where
     let plan = pending.counts.profile;
     let failure = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)
         .map_err(StoreRuntimeError::Plan)?;
-    if *pending.operation.kind() != pending.program.operation_kind()
-        || pending.operation.evidence().len() != 0
-    {
+    if *pending.operation.kind() != pending.program.operation_kind() {
         return Err(StoreRuntimeError::InvalidSourceSlot);
     }
     let source_attachments = pending

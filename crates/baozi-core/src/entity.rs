@@ -1,23 +1,11 @@
-//! Scene-owned hierarchy, camera, and light values.
+//! Canonical entity, camera, and light values.
 
-use crate::extension::{
-    ControlledRetainedFootprintError, ExtensionEntry, ExtensionEntryValidationError,
-    extension_entries_retained_allocation_bytes_controlled, validate_unique_extension_entry_keys,
-};
 use crate::math::{Color, Mat4, Quat, Vec3};
-use crate::provenance::Provenance;
-use std::convert::Infallible;
 use std::fmt;
 use thiserror::Error;
 
 /// Maximum UTF-8 bytes in one entity display name.
 pub const MAX_ENTITY_NAME_BYTES: usize = 1_024;
-
-/// Maximum direct children retained by one node.
-pub const MAX_NODE_CHILDREN: usize = 1_048_576;
-
-/// Maximum descriptive extension entries retained by one entity.
-pub const MAX_ENTITY_EXTENSION_ENTRIES: usize = 4_096;
 
 /// A bounded entity display name.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -45,10 +33,6 @@ impl EntityName {
     /// Fallibly copies this name without hiding an allocation failure.
     pub fn try_clone(&self) -> Result<Self, EntityNameError> {
         Self::try_new(self.as_str())
-    }
-
-    pub(crate) fn capacity(&self) -> usize {
-        self.0.capacity()
     }
 }
 
@@ -438,60 +422,6 @@ pub enum CameraProjectionError {
     FarPlane,
 }
 
-/// One scene-owned camera.
-#[derive(Debug, PartialEq)]
-pub struct Camera {
-    name: Option<EntityName>,
-    projection: CameraProjection,
-    provenance: Provenance,
-    extensions: Vec<ExtensionEntry>,
-}
-
-impl Camera {
-    pub fn try_new(
-        name: Option<EntityName>,
-        projection: CameraProjection,
-        provenance: Provenance,
-        extensions: impl IntoIterator<Item = ExtensionEntry>,
-    ) -> Result<Self, EntityCollectionError> {
-        Ok(Self {
-            name,
-            projection,
-            provenance,
-            extensions: try_collect_extensions(extensions)?,
-        })
-    }
-
-    pub const fn name(&self) -> Option<&EntityName> {
-        self.name.as_ref()
-    }
-
-    pub const fn projection(&self) -> CameraProjection {
-        self.projection
-    }
-
-    pub const fn provenance(&self) -> Provenance {
-        self.provenance
-    }
-
-    pub fn extensions(&self) -> impl ExactSizeIterator<Item = &ExtensionEntry> {
-        self.extensions.iter()
-    }
-
-    pub(crate) fn retained_allocation_bytes(&self) -> Result<usize, EntityRetainedFootprintError> {
-        unwrap_uncontrolled_retained_footprint(
-            self.retained_allocation_bytes_controlled(&mut || Ok::<(), Infallible>(())),
-        )
-    }
-
-    pub(crate) fn retained_allocation_bytes_controlled<E>(
-        &self,
-        charge_work: &mut impl FnMut() -> Result<(), E>,
-    ) -> Result<usize, ControlledRetainedFootprintError<E>> {
-        owner_retained_bytes_controlled(self.name.as_ref(), &self.extensions, charge_work)
-    }
-}
-
 /// The source-preserving category of a canonical light.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightKindCategory {
@@ -739,108 +669,13 @@ fn has_exact_vec3_bits(left: Vec3, right: Vec3) -> bool {
         .all(|(left, right)| left.to_bits() == right.to_bits())
 }
 
-/// One scene-owned light.
-#[derive(Debug, PartialEq)]
-pub struct Light {
-    name: Option<EntityName>,
-    kind: LightKind,
-    emission: LightEmission,
-    provenance: Provenance,
-    extensions: Vec<ExtensionEntry>,
-}
-
-impl Light {
-    pub fn try_new(
-        name: Option<EntityName>,
-        kind: LightKind,
-        emission: LightEmission,
-        provenance: Provenance,
-        extensions: impl IntoIterator<Item = ExtensionEntry>,
-    ) -> Result<Self, LightError> {
-        let extensions = try_collect_extensions(extensions).map_err(LightError::Collection)?;
-        Ok(Self {
-            name,
-            kind,
-            emission,
-            provenance,
-            extensions,
-        })
-    }
-
-    pub const fn name(&self) -> Option<&EntityName> {
-        self.name.as_ref()
-    }
-
-    pub const fn kind(&self) -> LightKind {
-        self.kind
-    }
-
-    pub const fn emission(&self) -> LightEmission {
-        self.emission
-    }
-
-    pub const fn provenance(&self) -> Provenance {
-        self.provenance
-    }
-
-    pub fn extensions(&self) -> impl ExactSizeIterator<Item = &ExtensionEntry> {
-        self.extensions.iter()
-    }
-
-    pub(crate) fn retained_allocation_bytes(&self) -> Result<usize, EntityRetainedFootprintError> {
-        unwrap_uncontrolled_retained_footprint(
-            self.retained_allocation_bytes_controlled(&mut || Ok::<(), Infallible>(())),
-        )
-    }
-
-    pub(crate) fn retained_allocation_bytes_controlled<E>(
-        &self,
-        charge_work: &mut impl FnMut() -> Result<(), E>,
-    ) -> Result<usize, ControlledRetainedFootprintError<E>> {
-        owner_retained_bytes_controlled(self.name.as_ref(), &self.extensions, charge_work)
-    }
-}
-
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EntityRetainedFootprintError {
-    #[error("entity retained-footprint accounting overflowed")]
-    Overflow,
-}
-
-fn owner_retained_bytes_controlled<E>(
-    name: Option<&EntityName>,
-    extensions: &Vec<ExtensionEntry>,
-    charge_work: &mut impl FnMut() -> Result<(), E>,
-) -> Result<usize, ControlledRetainedFootprintError<E>> {
-    name.map_or(0, EntityName::capacity)
-        .checked_add(extension_entries_retained_allocation_bytes_controlled(
-            extensions,
-            charge_work,
-        )?)
-        .ok_or(ControlledRetainedFootprintError::AccountingOverflow)
-}
-
-pub(crate) fn unwrap_uncontrolled_retained_footprint(
-    result: Result<usize, ControlledRetainedFootprintError<Infallible>>,
-) -> Result<usize, EntityRetainedFootprintError> {
-    match result {
-        Ok(bytes) => Ok(bytes),
-        Err(ControlledRetainedFootprintError::AccountingOverflow) => {
-            Err(EntityRetainedFootprintError::Overflow)
-        }
-        Err(ControlledRetainedFootprintError::Control(error)) => match error {},
-    }
-}
-
 /// Why a light was rejected.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum LightError {
     #[error("light range must be finite and positive when present")]
     InvalidRange,
     #[error("spot cone angles must be finite and satisfy 0 <= inner <= outer <= pi/2")]
     InvalidSpotCone,
-    #[error(transparent)]
-    Collection(#[from] EntityCollectionError),
 }
 
 /// Why a light emission value was rejected.
@@ -858,72 +693,6 @@ pub(crate) enum LightEmissionError {
     NonCanonicalTint,
     #[error("source light emission is not representable in canonical f32 storage")]
     Unrepresentable,
-}
-
-/// A bounded entity collection could not be built.
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum EntityCollectionError {
-    #[error(transparent)]
-    Extension(#[from] ExtensionEntryValidationError),
-    #[error("entity storage limit exceeded for {resource:?}; maximum {maximum}")]
-    LimitExceeded {
-        resource: EntityAllocation,
-        maximum: usize,
-    },
-    #[error("entity allocation failed for {resource:?}")]
-    AllocationFailed { resource: EntityAllocation },
-}
-
-/// The allocation category attached to a bounded entity error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntityAllocation {
-    NodeChildren,
-    Extensions,
-}
-
-fn try_collect_extensions(
-    extensions: impl IntoIterator<Item = ExtensionEntry>,
-) -> Result<Vec<ExtensionEntry>, EntityCollectionError> {
-    let extensions = try_collect_bounded(
-        extensions,
-        MAX_ENTITY_EXTENSION_ENTRIES,
-        EntityAllocation::Extensions,
-    )?;
-    validate_unique_extension_entry_keys(&extensions)?;
-    Ok(extensions)
-}
-
-fn try_collect_bounded<T>(
-    values: impl IntoIterator<Item = T>,
-    maximum: usize,
-    resource: EntityAllocation,
-) -> Result<Vec<T>, EntityCollectionError> {
-    let mut values = values.into_iter();
-    let (lower, upper) = values.size_hint();
-    if lower > maximum {
-        return Err(EntityCollectionError::LimitExceeded { resource, maximum });
-    }
-
-    let preflight = upper.filter(|count| *count <= maximum).unwrap_or(lower);
-    let mut collected = Vec::new();
-    if preflight > 0 {
-        collected
-            .try_reserve(preflight)
-            .map_err(|_| EntityCollectionError::AllocationFailed { resource })?;
-    }
-
-    for value in values.by_ref() {
-        if collected.len() == maximum {
-            return Err(EntityCollectionError::LimitExceeded { resource, maximum });
-        }
-        if collected.len() == collected.capacity() {
-            collected
-                .try_reserve(1)
-                .map_err(|_| EntityCollectionError::AllocationFailed { resource })?;
-        }
-        collected.push(value);
-    }
-    Ok(collected)
 }
 
 #[cfg(test)]
