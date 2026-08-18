@@ -1,10 +1,9 @@
 use crate::FORMAT_ID;
-use baozi_core::FormatId;
 use baozi_import::{
-    CompiledFormatOptions, FormatOptionCodec, FormatOptionEnvelope, FormatOptionEnvelopeError,
-    FormatOptionKey, FormatOptionLayers, FormatOptionPayload, FormatOptionReader,
-    FormatOptionSchema, FormatOptionSchemaId, FormatOptionSchemaKey, OptionCompileError,
-    OptionCompileScope, OptionRuntimeTypeKey, RegistryBuildScope,
+    CompiledFormatOptions, FormatId, FormatOptionCodec, FormatOptionEnvelope,
+    FormatOptionEnvelopeError, FormatOptionKey, FormatOptionLayers, FormatOptionPayload,
+    FormatOptionReader, FormatOptionSchema, FormatOptionSchemaId, FormatOptionSchemaKey,
+    OptionCompileError, OptionCompileScope, OptionRuntimeTypeKey, RegistryBuildScope,
 };
 use std::num::NonZeroU32;
 use std::sync::Arc;

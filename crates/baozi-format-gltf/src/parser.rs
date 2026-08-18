@@ -1,5 +1,4 @@
 use crate::{FORMAT_ID, GltfFailure, external_buffer_role, external_image_role};
-use baozi_core::__canonical_import::{ResourceSnapshotAuthoring, SceneDraft};
 use baozi_import::{
     AlphaMode, AnimationAuthoringBatch, AppearanceAuthoringBatch, AttributeDomain,
     AttributeSemantic, AuthoredTransform, AuthoringRange, CameraAuthoring, CameraLocalId,
@@ -16,12 +15,13 @@ use baozi_import::{
     ObservedResourceAuthoring, OwnerProvenanceAuthoring, ParseFailure, ParseResult, ParseScope,
     PbrMetallicRoughnessFactors, Presence, PrimitiveDeformationAuthoring, ProfileAuthoringBatch,
     ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ResourceIdentity,
-    ResourceIdentityLocalId, SamplerAuthoring, SamplerLocalId, SamplerState, SceneAuthoringBatch,
-    SceneSpace, SessionOpaqueReason, ShadingModel, SkinAuthoring, SkinLocalId, SkinMatrixSpaces,
-    SourceIdentityAuthoring, SourceIdentityLocalId, SourceObjectKind, SourceObjectLocator,
-    SpatialAuthoringBatch, TexelFilter, TextureAddressMode, TextureAuthoring,
-    TextureBlendOperation, TextureChannelMapping, TextureChannelSwizzle, TextureCoordinateSource,
-    TextureLocalId, TextureRole, TextureSourceKey, TextureStrength, TextureTransform, Vec3,
+    ResourceIdentityLocalId, ResourceSnapshotAuthoring, SamplerAuthoring, SamplerLocalId,
+    SamplerState, SceneAuthoringBatch, SceneDraft, SceneSpace, SessionOpaqueReason, ShadingModel,
+    SkinAuthoring, SkinLocalId, SkinMatrixSpaces, SourceIdentityAuthoring, SourceIdentityLocalId,
+    SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch, TexelFilter, TextureAddressMode,
+    TextureAuthoring, TextureBlendOperation, TextureChannelMapping, TextureChannelSwizzle,
+    TextureCoordinateSource, TextureLocalId, TextureRole, TextureSourceKey, TextureStrength,
+    TextureTransform, Vec3,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::{DecodeError, DecodeSliceError, Engine as _};

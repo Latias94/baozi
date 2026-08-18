@@ -1,9 +1,9 @@
 use crate::detect::{BINARY_PREAMBLE_BYTES, FACET_BYTES, HEADER_BYTES};
 use crate::error::{StlFailure, StlFailureCode};
 use crate::parser::{ParsedMesh, ParsedStl};
-use baozi_core::{Color, Vec3};
 use baozi_import::{
-    ImportStorageClass, ImportWorkClass, MeteredVec, ParseFailure, ParseResult, ParseScope,
+    Color, ImportStorageClass, ImportWorkClass, MeteredVec, ParseFailure, ParseResult, ParseScope,
+    Vec3,
 };
 
 const MATERIALISE_COLOR_TOKEN: &[u8] = b"COLOR=";

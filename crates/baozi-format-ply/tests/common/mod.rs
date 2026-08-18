@@ -2,12 +2,12 @@
 
 use baozi_format_ply::{PlyFailureCode, PlyImporter};
 use baozi_import::{
-    CauseOwner, DetectionOptions, FormatFailureDetailValue, FormatFailureEnvelope, FormatSelection,
-    ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportOperationControl,
-    ImportReport, ImportRequest, ImportRequestLayer, ImportResult, ImportRunError,
-    ImportTerminalCause, ImportTerminalFailureClass, OptionCompileLimits, RegistryBuildLimits,
-    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotLimits,
-    ScopeAbortCause, import_asset,
+    CauseOwner, DetectionOptions, FormatFailureDetailValue, FormatFailureEnvelope, FormatId,
+    FormatSelection, ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
+    ImportRunError, ImportTerminalCause, ImportTerminalFailureClass, OptionCompileLimits,
+    RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot,
+    SceneSnapshotLimits, ScopeAbortCause, import_asset,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::error::Error;
@@ -74,7 +74,7 @@ pub fn import_bytes_forced_result_with_control(
     limits: ResourceLimits,
     control: ImportOperationControl,
 ) -> TestResult<ImportResult<ImportReport>> {
-    let format = baozi_core::FormatId::new("org.baozi.ply").expect("static PLY format id is valid");
+    let format = FormatId::new("org.baozi.ply").expect("static PLY format id is valid");
     run_import_with_selection_and_control(
         source,
         bytes,
@@ -231,8 +231,7 @@ pub fn expected_ply_failure(
     failure: &ImportFailure,
     expected_code: PlyFailureCode,
 ) -> &FormatFailureEnvelope {
-    let expected_format =
-        baozi_core::FormatId::new("org.baozi.ply").expect("static PLY format id is valid");
+    let expected_format = FormatId::new("org.baozi.ply").expect("static PLY format id is valid");
     assert_eq!(
         failure.cause().owner(),
         CauseOwner::Format(expected_format.clone())

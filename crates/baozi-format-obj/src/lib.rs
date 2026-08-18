@@ -12,10 +12,9 @@ pub(crate) use error::ObjFailure;
 pub use error::ObjFailureCode;
 pub use options::{ObjImportOptions, ObjTextDecodingMode, obj_import_option_key};
 
-use baozi_core::FormatId;
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatImporter, OptionRuntimeTypeKey, ParseResult,
+    FormatDescriptor, FormatEncoding, FormatId, FormatImporter, OptionRuntimeTypeKey, ParseResult,
     ParseScope, Probe, ReadHint, RegistryBuilder, RegistryRegistrationError, SceneDraft,
     TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
     TextProfile, TextSourceEncoding,

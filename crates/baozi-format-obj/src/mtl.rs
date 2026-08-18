@@ -1,10 +1,9 @@
 use crate::material_library_role;
 use crate::parser::{self, TextDecodeFailure};
-use baozi_core::Color;
 use baozi_import::{
-    DependencyOrigin, DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
-    ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredOrderedMap, MeteredString,
-    MeteredVec, ParseFailure, ParseResult, ParseScope,
+    Color, DependencyOrigin, DependencySnapshot, DiagnosticCode, DiagnosticSeverity,
+    ImportProgressPhase, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredOrderedMap,
+    MeteredString, MeteredVec, ParseFailure, ParseResult, ParseScope,
 };
 use std::cmp::Ordering;
 use std::fmt;

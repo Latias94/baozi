@@ -1,7 +1,7 @@
 use crate::{ObjFailure, mtl, parser};
-use baozi_core::{Vec2, Vec3};
 use baozi_import::{
-    ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec, ParseResult, ParseScope,
+    ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec, ParseResult, ParseScope, Vec2,
+    Vec3,
 };
 
 use parser::usize_amount;

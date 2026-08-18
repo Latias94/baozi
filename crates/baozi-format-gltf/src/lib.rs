@@ -7,12 +7,11 @@ mod parser;
 pub(crate) use error::GltfFailure;
 pub use error::GltfFailureCode;
 
-use baozi_core::{__canonical_import::SceneDraft, FormatId};
 use baozi_import::{
     CapabilityStatus, DependencyRequirement, DependencyRoleId, DetectionOutcome, DetectionResult,
-    DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter,
-    ParseResult, ParseScope, Probe, ReadHint, TextBomPolicy, TextControlPolicy, TextDecodingMode,
-    TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding, FormatId, FormatImporter,
+    ParseResult, ParseScope, Probe, ReadHint, SceneDraft, TextBomPolicy, TextControlPolicy,
+    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
 };
 
 /// Stable identity used only by the internal development harness.

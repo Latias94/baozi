@@ -74,7 +74,6 @@ dependencies = [
 name = "baozi-format-gltf"
 version = "0.1.0"
 dependencies = [
- "baozi-core",
  "baozi-import",
  "baozi-io",
  "baozi-operation",
@@ -87,7 +86,6 @@ dependencies = [
 name = "baozi-format-obj"
 version = "0.1.0"
 dependencies = [
- "baozi-core",
  "baozi-import",
  "baozi-io",
  "baozi-operation",
@@ -98,7 +96,6 @@ dependencies = [
 name = "baozi-format-ply"
 version = "0.1.0"
 dependencies = [
- "baozi-core",
  "baozi-import",
  "baozi-io",
  "baozi-operation",
@@ -109,7 +106,6 @@ dependencies = [
 name = "baozi-format-stl"
 version = "0.1.0"
 dependencies = [
- "baozi-core",
  "baozi-import",
  "baozi-io",
  "baozi-operation",

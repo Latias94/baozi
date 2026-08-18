@@ -5,13 +5,11 @@ use crate::mtl::{
 use crate::obj::{Face, FaceVertex, ParsedObj, StateNameId};
 use crate::parser::usize_amount;
 use crate::{FORMAT_ID, ObjFailure, diffuse_texture_role};
-#[cfg(test)]
-use baozi_core::__canonical_import::{SceneActivationRequest, SceneValidationLimits};
 use baozi_import::{
     AlphaMode as CanonicalAlphaMode, AnimationAuthoringBatch, AppearanceAuthoringBatch,
-    AttributeDomain, AttributeSemantic, AuthoredTransform, AuthoringRange, ColorInterpretation,
-    DeformationAuthoringBatch, DependencySnapshot, ExtensionValueRef, FormatId,
-    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
+    AttributeDomain, AttributeSemantic, AuthoredTransform, AuthoringRange, Color,
+    ColorInterpretation, DeformationAuthoringBatch, DependencySnapshot, ExtensionValueRef,
+    FormatId, GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
     GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
     ImageAuthoring, ImageLocalId, ImportStorageClass, ImportWorkClass, LegacyMaterialFactors,
     LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring, MAX_ENTITY_NAME_BYTES,
@@ -25,7 +23,7 @@ use baozi_import::{
     ShadingModel as CanonicalShadingModel, SourceIdentityAuthoring, SourceIdentityLocalId,
     SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch, TextureAuthoring,
     TextureBlendOperation, TextureChannelMapping, TextureChannelSwizzle, TextureCoordinateSource,
-    TextureLocalId, TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
+    TextureLocalId, TextureRole, TextureSourceKey, TextureStrength, TextureTransform, Vec3,
 };
 
 const FALLBACK_RESOURCE_IDENTITY: &str = "session/obj-primary";
@@ -719,8 +717,8 @@ fn build_material<'input, 'scope>(
             name,
             CanonicalShadingModel::Phong,
             CanonicalAlphaMode::Opaque,
-            baozi_core::Color::WHITE,
-            baozi_core::Color::linear_rgba(0.0, 0.0, 0.0, 1.0),
+            Color::WHITE,
+            Color::linear_rgba(0.0, 0.0, 0.0, 1.0),
             0.0,
             None,
             None,
@@ -799,23 +797,23 @@ fn material_from_factors<'input, 'scope>(
     name: &'input str,
     shading_model: CanonicalShadingModel,
     alpha_mode: CanonicalAlphaMode,
-    base_color: baozi_core::Color,
-    emissive: baozi_core::Color,
+    base_color: Color,
+    emissive: Color,
     shininess: f32,
     metadata: Option<&'input ParsedMetadata<'scope>>,
     diffuse_texture: Option<BuiltTexture<'scope>>,
 ) -> ParseResult<BuiltMaterial<'input, 'scope>> {
     let legacy = LegacyMaterialFactors::try_new(
-        baozi_core::Vec3::ZERO,
-        baozi_core::Vec3::new(base_color.r, base_color.g, base_color.b),
-        baozi_core::Vec3::ZERO,
-        baozi_core::Vec3::new(emissive.r, emissive.g, emissive.b),
+        Vec3::ZERO,
+        Vec3::new(base_color.r, base_color.g, base_color.b),
+        Vec3::ZERO,
+        Vec3::new(emissive.r, emissive.g, emissive.b),
         shininess,
         base_color.a,
     )
     .map_err(|_| scope.format_failure(ObjFailure::internal("invalid-material-factors")))?;
     let factors = MaterialFactors::try_new(
-        baozi_core::Vec3::new(emissive.r, emissive.g, emissive.b),
+        Vec3::new(emissive.r, emissive.g, emissive.b),
         None,
         None,
         Some(legacy),
@@ -1356,9 +1354,6 @@ fn submit_complete_batch<'scope>(
         animations,
         profile,
     );
-    #[cfg(test)]
-    let _request = SceneActivationRequest::try_new(input, SceneValidationLimits::default())
-        .expect("OBJ complete batch must satisfy the authority-free request envelope");
     scope.submit_scene(input)
 }
 
