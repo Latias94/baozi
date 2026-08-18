@@ -5617,6 +5617,37 @@ where
         .map_err(StorePrepareError::from_raw)
     }
 
+    #[cfg(feature = "_u4-activation")]
+    pub(super) fn try_prepare_with_control(
+        self,
+        cause: u32,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<
+        (
+            PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
+            Option<ControlCause>,
+        ),
+        StorePrepareError,
+    > {
+        let Self {
+            raw,
+            forced_cause,
+            evidence_root,
+            domain,
+        } = self;
+        raw.try_prepare_with_control(
+            forced_cause.unwrap_or(PreparationFailureCode::domain(cause)),
+            final_progress,
+        )
+        .map(|(raw, control_cause)| {
+            (
+                classify_prepared_failure(raw, evidence_root, domain),
+                control_cause,
+            )
+        })
+        .map_err(StorePrepareError::from_raw)
+    }
+
     /// Discards rich failure and prepares only minimal fallback.
     ///
     /// Any verified cause carried from the rejected success path remains the frozen fallback

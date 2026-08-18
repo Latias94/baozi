@@ -1,17 +1,22 @@
 use baozi_operation::__canonical_activation::{
-    CanonicalFreezePermitIssue, CanonicalJointSeal, FailureEvidenceMember, FailureEvidenceOutcome,
-    FailureEvidenceValidationSession, RootedFailureValidation, StoreActivationContainment,
-    StoreCanonicalRejection, StoreNeverActivatedCause,
+    CanonicalFreezePermit, CanonicalFreezePermitIssue, CanonicalJointCommit, CanonicalJointSeal,
+    CentrallyRejectedCanonicalStoreSession, FailureEvidenceMember, FailureEvidenceOutcome,
+    FailureEvidenceValidationSession, FrozenFailureState, RootedFailureValidation,
+    StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
 };
 use baozi_operation::{
     ControlCause, CounterClass, FinalProgress, LedgerCause, OperationOwner,
-    PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccessOutcome, ProgressPhase,
-    ProgressUnit, RecordBlock, StoreBuildFailureClass, StoreRuntimeError,
+    PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
+    PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
+    PublishedOutcomeEvidenceStore, RecordBlock, StoreBuildFailureClass, StoreLedgerEvidence,
+    StoreRuntimeError,
 };
+use thiserror::Error;
 
 use crate::canonical_scene::store::schema::{
     NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
-    NodeSceneOutcomeEvidenceSchema, SCENE_SCHEMA_REVISION, node_scene_evidence_field,
+    NodeSceneOutcomeEvidenceSchema, SCENE_SCHEMA_REVISION, SceneDirectorySchema,
+    node_scene_evidence_field,
 };
 #[cfg(test)]
 use crate::identity::SceneGenerationId;
@@ -21,7 +26,10 @@ use super::super::{
     GENERATION_EXHAUSTED_CODE, PreparedTracerSceneFallback, SceneConstructionError,
     TracerSceneFallback, burn_generation_reservation,
 };
-use super::materialization::{NodeSceneActivationOutput, write_node_scene_evidence_row};
+use super::materialization::{
+    NodeSceneActivationOutput, NodeSceneEvidenceRecipe, NodeSceneLaneOutput,
+    NodeSceneLaneValidationProof, write_node_scene_evidence_row,
+};
 use super::{
     DeferredNodeSceneDraftBuild, NODE_SCENE_BUILD_INVARIANT_CODE,
     NODE_SCENE_CONTROL_INTERRUPTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
@@ -37,6 +45,212 @@ use super::{
 enum NodeSceneGenerationRejection {
     MissingDraft,
     DraftMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeSceneLaneGenerationRejectionKind {
+    MissingDraft,
+    DraftMismatch,
+    Exhausted,
+}
+
+/// Stable generation-admission rejection produced only by core descriptor validation.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[error("canonical Scene generation admission rejected the parser descriptor")]
+pub struct NodeSceneLaneGenerationRejection {
+    kind: NodeSceneLaneGenerationRejectionKind,
+}
+
+impl NodeSceneLaneGenerationRejection {
+    const fn missing_draft() -> Self {
+        Self {
+            kind: NodeSceneLaneGenerationRejectionKind::MissingDraft,
+        }
+    }
+
+    const fn draft_mismatch() -> Self {
+        Self {
+            kind: NodeSceneLaneGenerationRejectionKind::DraftMismatch,
+        }
+    }
+
+    const fn exhausted() -> Self {
+        Self {
+            kind: NodeSceneLaneGenerationRejectionKind::Exhausted,
+        }
+    }
+
+    pub const fn stable_code(&self) -> u32 {
+        match self.kind {
+            NodeSceneLaneGenerationRejectionKind::MissingDraft
+            | NodeSceneLaneGenerationRejectionKind::DraftMismatch => {
+                NODE_SCENE_BUILD_INVARIANT_CODE
+            }
+            NodeSceneLaneGenerationRejectionKind::Exhausted => GENERATION_EXHAUSTED_CODE,
+        }
+    }
+}
+
+/// Core-owned generation/proof half of a successful joint publication.
+///
+/// The token owns no operation, canonical store, ledger, or joint-commit capability.
+#[must_use = "the Scene handoff token must consume the matching published canonical owner"]
+pub struct NodeSceneHandoffToken {
+    generation: ReservedSceneGeneration,
+    proof: super::NodeSceneValidationProof,
+}
+
+/// Exact published owners returned only after the prepared canonical root matches core's proof.
+#[must_use = "the published Scene success must be transferred to the import terminal owner"]
+pub struct NodeScenePublishedSuccess {
+    scene: ValidatedNodeScene,
+    outcome_evidence: PublishedOutcomeEvidenceStore<RecordBlock, NodeSceneOutcomeEvidenceSchema>,
+    ledger_evidence: StoreLedgerEvidence,
+}
+
+impl NodeScenePublishedSuccess {
+    pub(in crate::canonical_scene::store) fn into_parts(
+        self,
+    ) -> (
+        ValidatedNodeScene,
+        PublishedOutcomeEvidenceStore<RecordBlock, NodeSceneOutcomeEvidenceSchema>,
+        StoreLedgerEvidence,
+    ) {
+        (self.scene, self.outcome_evidence, self.ledger_evidence)
+    }
+}
+
+/// A prepared store did not contain the canonical root proven by the matching core token.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[error("prepared canonical Scene owner does not match the validation handoff token")]
+pub struct NodeSceneHandoffPairingError;
+
+impl NodeSceneHandoffToken {
+    fn into_scene(
+        self,
+        canonical: PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>,
+    ) -> ValidatedNodeScene {
+        ValidatedNodeScene {
+            generation: self.generation.into_id(),
+            canonical,
+            proof: self.proof,
+            #[cfg(test)]
+            semantic_read_fault: None,
+        }
+    }
+
+    pub(in crate::canonical_scene::store) fn try_handoff_prepared(
+        self,
+        store: PreparedStoreSuccess<
+            RecordBlock,
+            SceneDirectorySchema,
+            RecordBlock,
+            NodeSceneOutcomeEvidenceSchema,
+        >,
+    ) -> Result<NodeScenePublishedSuccess, NodeSceneHandoffPairingError> {
+        let expected_root = self.proof.directory().into_store();
+        let published = store.handoff();
+        if published.canonical.root_ref() != expected_root {
+            drop(published);
+            drop(self);
+            return Err(NodeSceneHandoffPairingError);
+        }
+        Ok(NodeScenePublishedSuccess {
+            scene: self.into_scene(published.canonical),
+            outcome_evidence: published.outcome_evidence,
+            ledger_evidence: published.ledger_evidence,
+        })
+    }
+}
+
+pub type NodeSceneLaneFreezePermit<O, PP, U> = CanonicalFreezePermit<
+    O,
+    PP,
+    U,
+    NodeSceneLaneOutput,
+    NodeSceneLaneValidationProof,
+    RecordBlock,
+    SceneDirectorySchema,
+    RecordBlock,
+    NodeSceneOutcomeEvidenceSchema,
+>;
+
+pub type NodeSceneFrozenGenerationRejection<O, PP, U> = CentrallyRejectedCanonicalStoreSession<
+    O,
+    PP,
+    U,
+    NodeSceneLaneGenerationRejection,
+    RecordBlock,
+    NodeSceneOutcomeEvidenceSchema,
+    FrozenFailureState,
+>;
+
+pub type NodeSceneLaneJointCommit<'joint, O, PP, U> = CanonicalJointCommit<
+    'joint,
+    O,
+    PP,
+    U,
+    RecordBlock,
+    SceneDirectorySchema,
+    RecordBlock,
+    NodeSceneOutcomeEvidenceSchema,
+>;
+
+/// Consumes core's freeze permit without retaining or preparing the operation contribution.
+///
+/// Missing/foreign drafts and generation exhaustion remain ordinary frozen rejections. On
+/// success the HRTB callback receives the owner-free core token together with the matching scoped
+/// joint contribution and seal, so neither branded operation capability can escape this call.
+#[allow(clippy::type_complexity)]
+pub fn consume_node_scene_freeze_permit<O, PP, U, R>(
+    permit: NodeSceneLaneFreezePermit<O, PP, U>,
+    parser_draft: Option<NodeSceneDraft>,
+    reject: impl FnOnce(NodeSceneFrozenGenerationRejection<O, PP, U>) -> R,
+    prepare: impl for<'joint> FnOnce(
+        NodeSceneHandoffToken,
+        NodeSceneLaneJointCommit<'joint, O, PP, U>,
+        CanonicalJointSeal<'joint>,
+    ) -> R,
+) -> Result<R, StoreActivationContainment>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let expected_draft = permit.output().inner().draft;
+    let pairing_rejection = match parser_draft {
+        None => Some(NodeSceneLaneGenerationRejection::missing_draft()),
+        Some(draft) if !node_scene_draft_matches(draft, expected_draft) => {
+            Some(NodeSceneLaneGenerationRejection::draft_mismatch())
+        }
+        Some(_) => None,
+    };
+    if let Some(cause) = pairing_rejection {
+        let stable_code = cause.stable_code();
+        return permit.reject_generation(cause, stable_code).map(reject);
+    }
+
+    let generation = match crate::identity::SceneGenerationId::reserve() {
+        Ok(generation) => generation,
+        Err(SceneGenerationError::Exhausted) => {
+            let cause = NodeSceneLaneGenerationRejection::exhausted();
+            let stable_code = cause.stable_code();
+            return permit.reject_generation(cause, stable_code).map(reject);
+        }
+    };
+
+    Ok(
+        permit.bind_joint_commit(|_actual_output, proof, joint, seal| {
+            prepare(
+                NodeSceneHandoffToken {
+                    generation,
+                    proof: proof.into_inner(),
+                },
+                joint,
+                seal,
+            )
+        }),
+    )
 }
 
 macro_rules! prepare_frozen_node_failure {
@@ -138,14 +352,6 @@ where
             .map(|(prepared, _)| prepared)
     }
 
-    pub(in crate::canonical_scene::store) fn prepare_import_with_generation_source(
-        self,
-        draft: NodeSceneDraft,
-        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-    ) -> Result<(PreparedNodeSceneConstruction, Option<ControlCause>), SceneConstructionError> {
-        prepare_pending_node_scene_draft(self, Some(draft), Some(reserve_generation))
-    }
-
     pub(in crate::canonical_scene::store) fn prepare_missing_draft(
         self,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
@@ -155,16 +361,6 @@ where
             None::<fn() -> Result<ReservedSceneGeneration, SceneGenerationError>>,
         )
         .map(|(prepared, _)| prepared)
-    }
-
-    pub(in crate::canonical_scene::store) fn prepare_import_missing_draft(
-        self,
-    ) -> Result<(PreparedNodeSceneConstruction, Option<ControlCause>), SceneConstructionError> {
-        prepare_pending_node_scene_draft(
-            self,
-            None,
-            None::<fn() -> Result<ReservedSceneGeneration, SceneGenerationError>>,
-        )
     }
 }
 
@@ -655,6 +851,22 @@ where
         .unwrap_or(false)
 }
 
+impl NodeSceneEvidenceRecipe {
+    /// Validates rich failure evidence through the import-owned failure-validation session.
+    pub fn validate_failure<'session, 'storage, 'control, O, PP, U>(
+        &self,
+        session: &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
+        root: FailureEvidenceMember<'session, RecordBlock, NodeSceneOutcomeEvidenceSchema>,
+    ) -> bool
+    where
+        O: OperationOwner,
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        validate_node_scene_failure_evidence(session, root, self.counts())
+    }
+}
+
 fn node_scene_evidence_values(
     counts: SceneEvidenceCounts,
 ) -> [u32; NODE_SCENE_EVIDENCE_FIELD_COUNT] {
@@ -792,5 +1004,26 @@ impl PreparedNodeSceneConstruction {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod lane_only_tests {
+    use super::*;
+
+    #[test]
+    fn generation_rejections_keep_descriptor_and_exhaustion_codes_distinct() {
+        assert_eq!(
+            NodeSceneLaneGenerationRejection::missing_draft().stable_code(),
+            NODE_SCENE_BUILD_INVARIANT_CODE,
+        );
+        assert_eq!(
+            NodeSceneLaneGenerationRejection::draft_mismatch().stable_code(),
+            NODE_SCENE_BUILD_INVARIANT_CODE,
+        );
+        assert_eq!(
+            NodeSceneLaneGenerationRejection::exhausted().stable_code(),
+            GENERATION_EXHAUSTED_CODE,
+        );
     }
 }

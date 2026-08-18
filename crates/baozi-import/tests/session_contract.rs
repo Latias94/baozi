@@ -9,12 +9,13 @@ use baozi_import::{
     FormatFailureEvidence, FormatFailureEvidenceProducer, FormatImporter, FormatSelection,
     ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind,
     ImportOperationControl, ImportPhase, ImportProgressPhase, ImportProgressUnit, ImportReport,
-    ImportRequest, ImportRequestLayer, ImportResult, ImportStorageClass, ImportWorkClass,
-    LossPolicy, MeteredDecodedText, MeteredString, MeteredVec, OptionCompileLimits, ParseResult,
-    ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
-    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
-    TextProfile, TextSourceEncoding, TrustedExtensionBoundary, import_asset as run_import_asset,
+    ImportRequest, ImportRequestLayer, ImportResult, ImportStorageClass, ImportTerminalCause,
+    ImportTerminalFailureClass, ImportWorkClass, LossPolicy, MeteredDecodedText, MeteredString,
+    MeteredVec, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
+    ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
+    ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, TextBomPolicy, TextControlPolicy,
+    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    TrustedExtensionBoundary, import_asset as run_import_asset,
     import_asset_with_resolver as run_import_asset_with_resolver, import_bytes as run_import_bytes,
 };
 use baozi_io::{
@@ -2303,6 +2304,48 @@ fn post_parse_cancellation_releases_staged_format_failure_storage() {
         panic!("expected a cancellation scope failure")
     };
     assert!(matches!(abort.cause(), ScopeAbortCause::Control(_)));
+    assert_eq!(visits.load(Ordering::Acquire), 1);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn finalize_cancellation_overrides_a_pre_scene_format_failure() {
+    let visits = Arc::new(AtomicUsize::new(0));
+    let request = request_for(LifecycleFailureImporter::returning(
+        FailureEvidenceMode::Normal,
+        Arc::clone(&visits),
+    ));
+    let final_events = Arc::new(AtomicUsize::new(0));
+    let observed_final_events = Arc::clone(&final_events);
+    let control = ImportOperationControl::default().with_progress_observer(
+        move |event: baozi_operation::ProgressEvent<ImportProgressPhase, ImportProgressUnit>| {
+            if event.phase() == ImportProgressPhase::Finalize {
+                observed_final_events.fetch_add(1, Ordering::AcqRel);
+                ProgressDecision::Cancel
+            } else {
+                ProgressDecision::Continue
+            }
+        },
+    );
+
+    let failure = import_bytes(
+        &request,
+        AssetPath::new("asset.pre-scene-final-cancel").unwrap(),
+        b"primary",
+        control,
+    )
+    .expect_err("final cancellation must override the earlier format failure");
+
+    let ImportCause::Scope(abort) = failure.cause() else {
+        panic!("expected a control scope failure")
+    };
+    assert!(matches!(abort.cause(), ScopeAbortCause::Control(_)));
+    assert!(matches!(
+        failure.ledger().terminal_cause(),
+        ImportTerminalCause::Failure(terminal)
+            if terminal.class() == ImportTerminalFailureClass::Control
+    ));
+    assert_eq!(final_events.load(Ordering::Acquire), 1);
     assert_eq!(visits.load(Ordering::Acquire), 1);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
 }

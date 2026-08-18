@@ -589,7 +589,9 @@ impl<'session> ParseScope<'session> {
                 crate::store::ImportStoreActivationError::MaterializationFailed => {
                     "canonical-scene-materialization-failed"
                 }
-                crate::store::ImportStoreActivationError::Scene(_) => {
+                crate::store::ImportStoreActivationError::Containment(_)
+                | crate::store::ImportStoreActivationError::Preparation(_)
+                | crate::store::ImportStoreActivationError::Plan(_) => {
                     "canonical-scene-activation-contained"
                 }
             };

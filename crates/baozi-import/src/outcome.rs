@@ -6,7 +6,7 @@ use crate::format::DetectionOutcome;
 use crate::ledger::{ImportDimension, ImportLedgerSnapshot};
 use crate::loss::ImportLossEvidence;
 use crate::source_scope::SourceScopeRecord;
-use baozi_core::__canonical_import::{SceneMinimalFallback, SceneRichFailure, SceneSuccessReport};
+use crate::store::{ImportStoreMinimalFallback, ImportStoreRichFailure, ImportStoreSuccessReport};
 use baozi_core::{FormatId, SceneGenerationId, ValidatedScene};
 use baozi_io::AssetPath;
 use baozi_operation::LedgerLimitsError;
@@ -219,7 +219,7 @@ pub struct ImportReport {
 #[must_use = "import evidence retains the successful publication and terminal ledger"]
 pub struct ImportEvidence {
     scene_generation: SceneGenerationId,
-    _scene_report: SceneSuccessReport,
+    _scene_report: ImportStoreSuccessReport,
     source: AssetPath,
     format: Arc<FormatDescriptor>,
     detection: Vec<DetectionEvidence>,
@@ -234,7 +234,7 @@ pub struct ImportEvidence {
 
 pub(crate) struct ImportReportParts {
     pub scene: ValidatedScene,
-    pub scene_report: SceneSuccessReport,
+    pub scene_report: ImportStoreSuccessReport,
     pub source: AssetPath,
     pub format: Arc<FormatDescriptor>,
     pub detection: Vec<DetectionEvidence>,
@@ -533,8 +533,8 @@ impl fmt::Debug for ImportFailure {
 }
 
 pub(crate) enum ImportFailureStoreOwner {
-    Rich { _owner: SceneRichFailure },
-    Minimal { _owner: SceneMinimalFallback },
+    Rich { _owner: ImportStoreRichFailure },
+    Minimal { _owner: ImportStoreMinimalFallback },
 }
 
 impl fmt::Display for ImportFailure {

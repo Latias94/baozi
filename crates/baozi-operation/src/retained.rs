@@ -508,6 +508,16 @@ where
     Prepared(PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>),
 }
 
+type PreparedRetainedPublicationWithControl<CanonicalBlock, EvidenceBlock, F, P, D> = (
+    PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
+    Option<ControlCause>,
+);
+
+type RetainedTerminalPreparationWithControl<O, P, D, F, CanonicalBlock, EvidenceBlock> = (
+    RetainedTerminalPreparation<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+    Option<ControlCause>,
+);
+
 /// Evidence-building state after a semantic rejection or before an explicit rich failure.
 ///
 /// This wrapper intentionally exposes no canonical retain, share, or commitment method.
@@ -2574,7 +2584,8 @@ where
         PreparedRetainedPublication<CanonicalBlock, EvidenceBlock, F, P, D>,
         RetainedPublicationPrepareError,
     > {
-        match self.try_form_terminal_preparation(request)? {
+        let (preparation, _control_cause) = self.try_form_terminal_preparation(request)?;
+        match preparation {
             RetainedTerminalPreparation::SuccessIntent(intent) => intent
                 .qualify_and_commit()
                 .map_err(RetainedPublicationPrepareError::FinalizationContainment),
@@ -2582,11 +2593,29 @@ where
         }
     }
 
+    #[cfg(feature = "_u4-activation")]
+    fn try_prepare_terminal_with_control(
+        self,
+        request: RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U>,
+    ) -> Result<
+        PreparedRetainedPublicationWithControl<CanonicalBlock, EvidenceBlock, F, P, D>,
+        RetainedPublicationPrepareError,
+    > {
+        let (preparation, control_cause) = self.try_form_terminal_preparation(request)?;
+        let prepared = match preparation {
+            RetainedTerminalPreparation::SuccessIntent(intent) => intent
+                .qualify_and_commit()
+                .map_err(RetainedPublicationPrepareError::FinalizationContainment)?,
+            RetainedTerminalPreparation::Prepared(prepared) => prepared,
+        };
+        Ok((prepared, control_cause))
+    }
+
     fn try_form_terminal_preparation(
         mut self,
         request: RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U>,
     ) -> Result<
-        RetainedTerminalPreparation<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        RetainedTerminalPreparationWithControl<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationPrepareError,
     > {
         if self.containment != AssemblyContainmentProvenance::Healthy {
@@ -2618,6 +2647,7 @@ where
         }
 
         let frozen_success = matches!(&request, RetainedTerminalRequest::FrozenSuccess { .. });
+        let mut observed_control_cause = None;
         let terminal = match request {
             RetainedTerminalRequest::Success {
                 proof,
@@ -2650,6 +2680,7 @@ where
                     Some(operation) => {
                         let control_cause =
                             prepare_terminal_control(&mut operation.coordinator, final_progress);
+                        observed_control_cause = control_cause.clone();
                         if let Some(cause) = control_cause.as_ref() {
                             operation
                                 .record_terminal_cause(PreparationFailureCode::from_control(cause));
@@ -2734,6 +2765,7 @@ where
                     Some(operation) => {
                         let control_cause =
                             prepare_terminal_control(&mut operation.coordinator, final_progress);
+                        observed_control_cause = control_cause.clone();
                         if let Some(cause) = control_cause.as_ref() {
                             operation
                                 .record_terminal_cause(PreparationFailureCode::from_control(cause));
@@ -2788,13 +2820,11 @@ where
             RetainedTerminalRequest::MinimalFallback { requested_cause } => {
                 let cause = match self.operation.as_mut() {
                     Some(operation) => {
-                        let control_cause = operation
-                            .coordinator
-                            .poll()
-                            .err()
-                            .map(|cause| PreparationFailureCode::from_control(&cause));
-                        if let Some(cause) = control_cause {
-                            operation.record_terminal_cause(cause);
+                        let control_cause = operation.coordinator.poll().err();
+                        observed_control_cause = control_cause.clone();
+                        if let Some(cause) = control_cause.as_ref() {
+                            operation
+                                .record_terminal_cause(PreparationFailureCode::from_control(cause));
                         }
                         operation.sticky_terminal_cause().unwrap_or(requested_cause)
                     }
@@ -2852,9 +2882,10 @@ where
                 baseline_batches,
                 PrimaryPublicationBatches::new(canonical_batch, Some(evidence_batch)),
             );
-            return TerminalFallbackGuard::new(attribution, physical)
+            let prepared = TerminalFallbackGuard::new(attribution, physical)
                 .try_prepare(cause)
-                .map(RetainedTerminalPreparation::Prepared);
+                .map(RetainedTerminalPreparation::Prepared)?;
+            return Ok((prepared, observed_control_cause));
         }
 
         let primary = TerminalPrimaryGuard::new(
@@ -2864,27 +2895,29 @@ where
             physical,
         );
         if frozen_success {
-            return match primary.try_advance_frozen_success(terminal)? {
+            let preparation = match primary.try_advance_frozen_success(terminal)? {
                 FrozenSuccessPrimaryTransition::Success(success) => success
                     .try_form_joint_commit_intent(self.set_id)
                     .map(RetainedTerminalPreparation::SuccessIntent)
-                    .map_err(RetainedPublicationPrepareError::FinalizationContainment),
+                    .map_err(RetainedPublicationPrepareError::FinalizationContainment)?,
             };
+            return Ok((preparation, observed_control_cause));
         }
         let transition = primary.try_advance(terminal)?;
-        match transition {
+        let preparation = match transition {
             TerminalPrimaryTransition::Success(success) => success
                 .try_form_joint_commit_intent(self.set_id)
                 .map(RetainedTerminalPreparation::SuccessIntent)
-                .map_err(RetainedPublicationPrepareError::FinalizationContainment),
+                .map_err(RetainedPublicationPrepareError::FinalizationContainment)?,
             TerminalPrimaryTransition::Rich(rich) => rich
                 .into_prepared(self.set_id)
                 .map(RetainedTerminalPreparation::Prepared)
-                .map_err(RetainedPublicationPrepareError::FinalizationContainment),
+                .map_err(RetainedPublicationPrepareError::FinalizationContainment)?,
             TerminalPrimaryTransition::Fallback(fallback_guard, cause) => fallback_guard
                 .try_prepare(cause)
-                .map(RetainedTerminalPreparation::Prepared),
-        }
+                .map(RetainedTerminalPreparation::Prepared)?,
+        };
+        Ok((preparation, observed_control_cause))
     }
 }
 
@@ -3301,12 +3334,13 @@ where
         RetainedSuccessJointCommitFormation<O, P, D, F, CanonicalBlock, EvidenceBlock>,
         RetainedPublicationPrepareError,
     > {
-        match self
-            .assembly
-            .try_form_terminal_preparation(RetainedTerminalRequest::Success {
-                proof: self.proof,
-                final_progress,
-            })? {
+        let (preparation, _control_cause) =
+            self.assembly
+                .try_form_terminal_preparation(RetainedTerminalRequest::Success {
+                    proof: self.proof,
+                    final_progress,
+                })?;
+        match preparation {
             RetainedTerminalPreparation::SuccessIntent(intent) => {
                 Ok(RetainedSuccessJointCommitFormation::Intent(intent))
             }
@@ -3407,10 +3441,10 @@ where
         match assembly
             .try_form_terminal_preparation(RetainedTerminalRequest::FrozenSuccess { proof })
         {
-            Ok(RetainedTerminalPreparation::SuccessIntent(intent)) => {
+            Ok((RetainedTerminalPreparation::SuccessIntent(intent), _control_cause)) => {
                 Ok(RetainedSuccessJointCommitFormation::Intent(intent))
             }
-            Ok(RetainedTerminalPreparation::Prepared(prepared)) => Ok(
+            Ok((RetainedTerminalPreparation::Prepared(prepared), _control_cause)) => Ok(
                 RetainedSuccessJointCommitFormation::PreparedFailure(prepared),
             ),
             Err(cause) => Err(cause),
@@ -3630,6 +3664,23 @@ where
     > {
         self.assembly
             .try_prepare_terminal(RetainedTerminalRequest::RichFailure {
+                proof: self.proof,
+                requested_cause: cause,
+                final_progress,
+            })
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(crate) fn try_prepare_with_control(
+        self,
+        cause: PreparationFailureCode,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<
+        PreparedRetainedPublicationWithControl<CanonicalBlock, EvidenceBlock, F, P, D>,
+        RetainedPublicationPrepareError,
+    > {
+        self.assembly
+            .try_prepare_terminal_with_control(RetainedTerminalRequest::RichFailure {
                 proof: self.proof,
                 requested_cause: cause,
                 final_progress,

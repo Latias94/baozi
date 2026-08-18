@@ -40,18 +40,26 @@ mod geometry;
 mod materialization;
 #[cfg(test)]
 pub(in crate::canonical_scene::store) use materialization::validate_node_scene_batches_for_test;
+#[cfg(feature = "_u4-import")]
+pub use materialization::{
+    NodeSceneActivationPolicyRequirements, NodeSceneActivationPostflight,
+    NodeSceneActivationTransaction, NodeSceneEvidenceRecipe, NodeSceneLaneOutput,
+    NodeSceneLanePlan, NodeSceneLaneRejection, NodeSceneLaneValidationProof,
+};
 pub(in crate::canonical_scene::store) use materialization::{
     NodeSceneActivationRequest, NodeSceneMaterializedRefs,
-};
-#[cfg(feature = "_u4-import")]
-pub(in crate::canonical_scene::store) use materialization::{
-    NodeSceneActivationRoles, NodeSceneWriterRoles,
 };
 mod profile;
 pub(in crate::canonical_scene::store) use profile::{
     ProfileLeafRefs, ProfileLineageMaterializedRefs,
 };
 mod publication;
+#[cfg(feature = "_u4-import")]
+pub use publication::{
+    NodeSceneFrozenGenerationRejection, NodeSceneHandoffPairingError, NodeSceneHandoffToken,
+    NodeSceneLaneFreezePermit, NodeSceneLaneGenerationRejection, NodeSceneLaneJointCommit,
+    NodeScenePublishedSuccess, consume_node_scene_freeze_permit,
+};
 mod scratch;
 pub(in crate::canonical_scene::store) use scratch::{
     NodeSceneCentralValidationPlan, NodeSceneMeteredValidationScratch,

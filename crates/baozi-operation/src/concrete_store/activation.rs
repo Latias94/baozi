@@ -2722,6 +2722,7 @@ pub struct ValidatedFailureEvidence<
 #[must_use = "prepared failure evidence must be handed to the terminal publisher"]
 pub struct PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag> {
     cause: Cause,
+    final_control_cause: Option<ControlCause>,
     // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
     prepared: PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
 }

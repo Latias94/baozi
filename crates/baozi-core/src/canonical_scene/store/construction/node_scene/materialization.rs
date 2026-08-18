@@ -1,10 +1,12 @@
 use std::cell::Cell;
+use std::fmt;
 
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationSeal,
     CanonicalCentralValidationOutcome, CanonicalFailureRequirements, CanonicalLane,
     CanonicalMaterialization, CanonicalMaterializationRole, CanonicalRecordBuildRow,
-    CanonicalSuccessRequirements, CanonicalTableShape, CanonicalValidationDecision,
+    CanonicalReservation, CanonicalSemanticWorkSession, CanonicalSuccessRequirements,
+    CanonicalTableShape, CanonicalValidationDecision, CanonicalValidationPlanning,
     CanonicalValidationProgress, CanonicalValidationRole, ScopedRetainedStoreSessionOutcomeOwner,
     StoreActivationContainment,
 };
@@ -12,7 +14,8 @@ use baozi_operation::{
     FinalProgress, OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit,
     RecordBlock, RecordPlan, RetainedStoreBatchLimits, RetainedStoreOperation,
     RetainedStoreWriterPlan, SequencePlan, StoreBuildError, StoreControlledError,
-    StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError, StoredScalar, Utf8Plan,
+    StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError, StoreWorkError,
+    StoredScalar, Utf8Plan,
 };
 
 use crate::SceneValidationLimits;
@@ -179,7 +182,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneActivationRequest<'input> 
 
 /// Roleless writer and failure envelopes supplied by core to the operation-owning host.
 #[must_use = "the NodeScene activation policy requirements must bind one scoped outcome owner"]
-struct NodeSceneActivationPolicyRequirements {
+pub struct NodeSceneActivationPolicyRequirements {
     canonical_writer_limits: RetainedStoreBatchLimits,
     outcome_evidence_writer_limits: RetainedStoreBatchLimits,
     failure: CanonicalFailureRequirements,
@@ -301,6 +304,99 @@ struct NodeSceneActivationExecution<'input> {
     failure_evidence: NodeSceneFailureEvidencePlan,
 }
 
+/// Core-owned half of one authority-free Scene activation transaction.
+///
+/// The import host retains the planning owner. Core receives only the semantic-work lane for
+/// preflight and later the canonical lane for materialization. The execution payload can therefore
+/// neither bind an operation nor resolve an activation outcome.
+#[must_use = "the Scene activation transaction must run preflight and retain its postflight recipe"]
+pub struct NodeSceneActivationTransaction<'input> {
+    execution: Option<NodeSceneActivationExecution<'input>>,
+    brand: super::super::ConstructionBrand,
+    failure_evidence: NodeSceneFailureEvidencePlan,
+    sealed_counts: SceneEvidenceCounts,
+}
+
+/// Opaque metered plan consumed only by a canonical materialization lane.
+#[must_use = "the sealed Scene plan must bind its success requirements and materialize once"]
+pub struct NodeSceneLanePlan<'input, 'scope, O>
+where
+    O: OperationOwner,
+{
+    brand: super::super::ConstructionBrand,
+    sealed: NodeSceneSealedPlan<'input, CanonicalReservation<'scope, O>>,
+}
+
+/// Opaque Scene descriptor and validation recipe emitted by lane-only materialization.
+#[derive(Clone, Copy)]
+pub struct NodeSceneLaneOutput(NodeSceneActivationOutput);
+
+/// Opaque proof minted only by exact central validation of a lane output.
+#[derive(Clone, Copy)]
+pub struct NodeSceneLaneValidationProof(super::NodeSceneValidationProof);
+
+impl NodeSceneLaneValidationProof {
+    pub(in crate::canonical_scene::store) const fn into_inner(
+        self,
+    ) -> super::NodeSceneValidationProof {
+        self.0
+    }
+}
+
+/// Opaque semantic or physical rejection returned across the import-owned activation rail.
+#[derive(Debug)]
+pub struct NodeSceneLaneRejection(NodeSceneConstructionRejection<StoreRuntimeError>);
+
+impl NodeSceneLaneRejection {
+    /// Creates the fail-closed rejection used when the host cannot resolve the scoped protocol.
+    pub fn construction_invariant() -> Self {
+        Self::from(NodeSceneConstructionRejection::Materialization(
+            StoreRuntimeError::ConstructionInvariantUnverified,
+        ))
+    }
+
+    pub const fn stable_code(&self) -> u32 {
+        self.0.stable_code()
+    }
+
+    pub const fn is_authoring_rejection(&self) -> bool {
+        !matches!(self.0, NodeSceneConstructionRejection::Materialization(_))
+    }
+}
+
+impl fmt::Display for NodeSceneLaneRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for NodeSceneLaneRejection {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+impl From<NodeSceneConstructionRejection<StoreRuntimeError>> for NodeSceneLaneRejection {
+    fn from(rejection: NodeSceneConstructionRejection<StoreRuntimeError>) -> Self {
+        Self(rejection)
+    }
+}
+
+/// Lifetime-free core recipe retained after the scoped preflight transaction returns.
+#[must_use = "postflight evidence and validation must resolve the activation outcome"]
+pub struct NodeSceneActivationPostflight {
+    brand: super::super::ConstructionBrand,
+    failure_evidence: NodeSceneFailureEvidencePlan,
+    evidence_counts: SceneEvidenceCounts,
+}
+
+/// Exact evidence plan and row recipe derived from the activation transaction.
+#[derive(Clone, Copy)]
+pub struct NodeSceneEvidenceRecipe {
+    records: RecordPlan,
+    counts: SceneEvidenceCounts,
+}
+
 impl<'input> NodeSceneActivationRequest<'input> {
     pub(in crate::canonical_scene::store) fn try_new(
         input: SceneAuthoringBatch<'input>,
@@ -328,6 +424,26 @@ impl<'input> NodeSceneActivationRequest<'input> {
         })
     }
 
+    pub fn into_lane_parts(
+        self,
+    ) -> (
+        NodeSceneActivationPolicyRequirements,
+        NodeSceneActivationTransaction<'input>,
+    ) {
+        let Self { execution, policy } = self;
+        let brand = execution.brand;
+        let failure_evidence = execution.failure_evidence;
+        (
+            policy,
+            NodeSceneActivationTransaction {
+                execution: Some(execution),
+                brand,
+                failure_evidence,
+                sealed_counts: SceneEvidenceCounts::authoring_rejection(),
+            },
+        )
+    }
+
     pub(in crate::canonical_scene::store) const fn canonical_writer_limits(
         &self,
     ) -> RetainedStoreBatchLimits {
@@ -350,22 +466,6 @@ impl<'input> NodeSceneActivationRequest<'input> {
         activate_node_scene_scoped(activation, validation_progress, final_progress)
     }
 
-    pub(in crate::canonical_scene::store) fn activate_deferred<O, PP, U>(
-        self,
-        operation: RetainedStoreOperation<O, PP, U>,
-        roles: NodeSceneActivationRoles,
-        validation_progress: CanonicalValidationProgress<PP, U>,
-        final_progress: FinalProgress<PP, U>,
-    ) -> Result<DeferredNodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
-    where
-        O: OperationOwner,
-        PP: ProgressPhase,
-        U: ProgressUnit,
-    {
-        let activation = self.bind_operation(operation, roles)?;
-        activate_node_scene_scoped_deferred(activation, validation_progress, final_progress)
-    }
-
     fn bind_operation<O, PP, U, L>(
         self,
         operation: RetainedStoreOperation<O, PP, U, L>,
@@ -385,6 +485,207 @@ impl<'input> NodeSceneActivationRequest<'input> {
     }
 }
 
+impl<'input> NodeSceneActivationTransaction<'input> {
+    /// Runs semantic validation and physical planning without receiving operation ownership.
+    ///
+    /// The caller remains responsible for resolving the semantic session with `finish_exact` or
+    /// `finish_rejected`, and for sealing or rejecting its own planning transaction.
+    pub fn preflight<'scope, O, PP, U, L>(
+        &mut self,
+        semantic: &mut CanonicalSemanticWorkSession<'_, 'scope, O, PP, U, L>,
+    ) -> Result<NodeSceneLanePlan<'input, 'scope, O>, NodeSceneLaneRejection>
+    where
+        O: OperationOwner,
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        let execution = self.execution.take().ok_or_else(|| {
+            NodeSceneLaneRejection::from(NodeSceneConstructionRejection::Materialization(
+                StoreRuntimeError::ConstructionInvariantUnverified,
+            ))
+        })?;
+        let NodeSceneActivationExecution {
+            brand,
+            input,
+            validation_limits,
+            failure_evidence,
+        } = execution;
+        let sealed = {
+            let mut control = ScopedAuthoringControl::new(semantic);
+            validate_and_seal_node_scene_plan(
+                input,
+                validation_limits,
+                failure_evidence,
+                &mut control,
+            )
+        }
+        .map_err(NodeSceneLaneRejection::from)?;
+        self.sealed_counts = sealed.execution.materialization.evidence_counts();
+        Ok(NodeSceneLanePlan { brand, sealed })
+    }
+
+    /// Drops any unused execution payload and returns the lifetime-free evidence/validation recipe.
+    pub fn finish(mut self) -> NodeSceneActivationPostflight {
+        self.execution = None;
+        NodeSceneActivationPostflight {
+            brand: self.brand,
+            failure_evidence: self.failure_evidence,
+            evidence_counts: self.sealed_counts,
+        }
+    }
+}
+
+impl<'input, 'scope, O> NodeSceneLanePlan<'input, 'scope, O>
+where
+    O: OperationOwner,
+{
+    /// Returns the success envelope derived from this exact sealed execution plan.
+    pub const fn success_requirements(&self) -> CanonicalSuccessRequirements {
+        self.sealed.success_requirements
+    }
+
+    /// Materializes the sealed plan through the only authority accepted by this core seam.
+    pub fn materialize<'lane, PP, U, L>(
+        &self,
+        lane: CanonicalLane<'lane, O, PP, U, L>,
+    ) -> CanonicalMaterialization<
+        'lane,
+        NodeSceneLaneOutput,
+        NodeSceneLaneRejection,
+        RecordBlock,
+        SceneDirectorySchema,
+    >
+    where
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        materialize_node_scene_mapped(
+            lane,
+            &self.sealed.execution,
+            self.brand,
+            NodeSceneBuildFaults::none(),
+            NodeSceneLaneOutput,
+            NodeSceneLaneRejection,
+        )
+    }
+}
+
+impl NodeSceneLaneOutput {
+    pub(in crate::canonical_scene::store) const fn inner(self) -> NodeSceneActivationOutput {
+        self.0
+    }
+
+    pub(in crate::canonical_scene::store) const fn node_scene_draft(self) -> NodeSceneDraft {
+        self.0.draft
+    }
+}
+
+impl NodeSceneEvidenceRecipe {
+    /// Returns the exact retained evidence-table plan for this recipe.
+    pub const fn record_plan(&self) -> RecordPlan {
+        self.records
+    }
+
+    /// Writes the sole NodeScene evidence row without receiving storage ownership.
+    pub fn write_row(
+        &self,
+        row: &mut OutcomeEvidenceRecordRowWriter<'_>,
+    ) -> Result<(), StoreBuildError> {
+        write_node_scene_evidence_row(row, self.counts)
+    }
+
+    pub(super) const fn counts(&self) -> SceneEvidenceCounts {
+        self.counts
+    }
+}
+
+impl NodeSceneActivationPostflight {
+    /// Returns the failure recipe for a preflight or materialization rejection.
+    pub const fn failure_evidence(&self) -> NodeSceneEvidenceRecipe {
+        NodeSceneEvidenceRecipe {
+            records: self.failure_evidence.records,
+            counts: self.evidence_counts,
+        }
+    }
+
+    /// Returns the candidate recipe derived from the exact materialization output.
+    pub const fn candidate_evidence(
+        &self,
+        output: &NodeSceneLaneOutput,
+    ) -> NodeSceneEvidenceRecipe {
+        NodeSceneEvidenceRecipe {
+            records: self.failure_evidence.records,
+            counts: output.0.evidence_counts,
+        }
+    }
+
+    /// Runs core graph validation through an import-owned central-validation planning lane.
+    #[allow(clippy::type_complexity)]
+    pub fn validate_candidate<'session, 'storage, 'scope, 'operation, O, PP, U>(
+        &self,
+        planning: CanonicalValidationPlanning<
+            'session,
+            'storage,
+            'scope,
+            'operation,
+            O,
+            PP,
+            U,
+            RecordBlock,
+            SceneDirectorySchema,
+            RecordBlock,
+            NodeSceneOutcomeEvidenceSchema,
+            NodeSceneLaneValidationProof,
+            NodeSceneLaneRejection,
+        >,
+        output: &NodeSceneLaneOutput,
+    ) -> Result<(), StoreWorkError>
+    where
+        O: OperationOwner,
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        let output = output.0;
+        let validation_plan = output.central_validation;
+        let scratch_plan = validation_plan.scratch_plan();
+        planning.validate_with(
+            |checkpoint| {
+                ScopedNodeSceneValidationScratchOwner::try_allocate(checkpoint, scratch_plan)
+            },
+            |session, directory, evidence, scratch| {
+                let initialized = scratch.initialize(session, scratch_plan)?;
+                let proof = if initialized && output.draft.brand == self.brand {
+                    let mut scratch = scratch.metered_view();
+                    validate_node_scene_canonical_graph_metered(
+                        session,
+                        directory,
+                        evidence,
+                        output.evidence_counts,
+                        output.refs,
+                        validation_plan,
+                        &mut scratch,
+                    )?
+                } else {
+                    None
+                };
+                Ok(match proof {
+                    Some(proof) => {
+                        CanonicalValidationDecision::accept(NodeSceneLaneValidationProof(proof))
+                    }
+                    None => CanonicalValidationDecision::reject(
+                        NodeSceneLaneRejection::from(
+                            NodeSceneConstructionRejection::Materialization(
+                                StoreRuntimeError::ConstructionInvariantUnverified,
+                            ),
+                        ),
+                        NODE_SCENE_BUILD_INVARIANT_CODE,
+                    ),
+                })
+            },
+        )
+    }
+}
+
 /// One request's execution payload structurally paired with its bound scoped outcome owner.
 struct BoundNodeSceneActivation<'input, O, PP, U, L>
 where
@@ -397,6 +698,35 @@ where
 }
 
 impl NodeSceneActivationPolicyRequirements {
+    /// Builds the exact failure-only policy and evidence recipe for an import that never
+    /// submitted a canonical Scene request.
+    pub fn try_unsubmitted() -> Result<(Self, NodeSceneEvidenceRecipe), StorePlanError> {
+        let failure_evidence = NodeSceneFailureEvidencePlan::try_new()?;
+        Ok((
+            Self {
+                canonical_writer_limits: RetainedStoreBatchLimits::new(1, 1)?,
+                outcome_evidence_writer_limits: RetainedStoreBatchLimits::new(2, 4)?,
+                failure: failure_evidence.requirements()?,
+            },
+            NodeSceneEvidenceRecipe {
+                records: failure_evidence.records,
+                counts: SceneEvidenceCounts::authoring_rejection(),
+            },
+        ))
+    }
+
+    pub const fn canonical_writer_limits(&self) -> RetainedStoreBatchLimits {
+        self.canonical_writer_limits
+    }
+
+    pub const fn outcome_evidence_writer_limits(&self) -> RetainedStoreBatchLimits {
+        self.outcome_evidence_writer_limits
+    }
+
+    pub fn into_failure_requirements(self) -> CanonicalFailureRequirements {
+        self.failure
+    }
+
     fn into_parts(
         self,
     ) -> (
@@ -1004,10 +1334,10 @@ pub(super) fn node_scene_activation_roles(keys: SceneStoreKeys) -> NodeSceneActi
 }
 
 fn materialize_node_scene<'lane, R, O, PP, U, L>(
-    mut lane: CanonicalLane<'lane, O, PP, U, L>,
+    lane: CanonicalLane<'lane, O, PP, U, L>,
     plan: &NodeSceneExecutionPlan<'_, R>,
     brand: super::super::ConstructionBrand,
-    mut faults: NodeSceneBuildFaults,
+    faults: NodeSceneBuildFaults,
 ) -> CanonicalMaterialization<
     'lane,
     NodeSceneActivationOutput,
@@ -1020,6 +1350,30 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    materialize_node_scene_mapped(
+        lane,
+        plan,
+        brand,
+        faults,
+        |output| output,
+        |rejection| rejection,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_node_scene_mapped<'lane, R, O, PP, U, L, T, E>(
+    mut lane: CanonicalLane<'lane, O, PP, U, L>,
+    plan: &NodeSceneExecutionPlan<'_, R>,
+    brand: super::super::ConstructionBrand,
+    mut faults: NodeSceneBuildFaults,
+    map_output: fn(NodeSceneActivationOutput) -> T,
+    map_rejection: fn(NodeSceneConstructionRejection<StoreRuntimeError>) -> E,
+) -> CanonicalMaterialization<'lane, T, E, RecordBlock, SceneDirectorySchema>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     macro_rules! materialize {
         ($expression:expr) => {
             match $expression {
@@ -1027,7 +1381,7 @@ where
                 Err(cause) => {
                     let rejection = NodeSceneConstructionRejection::Materialization(cause);
                     let stable_code = rejection.stable_code();
-                    return lane.reject(rejection, stable_code);
+                    return lane.reject(map_rejection(rejection), stable_code);
                 }
             }
         };
@@ -1170,7 +1524,7 @@ where
         evidence_counts: plans.evidence_counts(),
         central_validation: *central_validation,
     };
-    lane.complete(directory.into_store(), output)
+    lane.complete(directory.into_store(), map_output(output))
 }
 
 /// Runs one core execution payload with the caller's already policy-bound scoped outcome owner.

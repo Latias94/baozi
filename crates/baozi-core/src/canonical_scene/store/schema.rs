@@ -201,7 +201,7 @@ pub(super) struct AuthoredMatrixSchema;
 pub(super) struct OutcomeEvidenceSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct SceneDirectorySchema;
+pub struct SceneDirectorySchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct SceneGeometryDirectorySchema;
@@ -219,7 +219,7 @@ pub(super) struct NodeSceneAuthoredTransformSchema;
 pub(super) struct NodeSceneNodeNameSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct NodeSceneOutcomeEvidenceSchema;
+pub struct NodeSceneOutcomeEvidenceSchema;
 
 impl CanonicalSchema for DirectorySchema {
     type StoreKind = RecordBlock;

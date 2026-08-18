@@ -1086,6 +1086,14 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    /// Borrows the exact candidate output frozen into this permit.
+    ///
+    /// Callers can validate descriptor pairing before generation admission without accepting a
+    /// second, independently movable copy of the output.
+    pub const fn output(&self) -> &T {
+        &self.output
+    }
+
     pub fn destination_counters_are_zero(&self) -> bool {
         let canonical = self
             .store

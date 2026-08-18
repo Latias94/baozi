@@ -1621,11 +1621,12 @@ where
             _lifecycle: _,
         } = self;
         let cause = ManuallyDrop::new(cause);
-        let prepared = validated.try_prepare(0, final_progress);
+        let prepared = validated.try_prepare_with_control(0, final_progress);
         match prepared {
-            Ok(prepared) => Ok(PreparedFailureEvidence {
+            Ok((prepared, final_control_cause)) => Ok(PreparedFailureEvidence {
                 prepared,
                 cause: ManuallyDrop::into_inner(cause),
+                final_control_cause,
             }),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
@@ -1656,6 +1657,7 @@ where
             Ok(prepared) => Ok(PreparedFailureEvidence {
                 prepared,
                 cause: ManuallyDrop::into_inner(cause),
+                final_control_cause: None,
             }),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
@@ -1711,6 +1713,16 @@ impl<Cause, EvidenceKind, EvidenceTag> PreparedFailureEvidence<Cause, EvidenceKi
         Cause,
     ) {
         (self.prepared, self.cause)
+    }
+
+    pub fn into_parts_with_control(
+        self,
+    ) -> (
+        PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
+        Cause,
+        Option<ControlCause>,
+    ) {
+        (self.prepared, self.cause, self.final_control_cause)
     }
 }
 

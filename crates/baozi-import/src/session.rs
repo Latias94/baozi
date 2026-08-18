@@ -28,9 +28,9 @@ use crate::scope::{
 };
 use crate::source_scope::{LiveSourceScopeRecord, SourceScopeRecord};
 use crate::store::{
-    ImportStoreBootstrapRequirements, ImportStoreReservation, ImportStoreSceneBoundary,
-    ImportStoreSessionOwner, ImportStoreTerminalEvidence, ImportStoreTerminalOutcome,
-    try_import_store_bootstrap,
+    ImportStoreBootstrapRequirements, ImportStoreFailureCauseAuthority, ImportStoreReservation,
+    ImportStoreSceneBoundary, ImportStoreSessionOwner, ImportStoreTerminalEvidence,
+    ImportStoreTerminalOutcome, try_import_store_bootstrap,
 };
 use baozi_core::FormatId;
 use baozi_io::{
@@ -901,7 +901,7 @@ impl<'a> ImportSession<'a> {
                 failure,
                 evidence,
                 control_cause,
-                scene_failure_submitted: _,
+                cause_authority: _,
             } => {
                 let cause = control_cause.map_or_else(
                     || operation_terminal_cause(&evidence),
@@ -921,7 +921,7 @@ impl<'a> ImportSession<'a> {
                 fallback,
                 evidence,
                 control_cause,
-                scene_failure_submitted: _,
+                cause_authority: _,
             } => {
                 let cause = control_cause.map_or_else(
                     || operation_terminal_cause(&evidence),
@@ -968,14 +968,10 @@ impl<'a> ImportSession<'a> {
                 failure,
                 evidence,
                 control_cause,
-                scene_failure_submitted,
+                cause_authority,
             } => {
-                let cause = select_terminal_failure_cause(
-                    cause,
-                    &evidence,
-                    control_cause,
-                    scene_failure_submitted,
-                );
+                let cause =
+                    select_terminal_failure_cause(cause, &evidence, control_cause, cause_authority);
                 terminal_failure(
                     cause,
                     source,
@@ -990,14 +986,10 @@ impl<'a> ImportSession<'a> {
                 fallback,
                 evidence,
                 control_cause,
-                scene_failure_submitted,
+                cause_authority,
             } => {
-                let cause = select_terminal_failure_cause(
-                    cause,
-                    &evidence,
-                    control_cause,
-                    scene_failure_submitted,
-                );
+                let cause =
+                    select_terminal_failure_cause(cause, &evidence, control_cause, cause_authority);
                 terminal_failure(
                     cause,
                     source,
@@ -1164,15 +1156,14 @@ fn select_terminal_failure_cause(
     original: ImportCause,
     evidence: &ImportStoreTerminalEvidence,
     control_cause: Option<ControlCause>,
-    scene_failure_submitted: bool,
+    cause_authority: ImportStoreFailureCauseAuthority,
 ) -> ImportCause {
     if let Some(cause) = control_cause {
         return ImportCause::Scope(ScopeAbort::new(ScopeAbortCause::Control(cause)));
     }
-    if scene_failure_submitted {
-        operation_terminal_cause(evidence)
-    } else {
-        original
+    match cause_authority {
+        ImportStoreFailureCauseAuthority::OriginalImport => original,
+        ImportStoreFailureCauseAuthority::OperationTerminal => operation_terminal_cause(evidence),
     }
 }
 

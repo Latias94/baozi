@@ -1,29 +1,30 @@
+mod scene_activation;
+
 use std::cell::{RefCell, RefMut};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
-use crate::SceneDraft;
 use baozi_core::__canonical_import::{
-    PendingSceneDraftOwner, PendingSceneFailureOwner, PreparedSceneConstruction,
-    SceneActivationError, SceneActivationRequest, SceneActivationRoles, SceneConstructionTerminal,
-    SceneConstructionTerminalParts, SceneDraftBuild, SceneMinimalFallback, SceneRichFailure,
-    SceneSuccessReport, SceneWriterRoles, maximum_scene_canonical_blocks,
-    maximum_scene_structural_work, prepare_unactivated_scene, scene_failure_evidence_field_work,
-    scene_failure_evidence_member_count, scene_failure_terminal_work_requirement,
+    SceneOutcomeEvidenceTag, maximum_scene_canonical_blocks, maximum_scene_structural_work,
+    scene_failure_evidence_field_work, scene_failure_evidence_member_count,
+    scene_failure_terminal_work_requirement,
 };
 use baozi_core::{SceneValidationLimits, ValidatedScene as CanonicalValidatedScene};
 use baozi_operation::__canonical_activation::{
-    CanonicalValidationProgress, RetainedStoreDimensionState, RetainedStoreObservedWork,
+    CanonicalActivationPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
+    RetainedStoreDimensionState, RetainedStoreObservedWork, StoreActivationContainment,
 };
 use baozi_operation::{
-    ControlCause, DimensionPolicy, FinalProgress, LedgerCause, LedgerLimits, LedgerLimitsError,
-    PhysicalStorageAccount, RetainedStoreBatchLimits, RetainedStoreFailureTerminalWorkPlan,
-    RetainedStoreOperation, RetainedStoreReservation, RetainedStoreSharePlan,
-    RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreDimensionKey,
-    StoreDimensionSemanticId, StoreDimensionSnapshot, StoreFallbackEnvelope, StoreKeyDomain,
-    StoreKeyDomainCreateError, StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError,
-    StorePhaseKey, StorePhaseSemanticId, StorePhaseSnapshot, StorePlanError,
-    StorePreparationFailureClass, StoreRuntimeError, StoreSemanticCatalogId, StoreTerminalCause,
+    ControlCause, DimensionPolicy, LedgerCause, LedgerLimits, LedgerLimitsError,
+    PhysicalStorageAccount, PublishedOutcomeEvidenceStore, PublishedRichFailureStore,
+    PublishedStoreFallbackOutput, RecordBlock, RetainedStoreBatchLimits,
+    RetainedStoreFailureTerminalWorkPlan, RetainedStoreOperation, RetainedStoreReservation,
+    RetainedStoreSharePlan, RetainedStoreStartError, RetainedStoreStartPlan,
+    RetainedStoreWriterPlan, StoreDimensionKey, StoreDimensionSemanticId, StoreDimensionSnapshot,
+    StoreFallbackEnvelope, StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerEvidence,
+    StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePhaseSnapshot,
+    StorePlanError, StorePreparationFailureClass, StorePrepareError, StoreRuntimeError,
+    StoreSemanticCatalogId, StoreTerminalCause,
 };
 
 use crate::error::ScopeAbortCause;
@@ -33,11 +34,12 @@ use crate::ledger::{
 };
 use crate::limits::ResourceLimits;
 
+pub(crate) use scene_activation::ImportStoreSceneBoundary;
+
 const IMPORT_STORE_CATALOG: StoreSemanticCatalogId =
     StoreSemanticCatalogId::new(*b"baozi-import-led", NonZeroU32::MIN);
 const IMPORT_DIMENSION_COUNT: usize = ImportDimension::DecompressedBytes as usize + 1;
 const IMPORT_STORE_FALLBACK_CODE: u32 = 0x494d_0001;
-const IMPORT_SCENE_NOT_SUBMITTED_CODE: u32 = 0x494d_0002;
 const MIN_CANONICAL_RETAINED_MEMBER_LIMIT: u64 = 1;
 const STARTUP_OUTCOME_EVIDENCE_AMOUNT: u64 = 1;
 const STARTUP_OUTCOME_EVIDENCE_TOTAL: u64 = STARTUP_OUTCOME_EVIDENCE_AMOUNT * 2;
@@ -47,12 +49,6 @@ const IMPORT_STORE_EVIDENCE_DIMENSION_COUNT: usize =
 
 type ImportStoreOperation =
     RetainedStoreOperation<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
-type ImportSceneDraftBuild =
-    SceneDraftBuild<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
-type ImportPendingSceneDraftOwner =
-    PendingSceneDraftOwner<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
-type ImportPendingSceneFailureOwner =
-    PendingSceneFailureOwner<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
 
 /// Import-owned terminal classification copied from the unique ledger header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,8 +346,9 @@ pub(crate) struct ImportStoreTerminalEvidence {
 }
 
 impl ImportStoreTerminalEvidence {
-    pub(crate) fn try_from_terminal(
-        terminal: &SceneConstructionTerminal,
+    #[cfg(test)]
+    fn try_from_terminal(
+        terminal: &ImportStoreTerminalOutcome,
     ) -> Result<Self, ImportStoreTerminalProjectionError> {
         Self::try_from_ledger(terminal.ledger_evidence())
     }
@@ -479,6 +476,59 @@ impl ImportStoreTerminalEvidence {
     }
 }
 
+/// Import-owned outcome evidence jointly published with a successful canonical Scene.
+#[must_use = "the success report owns the published outcome-evidence store"]
+pub(crate) struct ImportStoreSuccessReport {
+    _outcome_evidence: PublishedOutcomeEvidenceStore<RecordBlock, SceneOutcomeEvidenceTag>,
+    _ledger_evidence: StoreLedgerEvidence,
+}
+
+#[cfg(test)]
+impl ImportStoreSuccessReport {
+    pub(crate) fn outcome_evidence_block_count(&self) -> usize {
+        self._outcome_evidence.len()
+    }
+
+    pub(crate) const fn ledger_evidence(&self) -> &StoreLedgerEvidence {
+        &self._ledger_evidence
+    }
+}
+
+/// Import-owned structured failure evidence from the unique Scene transaction.
+#[must_use = "the rich failure owns the published outcome-evidence store"]
+pub(crate) struct ImportStoreRichFailure {
+    _outcome_evidence: PublishedRichFailureStore<RecordBlock, SceneOutcomeEvidenceTag>,
+    _ledger_evidence: StoreLedgerEvidence,
+}
+
+#[cfg(test)]
+impl ImportStoreRichFailure {
+    pub(crate) const fn ledger_evidence(&self) -> &StoreLedgerEvidence {
+        &self._ledger_evidence
+    }
+}
+
+/// Import-owned bounded fallback from the unique Scene transaction.
+#[must_use = "the fallback owns its bounded published failure state"]
+pub(crate) struct ImportStoreMinimalFallback {
+    _fallback: PublishedStoreFallbackOutput,
+    _ledger_evidence: StoreLedgerEvidence,
+}
+
+#[cfg(test)]
+impl ImportStoreMinimalFallback {
+    pub(crate) const fn ledger_evidence(&self) -> &StoreLedgerEvidence {
+        &self._ledger_evidence
+    }
+}
+
+/// Selects which pre-terminal cause remains authoritative after a failed import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportStoreFailureCauseAuthority {
+    OriginalImport,
+    OperationTerminal,
+}
+
 /// Exact retained owners and import-semantic evidence produced by one terminal handoff.
 #[must_use = "the terminal outcome owns the published Scene or failure evidence"]
 #[allow(
@@ -488,68 +538,49 @@ impl ImportStoreTerminalEvidence {
 pub(crate) enum ImportStoreTerminalOutcome {
     Success {
         scene: CanonicalValidatedScene,
-        report: SceneSuccessReport,
+        report: ImportStoreSuccessReport,
         evidence: ImportStoreTerminalEvidence,
     },
     RichFailure {
-        failure: SceneRichFailure,
+        failure: ImportStoreRichFailure,
         evidence: ImportStoreTerminalEvidence,
         control_cause: Option<ControlCause>,
-        scene_failure_submitted: bool,
+        cause_authority: ImportStoreFailureCauseAuthority,
     },
     MinimalFallback {
-        fallback: SceneMinimalFallback,
+        fallback: ImportStoreMinimalFallback,
         evidence: ImportStoreTerminalEvidence,
         control_cause: Option<ControlCause>,
-        scene_failure_submitted: bool,
+        cause_authority: ImportStoreFailureCauseAuthority,
     },
 }
 
+#[cfg(test)]
 impl ImportStoreTerminalOutcome {
-    fn try_from_terminal(
-        terminal: SceneConstructionTerminal,
-        scene_submitted: bool,
-        scene_failure_submitted: bool,
-    ) -> Result<Self, ImportStoreTerminalProjectionError> {
-        let control_cause = terminal.control_cause().cloned();
-        let evidence = ImportStoreTerminalEvidence::try_from_terminal(&terminal)?;
-        if control_cause.is_some() && evidence.cause().class() != ImportStoreTerminalClass::Control
-        {
-            return Err(ImportStoreTerminalProjectionError::TerminalOwnerCauseMismatch);
+    fn is_success(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+
+    fn canonical_block_count(&self) -> Option<usize> {
+        match self {
+            Self::Success { scene, .. } => Some(scene.canonical_block_count()),
+            Self::RichFailure { .. } | Self::MinimalFallback { .. } => None,
         }
-        match terminal.into_parts() {
-            SceneConstructionTerminalParts::Success { scene, report } => {
-                if !scene_submitted || evidence.cause() != ImportStoreTerminalCause::Success {
-                    return Err(ImportStoreTerminalProjectionError::TerminalOwnerCauseMismatch);
-                }
-                Ok(Self::Success {
-                    scene,
-                    report,
-                    evidence,
-                })
-            }
-            SceneConstructionTerminalParts::RichFailure(failure) => {
-                if evidence.cause() == ImportStoreTerminalCause::Success {
-                    return Err(ImportStoreTerminalProjectionError::TerminalOwnerCauseMismatch);
-                }
-                Ok(Self::RichFailure {
-                    failure,
-                    evidence,
-                    control_cause,
-                    scene_failure_submitted,
-                })
-            }
-            SceneConstructionTerminalParts::MinimalFallback(fallback) => {
-                if evidence.cause() == ImportStoreTerminalCause::Success {
-                    return Err(ImportStoreTerminalProjectionError::TerminalOwnerCauseMismatch);
-                }
-                Ok(Self::MinimalFallback {
-                    fallback,
-                    evidence,
-                    control_cause,
-                    scene_failure_submitted,
-                })
-            }
+    }
+
+    fn ledger_evidence(&self) -> &StoreLedgerEvidence {
+        match self {
+            Self::Success { report, .. } => report.ledger_evidence(),
+            Self::RichFailure { failure, .. } => failure.ledger_evidence(),
+            Self::MinimalFallback { fallback, .. } => fallback.ledger_evidence(),
+        }
+    }
+
+    fn control_cause(&self) -> Option<&ControlCause> {
+        match self {
+            Self::Success { .. } => None,
+            Self::RichFailure { control_cause, .. }
+            | Self::MinimalFallback { control_cause, .. } => control_cause.as_ref(),
         }
     }
 }
@@ -1048,27 +1079,37 @@ impl ImportStoreVocabulary {
         self.phases.map(|(_, key)| key)
     }
 
-    fn activation_roles(&self) -> SceneActivationRoles {
-        SceneActivationRoles::new(
-            SceneWriterRoles::new(
+    fn activation_policy(
+        &self,
+        canonical_writer_limits: RetainedStoreBatchLimits,
+        outcome_evidence_writer_limits: RetainedStoreBatchLimits,
+    ) -> CanonicalActivationPolicy {
+        CanonicalActivationPolicy::new(
+            RetainedStoreWriterPlan::new(
                 self.phase(ImportLedgerPhase::SceneConstruction),
                 self.dimension(ImportDimension::CanonicalOutputBytes),
                 self.dimension(ImportDimension::CanonicalOutputBytes),
+                canonical_writer_limits,
             ),
-            SceneWriterRoles::new(
+            RetainedStoreWriterPlan::new(
                 self.phase(ImportLedgerPhase::OutcomeFinalization),
                 self.startup_outcome_evidence,
                 self.startup_outcome_evidence,
+                outcome_evidence_writer_limits,
             ),
-            self.dimension(ImportDimension::WorkUnits),
-            self.dimension(ImportDimension::ScratchBytes),
-            self.phase(ImportLedgerPhase::Validation),
-            self.dimension(ImportDimension::WorkUnits),
-            self.dimension(ImportDimension::ScratchBytes),
+            CanonicalMaterializationRole::new(
+                self.dimension(ImportDimension::WorkUnits),
+                self.dimension(ImportDimension::ScratchBytes),
+            ),
+            CanonicalValidationRole::new(
+                self.phase(ImportLedgerPhase::Validation),
+                self.dimension(ImportDimension::WorkUnits),
+                self.dimension(ImportDimension::ScratchBytes),
+            ),
             self.canonical_retained_members,
             self.startup_outcome_evidence,
         )
-        .with_canonical_string_dimension(self.dimension(ImportDimension::CanonicalStringBytes))
+        .with_semantic_bytes_dimension(self.dimension(ImportDimension::CanonicalStringBytes))
     }
 }
 
@@ -1112,7 +1153,7 @@ pub(crate) struct ImportStoreSessionOwner {
 enum ImportStoreSessionState {
     Active(ImportStoreOperation),
     Transitioning,
-    Pending(ImportPendingScene),
+    Pending(scene_activation::ImportPendingScene),
     Contained,
 }
 
@@ -1122,88 +1163,6 @@ fn inactive_store_state_error(state: &ImportStoreSessionState) -> ImportStoreHos
         ImportStoreSessionState::Active(_)
         | ImportStoreSessionState::Transitioning
         | ImportStoreSessionState::Pending(_) => ImportStoreHostError::OperationConsumed,
-    }
-}
-
-#[allow(
-    clippy::large_enum_variant,
-    reason = "pending retained owners stay inline so descriptor rejection remains allocation-free"
-)]
-enum ImportPendingScene {
-    Draft(ImportPendingSceneDraftOwner),
-    Failure {
-        draft_built: bool,
-        owner: ImportPendingSceneFailureOwner,
-    },
-}
-
-struct ImportStorePreparedScene {
-    prepared: PreparedSceneConstruction,
-    scene_submitted: bool,
-    scene_failure_submitted: bool,
-}
-
-impl ImportStorePreparedScene {
-    fn handoff(self) -> SceneConstructionTerminal {
-        self.prepared.handoff()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ImportStoreSceneBoundary {
-    DraftBuilt,
-    Validated,
-}
-
-#[must_use = "the Scene activation transition must install a pending owner or become contained"]
-struct ImportStoreActivationTransition<'session> {
-    state: RefMut<'session, ImportStoreSessionState>,
-    armed: bool,
-}
-
-impl<'session> ImportStoreActivationTransition<'session> {
-    fn begin(
-        state: &'session RefCell<ImportStoreSessionState>,
-    ) -> Result<(ImportStoreOperation, Self), ImportStoreHostError> {
-        let mut state = state
-            .try_borrow_mut()
-            .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
-        let previous = std::mem::replace(&mut *state, ImportStoreSessionState::Transitioning);
-        let operation = match previous {
-            ImportStoreSessionState::Active(operation) => operation,
-            ImportStoreSessionState::Contained => {
-                *state = ImportStoreSessionState::Contained;
-                return Err(ImportStoreHostError::OperationContained);
-            }
-            previous @ (ImportStoreSessionState::Transitioning
-            | ImportStoreSessionState::Pending(_)) => {
-                *state = previous;
-                return Err(ImportStoreHostError::OperationConsumed);
-            }
-        };
-        Ok((operation, Self { state, armed: true }))
-    }
-
-    fn install(mut self, pending: ImportPendingScene) {
-        debug_assert!(matches!(
-            *self.state,
-            ImportStoreSessionState::Transitioning
-        ));
-        *self.state = ImportStoreSessionState::Pending(pending);
-        self.armed = false;
-    }
-
-    fn contain(mut self) {
-        *self.state = ImportStoreSessionState::Contained;
-        self.armed = false;
-    }
-}
-
-impl Drop for ImportStoreActivationTransition<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            *self.state = ImportStoreSessionState::Contained;
-        }
     }
 }
 
@@ -1247,134 +1206,6 @@ impl ImportStoreSessionOwner {
             ImportStoreSessionState::Contained => Err(ImportStoreHostError::OperationContained),
         }
     }
-
-    pub(crate) fn completed_scene_boundary(
-        &self,
-    ) -> Result<Option<ImportStoreSceneBoundary>, ImportStoreHostError> {
-        let state = self
-            .state
-            .try_borrow()
-            .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
-        Ok(match &*state {
-            ImportStoreSessionState::Pending(ImportPendingScene::Draft(_)) => {
-                Some(ImportStoreSceneBoundary::Validated)
-            }
-            ImportStoreSessionState::Pending(ImportPendingScene::Failure {
-                draft_built: true,
-                ..
-            }) => Some(ImportStoreSceneBoundary::DraftBuilt),
-            ImportStoreSessionState::Active(_)
-            | ImportStoreSessionState::Transitioning
-            | ImportStoreSessionState::Pending(ImportPendingScene::Failure {
-                draft_built: false,
-                ..
-            })
-            | ImportStoreSessionState::Contained => None,
-        })
-    }
-
-    pub(crate) fn submit_scene<'input>(
-        &self,
-        request: SceneActivationRequest<'input>,
-    ) -> Result<SceneDraft, ImportStoreActivationError> {
-        let (operation, transition) = ImportStoreActivationTransition::begin(&self.state)
-            .map_err(ImportStoreActivationError::StoreUnavailable)?;
-        let build = match request.activate(
-            operation,
-            self.vocabulary.activation_roles(),
-            CanonicalValidationProgress::new(
-                ImportProgressPhase::Validate,
-                ImportProgressUnit::WorkUnits,
-            ),
-            FinalProgress::new(
-                ImportProgressPhase::Finalize,
-                ImportProgressUnit::CanonicalItems,
-                1,
-            ),
-        ) {
-            Ok(build) => build,
-            Err(cause) => {
-                transition.contain();
-                return Err(ImportStoreActivationError::Scene(cause));
-            }
-        };
-        let (pending, result) = match build {
-            ImportSceneDraftBuild::Draft { draft, owner } => {
-                (ImportPendingScene::Draft(owner), Ok(draft))
-            }
-            ImportSceneDraftBuild::Failure {
-                authoring_rejected,
-                draft_built,
-                control_cause,
-                owner,
-            } => {
-                let result = if let Some(cause) = control_cause {
-                    Err(ImportStoreActivationError::Control(cause))
-                } else if authoring_rejected {
-                    Err(ImportStoreActivationError::AuthoringRejected)
-                } else {
-                    Err(ImportStoreActivationError::MaterializationFailed)
-                };
-                (ImportPendingScene::Failure { draft_built, owner }, result)
-            }
-        };
-        transition.install(pending);
-        result
-    }
-
-    fn prepare_scene(
-        self,
-        draft: Option<SceneDraft>,
-    ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
-        let (prepared, scene_submitted, scene_failure_submitted) = match self.state.into_inner() {
-            ImportStoreSessionState::Pending(ImportPendingScene::Draft(owner)) => (
-                owner
-                    .prepare(draft)
-                    .map_err(ImportStoreActivationError::Scene)?,
-                true,
-                false,
-            ),
-            ImportStoreSessionState::Pending(ImportPendingScene::Failure { owner, .. }) => (
-                owner.prepare().map_err(ImportStoreActivationError::Scene)?,
-                true,
-                true,
-            ),
-            ImportStoreSessionState::Active(operation) => (
-                prepare_unactivated_scene(operation, IMPORT_SCENE_NOT_SUBMITTED_CODE)
-                    .map_err(ImportStoreActivationError::Scene)?,
-                false,
-                false,
-            ),
-            ImportStoreSessionState::Transitioning | ImportStoreSessionState::Contained => {
-                return Err(ImportStoreActivationError::StoreUnavailable(
-                    ImportStoreHostError::OperationContained,
-                ));
-            }
-        };
-        Ok(ImportStorePreparedScene {
-            prepared,
-            scene_submitted,
-            scene_failure_submitted,
-        })
-    }
-
-    pub(crate) fn finish_scene(
-        self,
-        draft: Option<SceneDraft>,
-    ) -> Result<ImportStoreTerminalOutcome, ImportStoreFinalizationError> {
-        let prepared = self
-            .prepare_scene(draft)
-            .map_err(ImportStoreFinalizationError::Activation)?;
-        let scene_submitted = prepared.scene_submitted;
-        let scene_failure_submitted = prepared.scene_failure_submitted;
-        let terminal = prepared.handoff();
-        ImportStoreTerminalOutcome::try_from_terminal(
-            terminal,
-            scene_submitted,
-            scene_failure_submitted,
-        )
-        .map_err(ImportStoreFinalizationError::Projection)
-    }
 }
 
 pub(crate) fn scene_validation_limits(limits: &ResourceLimits) -> SceneValidationLimits {
@@ -1416,7 +1247,9 @@ pub(crate) enum ImportStoreActivationError {
     Control(ControlCause),
     AuthoringRejected,
     MaterializationFailed,
-    Scene(SceneActivationError),
+    Containment(StoreActivationContainment),
+    Preparation(StorePrepareError),
+    Plan(StorePlanError),
 }
 
 impl fmt::Display for ImportStoreActivationError {
@@ -1430,7 +1263,9 @@ impl fmt::Display for ImportStoreActivationError {
             Self::MaterializationFailed => {
                 formatter.write_str("canonical Scene materialization prepared a terminal failure")
             }
-            Self::Scene(cause) => cause.fmt(formatter),
+            Self::Containment(cause) => cause.fmt(formatter),
+            Self::Preparation(cause) => cause.fmt(formatter),
+            Self::Plan(cause) => cause.fmt(formatter),
         }
     }
 }
@@ -1441,7 +1276,9 @@ impl std::error::Error for ImportStoreActivationError {
             Self::StoreUnavailable(cause) => Some(cause),
             Self::Control(cause) => Some(cause),
             Self::AuthoringRejected | Self::MaterializationFailed => None,
-            Self::Scene(cause) => Some(cause),
+            Self::Containment(cause) => Some(cause),
+            Self::Preparation(cause) => Some(cause),
+            Self::Plan(cause) => Some(cause),
         }
     }
 }
@@ -2190,11 +2027,16 @@ impl std::error::Error for ImportStoreBootstrapError {
 
 #[cfg(test)]
 mod tests {
+    use super::scene_activation::{
+        IMPORT_SCENE_NOT_SUBMITTED_CODE, ImportPendingScene, ImportStoreActivationTransition,
+        ImportStorePreparedScene,
+    };
     use super::*;
     use std::mem::size_of;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use crate::SceneDraft;
     use crate::authoring::{
         AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoredTransform,
         DeformationAuthoringBatch, GeometryAuthoringBatch, LineageAuthoringBatch,
@@ -2220,9 +2062,8 @@ mod tests {
         const MAX_INLINE_SESSION_OWNER_BYTES: usize = 64 * 1024;
 
         assert!(size_of::<ImportStoreOperation>() <= MAX_INLINE_SESSION_OWNER_BYTES);
-        assert!(size_of::<ImportSceneDraftBuild>() <= MAX_INLINE_SESSION_OWNER_BYTES);
-        assert!(size_of::<ImportPendingSceneDraftOwner>() <= MAX_INLINE_SESSION_OWNER_BYTES);
-        assert!(size_of::<ImportPendingSceneFailureOwner>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportPendingScene>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportStorePreparedScene>() <= MAX_INLINE_SESSION_OWNER_BYTES);
         assert!(size_of::<ImportStoreSessionState>() <= MAX_INLINE_SESSION_OWNER_BYTES);
         assert!(size_of::<ImportStoreSessionOwner>() <= MAX_INLINE_SESSION_OWNER_BYTES);
     }
@@ -2514,7 +2355,8 @@ mod tests {
         let terminal = owner
             .prepare_scene(Some(draft))
             .expect("the centrally validated draft must prepare")
-            .handoff();
+            .handoff()
+            .expect("the prepared Scene terminal must project");
         let terminal_evidence = terminal.ledger_evidence();
         assert!(
             terminal.is_success(),
@@ -2631,7 +2473,8 @@ mod tests {
         let terminal = owner
             .prepare_scene(None)
             .expect("an import without a Scene must prepare the pre-admitted fallback")
-            .handoff();
+            .handoff()
+            .expect("the unsubmitted Scene terminal must project");
         assert!(!terminal.is_success());
         assert_eq!(terminal.canonical_block_count(), None);
         assert!(matches!(
@@ -2675,7 +2518,8 @@ mod tests {
         let terminal = owner
             .prepare_scene(Some(draft))
             .expect("the centrally validated draft must prepare")
-            .handoff();
+            .handoff()
+            .expect("the successful Scene terminal must project");
 
         let evidence = ImportStoreTerminalEvidence::try_from_terminal(&terminal)
             .expect("the exact terminal evidence must project into import vocabulary");
@@ -2748,7 +2592,8 @@ mod tests {
         let terminal = owner
             .prepare_scene(None)
             .expect("a missing parser descriptor must prepare exact failure evidence")
-            .handoff();
+            .handoff()
+            .expect("the missing-draft terminal must project");
         let StoreTerminalCause::Failure(header_cause) =
             terminal.ledger_evidence().header().terminal_cause()
         else {
@@ -2775,7 +2620,8 @@ mod tests {
         let terminal = owner
             .prepare_scene(None)
             .expect("the authoring rejection must retain its exact terminal")
-            .handoff();
+            .handoff()
+            .expect("the authoring rejection terminal must project");
         let StoreTerminalCause::Failure(header_cause) =
             terminal.ledger_evidence().header().terminal_cause()
         else {
@@ -2817,7 +2663,8 @@ mod tests {
         let terminal = owner
             .prepare_scene(None)
             .expect("cancelled authoring must retain its exact terminal")
-            .handoff();
+            .handoff()
+            .expect("the cancelled authoring terminal must project");
         assert!(matches!(
             terminal.control_cause(),
             Some(ControlCause::Cancelled {
@@ -2853,7 +2700,8 @@ mod tests {
         let terminal = owner
             .prepare_scene(None)
             .expect("work exhaustion must retain its exact terminal")
-            .handoff();
+            .handoff()
+            .expect("the work-exhaustion terminal must project");
         let StoreTerminalCause::Failure(header_cause) =
             terminal.ledger_evidence().header().terminal_cause()
         else {
@@ -2878,7 +2726,8 @@ mod tests {
         let terminal = owner
             .prepare_scene(None)
             .expect("a missing parser descriptor must prepare exact failure evidence")
-            .handoff();
+            .handoff()
+            .expect("the missing-draft terminal must project");
         assert!(!terminal.is_success());
         assert!(matches!(
             terminal.ledger_evidence().header().terminal_cause(),
@@ -2904,16 +2753,57 @@ mod tests {
         let left_terminal = left
             .prepare_scene(Some(right_draft))
             .expect("the left owner must freeze a foreign-draft failure")
-            .handoff();
+            .handoff()
+            .expect("the left foreign-draft terminal must project");
         let right_terminal = right
             .prepare_scene(Some(left_draft))
             .expect("the right owner must freeze a foreign-draft failure")
-            .handoff();
+            .handoff()
+            .expect("the right foreign-draft terminal must project");
         assert!(!left_terminal.is_success());
         assert!(!right_terminal.is_success());
 
         drop(left_terminal);
         drop(right_terminal);
+        for account in [left_account, right_account] {
+            let released = account.snapshot();
+            assert_eq!(released.live_retained_bytes(), 0);
+            assert_eq!(released.live_retained_allocations(), 0);
+            assert!(!released.poisoned());
+        }
+    }
+
+    #[test]
+    fn sibling_prepared_scene_owners_cannot_be_crossed_at_handoff() {
+        let (left, left_account) = start_store_owner_with_account();
+        let (right, right_account) = start_store_owner_with_account();
+        let left_draft =
+            submit_two_node(&left).expect("the left import owner must activate its draft");
+        let right_draft =
+            submit_two_node(&right).expect("the right import owner must activate its draft");
+
+        let ImportStorePreparedScene::Success {
+            token: left_token,
+            store: left_store,
+        } = left
+            .prepare_scene(Some(left_draft))
+            .expect("the left Scene must prepare its exact success owners")
+        else {
+            panic!("the left Scene must prepare a success")
+        };
+        let ImportStorePreparedScene::Success {
+            token: right_token,
+            store: right_store,
+        } = right
+            .prepare_scene(Some(right_draft))
+            .expect("the right Scene must prepare its exact success owners")
+        else {
+            panic!("the right Scene must prepare a success")
+        };
+
+        assert!(left_token.handoff(right_store).is_err());
+        assert!(right_token.handoff(left_store).is_err());
+
         for account in [left_account, right_account] {
             let released = account.snapshot();
             assert_eq!(released.live_retained_bytes(), 0);
@@ -2938,7 +2828,8 @@ mod tests {
         let terminal = owner
             .prepare_scene(Some(draft))
             .expect("the first descriptor must remain paired after the rejected submission")
-            .handoff();
+            .handoff()
+            .expect("the retained first Scene terminal must project");
         assert!(terminal.is_success());
 
         drop(terminal);
@@ -2974,7 +2865,8 @@ mod tests {
         let terminal = owner
             .prepare_scene(None)
             .expect("the quiescent session must prepare its deferred authoring failure")
-            .handoff();
+            .handoff()
+            .expect("the deferred authoring terminal must project");
         assert!(!terminal.is_success());
         assert!(matches!(
             terminal.ledger_evidence().header().terminal_cause(),
@@ -3006,7 +2898,8 @@ mod tests {
         let terminal = owner
             .prepare_scene(None)
             .expect("a quiescent ledger rejection must still prepare its terminal evidence")
-            .handoff();
+            .handoff()
+            .expect("the deferred ledger terminal must project");
         assert!(!terminal.is_success());
 
         drop(terminal);
