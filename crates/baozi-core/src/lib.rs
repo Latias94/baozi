@@ -6,11 +6,6 @@
     dead_code,
     reason = "canonical domain implementation is exposed through sealed views"
 )]
-mod animation;
-#[allow(
-    dead_code,
-    reason = "canonical domain implementation is exposed through sealed views"
-)]
 mod appearance;
 #[allow(
     dead_code,
@@ -27,11 +22,6 @@ mod canonical_scene;
     reason = "canonical domain implementation is exposed through sealed views"
 )]
 mod deform;
-#[allow(
-    dead_code,
-    reason = "canonical domain implementation is exposed through sealed views"
-)]
-mod derived;
 pub mod diagnostic;
 #[allow(
     dead_code,
@@ -71,11 +61,6 @@ mod ordered_map;
     reason = "canonical domain implementation is exposed through sealed views"
 )]
 mod provenance;
-#[allow(
-    dead_code,
-    reason = "canonical domain implementation is exposed through sealed views"
-)]
-mod remap;
 #[allow(
     dead_code,
     reason = "canonical domain implementation is exposed through sealed views"

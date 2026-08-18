@@ -22,14 +22,12 @@ use crate::canonical_scene::store::schema::profile::{
     ProfileLineageParentSchema, ProfileLineageProvenanceSchema, profile_owner_field,
     profile_provenance_scalar, profile_segment_field,
 };
-use crate::derived::DerivedAbsenceReason;
 use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
 use crate::identity::{
     NodeId, SceneEntityKind, SceneGenerationError, SceneGenerationId, SceneLookupError,
 };
 use crate::math::{Color, Mat4, Quat, Vec3};
 use crate::provenance::{DIGEST_LEN, OptionsDigest};
-use crate::remap::RemapChange;
 use crate::scene_space::SceneSpace;
 
 use super::super::tests::{
@@ -39,7 +37,7 @@ use super::super::tests::{
 use super::super::{NodeSceneDraftBuild, NodeSceneSuccessParts};
 use super::execution::NodeSceneEditPrepareError;
 use super::plan::NodeSceneEditPlanError;
-use super::report::CanonicalRemapSet;
+use super::report::{CanonicalRemapSet, DerivedAbsenceReason, RemapChange};
 use super::source::{
     NodeTransformEditStart, NodeTransformEditStartError, try_begin_node_transform_edit,
 };
