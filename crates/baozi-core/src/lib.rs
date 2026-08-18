@@ -1,54 +1,91 @@
 #![forbid(unsafe_code)]
 
-//! Canonical Baozi scene, math, material, diagnostic, and domain error types.
+//! Canonical Baozi scene, math, diagnostic, and domain types.
 
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod animation;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod appearance;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod attribute;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
-mod canonical_edit;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "sealed canonical storage is reached through feature-scoped crate adapters"
+)]
 mod canonical_scene;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
-mod canonical_validation;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod deform;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod derived;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
-mod derived_input;
 pub mod diagnostic;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod entity;
-pub mod error;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod extension;
 mod format_id;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod geometry;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod identity;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod image;
-pub mod material;
 pub mod math;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod namespaced;
 mod ordered_map;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod provenance;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod remap;
-pub mod scene;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain implementation is exposed through sealed views"
+)]
 mod scene_space;
-mod scene_storage;
-#[allow(dead_code, reason = "U4-private-canonical-rail: remove at U4 cutover")]
+#[allow(
+    dead_code,
+    reason = "canonical domain values still own retained nested payloads"
+)]
 mod shared_storage;
-mod validation;
 mod validation_control;
 
 #[cfg(not(feature = "_u4-import"))]
@@ -81,37 +118,16 @@ pub mod __canonical_geometry {
     pub use crate::canonical_scene::store::api::geometry::*;
 }
 
+pub use canonical_scene::store::api::scene::{
+    SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
+};
 pub use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSeverity, SourceLocation};
-pub use error::{
-    MetadataKeyViolation, MetadataValueViolation, SceneAnimationValueKind, SceneBuildError,
-    SceneBuildResource, SceneCameraParameter, SceneLightParameter, SceneMeshChannel,
-    SceneMetadataOwner, SceneReferenceKind, SceneStringOwner, SceneStringViolation,
-    SceneValidationCode, SceneValidationData, SceneValidationError, SceneValidationIssue,
-    SceneValidationLimit, SceneValidationPath,
-};
 pub use format_id::{FormatId, FormatIdError, MAX_FORMAT_ID_LEN};
-pub use material::{
-    AlphaMode, ColorSpace, Material, MaterialProperty, MaterialPropertyMap, ShadingModel, Texture,
-    TextureFilterMode, TextureRole, TextureSampler, TextureSlot, TextureSource, TextureTransform,
-    TextureWrapMode,
-};
+pub use identity::SceneGenerationId;
 pub use math::{Aabb, Color, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use ordered_map::{
     OrderedMap, OrderedMapCapacityPlan, OrderedMapError, OrderedMapIter, PreparedOrderedMapCapacity,
 };
-pub use scene::{
-    Animation, AnimationChannel, AnimationId, AnimationInterpolation, AnimationProperty,
-    AnimationTarget, AnimationValues, Camera, CameraId, CameraProjection, Light, LightId,
-    LightKind, MaterialId, Mesh, MeshBinding, MeshId, MetadataMap, MetadataValue, MorphTarget,
-    Node, NodeId, PreparedNodeInsert, PreparedNodeMeshBindingInsert, PreparedSceneInsert,
-    PreparedSceneMetadataInsert, PrimitiveTopology, SceneBuilder, SceneCapacityPlan,
-    SceneCollection, SceneDraft, SceneEdit, SceneGenerationId, SceneMetadataCapacityPlan,
-    SceneNodeCapacityPlan, SceneSpace, Skin, SkinId, TextureId, ValidatedScene, VertexAttribute,
-    VertexAttributeData, VertexAttributeSemantic, validate_scene, validate_scene_with,
-};
-pub use scene_storage::{SceneBuildValue, SceneStorageFootprint, SceneValueFootprint};
 pub use validation_control::{
-    SCENE_VALIDATION_POLL_INTERVAL, SceneCanonicalCounts, SceneFootprint, SceneReservationKind,
-    SceneValidationControl, SceneValidationFailure, SceneValidationLimits, SceneValidationStats,
-    SceneValidationSuccess, SceneValidationWork,
+    SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork,
 };

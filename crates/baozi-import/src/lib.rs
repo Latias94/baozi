@@ -25,7 +25,7 @@ mod session;
 mod source_scope;
 mod store;
 
-pub use baozi_core::__canonical_import::{
+pub use baozi_core::{
     SceneGenerationId, SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
 };
 

@@ -900,9 +900,9 @@ fn scene_from_document(
     geometry_contracts: &GeometryContracts<'_>,
     resolved_texture_uris: &ResolvedTextureUris<'_>,
 ) -> Result<SceneDraft> {
-    let external_images = load_external_image_resources(ctx, gltf, &resolved_texture_uris)?;
+    let external_images = load_external_image_resources(ctx, gltf, resolved_texture_uris)?;
     let appearance_storage =
-        build_appearance_storage(ctx, gltf, &resolved_texture_uris, &external_images)?;
+        build_appearance_storage(ctx, gltf, resolved_texture_uris, &external_images)?;
     let geometry_storage = build_geometry_storage(ctx, gltf, buffers, geometry_contracts)?;
     let cameras = build_cameras(ctx, gltf)?;
     add_unsupported_domain_diagnostics(ctx, gltf)?;

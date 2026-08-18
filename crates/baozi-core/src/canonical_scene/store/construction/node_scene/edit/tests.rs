@@ -37,9 +37,9 @@ use super::super::tests::{
     test_factory, test_limits,
 };
 use super::super::{NodeSceneDraftBuild, NodeSceneSuccessParts};
-use super::CanonicalRemapSet;
 use super::execution::NodeSceneEditPrepareError;
 use super::plan::NodeSceneEditPlanError;
+use super::report::CanonicalRemapSet;
 use super::source::{
     NodeTransformEditStart, NodeTransformEditStartError, try_begin_node_transform_edit,
 };

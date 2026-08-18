@@ -7,9 +7,9 @@ use crate::ledger::{ImportDimension, ImportLedgerSnapshot};
 use crate::loss::ImportLossEvidence;
 use crate::source_scope::SourceScopeRecord;
 use baozi_core::__canonical_import::{
-    SceneGenerationId, SceneMinimalFallback, SceneRichFailure, SceneSuccessReport, ValidatedScene,
+    SceneMinimalFallback, SceneRichFailure, SceneSuccessReport, ValidatedScene,
 };
-use baozi_core::FormatId;
+use baozi_core::{FormatId, SceneGenerationId};
 use baozi_io::AssetPath;
 use baozi_operation::LedgerLimitsError;
 use std::fmt;
@@ -124,6 +124,10 @@ impl ImportRunError {
 
     /// Extracts the complete operation failure without discarding an
     /// initialization error on mismatch.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the error retains its linear terminal owner without post-terminal allocation"
+    )]
     pub fn into_operation_failure(self) -> Result<ImportFailure, Self> {
         match self {
             error @ (Self::Initialization { .. } | Self::Finalization { .. }) => Err(error),
@@ -426,7 +430,7 @@ pub struct ImportFailure {
     loss_evidence: Vec<ImportLossEvidence>,
     source_scope_record: Option<SourceScopeRecord>,
     ledger: ImportLedgerSnapshot,
-    store_owner: ImportFailureStoreOwner,
+    _store_owner: ImportFailureStoreOwner,
     last_completed: ImportPhaseEvidence,
 }
 
@@ -458,7 +462,7 @@ impl ImportFailure {
             loss_evidence: parts.loss_evidence,
             source_scope_record: parts.source_scope_record,
             ledger: parts.ledger,
-            store_owner: parts.store_owner,
+            _store_owner: parts.store_owner,
             last_completed: parts.last_completed,
         }
     }
@@ -531,8 +535,8 @@ impl fmt::Debug for ImportFailure {
 }
 
 pub(crate) enum ImportFailureStoreOwner {
-    Rich(SceneRichFailure),
-    Minimal(SceneMinimalFallback),
+    Rich { _owner: SceneRichFailure },
+    Minimal { _owner: SceneMinimalFallback },
 }
 
 impl fmt::Display for ImportFailure {

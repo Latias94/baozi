@@ -1,5 +1,6 @@
 use crate::mtl::{
-    self, MaterialLibrary, ParsedMaterial, ParsedMetadata, ParsedMetadataValue, ParsedTexture,
+    self, MaterialLibrary, ParsedAlphaMode, ParsedMaterial, ParsedMetadata, ParsedMetadataValue,
+    ParsedTexture,
 };
 use crate::obj::{Face, FaceVertex, ParsedObj, StateNameId};
 use crate::parser::usize_amount;
@@ -743,11 +744,8 @@ fn material_from_parsed<'input, 'scope>(
         CanonicalAlphaMode::Blend
     } else {
         match parsed.alpha_mode {
-            baozi_core::AlphaMode::Opaque => CanonicalAlphaMode::Opaque,
-            baozi_core::AlphaMode::Blend => CanonicalAlphaMode::Blend,
-            baozi_core::AlphaMode::Mask => CanonicalAlphaMode::mask(0.5).map_err(|_| {
-                scope.format_failure(ObjFailure::internal("invalid-material-alpha-cutoff"))
-            })?,
+            ParsedAlphaMode::Opaque => CanonicalAlphaMode::Opaque,
+            ParsedAlphaMode::Blend => CanonicalAlphaMode::Blend,
         }
     };
 

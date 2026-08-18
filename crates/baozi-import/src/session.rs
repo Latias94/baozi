@@ -152,6 +152,10 @@ pub fn import_bytes(
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "import errors retain the linear terminal owner without post-terminal allocation"
+)]
 fn try_start_store(
     request: &PreparedImportRequest,
     control: ImportOperationControl,
@@ -909,7 +913,7 @@ impl<'a> ImportSession<'a> {
                     Some(format.id().clone()),
                     staging,
                     crate::ImportLedgerSnapshot::from_store(evidence),
-                    ImportFailureStoreOwner::Rich(failure),
+                    ImportFailureStoreOwner::Rich { _owner: failure },
                     last_completed,
                 )))
             }
@@ -929,13 +933,17 @@ impl<'a> ImportSession<'a> {
                     Some(format.id().clone()),
                     staging,
                     crate::ImportLedgerSnapshot::from_store(evidence),
-                    ImportFailureStoreOwner::Minimal(fallback),
+                    ImportFailureStoreOwner::Minimal { _owner: fallback },
                     last_completed,
                 )))
             }
         }
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "import failures retain the linear terminal owner without post-terminal allocation"
+    )]
     fn finalize_failure(mut self, cause: ImportCause) -> ImportResult<ImportReport> {
         let selected_format = self
             .selected
@@ -974,7 +982,7 @@ impl<'a> ImportSession<'a> {
                     selected_format,
                     staging,
                     crate::ImportLedgerSnapshot::from_store(evidence),
-                    ImportFailureStoreOwner::Rich(failure),
+                    ImportFailureStoreOwner::Rich { _owner: failure },
                     last_completed,
                 )
             }
@@ -996,7 +1004,7 @@ impl<'a> ImportSession<'a> {
                     selected_format,
                     staging,
                     crate::ImportLedgerSnapshot::from_store(evidence),
-                    ImportFailureStoreOwner::Minimal(fallback),
+                    ImportFailureStoreOwner::Minimal { _owner: fallback },
                     last_completed,
                 )
             }

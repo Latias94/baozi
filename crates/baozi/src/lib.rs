@@ -6,17 +6,7 @@
 //! `native-fs` capability is currently registered.
 
 pub use baozi_core::{
-    Aabb, AlphaMode, Animation, AnimationChannel, AnimationId, AnimationInterpolation,
-    AnimationProperty, AnimationTarget, AnimationValues, Camera, CameraId, CameraProjection, Color,
-    ColorSpace, FormatId, FormatIdError, Light, LightId, LightKind, Mat4, Material, MaterialId,
-    MaterialProperty, MaterialPropertyMap, Mesh, MeshBinding, MeshId, MetadataKeyViolation,
-    MetadataMap, MetadataValue, MetadataValueViolation, MorphTarget, Node, NodeId,
-    PrimitiveTopology, Quat, SceneCanonicalCounts, SceneCollection, SceneFootprint,
-    SceneGenerationId, SceneMetadataOwner, SceneSpace, SceneStorageFootprint, SceneStringOwner,
-    SceneStringViolation, SceneValidationError, SceneValidationLimit, SceneValidationStats, Skin,
-    SkinId, Texture, TextureFilterMode, TextureId, TextureRole, TextureSampler, TextureSlot,
-    TextureSource, TextureTransform, TextureWrapMode, Vec2, Vec3, Vec4, VertexAttribute,
-    VertexAttributeData, VertexAttributeSemantic,
+    Aabb, Color, FormatId, FormatIdError, Mat4, Quat, SceneGenerationId, Vec2, Vec3, Vec4,
 };
 pub use baozi_import::{
     CapabilityStatus, CauseOwner, ConformancePolicy, DeclarationEvidenceAuthority,

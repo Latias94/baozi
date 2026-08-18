@@ -194,12 +194,14 @@ impl FormatImporter for ReentrantImporter {
     }
 }
 
-fn registry_fixture() -> (
+type RegistryFixture = (
     RegistrySnapshot,
     FormatOptionKey<ReentrantOptions>,
     Arc<ParserOverlap>,
     Arc<Mutex<Vec<ParseObservation>>>,
-) {
+);
+
+fn registry_fixture() -> RegistryFixture {
     let format = FormatId::new(FORMAT_ID).expect("qualified parser reentrancy format id");
     let schema = FormatOptionSchema::new(
         FormatOptionSchemaKey::new(

@@ -18,8 +18,8 @@ use crate::provenance::{DIGEST_LEN, OperationIdentity, OperationKind};
 
 use super::super::scratch::NodeSceneCentralValidationPlan;
 use super::super::{SceneEvidenceCounts, ValidatedNodeScene};
-use super::CanonicalInvalidations;
 use super::leaf_plan::NodeSceneInheritedLeafScanPlan;
+use super::report::CanonicalInvalidations;
 
 const NODE_TRANSFORM_PROFILE_CANONICAL_BLOCK_DELTA: u32 = 4;
 const NODE_TRANSFORM_PROFILE_PAYLOAD_LEAF_DELTA: u32 = 1;

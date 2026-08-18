@@ -522,6 +522,10 @@ impl<'scope> DependencyOutcome<'scope> {
 
     /// Consumes the outcome, preserving ownership of either the admitted snapshot or its
     /// structured unavailable evidence.
+    #[allow(
+        clippy::result_large_err,
+        reason = "dependency evidence remains inline so unavailable outcomes need no failure-path allocation"
+    )]
     pub fn into_result(self) -> Result<DependencySnapshot<'scope>, OptionalDependencyEvidence> {
         match self.inner {
             DependencyOutcomeKind::Available(snapshot) => Ok(snapshot),

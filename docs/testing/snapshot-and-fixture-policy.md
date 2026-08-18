@@ -5,13 +5,13 @@ format, or a promise that `Scene` debug output is stable.
 
 ## Snapshot Schema
 
-`baozi-test-support` owns the normalized scene snapshot schema used by parser tests. The schema is
-handwritten text with a version line, stable object IDs, deterministic metadata key ordering,
-bounded vertex samples, material summaries, and diagnostics sorted by severity, code, source,
-location, and message.
+`baozi-core` owns the bounded canonical Scene snapshot traversed by parser and facade tests. The
+snapshot combines a complete, versioned semantic digest with a bounded review preview and typed
+totals. Tests consume that API through `ValidatedScene`; test support does not duplicate the Scene
+or define a second snapshot schema.
 
-Floats are printed with six decimal places by default. Negative zero is normalized to positive zero
-so geometry snapshots do not churn on platform-specific formatting details.
+Snapshot traversal and normalization rules are defined beside the retained canonical schema. Tests
+must use explicit preview-byte, collection-item, and work limits.
 
 ## Fixture Rules
 

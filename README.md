@@ -29,7 +29,7 @@ and resource-admission gates pass.
 | `baozi-format-obj` | OBJ/MTL importer |
 | `baozi-format-ply` | PLY importer; admitted for source builds but not yet published |
 | `baozi-format-gltf` | Internal glTF/GLB backend candidate; not facade-admitted |
-| `baozi-test-support` | Test snapshots and fixture helpers |
+| `baozi-test-support` | Format maturity and generated fixture helpers |
 | `baozi-xtask` | Bounded repository conformance and architecture-support checks; ADR semantics remain human-reviewed |
 
 ## Format Status

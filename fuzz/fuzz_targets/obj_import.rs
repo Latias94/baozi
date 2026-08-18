@@ -4,8 +4,7 @@ mod support;
 
 use baozi_format_obj::{FORMAT_ID, ObjImporter};
 use baozi_import::{
-    ImportOperationControl, PreparedImportRequest, SameAuthorityResolver, ValidatedScene,
-    import_asset_with_resolver,
+    ImportOperationControl, PreparedImportRequest, SameAuthorityResolver, import_asset_with_resolver,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use libfuzzer_sys::fuzz_target;
@@ -37,6 +36,6 @@ fuzz_target!(|data: &[u8]| {
         &SameAuthorityResolver,
         ImportOperationControl::default(),
     ) {
-        let _: &ValidatedScene = report.scene();
+        support::assert_validated_snapshot(report.scene());
     }
 });

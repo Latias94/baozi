@@ -1,8 +1,8 @@
 # Fuzzing
 
-Baozi parser and contract fuzzing uses `cargo-fuzz` and libFuzzer. Parser targets
-exercise production import paths, while generic contract targets cover registry
-detection and central Scene validation independently of any one format. The
+Baozi parser and contract fuzzing uses `cargo-fuzz` and libFuzzer. Parser targets exercise
+production import paths, central Scene validation, and bounded semantic snapshot capture, while the
+generic registry target covers format detection independently. The
 canonical sanitizer smoke run is the Linux CI job in `.github/workflows/ci.yml`
 because the Rust nightly, compiler-rt, and sanitizer runtime are pinned and run
 in a predictable Linux environment there.
@@ -32,8 +32,6 @@ cargo +nightly-2026-05-27 fuzz check ply_import
 cargo +nightly-2026-05-27 fuzz run ply_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz check registry_detection
 cargo +nightly-2026-05-27 fuzz run registry_detection -- -runs=256 -max_len=4106
-cargo +nightly-2026-05-27 fuzz check scene_validation
-cargo +nightly-2026-05-27 fuzz run scene_validation -- -runs=256 -max_len=4096
 cargo +nightly-2026-05-27 fuzz check gltf_import
 ```
 
@@ -64,7 +62,6 @@ cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz run ply_import -- -runs=256
 cargo +nightly-2026-05-27 fuzz run registry_detection -- -runs=256 -max_len=4106
-cargo +nightly-2026-05-27 fuzz run scene_validation -- -runs=256 -max_len=4096
 ```
 
 Known Windows outcomes:
@@ -113,9 +110,8 @@ infrastructure or promoting a parser support tier. Broader CI policy lives in [C
 
 | Target | Primary crate | Coverage focus |
 | --- | --- | --- |
-| `stl_import` | `baozi-format-stl` | Sanitizer-run target for binary and ASCII STL facade import. |
-| `obj_import` | `baozi-format-obj` | Sanitizer-run target for OBJ facade import plus optional MTL sidecar bytes split by the first NUL byte. |
-| `ply_import` | `baozi-format-ply` | Sanitizer-run target for PLY ASCII and binary facade import. |
+| `stl_import` | `baozi-format-stl` | Sanitizer-run target for binary and ASCII STL facade import; every success traverses the canonical snapshot. |
+| `obj_import` | `baozi-format-obj` | Sanitizer-run target for OBJ facade import plus optional MTL sidecar bytes split by the first NUL byte; every success traverses the canonical snapshot. |
+| `ply_import` | `baozi-format-ply` | Sanitizer-run target for PLY ASCII and binary facade import; every success traverses the canonical snapshot. |
 | `registry_detection` | `baozi-import` | Sanitizer-run contract target for bounded Automatic, Preferred, and Forced detection through compiled requests and the public import session. It checks that registration order cannot change selection or detection evidence. |
-| `scene_validation` | `baozi-core` | Sanitizer-run contract target for bounded valid, singly corrupted, and tight-limit Scene drafts through central validation and publication. |
-| `gltf_import` | `baozi-format-gltf` | Non-admitted check-only target for the internal glTF/GLB candidate. Inputs beginning with the `glTF` magic are treated as whole GLB bytes; other inputs use primary `.gltf` bytes plus external `buffer.bin` bytes split by the first NUL byte. It is not facade or sanitizer evidence. |
+| `gltf_import` | `baozi-format-gltf` | Non-admitted check-only target for the internal glTF/GLB candidate. Inputs beginning with the `glTF` magic are treated as whole GLB bytes; other inputs use primary `.gltf` bytes plus external `buffer.bin` bytes split by the first NUL byte. Successful candidates traverse the canonical snapshot, but this target is not facade or sanitizer evidence. |

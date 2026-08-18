@@ -308,7 +308,6 @@ jobs:
           - obj_import
           - ply_import
           - registry_detection
-          - scene_validation
     steps:
       - name: Checkout
         uses: actions/checkout@v7

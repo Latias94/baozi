@@ -26,7 +26,7 @@ pub(crate) mod continuation;
 pub(crate) mod geometry;
 #[cfg(feature = "_u4-import")]
 pub(crate) mod import;
-mod scene;
+pub(crate) mod scene;
 
 pub(crate) use scene::ValidatedScene;
 

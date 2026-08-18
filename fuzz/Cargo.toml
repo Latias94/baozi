@@ -54,11 +54,4 @@ test = false
 doc = false
 bench = false
 
-[[bin]]
-name = "scene_validation"
-path = "fuzz_targets/scene_validation.rs"
-test = false
-doc = false
-bench = false
-
 [workspace]

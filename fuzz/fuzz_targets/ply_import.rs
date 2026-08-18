@@ -3,7 +3,7 @@
 mod support;
 
 use baozi_format_ply::PlyImporter;
-use baozi_import::{ImportOperationControl, PreparedImportRequest, ValidatedScene, import_asset};
+use baozi_import::{ImportOperationControl, PreparedImportRequest, import_asset};
 use baozi_io::{AssetPath, MemoryAssetIo};
 use libfuzzer_sys::fuzz_target;
 use std::sync::{Arc, OnceLock};
@@ -17,6 +17,6 @@ fuzz_target!(|data: &[u8]| {
         .expect("the fuzz asset insertion must succeed");
 
     if let Ok(report) = import_asset(request, &io, source, ImportOperationControl::default()) {
-        let _: &ValidatedScene = report.scene();
+        support::assert_validated_snapshot(report.scene());
     }
 });

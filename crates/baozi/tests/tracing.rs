@@ -86,10 +86,6 @@ fn facade_tracing_is_fieldless_and_does_not_change_results() {
                 name: "baozi.parse",
                 fields: Vec::new(),
             },
-            CapturedSpan {
-                name: "baozi.validate",
-                fields: Vec::new(),
-            },
         ]
     );
     assert_import_eq(&without_subscriber, &with_subscriber);

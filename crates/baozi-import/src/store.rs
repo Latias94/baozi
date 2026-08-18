@@ -1,4 +1,4 @@
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{RefCell, RefMut};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
@@ -78,6 +78,7 @@ impl ImportStoreTerminalCause {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn code(self) -> Option<u32> {
         match self {
             Self::Success => None,
@@ -166,16 +167,14 @@ impl ImportStorePhaseEvidence {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn phase(self) -> ImportLedgerPhase {
         self.phase
     }
 
+    #[cfg(test)]
     pub(crate) const fn current_live_bytes(self) -> u64 {
         self.current_live_bytes
-    }
-
-    pub(crate) const fn peak_live_bytes(self) -> u64 {
-        self.peak_live_bytes
     }
 }
 
@@ -222,6 +221,7 @@ impl ImportStoreDimensionEvidence {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn dimension(self) -> ImportDimension {
         self.dimension
     }
@@ -242,16 +242,13 @@ impl ImportStoreDimensionEvidence {
         self.peak_live_bytes
     }
 
+    #[cfg(test)]
     pub(crate) const fn pending_publication(self) -> u64 {
         self.pending_publication
     }
 
     pub(crate) const fn committed(self) -> u64 {
         self.committed
-    }
-
-    pub(crate) const fn committed_canonical_output(self) -> u64 {
-        self.committed_canonical_output
     }
 
     pub(crate) const fn published_outcome_evidence(self) -> u64 {
@@ -305,38 +302,26 @@ impl ImportStoreTerminalDimensionEvidence {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn dimension(self) -> ImportStoreTerminalDimension {
         self.dimension
     }
 
-    pub(crate) const fn attempted(self) -> u64 {
-        self.attempted
-    }
-
-    pub(crate) const fn consumed(self) -> u64 {
-        self.consumed
-    }
-
+    #[cfg(test)]
     pub(crate) const fn current_live_bytes(self) -> u64 {
         self.current_live_bytes
     }
 
-    pub(crate) const fn peak_live_bytes(self) -> u64 {
-        self.peak_live_bytes
-    }
-
+    #[cfg(test)]
     pub(crate) const fn pending_publication(self) -> u64 {
         self.pending_publication
-    }
-
-    pub(crate) const fn committed(self) -> u64 {
-        self.committed
     }
 
     pub(crate) const fn committed_canonical_output(self) -> u64 {
         self.committed_canonical_output
     }
 
+    #[cfg(test)]
     pub(crate) const fn published_outcome_evidence(self) -> u64 {
         self.published_outcome_evidence
     }
@@ -424,10 +409,6 @@ impl ImportStoreTerminalEvidence {
         })
     }
 
-    pub(crate) const fn schema_revision(&self) -> u32 {
-        self.schema_revision
-    }
-
     pub(crate) const fn cause(&self) -> ImportStoreTerminalCause {
         self.cause
     }
@@ -456,18 +437,22 @@ impl ImportStoreTerminalEvidence {
         self.peak_evidence_bytes
     }
 
+    #[cfg(test)]
     pub(crate) const fn phases(&self) -> &[ImportStorePhaseEvidence] {
         &self.phases
     }
 
+    #[cfg(test)]
     pub(crate) const fn dimensions(&self) -> &[ImportStoreDimensionEvidence] {
         &self.dimensions
     }
 
+    #[cfg(test)]
     pub(crate) const fn terminal_dimensions(&self) -> &[ImportStoreTerminalDimensionEvidence] {
         &self.terminal_dimensions
     }
 
+    #[cfg(test)]
     pub(crate) fn phase(&self, phase: ImportLedgerPhase) -> Option<ImportStorePhaseEvidence> {
         self.phases.get(phase_index(phase)).copied()
     }
@@ -479,6 +464,7 @@ impl ImportStoreTerminalEvidence {
         self.dimensions.get(dimension as usize).copied()
     }
 
+    #[cfg(test)]
     pub(crate) fn terminal_dimension(
         &self,
         dimension: ImportStoreTerminalDimension,
@@ -563,14 +549,6 @@ impl ImportStoreTerminalOutcome {
                     scene_failure_submitted,
                 })
             }
-        }
-    }
-
-    pub(crate) const fn evidence(&self) -> &ImportStoreTerminalEvidence {
-        match self {
-            Self::Success { evidence, .. }
-            | Self::RichFailure { evidence, .. }
-            | Self::MinimalFallback { evidence, .. } => evidence,
         }
     }
 }
@@ -1052,6 +1030,7 @@ impl ImportStoreVocabulary {
             .find_map(|(dimension, candidate)| (*candidate == key).then_some(*dimension))
     }
 
+    #[cfg(test)]
     pub(crate) const fn outcome_evidence_dimension(&self) -> StoreDimensionKey {
         self.startup_outcome_evidence
     }
@@ -1354,25 +1333,18 @@ impl ImportStoreSessionOwner {
                 true,
                 false,
             ),
-            ImportStoreSessionState::Pending(ImportPendingScene::Failure { owner, .. }) => {
-                drop(draft);
-                (
-                    owner.prepare().map_err(ImportStoreActivationError::Scene)?,
-                    true,
-                    true,
-                )
-            }
-            ImportStoreSessionState::Active(operation) => {
-                drop(draft);
-                (
-                    prepare_unactivated_scene(operation, IMPORT_SCENE_NOT_SUBMITTED_CODE)
-                        .map_err(ImportStoreActivationError::Scene)?,
-                    false,
-                    false,
-                )
-            }
+            ImportStoreSessionState::Pending(ImportPendingScene::Failure { owner, .. }) => (
+                owner.prepare().map_err(ImportStoreActivationError::Scene)?,
+                true,
+                true,
+            ),
+            ImportStoreSessionState::Active(operation) => (
+                prepare_unactivated_scene(operation, IMPORT_SCENE_NOT_SUBMITTED_CODE)
+                    .map_err(ImportStoreActivationError::Scene)?,
+                false,
+                false,
+            ),
             ImportStoreSessionState::Transitioning | ImportStoreSessionState::Contained => {
-                drop(draft);
                 return Err(ImportStoreActivationError::StoreUnavailable(
                     ImportStoreHostError::OperationContained,
                 ));
@@ -1513,10 +1485,6 @@ pub(crate) struct ImportStoreHost<'session> {
     reason = "producer failures retain exact typed store causes without allocating on error paths"
 )]
 impl ImportStoreHost<'_> {
-    pub(crate) fn same_session(self, other: Self) -> bool {
-        std::ptr::eq(self.state, other.state) && std::ptr::eq(self.vocabulary, other.vocabulary)
-    }
-
     fn runtime_error(&self, cause: StoreRuntimeError) -> ImportStoreHostError {
         project_store_runtime_error(self.vocabulary, cause)
     }
@@ -1594,6 +1562,7 @@ impl ImportStoreHost<'_> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn transition(
         &self,
         reservation: &mut ImportStoreReservation,
@@ -1611,6 +1580,7 @@ impl ImportStoreHost<'_> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn validate_live_owner(
         &self,
         reservation: &ImportStoreReservation,
@@ -1682,26 +1652,6 @@ impl ImportStoreHost<'_> {
             .map_err(|cause| self.runtime_error(cause))
     }
 
-    pub(crate) fn complete_phase(
-        &self,
-        phase: ImportLedgerPhase,
-    ) -> Result<(), ImportStoreHostError> {
-        let operation = self
-            .state
-            .try_borrow()
-            .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
-        let operation = Ref::filter_map(operation, |state| match state {
-            ImportStoreSessionState::Active(operation) => Some(operation),
-            ImportStoreSessionState::Transitioning
-            | ImportStoreSessionState::Pending(_)
-            | ImportStoreSessionState::Contained => None,
-        })
-        .map_err(|state| inactive_store_state_error(&state))?;
-        operation
-            .try_complete_phase(self.vocabulary.phase(phase))
-            .map_err(|cause| self.runtime_error(cause))
-    }
-
     pub(crate) fn with_observed_work<const N: usize, T, E>(
         &self,
         charges: [(ImportDimension, u64); N],
@@ -1749,24 +1699,7 @@ pub(crate) struct ImportObservedWork<'operation, const N: usize> {
     reason = "observed-work errors preserve exact ledger and control causes without boxing"
 )]
 impl<const N: usize> ImportObservedWork<'_, N> {
-    pub(crate) fn poll(&mut self) -> Result<(), ImportStoreHostError> {
-        self.raw
-            .poll()
-            .map_err(|cause| project_store_runtime_error(self.vocabulary, cause))
-    }
-
-    pub(crate) fn report_progress(
-        &mut self,
-        phase: ImportProgressPhase,
-        unit: ImportProgressUnit,
-        completed: u64,
-        total: Option<u64>,
-    ) -> Result<(), ImportStoreHostError> {
-        self.raw
-            .report_progress(phase, unit, completed, total)
-            .map_err(|cause| project_store_runtime_error(self.vocabulary, cause))
-    }
-
+    #[cfg(test)]
     pub(crate) fn remaining(&self) -> [u64; N] {
         self.raw.remaining()
     }
@@ -2257,6 +2190,7 @@ impl std::error::Error for ImportStoreBootstrapError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::size_of;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2278,6 +2212,18 @@ mod tests {
     use crate::ledger::{
         ImportOperationControl, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit,
     };
+
+    #[test]
+    fn retained_session_owner_has_a_bounded_inline_stack_footprint() {
+        const MAX_INLINE_SESSION_OWNER_BYTES: usize = 64 * 1024;
+
+        assert!(size_of::<ImportStoreOperation>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportSceneDraftBuild>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportPendingSceneDraftOwner>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportPendingSceneFailureOwner>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportStoreSessionState>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportStoreSessionOwner>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+    }
 
     fn ordinary_work_limits(limits: &ResourceLimits) -> (u64, u64) {
         let import_limits = import_ledger_limits(limits).expect("test import policy is valid");
@@ -3042,8 +2988,10 @@ mod tests {
 
     #[test]
     fn ledger_rejection_can_prepare_deferred_terminal_after_the_session_is_quiescent() {
-        let mut limits = ResourceLimits::default();
-        limits.max_open_assets = 0;
+        let limits = ResourceLimits {
+            max_open_assets: 0,
+            ..ResourceLimits::default()
+        };
         let (owner, account) =
             start_store_owner_with_account_and_control(limits, ImportOperationControl::default());
         let failure = owner

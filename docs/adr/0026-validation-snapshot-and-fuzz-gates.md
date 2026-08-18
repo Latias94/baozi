@@ -14,10 +14,11 @@ related:
 evidence:
   - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
 tracers:
-  - crates/baozi-core/tests/scene_validation.rs
-  - crates/baozi-test-support/src/snapshot.rs
-  - crates/baozi-test-support/tests/snapshot.rs
-  - fuzz/fuzz_targets/scene_validation.rs
+  - crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot.rs
+  - crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs
+  - fuzz/fuzz_targets/stl_import.rs
+  - fuzz/fuzz_targets/obj_import.rs
+  - fuzz/fuzz_targets/ply_import.rs
 ---
 
 # ADR 0026: Validation, Snapshot, and Fuzz Evidence Contract

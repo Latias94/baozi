@@ -16,7 +16,8 @@ related:
   - docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md
   - docs/adr/0043-producer-attestation-closed-input-qualification-and-import-build-identity.md
 tracers:
-  - crates/baozi-test-support/src/snapshot.rs
+  - crates/baozi-core/src/canonical_scene/store/api/scene.rs
+  - crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot.rs
 ---
 
 # ADR 0017: Serialization, Snapshot, and Cache Boundary

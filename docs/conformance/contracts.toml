@@ -12,7 +12,7 @@ evidence_revision = 2
 implementation_tracers = [
   "crates/baozi-core/src/canonical_scene/store/api/continuation.rs",
   "crates/baozi-core/src/canonical_scene/store/construction/activation.rs",
-  "crates/baozi-core/src/scene.rs",
+  "crates/baozi-core/src/canonical_scene/store/api/scene.rs",
   "crates/baozi-import/src/session.rs",
 ]
 test_tracers = [
@@ -138,7 +138,6 @@ conformance_status = "partial"
 evidence_subject = "baozi.u4.legacy-scene-deletion"
 evidence_revision = 1
 implementation_tracers = [
-  "crates/baozi-core/src/scene.rs",
   "crates/baozi-core/src/shared_storage.rs",
   "crates/baozi-import/src/request_wire.rs",
 ]
@@ -203,7 +202,9 @@ implementation_tracers = [
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs",
 ]
 test_tracers = [
-  "fuzz/fuzz_targets/scene_validation.rs",
+  "fuzz/fuzz_targets/stl_import.rs",
+  "fuzz/fuzz_targets/obj_import.rs",
+  "fuzz/fuzz_targets/ply_import.rs",
   "fuzz/fuzz_targets/gltf_import.rs",
   "docs/conformance/u4c-metrics.toml",
 ]

@@ -1,6 +1,6 @@
 use crate::material_library_role;
 use crate::parser::{self, TextDecodeFailure};
-use baozi_core::{AlphaMode, Color};
+use baozi_core::Color;
 use baozi_import::{
     DependencyOrigin, DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
     ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredOrderedMap, MeteredString,
@@ -212,9 +212,15 @@ pub(crate) struct ParsedMaterial<'scope> {
     order: usize,
     pub base_color: Color,
     pub emissive: Color,
-    pub alpha_mode: AlphaMode,
+    pub alpha_mode: ParsedAlphaMode,
     pub metadata: ParsedMetadata<'scope>,
     pub diffuse_texture: Option<ParsedTexture<'scope>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParsedAlphaMode {
+    Opaque,
+    Blend,
 }
 
 pub(crate) struct ParsedTexture<'scope> {
@@ -261,7 +267,7 @@ impl<'scope> ParsedMaterial<'scope> {
             order,
             base_color: Color::WHITE,
             emissive: Color::linear_rgba(0.0, 0.0, 0.0, 1.0),
-            alpha_mode: AlphaMode::Opaque,
+            alpha_mode: ParsedAlphaMode::Opaque,
             metadata: ParsedMetadata {
                 entries: scope.metered_ordered_map(
                     ImportStorageClass::FormatNormalization,
@@ -436,7 +442,7 @@ fn parse_mtl<'scope>(
                 {
                     material.base_color.a = alpha;
                     if alpha < 1.0 {
-                        material.alpha_mode = AlphaMode::Blend;
+                        material.alpha_mode = ParsedAlphaMode::Blend;
                     }
                 }
             }
@@ -448,7 +454,7 @@ fn parse_mtl<'scope>(
                     let alpha = 1.0 - transparency;
                     material.base_color.a = alpha;
                     if alpha < 1.0 {
-                        material.alpha_mode = AlphaMode::Blend;
+                        material.alpha_mode = ParsedAlphaMode::Blend;
                     }
                 }
             }
@@ -863,6 +869,10 @@ fn texture_path_from_map<'scope>(
     Ok(TexturePathOutcome::Missing)
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the metered string retains its reservation inline; boxing would add unmetered allocation"
+)]
 enum TexturePathOutcome<'scope> {
     Missing,
     TooLong,
