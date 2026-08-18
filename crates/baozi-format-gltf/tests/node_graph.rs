@@ -18,6 +18,7 @@ use std::sync::{
 };
 
 const GRAPH_POLL_INTERVAL: usize = 4_096;
+const CANONICAL_IMPORT_STACK_BUDGET: usize = 2 * 1024 * 1024;
 
 #[derive(Clone)]
 struct GraphPollCancellation {
@@ -500,22 +501,29 @@ fn builds_a_wide_fanout_without_duplicate_nodes() -> TestResult<()> {
 }
 
 #[test]
-fn accepts_exact_graph_limits() -> TestResult<()> {
-    let document = scene_with_roots(
-        "0",
-        r#"{ "name": "Root", "children": [1] },
-           { "name": "Middle", "children": [2] },
-           { "name": "Leaf" }"#,
-    );
-    let mut options = GltfTestOptions::memory();
-    options.limits.max_graph_nodes = 4;
-    options.limits.max_graph_edges = 3;
-    options.limits.max_graph_depth = 4;
-    options.limits.max_graph_work = 7;
+fn accepts_exact_graph_limits_within_canonical_import_stack_budget() -> TestResult<()> {
+    std::thread::Builder::new()
+        .name("gltf-canonical-import-stack-budget".into())
+        .stack_size(CANONICAL_IMPORT_STACK_BUDGET)
+        .spawn(|| -> TestResult<()> {
+            let document = scene_with_roots(
+                "0",
+                r#"{ "name": "Root", "children": [1] },
+                   { "name": "Middle", "children": [2] },
+                   { "name": "Leaf" }"#,
+            );
+            let mut options = GltfTestOptions::memory();
+            options.limits.max_graph_nodes = 4;
+            options.limits.max_graph_edges = 3;
+            options.limits.max_graph_depth = 4;
+            options.limits.max_graph_work = 7;
 
-    let report = import_graph_result(document, options)??;
-    assert!(report.scene().canonical_block_count() > 0);
-    Ok(())
+            let report = import_graph_result(document, options)??;
+            assert!(report.scene().canonical_block_count() > 0);
+            Ok(())
+        })?
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
 }
 
 #[test]

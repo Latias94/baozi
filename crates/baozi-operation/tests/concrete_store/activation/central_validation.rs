@@ -279,8 +279,28 @@ fn centrally_rejected_sequence_work(elements: usize) -> (u64, u64) {
     work
 }
 
+const CANONICAL_VALIDATION_STACK_BUDGET: usize = 2 * 1024 * 1024;
+
+fn run_with_canonical_validation_stack_budget(test: fn()) {
+    let result = std::thread::Builder::new()
+        .name("canonical-validation-stack-budget".into())
+        .stack_size(CANONICAL_VALIDATION_STACK_BUDGET)
+        .spawn(test)
+        .expect("the canonical validation stack-budget thread must start")
+        .join();
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 #[test]
 fn matching_activation_can_only_publish_through_central_validation() {
+    run_with_canonical_validation_stack_budget(
+        matching_activation_can_only_publish_through_central_validation_body,
+    );
+}
+
+fn matching_activation_can_only_publish_through_central_validation_body() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
@@ -356,6 +376,12 @@ fn matching_activation_can_only_publish_through_central_validation() {
 
 #[test]
 fn canonical_shape_contract_cannot_be_overwritten_by_requested_rejection() {
+    run_with_canonical_validation_stack_budget(
+        canonical_shape_contract_cannot_be_overwritten_by_requested_rejection_body,
+    );
+}
+
+fn canonical_shape_contract_cannot_be_overwritten_by_requested_rejection_body() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
@@ -533,6 +559,12 @@ fn canonical_contract_precedes_later_control_interruption() {
 
 #[test]
 fn control_interruption_precedes_later_canonical_contract_failure() {
+    run_with_canonical_validation_stack_budget(
+        control_interruption_precedes_later_canonical_contract_failure_body,
+    );
+}
+
+fn control_interruption_precedes_later_canonical_contract_failure_body() {
     let factory = factory(1);
     let account = account(&factory);
     let cancellation = CancellationToken::new();
