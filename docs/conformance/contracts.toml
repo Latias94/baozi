@@ -8,11 +8,12 @@ contract_id = "u4-canonical-scene-lifecycle"
 authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
 conformance_status = "partial"
 evidence_subject = "baozi.u4.canonical-scene-lifecycle"
-evidence_revision = 2
+evidence_revision = 3
 implementation_tracers = [
-  "crates/baozi-core/src/canonical_scene/store/api/continuation.rs",
-  "crates/baozi-core/src/canonical_scene/store/construction/activation.rs",
+  "crates/baozi-core/src/canonical_scene/store/api/import.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/materialization.rs",
   "crates/baozi-core/src/canonical_scene/store/api/scene.rs",
+  "crates/baozi-import/src/store/scene_activation.rs",
   "crates/baozi-import/src/session.rs",
 ]
 test_tracers = [
@@ -31,11 +32,13 @@ contract_id = "u4-private-producer-consumer-proof"
 authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
 conformance_status = "partial"
 evidence_subject = "baozi.u4.private-producer-consumer-proof"
-evidence_revision = 4
+evidence_revision = 5
 implementation_tracers = [
-  "crates/baozi-core/src/canonical_scene/store/api/continuation.rs",
-  "crates/baozi-core/src/canonical_scene/store/construction/activation.rs",
+  "crates/baozi-core/src/canonical_scene/store/api/authoring.rs",
+  "crates/baozi-core/src/canonical_scene/store/api/import.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/materialization.rs",
   "crates/baozi-core/src/canonical_scene/store/production.rs",
+  "crates/baozi-import/src/store/scene_activation.rs",
 ]
 test_tracers = [
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests/profile_closure.rs",
@@ -77,12 +80,12 @@ contract_id = "import-lifecycle-outcome"
 authority_adr = "docs/adr/0020-import-lifecycle-and-report-contract.md"
 conformance_status = "partial"
 evidence_subject = "baozi.import.lifecycle-outcome"
-evidence_revision = 1
+evidence_revision = 2
 implementation_tracers = [
   "crates/baozi-import/src/format.rs",
   "crates/baozi-import/src/session.rs",
-  "crates/baozi-core/src/canonical_scene/store/api/continuation.rs",
-  "crates/baozi-core/src/canonical_scene/store/construction/activation.rs",
+  "crates/baozi-import/src/store/scene_activation.rs",
+  "crates/baozi-core/src/canonical_scene/store/api/import.rs",
 ]
 test_tracers = [
   "crates/baozi-import/tests/session_contract.rs",

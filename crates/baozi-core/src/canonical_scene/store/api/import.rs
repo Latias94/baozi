@@ -69,6 +69,10 @@ pub fn maximum_scene_structural_work(limits: SceneValidationLimits) -> Option<u6
 
 impl<'input> SceneActivationRequest<'input> {
     /// Validates the bounded input envelope without acquiring operation or storage authority.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the authority-free request preserves the complete bounded core rejection inline"
+    )]
     pub fn try_new(
         input: SceneAuthoringBatch<'input>,
         validation_limits: SceneValidationLimits,
@@ -136,7 +140,11 @@ impl ScenePublishedSuccess {
 ///
 /// Core immediately forwards the owner-free handoff token and both scoped joint capabilities to
 /// `prepare`; it never stores or prepares the operation contribution.
-#[allow(clippy::type_complexity)]
+#[allow(
+    clippy::result_large_err,
+    clippy::type_complexity,
+    reason = "the freeze pivot preserves exact containment and scoped joint ownership without boxing"
+)]
 pub fn consume_scene_freeze_permit<O, PP, U, R>(
     permit: SceneFreezePermit<O, PP, U>,
     parser_draft: Option<SceneDraft>,
