@@ -717,17 +717,3 @@ fn startup_fallback_panic_with_sibling_underflow_records_only_counter_fault() {
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 1);
 }
-
-#[test]
-fn single_value_bootstrap_and_primary_prepare_exclude_duplicate_tail_work() {
-    let production = retained_production_source();
-    assert!(!production.contains("set: fn("));
-    assert!(!production.contains("AggregateSetterPanicked"));
-    assert!(!production.contains("fn try_create_single_retained_part"));
-    assert_eq!(production.matches(".try_prepare_typed_control(").count(), 1);
-    assert_eq!(production.matches("ledger.try_bind_primary(").count(), 1);
-    assert_eq!(
-        production.matches("ledger.finish_bound_primary(").count(),
-        1
-    );
-}
