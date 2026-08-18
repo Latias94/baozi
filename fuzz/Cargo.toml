@@ -10,7 +10,6 @@ license = "MIT OR Apache-2.0"
 cargo-fuzz = true
 
 [dependencies]
-baozi-core = { path = "../crates/baozi-core" }
 baozi-format-gltf = { path = "../crates/baozi-format-gltf" }
 baozi-format-obj = { path = "../crates/baozi-format-obj" }
 baozi-format-ply = { path = "../crates/baozi-format-ply" }

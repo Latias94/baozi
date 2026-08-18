@@ -1,4 +1,4 @@
-use baozi_core::FormatId;
+use baozi_import::authoring::FormatId;
 use baozi_import::{
     FormatImporter, FormatSelection, ImportConfigOverlay, ImportRequest, ImportRequestLayer,
     OptionCompileLimits, PreparedImportRequest, RegistryBuildLimits, RegistryBuilder,

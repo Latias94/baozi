@@ -1,18 +1,19 @@
 #![no_main]
 
-use baozi_core::FormatId;
+use baozi_import::authoring::{
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, DeformationAuthoringBatch, FormatId,
+    GeometryAuthoringBatch, LineageAuthoringBatch, MetadataAuthoringBatch, NodeAuthoringBatch,
+    OperationKind, OptionsDigest, OwnerProvenanceAuthoring, Presence, ProfileAuthoringBatch,
+    ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring,
+    SceneAuthoringBatch, SceneSpace, SpatialAuthoringBatch,
+};
 use baozi_import::{
-    AnimationAuthoringBatch, AppearanceAuthoringBatch, CapabilityStatus,
-    DeformationAuthoringBatch, DetectionEvidence, DetectionInconclusive, DetectionOptions,
+    import_bytes, CapabilityStatus, DetectionEvidence, DetectionInconclusive, DetectionOptions,
     DetectionOutcome, DetectionResult, DetectionScope, FormatCapability, FormatDescriptor,
-    FormatEncoding, FormatImporter, FormatSelection, GeometryAuthoringBatch, ImportConfigOverlay,
-    ImportOperationControl, ImportRequest, ImportRequestLayer, ImportResult, LineageAuthoringBatch,
-    MetadataAuthoringBatch, NodeAuthoringBatch, OperationKind, OptionCompileLimits, OptionsDigest,
-    OwnerProvenanceAuthoring, ParseResult, ParseScope, PreparedImportRequest, Presence,
-    Probe, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
-    ProvenanceOperationAuthoring, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    ResourceLimits, ResourceLimitsOverlay, SceneAuthoringBatch, SceneDraft, SceneSpace,
-    SpatialAuthoringBatch, import_bytes,
+    FormatEncoding, FormatImporter, FormatSelection, ImportConfigOverlay, ImportOperationControl,
+    ImportRequest, ImportRequestLayer, ImportResult, OptionCompileLimits, ParseResult, ParseScope,
+    PreparedImportRequest, Probe, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
+    ResourceLimits, ResourceLimitsOverlay, SceneDraft,
 };
 use baozi_io::AssetPath;
 use libfuzzer_sys::fuzz_target;
