@@ -94,10 +94,6 @@ impl LossPolicy {
     const FORMAT_RECOVERY: u8 = 1 << 1;
     const SOURCE_SEMANTIC_LOSS: u8 = 1 << 2;
     const PROVENANCE_EVIDENCE_LOSS: u8 = 1 << 3;
-    pub(crate) const ALL_KNOWN: u8 = Self::OPTIONAL_DEPENDENCY_UNAVAILABLE
-        | Self::FORMAT_RECOVERY
-        | Self::SOURCE_SEMANTIC_LOSS
-        | Self::PROVENANCE_EVIDENCE_LOSS;
 
     pub const fn preserve_or_fail() -> Self {
         Self { allowed: 0 }
@@ -115,18 +111,6 @@ impl LossPolicy {
 
     pub const fn allows(self, kind: ImportLossKind) -> bool {
         self.allowed & loss_kind_bit(kind) != 0
-    }
-
-    pub(crate) const fn bits(self) -> u8 {
-        self.allowed
-    }
-
-    pub(crate) const fn from_bits(bits: u8) -> Option<Self> {
-        if bits & !Self::ALL_KNOWN == 0 {
-            Some(Self { allowed: bits })
-        } else {
-            None
-        }
     }
 }
 

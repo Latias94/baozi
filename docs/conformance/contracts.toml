@@ -139,7 +139,7 @@ evidence_subject = "baozi.u4.legacy-scene-deletion"
 evidence_revision = 1
 implementation_tracers = [
   "crates/baozi-core/src/canonical_scene/store/api/scene.rs",
-  "crates/baozi-import/src/request_wire.rs",
+  "crates/baozi-import/src/config.rs",
 ]
 test_tracers = ["docs/conformance/u4c-metrics.toml"]
 ci_tracers = [".github/workflows/ci.yml"]

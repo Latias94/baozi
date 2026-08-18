@@ -19,7 +19,6 @@ mod options;
 mod outcome;
 mod registry;
 mod request;
-mod request_wire;
 mod scope;
 mod session;
 mod source_scope;
@@ -123,10 +122,6 @@ pub use registry::{
     RegistrySnapshot,
 };
 pub use request::{PreparedImportRequest, RequestError};
-#[doc(hidden)]
-pub use request_wire::{
-    RequestWireError, RequestWireLimits, RequestWireScope, SerializedImportRequest,
-};
 pub use scope::{
     ImportStorageClass, ImportWorkClass, ImportWorkScope, ParseFailure, ParseResult, ParseScope,
 };
