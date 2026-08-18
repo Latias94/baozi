@@ -1,4 +1,5 @@
 use std::fmt;
+use std::num::NonZeroU64;
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -12,9 +13,12 @@ use baozi_operation::__canonical_activation::{
 use baozi_operation::__canonical_activation::{
     CanonicalActivationPolicy, CanonicalFailureRequirements, CanonicalLane,
     CanonicalMaterialization, CanonicalMaterializationRole, CanonicalRecordBuildRow,
-    CanonicalReservation, CanonicalSemanticWorkSession, CanonicalSuccessRequirements,
-    CanonicalTableShape, CanonicalValidationDecision, CanonicalValidationPlanning,
-    CanonicalValidationRole,
+    CanonicalReservation, CanonicalSemanticWorkSession, CanonicalValidationDecision,
+    CanonicalValidationPlanning, CanonicalValidationRole,
+};
+use baozi_operation::__canonical_activation_producer::{
+    CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalSealedActivationPlan,
+    CanonicalSuccessRequirements, CanonicalTableShape,
 };
 #[cfg(test)]
 use baozi_operation::{FinalProgress, RetainedStoreOperation};
@@ -341,6 +345,16 @@ where
     sealed: NodeSceneSealedPlan<'input, CanonicalReservation<'scope, O>>,
 }
 
+/// Exact execution payload paired with its success facts by [`NodeSceneLanePlan`].
+#[must_use = "the Scene execution plan must materialize through its bound activation permit"]
+pub struct NodeSceneLaneExecutionPlan<'input, 'scope, O>
+where
+    O: OperationOwner,
+{
+    brand: super::super::ConstructionBrand,
+    execution: NodeSceneExecutionPlan<'input, CanonicalReservation<'scope, O>>,
+}
+
 /// Opaque Scene descriptor and validation recipe emitted by lane-only materialization.
 #[derive(Clone, Copy)]
 pub struct NodeSceneLaneOutput(NodeSceneActivationOutput);
@@ -556,11 +570,40 @@ impl<'input, 'scope, O> NodeSceneLanePlan<'input, 'scope, O>
 where
     O: OperationOwner,
 {
-    /// Returns the success envelope derived from this exact sealed execution plan.
-    pub const fn success_requirements(&self) -> CanonicalSuccessRequirements {
-        self.sealed.success_requirements
+    fn into_activation_parts(
+        self,
+    ) -> (
+        CanonicalSuccessRequirements,
+        NodeSceneLaneExecutionPlan<'input, 'scope, O>,
+    ) {
+        let Self { brand, sealed } = self;
+        let (execution, requirements) = sealed.into_seal_parts();
+        (
+            requirements,
+            NodeSceneLaneExecutionPlan { brand, execution },
+        )
     }
+}
 
+impl<'input, 'scope, O> CanonicalActivationDescription for NodeSceneLanePlan<'input, 'scope, O>
+where
+    O: OperationOwner,
+{
+    type Execution = NodeSceneLaneExecutionPlan<'input, 'scope, O>;
+
+    fn seal_activation<'activation>(
+        self,
+        sealer: CanonicalActivationPlanSealer<'activation>,
+    ) -> CanonicalSealedActivationPlan<'activation, Self::Execution> {
+        let (requirements, execution) = self.into_activation_parts();
+        sealer.seal(requirements, execution)
+    }
+}
+
+impl<'input, 'scope, O> NodeSceneLaneExecutionPlan<'input, 'scope, O>
+where
+    O: OperationOwner,
+{
     /// Materializes the sealed plan through the only authority accepted by this core seam.
     pub fn materialize<'lane, PP, U, L>(
         &self,
@@ -578,7 +621,7 @@ where
     {
         materialize_node_scene_mapped(
             lane,
-            &self.sealed.execution,
+            &self.execution,
             self.brand,
             #[cfg(test)]
             NodeSceneBuildFaults::none(),
@@ -949,6 +992,23 @@ impl NodeSceneFailureEvidencePlan {
     }
 }
 
+pub(in crate::canonical_scene::store) fn maximum_node_scene_structural_work(
+    canonical_blocks: usize,
+) -> Option<u64> {
+    let success = CanonicalSuccessRequirements::new(
+        CanonicalTableShape::new(canonical_blocks, canonical_blocks).ok()?,
+        4,
+        canonical_blocks,
+        NonZeroU64::MIN,
+    )
+    .ok()?;
+    let failure = NodeSceneFailureEvidencePlan::try_new()
+        .ok()?
+        .requirements()
+        .ok()?;
+    success.structural_work_requirement(&failure).ok()
+}
+
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneMaterializedRefs {
     pub(in crate::canonical_scene::store) directory: CanonicalBlockRef<SceneDirectorySchema>,
@@ -1049,6 +1109,7 @@ impl NodeSceneMaterializationPlans {
             .map_err(|_| StorePlanError::SizeOverflow)?;
         CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(canonical_block_count, canonical_block_count)?,
+            4,
             canonical_block_count,
             central_validation.work(),
         )
@@ -1618,27 +1679,27 @@ where
             return planning.reject(rejection, stable_code);
         }
         sealed_counts_ref.set(plan.execution.materialization.evidence_counts());
-        let (execution, success_requirements) = plan.into_seal_parts();
         #[cfg(test)]
         if matches!(faults.planning, Some(NodeScenePlanningFault::Publication)) {
-            drop(execution);
+            drop(plan);
             let rejection = NodeSceneConstructionRejection::<StoreRuntimeError>::Planning(
                 StorePlanError::InvalidBlockTable,
             );
             let stable_code = rejection.stable_code();
             return planning.reject(rejection, stable_code);
         }
-        let permit = match planning.seal_activation(success_requirements, completion) {
-            CanonicalActivationSeal::Sealed(permit) => permit,
-            CanonicalActivationSeal::Unsealed(failure) => {
-                drop(execution);
-                return failure.finish_after_plan_drop();
-            }
+        let activation = NodeSceneLanePlan {
+            brand,
+            sealed: plan,
         };
-        permit.activate(execution, move |lane, execution| {
+        let permit = match planning.seal_activation(activation, completion) {
+            CanonicalActivationSeal::Sealed(permit) => permit,
+            CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+        };
+        permit.activate(move |lane, execution| {
             materialize_node_scene(
                 lane,
-                execution,
+                &execution.execution,
                 brand,
                 #[cfg(test)]
                 faults,

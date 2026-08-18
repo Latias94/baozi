@@ -157,6 +157,7 @@ fn scoped_activation_shape_with_validation_work(
         failure,
         success: CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(canonical_blocks, canonical_blocks).unwrap(),
+            2,
             canonical_blocks,
             validation_work,
         )
@@ -189,6 +190,7 @@ fn scoped_activation_shape_with_capacity(
         ),
         success: CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(canonical_capacity, canonical_capacity).unwrap(),
+            2,
             expected_materialized_blocks,
             NonZeroU64::MIN,
         )
@@ -1892,6 +1894,7 @@ fn canonical_validation_panic_flushes_the_nonzero_completed_prefix() {
         failure,
         success: CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(1, 1).unwrap(),
+            2,
             1,
             NonZeroU64::new(u64::try_from(VALIDATION_UNITS).unwrap()).unwrap(),
         )

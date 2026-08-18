@@ -13,18 +13,20 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Moves the operation into the single scoped planning-and-activation transaction.
-    pub fn into_scoped_session_outcome_owner(
+    /// Moves the operation into the session-lifetime outcome owner before canonical activation.
+    pub fn into_session_outcome_owner(
         self,
-        policy: CanonicalActivationPolicy,
+        policy: CanonicalActivationSessionPolicy,
+        outcome_evidence_writer_limits: RetainedStoreBatchLimits,
         failure_requirements: CanonicalFailureRequirements,
-    ) -> Result<ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, L>, StoreActivationContainment>
-    {
+    ) -> Result<RetainedStoreSessionOutcomeOwner<O, PP, U, L>, StoreActivationContainment> {
         let (canonical_phase, canonical_dimensions) =
             policy.canonical_writer.keys_for_publication_validation();
-        let (evidence_phase, evidence_dimensions) = policy
+        let outcome_evidence_writer = policy
             .outcome_evidence_writer
-            .keys_for_publication_validation();
+            .bind(outcome_evidence_writer_limits);
+        let (evidence_phase, evidence_dimensions) =
+            outcome_evidence_writer.keys_for_publication_validation();
         let roles_are_valid = self
             .validate_writer_keys(canonical_phase, canonical_dimensions)
             .and_then(|()| self.validate_writer_keys(evidence_phase, evidence_dimensions))
@@ -43,7 +45,9 @@ where
         if !roles_are_valid {
             return Err(contain_operation(self));
         }
-        let failure = match policy.bind_scoped_failure(failure_requirements) {
+        let failure = match policy
+            .bind_scoped_failure(outcome_evidence_writer_limits, failure_requirements)
+        {
             Ok(failure) => failure,
             Err(_) => return Err(contain_operation(self)),
         };
@@ -57,19 +61,114 @@ where
             construction_work_limit,
             validation_work_limit,
         };
-        let planning_baseline = self.raw.planning_baseline();
         let containment_anchor = self.raw.planning_containment_anchor();
-        Ok(ScopedRetainedStoreSessionOutcomeOwner {
+        Ok(RetainedStoreSessionOutcomeOwner {
             dormant: ScopedDormantActivation {
                 operation: Some(self),
                 containment_anchor,
                 armed: true,
             },
-            roles: BoundActivationRoles { policy },
+            policy,
             scoped_failure: failure,
-            planning_baseline,
             failure_work: FailureEvidenceWorkBudget::new(failure_work),
         })
+    }
+
+    /// Moves the operation into the single scoped planning-and-activation transaction.
+    pub fn into_scoped_session_outcome_owner(
+        self,
+        policy: CanonicalActivationPolicy,
+        failure_requirements: CanonicalFailureRequirements,
+    ) -> Result<ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, L>, StoreActivationContainment>
+    {
+        let (session_policy, canonical_writer_limits, outcome_evidence_writer_limits) =
+            policy.into_session_parts();
+        let owner = self.into_session_outcome_owner(
+            session_policy,
+            outcome_evidence_writer_limits,
+            failure_requirements,
+        )?;
+        let planning_baseline = owner.dormant.operation().raw.planning_baseline();
+        Ok(ScopedRetainedStoreSessionOutcomeOwner {
+            owner,
+            canonical_writer_limits,
+            planning_baseline,
+        })
+    }
+}
+
+impl<O, PP, U, L> RetainedStoreSessionOutcomeOwner<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    /// Borrows producer work and accounting before canonical activation begins.
+    pub fn producer_host(&mut self) -> RetainedStoreProducerHost<'_, O, PP, U> {
+        self.dormant.operation_mut().producer_host()
+    }
+
+    /// Borrows the operation's control and reservation checkpoint before activation begins.
+    pub fn control_checkpoint(&mut self) -> RetainedStoreControlCheckpoint<'_, O, PP, U> {
+        self.dormant.operation_mut().control_checkpoint()
+    }
+
+    /// Marks one qualified session phase complete without exposing the raw operation.
+    pub fn try_complete_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
+        self.dormant.operation().try_complete_phase(phase)
+    }
+
+    /// Runs one scoped activation whose sealed request owns its exact canonical capacities.
+    #[allow(
+        clippy::result_large_err,
+        clippy::type_complexity,
+        reason = "the HRTB transaction preserves the exact linear outcome owner"
+    )]
+    pub fn plan_and_activate_scoped<T, E, CanonicalKind, CanonicalTag>(
+        self,
+        transaction: impl for<'scope> FnMut(
+            CanonicalPlanning<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        ) -> CanonicalScopedDisposition<'scope>,
+    ) -> Result<
+        CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        StoreActivationContainment,
+    > {
+        self.run_plan_and_activate_scoped(None, None, transaction)
+    }
+
+    #[allow(
+        clippy::result_large_err,
+        clippy::type_complexity,
+        reason = "the HRTB transaction preserves the exact linear outcome owner"
+    )]
+    fn run_plan_and_activate_scoped<T, E, CanonicalKind, CanonicalTag>(
+        self,
+        compatibility_canonical_writer_limits: Option<RetainedStoreBatchLimits>,
+        planning_baseline: Option<RetainedPlanningBaseline>,
+        transaction: impl for<'scope> FnMut(
+            CanonicalPlanning<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        ) -> CanonicalScopedDisposition<'scope>,
+    ) -> Result<
+        CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        StoreActivationContainment,
+    > {
+        let Self {
+            dormant,
+            policy,
+            scoped_failure,
+            failure_work,
+        } = self;
+        run_scoped_activation(
+            dormant,
+            BoundActivationRoles {
+                policy,
+                compatibility_canonical_writer_limits,
+            },
+            scoped_failure,
+            failure_work,
+            planning_baseline,
+            transaction,
+        )
     }
 }
 
@@ -94,44 +193,70 @@ where
         CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         StoreActivationContainment,
     > {
-        let Self {
-            dormant,
-            roles,
-            scoped_failure,
-            planning_baseline,
-            failure_work,
-        } = self;
-        let (operation, containment_anchor) = dormant.into_parts()?;
-        let mut transaction = ManuallyDrop::new(Some(transaction));
-        let receipt_brand = ScopedReceiptBrand { _private: 0 };
-        let mut driver = ScopedActivationDriver {
-            state: ScopedActivationState::Planning(operation),
-            containment_anchor,
-            roles: Some(roles),
-            failure: Some(scoped_failure),
-            planning_baseline,
-            failure_work,
-            first_fault: None,
-            semantic_state: ScopedSemanticState::NotStarted,
-        };
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let transaction = transaction
-                .as_mut()
-                .expect("the scoped activation transaction remains owned until controlled drop");
-            let receipt = transaction(CanonicalPlanning {
-                driver: &mut driver,
-                receipt_brand: &receipt_brand,
-            });
-            std::ptr::eq(receipt.brand, &receipt_brand)
-        }));
-        let transaction_drop_failed = drop_optional_callback(transaction).is_err();
-        match result {
-            Ok(true) if !transaction_drop_failed => driver.finish(),
-            Ok(_) => Err(driver.contain_current()),
-            Err(payload) => {
-                discard_untrusted_panic_payload(payload);
-                Err(driver.contain_current())
-            }
+        self.owner.run_plan_and_activate_scoped(
+            Some(self.canonical_writer_limits),
+            Some(self.planning_baseline),
+            transaction,
+        )
+    }
+}
+
+#[allow(
+    clippy::result_large_err,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    reason = "the scoped driver keeps every linear owner inline through the compatibility cutover"
+)]
+fn run_scoped_activation<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
+    dormant: ScopedDormantActivation<O, PP, U, L>,
+    roles: BoundActivationRoles,
+    scoped_failure: BoundScopedFailureRequest,
+    failure_work: FailureEvidenceWorkBudget,
+    planning_baseline: Option<RetainedPlanningBaseline>,
+    transaction: impl for<'scope> FnMut(
+        CanonicalPlanning<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    ) -> CanonicalScopedDisposition<'scope>,
+) -> Result<
+    CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+    StoreActivationContainment,
+>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let planning_baseline =
+        planning_baseline.unwrap_or_else(|| dormant.operation().raw.planning_baseline());
+    let (operation, containment_anchor) = dormant.into_parts()?;
+    let mut transaction = ManuallyDrop::new(Some(transaction));
+    let receipt_brand = ScopedReceiptBrand { _private: 0 };
+    let mut driver = ScopedActivationDriver {
+        state: ScopedActivationState::Planning(operation),
+        containment_anchor,
+        roles: Some(roles),
+        failure: Some(scoped_failure),
+        planning_baseline,
+        failure_work,
+        first_fault: None,
+        semantic_state: ScopedSemanticState::NotStarted,
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let transaction = transaction
+            .as_mut()
+            .expect("the scoped activation transaction remains owned until controlled drop");
+        let receipt = transaction(CanonicalPlanning {
+            driver: &mut driver,
+            receipt_brand: &receipt_brand,
+        });
+        std::ptr::eq(receipt.brand, &receipt_brand)
+    }));
+    let transaction_drop_failed = drop_optional_callback(transaction).is_err();
+    match result {
+        Ok(true) if !transaction_drop_failed => driver.finish(),
+        Ok(_) => Err(driver.contain_current()),
+        Err(payload) => {
+            discard_untrusted_panic_payload(payload);
+            Err(driver.contain_current())
         }
     }
 }
@@ -350,7 +475,7 @@ where
             );
             return Err(());
         };
-        let request = match roles.policy.bind_scoped_success(requirements) {
+        let request = match roles.bind_scoped_success(requirements) {
             Ok(request) => request,
             Err(_) => {
                 let _ = preserve_first_fault::<()>(
@@ -368,7 +493,7 @@ where
             return Err(());
         };
         let outcome_evidence_destination_dimension = failure.outcome_evidence_destination_dimension;
-        let semantic_bytes_dimension = roles.policy.semantic_bytes_dimension;
+        let semantic_bytes_dimension = roles.semantic_bytes_dimension();
         let (phase, dimensions) = request.canonical_plan.keys_for_publication_validation();
         let original_baseline = self.planning_baseline;
         let Some(operation) = self.planning_operation_mut() else {
@@ -530,7 +655,7 @@ where
                 Err(StoreRuntimeError::ConstructionInvariantUnverified),
             );
         };
-        let (phase, work_dimension, scratch_dimension) = roles.policy.authoring_keys();
+        let (phase, work_dimension, scratch_dimension) = roles.authoring_keys();
         let operation = match state {
             ScopedActivationState::Planning(operation) => operation,
             _ => {
@@ -556,13 +681,27 @@ where
         })
     }
 
-    /// Seals one payload-free activation permit after exact semantic work and role binding succeed.
-    pub fn seal_activation(
+    /// Seals one opaque activation plan after exact semantic work and role binding succeed.
+    pub fn seal_activation<D>(
         self,
-        requirements: CanonicalSuccessRequirements,
+        description: D,
         completion: CanonicalSemanticCompletion<'scope>,
-    ) -> CanonicalActivationSeal<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L> {
+    ) -> CanonicalActivationSeal<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, D::Execution>
+    where
+        D: CanonicalActivationDescription,
+    {
+        let plan = description.seal_activation(CanonicalActivationPlanSealer {
+            receipt_brand: self.receipt_brand,
+            invariant: PhantomData,
+        });
         if !std::ptr::eq(completion.receipt_brand, self.receipt_brand) {
+            let _ = preserve_first_fault::<()>(
+                &mut self.driver.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+        }
+        let (requirements, plan, plan_brand) = plan.into_parts();
+        if !std::ptr::eq(plan_brand, self.receipt_brand) {
             let _ = preserve_first_fault::<()>(
                 &mut self.driver.first_fault,
                 Err(StoreRuntimeError::ConstructionInvariantUnverified),
@@ -572,10 +711,12 @@ where
             Ok(request) => CanonicalActivationSeal::Sealed(CanonicalActivationPermit {
                 driver: Some(self.driver),
                 request: Some(request),
+                plan: Some(plan),
                 receipt_brand: self.receipt_brand,
             }),
             Err(()) => CanonicalActivationSeal::Unsealed(CanonicalActivationSealFailure {
                 driver: Some(self.driver),
+                plan: Some(plan),
                 receipt_brand: self.receipt_brand,
             }),
         }
@@ -704,21 +845,27 @@ where
     owner: Option<ScopedTransitionOwner<O, PP, U, L>>,
 }
 
-impl<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-    CanonicalActivationSealFailure<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+    CanonicalActivationSealFailure<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    /// Resolves the seal failure after the caller has released its complete core-owned plan.
-    pub fn finish_after_plan_drop(mut self) -> CanonicalScopedDisposition<'scope> {
+    /// Releases the paired core plan before resolving the seal failure.
+    pub fn finish(mut self) -> CanonicalScopedDisposition<'scope> {
         let receipt_brand = self.receipt_brand;
+        let plan_drop_failed = self
+            .plan
+            .take()
+            .is_some_and(|plan| drop_scoped_value(plan).is_err());
         let driver = self
             .driver
             .take()
             .expect("an unsealed activation owns its scoped activation driver");
-        if let Some(fault) = driver.first_fault.take() {
+        if plan_drop_failed {
+            let _ = driver.contain_current();
+        } else if let Some(fault) = driver.first_fault.take() {
             if fault.contract_seen || fault.recoverable_code().is_none() {
                 let _ = driver.contain_current();
             } else {
@@ -733,16 +880,26 @@ where
     }
 }
 
-impl<O, PP, U, T, E, CanonicalKind, CanonicalTag, L> Drop
-    for CanonicalActivationSealFailure<'_, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P> Drop
+    for CanonicalActivationSealFailure<'_, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     fn drop(&mut self) {
-        // Releasing only the borrow leaves unresolved failure classification to the outer scoped
-        // transaction boundary, which contains the operation after caller-owned plans unwind.
+        let plan_drop_failed = self
+            .plan
+            .take()
+            .is_some_and(|plan| drop_scoped_value(plan).is_err());
+        if plan_drop_failed && let Some(driver) = self.driver.as_mut() {
+            let _ = preserve_first_fault::<()>(
+                &mut driver.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+        }
+        // Releasing the borrow leaves unresolved failure classification to the outer scoped
+        // transaction boundary, which contains the operation after the paired plan has unwound.
         self.driver.take();
     }
 }
@@ -874,8 +1031,8 @@ where
     }
 }
 
-impl<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
-    CanonicalActivationPermit<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
+    CanonicalActivationPermit<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -887,9 +1044,8 @@ where
         clippy::type_complexity,
         reason = "the activation call preserves the scoped scratch owner and exact terminal state"
     )]
-    pub fn activate<P>(
+    pub fn activate(
         mut self,
-        plan: P,
         materialize: impl for<'lane> FnMut(
             CanonicalLane<'lane, O, PP, U, L>,
             &P,
@@ -902,6 +1058,10 @@ where
         >,
     ) -> CanonicalScopedDisposition<'scope> {
         let receipt_brand = self.receipt_brand;
+        let plan = self
+            .plan
+            .take()
+            .expect("an activation permit owns its sealed core plan");
         let inputs = ScopedActivationInputs::new(plan, materialize);
         let driver = self
             .driver
@@ -1203,18 +1363,27 @@ where
     }
 }
 
-impl<O, PP, U, T, E, CanonicalKind, CanonicalTag, L> Drop
-    for CanonicalActivationPermit<'_, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
+impl<O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P> Drop
+    for CanonicalActivationPermit<'_, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     fn drop(&mut self) {
+        let plan_drop_failed = self
+            .plan
+            .take()
+            .is_some_and(|plan| drop_scoped_value(plan).is_err());
+        if plan_drop_failed && let Some(driver) = self.driver.as_mut() {
+            let _ = preserve_first_fault::<()>(
+                &mut driver.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+        }
         self.request.take();
-        // The permit contains no core payload. Releasing only this exclusive borrow lets the
-        // transaction callback destroy its private plan and metered scratch before the outer
-        // `plan_and_activate_scoped` boundary performs fail-closed containment.
+        // Releasing the exclusive borrow lets the outer `plan_and_activate_scoped` boundary
+        // perform fail-closed containment after the paired plan and metered scratch are gone.
         self.driver.take();
     }
 }

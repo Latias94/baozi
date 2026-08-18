@@ -19,10 +19,11 @@ use super::{
     OutcomeEvidenceUtf8Ref, PreparedStoreFailureOutcome, PreparedStoreFallback,
     PreparedStoreSuccessOutcome, PublishedCanonicalStore, RawStoreBorrowedWorkPermit,
     RawStoreFailureAssembly, RecordBlock, RecordPlan, RetainedAllocationPlan,
-    RetainedBuildFailureCode, RetainedStoreBlockTablePlan, RetainedStoreControlCheckpoint,
-    RetainedStoreFailureTerminalWorkPlan, RetainedStoreFailureTerminalWorkRequirement,
-    RetainedStoreOperation, RetainedStorePublicationAssembly, RetainedStorePublicationPlan,
-    RetainedStoreReservation, RetainedStoreWorkControl, RetainedStoreWriterPlan, ScalarSequence,
+    RetainedBuildFailureCode, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
+    RetainedStoreControlCheckpoint, RetainedStoreFailureTerminalWorkPlan,
+    RetainedStoreFailureTerminalWorkRequirement, RetainedStoreOperation, RetainedStoreProducerHost,
+    RetainedStorePublicationAssembly, RetainedStorePublicationPlan, RetainedStoreReservation,
+    RetainedStoreWorkControl, RetainedStoreWriterPlan, RetainedStoreWriterRole, ScalarSequence,
     SequencePlan, SequenceWriter, ShareableStoreKind, StoreBuildCallbackFailure, StoreBuildError,
     StoreControlledError, StoreControlledSuccessValidation, StoreDimensionKey,
     StoreEvidenceValidationSession, StoreFailureAssembly, StoreFailureValidation,
@@ -1153,6 +1154,18 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    fn operation(&self) -> &RetainedStoreOperation<O, PP, U, L> {
+        self.operation
+            .as_ref()
+            .expect("an armed dormant activation owns exactly one retained-store operation")
+    }
+
+    fn operation_mut(&mut self) -> &mut RetainedStoreOperation<O, PP, U, L> {
+        self.operation
+            .as_mut()
+            .expect("an armed dormant activation owns exactly one retained-store operation")
+    }
+
     #[allow(
         clippy::type_complexity,
         reason = "the temporary U4e migration seam transfers both inline linear owners without allocation and is deleted at core cutover"
@@ -1196,7 +1209,28 @@ where
     }
 }
 
-/// Scoped-only session owner with its failure shape bound before authoring begins.
+/// Session-lifetime owner of the sole retained operation and dormant activation authority.
+///
+/// The owner binds stable store roles and failure-evidence capacity before activation. Producer work
+/// remains available only through its narrow borrowed capabilities. Exact canonical writer capacity
+/// stays inside the single-use success request emitted by a sealed construction plan.
+#[must_use = "the session outcome owner must resolve or activate its retained operation"]
+pub struct RetainedStoreSessionOutcomeOwner<O, PP, U, L = FreshStoreLineage>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    dormant: ScopedDormantActivation<O, PP, U, L>,
+    policy: CanonicalActivationSessionPolicy,
+    scoped_failure: BoundScopedFailureRequest,
+    failure_work: FailureEvidenceWorkBudget,
+}
+
+/// Compatibility adapter for the U4 scoped activation surface.
+///
+/// New session owners bind only the exact canonical limits supplied by a sealed request. This
+/// wrapper preserves the old single-call shape until the import cutover deletes the scoped rail.
 #[must_use = "the scoped session outcome owner must run its activation transaction"]
 pub struct ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, L = FreshStoreLineage>
 where
@@ -1204,11 +1238,9 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    dormant: ScopedDormantActivation<O, PP, U, L>,
-    roles: BoundActivationRoles,
-    scoped_failure: BoundScopedFailureRequest,
+    owner: RetainedStoreSessionOutcomeOwner<O, PP, U, L>,
+    canonical_writer_limits: RetainedStoreBatchLimits,
     planning_baseline: RetainedPlanningBaseline,
-    failure_work: FailureEvidenceWorkBudget,
 }
 
 fn finish_rejected_session<O, PP, U, E, L>(
@@ -1686,13 +1718,73 @@ pub struct CanonicalSemanticCompletion<'scope> {
     invariant: PhantomData<fn(&'scope mut ()) -> &'scope mut ()>,
 }
 
-/// Payload-free permit for one scoped canonical activation.
+/// Transaction-scoped authority that seals one complete activation description.
 ///
-/// Core retains ownership of its concrete execution plan until [`Self::activate`] places that plan
-/// and its materializer behind the owner-consuming open transition. Materialization receives only a
-/// shared plan view; the transaction drops the plan in a separate panic boundary before final
-/// containment. Operation proves only the semantic completion receipt, transaction brand, physical
-/// shape, ledger roles, and retained publication authority; it never interprets the core plan.
+/// The constructor is private. A description receives this value only while the matching planning
+/// transaction consumes it. The receipt brand prevents a sealed value from crossing planning
+/// transactions; the producer remains responsible for deriving both arguments to [`Self::seal`]
+/// from one opaque construction description.
+#[must_use = "the plan sealer must return one sealed activation plan"]
+pub struct CanonicalActivationPlanSealer<'scope> {
+    receipt_brand: &'scope ScopedReceiptBrand,
+    invariant: PhantomData<fn(&'scope mut ()) -> &'scope mut ()>,
+}
+
+impl<'scope> CanonicalActivationPlanSealer<'scope> {
+    /// Seals the success facts and execution payload owned by one construction description.
+    pub fn seal<P>(
+        self,
+        requirements: CanonicalSuccessRequirements,
+        plan: P,
+    ) -> CanonicalSealedActivationPlan<'scope, P> {
+        CanonicalSealedActivationPlan {
+            requirements,
+            plan,
+            receipt_brand: self.receipt_brand,
+        }
+    }
+}
+
+/// Single-use construction description that owns both success facts and execution data.
+///
+/// This is a trusted migration seam for deep canonical construction modules. Implementations must
+/// move success facts and execution data out of the same opaque description without running
+/// fallible user code. [`CanonicalPlanning::seal_activation`] proves the transaction receipt; it
+/// intentionally does not attempt to validate an arbitrary third-party implementation of this
+/// producer contract.
+pub trait CanonicalActivationDescription {
+    type Execution;
+
+    fn seal_activation<'scope>(
+        self,
+        sealer: CanonicalActivationPlanSealer<'scope>,
+    ) -> CanonicalSealedActivationPlan<'scope, Self::Execution>;
+}
+
+/// One opaque activation plan whose success facts and execution payload travel together.
+///
+/// Operation mints this value only while consuming one complete construction description. The
+/// transaction brand prevents a sealed value from crossing planning transactions, while private
+/// fields prevent downstream code from splitting and recombining a producer's opaque plan.
+#[must_use = "the sealed activation plan must seal or reject exactly once"]
+pub struct CanonicalSealedActivationPlan<'scope, P> {
+    requirements: CanonicalSuccessRequirements,
+    plan: P,
+    receipt_brand: &'scope ScopedReceiptBrand,
+}
+
+impl<'scope, P> CanonicalSealedActivationPlan<'scope, P> {
+    fn into_parts(self) -> (CanonicalSuccessRequirements, P, &'scope ScopedReceiptBrand) {
+        (self.requirements, self.plan, self.receipt_brand)
+    }
+}
+
+/// Permit for one scoped canonical activation with its execution plan already bound.
+///
+/// Materialization receives only a shared plan view. The transaction drops the plan in a separate
+/// panic boundary before final containment. Operation proves only the semantic completion receipt,
+/// transaction brand, physical shape, ledger roles, and retained publication authority; it never
+/// interprets the core plan.
 #[must_use = "the activation permit must activate exactly once"]
 pub struct CanonicalActivationPermit<
     'scope,
@@ -1704,6 +1796,7 @@ pub struct CanonicalActivationPermit<
     CanonicalKind,
     CanonicalTag,
     L = FreshStoreLineage,
+    P = (),
 > where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1716,16 +1809,17 @@ pub struct CanonicalActivationPermit<
     driver:
         Option<&'scope mut ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>>,
     request: Option<BoundScopedSuccessRequest>,
+    plan: Option<P>,
     receipt_brand: &'scope ScopedReceiptBrand,
 }
 
 /// Linear resolver for one activation that could not be sealed.
 ///
-/// The caller must release its core-owned execution plan and every scoped reservation before
-/// consuming this resolver. Operation then verifies the restored planning baseline before it
-/// installs a recoverable `NeverActivated` outcome; an unresolved contract or ownership graph is
+/// The resolver owns the exact core plan paired with the rejected success envelope. It releases
+/// that plan and every scoped reservation before verifying the restored planning baseline. A
+/// recoverable fault may then install `NeverActivated`; any drop, contract, or ownership failure is
 /// contained fail closed.
-#[must_use = "release the core plan, then resolve the unsealed activation exactly once"]
+#[must_use = "resolve the unsealed activation exactly once"]
 pub struct CanonicalActivationSealFailure<
     'scope,
     O,
@@ -1736,6 +1830,7 @@ pub struct CanonicalActivationSealFailure<
     CanonicalKind,
     CanonicalTag,
     L = FreshStoreLineage,
+    P = (),
 > where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1747,10 +1842,11 @@ pub struct CanonicalActivationSealFailure<
     )]
     driver:
         Option<&'scope mut ScopedActivationDriver<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>>,
+    plan: Option<P>,
     receipt_brand: &'scope ScopedReceiptBrand,
 }
 
-/// Result of sealing one payload-free activation permit.
+/// Result of sealing one activation plan with its payload already bound.
 #[must_use = "consume the activation permit or resolve the unsealed activation"]
 #[allow(
     clippy::large_enum_variant,
@@ -1766,14 +1862,15 @@ pub enum CanonicalActivationSeal<
     CanonicalKind,
     CanonicalTag,
     L = FreshStoreLineage,
+    P = (),
 > where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    Sealed(CanonicalActivationPermit<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>),
+    Sealed(CanonicalActivationPermit<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>),
     Unsealed(
-        CanonicalActivationSealFailure<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
+        CanonicalActivationSealFailure<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L, P>,
     ),
 }
 
@@ -1920,14 +2017,15 @@ impl CanonicalFailureRequirements {
     }
 }
 
-/// Success-only requirements sealed after complete semantic preflight.
+/// Success-only activation facts derived after complete semantic preflight.
 ///
 /// Failure evidence remains session-bound. The operation-issued completion token proves that the
-/// matching transaction resolved a nonempty action-derived semantic pass; canonical shape and
-/// validation work remain derived from the same core execution plan that activation consumes.
-#[must_use = "success requirements must seal exactly one activation permit"]
-#[derive(Clone, Copy)]
+/// matching transaction resolved a nonempty action-derived semantic pass. Canonical writer
+/// capacity, table shape, materialization shape, and validation work are moved into one opaque plan
+/// together with the execution payload before operation may seal activation.
+#[must_use = "success requirements must be bound to their exact execution plan"]
 pub struct CanonicalSuccessRequirements {
+    canonical_writer_limits: RetainedStoreBatchLimits,
     canonical: CanonicalTableShape,
     expected_materialized_blocks: usize,
     validation_work: NonZeroU64,
@@ -1937,6 +2035,7 @@ pub struct CanonicalSuccessRequirements {
 impl CanonicalSuccessRequirements {
     pub fn new(
         canonical: CanonicalTableShape,
+        canonical_commitment_slots: usize,
         expected_materialized_blocks: usize,
         validation_work: NonZeroU64,
     ) -> Result<Self, StorePlanError> {
@@ -1945,7 +2044,15 @@ impl CanonicalSuccessRequirements {
         {
             return Err(StorePlanError::InvalidBlockTable);
         }
+        let canonical_writer_limits = RetainedStoreBatchLimits::new(
+            canonical
+                .max_new_blocks
+                .checked_add(1)
+                .ok_or(StorePlanError::InvalidBlockTable)?,
+            canonical_commitment_slots,
+        )?;
         Ok(Self {
+            canonical_writer_limits,
             canonical,
             expected_materialized_blocks,
             validation_work,
@@ -2051,14 +2158,15 @@ impl CanonicalValidationRole {
     }
 }
 
-/// Host-owned role policy consumed before any canonical activation request is accepted.
+/// Session-stable host roles retained across producer work and canonical activation.
 ///
-/// Core and format code never receive this value. The session owner validates and seals all role
-/// keys before binding a keyless request to concrete retained-table plans.
-#[must_use = "the activation policy must be consumed by one retained-store operation"]
-pub struct CanonicalActivationPolicy {
-    canonical_writer: RetainedStoreWriterPlan,
-    outcome_evidence_writer: RetainedStoreWriterPlan,
+/// Core and format code never receive this value. Writer placement and failure-evidence capacity are
+/// session-bound, while canonical success capacity remains absent until a sealed activation request
+/// is consumed.
+#[must_use = "the activation session policy must be bound to one retained-store operation"]
+pub struct CanonicalActivationSessionPolicy {
+    canonical_writer: RetainedStoreWriterRole,
+    outcome_evidence_writer: RetainedStoreWriterRole,
     materialization_work_dimension: StoreDimensionKey,
     materialization_scratch_dimension: StoreDimensionKey,
     validation_phase: StorePhaseKey,
@@ -2069,10 +2177,10 @@ pub struct CanonicalActivationPolicy {
     semantic_bytes_dimension: Option<StoreDimensionKey>,
 }
 
-impl CanonicalActivationPolicy {
+impl CanonicalActivationSessionPolicy {
     pub const fn new(
-        canonical_writer: RetainedStoreWriterPlan,
-        outcome_evidence_writer: RetainedStoreWriterPlan,
+        canonical_writer: RetainedStoreWriterRole,
+        outcome_evidence_writer: RetainedStoreWriterRole,
         materialization: CanonicalMaterializationRole,
         validation: CanonicalValidationRole,
         canonical_destination_dimension: StoreDimensionKey,
@@ -2109,12 +2217,13 @@ impl CanonicalActivationPolicy {
 
     fn bind_scoped_failure(
         &self,
+        writer_limits: RetainedStoreBatchLimits,
         requirements: CanonicalFailureRequirements,
     ) -> Result<BoundScopedFailureRequest, StorePlanError> {
         Ok(BoundScopedFailureRequest {
             outcome_evidence_plan: requirements
                 .outcome_evidence
-                .bind(self.outcome_evidence_writer)?,
+                .bind(self.outcome_evidence_writer.bind(writer_limits))?,
             outcome_evidence_destination_dimension: self.outcome_evidence_destination_dimension,
         })
     }
@@ -2124,7 +2233,10 @@ impl CanonicalActivationPolicy {
         requirements: CanonicalSuccessRequirements,
     ) -> Result<BoundScopedSuccessRequest, StorePlanError> {
         Ok(BoundScopedSuccessRequest {
-            canonical_plan: requirements.canonical.bind(self.canonical_writer)?,
+            canonical_plan: requirements.canonical.bind(
+                self.canonical_writer
+                    .bind(requirements.canonical_writer_limits),
+            )?,
             materialization_work_dimension: self.materialization_work_dimension,
             materialization_scratch_dimension: self.materialization_scratch_dimension,
             validation_phase: self.validation_phase,
@@ -2138,8 +2250,92 @@ impl CanonicalActivationPolicy {
     }
 }
 
+/// Compatibility policy consumed by the U4 scoped adapter.
+///
+/// Core and format code never receive this value. The session owner validates and seals all role
+/// keys before binding a keyless request to concrete retained-table plans.
+#[must_use = "the activation policy must be consumed by one retained-store operation"]
+pub struct CanonicalActivationPolicy {
+    session: CanonicalActivationSessionPolicy,
+    canonical_writer_limits: RetainedStoreBatchLimits,
+    outcome_evidence_writer_limits: RetainedStoreBatchLimits,
+}
+
+impl CanonicalActivationPolicy {
+    pub const fn new(
+        canonical_writer: RetainedStoreWriterPlan,
+        outcome_evidence_writer: RetainedStoreWriterPlan,
+        materialization: CanonicalMaterializationRole,
+        validation: CanonicalValidationRole,
+        canonical_destination_dimension: StoreDimensionKey,
+        outcome_evidence_destination_dimension: StoreDimensionKey,
+    ) -> Self {
+        Self {
+            session: CanonicalActivationSessionPolicy::new(
+                canonical_writer.role(),
+                outcome_evidence_writer.role(),
+                materialization,
+                validation,
+                canonical_destination_dimension,
+                outcome_evidence_destination_dimension,
+            ),
+            canonical_writer_limits: canonical_writer.limits(),
+            outcome_evidence_writer_limits: outcome_evidence_writer.limits(),
+        }
+    }
+
+    /// Projects exact sealed semantic bytes into one host-owned accounting dimension.
+    pub const fn with_semantic_bytes_dimension(mut self, dimension: StoreDimensionKey) -> Self {
+        self.session.semantic_bytes_dimension = Some(dimension);
+        self
+    }
+
+    fn into_session_parts(
+        self,
+    ) -> (
+        CanonicalActivationSessionPolicy,
+        RetainedStoreBatchLimits,
+        RetainedStoreBatchLimits,
+    ) {
+        (
+            self.session,
+            self.canonical_writer_limits,
+            self.outcome_evidence_writer_limits,
+        )
+    }
+}
+
 struct BoundActivationRoles {
-    policy: CanonicalActivationPolicy,
+    policy: CanonicalActivationSessionPolicy,
+    compatibility_canonical_writer_limits: Option<RetainedStoreBatchLimits>,
+}
+
+impl BoundActivationRoles {
+    fn authoring_keys(&self) -> (StorePhaseKey, StoreDimensionKey, StoreDimensionKey) {
+        self.policy.authoring_keys()
+    }
+
+    fn bind_scoped_success(
+        &self,
+        requirements: CanonicalSuccessRequirements,
+    ) -> Result<BoundScopedSuccessRequest, StorePlanError> {
+        if self
+            .compatibility_canonical_writer_limits
+            .is_some_and(|limits| {
+                limits.attribution_slots()
+                    < requirements.canonical_writer_limits.attribution_slots()
+                    || limits.commitment_slots()
+                        != requirements.canonical_writer_limits.commitment_slots()
+            })
+        {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
+        self.policy.bind_scoped_success(requirements)
+    }
+
+    const fn semantic_bytes_dimension(&self) -> Option<StoreDimensionKey> {
+        self.policy.semantic_bytes_dimension
+    }
 }
 
 struct VerifiedRejection<E> {
@@ -3016,6 +3212,22 @@ mod scoped_transition_tests {
 
     struct PanickingResultDrop<'probe>(&'probe Cell<bool>);
 
+    struct TestActivationDescription<P> {
+        requirements: CanonicalSuccessRequirements,
+        execution: P,
+    }
+
+    impl<P> CanonicalActivationDescription for TestActivationDescription<P> {
+        type Execution = P;
+
+        fn seal_activation<'scope>(
+            self,
+            sealer: CanonicalActivationPlanSealer<'scope>,
+        ) -> CanonicalSealedActivationPlan<'scope, Self::Execution> {
+            sealer.seal(self.requirements, self.execution)
+        }
+    }
+
     impl Drop for PanickingResultDrop<'_> {
         fn drop(&mut self) {
             self.0.set(true);
@@ -3165,6 +3377,7 @@ mod scoped_transition_tests {
             CanonicalFailureRequirements::new(CanonicalTableShape::new(1, 1).unwrap()),
             CanonicalSuccessRequirements::new(
                 CanonicalTableShape::new(1, 1).unwrap(),
+                2,
                 1,
                 NonZeroU64::MIN,
             )
@@ -3202,23 +3415,32 @@ mod scoped_transition_tests {
         let account = account();
         let (operation, keys) = operation(&account);
         let (policy, failure, success) = scoped_shape(keys);
+        let (session_policy, _canonical_writer_limits, outcome_evidence_writer_limits) =
+            policy.into_session_parts();
         let owner = operation
-            .into_scoped_session_outcome_owner(policy, failure)
+            .into_session_outcome_owner(session_policy, outcome_evidence_writer_limits, failure)
             .unwrap();
+        let mut success = Some(success);
 
         let result: Result<TestOutcome, StoreActivationContainment> = owner
             .plan_and_activate_scoped(|mut planning| {
                 let mut semantic = planning.begin_semantic_work().unwrap();
                 semantic.run_unit(|| ()).unwrap();
                 let completion = semantic.finish_exact().unwrap();
-                let permit = match planning.seal_activation(success, completion) {
+                let permit = match planning.seal_activation(
+                    TestActivationDescription {
+                        requirements: success
+                            .take()
+                            .expect("the test success requirements are consumed exactly once"),
+                        execution: (),
+                    },
+                    completion,
+                ) {
                     CanonicalActivationSeal::Sealed(permit) => permit,
-                    CanonicalActivationSeal::Unsealed(failure) => {
-                        return failure.finish_after_plan_drop();
-                    }
+                    CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
                 };
                 test_panic_scoped_transition_at(point);
-                permit.activate((), |lane, _plan| match point {
+                permit.activate(|lane, _plan| match point {
                     ScopedTransitionPanicPoint::TryOpenActivation => {
                         panic!("try_open_activation fault must run before materialization")
                     }
@@ -3257,6 +3479,7 @@ mod scoped_transition_tests {
         let owner = operation
             .into_scoped_session_outcome_owner(policy, failure)
             .unwrap();
+        let mut success = Some(success);
         let physical_baseline = account.snapshot();
         assert!(!physical_baseline.poisoned());
         assert!(physical_baseline.live_retained_allocations() > 0);
@@ -3275,12 +3498,6 @@ mod scoped_transition_tests {
                 semantic.validate_live_owner(&scratch).unwrap();
                 semantic.run_unit(|| ()).unwrap();
                 let completion = semantic.finish_exact().unwrap();
-                let permit = match planning.seal_activation(success, completion) {
-                    CanonicalActivationSeal::Sealed(permit) => permit,
-                    CanonicalActivationSeal::Unsealed(failure) => {
-                        return failure.finish_after_plan_drop();
-                    }
-                };
                 let plan = PanickingTrackedPlan {
                     scratch: Some(scratch),
                     reservation_released: &reservation_released,
@@ -3291,6 +3508,18 @@ mod scoped_transition_tests {
                         poison_event_count_while_dropping: &plan_poison_events_while_dropping,
                     }),
                 };
+                let permit = match planning.seal_activation(
+                    TestActivationDescription {
+                        requirements: success
+                            .take()
+                            .expect("the test success requirements are consumed exactly once"),
+                        execution: plan,
+                    },
+                    completion,
+                ) {
+                    CanonicalActivationSeal::Sealed(permit) => permit,
+                    CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+                };
                 let materializer_marker = TransitionDropMarker {
                     dropped: &materializer_dropped,
                     account: &account,
@@ -3299,7 +3528,6 @@ mod scoped_transition_tests {
                 };
                 test_panic_scoped_transition_at(ScopedTransitionPanicPoint::TryOpenActivation);
                 permit.activate(
-                    plan,
                     move |_lane,
                           _plan|
                           -> CanonicalMaterialization<
@@ -3353,6 +3581,7 @@ mod scoped_transition_tests {
         let owner = operation
             .into_scoped_session_outcome_owner(policy, failure)
             .unwrap();
+        let mut success = Some(success);
         let physical_baseline = account.snapshot();
         let reservation_released = Cell::new(false);
         let plan_marker_dropped = Cell::new(false);
@@ -3369,12 +3598,6 @@ mod scoped_transition_tests {
                 semantic.validate_live_owner(&scratch).unwrap();
                 semantic.run_unit(|| ()).unwrap();
                 let completion = semantic.finish_exact().unwrap();
-                let permit = match planning.seal_activation(success, completion) {
-                    CanonicalActivationSeal::Sealed(permit) => permit,
-                    CanonicalActivationSeal::Unsealed(failure) => {
-                        return failure.finish_after_plan_drop();
-                    }
-                };
                 let plan = PanickingTrackedPlan {
                     scratch: Some(scratch),
                     reservation_released: &reservation_released,
@@ -3385,6 +3608,18 @@ mod scoped_transition_tests {
                         poison_event_count_while_dropping: &plan_poison_events_while_dropping,
                     }),
                 };
+                let permit = match planning.seal_activation(
+                    TestActivationDescription {
+                        requirements: success
+                            .take()
+                            .expect("the test success requirements are consumed exactly once"),
+                        execution: plan,
+                    },
+                    completion,
+                ) {
+                    CanonicalActivationSeal::Sealed(permit) => permit,
+                    CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+                };
                 let materializer_marker = TransitionDropMarker {
                     dropped: &materializer_dropped,
                     account: &account,
@@ -3393,7 +3628,6 @@ mod scoped_transition_tests {
                 };
                 crate::retained::panic_next_publication_account_open();
                 permit.activate(
-                    plan,
                     move |_lane,
                           _plan|
                           -> CanonicalMaterialization<

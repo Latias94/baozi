@@ -557,6 +557,52 @@ impl RetainedStoreBatchLimits {
     }
 }
 
+/// Ledger placement for one concrete retained writer.
+///
+/// The role is stable for one session vocabulary. Request-specific capacities are bound only after
+/// a complete construction plan has derived its exact retained shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetainedStoreWriterRole {
+    phase: StorePhaseKey,
+    capacity_dimension: StoreDimensionKey,
+    attribution_dimension: StoreDimensionKey,
+}
+
+impl RetainedStoreWriterRole {
+    /// Creates a writer role without entering the ledger or allocator.
+    pub const fn new(
+        phase: StorePhaseKey,
+        capacity_dimension: StoreDimensionKey,
+        attribution_dimension: StoreDimensionKey,
+    ) -> Self {
+        Self {
+            phase,
+            capacity_dimension,
+            attribution_dimension,
+        }
+    }
+
+    /// Binds one request-derived fixed-capacity envelope to this stable role.
+    pub(super) const fn bind(self, limits: RetainedStoreBatchLimits) -> RetainedStoreWriterPlan {
+        RetainedStoreWriterPlan {
+            phase: self.phase,
+            capacity_dimension: self.capacity_dimension,
+            attribution_dimension: self.attribution_dimension,
+            limits,
+        }
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) const fn keys_for_publication_validation(
+        self,
+    ) -> (StorePhaseKey, [StoreDimensionKey; 2]) {
+        (
+            self.phase,
+            [self.capacity_dimension, self.attribution_dimension],
+        )
+    }
+}
+
 /// Ledger placement and fixed capacities for one concrete retained writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetainedStoreWriterPlan {
@@ -574,12 +620,21 @@ impl RetainedStoreWriterPlan {
         attribution_dimension: StoreDimensionKey,
         limits: RetainedStoreBatchLimits,
     ) -> Self {
-        Self {
-            phase,
-            capacity_dimension,
-            attribution_dimension,
-            limits,
-        }
+        RetainedStoreWriterRole::new(phase, capacity_dimension, attribution_dimension).bind(limits)
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) const fn role(self) -> RetainedStoreWriterRole {
+        RetainedStoreWriterRole::new(
+            self.phase,
+            self.capacity_dimension,
+            self.attribution_dimension,
+        )
+    }
+
+    #[cfg(feature = "_u4-activation")]
+    pub(super) const fn limits(self) -> RetainedStoreBatchLimits {
+        self.limits
     }
 
     pub(super) const fn into_raw(self) -> RetainedWriterPlan<StorePhaseKey, StoreDimensionKey> {

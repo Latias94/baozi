@@ -1,7 +1,10 @@
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
-    CanonicalMaterialization, CanonicalSuccessRequirements, CanonicalTableShape,
-    CanonicalValidationDecision, CanonicalValidationProgress,
+    CanonicalMaterialization, CanonicalValidationDecision, CanonicalValidationProgress,
+};
+use baozi_operation::__canonical_activation_producer::{
+    CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalSealedActivationPlan,
+    CanonicalSuccessRequirements, CanonicalTableShape,
 };
 use baozi_operation::{
     CanonicalInheritanceSource, OperationControl, RecordBlock, RetainedStoreBatchLimits,
@@ -47,6 +50,24 @@ pub(in crate::canonical_scene::store) enum NodeSceneEditPrepareError {
 struct NodeSceneEditExecutionPlan<'scope, 'scene> {
     pending: BoundPendingNodeSceneEdit<'scene>,
     inherited: NodeSceneInheritedLeafPlan<'scope, super::super::super::SceneConstructionOwner>,
+}
+
+struct NodeSceneEditActivationDescription<'scope, 'scene> {
+    requirements: CanonicalSuccessRequirements,
+    execution: NodeSceneEditExecutionPlan<'scope, 'scene>,
+}
+
+impl<'scope, 'scene> CanonicalActivationDescription
+    for NodeSceneEditActivationDescription<'scope, 'scene>
+{
+    type Execution = NodeSceneEditExecutionPlan<'scope, 'scene>;
+
+    fn seal_activation<'activation>(
+        self,
+        sealer: CanonicalActivationPlanSealer<'activation>,
+    ) -> CanonicalSealedActivationPlan<'activation, Self::Execution> {
+        sealer.seal(self.requirements, self.execution)
+    }
 }
 
 impl PendingNodeSceneEdit {
@@ -157,7 +178,7 @@ fn prepare_scoped_edit(
     let evidence_counts = pending.counts.evidence;
     let input_generation = pending.input.generation();
     let invalidations = pending.invalidations;
-    let success_requirements = edit_success_requirements(&pending)?;
+    let mut success_requirements = Some(edit_success_requirements(&pending)?);
     let mut pending = Some(pending);
 
     let outcome = owner.plan_and_activate_scoped(move |mut planning| {
@@ -197,17 +218,17 @@ fn prepare_scoped_edit(
                 return planning.reject(rejection, stable_code);
             }
         };
-        let execution = NodeSceneEditExecutionPlan { pending, inherited };
-        let permit = match planning.seal_activation(success_requirements, completion) {
-            CanonicalActivationSeal::Sealed(permit) => permit,
-            CanonicalActivationSeal::Unsealed(failure) => {
-                drop(execution);
-                return failure.finish_after_plan_drop();
-            }
+        let description = NodeSceneEditActivationDescription {
+            requirements: success_requirements
+                .take()
+                .expect("the edit success requirements are consumed exactly once"),
+            execution: NodeSceneEditExecutionPlan { pending, inherited },
         };
-        permit.activate(execution, move |lane, execution| {
-            materialize_edit(lane, execution, brand)
-        })
+        let permit = match planning.seal_activation(description, completion) {
+            CanonicalActivationSeal::Sealed(permit) => permit,
+            CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+        };
+        permit.activate(move |lane, execution| materialize_edit(lane, execution, brand))
     })?;
 
     let validation_progress = CanonicalValidationProgress::new(
@@ -323,6 +344,7 @@ fn edit_success_requirements(
     let total = pending.counts.canonical_blocks.as_usize();
     CanonicalSuccessRequirements::new(
         CanonicalTableShape::new(total, pending.counts.new_canonical_blocks.as_usize())?,
+        4,
         total,
         pending.counts.central_validation_plan.work(),
     )

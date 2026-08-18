@@ -259,28 +259,43 @@ pub use concrete_store::{
 pub mod __canonical_activation {
     pub use crate::concrete_store::activation::{
         CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationPolicy,
-        CanonicalActivationSeal, CanonicalActivationSealFailure, CanonicalBuildControl,
-        CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome,
+        CanonicalActivationSeal, CanonicalActivationSealFailure, CanonicalActivationSessionPolicy,
+        CanonicalBuildControl, CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome,
         CanonicalFailureRequirements, CanonicalFailureTerminalWorkPlan,
         CanonicalFreezeInterruption, CanonicalFreezeInterruptionClass, CanonicalFreezePermit,
         CanonicalFreezePermitIssue, CanonicalJointCommit, CanonicalJointSeal, CanonicalLane,
         CanonicalMaterialization, CanonicalMaterializationRole, CanonicalPlanning,
         CanonicalRecordBuildRow, CanonicalReservation, CanonicalScopedDisposition,
-        CanonicalSemanticCompletion, CanonicalSemanticWorkSession, CanonicalSuccessRequirements,
-        CanonicalTableShape, CanonicalValidationCheckpoint, CanonicalValidationDecision,
-        CanonicalValidationMember, CanonicalValidationPlanning,
+        CanonicalSemanticCompletion, CanonicalSemanticWorkSession, CanonicalValidationCheckpoint,
+        CanonicalValidationDecision, CanonicalValidationMember, CanonicalValidationPlanning,
         CanonicalValidationPreparationError, CanonicalValidationProgress,
         CanonicalValidationRecordRow, CanonicalValidationRole, CanonicalValidationSession,
         CentrallyRejectedCanonicalStoreSession, FailureEvidenceDecision, FailureEvidenceMember,
         FailureEvidenceOutcome, FailureEvidenceRecordRow, FailureEvidenceValidationSession,
         FrozenFailureState, InterruptedCanonicalStoreSession, NeverActivatedStoreSession,
         OutcomeEvidenceBuildControl, OutcomeEvidenceDecision, OutcomeEvidenceValidationMember,
-        OutcomeEvidenceValidationRecordRow, RejectedCanonicalStoreSession, RootedFailureValidation,
+        OutcomeEvidenceValidationRecordRow, RejectedCanonicalStoreSession,
+        RetainedStoreSessionOutcomeOwner, RootedFailureValidation,
         ScopedRetainedStoreSessionOutcomeOwner, StoreActivationContainment,
         StoreCanonicalRejection, StoreNeverActivatedCause, VerifiedMinimalFallback,
     };
     pub use crate::concrete_store::{
         RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreProducerHost,
+        RetainedStoreWriterRole,
+    };
+}
+
+/// Trusted producer surface for opaque canonical construction plans.
+///
+/// Only the core canonical construction modules may use this migration seam. Operation consumers
+/// receive already opaque domain plans and cannot name or rebind their success facts. This module
+/// is temporary until those producers move behind the final canonical Scene transaction boundary.
+#[doc(hidden)]
+#[cfg(feature = "_u4-activation")]
+pub mod __canonical_activation_producer {
+    pub use crate::concrete_store::activation::{
+        CanonicalActivationDescription, CanonicalActivationPlanSealer,
+        CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
     };
 }
 pub use control::{

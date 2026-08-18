@@ -7,15 +7,20 @@ use std::cell::Cell;
 
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationPolicy,
-    CanonicalActivationSeal, CanonicalActivationSealFailure, CanonicalCentralValidationOutcome,
-    CanonicalFailureRequirements, CanonicalFreezePermit, CanonicalJointCommit, CanonicalJointSeal,
-    CanonicalLane, CanonicalMaterialization, CanonicalMaterializationRole, CanonicalReservation,
-    CanonicalScopedDisposition, CanonicalSemanticCompletion, CanonicalSuccessRequirements,
-    CanonicalTableShape, CanonicalValidationDecision, CanonicalValidationMember,
+    CanonicalActivationSeal, CanonicalActivationSealFailure, CanonicalActivationSessionPolicy,
+    CanonicalCentralValidationOutcome, CanonicalFailureRequirements, CanonicalFreezePermit,
+    CanonicalJointCommit, CanonicalJointSeal, CanonicalLane, CanonicalMaterialization,
+    CanonicalMaterializationRole, CanonicalReservation, CanonicalScopedDisposition,
+    CanonicalSemanticCompletion, CanonicalValidationDecision, CanonicalValidationMember,
     CanonicalValidationProgress, CanonicalValidationRole, CanonicalValidationSession,
     FailureEvidenceDecision, FailureEvidenceMember, FailureEvidenceOutcome,
-    OutcomeEvidenceDecision, OutcomeEvidenceValidationMember, RootedFailureValidation,
-    StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
+    OutcomeEvidenceDecision, OutcomeEvidenceValidationMember, RetainedStoreSessionOutcomeOwner,
+    RetainedStoreWriterRole, RootedFailureValidation, StoreActivationContainment,
+    StoreCanonicalRejection, StoreNeverActivatedCause,
+};
+use baozi_operation::__canonical_activation_producer::{
+    CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalSealedActivationPlan,
+    CanonicalSuccessRequirements, CanonicalTableShape,
 };
 use baozi_operation::{ScalarSequence, StoreDestination, StorePlanError, StoreWorkError};
 
@@ -25,6 +30,22 @@ struct TestScopedActivation {
     policy: CanonicalActivationPolicy,
     failure: CanonicalFailureRequirements,
     success: CanonicalSuccessRequirements,
+}
+
+struct TestActivationDescription<P> {
+    requirements: CanonicalSuccessRequirements,
+    execution: P,
+}
+
+impl<P> CanonicalActivationDescription for TestActivationDescription<P> {
+    type Execution = P;
+
+    fn seal_activation<'scope>(
+        self,
+        sealer: CanonicalActivationPlanSealer<'scope>,
+    ) -> CanonicalSealedActivationPlan<'scope, Self::Execution> {
+        sealer.seal(self.requirements, self.execution)
+    }
 }
 
 type TestActivationOutcome<T, E, CanonicalKind, CanonicalTag> = CanonicalActivationOutcome<
@@ -58,7 +79,7 @@ fn activate_scoped<'scope, T, E, CanonicalKind, CanonicalTag>(
         CanonicalTag,
     >,
 ) -> CanonicalScopedDisposition<'scope> {
-    permit.activate((), |lane, _plan| materialize(lane))
+    permit.activate(|lane, _plan| materialize(lane))
 }
 
 fn run_scoped_activation<T, E, CanonicalKind, CanonicalTag>(
@@ -82,19 +103,26 @@ fn run_scoped_activation<T, E, CanonicalKind, CanonicalTag>(
     let owner = operation
         .into_scoped_session_outcome_owner(policy, failure)
         .unwrap();
+    let mut activation_plan = Some(TestActivationDescription {
+        requirements: success,
+        execution: (),
+    });
     let mut materialize = Some(materialize);
     owner.plan_and_activate_scoped(move |mut planning| {
         let mut semantic = planning.begin_semantic_work().unwrap();
         semantic.run_unit(|| ()).unwrap();
         let completion = semantic.finish_exact().unwrap();
-        match planning.seal_activation(success, completion) {
+        let activation_plan = activation_plan
+            .take()
+            .expect("the scoped activation plan is consumed exactly once");
+        match planning.seal_activation(activation_plan, completion) {
             CanonicalActivationSeal::Sealed(permit) => activate_scoped(
                 permit,
                 materialize
                     .take()
                     .expect("the scoped materializer is transferred exactly once"),
             ),
-            CanonicalActivationSeal::Unsealed(failure) => failure.finish_after_plan_drop(),
+            CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
         }
     })
 }
@@ -153,6 +181,8 @@ fn canonical_activation_authorities_remain_linear() {
     impl<T: Clone> AmbiguousIfClone<CloneMarker> for T {}
 
     type Completion = CanonicalSemanticCompletion<'static>;
+    type SuccessRequest = CanonicalSuccessRequirements;
+    type SessionOwner = RetainedStoreSessionOutcomeOwner<TestOwner, TestProgress, TestUnit>;
     type ActivationPermit = CanonicalActivationPermit<
         'static,
         TestOwner,
@@ -175,6 +205,10 @@ fn canonical_activation_authorities_remain_linear() {
     >;
     let _ = <Completion as AmbiguousIfCopy<_>>::assert_not_copy;
     let _ = <Completion as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <SuccessRequest as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <SuccessRequest as AmbiguousIfClone<_>>::assert_not_clone;
+    let _ = <SessionOwner as AmbiguousIfCopy<_>>::assert_not_copy;
+    let _ = <SessionOwner as AmbiguousIfClone<_>>::assert_not_clone;
     let _ = <ActivationPermit as AmbiguousIfCopy<_>>::assert_not_copy;
     let _ = <ActivationPermit as AmbiguousIfClone<_>>::assert_not_clone;
     let _ = <ActivationFailure as AmbiguousIfCopy<_>>::assert_not_copy;
@@ -296,6 +330,7 @@ fn scoped_activation_shape_with_dimensions_and_validation_work(
         ),
         success: CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(canonical_blocks, canonical_blocks).unwrap(),
+            2,
             canonical_blocks,
             validation_work,
         )
@@ -309,6 +344,7 @@ fn activation_requirements_reject_impossible_exact_shapes() {
         CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(1, 1).unwrap(),
             0,
+            1,
             NonZeroU64::MIN,
         ),
         Err(StorePlanError::InvalidBlockTable)
@@ -317,6 +353,16 @@ fn activation_requirements_reject_impossible_exact_shapes() {
         CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(1, 1).unwrap(),
             2,
+            0,
+            NonZeroU64::MIN,
+        ),
+        Err(StorePlanError::InvalidBlockTable)
+    ));
+    assert!(matches!(
+        CanonicalSuccessRequirements::new(
+            CanonicalTableShape::new(1, 1).unwrap(),
+            2,
+            2,
             NonZeroU64::MIN,
         ),
         Err(StorePlanError::InvalidBlockTable)
@@ -324,6 +370,7 @@ fn activation_requirements_reject_impossible_exact_shapes() {
     assert!(matches!(
         CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(3, 1).unwrap(),
+            2,
             4,
             NonZeroU64::MIN,
         ),
@@ -332,6 +379,7 @@ fn activation_requirements_reject_impossible_exact_shapes() {
     assert!(
         CanonicalSuccessRequirements::new(
             CanonicalTableShape::new(3, 1).unwrap(),
+            2,
             3,
             NonZeroU64::MIN,
         )
@@ -374,11 +422,11 @@ fn structural_work_requirement_counts_operation_owned_share_actions() {
 
 #[test]
 fn structural_work_requirement_rejects_extreme_shape_overflow() {
-    let canonical = CanonicalTableShape::new(usize::MAX, usize::MAX).unwrap();
+    let canonical = CanonicalTableShape::new(usize::MAX - 1, usize::MAX - 1).unwrap();
     let evidence = CanonicalTableShape::new(1, 1).unwrap();
     let failure = CanonicalFailureRequirements::new(evidence);
     let success =
-        CanonicalSuccessRequirements::new(canonical, usize::MAX, NonZeroU64::MIN).unwrap();
+        CanonicalSuccessRequirements::new(canonical, 2, usize::MAX - 1, NonZeroU64::MIN).unwrap();
 
     assert_eq!(failure.pre_activation_structural_work_requirement(), Ok(8));
     assert_eq!(

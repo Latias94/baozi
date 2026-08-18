@@ -183,6 +183,8 @@ pub use batch::{
     CanonicalStoreRange, CanonicalUtf8Range, SequenceBatchItem, SequenceBatchPlan,
     StoreBatchRuntimeError, Utf8BatchItem, Utf8BatchPlan,
 };
+#[cfg(feature = "_u4-activation")]
+pub use vocabulary::RetainedStoreWriterRole;
 pub use vocabulary::{
     RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStoreFailureTerminalWorkPlan,
     RetainedStoreFailureTerminalWorkRequirement, RetainedStorePublicationPlan,

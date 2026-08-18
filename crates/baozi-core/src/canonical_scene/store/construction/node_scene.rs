@@ -41,6 +41,8 @@ mod materialization;
 #[cfg(any(test, feature = "_u4-import"))]
 pub(in crate::canonical_scene::store) use materialization::NodeSceneActivationRequest;
 pub(in crate::canonical_scene::store) use materialization::NodeSceneMaterializedRefs;
+#[cfg(feature = "_u4-import")]
+pub(in crate::canonical_scene::store) use materialization::maximum_node_scene_structural_work;
 #[cfg(test)]
 pub(in crate::canonical_scene::store) use materialization::validate_node_scene_batches_for_test;
 #[cfg(feature = "_u4-import")]

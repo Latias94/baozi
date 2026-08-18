@@ -561,15 +561,11 @@ impl ImportStoreSessionOwner {
                     return planning.reject(rejection, stable_code);
                 }
             };
-            let success_requirements = plan.success_requirements();
-            match planning.seal_activation(success_requirements, completion) {
+            match planning.seal_activation(plan, completion) {
                 CanonicalActivationSeal::Sealed(permit) => {
-                    permit.activate(plan, |lane, plan| plan.materialize(lane))
+                    permit.activate(|lane, plan| plan.materialize(lane))
                 }
-                CanonicalActivationSeal::Unsealed(failure) => {
-                    drop(plan);
-                    failure.finish_after_plan_drop()
-                }
+                CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
             }
         }) {
             Ok(outcome) => outcome,

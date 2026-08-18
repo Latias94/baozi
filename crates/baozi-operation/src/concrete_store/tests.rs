@@ -2,8 +2,9 @@ use super::*;
 
 #[cfg(feature = "_u4-activation")]
 use super::activation::{
-    CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationSeal,
-    CanonicalFailureRequirements, CanonicalMaterializationRole, CanonicalSuccessRequirements,
+    CanonicalActivationDescription, CanonicalActivationOutcome, CanonicalActivationPlanSealer,
+    CanonicalActivationPolicy, CanonicalActivationSeal, CanonicalFailureRequirements,
+    CanonicalMaterializationRole, CanonicalSealedActivationPlan, CanonicalSuccessRequirements,
     CanonicalTableShape, CanonicalValidationRole, FailureEvidenceDecision, FailureEvidenceOutcome,
 };
 
@@ -24,6 +25,24 @@ mod mapped_record_append;
 struct TestOwner;
 
 impl OperationOwner for TestOwner {}
+
+#[cfg(feature = "_u4-activation")]
+struct TestActivationDescription<P> {
+    requirements: CanonicalSuccessRequirements,
+    execution: P,
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<P> CanonicalActivationDescription for TestActivationDescription<P> {
+    type Execution = P;
+
+    fn seal_activation<'scope>(
+        self,
+        sealer: CanonicalActivationPlanSealer<'scope>,
+    ) -> CanonicalSealedActivationPlan<'scope, Self::Execution> {
+        sealer.seal(self.requirements, self.execution)
+    }
+}
 
 const fn test_catalog() -> StoreSemanticCatalogId {
     StoreSemanticCatalogId::new(
@@ -221,6 +240,7 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
     );
     let success = CanonicalSuccessRequirements::new(
         CanonicalTableShape::new(1, 1).expect("activation canonical shape"),
+        2,
         1,
         NonZeroU64::MIN,
     )
@@ -236,6 +256,7 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
     let outcome_owner = operation
         .into_scoped_session_outcome_owner(policy, failure)
         .expect("scoped activation owner");
+    let mut success = Some(success);
     let mut ledger = None;
 
     let result = outcome_owner.plan_and_activate_scoped(|mut planning| {
@@ -244,11 +265,17 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
             .expect("semantic work session");
         semantic.run_unit(|| ()).expect("semantic work completion");
         let completion = semantic.finish_exact().expect("semantic completion");
-        let permit = match planning.seal_activation(success, completion) {
-            CanonicalActivationSeal::Sealed(permit) => permit,
-            CanonicalActivationSeal::Unsealed(failure) => return failure.finish_after_plan_drop(),
+        let activation_plan = TestActivationDescription {
+            requirements: success
+                .take()
+                .expect("the test success requirements are consumed exactly once"),
+            execution: (),
         };
-        permit.activate((), |mut lane, _plan| {
+        let permit = match planning.seal_activation(activation_plan, completion) {
+            CanonicalActivationSeal::Sealed(permit) => permit,
+            CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+        };
+        permit.activate(|mut lane, _plan| {
             ledger = Some(lane.test_ledger_probe());
             let cause = lane
                 .try_retain_sequence(

@@ -1,11 +1,9 @@
 //! Hidden cross-crate bridge for the U4 canonical import cutover.
 
 use std::fmt;
-use std::num::NonZeroU64;
 
-use baozi_operation::__canonical_activation::{
-    CanonicalFailureRequirements, CanonicalSuccessRequirements, CanonicalTableShape,
-};
+#[cfg(test)]
+use baozi_operation::__canonical_activation::CanonicalFailureRequirements;
 use baozi_operation::{
     OperationOwner, PreparedStoreSuccess, ProgressPhase, ProgressUnit,
     PublishedOutcomeEvidenceStore, RecordBlock, RetainedStoreFailureTerminalWorkRequirement,
@@ -14,8 +12,6 @@ use baozi_operation::{
 
 use crate::validation_control::SceneValidationLimits;
 
-use super::super::construction::node_scene::NodeSceneActivationRequest;
-use super::super::construction::node_scene::consume_node_scene_freeze_permit;
 pub use super::super::construction::node_scene::{
     NodeSceneActivationPolicyRequirements as SceneActivationRequirements,
     NodeSceneActivationPostflight as SceneActivationPostflight,
@@ -29,6 +25,10 @@ pub use super::super::construction::node_scene::{
     NodeSceneLanePlan as SceneSealedActivationPlan,
     NodeSceneLaneRejection as SceneActivationRejection,
     NodeSceneLaneValidationProof as SceneValidationProof,
+};
+use super::super::construction::node_scene::{
+    NodeSceneActivationRequest, consume_node_scene_freeze_permit,
+    maximum_node_scene_structural_work,
 };
 use super::super::construction::{
     FAILURE_TERMINAL_EVIDENCE_MEMBERS, SceneConstructionStartError,
@@ -57,14 +57,7 @@ pub fn maximum_scene_canonical_blocks(limits: SceneValidationLimits) -> Option<u
 /// Returns the protected structural-work ceiling for any fresh Scene admitted under `limits`.
 pub fn maximum_scene_structural_work(limits: SceneValidationLimits) -> Option<u64> {
     let canonical_blocks = maximum_scene_canonical_blocks(limits)?;
-    let canonical = CanonicalTableShape::new(canonical_blocks, canonical_blocks).ok()?;
-    let success =
-        CanonicalSuccessRequirements::new(canonical, canonical_blocks, NonZeroU64::MIN).ok()?;
-    let failure_blocks = FAILURE_TERMINAL_EVIDENCE_MEMBERS;
-    let failure = CanonicalFailureRequirements::new(
-        CanonicalTableShape::new(failure_blocks, failure_blocks).ok()?,
-    );
-    success.structural_work_requirement(&failure).ok()
+    maximum_node_scene_structural_work(canonical_blocks)
 }
 
 impl<'input> SceneActivationRequest<'input> {
@@ -235,24 +228,5 @@ mod tests {
             SceneHandoffToken,
             TestPreparedSceneSuccess,
         ) -> Result<ScenePublishedSuccess, SceneHandoffPairingError> = SceneHandoffToken::handoff;
-
-        fn _materializes_only_from_lane<'input, 'scope, 'lane, O, PP, U, L>(
-            plan: &SceneSealedActivationPlan<'input, 'scope, O>,
-            lane: baozi_operation::__canonical_activation::CanonicalLane<'lane, O, PP, U, L>,
-        ) -> baozi_operation::__canonical_activation::CanonicalMaterialization<
-            'lane,
-            SceneActivationOutput,
-            SceneActivationRejection,
-            RecordBlock,
-            SceneCanonicalRootTag,
-        >
-        where
-            O: OperationOwner,
-            PP: ProgressPhase,
-            U: ProgressUnit,
-        {
-            let _: CanonicalSuccessRequirements = plan.success_requirements();
-            plan.materialize(lane)
-        }
     }
 }
