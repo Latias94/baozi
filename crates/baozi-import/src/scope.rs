@@ -34,9 +34,8 @@ use crate::source_scope::{
 use crate::store::{
     ImportStoreHost, ImportStoreReservation, ImportStoreSessionOwner, scene_validation_limits,
 };
-use baozi_core::__canonical_import::{
-    SceneActivationRequest, SceneAuthoringBatch, SceneDraft as CanonicalSceneDraft,
-};
+use crate::{SceneDraft as CanonicalSceneDraft, authoring::SceneAuthoringBatch};
+use baozi_core::__canonical_import::SceneActivationRequest;
 use baozi_core::{OrderedMap, OrderedMapError};
 use baozi_io::{AssetIo, AssetLength, AssetPath, AuthorityDomain, OpenedAsset, PathError};
 use baozi_operation::{CapacityPlan, CapacityPlanError, CounterClass, LedgerCause};

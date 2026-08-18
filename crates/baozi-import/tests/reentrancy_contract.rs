@@ -1,6 +1,7 @@
 mod support;
 
 use baozi_core::FormatId;
+use baozi_import::authoring::SceneSpace;
 use baozi_import::{
     CapabilityStatus, CompiledFormatOptions, DetectionOutcome, DetectionResult, DetectionScope,
     FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter, FormatOptionCodec,
@@ -9,7 +10,7 @@ use baozi_import::{
     ImportReport, ImportRequest, ImportRequestLayer, OptionCompileError, OptionCompileLimits,
     OptionCompileScope, OptionRuntimeTypeKey, ParseResult, ParseScope, PreparedImportRequest,
     ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuildScope, RegistryBuilder,
-    RegistrySnapshot, SceneDraft, SceneSpace, import_bytes,
+    RegistrySnapshot, SceneDraft, import_bytes,
 };
 use baozi_io::AssetPath;
 use std::num::NonZeroU32;

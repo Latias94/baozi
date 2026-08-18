@@ -7,12 +7,12 @@ mod parser;
 pub(crate) use error::PlyFailure;
 pub use error::PlyFailureCode;
 
+use baozi_import::authoring::FormatId;
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatId, FormatImporter, ParseResult, ParseScope, Probe,
-    ReadHint, RegistryBuilder, RegistryRegistrationError, SceneDraft, TextBomPolicy,
-    TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
-    TextSourceEncoding,
+    FormatDescriptor, FormatEncoding, FormatImporter, ParseResult, ParseScope, Probe, ReadHint,
+    RegistryBuilder, RegistryRegistrationError, SceneDraft, TextBomPolicy, TextControlPolicy,
+    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
 };
 
 pub(crate) const FORMAT_ID: &str = "org.baozi.ply";

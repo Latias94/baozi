@@ -1,3 +1,4 @@
+use crate::SceneDraft;
 use crate::descriptor::FormatDescriptor;
 use crate::detection::{DetectionResult, DetectionScope};
 use crate::options::{
@@ -5,7 +6,6 @@ use crate::options::{
 };
 use crate::scope::{ParseResult, ParseScope};
 use crate::session::ReadHint;
-use baozi_core::__canonical_import::SceneDraft;
 use std::any::Any;
 use std::fmt;
 use std::panic::RefUnwindSafe;

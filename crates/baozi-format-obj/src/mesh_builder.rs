@@ -5,25 +5,28 @@ use crate::mtl::{
 use crate::obj::{Face, FaceVertex, ParsedObj, StateNameId};
 use crate::parser::usize_amount;
 use crate::{FORMAT_ID, ObjFailure, diffuse_texture_role};
-use baozi_import::{
+use baozi_import::authoring::{
     AlphaMode as CanonicalAlphaMode, AnimationAuthoringBatch, AppearanceAuthoringBatch,
     AttributeDomain, AttributeSemantic, AuthoredTransform, AuthoringRange, Color,
-    ColorInterpretation, DeformationAuthoringBatch, DependencySnapshot, ExtensionValueRef,
-    FormatId, GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
+    ColorInterpretation, DeformationAuthoringBatch, ExtensionValueRef, FormatId,
+    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
     GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
-    ImageAuthoring, ImageLocalId, ImportStorageClass, ImportWorkClass, LegacyMaterialFactors,
-    LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring, MAX_ENTITY_NAME_BYTES,
-    MaterialAuthoring, MaterialBindingAuthoring, MaterialFactors, MaterialLocalId,
-    MeshInstanceDeformationAuthoring, MetadataAuthoringBatch, MetadataAuthoringEntry, MeteredVec,
-    NamespacedName, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, ObservedResourceAuthoring,
-    OwnerProvenanceAuthoring, ParseResult, ParseScope, Presence, PrimitiveDeformationAuthoring,
+    ImageAuthoring, ImageLocalId, LegacyMaterialFactors, LineageAuthoringBatch, LogicalMeshLocalId,
+    LogicalMorphAuthoring, MAX_ENTITY_NAME_BYTES, MaterialAuthoring, MaterialBindingAuthoring,
+    MaterialFactors, MaterialLocalId, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
+    MetadataAuthoringEntry, NamespacedName, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
+    ObservedResourceAuthoring, OwnerProvenanceAuthoring, Presence, PrimitiveDeformationAuthoring,
     ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
     ResourceIdentity, ResourceIdentityLocalId, ResourceSnapshotAuthoring, SamplerAuthoring,
-    SamplerLocalId, SamplerState, SceneAuthoringBatch, SceneDraft, SceneSpace, SessionOpaqueReason,
+    SamplerLocalId, SamplerState, SceneAuthoringBatch, SceneSpace, SessionOpaqueReason,
     ShadingModel as CanonicalShadingModel, SourceIdentityAuthoring, SourceIdentityLocalId,
     SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch, TextureAuthoring,
     TextureBlendOperation, TextureChannelMapping, TextureChannelSwizzle, TextureCoordinateSource,
     TextureLocalId, TextureRole, TextureSourceKey, TextureStrength, TextureTransform, Vec3,
+};
+use baozi_import::{
+    DependencySnapshot, ImportStorageClass, ImportWorkClass, MeteredVec, ParseResult, ParseScope,
+    SceneDraft,
 };
 
 const FALLBACK_RESOURCE_IDENTITY: &str = "session/obj-primary";

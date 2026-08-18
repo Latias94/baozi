@@ -21,6 +21,7 @@ use super::construction::node_scene::{
     PendingNodeSceneDraft, PreparedNodeSceneConstruction, PreparedNodeSceneFailure,
 };
 
+pub(crate) mod authoring;
 pub(crate) mod continuation;
 #[cfg(feature = "_u4-import")]
 pub(crate) mod import;
@@ -30,10 +31,10 @@ pub(crate) use scene::ValidatedScene;
 
 /// A non-owning descriptor for one materialized canonical Scene directory.
 ///
-/// This type is intentionally neither `Clone` nor `Copy`. The matching retained owner is carried
-/// separately by [`PendingSceneDraftOwner`] and must be consumed with this descriptor.
+/// This type is intentionally neither `Clone` nor `Copy`. The import session carries its matching
+/// retained owner separately and must consume both values together.
 #[must_use = "a Scene draft descriptor must be centrally prepared with its retained owner"]
-pub(crate) struct SceneDraft(NodeSceneDraft);
+pub struct SceneDraft(NodeSceneDraft);
 
 /// Structural owner for all retained blocks referenced by one [`SceneDraft`].
 ///

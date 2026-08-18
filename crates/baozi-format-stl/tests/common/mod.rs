@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
 use baozi_format_stl::{FORMAT_ID, StlImporter};
+use baozi_import::authoring::FormatId;
 use baozi_import::{
-    FormatFailureDetailValue, FormatFailureEnvelope, FormatId, FormatSelection, ImportCause,
+    FormatFailureDetailValue, FormatFailureEnvelope, FormatSelection, ImportCause,
     ImportConfigOverlay, ImportFailure, ImportOperationControl, ImportReport, ImportRequest,
     ImportRequestLayer, ImportResult, OptionCompileLimits, PreparedImportRequest,
     RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot,

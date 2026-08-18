@@ -40,6 +40,15 @@ mod provenance;
 mod scene_space;
 mod validation_control;
 
+/// Internal carrier for the extension-tier Scene authoring vocabulary owned by `baozi-import`.
+///
+/// This module is public only because Rust has no workspace-private visibility. It is not a
+/// canonical-model compatibility surface; importer authors should use `baozi_import::authoring`.
+#[doc(hidden)]
+pub mod __canonical_authoring {
+    pub use crate::canonical_scene::store::api::authoring::*;
+}
+
 #[cfg(not(feature = "_u4-import"))]
 /// The temporary U4 import bridge is absent from ordinary `baozi-core` builds.
 ///
@@ -49,6 +58,12 @@ mod validation_control;
 mod canonical_import_visibility_contract {}
 
 /// Temporary cross-crate integration surface for the atomic U4 import cutover.
+///
+/// Authoring values do not belong to this transaction bridge.
+///
+/// ```compile_fail,E0432
+/// use baozi_core::__canonical_import::SceneAuthoringBatch;
+/// ```
 #[cfg(feature = "_u4-import")]
 #[doc(hidden)]
 pub mod __canonical_import {

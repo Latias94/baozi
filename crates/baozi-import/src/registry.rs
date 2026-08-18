@@ -1,3 +1,4 @@
+use crate::SceneDraft;
 use crate::descriptor::FormatDescriptor;
 use crate::detection::{DetectionResult, DetectionScope};
 use crate::format::{
@@ -11,7 +12,6 @@ use crate::options::{
 };
 use crate::scope::{ParseResult, ParseScope};
 use crate::session::ReadHint;
-use baozi_core::__canonical_import::SceneDraft;
 use baozi_core::FormatId;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};

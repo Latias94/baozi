@@ -1,13 +1,14 @@
 #![allow(dead_code)]
 
 use baozi_format_gltf::{FORMAT_ID, GltfFailureCode, GltfImporter};
+use baozi_import::authoring::{FormatId, Mat4};
 use baozi_import::{
     DenyDependencies, DetectionOptions, DetectionOutcome, FormatFailureDetailValue,
-    FormatFailureEnvelope, FormatId, FormatSelection, ImportCause, ImportConfigOverlay,
-    ImportDiagnostic, ImportFailure, ImportOperationControl, ImportReport, ImportRequest,
-    ImportRequestLayer, ImportResult, OptionCompileLimits, PreparedImportRequest,
-    RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause,
-    import_asset, import_asset_with_resolver,
+    FormatFailureEnvelope, FormatSelection, ImportCause, ImportConfigOverlay, ImportDiagnostic,
+    ImportFailure, ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer,
+    ImportResult, OptionCompileLimits, PreparedImportRequest, RegistryBuildLimits, RegistryBuilder,
+    ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, import_asset,
+    import_asset_with_resolver,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use base64::Engine as _;
@@ -446,7 +447,7 @@ pub fn skinned_triangle_bin() -> Vec<u8> {
         bytes.extend_from_slice(&weight.to_le_bytes());
     }
     for _ in 0..2 {
-        for value in baozi_import::Mat4::IDENTITY.cols.iter().flatten() {
+        for value in Mat4::IDENTITY.cols.iter().flatten() {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
     }

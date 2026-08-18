@@ -473,6 +473,7 @@ impl ParseScope<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SceneDraft as CanonicalSceneDraft;
     use crate::metered_storage::inject_next_accounted_allocation_failure;
     use crate::{
         CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
@@ -481,7 +482,6 @@ mod tests {
         OptionCompileLimits, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
         ResourceLimits, ResourceLimitsOverlay,
     };
-    use baozi_core::__canonical_import::SceneDraft as CanonicalSceneDraft;
     use baozi_core::FormatId;
     use baozi_io::AssetPath;
 

@@ -1,3 +1,4 @@
+use crate::SceneDraft;
 use crate::config::FormatSelection;
 use crate::dependency::{
     DenyDependencies, DependencyCache, DependencyOriginIssuer, DependencyResolver,
@@ -31,7 +32,6 @@ use crate::store::{
     ImportStoreSessionOwner, ImportStoreTerminalEvidence, ImportStoreTerminalOutcome,
     try_import_store_bootstrap,
 };
-use baozi_core::__canonical_import::SceneDraft;
 use baozi_core::FormatId;
 use baozi_io::{
     AssetIo, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetPath, AuthorityDomain,

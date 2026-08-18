@@ -14,10 +14,11 @@ use baozi_operation::{
 };
 
 use crate::identity::SceneGenerationId;
+use crate::validation_control::SceneValidationLimits;
 
 use super::super::construction::node_scene::{
     DeferredNodeSceneDraftBuild, NodeSceneActivationRequest, NodeSceneActivationRoles,
-    NodeSceneConstructionTerminal, NodeSceneDraft, NodeSceneRichFailure, NodeSceneSuccessParts,
+    NodeSceneConstructionTerminal, NodeSceneRichFailure, NodeSceneSuccessParts,
     NodeSceneSuccessReport, NodeSceneWriterRoles, PendingNodeSceneDraft, PendingNodeSceneFailure,
     PreparedNodeSceneConstruction, prepare_unactivated_node_scene,
 };
@@ -27,72 +28,10 @@ use super::super::construction::{
 };
 use super::super::production::SceneInputEnvelope;
 use super::super::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT;
+use super::authoring::SceneAuthoringBatch;
+use super::scene::ValidatedScene;
 
-pub use super::scene::{SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene};
-
-pub use super::super::production::input::animation::{
-    AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
-    AnimationExtrapolationAuthoring, AnimationInterpolationAuthoring, AnimationTargetAuthoring,
-    AnimationTimeDomainAuthoring,
-};
-pub use super::super::production::input::appearance::{
-    AppearanceAuthoringBatch, ImageAuthoring, ImageLocalId, MaterialAuthoring,
-    MaterialBindingAuthoring, MaterialLocalId, SamplerAuthoring, SamplerLocalId, TextureAuthoring,
-    TextureLocalId,
-};
-pub use super::super::production::input::deformation::{
-    DeformationAuthoringBatch, InfluenceAuthoring, InfluenceRowsAuthoring, LogicalMorphAuthoring,
-    MeshInstanceDeformationAuthoring, MorphDeltaAuthoring, MorphDeltaPayloadAuthoring,
-    MorphTargetDefinitionAuthoring, MorphTargetIdentity, PrimitiveDeformationAuthoring,
-    PrimitiveMorphTargetAuthoring, SkinAuthoring, SkinLocalId,
-};
-pub use super::super::production::input::geometry::{
-    AuthoringRange, GeometryAttributeAuthoring, GeometryAuthoringBatch,
-    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
-    GeometryTopologyAuthoring, LogicalMeshLocalId,
-};
-pub use super::super::production::input::lineage::{
-    LineageAuthoringBatch, ObservedResourceAuthoring, OwnerProvenanceAuthoring, ProfileOwner,
-    ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring,
-    ResourceIdentityLocalId, SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId,
-};
-pub use super::super::production::input::metadata::{
-    MetadataAuthoringBatch, MetadataAuthoringEntry,
-};
-pub use super::super::production::input::spatial::{
-    CameraAuthoring, CameraLocalId, LightAuthoring, LightAuthoringError, LightLocalId,
-    SpatialAuthoringBatch,
-};
-pub use super::super::production::input::{
-    NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent, Presence,
-    ProfileAuthoringBatch, ResourceSnapshotAuthoring, SceneAuthoringBatch,
-};
-pub use crate::FormatId;
-pub use crate::appearance::{
-    AlphaMode, AppearanceBuildError, ColorInterpretation, LegacyMaterialFactors, MaterialFactors,
-    PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel,
-    SupplementalPbrFactors, TextureBlendOperation, TextureChannel, TextureChannelMapping,
-    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength,
-    TextureTransform,
-};
-pub use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemantic};
-pub use crate::deform::{MorphDeltaSemantic, SkinMatrixSpaces};
-pub use crate::entity::{
-    AuthoredTransform, CameraProjection, EntityName, LightKind, MAX_ENTITY_NAME_BYTES,
-};
-pub use crate::extension::{ExtensionMediaType, ExtensionValueRef};
-pub use crate::image::{MipmapFilter, SamplerState, TexelFilter, TextureAddressMode};
-pub use crate::math::{Color, Mat4, Quat, Vec2, Vec3};
-pub use crate::namespaced::NamespacedName;
-pub use crate::provenance::{
-    ContentDigest, DigestAlgorithm, EvidenceDigest, OperationEvidenceSummary, OperationKind,
-    OptionsDigest, ResourceIdentity, SourceDisplayName, SourceObjectKind, SourceObjectLocator,
-};
-pub use crate::scene_space::{
-    Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
-    TangentHandednessEncoding, TransformConvention, UvOrigin,
-};
-pub use crate::validation_control::SceneValidationLimits;
+pub use super::SceneDraft;
 
 /// Roleless complete-batch request which can be consumed only with one retained operation.
 #[must_use = "the Scene activation request must be consumed by one import session owner"]
@@ -203,13 +142,6 @@ impl SceneActivationRoles {
         self
     }
 }
-
-/// Non-owning descriptor for one materialized canonical Scene directory.
-///
-/// The descriptor is deliberately neither `Clone` nor `Copy`. Its matching retained owner stays
-/// in the import session until the parser returns this exact value.
-#[must_use = "the Scene draft must be returned to its import session"]
-pub struct SceneDraft(NodeSceneDraft);
 
 /// Structural owner for the retained blocks referenced by one [`SceneDraft`].
 ///
@@ -546,143 +478,5 @@ mod tests {
         let _: fn(&SceneMinimalFallback) -> u32 = SceneMinimalFallback::stable_code;
         let _: for<'a> fn(&'a SceneMinimalFallback) -> &'a StoreLedgerEvidence =
             SceneMinimalFallback::ledger_evidence;
-    }
-
-    #[test]
-    fn hidden_import_surface_constructs_the_complete_authoring_batch() {
-        use crate::__canonical_import as bridge;
-
-        let scene_space = bridge::SceneSpace::unknown();
-        let input = bridge::SceneAuthoringBatch::new(
-            bridge::SpatialAuthoringBatch::new(&scene_space, &[], &[]),
-            bridge::NodeAuthoringBatch::new(bridge::Presence::Present(&[]), &[]),
-            bridge::AppearanceAuthoringBatch::empty(),
-            bridge::GeometryAuthoringBatch::empty(),
-            bridge::DeformationAuthoringBatch::empty(),
-            bridge::AnimationAuthoringBatch::empty(),
-            bridge::ProfileAuthoringBatch::new(
-                bridge::LineageAuthoringBatch::new(&[], &[], &[], &[]),
-                bridge::MetadataAuthoringBatch::empty(),
-            ),
-        );
-        let _: bridge::SceneAuthoringBatch<'_> = input;
-
-        let _: fn(u32) -> bridge::NodeLocalId = bridge::NodeLocalId::new;
-        let _: fn(bridge::NodeLocalId, u32) -> bridge::NodeParent = bridge::NodeParent::new;
-        let _: fn(u32, u32) -> bridge::AuthoringRange = bridge::AuthoringRange::new;
-
-        let _ = bridge::AnimationChannelAuthoring::new(
-            bridge::AnimationTargetAuthoring::NodeTranslation(bridge::NodeLocalId::new(0)),
-            bridge::AnimationInterpolationAuthoring::Linear,
-            bridge::AnimationExtrapolationAuthoring::SourceDefault,
-            bridge::AnimationExtrapolationAuthoring::SourceDefault,
-            &[],
-            &[],
-            bridge::Presence::Absent,
-            bridge::Presence::Absent,
-        );
-        let _: fn(
-            f64,
-            bridge::AnimationTimeDomainAuthoring,
-            bridge::AuthoringRange,
-        ) -> bridge::AnimationClipAuthoring = bridge::AnimationClipAuthoring::new;
-
-        let _: fn(u32) -> bridge::ImageLocalId = bridge::ImageLocalId::new;
-        let _: fn(u32) -> bridge::SamplerLocalId = bridge::SamplerLocalId::new;
-        let _: fn(u32) -> bridge::TextureLocalId = bridge::TextureLocalId::new;
-        let _: fn(u32) -> bridge::MaterialLocalId = bridge::MaterialLocalId::new;
-        let _ = bridge::ImageAuthoring::session_resource(
-            bridge::ResourceIdentityLocalId::new(0),
-            bridge::Presence::Absent,
-        );
-        let _: fn(bridge::SamplerState) -> bridge::SamplerAuthoring = bridge::SamplerAuthoring::new;
-        let _: fn(bridge::ImageLocalId, bridge::SamplerLocalId) -> bridge::TextureAuthoring =
-            bridge::TextureAuthoring::new;
-        let role = bridge::TextureRole::BaseColor;
-        let coordinate_source = bridge::TextureCoordinateSource::UvSet(0);
-        let channel_mapping =
-            bridge::TextureChannelMapping::swizzle(bridge::TextureChannelSwizzle::RGBA);
-        let color_interpretation = bridge::ColorInterpretation::SrgbColor;
-        let blend = bridge::TextureBlendOperation::Replace;
-        assert!(
-            bridge::MaterialBindingAuthoring::try_from_parts(
-                bridge::TextureLocalId::new(0),
-                &role,
-                &coordinate_source,
-                &channel_mapping,
-                &color_interpretation,
-                bridge::TextureTransform::IDENTITY,
-                bridge::TextureStrength::ONE,
-                &blend,
-                None,
-            )
-            .is_ok()
-        );
-        assert!(
-            bridge::MaterialAuthoring::try_from_parts(
-                bridge::AuthoringRange::new(0, 0),
-                &bridge::ShadingModel::Unspecified,
-                &bridge::AlphaMode::Opaque,
-                false,
-                bridge::MaterialFactors::empty(),
-            )
-            .is_ok()
-        );
-
-        let _: fn(u32) -> bridge::LogicalMeshLocalId = bridge::LogicalMeshLocalId::new;
-        let _ = bridge::GeometryAttributeAuthoring::f32(
-            bridge::AttributeSemantic::Position,
-            bridge::AttributeDomain::Vertex,
-            3,
-            &[],
-            bridge::Presence::Absent,
-        );
-
-        let _: fn(u32) -> bridge::SkinLocalId = bridge::SkinLocalId::new;
-        let _: fn(u32) -> bridge::MorphTargetIdentity = bridge::MorphTargetIdentity::new;
-        let _: fn(u32, f32, u32) -> bridge::InfluenceAuthoring = bridge::InfluenceAuthoring::new;
-        let _ = bridge::MorphDeltaAuthoring::new(
-            bridge::MorphDeltaSemantic::Position,
-            bridge::MorphDeltaPayloadAuthoring::Dense { values: &[] },
-        );
-
-        let _: fn(u32) -> bridge::ResourceIdentityLocalId = bridge::ResourceIdentityLocalId::new;
-        let _: fn(u32) -> bridge::SourceIdentityLocalId = bridge::SourceIdentityLocalId::new;
-        let _: fn(u32) -> bridge::ProvenanceLocalId = bridge::ProvenanceLocalId::new;
-        let resource = bridge::ResourceIdentity::new("tests/authoring-bridge")
-            .expect("resource identity must be valid");
-        let observed_resource = bridge::ObservedResourceAuthoring::session_opaque(
-            &resource,
-            bridge::SessionOpaqueReason::CallerLabel,
-        );
-        let resources = [observed_resource];
-        let resource_snapshots = [bridge::ResourceSnapshotAuthoring::snapshotted(&[])];
-        let _ = bridge::ProfileAuthoringBatch::new(
-            bridge::LineageAuthoringBatch::new(&resources, &[], &[], &[]),
-            bridge::MetadataAuthoringBatch::empty(),
-        )
-        .with_resource_snapshots(&resource_snapshots);
-        let format = bridge::FormatId::new("test").expect("format ID must be valid");
-        let locator = bridge::SourceObjectLocator::indexed(bridge::SourceObjectKind::Scene, 0);
-        let _ = bridge::SourceIdentityAuthoring::new(
-            bridge::ResourceIdentityLocalId::new(0),
-            &format,
-            &locator,
-        );
-
-        let key = bridge::NamespacedName::new("baozi-tests:authoring-bridge")
-            .expect("metadata key must be valid");
-        let _ = bridge::MetadataAuthoringEntry::new(
-            bridge::ProfileOwner::Scene,
-            &key,
-            bridge::ExtensionValueRef::Bool(true),
-        );
-
-        let _: fn(
-            bridge::LightKind,
-            bridge::Color,
-            f32,
-        ) -> Result<bridge::LightAuthoring, bridge::LightAuthoringError> =
-            bridge::LightAuthoring::try_from_scaled_linear_srgb;
     }
 }

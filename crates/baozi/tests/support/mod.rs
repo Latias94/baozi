@@ -3,18 +3,19 @@
     reason = "each integration-test crate uses only the canonical Scene fixture variants it needs"
 )]
 
-use baozi_import::{
+use baozi_import::authoring::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AttributeDomain, AttributeSemantic,
     AuthoredTransform, AuthoringRange, DeformationAuthoringBatch, GeometryAttributeAuthoring,
     GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
     GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LineageAuthoringBatch,
     LogicalMeshLocalId, LogicalMorphAuthoring, MeshInstanceDeformationAuthoring,
     MetadataAuthoringBatch, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent,
-    OperationKind, OptionsDigest, OwnerProvenanceAuthoring, ParseResult, ParseScope, Presence,
+    OperationKind, OptionsDigest, OwnerProvenanceAuthoring, Presence,
     PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId,
-    ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, SceneAuthoringBatch, SceneDraft,
-    SceneSpace, SpatialAuthoringBatch,
+    ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, SceneAuthoringBatch, SceneSpace,
+    SpatialAuthoringBatch,
 };
+use baozi_import::{ParseResult, ParseScope, SceneDraft};
 
 /// Submits the smallest complete canonical Scene accepted by the production import rail.
 pub(crate) fn submit_minimal_scene(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {

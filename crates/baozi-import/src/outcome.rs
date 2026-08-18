@@ -6,10 +6,8 @@ use crate::format::DetectionOutcome;
 use crate::ledger::{ImportDimension, ImportLedgerSnapshot};
 use crate::loss::ImportLossEvidence;
 use crate::source_scope::SourceScopeRecord;
-use baozi_core::__canonical_import::{
-    SceneMinimalFallback, SceneRichFailure, SceneSuccessReport, ValidatedScene,
-};
-use baozi_core::{FormatId, SceneGenerationId};
+use baozi_core::__canonical_import::{SceneMinimalFallback, SceneRichFailure, SceneSuccessReport};
+use baozi_core::{FormatId, SceneGenerationId, ValidatedScene};
 use baozi_io::AssetPath;
 use baozi_operation::LedgerLimitsError;
 use std::fmt;

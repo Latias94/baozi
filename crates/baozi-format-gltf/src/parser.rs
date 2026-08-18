@@ -1,27 +1,30 @@
 use crate::{FORMAT_ID, GltfFailure, external_buffer_role, external_image_role};
-use baozi_import::{
+use baozi_import::authoring::{
     AlphaMode, AnimationAuthoringBatch, AppearanceAuthoringBatch, AttributeDomain,
     AttributeSemantic, AuthoredTransform, AuthoringRange, CameraAuthoring, CameraLocalId,
-    CameraProjection, Color, ColorInterpretation, DeformationAuthoringBatch, DependencySnapshot,
-    DiagnosticCode, DiagnosticSeverity, EntityName, ExtensionMediaType, ExtensionValueRef,
-    FormatId, GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
-    GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
-    ImageAuthoring, ImageLocalId, ImportStorageClass, ImportWorkClass, ImportWorkScope,
+    CameraProjection, Color, ColorInterpretation, DeformationAuthoringBatch, EntityName,
+    ExtensionMediaType, ExtensionValueRef, FormatId, GeometryAttributeAuthoring,
+    GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, ImageAuthoring, ImageLocalId,
     InfluenceAuthoring, InfluenceRowsAuthoring, LineageAuthoringBatch, LogicalMeshLocalId,
     LogicalMorphAuthoring, Mat4, MaterialAuthoring, MaterialBindingAuthoring, MaterialFactors,
     MaterialLocalId, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
-    MetadataAuthoringEntry, MeteredOrderedMap, MeteredString, MeteredVec, MipmapFilter,
-    NamespacedName, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent,
-    ObservedResourceAuthoring, OwnerProvenanceAuthoring, ParseFailure, ParseResult, ParseScope,
+    MetadataAuthoringEntry, MipmapFilter, NamespacedName, NodeAuthoringBatch, NodeAuthoringNode,
+    NodeLocalId, NodeParent, ObservedResourceAuthoring, OwnerProvenanceAuthoring,
     PbrMetallicRoughnessFactors, Presence, PrimitiveDeformationAuthoring, ProfileAuthoringBatch,
     ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ResourceIdentity,
     ResourceIdentityLocalId, ResourceSnapshotAuthoring, SamplerAuthoring, SamplerLocalId,
-    SamplerState, SceneAuthoringBatch, SceneDraft, SceneSpace, SessionOpaqueReason, ShadingModel,
+    SamplerState, SceneAuthoringBatch, SceneSpace, SessionOpaqueReason, ShadingModel,
     SkinAuthoring, SkinLocalId, SkinMatrixSpaces, SourceIdentityAuthoring, SourceIdentityLocalId,
     SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch, TexelFilter, TextureAddressMode,
     TextureAuthoring, TextureBlendOperation, TextureChannelMapping, TextureChannelSwizzle,
     TextureCoordinateSource, TextureLocalId, TextureRole, TextureSourceKey, TextureStrength,
     TextureTransform, Vec3,
+};
+use baozi_import::{
+    DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass,
+    ImportWorkScope, MeteredOrderedMap, MeteredString, MeteredVec, ParseFailure, ParseResult,
+    ParseScope, SceneDraft,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::{DecodeError, DecodeSliceError, Engine as _};

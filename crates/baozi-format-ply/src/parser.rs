@@ -1,19 +1,22 @@
 use crate::{FORMAT_ID, PlyFailure, PlyFailureCode};
-use baozi_import::{
+use baozi_import::authoring::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AttributeDomain, AttributeSemantic,
     AuthoredTransform, AuthoringRange, CustomAttributeSemantic, DeformationAuthoringBatch,
-    DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, ExtensionValueRef, FormatId,
-    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
-    GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
-    ImportProgressPhase, ImportStorageClass, ImportWorkClass, ImportWorkScope,
-    LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring,
+    ExtensionValueRef, FormatId, GeometryAttributeAuthoring, GeometryAuthoringBatch,
+    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
+    GeometryTopologyAuthoring, LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring,
     MeshInstanceDeformationAuthoring, MetadataAuthoringBatch, MetadataAuthoringEntry,
-    MeteredString, MeteredVec, NamespacedName, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
-    ObservedResourceAuthoring, OwnerProvenanceAuthoring, ParseFailure, ParseResult, ParseScope,
-    Presence, PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner,
-    ProvenanceLocalId, ProvenanceNodeAuthoring, ResourceIdentity, ResourceIdentityLocalId,
-    SceneAuthoringBatch, SceneDraft, SceneSpace, SessionOpaqueReason, SourceIdentityAuthoring,
-    SourceIdentityLocalId, SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch,
+    NamespacedName, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, ObservedResourceAuthoring,
+    OwnerProvenanceAuthoring, Presence, PrimitiveDeformationAuthoring, ProfileAuthoringBatch,
+    ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ResourceIdentity,
+    ResourceIdentityLocalId, SceneAuthoringBatch, SceneSpace, SessionOpaqueReason,
+    SourceIdentityAuthoring, SourceIdentityLocalId, SourceObjectKind, SourceObjectLocator,
+    SpatialAuthoringBatch,
+};
+use baozi_import::{
+    DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
+    ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredString, MeteredVec, ParseFailure,
+    ParseResult, ParseScope, SceneDraft,
 };
 use std::cell::RefCell;
 use std::fmt;

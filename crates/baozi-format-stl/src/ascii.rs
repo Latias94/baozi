@@ -1,9 +1,10 @@
 use crate::error::{StlFailure, StlFailureCode};
 use crate::parser::{ParsedMesh, ParsedStl};
+use baozi_import::authoring::Vec3;
 use baozi_import::{
     DetectionResult, DetectionScope, DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity,
     ImportProgressPhase, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredDecodedText,
-    MeteredString, MeteredVec, ParseFailure, ParseResult, ParseScope, Vec3,
+    MeteredString, MeteredVec, ParseFailure, ParseResult, ParseScope,
 };
 
 const CHECKPOINT_CHUNK_BYTES: usize = 4 * 1024;

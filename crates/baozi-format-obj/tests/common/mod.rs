@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
 use baozi_format_obj::{FORMAT_ID, ObjImportOptions, ObjImporter};
+use baozi_import::authoring::FormatId;
 use baozi_import::{
-    ConformancePolicy, FormatId, FormatSelection, ImportConfigOverlay, ImportFailure,
-    ImportLossKind, ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer,
-    ImportResult, LossPolicy, OptionCompileLimits, RegistryBuildLimits, RegistryBuilder,
-    ResourceLimits, ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits,
-    import_asset,
+    ConformancePolicy, FormatSelection, ImportConfigOverlay, ImportFailure, ImportLossKind,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
+    LossPolicy, OptionCompileLimits, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
+    ResourceLimitsOverlay, SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, import_asset,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
 use std::error::Error;

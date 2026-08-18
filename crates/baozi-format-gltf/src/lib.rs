@@ -7,9 +7,10 @@ mod parser;
 pub(crate) use error::GltfFailure;
 pub use error::GltfFailureCode;
 
+use baozi_import::authoring::FormatId;
 use baozi_import::{
     CapabilityStatus, DependencyRequirement, DependencyRoleId, DetectionOutcome, DetectionResult,
-    DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding, FormatId, FormatImporter,
+    DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter,
     ParseResult, ParseScope, Probe, ReadHint, SceneDraft, TextBomPolicy, TextControlPolicy,
     TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
 };

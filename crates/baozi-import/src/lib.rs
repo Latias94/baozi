@@ -4,6 +4,7 @@
 
 pub use baozi_operation::{CapacityPlan, CapacityPlanError, LedgerCause};
 
+pub mod authoring;
 mod config;
 mod dependency;
 mod descriptor;
@@ -24,41 +25,19 @@ mod session;
 mod source_scope;
 mod store;
 
+/// Opaque descriptor returned after a parser submits one complete canonical Scene batch.
+///
+/// The descriptor cannot be cloned or constructed by importer code. Its matching retained owner
+/// remains inside the import session and is consumed when parsing finishes.
+///
+/// ```compile_fail,E0599
+/// fn clone_draft(draft: baozi_import::SceneDraft) -> baozi_import::SceneDraft {
+///     draft.clone()
+/// }
+/// ```
+pub use baozi_core::__canonical_import::SceneDraft;
 pub use baozi_core::{
     SceneGenerationId, SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
-};
-
-#[doc(hidden)]
-pub use baozi_core::__canonical_import::{
-    AlphaMode, AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
-    AnimationExtrapolationAuthoring, AnimationInterpolationAuthoring, AnimationTargetAuthoring,
-    AnimationTimeDomainAuthoring, AppearanceAuthoringBatch, AppearanceBuildError, AttributeDomain,
-    AttributeSemantic, AuthoredTransform, AuthoringRange, Axis, CameraAuthoring, CameraLocalId,
-    CameraProjection, Color, ColorInterpretation, ContentDigest, CustomAttributeSemantic,
-    DeformationAuthoringBatch, DigestAlgorithm, EntityName, EvidenceDigest, ExtensionMediaType,
-    ExtensionValueRef, FormatId, FrontFaceWinding, GeometryAttributeAuthoring,
-    GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
-    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, Handedness, ImageAuthoring,
-    ImageLocalId, InfluenceAuthoring, InfluenceRowsAuthoring, LegacyMaterialFactors,
-    LightAuthoring, LightAuthoringError, LightKind, LightLocalId, LineageAuthoringBatch,
-    LogicalMeshLocalId, LogicalMorphAuthoring, MAX_ENTITY_NAME_BYTES, Mat4, MaterialAuthoring,
-    MaterialBindingAuthoring, MaterialFactors, MaterialLocalId, MeshInstanceDeformationAuthoring,
-    MetadataAuthoringBatch, MetadataAuthoringEntry, MipmapFilter, MorphDeltaAuthoring,
-    MorphDeltaPayloadAuthoring, MorphDeltaSemantic, MorphTargetDefinitionAuthoring,
-    MorphTargetIdentity, NamespacedName, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
-    NodeParent, ObservedResourceAuthoring, OperationEvidenceSummary, OperationKind, OptionsDigest,
-    OwnerProvenanceAuthoring, PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, Presence,
-    PrimitiveDeformationAuthoring, PrimitiveMorphTargetAuthoring, ProfileAuthoringBatch,
-    ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, Quat,
-    ResourceIdentity, ResourceIdentityLocalId, ResourceSnapshotAuthoring, SamplerAuthoring,
-    SamplerLocalId, SamplerState, SceneAuthoringBatch, SceneDraft, SceneSpace, SessionOpaqueReason,
-    ShadingModel, SkinAuthoring, SkinLocalId, SkinMatrixSpaces, SourceDisplayName,
-    SourceIdentityAuthoring, SourceIdentityLocalId, SourceObjectKind, SourceObjectLocator,
-    SpatialAuthoringBatch, SupplementalPbrFactors, TangentBasisConvention,
-    TangentHandednessEncoding, TexelFilter, TextureAddressMode, TextureAuthoring,
-    TextureBlendOperation, TextureChannel, TextureChannelMapping, TextureChannelSwizzle,
-    TextureCoordinateSource, TextureLocalId, TextureRole, TextureSourceKey, TextureStrength,
-    TextureTransform, TransformConvention, UvOrigin, Vec2, Vec3,
 };
 
 pub use config::{

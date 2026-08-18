@@ -1,21 +1,24 @@
 use crate::detect::exact_binary_facets;
 use crate::error::{StlFailure, StlFailureCode};
 use crate::{FORMAT_ID, ascii, binary};
-use baozi_import::{
+use baozi_import::authoring::{
     AlphaMode, AnimationAuthoringBatch, AppearanceAuthoringBatch, AttributeDomain,
     AttributeSemantic, AuthoredTransform, AuthoringRange, Color, DeformationAuthoringBatch,
     FormatId, GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
     GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
     LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring, MaterialAuthoring,
     MaterialFactors, MaterialLocalId, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
-    MeteredString, MeteredVec, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
-    ObservedResourceAuthoring, OwnerProvenanceAuthoring, PbrMetallicRoughnessFactors, Presence,
-    PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId,
-    ProvenanceNodeAuthoring, ResourceIdentity, ResourceIdentityLocalId, SceneAuthoringBatch,
-    SceneDraft, SceneSpace, SessionOpaqueReason, ShadingModel, SourceIdentityAuthoring,
-    SourceIdentityLocalId, SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch, Vec3,
+    NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, ObservedResourceAuthoring,
+    OwnerProvenanceAuthoring, PbrMetallicRoughnessFactors, Presence, PrimitiveDeformationAuthoring,
+    ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
+    ResourceIdentity, ResourceIdentityLocalId, SceneAuthoringBatch, SceneSpace,
+    SessionOpaqueReason, ShadingModel, SourceIdentityAuthoring, SourceIdentityLocalId,
+    SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch, Vec3,
 };
-use baozi_import::{ImportStorageClass, ImportWorkClass, ParseFailure, ParseResult, ParseScope};
+use baozi_import::{
+    ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec, ParseFailure, ParseResult,
+    ParseScope, SceneDraft,
+};
 
 const MATERIAL_NAME: &str = "STL Default Material";
 const FALLBACK_RESOURCE_IDENTITY: &str = "session/stl-primary";

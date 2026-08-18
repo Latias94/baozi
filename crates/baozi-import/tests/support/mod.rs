@@ -3,14 +3,16 @@
     reason = "each integration-test crate uses only the canonical Scene fixture variants it needs"
 )]
 
-use baozi_import::{
+use baozi_import::authoring::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoredTransform,
-    DeformationAuthoringBatch, DependencyOutcome, DependencyRoleId, DependencySnapshot,
-    GeometryAuthoringBatch, LineageAuthoringBatch, MetadataAuthoringBatch, NodeAuthoringBatch,
-    NodeAuthoringNode, NodeLocalId, NodeParent, OperationKind, OptionsDigest,
-    OwnerProvenanceAuthoring, ParseResult, ParseScope, Presence, ProfileAuthoringBatch,
+    DeformationAuthoringBatch, GeometryAuthoringBatch, LineageAuthoringBatch,
+    MetadataAuthoringBatch, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent,
+    OperationKind, OptionsDigest, OwnerProvenanceAuthoring, Presence, ProfileAuthoringBatch,
     ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring,
-    SceneAuthoringBatch, SceneDraft, SceneSpace, SpatialAuthoringBatch,
+    SceneAuthoringBatch, SceneSpace, SpatialAuthoringBatch,
+};
+use baozi_import::{
+    DependencyOutcome, DependencyRoleId, DependencySnapshot, ParseResult, ParseScope, SceneDraft,
 };
 
 pub(crate) fn root_dependency<'scope>(

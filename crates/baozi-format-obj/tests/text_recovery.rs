@@ -4,9 +4,10 @@ use baozi_format_obj::{
     FORMAT_ID, ObjFailureCode, ObjImportOptions, ObjImporter, ObjTextDecodingMode,
     format_descriptor, obj_import_option_key,
 };
+use baozi_import::authoring::FormatId;
 use baozi_import::{
-    ConformancePolicy, FormatId, FormatSelection, ImportCause, ImportConfigOverlay,
-    ImportDimension, ImportLossDisposition, ImportLossKind, ImportOperationControl, ImportRequest,
+    ConformancePolicy, FormatSelection, ImportCause, ImportConfigOverlay, ImportDimension,
+    ImportLossDisposition, ImportLossKind, ImportOperationControl, ImportRequest,
     ImportRequestLayer, LossPolicy, OptionCompileLimits, RegistryBuildLimits, RegistryBuilder,
     ResourceLimits, ScopeAbortCause, TextDecodingMode, import_asset,
 };

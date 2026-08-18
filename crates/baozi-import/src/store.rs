@@ -2,15 +2,16 @@ use std::cell::{RefCell, RefMut};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
+use crate::SceneDraft;
 use baozi_core::__canonical_import::{
     PendingSceneDraftOwner, PendingSceneFailureOwner, PreparedSceneConstruction,
     SceneActivationError, SceneActivationRequest, SceneActivationRoles, SceneConstructionTerminal,
-    SceneConstructionTerminalParts, SceneDraft, SceneDraftBuild, SceneMinimalFallback,
-    SceneRichFailure, SceneSuccessReport, SceneValidationLimits, SceneWriterRoles,
-    ValidatedScene as CanonicalValidatedScene, maximum_scene_canonical_blocks,
+    SceneConstructionTerminalParts, SceneDraftBuild, SceneMinimalFallback, SceneRichFailure,
+    SceneSuccessReport, SceneWriterRoles, maximum_scene_canonical_blocks,
     maximum_scene_structural_work, prepare_unactivated_scene, scene_failure_evidence_field_work,
     scene_failure_evidence_member_count, scene_failure_terminal_work_requirement,
 };
+use baozi_core::{SceneValidationLimits, ValidatedScene as CanonicalValidatedScene};
 use baozi_operation::__canonical_activation::{
     CanonicalValidationProgress, RetainedStoreDimensionState, RetainedStoreObservedWork,
 };
@@ -2194,15 +2195,16 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use baozi_core::__canonical_import::{
+    use crate::authoring::{
         AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoredTransform,
         DeformationAuthoringBatch, GeometryAuthoringBatch, LineageAuthoringBatch,
         MetadataAuthoringBatch, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent,
         OperationKind, OptionsDigest, OwnerProvenanceAuthoring, Presence, ProfileAuthoringBatch,
         ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring,
-        SceneActivationRequest, SceneAuthoringBatch, SceneSpace, SceneValidationLimits,
-        SpatialAuthoringBatch,
+        SceneAuthoringBatch, SceneSpace, SpatialAuthoringBatch,
     };
+    use baozi_core::__canonical_import::SceneActivationRequest;
+    use baozi_core::SceneValidationLimits;
     use baozi_operation::{
         CancellationOrigin, CancellationSignal, PhysicalStorageAccountFactory,
         PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits, RetainedStoreOperation,
