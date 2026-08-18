@@ -652,9 +652,13 @@ fn materialized_draft_outlives_source_buffers_before_generation_and_handoff() {
         })
         .expect("owned draft must centrally prepare without source buffers");
     let parts = successful_parts(prepared);
+    let semantic = parts
+        .scene
+        .semantic_view()
+        .expect("materialized draft semantic view");
 
-    assert_eq!(parts.scene.source_node_count(), Some(1));
-    assert_eq!(parts.scene.source_root_count(), Some(1));
+    assert_eq!(semantic.node_count(), 1);
+    assert_eq!(semantic.root_count(), 1);
     assert_eq!(generation_source.load(Ordering::Relaxed), 1);
     drop(parts);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -831,8 +835,12 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
     let expected_canonical_block_count =
         9 + usize::try_from(NODE_ONLY_PROFILE_CANONICAL_BLOCK_COUNT)
             .expect("node-only profile canonical block count");
-    assert_eq!(parts.scene.source_node_count(), Some(5));
-    assert_eq!(parts.scene.source_root_count(), Some(2));
+    let semantic = parts
+        .scene
+        .semantic_view()
+        .expect("source-ordered forest semantic view");
+    assert_eq!(semantic.node_count(), 5);
+    assert_eq!(semantic.root_count(), 2);
     assert_eq!(
         parts.scene.canonical_block_count(),
         expected_canonical_block_count
@@ -842,27 +850,49 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
     assert!(parts.scene.generation() < generation_after);
     assert_eq!(generation_source.load(Ordering::Relaxed), 3);
     assert_eq!(before_handoff, after_handoff);
-    assert_eq!(parts.scene.parent(0), Some(None));
-    assert_eq!(parts.scene.parent(1), Some(None));
-    assert_eq!(parts.scene.parent(2), Some(Some(0)));
-    assert_eq!(parts.scene.parent(3), Some(Some(0)));
-    assert_eq!(parts.scene.parent(4), Some(Some(1)));
-    assert_eq!(parts.scene.parent(5), None);
-    assert_eq!(parts.scene.child(None, 0), Some(0));
-    assert_eq!(parts.scene.child(None, 1), Some(1));
-    assert_eq!(parts.scene.child(None, 2), None);
-    assert_eq!(parts.scene.child(Some(0), 0), Some(2));
-    assert_eq!(parts.scene.child(Some(0), 1), Some(3));
-    assert_eq!(parts.scene.child(Some(0), 2), None);
-    assert_eq!(parts.scene.child(Some(1), 0), Some(4));
-    assert_eq!(parts.scene.child(Some(2), 0), None);
+    let mut cursor = semantic
+        .into_cursor()
+        .expect("source-ordered forest semantic cursor");
+    let mut roots = cursor.take_roots().expect("source-ordered forest roots");
+    assert_eq!(roots.declared_count(), 2);
+    assert_eq!(roots.next().expect("first root"), Some(0));
+    assert_eq!(roots.next().expect("second root"), Some(1));
+    assert_eq!(roots.next().expect("root cursor exhaustion"), None);
+
+    let expected_children: [&[usize]; 5] = [&[2, 3], &[4], &[], &[], &[]];
+    for (expected_source, expected_children) in expected_children.into_iter().enumerate() {
+        let node = cursor
+            .next_node()
+            .expect("source-ordered forest node read")
+            .expect("source-ordered forest node count");
+        assert_eq!(node.source_index(), expected_source);
+        assert_eq!(node.child_count(), expected_children.len());
+        let mut children = node.into_children();
+        for &expected_child in expected_children {
+            assert_eq!(
+                children.next().expect("source-ordered child read"),
+                Some(expected_child)
+            );
+        }
+        assert_eq!(
+            children.next().expect("source-ordered child exhaustion"),
+            None
+        );
+    }
+    assert!(
+        cursor
+            .next_node()
+            .expect("source-node cursor exhaustion")
+            .is_none()
+    );
 
     let canonical_local_order = [3, 1, 2, 0, 4];
     for (canonical_source, local) in canonical_local_order.into_iter().enumerate() {
         let inspected = parts
             .scene
-            .authored_transform(canonical_source)
-            .expect("canonical authored transform");
+            .semantic_authored_transform_at(canonical_source)
+            .expect("canonical authored transform")
+            .authored_transform();
         assert!(inspected.has_same_authored_bits(transforms[local]));
     }
     assert_eq!(parts.report.outcome_evidence_block_count(), 1);
@@ -1030,13 +1060,21 @@ fn present_empty_scene_publishes_every_domain_directory() {
     .prepare_for_test()
     .expect("present empty node Scene must prepare");
     let parts = successful_parts(prepared);
+    let semantic = parts
+        .scene
+        .semantic_view()
+        .expect("present-empty Scene semantic view");
 
-    assert_eq!(parts.scene.source_node_count(), Some(0));
-    assert_eq!(parts.scene.source_root_count(), Some(0));
+    assert_eq!(semantic.node_count(), 0);
+    assert_eq!(semantic.root_count(), 0);
     assert_eq!(parts.scene.canonical_block_count(), 15);
-    assert_eq!(parts.scene.parent(0), None);
-    assert_eq!(parts.scene.child(None, 0), None);
-    assert_eq!(parts.scene.authored_transform(0), None);
+    let mut cursor = semantic
+        .into_cursor()
+        .expect("present-empty Scene semantic cursor");
+    let mut roots = cursor.take_roots().expect("present-empty Scene roots");
+    assert_eq!(roots.next().expect("empty root cursor"), None);
+    assert!(cursor.next_node().expect("empty node cursor").is_none());
+    assert!(parts.scene.semantic_authored_transform_at(0).is_err());
 
     drop(parts);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);

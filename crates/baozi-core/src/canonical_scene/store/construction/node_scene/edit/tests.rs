@@ -34,7 +34,9 @@ use super::super::tests::{
     build_gltf_capability_scene_for_probe, profile_fixture, single_trs_batch, test_account,
     test_factory, test_limits,
 };
-use super::super::{NodeSceneDraftBuild, NodeSceneSuccessParts, NodeSceneTestTransaction};
+use super::super::{
+    NodeSceneDraftBuild, NodeSceneSuccessParts, NodeSceneTestTransaction, ValidatedNodeScene,
+};
 use super::execution::NodeSceneEditPrepareError;
 use super::plan::NodeSceneEditPlanError;
 use super::report::{CanonicalRemapSet, DerivedAbsenceReason, RemapChange};
@@ -42,6 +44,17 @@ use super::source::{
     NodeTransformEditStart, NodeTransformEditStartError, try_begin_node_transform_edit,
 };
 use crate::canonical_scene::store::construction::SceneConstructionLimits;
+
+fn authored_transform_at(
+    scene: &ValidatedNodeScene,
+    source_index: usize,
+    context: &str,
+) -> AuthoredTransform {
+    scene
+        .semantic_authored_transform_at(source_index)
+        .unwrap_or_else(|error| panic!("{context}: {error:?}"))
+        .authored_transform()
+}
 
 fn build_single_trs_scene(
     account: &PhysicalStorageAccount,
@@ -461,9 +474,7 @@ fn unchanged_authored_bits_return_the_exact_input_without_reserving_a_generation
     let parts = build_single_trs_scene(&account, &generation_source);
     let source = &parts.scene;
     let node = NodeId::new(source.generation(), 0);
-    let replacement = source
-        .authored_transform(0)
-        .expect("single-node fixture authored transform");
+    let replacement = authored_transform_at(source, 0, "single-node fixture authored transform");
     let generation_before = generation_source.load(Ordering::Relaxed);
     let account_before = account.snapshot();
     let nonce_count_before = issued_profile_segment_nonce_count_for_test();
@@ -612,16 +623,11 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         source_profile.shareable_leaf_count + 4
     );
     assert!(
-        output
-            .scene
-            .authored_transform(0)
-            .expect("edited authored transform")
+        authored_transform_at(&output.scene, 0, "edited authored transform")
             .has_same_authored_bits(replacement),
     );
     assert!(
-        source
-            .authored_transform(0)
-            .expect("input authored transform remains readable")
+        authored_transform_at(source, 0, "input authored transform remains readable")
             .has_same_authored_bits(AuthoredTransform::identity_trs()),
     );
     let live_allocation_delta = account
@@ -866,16 +872,11 @@ fn trs_to_matrix_rewrites_node_offsets_and_directory_shape_before_publication() 
 
     assert_ne!(output.scene.generation(), input_generation);
     assert!(
-        output
-            .scene
-            .authored_transform(0)
-            .expect("shape-changed authored transform")
+        authored_transform_at(&output.scene, 0, "shape-changed authored transform")
             .has_same_authored_bits(replacement),
     );
     assert!(
-        source
-            .authored_transform(0)
-            .expect("source authored transform remains readable")
+        authored_transform_at(source, 0, "source authored transform remains readable")
             .has_same_authored_bits(AuthoredTransform::identity_trs()),
     );
     assert_all_subjects_unchanged(
@@ -1238,9 +1239,7 @@ fn cancellation_after_evidence_commit_preserves_rich_failure_and_the_input() {
     );
     assert_eq!(generation_source.load(Ordering::Relaxed), 1);
     assert!(
-        source
-            .authored_transform(0)
-            .expect("cancelled input transform remains readable")
+        authored_transform_at(source, 0, "cancelled input transform remains readable")
             .has_same_authored_bits(AuthoredTransform::identity_trs()),
     );
     drop(failure);
@@ -1287,10 +1286,12 @@ fn generation_exhaustion_after_admission_leaves_one_invisible_nonce_gap() {
         "a generation failure after retained assembly admission leaves one invisible nonce gap",
     );
     assert!(
-        source
-            .authored_transform(0)
-            .expect("generation-exhausted input transform remains readable")
-            .has_same_authored_bits(AuthoredTransform::identity_trs()),
+        authored_transform_at(
+            source,
+            0,
+            "generation-exhausted input transform remains readable",
+        )
+        .has_same_authored_bits(AuthoredTransform::identity_trs()),
     );
     drop(failure);
     drop(parts);
@@ -1335,10 +1336,12 @@ fn central_validation_rejection_preserves_rich_evidence_and_the_input() {
     );
     assert_eq!(generation_source.load(Ordering::Relaxed), 1);
     assert!(
-        source
-            .authored_transform(0)
-            .expect("validation-rejected input transform remains readable")
-            .has_same_authored_bits(AuthoredTransform::identity_trs()),
+        authored_transform_at(
+            source,
+            0,
+            "validation-rejected input transform remains readable",
+        )
+        .has_same_authored_bits(AuthoredTransform::identity_trs()),
     );
     drop(failure);
     drop(parts);
@@ -1386,9 +1389,7 @@ fn dropping_prepared_success_burns_one_gap_and_releases_only_unpublished_output(
         live_source.live_retained_allocations(),
     );
     assert!(
-        source
-            .authored_transform(0)
-            .expect("prepared-drop input transform remains readable")
+        authored_transform_at(source, 0, "prepared-drop input transform remains readable")
             .has_same_authored_bits(AuthoredTransform::identity_trs()),
     );
     let next = SceneGenerationId::reserve_from(&generation_source)
@@ -1427,19 +1428,14 @@ fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
 
     drop(parts);
     assert!(
-        output
-            .scene
-            .authored_transform(0)
-            .expect("derived transform after input release")
+        authored_transform_at(&output.scene, 0, "derived transform after input release")
             .has_same_authored_bits(replacement),
     );
     assert_eq!(output.report.outcome_evidence_block_count(), 1);
     let super::publication::NodeSceneEditSuccessParts { scene, report } = output;
     drop(report);
     assert!(
-        scene
-            .authored_transform(0)
-            .expect("derived transform after report release")
+        authored_transform_at(&scene, 0, "derived transform after report release")
             .has_same_authored_bits(replacement),
     );
     drop(scene);
@@ -1475,11 +1471,12 @@ fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
 
     drop(scene);
     assert!(
-        parts
-            .scene
-            .authored_transform(0)
-            .expect("input transform after derived scene release")
-            .has_same_authored_bits(AuthoredTransform::identity_trs()),
+        authored_transform_at(
+            &parts.scene,
+            0,
+            "input transform after derived scene release",
+        )
+        .has_same_authored_bits(AuthoredTransform::identity_trs()),
     );
     assert_eq!(report.outcome_evidence_block_count(), 1);
     assert!(matches!(
