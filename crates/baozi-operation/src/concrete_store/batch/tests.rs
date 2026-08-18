@@ -399,22 +399,6 @@ fn sequence_bytes_and_utf8_batches_publish_opaque_ranges() {
         Some("beta")
     );
 
-    #[cfg(feature = "_u4c-collector")]
-    {
-        let session =
-            crate::u4c_collector::MeasurementSession::begin().expect("range-only measurement");
-        assert!(sequence_range.get(sequence_range.len()).is_none());
-        assert!(
-            published
-                .canonical
-                .sequence(sequence_range.get(0).expect("measured sequence reference"))
-                .is_some()
-        );
-        let report = session.finish().expect("range-only report");
-        assert_eq!(report.completed_lookups(), 1);
-        assert_eq!(report.rejected_lookups(), 0);
-    }
-
     drop(published);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -526,34 +510,6 @@ fn foreign_range_references_are_rejected_and_lookup_depth_is_batch_size_independ
             .sequence(second_range.get(0).expect("reverse foreign reference"))
             .is_none()
     );
-
-    #[cfg(feature = "_u4c-collector")]
-    {
-        let first_session =
-            crate::u4c_collector::MeasurementSession::begin().expect("first lookup measurement");
-        assert!(
-            first_published
-                .canonical
-                .sequence(first_range.get(2).expect("first lookup reference"))
-                .is_some()
-        );
-        let first_report = first_session.finish().expect("first lookup report");
-
-        let second_session =
-            crate::u4c_collector::MeasurementSession::begin().expect("second lookup measurement");
-        assert!(
-            second_published
-                .canonical
-                .sequence(second_range.get(0).expect("second lookup reference"))
-                .is_some()
-        );
-        let second_report = second_session.finish().expect("second lookup report");
-
-        assert_eq!(
-            first_report.max_lookup_events(),
-            second_report.max_lookup_events()
-        );
-    }
 
     drop(first_published);
     drop(second_published);

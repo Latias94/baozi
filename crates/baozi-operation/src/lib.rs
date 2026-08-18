@@ -13,19 +13,6 @@ mod owner;
     reason = "the private retained-publication foundation precedes the atomic U4 consumer switch"
 )]
 mod retained;
-#[cfg(feature = "_u4c-collector")]
-mod u4c_collector;
-
-/// Temporary repository measurement surface for the U4 canonical-store cutover.
-///
-/// This module is not a supported runtime API and is removed at U4f. Calling it cannot certify a
-/// scenario: the repository runner must select the fixed core probe and its frozen source closure
-/// before it may accept any report as evidence.
-#[cfg(feature = "_u4c-collector")]
-#[doc(hidden)]
-pub mod __u4c {
-    pub use crate::u4c_collector::{MeasurementError, MeasurementReport, MeasurementSession};
-}
 
 pub use capacity::{
     CAPACITY_POLICY_REVISION, CapacityPlan, CapacityPlanError, GrowableCapacityPlan,

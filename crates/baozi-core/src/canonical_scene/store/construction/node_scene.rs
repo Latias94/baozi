@@ -64,25 +64,6 @@ mod view;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(in crate::canonical_scene::store) use tests::{
-    FACADE_OBSERVATION_SCHEMA_ID, FacadeObservationOutcomeV1, GLTF_SOURCE_VECTOR_SCHEMA_ID,
-    GltfCapabilityCanonicalShapeObservation, GltfCapabilitySourceShapeObservation,
-    OBJ_SOURCE_VECTOR_SCHEMA_ID, ObjCapabilityCanonicalShapeObservation,
-    ObjCapabilitySourceShapeObservation, ProfileClosureCanonicalShapeObservation,
-    ProfileClosureNegativeCaseObservation, ProfileClosurePreflightStorageObservation,
-    build_gltf_capability_scene_for_probe, build_minimal_fallback_terminal_for_probe,
-    build_obj_capability_scene_for_probe, build_profile_closure_scene_for_probe,
-    build_protected_terminal_activation_for_probe, capture_gltf_capability_snapshots_for_probe,
-    capture_obj_capability_snapshots_for_probe, capture_profile_closure_snapshots_for_probe,
-    collect_gltf_capability_vectors_for_probe, collect_obj_capability_vectors_for_probe,
-    collect_profile_closure_digest_vectors_for_probe,
-    collect_profile_closure_negative_cases_for_probe, inspect_gltf_capability_semantics_for_probe,
-    inspect_gltf_capability_semantics_with_first_transform_for_probe,
-    inspect_obj_capability_semantics_for_probe, inspect_profile_closure_semantics_for_probe,
-    project_gltf_facade_observation_v1_for_probe,
-};
-
 const NODE_SCENE_BUILD_INVARIANT_CODE: u32 = 0x5343_1001;
 const NODE_SCENE_CONTROL_INTERRUPTION_CODE: u32 = 0x5343_1002;
 const NODE_SCENE_WORK_INTERRUPTION_CODE: u32 = 0x5343_1003;

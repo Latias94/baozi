@@ -24,12 +24,6 @@ use crate::ledger::{
     AttributionBatchPlan, AttributionReservationBatch, CanonicalOutput, Ledger, LedgerCause,
     PublicationDestination,
 };
-#[cfg(feature = "_u4c-collector")]
-use crate::u4c_collector::{
-    BlockKind, LookupStage, record_block_begin, record_block_seal, record_lookup_member_probe,
-    record_lookup_rejected, record_lookup_stage, record_payload_backing_allocation,
-    record_slot_publication,
-};
 use crate::{CapacityPlan, OperationOwner};
 use std::any::TypeId;
 use std::fmt;
@@ -1162,8 +1156,6 @@ mod published_table_capability {
         }
 
         fn probe_member(&self, index: usize) -> Option<ProbedPublishedMember<'a, Block>> {
-            #[cfg(feature = "_u4c-collector")]
-            super::record_lookup_member_probe();
             let member = self.members.get(index)?;
             Some(ProbedPublishedMember {
                 block: member.allocation.as_ref(),
@@ -1265,8 +1257,6 @@ mod published_table_capability {
         where
             Tag: Copy + Send + Sync + 'static,
         {
-            #[cfg(feature = "_u4c-collector")]
-            super::super::record_lookup_stage(super::super::LookupStage::CheckTableBrand);
             if table.table_membership()
                 != Some(RetainedMembership {
                     set_id,
@@ -1274,29 +1264,15 @@ mod published_table_capability {
                     ordinal: 0,
                 })
             {
-                #[cfg(feature = "_u4c-collector")]
-                super::super::record_lookup_rejected();
                 return None;
             }
 
-            #[cfg(feature = "_u4c-collector")]
-            super::super::record_lookup_stage(super::super::LookupStage::CheckSlotSet);
             if identity.set_id != set_id {
-                #[cfg(feature = "_u4c-collector")]
-                super::super::record_lookup_rejected();
                 return None;
             }
 
-            #[cfg(feature = "_u4c-collector")]
-            super::super::record_lookup_stage(super::super::LookupStage::CheckRange);
-            let Some(member) = table.probe_member(identity.index) else {
-                #[cfg(feature = "_u4c-collector")]
-                super::super::record_lookup_rejected();
-                return None;
-            };
+            let member = table.probe_member(identity.index)?;
 
-            #[cfg(feature = "_u4c-collector")]
-            super::super::record_lookup_stage(super::super::LookupStage::LoadMember);
             Some(RetainedLookupMember {
                 block: member.block,
                 schema_tag_matches: identity.tag == TypeId::of::<Tag>()
@@ -2776,27 +2752,16 @@ where
         },
         plan,
         || {
-            #[cfg(feature = "_u4c-collector")]
-            record_block_begin(BlockKind::New);
-            let block = build(
+            build(
                 BlockEmplacer {
                     marker: PhantomData,
                 },
                 table,
             )
-            .map(BlockPlacement::into_block);
-            #[cfg(feature = "_u4c-collector")]
-            if block.is_ok() {
-                record_block_seal(BlockKind::New);
-            }
-            block
+            .map(BlockPlacement::into_block)
         },
     ) {
-        Ok(allocation) => {
-            #[cfg(feature = "_u4c-collector")]
-            record_payload_backing_allocation();
-            allocation
-        }
+        Ok(allocation) => allocation,
         Err(cause) => {
             if cause.charge_retained() {
                 std::mem::forget(attribution);
@@ -2861,8 +2826,6 @@ where
             let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
             RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(poisoned))
         })?;
-    #[cfg(feature = "_u4c-collector")]
-    record_slot_publication(BlockKind::New);
     Ok(identity)
 }
 
@@ -3428,11 +3391,6 @@ where
             map_inherited_cleanup_error(account, outcome, RetainedWriterError::OwnershipUnverified),
         ));
     }
-    #[cfg(feature = "_u4c-collector")]
-    {
-        record_block_begin(BlockKind::Inherited);
-        record_block_seal(BlockKind::Inherited);
-    }
     let identity = table
         .try_push_committed_member(
             account,
@@ -3451,8 +3409,6 @@ where
             let poisoned = account.record_poison(AccountPoisonReason::OwnershipGraphUnverified);
             RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(poisoned))
         })?;
-    #[cfg(feature = "_u4c-collector")]
-    record_slot_publication(BlockKind::Inherited);
     Ok(identity)
 }
 

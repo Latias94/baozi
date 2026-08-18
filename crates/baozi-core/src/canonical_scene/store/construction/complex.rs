@@ -58,8 +58,6 @@ type ComplexPreparedStoreSuccess =
 
 mod semantic;
 
-pub(in crate::canonical_scene::store) use semantic::COMPLEX_SEMANTIC_TRANSCRIPT_SCHEMA_ID;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComplexFixtureFault {
     CrossTableIndex,

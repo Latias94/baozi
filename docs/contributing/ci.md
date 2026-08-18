@@ -36,8 +36,7 @@ Review these pins when changing CI, investigating tooling failures, or promoting
 - `RUST_FUZZ_NIGHTLY` in `.github/workflows/ci.yml` and `.github/workflows/fuzz.yml`
 
 The dated fuzz nightly intentionally uses `dtolnay/rust-toolchain@master` with a `toolchain` input.
-The main Stable Rust job uses the `dtolnay/rust-toolchain@1.95.0` action ref. The separate
-U4c lifecycle diagnostic uses Rust 1.97.1 because its evidence identity is toolchain-qualified.
+The main Stable Rust job uses the `dtolnay/rust-toolchain@1.95.0` action ref.
 
 ## Local Checks
 
@@ -63,20 +62,6 @@ cargo run --locked -p baozi-xtask -- native-fs-check
 cargo nextest run --locked -p baozi-xtask
 cargo nextest run --locked -p baozi-xtask --all-features
 cargo run --locked -p baozi-xtask -- repository-conformance-check
-```
-
-The U4c lifecycle diagnostic is Windows- and toolchain-qualified. Run its exact gate with
-Rust 1.97.1:
-
-```powershell
-cargo +1.97.1 run -j 1 --locked -p baozi-xtask -- u4c-metrics --spec docs/conformance/u4c-lifecycle-diagnostic.toml
-```
-
-The U4c production evidence comparator is host-bound. Run its exact gate only on an
-`x86_64-unknown-linux-gnu` host; normal CI executes it on the Ubuntu runner:
-
-```bash
-cargo +1.95.0 run -j 1 --locked -p baozi-xtask --features repository-input-candidate --target x86_64-unknown-linux-gnu -- u4c-metrics --spec docs/conformance/u4c-metrics.toml
 ```
 
 There is currently no release-registered `native-fs` or low-level `fs` feature. The explicitly
@@ -119,8 +104,9 @@ checks directly; ADR review remains an authoring concern rather than a default R
 `repository-conformance-check` command reads only `docs/conformance/contracts.toml`,
 `docs/conformance/gates.toml`, and the repository-relative files explicitly named there. It does not
 scan ADR prose, source prose, Git history, or the repository tree, and it does not execute the
-cataloged commands. CI runs the U4c production comparator as its own step before checking the
-inventory relationship.
+cataloged commands. Focused retained-store and canonical-Scene commands are cataloged as behavioral
+evidence while the corresponding contracts remain partial; CI executes their code through the
+workspace test job rather than through a source-layout comparator.
 
 A green dependency or candidate runner gate is not filesystem-conformance evidence. The three exact
 runtime candidates still require the complete platform-local race, link/reparse,

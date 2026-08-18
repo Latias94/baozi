@@ -15,7 +15,6 @@ dependencies = [
  "baozi-operation",
  "sha2",
  "thiserror",
- "triomphe",
 ]
 
 [[package]]

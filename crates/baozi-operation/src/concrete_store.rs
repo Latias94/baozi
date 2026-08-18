@@ -157,11 +157,6 @@ use crate::retained::{
     RetainedProducerHost, RetainedProducerWorkFinishError, RetainedProducerWorkPermit,
     RetainedProducerWorkStartError, RetainedWorkConsumeError,
 };
-#[cfg(feature = "_u4c-collector")]
-use crate::u4c_collector::{
-    record_payload_copy_bytes, record_reference_write, record_semantic_cell_write,
-    record_semantic_cell_writes,
-};
 #[cfg(feature = "_u4-activation")]
 use terminal_output::prepared_store_success_from_raw;
 use terminal_output::{
@@ -906,11 +901,6 @@ macro_rules! impl_stored_scalar {
                 match &mut writer.storage {
                     SequenceStorage::$sequence(values) => {
                         values.push(value);
-                        #[cfg(feature = "_u4c-collector")]
-                        {
-                            record_semantic_cell_write();
-                            record_payload_copy_bytes(std::mem::size_of::<$type>());
-                        }
                         Ok(())
                     }
                     _ => Err(StoreBuildError::capacity_envelope_violated()),
@@ -1003,11 +993,6 @@ impl BytesWriter {
             return Err(StoreBuildError::capacity_exceeded());
         }
         self.values.extend_from_slice(bytes);
-        #[cfg(feature = "_u4c-collector")]
-        {
-            record_semantic_cell_writes(bytes.len());
-            record_payload_copy_bytes(bytes.len());
-        }
         Ok(())
     }
 
@@ -1068,11 +1053,6 @@ impl Utf8Writer {
             return Err(StoreBuildError::capacity_exceeded());
         }
         self.value.push_str(value);
-        #[cfg(feature = "_u4c-collector")]
-        {
-            record_semantic_cell_writes(value.len());
-            record_payload_copy_bytes(value.len());
-        }
         Ok(())
     }
 
@@ -1247,15 +1227,6 @@ impl CanonicalRecordRowWriter<'_> {
             return Err(StoreBuildError::invalid_record_width());
         }
         self.cells.push(cell);
-        #[cfg(feature = "_u4c-collector")]
-        {
-            match cell {
-                RecordCell::Scalar(_) => record_semantic_cell_write(),
-                RecordCell::CanonicalReference { .. }
-                | RecordCell::OutcomeEvidenceReference { .. } => record_reference_write(),
-            }
-            record_payload_copy_bytes(std::mem::size_of::<RecordCell>());
-        }
         Ok(())
     }
 
@@ -1323,15 +1294,6 @@ impl OutcomeEvidenceRecordRowWriter<'_> {
             return Err(StoreBuildError::invalid_record_width());
         }
         self.cells.push(cell);
-        #[cfg(feature = "_u4c-collector")]
-        {
-            match cell {
-                RecordCell::Scalar(_) => record_semantic_cell_write(),
-                RecordCell::CanonicalReference { .. }
-                | RecordCell::OutcomeEvidenceReference { .. } => record_reference_write(),
-            }
-            record_payload_copy_bytes(std::mem::size_of::<RecordCell>());
-        }
         Ok(())
     }
 
@@ -3942,17 +3904,6 @@ where
                         let cell = mapped_canonical_record_cell(source_cell, &mapping)
                             .ok_or_else(StoreBuildError::capacity_envelope_violated)?;
                         writer.storage.cells.push(cell);
-                        #[cfg(feature = "_u4c-collector")]
-                        {
-                            match cell {
-                                RecordCell::Scalar(_) => record_semantic_cell_write(),
-                                RecordCell::CanonicalReference { .. }
-                                | RecordCell::OutcomeEvidenceReference { .. } => {
-                                    record_reference_write();
-                                }
-                            }
-                            record_payload_copy_bytes(std::mem::size_of::<RecordCell>());
-                        }
                     }
                     writer.finish().map_err(Into::into)
                 })();
@@ -4673,17 +4624,6 @@ where
                         let cell = mapped_canonical_record_cell(source_cell, &mapping)
                             .ok_or_else(StoreBuildError::capacity_envelope_violated)?;
                         writer.core.storage.cells.push(cell);
-                        #[cfg(feature = "_u4c-collector")]
-                        {
-                            match cell {
-                                RecordCell::Scalar(_) => record_semantic_cell_write(),
-                                RecordCell::CanonicalReference { .. }
-                                | RecordCell::OutcomeEvidenceReference { .. } => {
-                                    record_reference_write();
-                                }
-                            }
-                            record_payload_copy_bytes(std::mem::size_of::<RecordCell>());
-                        }
                     }
                     append(&mut writer, &mut control)
                 })();

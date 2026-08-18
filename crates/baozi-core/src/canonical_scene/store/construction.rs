@@ -50,10 +50,7 @@ pub(super) mod node_scene;
 mod complex;
 
 #[cfg(test)]
-pub(super) use complex::{
-    COMPLEX_SEMANTIC_TRANSCRIPT_SCHEMA_ID, ComplexFixtureFault, ComplexFixtureTerminal,
-    PreparedComplexFixture,
-};
+pub(super) use complex::{ComplexFixtureFault, ComplexFixtureTerminal, PreparedComplexFixture};
 const STORE_CATALOG: StoreSemanticCatalogId =
     StoreSemanticCatalogId::new(*b"baozi-core-scene", NonZeroU32::MIN);
 const STORE_PHASE: StorePhaseSemanticId = StorePhaseSemanticId::new(STORE_CATALOG, NonZeroU64::MIN);

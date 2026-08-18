@@ -5,6 +5,25 @@ replacement by stronger proofs. It is a review record, not an executable Rust pa
 specification. The repository checker must not infer private names, field order, call counts, or AST
 shape from this file.
 
+## `u4c-metrics` and `_u4c-collector`
+
+- **Owners:** `u4-canonical-scene-lifecycle`, `u4-private-producer-consumer-proof`, and
+  `u4-retained-physical-ownership`.
+- **Retired checks:** the operation-level measurement hooks, core JSON production probes, frozen
+  source and build-output digests, the `u4c-metrics` xtask command, and the U4c/U4d aggregation jobs.
+- **Reason:** these checks qualified a migration implementation and exact source closure. ADR 0044
+  superseded those U4-specific commands, hashes, fixtures, and thresholds as architectural
+  authority, and the receipts had become stale under ordinary implementation refactoring.
+- **Replacement proof:** retained publication, activation, accounting, rollback, poison, panic, and
+  destructor fault-injection tests; canonical Scene construction, semantic, snapshot, edit, format,
+  and facade behavior tests; Rust visibility and ownership checks; workspace CI; and sanitizer fuzz
+  smoke. The focused conformance inventory points directly to these durable tests.
+- **Conformance effect:** affected contracts remain `partial`. Removing the migration collector does
+  not promote a contract or claim release readiness.
+- **Status:** retired. A future performance or allocation regression gate must measure a stable
+  public behavior and bounded workload, not private source shape or a recursively reconstructed
+  Cargo/Rust frontend.
+
 ## `u4-retained-private-source-shape`
 
 - **Owner:** `u4-retained-physical-ownership`

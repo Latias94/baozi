@@ -81,26 +81,7 @@ fn exhaust_profile_for_test(profile: &mut NodeSceneProfileCursor<'_>) {
 }
 
 pub(in crate::canonical_scene::store) use gltf_capability::{
-    FACADE_OBSERVATION_SCHEMA_ID, FacadeObservationOutcomeV1, GLTF_SOURCE_VECTOR_SCHEMA_ID,
-    GltfCapabilityCanonicalShapeObservation, GltfCapabilitySourceShapeObservation,
-    build_gltf_capability_scene_for_probe, capture_gltf_capability_snapshots_for_probe,
-    collect_gltf_capability_vectors_for_probe, inspect_gltf_capability_semantics_for_probe,
-    inspect_gltf_capability_semantics_with_first_transform_for_probe,
-    project_gltf_facade_observation_v1_for_probe,
-};
-
-pub(in crate::canonical_scene::store) use obj_capability::{
-    OBJ_SOURCE_VECTOR_SCHEMA_ID, ObjCapabilityCanonicalShapeObservation,
-    ObjCapabilitySourceShapeObservation, build_obj_capability_scene_for_probe,
-    capture_obj_capability_snapshots_for_probe, collect_obj_capability_vectors_for_probe,
-    inspect_obj_capability_semantics_for_probe,
-};
-
-pub(in crate::canonical_scene::store) use profile_closure::{
-    ProfileClosureCanonicalShapeObservation, ProfileClosureNegativeCaseObservation,
-    ProfileClosurePreflightStorageObservation, build_profile_closure_scene_for_probe,
-    capture_profile_closure_snapshots_for_probe, collect_profile_closure_digest_vectors_for_probe,
-    collect_profile_closure_negative_cases_for_probe, inspect_profile_closure_semantics_for_probe,
+    build_gltf_capability_scene_for_probe, project_gltf_facade_observation_v1_for_probe,
 };
 
 const NODE_ONLY_PROFILE_CANONICAL_BLOCK_COUNT: u64 = 8;

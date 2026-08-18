@@ -4,146 +4,75 @@ schema_version = 1
 # establish execution and cannot authorize conformance promotion.
 
 [[gates]]
-gate_id = "u4c-lifecycle-v2"
-tracer_class = "implementation"
-executor = "command"
-success_condition = "process-exit-zero"
-evidence_identity = "baozi.u4c.lifecycle-diagnostic/v2"
-evidence_paths = ["docs/conformance/u4c-lifecycle-diagnostic.toml"]
-applicable_contracts = [
-  "u4-canonical-scene-lifecycle",
-  "u4-retained-physical-ownership",
-]
-program = "cargo"
-args = [
-  "+1.97.1",
-  "run",
-  "-j",
-  "1",
-  "--locked",
-  "-p",
-  "baozi-xtask",
-  "--",
-  "u4c-metrics",
-  "--spec",
-  "docs/conformance/u4c-lifecycle-diagnostic.toml",
-]
-
-[[gates]]
-gate_id = "u4c-lifecycle-ci"
-tracer_class = "ci"
-executor = "workflow"
-success_condition = "required-workflow-status"
-evidence_identity = "github-actions/ci/u4c-lifecycle-diagnostic/verify-u4c-lifecycle-diagnostic"
-evidence_paths = [".github/workflows/ci.yml"]
-applicable_contracts = [
-  "u4-canonical-scene-lifecycle",
-  "u4-retained-physical-ownership",
-]
-workflow_path = ".github/workflows/ci.yml"
-job_id = "u4c-lifecycle-diagnostic"
-step_name = "Verify U4c lifecycle diagnostic"
-
-[[gates]]
-gate_id = "u4c-production-v2"
+gate_id = "canonical-scene-behavior-tests"
 tracer_class = "test"
 executor = "command"
 success_condition = "process-exit-zero"
-evidence_identity = "baozi.u4c.production-report/v2-revision-4"
-evidence_paths = ["docs/conformance/u4c-metrics.toml"]
+evidence_identity = "baozi.canonical-scene.behavior-tests/v1"
+evidence_paths = [
+  "crates/baozi-core/src/canonical_scene/store/tests.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/edit/tests.rs",
+]
 applicable_contracts = [
   "u4-canonical-scene-lifecycle",
   "u4-private-producer-consumer-proof",
-  "u4-retained-physical-ownership",
-  "resource-ledger-budget-accounting",
   "u4-legacy-scene-deletion",
   "validation-snapshot-fuzz-evidence",
   "source-identity-provenance-metadata",
 ]
 program = "cargo"
 args = [
-  "+1.95.0",
+  "nextest",
   "run",
   "-j",
   "1",
   "--locked",
   "-p",
-  "baozi-xtask",
-  "--features",
-  "repository-input-candidate",
-  "--target",
-  "x86_64-unknown-linux-gnu",
-  "--",
-  "u4c-metrics",
-  "--spec",
-  "docs/conformance/u4c-metrics.toml",
+  "baozi-core",
+  "--all-features",
 ]
 
 [[gates]]
-gate_id = "u4c-production-ci"
-tracer_class = "ci"
-executor = "workflow"
-success_condition = "required-workflow-status"
-evidence_identity = "github-actions/ci/rust/verify-u4c-production-evidence"
-evidence_paths = [".github/workflows/ci.yml"]
-applicable_contracts = [
-  "u4-canonical-scene-lifecycle",
-  "u4-private-producer-consumer-proof",
-  "u4-retained-physical-ownership",
-  "resource-ledger-budget-accounting",
-  "u4-legacy-scene-deletion",
-  "validation-snapshot-fuzz-evidence",
-  "source-identity-provenance-metadata",
-]
-workflow_path = ".github/workflows/ci.yml"
-job_id = "rust"
-step_name = "Verify U4c production evidence"
-
-[[gates]]
-gate_id = "u4d-local-production-v1"
-tracer_class = "implementation"
+gate_id = "retained-store-behavior-tests"
+tracer_class = "test"
 executor = "command"
 success_condition = "process-exit-zero"
-evidence_identity = "baozi.u4d.local-production/v1-revision-4"
+evidence_identity = "baozi.retained-store.behavior-tests/v1"
 evidence_paths = [
-  "crates/baozi-xtask/src/main.rs",
-  "crates/baozi-xtask/src/u4c_metrics.rs",
-  "crates/baozi-xtask/src/u4c_metrics/production.rs",
-  "docs/conformance/u4c-metrics.toml",
+  "crates/baozi-operation/src/retained/tests.rs",
+  "crates/baozi-operation/tests/ledger.rs",
+  "crates/baozi-operation/tests/concrete_store/activation/scoped_plan.rs",
+  "crates/baozi-operation/tests/concrete_store/activation/central_validation.rs",
 ]
-applicable_contracts = ["u4-private-producer-consumer-proof"]
-evidence_claims = [{ contract_id = "u4-private-producer-consumer-proof", evidence_subject = "baozi.u4.private-producer-consumer-proof", evidence_revision = 4 }]
+applicable_contracts = [
+  "u4-retained-physical-ownership",
+  "resource-ledger-budget-accounting",
+]
 program = "cargo"
 args = [
-  "+1.95.0",
+  "nextest",
   "run",
   "-j",
   "1",
   "--locked",
   "-p",
-  "baozi-xtask",
-  "--features",
-  "repository-input-candidate",
-  "--target",
-  "x86_64-unknown-linux-gnu",
-  "--",
-  "u4c-metrics",
-  "--require-u4d-local-evidence",
-  "--spec",
-  "docs/conformance/u4c-metrics.toml",
+  "baozi-operation",
+  "--all-features",
 ]
 
 [[gates]]
-gate_id = "u4d-stage-exit-ci"
+gate_id = "format-fuzz-smoke-ci"
 tracer_class = "ci"
 executor = "workflow"
 success_condition = "required-workflow-status"
-evidence_identity = "github-actions/ci/u4d-stage-exit/exact-workflow-revision"
+evidence_identity = "github-actions/ci/fuzz/run-fuzz-smoke"
 evidence_paths = [".github/workflows/ci.yml"]
-applicable_contracts = ["u4-private-producer-consumer-proof"]
+applicable_contracts = ["validation-snapshot-fuzz-evidence"]
 workflow_path = ".github/workflows/ci.yml"
-job_id = "u4d-stage-exit"
-step_name = "Require exact-revision U4d evidence stage"
+job_id = "fuzz"
+step_name = "Run fuzz smoke"
 
 [[gates]]
 gate_id = "repository-conformance-tests"
@@ -234,9 +163,15 @@ success_condition = "required-workflow-status"
 evidence_identity = "github-actions/ci/rust/test-workspace"
 evidence_paths = [".github/workflows/ci.yml"]
 applicable_contracts = [
+  "u4-canonical-scene-lifecycle",
+  "u4-private-producer-consumer-proof",
+  "u4-retained-physical-ownership",
   "import-lifecycle-outcome",
-  "postprocess-pipeline-semantics",
   "resource-ledger-budget-accounting",
+  "u4-legacy-scene-deletion",
+  "postprocess-pipeline-semantics",
+  "validation-snapshot-fuzz-evidence",
+  "source-identity-provenance-metadata",
   "resource-dependency-graph-manifest",
 ]
 workflow_path = ".github/workflows/ci.yml"

@@ -18,9 +18,6 @@ use crate::retained::{
     PublishedFallbackOutput, PublishedLedgerEvidence, PublishedOutcomeEvidenceOutput,
     PublishedRichFailureOutput, RetainedLookupMember, TerminalEvidenceCause,
 };
-#[cfg(feature = "_u4c-collector")]
-use crate::u4c_collector::{LookupStage, record_lookup_rejected, record_lookup_stage};
-
 pub(super) type RawPreparedStore = PreparedRetainedPublication<
     StoredBlock,
     StoredBlock,
@@ -36,8 +33,6 @@ type RawPreparedStoreFallback =
     PreparedRetainedFallback<StoreFallbackEnvelope, StorePhaseKey, StoreDimensionKey>;
 
 fn reject_lookup<T>() -> Option<T> {
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_rejected();
     None
 }
 
@@ -47,121 +42,81 @@ fn project_sequence_view<'a, T>(
 where
     T: StoredScalar,
 {
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::CheckVariant);
     if !matches!(member.block(), StoredBlock::Sequence(_)) {
         return reject_lookup();
     }
 
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::CheckSchemaTag);
     if !member.schema_tag_matches() || !sequence_kind_matches::<T>(member.block()) {
         return reject_lookup();
     }
 
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::ProjectView);
     let Some(view) = sequence_view::<T>(member.block()) else {
         return reject_lookup();
     };
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::ReturnView);
     Some(view)
 }
 
 fn project_bytes_view(member: RetainedLookupMember<'_, StoredBlock>) -> Option<&[u8]> {
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::CheckVariant);
     if !matches!(member.block(), StoredBlock::Bytes(_)) {
         return reject_lookup();
     }
 
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::CheckSchemaTag);
     if !member.schema_tag_matches() {
         return reject_lookup();
     }
 
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::ProjectView);
     let Some(view) = bytes_view(member.block()) else {
         return reject_lookup();
     };
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::ReturnView);
     Some(view)
 }
 
 fn project_utf8_view(member: RetainedLookupMember<'_, StoredBlock>) -> Option<&str> {
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::CheckVariant);
     if !matches!(member.block(), StoredBlock::Utf8(_)) {
         return reject_lookup();
     }
 
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::CheckSchemaTag);
     if !member.schema_tag_matches() {
         return reject_lookup();
     }
 
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::ProjectView);
     let Some(view) = utf8_view(member.block()) else {
         return reject_lookup();
     };
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::ReturnView);
     Some(view)
 }
 
 fn project_canonical_record_view(
     member: RetainedLookupMember<'_, StoredBlock>,
 ) -> Option<CanonicalRecordView<'_>> {
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::CheckVariant);
     if !matches!(member.block(), StoredBlock::Records(_)) {
         return reject_lookup();
     }
 
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::CheckSchemaTag);
     if !member.schema_tag_matches() {
         return reject_lookup();
     }
 
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::ProjectView);
     let Some(view) = canonical_record_view(member.block()) else {
         return reject_lookup();
     };
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::ReturnView);
     Some(view)
 }
 
 fn project_outcome_evidence_record_view(
     member: RetainedLookupMember<'_, StoredBlock>,
 ) -> Option<OutcomeEvidenceRecordView<'_>> {
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::CheckVariant);
     if !matches!(member.block(), StoredBlock::Records(_)) {
         return reject_lookup();
     }
 
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::CheckSchemaTag);
     if !member.schema_tag_matches() {
         return reject_lookup();
     }
 
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::ProjectView);
     let Some(view) = outcome_evidence_record_view(member.block()) else {
         return reject_lookup();
     };
-    #[cfg(feature = "_u4c-collector")]
-    record_lookup_stage(LookupStage::ReturnView);
     Some(view)
 }
 

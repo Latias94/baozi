@@ -18,8 +18,6 @@ mod tests;
 #[cfg(test)]
 pub(in crate::canonical_scene::store) use publication::NodeSceneEditTerminal;
 #[cfg(test)]
-pub(crate) use report::{CanonicalRemapSet, DerivedAbsenceReason, RemapChange};
-#[cfg(test)]
 pub(in crate::canonical_scene::store) use source::{
     NodeTransformEditStart, try_begin_node_transform_edit,
 };
