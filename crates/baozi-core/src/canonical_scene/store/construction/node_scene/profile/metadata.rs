@@ -24,7 +24,9 @@ use crate::canonical_scene::store::schema::profile::{
 use crate::canonical_scene::store::schema::{CanonicalBlockRef, CanonicalSchema};
 use crate::extension::{ExtensionArrayRef, ExtensionValueRef};
 
-use super::{MetadataLeafRefs, ProfileBuildFault, ProfileMaterializationPlans, encode_owner};
+#[cfg(test)]
+use super::ProfileBuildFault;
+use super::{MetadataLeafRefs, ProfileMaterializationPlans, encode_owner};
 
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct RetainedMetadataRefs {
@@ -69,7 +71,7 @@ pub(super) fn retain_metadata<'lane, O, PP, U, L, R>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
-    faults: &mut ProfileBuildFault,
+    #[cfg(test)] faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<RetainedMetadataRefs, StoreRuntimeError>
 where
@@ -116,10 +118,26 @@ where
         f32s,
     };
     refs.entries = match plans.metadata_entries {
-        Some(plan) => Some(retain_entries(lane, plan, batch, refs, faults, failure)?),
+        Some(plan) => Some(retain_entries(
+            lane,
+            plan,
+            batch,
+            refs,
+            #[cfg(test)]
+            faults,
+            failure,
+        )?),
         None => None,
     };
-    let directory = retain_directory(lane, plans, batch, refs, faults, failure)?;
+    let directory = retain_directory(
+        lane,
+        plans,
+        batch,
+        refs,
+        #[cfg(test)]
+        faults,
+        failure,
+    )?;
     Ok(RetainedMetadataRefs {
         directory,
         leaves: refs,
@@ -404,7 +422,7 @@ fn retain_entries<'lane, O, PP, U, L, R>(
     plan: baozi_operation::RecordPlan,
     batch: &ValidatedProfileBatch<'_, R>,
     refs: MetadataLeafRefs,
-    faults: &mut ProfileBuildFault,
+    #[cfg(test)] faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<ProfileMetadataEntryTableSchema>, StoreRuntimeError>
 where
@@ -435,9 +453,13 @@ where
             let scalar_offset = scalar_cursor(&cursors, encoding.lane);
             advance_scalar_cursor(&mut cursors, encoding.lane, encoding.scalar_count, failure)?;
             let (owner_kind, owner_index) = encode_owner(entry.owner());
-            let stored_scalar_count = faults.metadata_scalar_count(encoding.scalar_count);
-            let omit_bool_lane_reference = matches!(encoding.lane, ScalarLane::Bool)
-                && faults.omit_metadata_bool_lane_reference();
+            let stored_scalar_count = encoding.scalar_count;
+            #[cfg(test)]
+            let stored_scalar_count = faults.metadata_scalar_count(stored_scalar_count);
+            let write_bool_lane =
+                matches!(encoding.lane, ScalarLane::Bool) && encoding.scalar_count != 0;
+            #[cfg(test)]
+            let write_bool_lane = write_bool_lane && !faults.omit_metadata_bool_lane_reference();
             control.write_row(|row| {
                 row.write_scalar(owner_kind)?;
                 row.write_scalar(owner_index)?;
@@ -454,14 +476,7 @@ where
                 row.write_scalar(stored_scalar_count)?;
                 write_utf8_lane(row, true, refs.text, failure)?;
                 write_bytes_lane(row, encoding.byte_count != 0, refs.bytes, failure)?;
-                write_sequence_lane(
-                    row,
-                    matches!(encoding.lane, ScalarLane::Bool)
-                        && encoding.scalar_count != 0
-                        && !omit_bool_lane_reference,
-                    refs.bools,
-                    failure,
-                )?;
+                write_sequence_lane(row, write_bool_lane, refs.bools, failure)?;
                 write_sequence_lane(
                     row,
                     matches!(encoding.lane, ScalarLane::I64) && encoding.scalar_count != 0,
@@ -509,7 +524,7 @@ fn retain_directory<'lane, O, PP, U, L, R>(
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
     refs: MetadataLeafRefs,
-    faults: &mut ProfileBuildFault,
+    #[cfg(test)] faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<ProfileMetadataDirectorySchema>, StoreRuntimeError>
 where
@@ -524,7 +539,11 @@ where
             control.write_row(|row| {
                 row.write_scalar(PROFILE_METADATA_SCHEMA_REVISION)?;
                 let shape = batch.retention_shape();
-                if faults.omit_metadata_entries_reference() {
+                #[cfg(test)]
+                let omit_entries_reference = faults.omit_metadata_entries_reference();
+                #[cfg(not(test))]
+                let omit_entries_reference = false;
+                if omit_entries_reference {
                     row.write_scalar(batch.metadata_entry_count())?;
                     row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
                 } else {

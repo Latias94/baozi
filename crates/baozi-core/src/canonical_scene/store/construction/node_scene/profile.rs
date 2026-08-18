@@ -42,6 +42,7 @@ mod lineage;
 mod metadata;
 pub(in crate::canonical_scene::store) use metadata::RetainedMetadataRefs;
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProfileBuildFault {
     None,
@@ -56,12 +57,12 @@ pub(super) enum ProfileBuildFault {
     MetadataBoolLaneReference,
 }
 
+#[cfg(test)]
 impl ProfileBuildFault {
     pub(super) const fn none() -> Self {
         Self::None
     }
 
-    #[cfg(test)]
     pub(super) const ALL: [Self; 9] = [
         Self::SegmentOrdinal,
         Self::SegmentNonce,
@@ -440,7 +441,7 @@ pub(super) fn retain_profile<'lane, O, PP, U, L, R>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
-    faults: &mut ProfileBuildFault,
+    #[cfg(test)] faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<RetainedProfileRefs, StoreRuntimeError>
 where
@@ -453,9 +454,33 @@ where
     let segment_nonce =
         issue_profile_segment_nonce().map_err(|_| StoreRuntimeError::MembershipExhausted)?;
     let lineage = lineage::retain_lineage(lane, plans, batch, segment_nonce, failure)?;
-    let metadata = metadata::retain_metadata(lane, plans, batch, faults, failure)?;
-    let segments = retain_segments(lane, plans, batch, lineage, segment_nonce, faults, failure)?;
-    let owners = retain_owners(lane, plans, batch, lineage, faults, failure)?;
+    let metadata = metadata::retain_metadata(
+        lane,
+        plans,
+        batch,
+        #[cfg(test)]
+        faults,
+        failure,
+    )?;
+    let segments = retain_segments(
+        lane,
+        plans,
+        batch,
+        lineage,
+        segment_nonce,
+        #[cfg(test)]
+        faults,
+        failure,
+    )?;
+    let owners = retain_owners(
+        lane,
+        plans,
+        batch,
+        lineage,
+        #[cfg(test)]
+        faults,
+        failure,
+    )?;
     let directory = lane
         .try_retain_records(plans.directory, ProfileDirectorySchema, |control| {
             control.write_row(|row| {
@@ -483,7 +508,7 @@ fn retain_segments<'lane, O, PP, U, L, R>(
     batch: &ValidatedProfileBatch<'_, R>,
     refs: ProfileLeafRefs,
     segment_nonce: ProfileSegmentNonce,
-    faults: &mut ProfileBuildFault,
+    #[cfg(test)] faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<ProfileSegmentTableSchema>, StoreRuntimeError>
 where
@@ -494,8 +519,15 @@ where
     let shape = batch.retention_shape();
     lane.try_retain_records(plans.segments, ProfileSegmentTableSchema, |control| {
         control.write_row(|row| {
-            row.write_scalar(faults.segment_ordinal(0))?;
-            if faults.omit_segment_resource_reference() {
+            let segment_ordinal = 0_u32;
+            #[cfg(test)]
+            let segment_ordinal = faults.segment_ordinal(segment_ordinal);
+            row.write_scalar(segment_ordinal)?;
+            #[cfg(test)]
+            let omit_resource_reference = faults.omit_segment_resource_reference();
+            #[cfg(not(test))]
+            let omit_resource_reference = false;
+            if omit_resource_reference {
                 row.write_scalar(batch.resource_count())?;
                 row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
             } else {
@@ -514,8 +546,14 @@ where
             write_optional_sequence_ref(row, shape.wide_count(), refs.wide, failure)?;
             write_optional_utf8_ref(row, shape.lineage_text_bytes(), refs.text, failure)?;
             write_optional_bytes_ref(row, shape.lineage_digest_bytes(), refs.digests, failure)?;
-            row.write_scalar(faults.segment_nonce(segment_nonce.get()))?;
-            row.write_scalar(faults.segment_provenance_base(0))
+            let segment_nonce = segment_nonce.get();
+            #[cfg(test)]
+            let segment_nonce = faults.segment_nonce(segment_nonce);
+            let provenance_base = 0_u32;
+            #[cfg(test)]
+            let provenance_base = faults.segment_provenance_base(provenance_base);
+            row.write_scalar(segment_nonce)?;
+            row.write_scalar(provenance_base)
         })
     })
     .map(CanonicalBlockRef::from_store)
@@ -526,7 +564,7 @@ fn retain_owners<'lane, O, PP, U, L, R>(
     plans: &ProfileMaterializationPlans,
     batch: &ValidatedProfileBatch<'_, R>,
     refs: ProfileLeafRefs,
-    faults: &mut ProfileBuildFault,
+    #[cfg(test)] faults: &mut ProfileBuildFault,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<ProfileOwnerTableSchema>, StoreRuntimeError>
 where
@@ -544,8 +582,11 @@ where
                 return Err(failure.into());
             }
             let (owner_kind, owner_index) = encode_owner(owner);
+            #[cfg(test)]
             let owner_kind = faults.owner_kind(owner_kind);
-            let stored_attachment_offset = faults.owner_attachment_offset(attachment_offset);
+            let stored_attachment_offset = attachment_offset;
+            #[cfg(test)]
+            let stored_attachment_offset = faults.owner_attachment_offset(stored_attachment_offset);
             control.write_row(|row| {
                 row.write_scalar(owner_kind)?;
                 row.write_scalar(owner_index)?;

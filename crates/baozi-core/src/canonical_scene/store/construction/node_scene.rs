@@ -38,6 +38,9 @@ mod deformation;
 pub(crate) mod edit;
 mod geometry;
 mod materialization;
+#[cfg(any(test, feature = "_u4-import"))]
+pub(in crate::canonical_scene::store) use materialization::NodeSceneActivationRequest;
+pub(in crate::canonical_scene::store) use materialization::NodeSceneMaterializedRefs;
 #[cfg(test)]
 pub(in crate::canonical_scene::store) use materialization::validate_node_scene_batches_for_test;
 #[cfg(feature = "_u4-import")]
@@ -45,9 +48,6 @@ pub use materialization::{
     NodeSceneActivationPolicyRequirements, NodeSceneActivationPostflight,
     NodeSceneActivationTransaction, NodeSceneEvidenceRecipe, NodeSceneLaneOutput,
     NodeSceneLanePlan, NodeSceneLaneRejection, NodeSceneLaneValidationProof,
-};
-pub(in crate::canonical_scene::store) use materialization::{
-    NodeSceneActivationRequest, NodeSceneMaterializedRefs,
 };
 mod profile;
 pub(in crate::canonical_scene::store) use profile::{
@@ -133,31 +133,28 @@ fn optional_utf8_validation_work(plan: Option<Utf8Plan>) -> Result<u64, StorePla
     })
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct NodeSceneBuildFaults {
     alter_first_authored_transform: bool,
     alter_first_geometry_f32: bool,
     profile: profile::ProfileBuildFault,
-    #[cfg(test)]
     planning: Option<materialization::NodeScenePlanningFault>,
-    #[cfg(test)]
     panic_central_validator: bool,
 }
 
+#[cfg(test)]
 impl NodeSceneBuildFaults {
     const fn none() -> Self {
         Self {
             alter_first_authored_transform: false,
             alter_first_geometry_f32: false,
             profile: profile::ProfileBuildFault::none(),
-            #[cfg(test)]
             planning: None,
-            #[cfg(test)]
             panic_central_validator: false,
         }
     }
 
-    #[cfg(test)]
     const fn altered_authored_transform() -> Self {
         Self {
             alter_first_authored_transform: true,
@@ -165,7 +162,6 @@ impl NodeSceneBuildFaults {
         }
     }
 
-    #[cfg(test)]
     const fn altered_geometry_f32() -> Self {
         Self {
             alter_first_geometry_f32: true,
@@ -173,7 +169,6 @@ impl NodeSceneBuildFaults {
         }
     }
 
-    #[cfg(test)]
     const fn altered_profile(fault: profile::ProfileBuildFault) -> Self {
         Self {
             profile: fault,
@@ -181,7 +176,6 @@ impl NodeSceneBuildFaults {
         }
     }
 
-    #[cfg(test)]
     const fn minimal_fallback() -> Self {
         Self {
             panic_central_validator: true,

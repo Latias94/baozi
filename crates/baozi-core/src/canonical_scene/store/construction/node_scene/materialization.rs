@@ -78,10 +78,12 @@ use super::scratch::{
     ScopedNodeSceneValidationScratchOwner,
 };
 mod spatial;
+#[cfg(test)]
+use super::NodeSceneBuildFaults;
 use super::{
-    DeferredNodeSceneDraftBuild, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneBuildFaults,
-    NodeSceneConstructionRejection, NodeSceneDraft, NodeSceneDraftBuild, PendingNodeSceneDraft,
-    PendingNodeSceneFailure, SceneEvidenceCounts,
+    DeferredNodeSceneDraftBuild, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneConstructionRejection,
+    NodeSceneDraft, NodeSceneDraftBuild, PendingNodeSceneDraft, PendingNodeSceneFailure,
+    SceneEvidenceCounts,
 };
 pub(in crate::canonical_scene::store) use spatial::RetainedSpatialRefs;
 use spatial::{SpatialMaterializationPlans, retain_spatial};
@@ -561,6 +563,7 @@ where
             lane,
             &self.sealed.execution,
             self.brand,
+            #[cfg(test)]
             NodeSceneBuildFaults::none(),
             NodeSceneLaneOutput,
             NodeSceneLaneRejection,
@@ -1281,7 +1284,7 @@ fn materialize_node_scene<'lane, R, O, PP, U, L>(
     lane: CanonicalLane<'lane, O, PP, U, L>,
     plan: &NodeSceneExecutionPlan<'_, R>,
     brand: super::super::ConstructionBrand,
-    faults: NodeSceneBuildFaults,
+    #[cfg(test)] faults: NodeSceneBuildFaults,
 ) -> CanonicalMaterialization<
     'lane,
     NodeSceneActivationOutput,
@@ -1298,6 +1301,7 @@ where
         lane,
         plan,
         brand,
+        #[cfg(test)]
         faults,
         |output| output,
         |rejection| rejection,
@@ -1309,7 +1313,7 @@ fn materialize_node_scene_mapped<'lane, R, O, PP, U, L, T, E>(
     mut lane: CanonicalLane<'lane, O, PP, U, L>,
     plan: &NodeSceneExecutionPlan<'_, R>,
     brand: super::super::ConstructionBrand,
-    mut faults: NodeSceneBuildFaults,
+    #[cfg(test)] mut faults: NodeSceneBuildFaults,
     map_output: fn(NodeSceneActivationOutput) -> T,
     map_rejection: fn(NodeSceneConstructionRejection<StoreRuntimeError>) -> E,
 ) -> CanonicalMaterialization<'lane, T, E, RecordBlock, SceneDirectorySchema>
@@ -1350,6 +1354,7 @@ where
             plan,
             &batches.nodes,
             plans,
+            #[cfg(test)]
             &mut faults,
         ))),
         None => None,
@@ -1401,6 +1406,7 @@ where
         &batches.nodes,
         nodes,
         appearance.materials(),
+        #[cfg(test)]
         &mut faults,
         failure,
     ));
@@ -1428,6 +1434,7 @@ where
         &mut lane,
         &plans.profile,
         &batches.profile,
+        #[cfg(test)]
         &mut faults.profile,
         failure,
     ));
@@ -1490,6 +1497,7 @@ where
         activation,
         validation_progress,
         final_progress,
+        #[cfg(test)]
         NodeSceneBuildFaults::none(),
     )?
     .prepare_immediately()
@@ -1509,6 +1517,7 @@ where
         activation,
         validation_progress,
         final_progress,
+        #[cfg(test)]
         NodeSceneBuildFaults::none(),
     )
 }
@@ -1536,7 +1545,7 @@ fn drive_node_scene_activation_deferred<'input, O, PP, U, L>(
     activation: BoundNodeSceneActivation<'input, O, PP, U, L>,
     validation_progress: CanonicalValidationProgress<PP, U>,
     final_progress: FinalProgress<PP, U>,
-    faults: NodeSceneBuildFaults,
+    #[cfg(test)] faults: NodeSceneBuildFaults,
 ) -> Result<DeferredNodeSceneDraftBuild<O, PP, U, L>, SceneConstructionError>
 where
     O: OperationOwner,
@@ -1625,7 +1634,13 @@ where
             }
         };
         permit.activate(execution, move |lane, execution| {
-            materialize_node_scene(lane, execution, brand, faults)
+            materialize_node_scene(
+                lane,
+                execution,
+                brand,
+                #[cfg(test)]
+                faults,
+            )
         })
     })?;
 
@@ -1817,7 +1832,7 @@ fn retain_node_scene_transforms<'lane, O, PP, U, L, R>(
     plan: SequencePlan<f32>,
     batch: &ValidatedNodeBatch<'_, R>,
     plans: &NodeSceneMaterializationPlans,
-    faults: &mut NodeSceneBuildFaults,
+    #[cfg(test)] faults: &mut NodeSceneBuildFaults,
 ) -> Result<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>, StoreRuntimeError>
 where
     O: OperationOwner,
@@ -1830,16 +1845,24 @@ where
         for &local in batch.canonical_order() {
             let authored = nodes.get(local).ok_or(failure)?.authored_transform();
             if let Some(matrix) = authored.authored_matrix() {
-                for mut column in matrix.cols {
-                    column[0] = faults.transform_scalar(column[0]);
+                for column in matrix.cols {
+                    #[cfg(test)]
+                    let mut column = column;
+                    #[cfg(test)]
+                    {
+                        column[0] = faults.transform_scalar(column[0]);
+                    }
                     control.extend_from_slice(&column)?;
                 }
             } else if let Some(trs) = authored.authored_trs() {
                 let translation = trs.translation();
                 let rotation = trs.rotation();
                 let scale = trs.scale();
+                let translation_x = translation.x;
+                #[cfg(test)]
+                let translation_x = faults.transform_scalar(translation_x);
                 control.extend_from_slice(&[
-                    faults.transform_scalar(translation.x),
+                    translation_x,
                     translation.y,
                     translation.z,
                     rotation.x,

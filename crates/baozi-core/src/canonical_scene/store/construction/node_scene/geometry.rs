@@ -31,6 +31,7 @@ use crate::canonical_scene::store::schema::{
     SceneGeometryDirectorySchema,
 };
 
+#[cfg(test)]
 use super::NodeSceneBuildFaults;
 use super::{
     checked_validation_work_sum, optional_record_validation_work, optional_utf8_validation_work,
@@ -449,7 +450,7 @@ pub(super) fn retain_geometry<'lane, O, PP, U, L, R, NR>(
     nodes: &ValidatedNodeBatch<'_, NR>,
     node_table: CanonicalBlockRef<super::super::super::schema::NodeSceneNodeTableSchema>,
     appearance_materials: Option<CanonicalBlockRef<AppearanceMaterialTableSchema>>,
-    faults: &mut NodeSceneBuildFaults,
+    #[cfg(test)] faults: &mut NodeSceneBuildFaults,
     failure: StoreBuildError,
 ) -> Result<RetainedGeometryRefs, StoreRuntimeError>
 where
@@ -467,8 +468,14 @@ where
     };
     let primitive_payload_blocks =
         retain_primitive_leaves(lane, batch, &mut scratch.primitive_refs, failure)?;
-    let attribute_payload_blocks =
-        retain_attribute_leaves(lane, batch, &mut scratch.attribute_refs, faults, failure)?;
+    let attribute_payload_blocks = retain_attribute_leaves(
+        lane,
+        batch,
+        &mut scratch.attribute_refs,
+        #[cfg(test)]
+        faults,
+        failure,
+    )?;
     let payload_block_count = primitive_payload_blocks
         .checked_add(attribute_payload_blocks)
         .and_then(|count| count.checked_add(u32::from(logical_mesh_names.is_some())))
@@ -659,7 +666,7 @@ fn retain_attribute_leaves<'lane, O, PP, U, L, R>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     batch: &ValidatedGeometryBatch<'_, R>,
     refs: &mut [AttributeLeafRefs],
-    faults: &mut NodeSceneBuildFaults,
+    #[cfg(test)] faults: &mut NodeSceneBuildFaults,
     failure: StoreBuildError,
 ) -> Result<u32, StoreRuntimeError>
 where
@@ -686,6 +693,7 @@ where
                         lane,
                         source_values,
                         GeometryF32ValuesSchema,
+                        #[cfg(test)]
                         faults,
                     )?);
                     record_payload_block(&mut payload_block_count, failure)?;
@@ -697,6 +705,7 @@ where
                         indices,
                         lanes,
                         attribute.canonical_scalar_count(),
+                        #[cfg(test)]
                         faults,
                         failure,
                     )?);
@@ -735,6 +744,7 @@ where
                         lane,
                         values,
                         GeometryF32ValuesSchema,
+                        #[cfg(test)]
                         faults,
                     )?);
                     record_payload_block(&mut payload_block_count, failure)?;
@@ -752,6 +762,7 @@ where
                         lane,
                         default,
                         GeometrySparseF32DefaultsSchema,
+                        #[cfg(test)]
                         faults,
                     )?);
                     record_payload_block(&mut payload_block_count, failure)?;
@@ -854,7 +865,7 @@ fn retain_f32_sequence<'lane, O, PP, U, L, Tag>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     values: &[f32],
     tag: Tag,
-    faults: &mut NodeSceneBuildFaults,
+    #[cfg(test)] faults: &mut NodeSceneBuildFaults,
 ) -> Result<CanonicalBlockRef<Tag>, StoreRuntimeError>
 where
     O: OperationOwner,
@@ -865,7 +876,9 @@ where
     let plan = SequencePlan::<f32>::new(values.len()).map_err(StoreRuntimeError::Plan)?;
     lane.try_retain_sequence(plan, tag, |control| {
         for &value in values {
-            control.push(faults.geometry_f32(value))?;
+            #[cfg(test)]
+            let value = faults.geometry_f32(value);
+            control.push(value)?;
         }
         Ok(())
     })
@@ -895,7 +908,7 @@ fn retain_projected_f32_sequence<'lane, O, PP, U, L>(
     source_indices: &[u32],
     lanes: u8,
     scalar_count: u64,
-    faults: &mut NodeSceneBuildFaults,
+    #[cfg(test)] faults: &mut NodeSceneBuildFaults,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<GeometryF32ValuesSchema>, StoreRuntimeError>
 where
@@ -916,7 +929,9 @@ where
             let end = start.checked_add(lanes_usize).ok_or(failure)?;
             let values = source_values.get(start..end).ok_or(failure)?;
             for &value in values {
-                control.push(faults.geometry_f32(value))?;
+                #[cfg(test)]
+                let value = faults.geometry_f32(value);
+                control.push(value)?;
             }
         }
         Ok(())
