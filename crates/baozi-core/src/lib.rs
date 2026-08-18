@@ -55,21 +55,6 @@ pub mod __canonical_import {
     pub use crate::canonical_scene::store::api::import::*;
 }
 
-#[cfg(not(feature = "_u7-geometry"))]
-/// The temporary U7 geometry seam is absent from ordinary `baozi-core` builds.
-///
-/// ```compile_fail,E0432
-/// use baozi_core::__canonical_geometry::SceneGeometryCursor;
-/// ```
-mod canonical_geometry_visibility_contract {}
-
-/// Temporary cross-crate semantic-read surface for the U7 post-process cutover.
-#[cfg(feature = "_u7-geometry")]
-#[doc(hidden)]
-pub mod __canonical_geometry {
-    pub use crate::canonical_scene::store::api::geometry::*;
-}
-
 pub use canonical_scene::store::api::scene::{
     SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
 };

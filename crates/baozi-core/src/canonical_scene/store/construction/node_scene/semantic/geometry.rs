@@ -30,14 +30,6 @@ use crate::geometry::TopologyKind;
 
 use super::{NodeSceneSemanticResult, invariant, read_scalar, read_u32_as_usize};
 
-#[cfg(feature = "_u7-geometry")]
-mod inspection;
-
-#[cfg(feature = "_u7-geometry")]
-pub(in crate::canonical_scene::store) use inspection::{
-    NodeSceneGeometryInspectionCursor, NodeSceneGeometryPrimitiveFacts,
-};
-
 type SceneCanonicalStore = PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>;
 
 /// The four proof-bound geometry table projections retained by the one Scene.

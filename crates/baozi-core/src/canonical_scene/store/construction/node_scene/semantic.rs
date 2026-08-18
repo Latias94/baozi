@@ -31,10 +31,6 @@ pub(in crate::canonical_scene::store) use geometry::{
     NodeSceneGeometryF32Cursor, NodeSceneGeometryI32Cursor, NodeSceneGeometryNormalization,
     NodeSceneGeometryPayloadKind, NodeSceneGeometryScalarKind, NodeSceneGeometryU32Cursor,
 };
-#[cfg(feature = "_u7-geometry")]
-pub(in crate::canonical_scene::store) use geometry::{
-    NodeSceneGeometryInspectionCursor, NodeSceneGeometryPrimitiveFacts,
-};
 pub(in crate::canonical_scene::store) use profile::{
     NodeSceneProfileCursor, NodeSceneProfileDigest, NodeSceneProfileEvidence,
     NodeSceneProfileMetadataArray, NodeSceneProfileMetadataArrayKind,
@@ -127,13 +123,6 @@ impl ValidatedNodeScene {
         &self,
     ) -> NodeSceneSemanticResult<NodeSceneSemanticView<'_>> {
         NodeSceneSemanticView::try_new(self)
-    }
-
-    #[cfg(feature = "_u7-geometry")]
-    pub(in crate::canonical_scene::store) fn semantic_geometry_inspection(
-        &self,
-    ) -> NodeSceneSemanticResult<NodeSceneGeometryInspectionCursor<'_>> {
-        NodeSceneGeometryInspectionCursor::try_new(&self.canonical, self.proof, self.generation)
     }
 
     /// Reads one source-node transform without projecting unrelated Scene domains.

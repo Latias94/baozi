@@ -6,7 +6,7 @@ mod error;
 mod operation;
 mod pipeline;
 
-pub use baozi_core::__canonical_geometry::SceneGenerationId;
+pub use baozi_core::SceneGenerationId;
 
 pub use error::{
     PostProcessCancellationOrigin, PostProcessCompileFailure, PostProcessControlCause,

@@ -7,7 +7,7 @@ use crate::operation::{
     PostProcessProgressPhase, PostProcessProgressUnit, RuntimePostProcessControl,
     default_ledger_limits,
 };
-use baozi_core::__canonical_geometry::{SceneGenerationId, ValidatedScene};
+use baozi_core::{SceneGenerationId, ValidatedScene};
 use baozi_operation::{LedgerCause, LedgerLimits, LedgerLimitsError, OperationCoordinator};
 
 type Coordinator = OperationCoordinator<

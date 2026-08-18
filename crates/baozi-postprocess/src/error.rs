@@ -2,7 +2,7 @@ use crate::CompiledPostProcessPlan;
 use crate::operation::{
     PostProcessDimension, PostProcessResourceEvidence, RuntimePostProcessLedger,
 };
-use baozi_core::__canonical_geometry::{SceneGenerationId, ValidatedScene};
+use baozi_core::{SceneGenerationId, ValidatedScene};
 use baozi_operation::{CancellationOrigin, ControlCause, LedgerCause, LedgerFinishError};
 use std::error::Error;
 use std::fmt;
