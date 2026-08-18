@@ -15,6 +15,7 @@ use crate::appearance::{
     TextureSourceKey, TextureStrength, TextureTransform,
 };
 use crate::attribute::{AttributeDomain, AttributeSemantic};
+use crate::canonical_scene::store::construction::STORE_DIMENSION;
 use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneAnimationExtrapolation, NodeSceneAnimationInterpolation, NodeSceneAnimationTarget,
     NodeSceneAnimationTimeDomain, NodeSceneDeformationF32Cursor, NodeSceneDeformationMorphPayload,
@@ -27,9 +28,8 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionTerminal, NodeSceneDraftBuild, NodeSceneSuccessParts,
-    PreparedNodeSceneConstruction, ValidatedNodeScene,
+    NodeSceneTestTransaction, PreparedNodeSceneConstruction, ValidatedNodeScene,
 };
-use crate::canonical_scene::store::construction::{STORE_DIMENSION, SceneConstructionOperation};
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AnimationAuthoringFailure, AnimationAuthoringSemanticError,
     AnimationChannelAuthoring, AnimationClipAuthoring, AnimationExtrapolationAuthoring,
@@ -1752,7 +1752,7 @@ fn build_gltf_scene_input_with_generation_source(
     mutation: GltfCapabilityMutation,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> NodeSceneSuccessParts {
-    let prepared = SceneConstructionOperation::with_account_for_scene_input(
+    let prepared = NodeSceneTestTransaction::with_account(
         account,
         test_limits(),
         input,
@@ -3406,7 +3406,7 @@ fn reject_gltf_mutation(
 ) {
     let (prepared, rejection) =
         with_gltf_scene_input(GltfCapabilityScope::All, mutation, |input| {
-            match SceneConstructionOperation::with_account_for_scene_input(
+            match NodeSceneTestTransaction::with_account(
                 account,
                 test_limits(),
                 input,
@@ -3544,7 +3544,7 @@ fn gltf_construction_one_short_work_limit_publishes_only_rich_failure() {
         GltfCapabilityScope::All,
         GltfCapabilityMutation::Baseline,
         |input| {
-            let build = SceneConstructionOperation::with_account_for_scene_input(
+            let build = NodeSceneTestTransaction::with_account(
                 &account,
                 test_limits_with_work(work_limit),
                 input,
@@ -3587,17 +3587,16 @@ fn gltf_cancellation_after_validation_publishes_only_rich_failure() {
         GltfCapabilityScope::All,
         GltfCapabilityMutation::Baseline,
         |input| {
-            let build =
-                SceneConstructionOperation::with_account_and_cancellation_for_scene_input_for_test(
-                    &account,
-                    test_limits(),
-                    input,
-                    SceneValidationLimits::default(),
-                    cancellation.clone(),
-                )
-                .expect("cancellable glTF Scene input admission")
-                .finish_draft()
-                .expect("glTF input must activate before cancellation");
+            let build = NodeSceneTestTransaction::with_account_and_cancellation(
+                &account,
+                test_limits(),
+                input,
+                SceneValidationLimits::default(),
+                cancellation.clone(),
+            )
+            .expect("cancellable glTF Scene input admission")
+            .finish_draft()
+            .expect("glTF input must activate before cancellation");
             let (draft, owner) = match build {
                 NodeSceneDraftBuild::Draft { draft, owner } => (draft, owner),
                 NodeSceneDraftBuild::Failure { .. } => {

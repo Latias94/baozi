@@ -17,7 +17,6 @@ implementation_tracers = [
   "crates/baozi-import/src/session.rs",
 ]
 test_tracers = [
-  "crates/baozi-core/src/canonical_scene/store/tests.rs",
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests.rs",
   "crates/baozi-import/tests/session_contract.rs",
 ]
@@ -61,7 +60,7 @@ evidence_revision = 2
 implementation_tracers = [
   "crates/baozi-operation/src/concrete_store/activation.rs",
   "crates/baozi-operation/src/retained.rs",
-  "crates/baozi-core/src/canonical_scene/store/construction/activation.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/materialization.rs",
   "crates/baozi-core/src/canonical_scene/store/construction.rs",
 ]
 test_tracers = [
@@ -105,7 +104,7 @@ implementation_tracers = [
   "crates/baozi-operation/src/ledger.rs",
   "crates/baozi-operation/src/concrete_store/activation.rs",
   "crates/baozi-operation/src/retained/operation.rs",
-  "crates/baozi-core/src/canonical_scene/store/construction/activation.rs",
+  "crates/baozi-import/src/store/scene_activation.rs",
 ]
 test_tracers = [
   "crates/baozi-operation/tests/ledger.rs",
@@ -129,7 +128,6 @@ implementation_tracers = [
   "crates/baozi-import/src/config.rs",
 ]
 test_tracers = [
-  "crates/baozi-core/src/canonical_scene/store/tests.rs",
   "crates/baozi/tests/importer_api.rs",
   "crates/baozi/tests/importer_boundary.rs",
 ]

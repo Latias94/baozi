@@ -61,9 +61,7 @@ use crate::provenance::{OperationKind, OptionsDigest};
 #[cfg(test)]
 use crate::scene_space::SceneSpace;
 
-use super::super::{
-    SceneAuthoringOperation, SceneConstructionError, SceneConstructionStartError, SceneStoreKeys,
-};
+use super::super::{SceneConstructionError, SceneConstructionStartError, SceneStoreKeys};
 use super::animation::{AnimationMaterializationPlans, AnimationTargetTableRefs, retain_animation};
 use super::appearance::{AppearanceMaterializationPlans, retain_appearance};
 use super::deformation::{
@@ -861,60 +859,6 @@ where
         .map_err(NodeSceneConstructionRejection::Planning)
 }
 
-impl<'input> SceneAuthoringOperation<'input> {
-    /// Runs the complete fresh Scene authoring transaction through the sole scoped activation rail.
-    pub(in crate::canonical_scene::store) fn finish_draft(
-        self,
-    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
-        let Self { raw, keys, request } = self;
-        request.activate(
-            raw,
-            node_scene_activation_roles(keys),
-            CanonicalValidationProgress::new(
-                super::super::SceneConstructionPhase::Validation,
-                super::super::SceneConstructionUnit::WorkUnits,
-            ),
-            super::super::final_progress(),
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn finish_draft_with_test_faults(
-        self,
-        faults: NodeSceneBuildFaults,
-    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
-        self.finish_draft_with_faults(faults)
-    }
-
-    #[cfg(test)]
-    pub(super) fn finish_draft_with_planning_fault_for_test(
-        self,
-        planning: NodeScenePlanningFault,
-    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
-        self.finish_draft_with_faults(NodeSceneBuildFaults {
-            planning: Some(planning),
-            ..NodeSceneBuildFaults::none()
-        })
-    }
-
-    fn finish_draft_with_faults(
-        self,
-        faults: NodeSceneBuildFaults,
-    ) -> Result<NodeSceneDraftBuild, SceneConstructionError> {
-        let Self { raw, keys, request } = self;
-        let activation = request.bind_operation(raw, node_scene_activation_roles(keys))?;
-        drive_node_scene_activation(
-            activation,
-            CanonicalValidationProgress::new(
-                super::super::SceneConstructionPhase::Validation,
-                super::super::SceneConstructionUnit::WorkUnits,
-            ),
-            super::super::final_progress(),
-            faults,
-        )
-    }
-}
-
 #[derive(Clone, Copy)]
 struct NodeSceneDirectoryRefs {
     nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
@@ -1569,8 +1513,11 @@ where
     )
 }
 
-fn drive_node_scene_activation<'input, O, PP, U, L>(
-    activation: BoundNodeSceneActivation<'input, O, PP, U, L>,
+#[cfg(test)]
+pub(super) fn activate_node_scene_with_faults_for_test<'input, O, PP, U>(
+    request: NodeSceneActivationRequest<'input>,
+    operation: RetainedStoreOperation<O, PP, U>,
+    roles: NodeSceneActivationRoles,
     validation_progress: CanonicalValidationProgress<PP, U>,
     final_progress: FinalProgress<PP, U>,
     faults: NodeSceneBuildFaults,
@@ -1580,6 +1527,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    let activation = request.bind_operation(operation, roles)?;
     drive_node_scene_activation_deferred(activation, validation_progress, final_progress, faults)?
         .prepare_immediately()
 }

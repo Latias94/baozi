@@ -4,9 +4,10 @@ use baozi_operation::__canonical_activation::{
     VerifiedMinimalFallback,
 };
 use baozi_operation::{
-    BytesPlan, ControlCause, FinalProgress, OperationOwner, ProgressPhase, ProgressUnit,
-    PublishedCanonicalStore, PublishedOutcomeEvidenceStore, PublishedRichFailureStore, RecordBlock,
-    RecordPlan, RetainedStoreOperation, RetainedStoreWorkControl, SequencePlan, StoreBuildError,
+    BytesPlan, ControlCause, FinalProgress, OperationOwner, PreparedStoreFallback, ProgressPhase,
+    ProgressUnit, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
+    PublishedRichFailureStore, PublishedStoreFallbackOutput, RecordBlock, RecordPlan,
+    RetainedStoreOperation, RetainedStoreWorkControl, SequencePlan, StoreBuildError,
     StoreControlledError, StoreFailureAssembly, StoreFailureValidation, StoreLedgerEvidence,
     StorePlanError, StoreRuntimeError, StoreWorkError, StoredScalar, Utf8Plan,
     ValidatedStoreSuccess,
@@ -27,9 +28,8 @@ use super::super::schema::{
 };
 use super::super::validation::NodeSceneValidationProof;
 use super::{
-    ConstructionBrand, PreparedTracerSceneFallback, SceneConstructionError, SceneConstructionOwner,
-    SceneConstructionPhase, SceneConstructionUnit, SceneStoreAssembly, SceneStoreControlCheckpoint,
-    SceneStoreKeys, TracerSceneFallback,
+    ConstructionBrand, SceneConstructionError, SceneConstructionOwner, SceneConstructionPhase,
+    SceneConstructionUnit, SceneStoreAssembly, SceneStoreControlCheckpoint, SceneStoreKeys,
 };
 
 mod animation;
@@ -67,6 +67,10 @@ pub(in crate::canonical_scene::store) use scratch::{
 };
 pub(in crate::canonical_scene::store) mod semantic;
 pub(in crate::canonical_scene::store) mod snapshot;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+pub(in crate::canonical_scene::store) use test_support::NodeSceneTestTransaction;
 mod view;
 
 #[cfg(test)]
@@ -739,6 +743,21 @@ pub(in crate::canonical_scene::store) struct PreparedNodeSceneRichFailure {
     store: PreparedNodeStoreFailure,
 }
 
+pub(in crate::canonical_scene::store) struct PreparedNodeSceneFallback {
+    store: PreparedStoreFallback,
+}
+
+pub(in crate::canonical_scene::store) struct NodeSceneFallback {
+    fallback: PublishedStoreFallbackOutput,
+    ledger_evidence: StoreLedgerEvidence,
+}
+
+impl NodeSceneFallback {
+    pub(in crate::canonical_scene::store) const fn ledger_evidence(&self) -> &StoreLedgerEvidence {
+        &self.ledger_evidence
+    }
+}
+
 #[must_use = "every prepared node Scene failure owns an exact frozen publication"]
 #[allow(
     clippy::large_enum_variant,
@@ -746,7 +765,7 @@ pub(in crate::canonical_scene::store) struct PreparedNodeSceneRichFailure {
 )]
 pub(in crate::canonical_scene::store) enum PreparedNodeSceneFailure {
     RichFailure(PreparedNodeSceneRichFailure),
-    MinimalFallback(PreparedTracerSceneFallback),
+    MinimalFallback(PreparedNodeSceneFallback),
 }
 
 #[must_use = "every prepared node Scene owns an exact frozen publication"]
@@ -757,7 +776,7 @@ pub(in crate::canonical_scene::store) enum PreparedNodeSceneFailure {
 pub(in crate::canonical_scene::store) enum PreparedNodeSceneConstruction {
     Success(PreparedNodeSceneSuccess),
     RichFailure(PreparedNodeSceneRichFailure),
-    MinimalFallback(PreparedTracerSceneFallback),
+    MinimalFallback(PreparedNodeSceneFallback),
 }
 
 impl From<PreparedNodeSceneFailure> for PreparedNodeSceneConstruction {
@@ -780,7 +799,7 @@ where
 {
     let store = operation.prepare_minimal_fallback(stable_code)?;
     Ok(PreparedNodeSceneConstruction::MinimalFallback(
-        PreparedTracerSceneFallback { store },
+        PreparedNodeSceneFallback { store },
     ))
 }
 
@@ -816,5 +835,5 @@ pub(in crate::canonical_scene::store) struct NodeSceneRichFailure {
 pub(in crate::canonical_scene::store) enum NodeSceneConstructionTerminal {
     Success(NodeSceneSuccessParts),
     RichFailure(NodeSceneRichFailure),
-    MinimalFallback(TracerSceneFallback),
+    MinimalFallback(NodeSceneFallback),
 }

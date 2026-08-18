@@ -3,8 +3,7 @@ use std::sync::{Arc, OnceLock};
 
 use baozi_operation::{
     CancellationSignal, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
-    PhysicalStorageAccountLimits, StorePlanError, StorePreparationFailureClass, StoreRuntimeError,
-    StoreTerminalCause,
+    PhysicalStorageAccountLimits, StorePlanError, StorePreparationFailureClass, StoreTerminalCause,
 };
 
 use crate::FormatId;
@@ -14,10 +13,8 @@ use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneProfileCursor, NodeSceneProfileStep,
 };
 use crate::canonical_scene::store::construction::{
-    FAILURE_TERMINAL_WORK_DIMENSION, FALLBACK_CODE, GENERATION_EXHAUSTED_CODE,
-    OPEN_PLAN_REJECTION_CODE, OPEN_RESOURCE_REJECTION_CODE, STORE_DIMENSION,
-    SceneConstructionLimits, SceneConstructionOperation, failure_terminal_work_requirement,
-    tracer_scene_open_failure_code,
+    FAILURE_TERMINAL_WORK_DIMENSION, GENERATION_EXHAUSTED_CODE, STORE_DIMENSION,
+    SceneConstructionLimits, failure_terminal_work_requirement,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
@@ -46,7 +43,7 @@ use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_NODE_AUTHORING_REJECTION_CODE,
     NODE_SCENE_PLANNING_REJECTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults,
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
-    NodeSceneDraftBuild, NodeSceneRichFailure, PendingNodeSceneDraft,
+    NodeSceneDraftBuild, NodeSceneRichFailure, NodeSceneTestTransaction, PendingNodeSceneDraft,
     PreparedNodeSceneConstruction,
 };
 
@@ -265,18 +262,6 @@ fn indexed_profile_owners(
     (0..len).map(move |index| owner(u32::try_from(index).expect("test profile owner index")))
 }
 
-#[test]
-fn tracer_open_recovery_classifies_exact_cause_before_fallback() {
-    let plan_code = tracer_scene_open_failure_code(&StoreRuntimeError::InvalidPublicationPlan);
-    let allocation_code = tracer_scene_open_failure_code(&StoreRuntimeError::AllocationFailed);
-
-    assert_eq!(plan_code, OPEN_PLAN_REJECTION_CODE);
-    assert_eq!(allocation_code, OPEN_RESOURCE_REJECTION_CODE);
-    assert_ne!(plan_code, FALLBACK_CODE);
-    assert_ne!(allocation_code, FALLBACK_CODE);
-    assert_ne!(plan_code, allocation_code);
-}
-
 #[derive(Clone)]
 struct CancelOnSignalPoll {
     polls: Arc<AtomicUsize>,
@@ -355,7 +340,7 @@ fn finish_node_batch(
     nodes: NodeAuthoringBatch<'_>,
     validation_limits: SceneValidationLimits,
 ) -> NodeSceneDraftBuild {
-    SceneConstructionOperation::with_account_for_scene_input(
+    NodeSceneTestTransaction::with_account(
         account,
         limits,
         test_scene_authoring_batch(nodes),
@@ -373,14 +358,14 @@ fn finish_node_batch_with_faults(
     validation_limits: SceneValidationLimits,
     faults: NodeSceneBuildFaults,
 ) -> NodeSceneDraftBuild {
-    SceneConstructionOperation::with_account_for_scene_input(
+    NodeSceneTestTransaction::with_account(
         account,
         limits,
         test_scene_authoring_batch(nodes),
         validation_limits,
     )
     .expect("node Scene input must be admitted")
-    .finish_draft_with_test_faults(faults)
+    .finish_draft_with_faults(faults)
     .expect("node Scene scoped activation must prepare an exact outcome")
 }
 
@@ -391,7 +376,7 @@ fn finish_node_batch_with_cancellation(
     validation_limits: SceneValidationLimits,
     cancellation: impl CancellationSignal,
 ) -> NodeSceneDraftBuild {
-    SceneConstructionOperation::with_account_and_cancellation_for_scene_input_for_test(
+    NodeSceneTestTransaction::with_account_and_cancellation(
         account,
         limits,
         test_scene_authoring_batch(nodes),
@@ -408,14 +393,14 @@ fn finish_node_batch_with_planning_fault(
     nodes: NodeAuthoringBatch<'_>,
     planning_fault: NodeScenePlanningFault,
 ) -> NodeSceneDraftBuild {
-    SceneConstructionOperation::with_account_for_scene_input(
+    NodeSceneTestTransaction::with_account(
         account,
         test_limits(),
         test_scene_authoring_batch(nodes),
         SceneValidationLimits::default(),
     )
     .expect("planning-fault node Scene input must be admitted")
-    .finish_draft_with_planning_fault_for_test(planning_fault)
+    .finish_draft_with_planning_fault(planning_fault)
     .expect("planning rejection must prepare an exact scoped outcome")
 }
 
@@ -1005,7 +990,7 @@ fn scene_input_admission_exceeds_the_legacy_fixed_slot_bound() {
         profile.batch(),
     );
 
-    let prepared = SceneConstructionOperation::with_account_for_scene_input(
+    let prepared = NodeSceneTestTransaction::with_account(
         &account,
         test_limits(),
         input,
@@ -1283,6 +1268,46 @@ fn generation_exhaustion_discards_canonical_storage_and_preserves_evidence() {
 }
 
 #[test]
+fn generation_source_panic_after_reservation_burns_the_gap_and_fails_closed() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let generation_source = AtomicU64::new(0);
+    let build = finish_node_batch(
+        &account,
+        test_limits(),
+        single_trs_batch(),
+        SceneValidationLimits::default(),
+    );
+    let before = account.snapshot();
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = build.prepare_with_generation_source_for_test(|| {
+            let _generation = SceneGenerationId::reserve_from(&generation_source)
+                .expect("the injected generation reservation must succeed");
+            panic!("injected generation source panic after reservation")
+        });
+    }));
+
+    assert!(panic.is_err());
+    assert_eq!(generation_source.load(Ordering::Relaxed), 1);
+    let after = account.snapshot();
+    assert!(after.poisoned());
+    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations()
+    );
+    assert_eq!(
+        after.total_admitted_retained_bytes(),
+        before.total_admitted_retained_bytes()
+    );
+    assert_eq!(
+        after.total_admitted_retained_allocations(),
+        before.total_admitted_retained_allocations()
+    );
+}
+
+#[test]
 fn invalid_authored_transform_fault_is_a_build_invariant_rich_failure() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
@@ -1378,14 +1403,14 @@ fn central_validation_rejects_each_corrupted_profile_structure() {
             animations,
             profile.batch_with_metadata(MetadataAuthoringBatch::new(&metadata)),
         );
-        let build = SceneConstructionOperation::with_account_for_scene_input(
+        let build = NodeSceneTestTransaction::with_account(
             &account,
             test_limits(),
             input,
             SceneValidationLimits::default(),
         )
         .unwrap_or_else(|_| panic!("{fault:?} profile fault operation must be admitted"))
-        .finish_draft_with_test_faults(NodeSceneBuildFaults::altered_profile(fault))
+        .finish_draft_with_faults(NodeSceneBuildFaults::altered_profile(fault))
         .unwrap_or_else(|_| panic!("{fault:?} must prepare an exact scoped outcome"));
 
         let failure = rich_failure(
@@ -1449,14 +1474,14 @@ fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
         animations,
         profile.batch(),
     );
-    let build = SceneConstructionOperation::with_account_for_scene_input(
+    let build = NodeSceneTestTransaction::with_account(
         &account,
         test_limits(),
         input,
         SceneValidationLimits::default(),
     )
     .expect("geometry semantic fault operation")
-    .finish_draft_with_test_faults(NodeSceneBuildFaults::altered_geometry_f32())
+    .finish_draft_with_faults(NodeSceneBuildFaults::altered_geometry_f32())
     .expect("invalid geometry payload must prepare an exact scoped outcome");
 
     let failure = rich_failure(
@@ -1596,7 +1621,7 @@ fn physical_budget_boundaries_release_storage_for_every_terminal_class() {
             Presence::Absent,
         )];
         let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
-        let operation = match SceneConstructionOperation::with_account_for_scene_input(
+        let operation = match NodeSceneTestTransaction::with_account(
             &account,
             test_limits(),
             test_scene_authoring_batch(node_batch),
@@ -1658,7 +1683,7 @@ fn materialization_failure_never_calls_the_generation_source() {
             Presence::Absent,
         )];
         let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
-        let operation = match SceneConstructionOperation::with_account_for_scene_input(
+        let operation = match NodeSceneTestTransaction::with_account(
             &account,
             test_limits(),
             test_scene_authoring_batch(node_batch),

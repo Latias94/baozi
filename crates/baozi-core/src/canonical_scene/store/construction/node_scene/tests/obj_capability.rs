@@ -4,6 +4,7 @@ use baozi_operation::{CancellationToken, PhysicalStorageAccount, StorePreparatio
 
 use crate::SceneValidationLimits;
 use crate::attribute::{AttributeDomain, AttributeSemantic};
+use crate::canonical_scene::store::construction::STORE_DIMENSION;
 use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic,
     NodeSceneGeometryF32Cursor, NodeSceneGeometryU32Cursor,
@@ -13,9 +14,9 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
-    NodeSceneSuccessParts, PreparedNodeSceneConstruction, ValidatedNodeScene,
+    NodeSceneSuccessParts, NodeSceneTestTransaction, PreparedNodeSceneConstruction,
+    ValidatedNodeScene,
 };
-use crate::canonical_scene::store::construction::{STORE_DIMENSION, SceneConstructionOperation};
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
     GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryAuthoringFailure,
@@ -356,7 +357,7 @@ fn build_obj_scene_with_generation_source(
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> NodeSceneSuccessParts {
     projection.with_scene_input(|input| {
-        let build = SceneConstructionOperation::with_account_for_scene_input(
+        let build = NodeSceneTestTransaction::with_account(
             account,
             test_limits(),
             input,
@@ -1058,7 +1059,7 @@ fn incomplete_obj_corner_projection_is_rejected_by_central_validation() {
     assert_eq!(projection.texcoord_indices.pop(), Some(1));
 
     projection.with_scene_input(|input| {
-        let build = SceneConstructionOperation::with_account_for_scene_input(
+        let build = NodeSceneTestTransaction::with_account(
             &account,
             test_limits(),
             input,
@@ -1136,7 +1137,7 @@ fn obj_construction_one_short_work_limit_publishes_only_rich_failure() {
         .checked_sub(1)
         .expect("OBJ construction must consume work");
     projection.with_scene_input(|input| {
-        let build = SceneConstructionOperation::with_account_for_scene_input(
+        let build = NodeSceneTestTransaction::with_account(
             &account,
             test_limits_with_work(work_limit),
             input,
@@ -1176,17 +1177,16 @@ fn obj_cancellation_after_validation_publishes_only_rich_failure() {
     let cancellation = CancellationToken::new();
 
     projection.with_scene_input(|input| {
-        let build =
-            SceneConstructionOperation::with_account_and_cancellation_for_scene_input_for_test(
-                &account,
-                test_limits(),
-                input,
-                SceneValidationLimits::default(),
-                cancellation.clone(),
-            )
-            .expect("cancellable OBJ Scene input admission")
-            .finish_draft()
-            .expect("OBJ input must materialize and validate before cancellation");
+        let build = NodeSceneTestTransaction::with_account_and_cancellation(
+            &account,
+            test_limits(),
+            input,
+            SceneValidationLimits::default(),
+            cancellation.clone(),
+        )
+        .expect("cancellable OBJ Scene input admission")
+        .finish_draft()
+        .expect("OBJ input must materialize and validate before cancellation");
         let NodeSceneDraftBuild::Draft { draft, owner } = build else {
             panic!("valid OBJ input must retain its draft before cancellation");
         };

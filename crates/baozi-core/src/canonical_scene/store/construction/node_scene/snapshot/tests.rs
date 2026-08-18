@@ -7,15 +7,14 @@ use crate::FormatId;
 use crate::SceneValidationLimits;
 use crate::appearance::{AlphaMode, MaterialFactors, MaterialSemanticsRef, ShadingModel};
 use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemantic};
+use crate::canonical_scene::store::construction::SceneConstructionLimits;
 use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneProfileCursor, NodeSceneProfileMetadataArray, NodeSceneProfileMetadataArrayKind,
     NodeSceneProfileMetadataValue, NodeSceneProfileStep,
 };
 use crate::canonical_scene::store::construction::node_scene::{
-    NodeSceneConstructionTerminal, NodeSceneDraftBuild, NodeSceneSuccessParts, ValidatedNodeScene,
-};
-use crate::canonical_scene::store::construction::{
-    SceneConstructionLimits, SceneConstructionOperation,
+    NodeSceneConstructionTerminal, NodeSceneDraftBuild, NodeSceneSuccessParts,
+    NodeSceneTestTransaction, ValidatedNodeScene,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, CameraAuthoring,
@@ -477,7 +476,7 @@ fn publish_scene_input(
     account: &PhysicalStorageAccount,
     input: SceneAuthoringBatch<'_>,
 ) -> NodeSceneSuccessParts {
-    let build = SceneConstructionOperation::with_account_for_scene_input(
+    let build = NodeSceneTestTransaction::with_account(
         account,
         operation_limits(),
         input,

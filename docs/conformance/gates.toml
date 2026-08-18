@@ -10,7 +10,6 @@ executor = "command"
 success_condition = "process-exit-zero"
 evidence_identity = "baozi.canonical-scene.behavior-tests/v1"
 evidence_paths = [
-  "crates/baozi-core/src/canonical_scene/store/tests.rs",
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests.rs",
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs",
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/edit/tests.rs",

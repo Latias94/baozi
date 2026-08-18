@@ -34,16 +34,14 @@ use super::super::tests::{
     build_gltf_capability_scene_for_probe, profile_fixture, single_trs_batch, test_account,
     test_factory, test_limits,
 };
-use super::super::{NodeSceneDraftBuild, NodeSceneSuccessParts};
+use super::super::{NodeSceneDraftBuild, NodeSceneSuccessParts, NodeSceneTestTransaction};
 use super::execution::NodeSceneEditPrepareError;
 use super::plan::NodeSceneEditPlanError;
 use super::report::{CanonicalRemapSet, DerivedAbsenceReason, RemapChange};
 use super::source::{
     NodeTransformEditStart, NodeTransformEditStartError, try_begin_node_transform_edit,
 };
-use crate::canonical_scene::store::construction::{
-    SceneConstructionLimits, SceneConstructionOperation,
-};
+use crate::canonical_scene::store::construction::SceneConstructionLimits;
 
 fn build_single_trs_scene(
     account: &PhysicalStorageAccount,
@@ -80,7 +78,7 @@ fn try_build_single_trs_scene(
         animations,
         profile.batch(),
     );
-    let build = SceneConstructionOperation::with_account_for_scene_input(
+    let build = NodeSceneTestTransaction::with_account(
         account,
         test_limits(),
         input,
@@ -149,7 +147,7 @@ fn build_spatial_scene(
         animations,
         profile.batch(),
     );
-    let build = SceneConstructionOperation::with_account_for_scene_input(
+    let build = NodeSceneTestTransaction::with_account(
         account,
         test_limits(),
         input,

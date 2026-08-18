@@ -23,8 +23,7 @@ use crate::identity::SceneGenerationId;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError};
 
 use super::super::{
-    GENERATION_EXHAUSTED_CODE, PreparedTracerSceneFallback, SceneConstructionError,
-    TracerSceneFallback, burn_generation_reservation,
+    GENERATION_EXHAUSTED_CODE, SceneConstructionError, burn_generation_reservation,
 };
 use super::materialization::{
     NodeSceneActivationOutput, NodeSceneEvidenceRecipe, NodeSceneLaneOutput,
@@ -35,10 +34,11 @@ use super::{
     NODE_SCENE_CONTROL_INTERRUPTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
     NODE_SCENE_WORK_INTERRUPTION_CODE, NodeSceneCanonicalJointCommit,
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
-    NodeSceneDraftBuild, NodeSceneRichFailure, NodeSceneSuccessParts, NodeSceneSuccessReport,
-    PendingNodeSceneDraft, PendingNodeSceneFailure, PreparedNodeSceneConstruction,
-    PreparedNodeSceneFailure, PreparedNodeSceneRichFailure, PreparedNodeSceneSuccess,
-    SceneEvidenceCounts, ValidatedNodeScene,
+    NodeSceneDraftBuild, NodeSceneFallback, NodeSceneRichFailure, NodeSceneSuccessParts,
+    NodeSceneSuccessReport, PendingNodeSceneDraft, PendingNodeSceneFailure,
+    PreparedNodeSceneConstruction, PreparedNodeSceneFailure, PreparedNodeSceneFallback,
+    PreparedNodeSceneRichFailure, PreparedNodeSceneSuccess, SceneEvidenceCounts,
+    ValidatedNodeScene,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,13 +268,13 @@ macro_rules! prepare_frozen_node_failure {
             RootedFailureValidation::Rejected(rejected) => {
                 let (store, _cause) = rejected.prepare_minimal_fallback()?.into_parts();
                 Ok(PreparedNodeSceneConstruction::MinimalFallback(
-                    PreparedTracerSceneFallback { store },
+                    PreparedNodeSceneFallback { store },
                 ))
             }
             RootedFailureValidation::Fallback(fallback) => {
                 let (store, _cause) = fallback.into_parts();
                 Ok(PreparedNodeSceneConstruction::MinimalFallback(
-                    PreparedTracerSceneFallback { store },
+                    PreparedNodeSceneFallback { store },
                 ))
             }
         }
@@ -330,7 +330,7 @@ where
             PreparedStoreSuccessOutcome::MinimalFallback(store) => {
                 burn_generation_reservation(generation);
                 Ok(PreparedNodeSceneConstruction::MinimalFallback(
-                    PreparedTracerSceneFallback { store },
+                    PreparedNodeSceneFallback { store },
                 ))
             }
         }
@@ -621,7 +621,7 @@ where
             Self::PreparedFallback(fallback) => {
                 let (store, _cause) = fallback.into_parts();
                 return Ok((
-                    PreparedNodeSceneConstruction::MinimalFallback(PreparedTracerSceneFallback {
+                    PreparedNodeSceneConstruction::MinimalFallback(PreparedNodeSceneFallback {
                         store,
                     }),
                     None,
@@ -707,7 +707,7 @@ where
         FailureEvidenceOutcome::MinimalFallback(fallback) => {
             let (store, cause) = fallback.into_parts();
             (
-                PreparedNodeSceneFailure::MinimalFallback(PreparedTracerSceneFallback { store }),
+                PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store }),
                 Some(cause),
             )
         }
@@ -750,7 +750,7 @@ where
 {
     NodeSceneDraftBuild::Failure {
         authoring_rejection: None,
-        prepared: PreparedNodeSceneFailure::MinimalFallback(PreparedTracerSceneFallback { store }),
+        prepared: PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store }),
     }
 }
 
@@ -798,14 +798,14 @@ where
         RootedFailureValidation::Rejected(rejected) => {
             let (store, cause) = rejected.prepare_minimal_fallback()?.into_parts();
             Ok((
-                PreparedNodeSceneFailure::MinimalFallback(PreparedTracerSceneFallback { store }),
+                PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store }),
                 Some(cause),
             ))
         }
         RootedFailureValidation::Fallback(fallback) => {
             let (store, _cause) = fallback.into_parts();
             Ok((
-                PreparedNodeSceneFailure::MinimalFallback(PreparedTracerSceneFallback { store }),
+                PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store }),
                 None,
             ))
         }
@@ -820,7 +820,7 @@ fn map_node_prepared_failure(
             PreparedNodeSceneFailure::RichFailure(PreparedNodeSceneRichFailure { store })
         }
         PreparedStoreFailureOutcome::MinimalFallback(store) => {
-            PreparedNodeSceneFailure::MinimalFallback(PreparedTracerSceneFallback { store })
+            PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store })
         }
     }
 }
@@ -998,7 +998,7 @@ impl PreparedNodeSceneConstruction {
             }
             Self::MinimalFallback(prepared) => {
                 let published = prepared.store.handoff();
-                NodeSceneConstructionTerminal::MinimalFallback(TracerSceneFallback {
+                NodeSceneConstructionTerminal::MinimalFallback(NodeSceneFallback {
                     fallback: published.fallback,
                     ledger_evidence: published.ledger_evidence,
                 })

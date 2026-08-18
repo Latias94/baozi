@@ -11,15 +11,15 @@ use crate::canonical_scene::store::schema::{NodeSceneOutcomeEvidenceSchema, Scen
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 
 use super::super::super::{
-    GENERATION_EXHAUSTED_CODE, PreparedTracerSceneFallback, SceneConstructionError,
-    SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit, TracerSceneFallback,
-    burn_generation_reservation,
+    GENERATION_EXHAUSTED_CODE, SceneConstructionError, SceneConstructionOwner,
+    SceneConstructionPhase, SceneConstructionUnit, burn_generation_reservation,
 };
 use super::super::publication::validate_node_scene_failure_evidence;
 use super::super::{
     ActivatedNodeSceneCandidate, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneCanonicalJointCommit,
-    NodeSceneRichFailure, PendingNodeSceneFailure, PreparedNodeSceneConstruction,
-    PreparedNodeSceneRichFailure, ValidatedNodeScene,
+    NodeSceneFallback, NodeSceneRichFailure, PendingNodeSceneFailure,
+    PreparedNodeSceneConstruction, PreparedNodeSceneFallback, PreparedNodeSceneRichFailure,
+    ValidatedNodeScene,
 };
 use super::report::{CanonicalInvalidations, CanonicalRemapSet};
 
@@ -83,7 +83,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneEditSuccessParts {
 pub(in crate::canonical_scene::store) enum NodeSceneEditTerminal {
     Success(NodeSceneEditSuccessParts),
     RichFailure(NodeSceneRichFailure),
-    MinimalFallback(TracerSceneFallback),
+    MinimalFallback(NodeSceneFallback),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -272,11 +272,9 @@ fn map_prepared_construction_failure(
         PreparedNodeSceneConstruction::RichFailure(PreparedNodeSceneRichFailure { store }) => Ok(
             PreparedNodeSceneEdit::rich_failure(PreparedNodeSceneEditRichFailure { store }),
         ),
-        PreparedNodeSceneConstruction::MinimalFallback(PreparedTracerSceneFallback { store }) => {
-            Ok(PreparedNodeSceneEdit::minimal_fallback(
-                PreparedNodeSceneEditMinimalFallback { store },
-            ))
-        }
+        PreparedNodeSceneConstruction::MinimalFallback(PreparedNodeSceneFallback { store }) => Ok(
+            PreparedNodeSceneEdit::minimal_fallback(PreparedNodeSceneEditMinimalFallback { store }),
+        ),
     }
 }
 
@@ -342,7 +340,7 @@ impl PreparedNodeSceneEdit {
             }
             PreparedNodeSceneEditState::MinimalFallback(prepared) => {
                 let published = prepared.store.handoff();
-                NodeSceneEditTerminal::MinimalFallback(TracerSceneFallback {
+                NodeSceneEditTerminal::MinimalFallback(NodeSceneFallback {
                     fallback: published.fallback,
                     ledger_evidence: published.ledger_evidence,
                 })

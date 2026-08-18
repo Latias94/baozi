@@ -13,12 +13,10 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
-    NodeSceneSuccessParts, PreparedNodeSceneConstruction, PreparedNodeSceneFailure,
-    ValidatedNodeScene,
+    NodeSceneSuccessParts, NodeSceneTestTransaction, PreparedNodeSceneConstruction,
+    PreparedNodeSceneFailure, ValidatedNodeScene,
 };
-use crate::canonical_scene::store::construction::{
-    STORE_DIMENSION, SceneConstructionError, SceneConstructionOperation,
-};
+use crate::canonical_scene::store::construction::{STORE_DIMENSION, SceneConstructionError};
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, CameraAuthoring, CameraLocalId,
     CanonicalProfileOwner, DeformationAuthoringBatch, GeometryAuthoringBatch, LightAuthoring,
@@ -410,7 +408,7 @@ fn build_profile_closure_scene_variant(
     variant: ProfileClosureInputVariant,
 ) -> NodeSceneSuccessParts {
     with_profile_closure_input_variant(variant, |input| {
-        let build = SceneConstructionOperation::with_account_for_scene_input(
+        let build = NodeSceneTestTransaction::with_account(
             account,
             test_limits(),
             input,
@@ -949,7 +947,7 @@ fn observe_profile_closure_negative_case(
     let (disposition, before_preflight) = with_profile_closure_input_variant(
         case.input_variant(),
         |input| {
-            let operation = SceneConstructionOperation::with_account_for_scene_input(
+            let operation = NodeSceneTestTransaction::with_account(
                 &account,
                 test_limits(),
                 input,
