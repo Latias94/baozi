@@ -93,7 +93,7 @@ fn pending_and_published_boundaries_seal_all_accounting_mutation() {
         Err(LedgerCause::PublicationAlreadyPending)
     ));
     assert_eq!(
-        coordinator.transfer_reservation(&mut zero, Phase::Output),
+        coordinator.transition_reservation(&mut zero, Phase::Output, Dimension::AssetBytes, 0),
         Err(LedgerCause::PublicationAlreadyPending)
     );
     assert!(matches!(
@@ -103,9 +103,8 @@ fn pending_and_published_boundaries_seal_all_accounting_mutation() {
 
     pending.rollback();
     coordinator
-        .transfer_reservation(&mut zero, Phase::Output)
+        .transition_reservation(&mut zero, Phase::Output, Dimension::AssetBytes, 0)
         .expect("rollback reopens accounting mutation");
-    drop(zero);
 
     let mut replacement_batch = PublicationBatch::default();
     let mut pending = coordinator
@@ -126,6 +125,11 @@ fn pending_and_published_boundaries_seal_all_accounting_mutation() {
             .charge_attempted(Dimension::Records, 1),
         Err(LedgerCause::PublicationAlreadyCompleted)
     );
+    assert_eq!(
+        coordinator.transition_reservation(&mut zero, Phase::Snapshot, Dimension::AssetBytes, 0),
+        Err(LedgerCause::PublicationAlreadyCompleted)
+    );
+    drop(zero);
 }
 
 #[test]

@@ -2458,54 +2458,6 @@ fn reservation_construction_binds_keys_once_and_resize_uses_only_bound_positions
 }
 
 #[test]
-fn reservation_transfer_uses_bound_positions_after_its_lookup_preflight() {
-    let _guard = BOUND_ORD_TEST_LOCK.lock().expect("bound Ord test lock");
-    let source_phase = StatefulOrd(1);
-    let target_phase = StatefulOrd(2);
-    let dimension = StatefulOrd(7);
-    let ledger = stateful_ledger(stateful_ord_limits(), &[source_phase, target_phase]);
-    let mut reservation = ledger
-        .reserve(source_phase, dimension, 5)
-        .expect("transfer source");
-
-    BOUND_ORD_COMPARISONS_REMAINING.store(3, Ordering::SeqCst);
-    let transfer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ledger.transfer(&mut reservation, target_phase)
-    }));
-    let remaining = BOUND_ORD_COMPARISONS_REMAINING.swap(usize::MAX, Ordering::SeqCst);
-
-    assert_eq!(
-        remaining, 0,
-        "source equality and target phase lookup must finish before mutation"
-    );
-    transfer
-        .expect("transfer compared owner keys after its target lookup")
-        .expect("predeclared target phase must accept the transfer");
-    assert_eq!(
-        ledger
-            .phase_evidence(source_phase)
-            .expect("source phase evidence")
-            .current_live_bytes(),
-        0
-    );
-    assert_eq!(
-        ledger
-            .phase_evidence(target_phase)
-            .expect("target phase evidence")
-            .current_live_bytes(),
-        5
-    );
-
-    REVERSE_BOUND_ORD.store(true, Ordering::SeqCst);
-    let release = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        drop(reservation);
-    }));
-    REVERSE_BOUND_ORD.store(false, Ordering::SeqCst);
-    release.expect("bound reservation release must not compare owner keys");
-    assert_eq!(ledger.test_probe().current_live_bytes(), 0);
-}
-
-#[test]
 fn commitment_aggregate_panic_releases_current_evidence_before_unwind() {
     let _guard = BOUND_ORD_TEST_LOCK.lock().expect("bound Ord test lock");
     let phase = StatefulOrd(2);
@@ -3522,47 +3474,6 @@ fn reservation_admission_and_resize_use_one_preflight_then_numeric_slots() {
         assert!(
             !resize[first_resize_mutation..].contains(forbidden),
             "reservation resize regained an allocation or fault gate after its first write through `{forbidden}`"
-        );
-    }
-}
-
-#[test]
-fn reservation_transfer_finishes_all_fallible_lookup_before_mutating_phase_bytes() {
-    let production = ledger_root_source();
-    let transfer = production
-        .split("pub fn transfer(")
-        .nth(1)
-        .expect("reservation transfer exists")
-        .split("/// Resizes one live reservation")
-        .next()
-        .expect("reservation transfer boundary exists");
-    let target_lookup = transfer
-        .find("phase_position(&state, phase)")
-        .expect("target phase is resolved before mutation");
-    let first_mutation = transfer
-        .find("state.phase_states[source_position].current_live_bytes = source_live")
-        .expect("source bytes are released by numeric position");
-    assert!(target_lookup < first_mutation);
-    assert!(transfer[..first_mutation].contains("source_position >= state.phase_states.len()"));
-
-    let mutation_tail = &transfer[first_mutation..];
-    for forbidden in [
-        "?",
-        "binary_search",
-        "phase_position(",
-        "phase_state(",
-        "release_phase(",
-        "try_reserve",
-        ".reserve(",
-        ".push(",
-        ".insert(",
-        "expect(",
-        "unwrap",
-        "panic!",
-    ] {
-        assert!(
-            !mutation_tail.contains(forbidden),
-            "transfer regained a fallible or semantic operation after its first write through `{forbidden}`"
         );
     }
 }

@@ -2192,48 +2192,6 @@ where
         Ok(())
     }
 
-    /// Transfers live ownership to another owner-defined ledger phase without changing totals.
-    pub fn transfer(
-        &self,
-        reservation: &mut LiveReservation<O, P, D>,
-        phase: P,
-    ) -> Result<(), LedgerCause<D>> {
-        self.check_reservation(reservation)?;
-        let mut state = lock(&self.state);
-        Self::ensure_open(&state)?;
-        if reservation.core.phase == phase {
-            return Ok(());
-        }
-        let source_position = reservation.core.phase_position;
-        if source_position >= state.phase_states.len() {
-            return Err(LedgerCause::FinalSnapshotShapeMismatch);
-        }
-        let target_position = phase_position(&state, phase)?;
-        if source_position == target_position {
-            reservation.core.phase = phase;
-            return Ok(());
-        }
-        let source_live = state.phase_states[source_position]
-            .current_live_bytes
-            .checked_sub(reservation.core.bytes)
-            .ok_or(LedgerCause::FinalSnapshotShapeMismatch)?;
-        let target_live = state.phase_states[target_position]
-            .current_live_bytes
-            .checked_add(reservation.core.bytes)
-            .ok_or(LedgerCause::ArithmeticOverflow {
-                class: CounterClass::Live,
-                dimension: reservation.core.dimension,
-            })?;
-
-        state.phase_states[source_position].current_live_bytes = source_live;
-        let target = &mut state.phase_states[target_position];
-        target.current_live_bytes = target_live;
-        target.peak_live_bytes = target.peak_live_bytes.max(target_live);
-        reservation.core.phase = phase;
-        reservation.core.phase_position = target_position;
-        Ok(())
-    }
-
     /// Resizes one live reservation without changing its phase or dimension.
     ///
     /// Admission is atomic: a failed increase leaves both the token and every
@@ -2336,7 +2294,9 @@ where
     ///
     /// `bytes` is distributed in source order, preserving each token's current size until the
     /// requested total is exhausted. The last token absorbs any requested growth. Admission or
-    /// evidence failure leaves every token and every live current/peak counter unchanged.
+    /// evidence failure leaves every token and every live current/peak counter unchanged. A
+    /// projection that preserves the dimension or operation live total does not re-admit that
+    /// unchanged total against a policy tightened below already-live evidence.
     pub fn transition_reservations(
         &self,
         reservations: &mut [LiveReservation<O, P, D>],
@@ -2401,6 +2361,8 @@ where
                         dimension,
                     })
             })?;
+        let dimension_live_is_unchanged = target_dimension_source == bytes;
+        let operation_live_is_unchanged = source_bytes == bytes;
         let project = |current: u64, source: u64| {
             current
                 .checked_sub(source)
@@ -2417,7 +2379,7 @@ where
                 .current_live_bytes,
             target_dimension_source,
         )?;
-        if dimension_live > dimension_limit {
+        if !dimension_live_is_unchanged && dimension_live > dimension_limit {
             return Err(LedgerCause::LimitExceeded {
                 class: CounterClass::Live,
                 dimension,
@@ -2426,7 +2388,7 @@ where
             });
         }
         let operation_live = project(state.current_live_bytes, source_bytes)?;
-        if operation_live > self.operation_live_byte_limit {
+        if !operation_live_is_unchanged && operation_live > self.operation_live_byte_limit {
             return Err(LedgerCause::LimitExceeded {
                 class: CounterClass::Live,
                 dimension,

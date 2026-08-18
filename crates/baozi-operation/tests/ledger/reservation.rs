@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn reservations_track_overlap_phase_peaks_transfer_and_raii_release() {
+fn reservations_track_overlap_phase_peaks_transition_and_raii_release() {
     let mut coordinator = coordinator(20);
     let snapshot_bytes = coordinator
         .checkpoint()
@@ -24,8 +24,8 @@ fn reservations_track_overlap_phase_peaks_transfer_and_raii_release() {
     );
 
     coordinator
-        .transfer_reservation(&mut decode_bytes, Phase::Output)
-        .expect("same-ledger phase transfer");
+        .transition_reservation(&mut decode_bytes, Phase::Output, Dimension::AssetBytes, 7)
+        .expect("same-ledger phase transition");
     let transferred = coordinator.ledger_snapshot();
     assert_eq!(
         transferred
@@ -54,6 +54,51 @@ fn reservations_track_overlap_phase_peaks_transfer_and_raii_release() {
             .peak_live_bytes(),
         7
     );
+}
+
+#[test]
+fn phase_only_transition_does_not_readmit_unchanged_live_bytes() {
+    let mut coordinator = coordinator(20);
+    let mut reservation = coordinator
+        .checkpoint()
+        .reserve(Phase::Snapshot, Dimension::AssetBytes, 4)
+        .expect("initial reservation");
+
+    assert_eq!(
+        coordinator.tighten_dimension_policy(
+            Dimension::AssetBytes,
+            DimensionPolicy::reservable_bytes(10, 8, 0, 3),
+        ),
+        Err(LedgerCause::LimitExceeded {
+            class: CounterClass::Live,
+            dimension: Dimension::AssetBytes,
+            value: 4,
+            limit: 3,
+        })
+    );
+
+    coordinator
+        .transition_reservation(&mut reservation, Phase::Output, Dimension::AssetBytes, 4)
+        .expect("phase-only transition preserves the tightened live total");
+    let transitioned = coordinator.ledger_snapshot();
+    assert_eq!(transitioned.current_live_bytes(), 4);
+    assert_eq!(
+        transitioned
+            .phase(Phase::Snapshot)
+            .expect("snapshot phase")
+            .current_live_bytes(),
+        0
+    );
+    assert_eq!(
+        transitioned
+            .phase(Phase::Output)
+            .expect("output phase")
+            .current_live_bytes(),
+        4
+    );
+
+    drop(reservation);
+    assert_eq!(coordinator.ledger_snapshot().current_live_bytes(), 0);
 }
 
 #[test]
@@ -617,20 +662,13 @@ fn reservation_transition_rejects_owner_mismatch_and_pending_mutation() {
 }
 
 #[test]
-fn same_owner_type_cannot_transfer_across_ledger_instances() {
+fn same_owner_type_cannot_prepare_publication_across_ledger_instances() {
     let mut owner = publication_coordinator(20);
     let mut other = coordinator(20);
-    let mut reservation = owner
+    let reservation = owner
         .checkpoint()
         .reserve(Phase::Snapshot, Dimension::AssetBytes, 3)
         .expect("owner reservation");
-
-    assert_eq!(
-        other.transfer_reservation(&mut reservation, Phase::Decode),
-        Err(LedgerCause::OwnerMismatch)
-    );
-    assert_eq!(owner.ledger_snapshot().current_live_bytes(), 3);
-    assert_eq!(other.ledger_snapshot().current_live_bytes(), 0);
 
     let mut batch = publication_batch(&mut owner, [reservation]);
     assert!(matches!(

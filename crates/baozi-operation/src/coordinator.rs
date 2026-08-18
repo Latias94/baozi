@@ -432,15 +432,6 @@ where
         self.ledger.phase_evidence(phase)
     }
 
-    /// Transfers a reservation to another owner-defined phase.
-    pub fn transfer_reservation(
-        &mut self,
-        reservation: &mut LiveReservation<O, LP, D>,
-        phase: LP,
-    ) -> Result<(), LedgerCause<D>> {
-        self.ledger.transfer(reservation, phase)
-    }
-
     /// Resizes one reservation while preserving it unchanged on admission failure.
     pub fn resize_reservation(
         &mut self,
