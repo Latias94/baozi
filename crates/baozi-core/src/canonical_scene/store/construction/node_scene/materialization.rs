@@ -1,21 +1,28 @@
-use std::cell::Cell;
 use std::fmt;
 
+#[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
 use baozi_operation::__canonical_activation::{
-    CanonicalActivationOutcome, CanonicalActivationPolicy, CanonicalActivationSeal,
-    CanonicalCentralValidationOutcome, CanonicalFailureRequirements, CanonicalLane,
+    CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
+    CanonicalValidationProgress, ScopedRetainedStoreSessionOutcomeOwner,
+    StoreActivationContainment,
+};
+use baozi_operation::__canonical_activation::{
+    CanonicalActivationPolicy, CanonicalFailureRequirements, CanonicalLane,
     CanonicalMaterialization, CanonicalMaterializationRole, CanonicalRecordBuildRow,
     CanonicalReservation, CanonicalSemanticWorkSession, CanonicalSuccessRequirements,
     CanonicalTableShape, CanonicalValidationDecision, CanonicalValidationPlanning,
-    CanonicalValidationProgress, CanonicalValidationRole, ScopedRetainedStoreSessionOutcomeOwner,
-    StoreActivationContainment,
+    CanonicalValidationRole,
 };
+#[cfg(test)]
+use baozi_operation::{FinalProgress, RetainedStoreOperation};
 use baozi_operation::{
-    FinalProgress, OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit,
-    RecordBlock, RecordPlan, RetainedStoreBatchLimits, RetainedStoreOperation,
-    RetainedStoreWriterPlan, SequencePlan, StoreBuildError, StoreControlledError,
-    StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError, StoreWorkError,
-    StoredScalar, Utf8Plan,
+    OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit, RecordBlock,
+    RecordPlan, RetainedStoreBatchLimits, RetainedStoreWriterPlan, SequencePlan, StoreBuildError,
+    StoreControlledError, StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError,
+    StoreWorkError, StoredScalar, Utf8Plan,
 };
 
 use crate::SceneValidationLimits;
@@ -61,7 +68,9 @@ use crate::provenance::{OperationKind, OptionsDigest};
 #[cfg(test)]
 use crate::scene_space::SceneSpace;
 
-use super::super::{SceneConstructionError, SceneConstructionStartError, SceneStoreKeys};
+#[cfg(test)]
+use super::super::SceneConstructionError;
+use super::super::{SceneConstructionStartError, SceneStoreKeys};
 use super::animation::{AnimationMaterializationPlans, AnimationTargetTableRefs, retain_animation};
 use super::appearance::{AppearanceMaterializationPlans, retain_appearance};
 use super::deformation::{
@@ -72,6 +81,7 @@ use super::geometry::{
     retain_geometry,
 };
 use super::profile::{ProfileMaterializationPlans, retain_profile};
+#[cfg(test)]
 use super::publication::NodeActivationFailureCause;
 use super::scratch::{
     NodeSceneCentralValidationPlan, NodeSceneValidationScratchPlan,
@@ -80,9 +90,13 @@ use super::scratch::{
 mod spatial;
 #[cfg(test)]
 use super::NodeSceneBuildFaults;
+#[cfg(test)]
 use super::{
-    DeferredNodeSceneDraftBuild, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneConstructionRejection,
-    NodeSceneDraft, NodeSceneDraftBuild, PendingNodeSceneDraft, PendingNodeSceneFailure,
+    DeferredNodeSceneDraftBuild, NodeSceneDraftBuild, PendingNodeSceneDraft,
+    PendingNodeSceneFailure,
+};
+use super::{
+    NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneConstructionRejection, NodeSceneDraft,
     SceneEvidenceCounts,
 };
 pub(in crate::canonical_scene::store) use spatial::RetainedSpatialRefs;
@@ -444,12 +458,14 @@ impl<'input> NodeSceneActivationRequest<'input> {
         )
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn canonical_writer_limits(
         &self,
     ) -> RetainedStoreBatchLimits {
         self.policy.canonical_writer_limits
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn activate<O, PP, U>(
         self,
         operation: RetainedStoreOperation<O, PP, U>,
@@ -466,6 +482,7 @@ impl<'input> NodeSceneActivationRequest<'input> {
         activate_node_scene_scoped(activation, validation_progress, final_progress)
     }
 
+    #[cfg(test)]
     fn bind_operation<O, PP, U, L>(
         self,
         operation: RetainedStoreOperation<O, PP, U, L>,
@@ -688,6 +705,7 @@ impl NodeSceneActivationPostflight {
 }
 
 /// One request's execution payload structurally paired with its bound scoped outcome owner.
+#[cfg(test)]
 struct BoundNodeSceneActivation<'input, O, PP, U, L>
 where
     O: OperationOwner,
@@ -728,6 +746,7 @@ impl NodeSceneActivationPolicyRequirements {
         self.failure
     }
 
+    #[cfg(test)]
     fn into_parts(
         self,
     ) -> (
@@ -1483,6 +1502,7 @@ where
 /// The interface accepts no raw operation, store key, account, ledger, or proof capability. Its
 /// generic vocabulary is preserved through rejection, central validation, and pending joint
 /// publication so the caller's sole session ledger remains the only ledger involved.
+#[cfg(test)]
 fn activate_node_scene_scoped<'input, O, PP, U, L>(
     activation: BoundNodeSceneActivation<'input, O, PP, U, L>,
     validation_progress: CanonicalValidationProgress<PP, U>,
@@ -1501,25 +1521,6 @@ where
         NodeSceneBuildFaults::none(),
     )?
     .prepare_immediately()
-}
-
-fn activate_node_scene_scoped_deferred<'input, O, PP, U, L>(
-    activation: BoundNodeSceneActivation<'input, O, PP, U, L>,
-    validation_progress: CanonicalValidationProgress<PP, U>,
-    final_progress: FinalProgress<PP, U>,
-) -> Result<DeferredNodeSceneDraftBuild<O, PP, U, L>, SceneConstructionError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    drive_node_scene_activation_deferred(
-        activation,
-        validation_progress,
-        final_progress,
-        #[cfg(test)]
-        NodeSceneBuildFaults::none(),
-    )
 }
 
 #[cfg(test)]
@@ -1541,6 +1542,7 @@ where
         .prepare_immediately()
 }
 
+#[cfg(test)]
 fn drive_node_scene_activation_deferred<'input, O, PP, U, L>(
     activation: BoundNodeSceneActivation<'input, O, PP, U, L>,
     validation_progress: CanonicalValidationProgress<PP, U>,
