@@ -27,8 +27,6 @@ use crate::canonical_scene::store::schema::{
 use crate::identity::SceneGenerationId;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError};
 
-#[cfg(test)]
-use super::super::burn_generation_reservation;
 use super::super::{GENERATION_EXHAUSTED_CODE, SceneConstructionError};
 #[cfg(test)]
 use super::NodeSceneDraftBuild;
@@ -46,7 +44,6 @@ use super::{
 use super::{
     NodeSceneConstructionTerminal, NodeSceneFallback, NodeSceneRichFailure, NodeSceneSuccessParts,
     NodeSceneSuccessReport, PendingNodeSceneDraft, PreparedNodeSceneConstruction,
-    PreparedNodeSceneSuccess,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,14 +294,14 @@ macro_rules! prepare_frozen_node_failure {
             }
             RootedFailureValidation::Rejected(rejected) => {
                 let (store, _cause) = rejected.prepare_minimal_fallback()?.into_parts();
-                Ok(PreparedNodeSceneConstruction::MinimalFallback(
-                    PreparedNodeSceneFallback { store },
+                Ok(PreparedNodeSceneConstruction::from(
+                    PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store }),
                 ))
             }
             RootedFailureValidation::Fallback(fallback) => {
                 let (store, _cause) = fallback.into_parts();
-                Ok(PreparedNodeSceneConstruction::MinimalFallback(
-                    PreparedNodeSceneFallback { store },
+                Ok(PreparedNodeSceneConstruction::from(
+                    PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store }),
                 ))
             }
         }
@@ -322,25 +319,21 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let NodeSceneHandoffToken { generation, proof } = handoff;
     match joint.prepare(seal)? {
-        PreparedStoreSuccessOutcome::Success(store) => Ok(PreparedNodeSceneConstruction::Success(
-            PreparedNodeSceneSuccess {
-                generation,
-                proof,
-                store,
-            },
-        )),
+        PreparedStoreSuccessOutcome::Success(store) => Ok(PreparedNodeSceneConstruction::Success {
+            token: handoff,
+            store,
+        }),
         PreparedStoreSuccessOutcome::RichFailure(store) => {
-            burn_generation_reservation(generation);
-            Ok(PreparedNodeSceneConstruction::RichFailure(
-                PreparedNodeSceneRichFailure { store },
+            drop(handoff);
+            Ok(PreparedNodeSceneConstruction::from(
+                PreparedNodeSceneFailure::RichFailure(PreparedNodeSceneRichFailure { store }),
             ))
         }
         PreparedStoreSuccessOutcome::MinimalFallback(store) => {
-            burn_generation_reservation(generation);
-            Ok(PreparedNodeSceneConstruction::MinimalFallback(
-                PreparedNodeSceneFallback { store },
+            drop(handoff);
+            Ok(PreparedNodeSceneConstruction::from(
+                PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store }),
             ))
         }
     }
@@ -365,6 +358,20 @@ where
 
 #[cfg(test)]
 impl NodeSceneDraftBuild {
+    pub(super) fn publish_for_test(
+        self,
+    ) -> Result<NodeSceneConstructionTerminal, SceneConstructionError> {
+        self.publish_with_generation_source_for_test(SceneGenerationId::reserve)
+    }
+
+    pub(super) fn publish_with_generation_source_for_test(
+        self,
+        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+    ) -> Result<NodeSceneConstructionTerminal, SceneConstructionError> {
+        self.prepare_with_generation_source_for_test(reserve_generation)
+            .map(PreparedNodeSceneConstruction::handoff)
+    }
+
     pub(super) fn prepare_for_test(
         self,
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
@@ -844,36 +851,27 @@ pub(super) const fn post_evidence_build_failure_code(class: StoreBuildFailureCla
 impl PreparedNodeSceneConstruction {
     pub(in crate::canonical_scene::store) fn handoff(self) -> NodeSceneConstructionTerminal {
         match self {
-            Self::Success(prepared) => {
-                let PreparedNodeSceneSuccess {
-                    generation,
-                    proof,
-                    store,
-                } = prepared;
-                let published = store.handoff();
-                let generation = generation.into_id();
+            Self::Success { token, store } => {
+                let published = token
+                    .try_handoff_prepared(store)
+                    .expect("test Scene joint preparation must preserve its proven canonical root");
+                let (scene, outcome_evidence, ledger_evidence) = published.into_parts();
                 NodeSceneConstructionTerminal::Success(NodeSceneSuccessParts {
-                    scene: ValidatedNodeScene {
-                        generation,
-                        canonical: published.canonical,
-                        proof,
-                        #[cfg(test)]
-                        semantic_read_fault: None,
-                    },
+                    scene,
                     report: NodeSceneSuccessReport {
-                        outcome_evidence: published.outcome_evidence,
-                        ledger_evidence: published.ledger_evidence,
+                        outcome_evidence,
+                        ledger_evidence,
                     },
                 })
             }
-            Self::RichFailure(prepared) => {
+            Self::Failure(PreparedNodeSceneFailure::RichFailure(prepared)) => {
                 let published = prepared.store.handoff();
                 NodeSceneConstructionTerminal::RichFailure(NodeSceneRichFailure {
                     outcome_evidence: published.outcome_evidence,
                     ledger_evidence: published.ledger_evidence,
                 })
             }
-            Self::MinimalFallback(prepared) => {
+            Self::Failure(PreparedNodeSceneFailure::MinimalFallback(prepared)) => {
                 let published = prepared.store.handoff();
                 NodeSceneConstructionTerminal::MinimalFallback(NodeSceneFallback {
                     fallback: published.fallback,

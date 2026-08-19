@@ -21,8 +21,6 @@ use baozi_operation::{
 };
 use thiserror::Error;
 
-#[cfg(test)]
-use crate::identity::ReservedSceneGeneration;
 use crate::identity::SceneGenerationId;
 
 use super::super::production::{
@@ -522,15 +520,6 @@ impl SceneEvidenceCounts {
     }
 }
 
-#[cfg(test)]
-pub(in crate::canonical_scene::store) struct PreparedNodeSceneSuccess {
-    generation: ReservedSceneGeneration,
-    proof: NodeSceneValidationProof,
-    // The physical publication owner must drop last so an earlier field destructor cannot escape
-    // fail-closed containment before the terminal store has been prepared.
-    store: PreparedNodeStoreSuccess,
-}
-
 pub(in crate::canonical_scene::store) struct PreparedNodeSceneRichFailure {
     store: PreparedNodeStoreFailure,
 }
@@ -567,18 +556,19 @@ pub(in crate::canonical_scene::store) enum PreparedNodeSceneFailure {
 )]
 #[cfg(test)]
 pub(in crate::canonical_scene::store) enum PreparedNodeSceneConstruction {
-    Success(PreparedNodeSceneSuccess),
-    RichFailure(PreparedNodeSceneRichFailure),
-    MinimalFallback(PreparedNodeSceneFallback),
+    Success {
+        token: publication::NodeSceneHandoffToken,
+        // The physical publication owner must drop last so an earlier field destructor cannot
+        // escape fail-closed containment before the terminal store has been prepared.
+        store: PreparedNodeStoreSuccess,
+    },
+    Failure(PreparedNodeSceneFailure),
 }
 
 #[cfg(test)]
 impl From<PreparedNodeSceneFailure> for PreparedNodeSceneConstruction {
     fn from(failure: PreparedNodeSceneFailure) -> Self {
-        match failure {
-            PreparedNodeSceneFailure::RichFailure(failure) => Self::RichFailure(failure),
-            PreparedNodeSceneFailure::MinimalFallback(fallback) => Self::MinimalFallback(fallback),
-        }
+        Self::Failure(failure)
     }
 }
 
