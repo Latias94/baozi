@@ -1064,7 +1064,6 @@ where
         self.state.try_into_prepared()
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn qualify_and_commit_frozen_exact(
         self,
     ) -> Result<
@@ -1118,7 +1117,6 @@ where
         Ok(state.try_commit()?.into_prepared())
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn try_into_prepared_success(
         mut self,
     ) -> Result<
@@ -1183,7 +1181,6 @@ impl<P, D, F, CanonicalBlock, EvidenceBlock>
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn into_prepared_success(self) -> PreparedRetainedSuccess<CanonicalBlock, EvidenceBlock, P, D> {
         let Self {
             canonical_table,

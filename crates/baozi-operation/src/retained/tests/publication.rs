@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(feature = "_u4-activation")]
 use std::num::NonZeroU64;
 
 type ValidatedScalarSuccess = ValidatedRetainedSuccess<
@@ -41,7 +40,6 @@ fn validated_scalar_success_on_account(account: &PhysicalStorageAccount) -> Vali
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 fn validated_freeze_success_with_limits(
     account: &PhysicalStorageAccount,
     committed_limit: u64,
@@ -227,7 +225,6 @@ fn failure_terminal_operation_with_limit(
     .unwrap_or_else(|_| panic!("failure-terminal test operation must start"))
 }
 
-#[cfg(feature = "_u4-activation")]
 fn ordinary_linear_work_operation(
     account: &PhysicalStorageAccount,
     attempted_limit: u64,
@@ -241,7 +238,6 @@ fn ordinary_linear_work_operation(
     )
 }
 
-#[cfg(feature = "_u4-activation")]
 fn ordinary_linear_work_operation_with_control(
     account: &PhysicalStorageAccount,
     attempted_limit: u64,
@@ -270,7 +266,6 @@ fn ordinary_linear_work_operation_with_control(
         .unwrap_or_else(|_| panic!("ordinary linear work operation must start"))
 }
 
-#[cfg(feature = "_u4-activation")]
 fn finish_ordinary_linear_work_test(assembly: TestPublication<u64, u64>) -> PreparationFailureCode {
     let published = handoff_for_test(
         assembly
@@ -290,7 +285,6 @@ fn finish_ordinary_linear_work_test(assembly: TestPublication<u64, u64>) -> Prep
     cause
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn ordinary_work_permit_records_exact_attempted_and_completed_work() {
     let factory = account_factory(1);
@@ -350,7 +344,6 @@ fn ordinary_work_permit_records_exact_attempted_and_completed_work() {
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn ordinary_work_permit_preserves_completed_prefix_when_dropped_incomplete() {
     let factory = account_factory(1);
@@ -398,7 +391,6 @@ fn ordinary_work_permit_preserves_completed_prefix_when_dropped_incomplete() {
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn borrowed_work_permit_resolves_verified_partial_work_without_abandonment() {
     let factory = account_factory(1);
@@ -445,7 +437,6 @@ fn borrowed_work_permit_resolves_verified_partial_work_without_abandonment() {
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn dropped_borrowed_work_permit_preserves_prefix_and_latches_abandonment() {
     let factory = account_factory(1);
@@ -492,7 +483,6 @@ fn dropped_borrowed_work_permit_preserves_prefix_and_latches_abandonment() {
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 fn assert_unresolved_validation_permit_cannot_validate_success(forget: bool) {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
@@ -580,19 +570,16 @@ fn assert_unresolved_validation_permit_cannot_validate_success(forget: bool) {
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn dropped_validation_permit_cannot_validate_success() {
     assert_unresolved_validation_permit_cannot_validate_success(false);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn forgotten_validation_permit_forces_finalization_containment() {
     assert_unresolved_validation_permit_cannot_validate_success(true);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn partially_resolved_validation_work_cannot_validate_success() {
     let factory = account_factory(1);
@@ -652,7 +639,6 @@ fn partially_resolved_validation_work_cannot_validate_success() {
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn ignored_validation_control_failure_cannot_validate_success() {
     let factory = account_factory(1);
@@ -707,7 +693,6 @@ fn ignored_validation_control_failure_cannot_validate_success() {
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn ignored_validation_ledger_failure_cannot_validate_success() {
     let factory = account_factory(1);
@@ -755,7 +740,6 @@ fn ignored_validation_ledger_failure_cannot_validate_success() {
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn borrowed_work_permit_preserves_prefix_before_mid_action_cancellation() {
     let factory = account_factory(1);
@@ -806,7 +790,6 @@ fn borrowed_work_permit_preserves_prefix_before_mid_action_cancellation() {
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn ordinary_work_permit_rejects_consumed_overrun_without_fabricating_completion() {
     let factory = account_factory(1);
@@ -854,7 +837,6 @@ fn ordinary_work_permit_rejects_consumed_overrun_without_fabricating_completion(
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn ordinary_work_admission_rejects_short_consumed_capacity_before_action() {
     let factory = account_factory(1);
@@ -908,7 +890,6 @@ fn ordinary_work_admission_rejects_short_consumed_capacity_before_action() {
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn ordinary_work_admission_observes_preexisting_cancellation_before_attempting_work() {
     let factory = account_factory(1);
@@ -957,7 +938,6 @@ fn ordinary_work_admission_observes_preexisting_cancellation_before_attempting_w
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn ordinary_work_permit_cannot_address_the_protected_failure_dimension() {
     let factory = account_factory(1);
@@ -2193,7 +2173,6 @@ fn success_joint_commit_intent_keeps_publication_uncommitted_until_qualification
     assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
-#[cfg(feature = "_u4-activation")]
 fn assert_freeze_destination_rejected(
     account: &PhysicalStorageAccount,
     committed_limit: u64,
@@ -2269,7 +2248,6 @@ fn assert_freeze_destination_rejected(
 }
 
 #[test]
-#[cfg(feature = "_u4-activation")]
 fn freeze_pair_prequalification_rejects_zero_committed_limit_without_mutation() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
@@ -2280,7 +2258,6 @@ fn freeze_pair_prequalification_rejects_zero_committed_limit_without_mutation() 
 }
 
 #[test]
-#[cfg(feature = "_u4-activation")]
 fn freeze_pair_prequalification_rejects_insufficient_evidence_limit_without_mutation() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);
@@ -2299,7 +2276,6 @@ fn freeze_pair_prequalification_rejects_insufficient_evidence_limit_without_muta
 }
 
 #[test]
-#[cfg(feature = "_u4-activation")]
 fn freeze_permit_issues_ready_for_the_exact_qualified_pair() {
     let factory = account_factory(1);
     let account = account(&factory, u64::MAX, 128);

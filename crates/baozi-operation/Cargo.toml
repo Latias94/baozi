@@ -10,9 +10,6 @@ documentation.workspace = true
 authors.workspace = true
 description.workspace = true
 
-[features]
-_u4-activation = []
-
 [dependencies]
 triomphe.workspace = true
 scopeguard.workspace = true

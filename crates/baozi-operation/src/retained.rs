@@ -25,7 +25,6 @@ mod terminal_output;
 use crate::OperationControl;
 use crate::control::discard_untrusted_panic_payload;
 use crate::coordinator::{FinalProgress, OperationCoordinator};
-#[cfg(feature = "_u4-activation")]
 use crate::ledger::CommitmentPairPushError;
 #[cfg(test)]
 use crate::ledger::{AttributionBatchCreateError, LedgerLimits};
@@ -82,7 +81,6 @@ use block_table::{
     try_qualify_retained_block_table_plan, try_retain_block, try_retain_rewritten_canonical_block,
     try_rewrite_canonical_block_controlled, try_share_retained_block,
 };
-#[cfg(feature = "_u4-activation")]
 pub(crate) use block_table::{
     RetainedCanonicalMemberVisit, RetainedEvidenceMemberVisit, RetainedOutcomeEvidenceMemberVisit,
     RetainedPendingCanonicalMember, RetainedPendingEvidenceMember,
@@ -157,9 +155,8 @@ pub(crate) use terminal_output::{
 };
 use triomphe::{Arc, UniqueArc};
 
-#[cfg(all(test, feature = "_u4-activation"))]
+#[cfg(test)]
 pub(crate) use operation::panic_next_publication_account_open;
-#[cfg(feature = "_u4-activation")]
 pub(crate) use operation::{
     BorrowedRetainedWorkPermit, RetainedFailureWorkConsumeError, RetainedFailureWorkFinishError,
     RetainedFailureWorkPermit, RetainedFailureWorkStartError, RetainedPlanningBaseline,
@@ -183,7 +180,6 @@ use operation_start::{
     map_pending_rollback_or, try_admit_retained_share_work,
     try_admit_retained_share_work_before_physical, try_open_publication_account,
 };
-#[cfg(feature = "_u4-activation")]
 use publication_contract::RetainedPublicationOpenDisposition;
 pub(super) use publication_contract::retained_publication_error_requires_containment;
 use publication_contract::{
@@ -325,7 +321,6 @@ where
         result
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn report_progress(&mut self, phase: PP, unit: U, completed: u64, total: Option<u64>)
     where
         P: TerminalEvidenceKey,
@@ -401,7 +396,6 @@ where
 }
 
 /// Success closure after exact destinations and final progress are sealed for generation.
-#[cfg(feature = "_u4-activation")]
 #[must_use = "the freeze permit must be downgraded or converted into a joint-commit contribution"]
 pub(crate) struct RetainedSuccessFreezePermit<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
@@ -418,7 +412,6 @@ where
 }
 
 /// Operation-only success owner released after the core accepts one generation identity.
-#[cfg(feature = "_u4-activation")]
 #[must_use = "the freeze contribution must form the exact joint-commit intent"]
 pub(crate) struct RetainedSuccessFreezeContribution<
     O,
@@ -442,7 +435,6 @@ pub(crate) struct RetainedSuccessFreezeContribution<
     validated: ValidatedRetainedSuccess<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
 }
 
-#[cfg(feature = "_u4-activation")]
 #[must_use = "every freeze-permit branch retains the exact publication owner"]
 pub(crate) enum RetainedSuccessFreezePermitIssue<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
@@ -467,7 +459,7 @@ where
     },
 }
 
-#[cfg(all(test, feature = "_u4-activation"))]
+#[cfg(test)]
 enum FreezePermitQualificationProbe<D> {
     Ready,
     Rejected {
@@ -631,7 +623,6 @@ where
     FallbackOnly(RetainedFallbackOnly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>),
 }
 
-#[cfg(feature = "_u4-activation")]
 #[allow(clippy::result_large_err)]
 impl<O, P, PP, U, D, F> RetainedOperation<O, P, PP, U, D, F>
 where
@@ -682,7 +673,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 #[must_use = "activation open disposition owns the operation until it is handled"]
 pub(crate) enum RetainedActivationOpenDisposition<Operation> {
     Retry(Operation),
@@ -690,7 +680,6 @@ pub(crate) enum RetainedActivationOpenDisposition<Operation> {
     FailClosed(Operation),
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, P, PP, U, D, F> RetainedPublicationOpenError<RetainedOperation<O, P, PP, U, D, F>, D>
 where
     O: OperationOwner,
@@ -723,7 +712,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 type RetainedFailureAssemblyResult<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock> = Result<
     RetainedFailureAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>,
     FinalizationContainmentError,
@@ -742,7 +730,6 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn contain_activation_fault(mut self) -> FinalizationContainmentError {
         let recorded = self
             .first_containment_account()
@@ -764,7 +751,6 @@ where
     /// Storage is released before its attribution batch. Only a verified evidence-only graph can
     /// be returned; any uncertain release poisons the account and retains all remaining authority
     /// fail-closed.
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn try_discard_canonical_for_rejection(
         mut self,
         fallback_cause: PreparationFailureCode,
@@ -789,7 +775,6 @@ where
 
     /// Converts an already-open evidence-only publication into its rooted-failure construction
     /// state without ever creating canonical ownership.
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn into_verified_failure_only(
         mut self,
         fallback_cause: PreparationFailureCode,
@@ -809,7 +794,6 @@ where
         })
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn try_discard_canonical_ownership(&mut self) -> Result<(), FinalizationContainmentError> {
         if self.mode == RetainedOutcomeMode::FailureOnly && self.canonical_ownership_is_absent() {
             return Ok(());
@@ -1561,7 +1545,6 @@ where
             .map_or(0, AttributionReservationBatch::commitment_len)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn contains_canonical_member<Tag>(
         &self,
         slot: CanonicalRetainedSlot<CanonicalBlock, Tag>,
@@ -2305,7 +2288,6 @@ where
     /// The selected dimension cannot be the protected failure-terminal dimension. Allocation,
     /// attribution, and table membership remain inside the existing single-block rollback and
     /// panic-containment boundary.
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn try_retain_success_outcome_evidence_controlled<Tag>(
         &mut self,
         work_dimension: D,
@@ -2589,7 +2571,6 @@ where
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn try_prepare_terminal_with_control(
         self,
         request: RetainedTerminalRequest<CanonicalBlock, EvidenceBlock, PP, U>,
@@ -3107,7 +3088,7 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    #[cfg(all(test, feature = "_u4-activation"))]
+    #[cfg(test)]
     fn test_probe_freeze_permit_qualification(
         mut self,
         canonical_dimension: D,
@@ -3169,22 +3150,18 @@ where
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) const fn canonical_member_count(&self) -> usize {
         self.proof.canonical_count
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) const fn outcome_evidence_member_count(&self) -> usize {
         self.proof.evidence_count
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.assembly.contain_activation_fault()
     }
 
-    #[cfg(feature = "_u4-activation")]
     #[allow(
         clippy::type_complexity,
         reason = "the private freeze-permit result keeps the full retained ownership graph in each linear branch"
@@ -3359,7 +3336,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
     RetainedSuccessFreezePermit<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
@@ -3414,7 +3390,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
     RetainedSuccessFreezeContribution<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
@@ -3460,7 +3435,6 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn try_discard_canonical_for_rejection(
         mut self,
     ) -> Result<Self, FinalizationContainmentError> {
@@ -3468,12 +3442,10 @@ where
         Ok(self)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.assembly.contain_activation_fault()
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn canonical_ownership_is_absent(&self) -> bool {
         self.assembly.mode == RetainedOutcomeMode::FailureOnly
             && self.assembly.canonical_ownership_is_absent()
@@ -3518,7 +3490,6 @@ where
         self.assembly.try_retain_outcome_evidence(plan, build)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn try_retain_outcome_evidence_controlled<Tag>(
         &mut self,
         plan: RetainedAllocationPlan,
@@ -3571,7 +3542,6 @@ where
         self.assembly.validate_rich_failure(evidence_root, validate)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn validate_rich_failure_controlled<EvidenceTag>(
         self,
         evidence_root: OutcomeEvidenceRetainedSlot<EvidenceBlock, EvidenceTag>,
@@ -3613,17 +3583,14 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    #[cfg(feature = "_u4-activation")]
     pub(crate) const fn outcome_evidence_member_count(&self) -> usize {
         self.proof.evidence_count
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn outcome_evidence_commitment_len(&self) -> usize {
         self.assembly.outcome_evidence_commitment_len()
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn try_stage_exact_outcome_evidence(
         &mut self,
         dimension: D,
@@ -3645,7 +3612,6 @@ where
         Ok(())
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.assembly.contain_activation_fault()
     }
@@ -3666,7 +3632,6 @@ where
             })
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn try_prepare_with_control(
         self,
         cause: PreparationFailureCode,
@@ -3683,7 +3648,6 @@ where
             })
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn try_prepare_frozen(
         self,
         cause: PreparationFailureCode,
@@ -3730,12 +3694,10 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
-    #[cfg(feature = "_u4-activation")]
     pub(crate) const fn activation_containment_required(&self) -> bool {
         self.activation_containment_required
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.assembly.contain_activation_fault()
     }

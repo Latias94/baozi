@@ -65,7 +65,6 @@ pub use concrete_store::{
 ///
 /// This module is intentionally excluded from the supported crate-root API. It is removed or
 /// privatized once core, import, formats, facade, snapshot, and fuzz use the same production path.
-#[cfg(feature = "_u4-activation")]
 #[doc(hidden)]
 /// Temporary canonical activation vocabulary.
 ///
@@ -290,7 +289,6 @@ pub mod __canonical_activation {
 /// receive already opaque domain plans and cannot name or rebind their success facts. This module
 /// is temporary until those producers move behind the final canonical Scene transaction boundary.
 #[doc(hidden)]
-#[cfg(feature = "_u4-activation")]
 pub mod __canonical_activation_producer {
     pub use crate::concrete_store::activation::{
         CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,

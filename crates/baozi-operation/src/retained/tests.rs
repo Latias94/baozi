@@ -148,7 +148,6 @@ impl ProgressUnit for TestUnit {
 enum TestDimension {
     Bytes,
     FailureTerminalWork,
-    #[cfg(feature = "_u4-activation")]
     Work,
     Unregistered,
 }

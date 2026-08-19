@@ -2,7 +2,6 @@ use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::{Arc, OnceLock};
 
-#[cfg(feature = "_u4-activation")]
 use baozi_operation::StoreBuildError;
 use baozi_operation::{
     AccountPoisonReason, BytesPlan, CancellationToken, CanonicalSequenceRef, DimensionPolicy,
@@ -356,7 +355,6 @@ fn operation_with_evidence_limit(
     operation_with_control_and_evidence_limit(account, OperationControl::default(), evidence_limit)
 }
 
-#[cfg(feature = "_u4-activation")]
 fn operation_with_commit_limit(
     account: &PhysicalStorageAccount,
     committed_limit: u64,
@@ -405,7 +403,6 @@ fn operation_with_catalog_and_limits(
     )
 }
 
-#[cfg(feature = "_u4-activation")]
 fn operation_with_failure_work_limits(
     account: &PhysicalStorageAccount,
     construction_work_limit: u64,
@@ -443,7 +440,6 @@ fn operation_with_catalog_limits_and_failure_work(
     )
 }
 
-#[cfg(feature = "_u4-activation")]
 fn operation_with_terminal_attribution_slots(
     account: &PhysicalStorageAccount,
     terminal_attribution_slots: usize,
@@ -704,7 +700,6 @@ fn publish_sequence_source(account: &PhysicalStorageAccount) -> PublishedSource 
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 #[path = "concrete_store/activation.rs"]
 mod activation;
 #[path = "concrete_store/construction.rs"]
@@ -715,7 +710,6 @@ mod domain;
 mod evidence;
 #[path = "concrete_store/failure.rs"]
 mod failure;
-#[cfg(feature = "_u4-activation")]
 #[path = "concrete_store/producer_host.rs"]
 mod producer_host;
 #[path = "concrete_store/publication.rs"]

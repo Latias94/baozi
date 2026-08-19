@@ -127,7 +127,6 @@ use std::marker::PhantomData;
 use crate::capacity::{CapacityPlan, CapacityPlanError};
 use crate::control::{ControlCause, OperationControl, ProgressPhase, ProgressUnit};
 use crate::coordinator::FinalProgress;
-#[cfg(feature = "_u4-activation")]
 use crate::ledger::DimensionPolicy;
 #[cfg(test)]
 use crate::ledger::PhaseCompletionError;
@@ -135,7 +134,6 @@ use crate::ledger::{LedgerCause, LiveReservation};
 use crate::owner::OperationOwner;
 #[cfg(test)]
 use crate::retained::RetainedAllocationError;
-#[cfg(feature = "_u4-activation")]
 use crate::retained::{
     BlockEmplacer, BlockPlacement, BorrowedRetainedWorkPermit, RetainedSuccessFreezeContribution,
     RetainedSuccessFreezePermit, RetainedSuccessFreezePermitIssue,
@@ -152,12 +150,10 @@ use crate::retained::{
     RetainedPublicationOpenRecovery, RetainedPublicationPrepareError, RetainedSuccessValidation,
     RetainedWorkControl, RetainedWriterError, ValidatedRetainedFailure, ValidatedRetainedSuccess,
 };
-#[cfg(feature = "_u4-activation")]
 use crate::retained::{
     RetainedProducerHost, RetainedProducerWorkFinishError, RetainedProducerWorkPermit,
     RetainedProducerWorkStartError, RetainedWorkConsumeError,
 };
-#[cfg(feature = "_u4-activation")]
 use terminal_output::prepared_store_success_from_raw;
 use terminal_output::{
     classify_prepared_failure, classify_prepared_fallback, classify_prepared_success,
@@ -169,7 +165,6 @@ use validation::{
     publication_error_requires_containment,
 };
 
-#[cfg(feature = "_u4-activation")]
 #[doc(hidden)]
 pub mod activation;
 mod batch;
@@ -183,7 +178,6 @@ pub use batch::{
     CanonicalStoreRange, CanonicalUtf8Range, SequenceBatchItem, SequenceBatchPlan,
     StoreBatchRuntimeError, Utf8BatchItem, Utf8BatchPlan,
 };
-#[cfg(feature = "_u4-activation")]
 pub use vocabulary::RetainedStoreWriterRole;
 pub use vocabulary::{
     RetainedStoreBatchLimits, RetainedStoreBlockTablePlan, RetainedStoreFailureTerminalWorkPlan,
@@ -1729,15 +1723,12 @@ type RawStoreOperation<O, PP, U> =
     RetainedOperation<O, StorePhaseKey, PP, U, StoreDimensionKey, StoreFallbackEnvelope>;
 type RawStoreControlCheckpoint<'a, O, PP, U> =
     RetainedControlCheckpoint<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
-#[cfg(feature = "_u4-activation")]
 type RawStoreProducerHost<'a, O, PP, U> =
     RetainedProducerHost<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
-#[cfg(feature = "_u4-activation")]
 type RawStoreProducerWork<'a, O, PP, U, const N: usize> =
     RetainedProducerWorkPermit<'a, O, StorePhaseKey, PP, U, StoreDimensionKey, N>;
 type RawStoreWorkControl<'a, O, PP, U> =
     RetainedWorkControl<'a, O, StorePhaseKey, PP, U, StoreDimensionKey>;
-#[cfg(feature = "_u4-activation")]
 type RawStoreBorrowedWorkPermit<'borrow, 'operation, O, PP, U> =
     BorrowedRetainedWorkPermit<'borrow, 'operation, O, StorePhaseKey, PP, U, StoreDimensionKey>;
 type RawStoreAssembly<O, PP, U> = RetainedPublicationAssembly<
@@ -1861,14 +1852,12 @@ where
 ///
 /// Publication counters, high-water marks, raw policy, and ledger ownership remain private.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(feature = "_u4-activation")]
 pub struct RetainedStoreDimensionState {
     attempted: u64,
     consumed: u64,
     live_bytes: u64,
 }
 
-#[cfg(feature = "_u4-activation")]
 impl RetainedStoreDimensionState {
     /// Returns non-refundable work admitted before producer actions began.
     pub const fn attempted(self) -> u64 {
@@ -1891,7 +1880,6 @@ impl RetainedStoreDimensionState {
 /// The host can report semantic progress, inspect narrow accounting, tighten policy, and admit one
 /// linear observed-work action. It cannot access raw coordinator state, publish output, or mutate
 /// retained block tables.
-#[cfg(feature = "_u4-activation")]
 pub struct RetainedStoreProducerHost<'a, O, PP, U>
 where
     O: OperationOwner,
@@ -1909,7 +1897,6 @@ where
 /// Normal short reads and EOF must call [`Self::finish_partial`]. Dropping an unresolved owner
 /// records ProductGraph; forgetting it leaves an outstanding ledger permit and blocks preparation.
 #[must_use = "observed work must finish exactly or explicitly resolve its completed prefix"]
-#[cfg(feature = "_u4-activation")]
 pub struct RetainedStoreObservedWork<'a, O, PP, U, const N: usize>
 where
     O: OperationOwner,
@@ -1988,12 +1975,10 @@ where
         self.preserve(result)
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn record_product_graph_failure(&mut self, code: u32) {
         self.raw.record_product_graph_failure(code);
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn reserve(
         &mut self,
         phase: StorePhaseKey,
@@ -2010,7 +1995,6 @@ where
         self.preserve(result)
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn resize(
         &mut self,
         reservation: &mut RetainedStoreReservation<O>,
@@ -2026,7 +2010,6 @@ where
         self.preserve(result)
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn validate_live_owner(
         &mut self,
         reservation: &RetainedStoreReservation<O>,
@@ -2074,7 +2057,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, PP, U> RetainedStoreProducerHost<'_, O, PP, U>
 where
     O: OperationOwner,
@@ -2229,7 +2211,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 fn map_producer_work_start_error(
     cause: RetainedProducerWorkStartError<StoreDimensionKey>,
 ) -> StoreRuntimeError {
@@ -2240,7 +2221,6 @@ fn map_producer_work_start_error(
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, PP, U, const N: usize> RetainedStoreObservedWork<'_, O, PP, U, N>
 where
     O: OperationOwner,
@@ -2428,12 +2408,10 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    #[cfg(feature = "_u4-activation")]
     fn activation_terminal_cause(&self) -> Option<PreparationFailureCode> {
         self.raw.sticky_terminal_cause()
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn latch_activation_terminal_cause(&mut self, cause: PreparationFailureCode) {
         self.raw.record_terminal_cause(cause);
     }
@@ -2454,7 +2432,6 @@ where
     }
 
     /// Borrows the operation-level producer host before retained publication begins.
-    #[cfg(feature = "_u4-activation")]
     pub fn producer_host(&mut self) -> RetainedStoreProducerHost<'_, O, PP, U> {
         let Self {
             raw,
@@ -2519,7 +2496,6 @@ where
             .map_err(|cause| map_publication_error(&cause))
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn rebind_activation_canonical_assembly(
         &mut self,
         plan: RetainedStoreBlockTablePlan,
@@ -2550,7 +2526,6 @@ where
         Ok(())
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn validate_activation_phase(&self, phase: StorePhaseKey) -> Result<(), StoreRuntimeError> {
         self.validate_phase_key(phase)?;
         if !self.raw.contains_phase(phase) {
@@ -2559,7 +2534,6 @@ where
         Ok(())
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn validate_activation_dimensions<const N: usize>(
         &self,
         dimensions: [StoreDimensionKey; N],
@@ -3110,7 +3084,6 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    #[cfg(feature = "_u4-activation")]
     fn report_progress(&mut self, phase: PP, unit: U, completed: u64, total: Option<u64>) {
         self.raw.report_progress(phase, unit, completed, total);
     }
@@ -3153,7 +3126,6 @@ where
         self.raw.canonical_commitment_len()
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn contains_activation_canonical_root<Kind, Tag>(
         &self,
         root: CanonicalStoreRef<Kind, Tag>,
@@ -3181,7 +3153,6 @@ where
         self.fallback_cause.is_some()
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn contain_activation_fault(self) -> FinalizationContainmentError {
         let Self {
             raw,
@@ -3193,12 +3164,10 @@ where
         raw.contain_activation_fault()
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn latch_activation_terminal_cause(&mut self, cause: PreparationFailureCode) {
         self.raw.record_terminal_cause(cause);
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn reject_failure_terminal_work_envelope(&mut self, code: u32) {
         self.raw.reject_failure_terminal_work_envelope(code);
     }
@@ -3262,7 +3231,6 @@ where
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn try_retain_success_outcome_evidence_controlled<Kind, Tag>(
         &mut self,
         work_dimension: StoreDimensionKey,
@@ -4750,22 +4718,18 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    #[cfg(feature = "_u4-activation")]
     pub(super) const fn canonical_member_count(&self) -> usize {
         self.raw.canonical_member_count()
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) const fn outcome_evidence_member_count(&self) -> usize {
         self.raw.outcome_evidence_member_count()
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.raw.contain_activation_fault()
     }
 
-    #[cfg(feature = "_u4-activation")]
     #[allow(
         clippy::type_complexity,
         reason = "the crate-private activation result preserves every linear owner across the exact branch set"
@@ -4882,7 +4846,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 type RawStoreSuccessFreezePermit<O, PP, U> = RetainedSuccessFreezePermit<
     O,
     StorePhaseKey,
@@ -4894,7 +4857,6 @@ type RawStoreSuccessFreezePermit<O, PP, U> = RetainedSuccessFreezePermit<
     StoredBlock,
 >;
 
-#[cfg(feature = "_u4-activation")]
 type RawStoreSuccessFreezeContribution<O, PP, U> = RetainedSuccessFreezeContribution<
     O,
     StorePhaseKey,
@@ -4906,7 +4868,6 @@ type RawStoreSuccessFreezeContribution<O, PP, U> = RetainedSuccessFreezeContribu
     StoredBlock,
 >;
 
-#[cfg(feature = "_u4-activation")]
 type RawStoreSuccessJointCommitIntent<O> = RetainedSuccessJointCommitIntent<
     O,
     StorePhaseKey,
@@ -4916,7 +4877,6 @@ type RawStoreSuccessJointCommitIntent<O> = RetainedSuccessJointCommitIntent<
     StoredBlock,
 >;
 
-#[cfg(feature = "_u4-activation")]
 pub(super) struct StoreSuccessFreezePermit<
     O,
     PP,
@@ -4936,7 +4896,6 @@ pub(super) struct StoreSuccessFreezePermit<
     domain: StoreKeyDomain,
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(super) enum StoreSuccessFreezePermitIssue<
     O,
     PP,
@@ -4964,7 +4923,6 @@ pub(super) enum StoreSuccessFreezePermitIssue<
     },
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(super) struct StoreSuccessFreezeContribution<
     O,
     PP,
@@ -4984,7 +4942,6 @@ pub(super) struct StoreSuccessFreezeContribution<
     domain: StoreKeyDomain,
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(super) struct StoreSuccessJointCommitIntent<
     O,
     CanonicalKind,
@@ -5000,7 +4957,6 @@ pub(super) struct StoreSuccessJointCommitIntent<
     domain: StoreKeyDomain,
 }
 
-#[cfg(feature = "_u4-activation")]
 #[must_use = "joint-commit formation retains the exact success or prepared failure owner"]
 #[allow(
     clippy::large_enum_variant,
@@ -5021,7 +4977,6 @@ pub(super) enum StoreSuccessJointCommitFormation<
     PreparedFailure(PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>),
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
     StoreSuccessFreezePermit<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
 where
@@ -5077,7 +5032,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
     StoreSuccessFreezeContribution<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
 where
@@ -5132,7 +5086,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
     StoreSuccessJointCommitIntent<O, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>
 where
@@ -5178,14 +5131,12 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn with_forced_cause(mut self, cause: PreparationFailureCode) -> Self {
         self.raw = self.raw.with_fallback_cause(cause);
         self.forced_cause = Some(cause);
         self
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn try_discard_canonical_for_activation(
         mut self,
     ) -> Result<Self, FinalizationContainmentError> {
@@ -5194,7 +5145,6 @@ where
         Ok(self)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.raw.contain_activation_fault()
     }
@@ -5418,7 +5368,6 @@ where
         )
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn validate_rich_failure_controlled<EvidenceKind, EvidenceTag>(
         self,
         evidence_root: OutcomeEvidenceStoreRef<EvidenceKind, EvidenceTag>,
@@ -5575,12 +5524,10 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn outcome_evidence_commitment_len(&self) -> usize {
         self.raw.outcome_evidence_commitment_len()
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn try_stage_exact_outcome_evidence(
         &mut self,
         dimension: StoreDimensionKey,
@@ -5590,7 +5537,6 @@ where
             .map_err(|cause| map_publication_error(&cause))
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
         self.raw.contain_activation_fault()
     }
@@ -5619,7 +5565,6 @@ where
         .map_err(StorePrepareError::from_raw)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn try_prepare_with_control(
         self,
         cause: u32,
@@ -5669,7 +5614,6 @@ where
             .map_err(StorePrepareError::from_raw)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn try_prepare_frozen(
         self,
     ) -> Result<PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>, StorePrepareError> {
@@ -5717,7 +5661,6 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn activation_containment_required(&self) -> bool {
         match &self.state {
             StoreFallbackState::Validated(raw) => raw.activation_containment_required(),
@@ -5725,7 +5668,6 @@ where
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn contain_activation_fault(self) -> FinalizationContainmentError {
         match self.state {
             StoreFallbackState::Assembly { raw, cause: _ } => raw.contain_activation_fault(),

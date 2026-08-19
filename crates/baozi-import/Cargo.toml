@@ -17,6 +17,6 @@ tracing = ["dep:tracing", "baozi-core/tracing"]
 [dependencies]
 baozi-core = { workspace = true, features = ["_scene-integration"] }
 baozi-io.workspace = true
-baozi-operation = { workspace = true, features = ["_u4-activation"] }
+baozi-operation.workspace = true
 sha2.workspace = true
 tracing = { workspace = true, optional = true }

@@ -13,7 +13,6 @@ use crate::retained::{
     RetainedEvidenceClosureSession, RetainedPublicationError, RetainedWriterError,
     retained_publication_error_requires_containment,
 };
-#[cfg(feature = "_u4-activation")]
 use crate::retained::{
     RetainedCanonicalMemberVisit, RetainedEvidenceMemberVisit, RetainedOutcomeEvidenceMemberVisit,
     RetainedPendingCanonicalMember, RetainedPendingEvidenceMember,
@@ -73,7 +72,6 @@ pub struct StoreValidationSession<'session, 'storage> {
     pub(super) raw: &'session mut RetainedClosureSession<'storage, StoredBlock, StoredBlock>,
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(super) enum StoreCanonicalMemberVisit<'storage, View, Tag> {
     Completed(View),
     Pending {
@@ -82,12 +80,10 @@ pub(super) enum StoreCanonicalMemberVisit<'storage, View, Tag> {
     },
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(super) struct StoreCanonicalMemberCompletion<'storage, Tag> {
     raw: RetainedPendingCanonicalMember<'storage, StoredBlock, Tag>,
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(super) enum StoreOutcomeEvidenceMemberVisit<'storage, View, Tag> {
     Completed(View),
     Pending {
@@ -96,13 +92,11 @@ pub(super) enum StoreOutcomeEvidenceMemberVisit<'storage, View, Tag> {
     },
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(super) struct StoreOutcomeEvidenceMemberCompletion<'storage, Tag> {
     raw: RetainedPendingOutcomeEvidenceMember<'storage, StoredBlock, Tag>,
 }
 
 impl<'storage> StoreValidationSession<'_, 'storage> {
-    #[cfg(feature = "_u4-activation")]
     fn project_canonical_visit<View, Tag>(
         &mut self,
         visit: RetainedCanonicalMemberVisit<'storage, StoredBlock, Tag>,
@@ -129,7 +123,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn project_outcome_evidence_visit<View, Tag>(
         &mut self,
         visit: RetainedOutcomeEvidenceMemberVisit<'storage, StoredBlock, Tag>,
@@ -156,7 +149,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_canonical_sequence<T: StoredScalar, Tag>(
         &mut self,
         slot: CanonicalSequenceRef<T, Tag>,
@@ -168,7 +160,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         self.project_canonical_visit(visit, sequence_view::<T>)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_canonical_bytes<Tag>(
         &mut self,
         slot: CanonicalBytesRef<Tag>,
@@ -180,7 +171,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         self.project_canonical_visit(visit, bytes_view)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_canonical_utf8<Tag>(
         &mut self,
         slot: CanonicalUtf8Ref<Tag>,
@@ -192,7 +182,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         self.project_canonical_visit(visit, utf8_view)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_canonical_records<Tag>(
         &mut self,
         slot: CanonicalRecordRef<Tag>,
@@ -204,7 +193,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         self.project_canonical_visit(visit, canonical_record_view)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_outcome_evidence_sequence<T: StoredScalar, Tag>(
         &mut self,
         slot: OutcomeEvidenceSequenceRef<T, Tag>,
@@ -216,7 +204,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         self.project_outcome_evidence_visit(visit, sequence_view::<T>)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_outcome_evidence_bytes<Tag>(
         &mut self,
         slot: OutcomeEvidenceBytesRef<Tag>,
@@ -228,7 +215,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         self.project_outcome_evidence_visit(visit, bytes_view)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_outcome_evidence_utf8<Tag>(
         &mut self,
         slot: OutcomeEvidenceUtf8Ref<Tag>,
@@ -240,7 +226,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         self.project_outcome_evidence_visit(visit, utf8_view)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_outcome_evidence_records<Tag>(
         &mut self,
         slot: OutcomeEvidenceRecordRef<Tag>,
@@ -252,7 +237,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         self.project_outcome_evidence_visit(visit, outcome_evidence_record_view)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn complete_canonical_member<Tag>(
         &mut self,
         completion: StoreCanonicalMemberCompletion<'storage, Tag>,
@@ -263,7 +247,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         self.raw.complete_canonical(completion.raw)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn complete_outcome_evidence_member<Tag>(
         &mut self,
         completion: StoreOutcomeEvidenceMemberCompletion<'storage, Tag>,
@@ -274,7 +257,6 @@ impl<'storage> StoreValidationSession<'_, 'storage> {
         self.raw.complete_outcome_evidence(completion.raw)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn invalidate(&mut self) {
         self.raw.invalidate();
     }
@@ -367,7 +349,6 @@ pub struct StoreEvidenceValidationSession<'session, 'storage> {
     pub(super) raw: &'session mut RetainedEvidenceClosureSession<'storage, StoredBlock>,
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(super) enum StoreEvidenceMemberVisit<'storage, View, Tag> {
     Completed,
     Pending {
@@ -376,13 +357,11 @@ pub(super) enum StoreEvidenceMemberVisit<'storage, View, Tag> {
     },
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(super) struct StoreEvidenceMemberCompletion<'storage, Tag> {
     raw: RetainedPendingEvidenceMember<'storage, StoredBlock, Tag>,
 }
 
 impl<'storage> StoreEvidenceValidationSession<'_, 'storage> {
-    #[cfg(feature = "_u4-activation")]
     fn project_visit<View, Tag>(
         &mut self,
         visit: RetainedEvidenceMemberVisit<'storage, StoredBlock, Tag>,
@@ -410,7 +389,6 @@ impl<'storage> StoreEvidenceValidationSession<'_, 'storage> {
     }
 
     /// Peeks at one typed scalar sequence without completing its retained member.
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_sequence<T: StoredScalar, Tag>(
         &mut self,
         slot: OutcomeEvidenceSequenceRef<T, Tag>,
@@ -423,7 +401,6 @@ impl<'storage> StoreEvidenceValidationSession<'_, 'storage> {
     }
 
     /// Peeks at one binary block without completing its retained member.
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_bytes<Tag>(
         &mut self,
         slot: OutcomeEvidenceBytesRef<Tag>,
@@ -436,7 +413,6 @@ impl<'storage> StoreEvidenceValidationSession<'_, 'storage> {
     }
 
     /// Peeks at one UTF-8 block without completing its retained member.
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_utf8<Tag>(
         &mut self,
         slot: OutcomeEvidenceUtf8Ref<Tag>,
@@ -449,7 +425,6 @@ impl<'storage> StoreEvidenceValidationSession<'_, 'storage> {
     }
 
     /// Peeks at one record block without completing its retained member.
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn peek_records<Tag>(
         &mut self,
         slot: OutcomeEvidenceRecordRef<Tag>,
@@ -462,7 +437,6 @@ impl<'storage> StoreEvidenceValidationSession<'_, 'storage> {
     }
 
     /// Completes one typed evidence member after its complete contents were validated.
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn complete_member<Tag>(
         &mut self,
         completion: StoreEvidenceMemberCompletion<'storage, Tag>,
@@ -753,13 +727,10 @@ pub enum StoreRuntimeError {
     /// A callback returned a control or ledger cause that its current capability did not issue.
     UnverifiedControlledCause,
     /// Another producer observed-work owner is still unresolved.
-    #[cfg(feature = "_u4-activation")]
     ObservedWorkOutstanding,
     /// Producer completion exceeded the action's admitted observed-work envelope.
-    #[cfg(feature = "_u4-activation")]
     ObservedWorkExceedsAdmitted,
     /// Exact producer work completion left part of the admitted envelope unfinished.
-    #[cfg(feature = "_u4-activation")]
     ObservedWorkIncomplete,
     FallbackOnly,
     Poisoned,
@@ -855,15 +826,12 @@ impl fmt::Display for StoreRuntimeError {
             Self::UnverifiedControlledCause => formatter.write_str(
                 "retained store callback returned an unverified control or ledger cause",
             ),
-            #[cfg(feature = "_u4-activation")]
             Self::ObservedWorkOutstanding => {
                 formatter.write_str("retained store producer has unresolved observed work")
             }
-            #[cfg(feature = "_u4-activation")]
             Self::ObservedWorkExceedsAdmitted => formatter.write_str(
                 "retained store producer completed work beyond its admitted envelope",
             ),
-            #[cfg(feature = "_u4-activation")]
             Self::ObservedWorkIncomplete => formatter
                 .write_str("retained store observed work did not complete its admitted envelope"),
             Self::FallbackOnly => {

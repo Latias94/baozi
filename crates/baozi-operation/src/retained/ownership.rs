@@ -710,7 +710,6 @@ where
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn with_batches<R>(
         &self,
         inspect: impl FnOnce(&FallbackBatchBaseline<O, P, D>) -> R,
@@ -740,7 +739,6 @@ where
         (fallback, evidence, batches)
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) fn try_replace_canonical_assembly(
         &mut self,
         replacement: AttributionReservationBatch<O, P, D, CanonicalOutput>,

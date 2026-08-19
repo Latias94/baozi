@@ -599,7 +599,6 @@ fn consumed_batch_is_atomic_and_aggregates_duplicate_dimensions() {
     );
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn linear_work_admission_records_attempted_before_consumed_completion() {
     let ledger = test_ledger(limits());
@@ -629,7 +628,6 @@ fn linear_work_admission_records_attempted_before_consumed_completion() {
     assert_eq!((complete.attempted(), complete.consumed()), (3, 3));
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn linear_work_admission_preserves_attempted_when_consumed_capacity_is_short() {
     let constrained = LedgerLimits::new(
@@ -1721,7 +1719,6 @@ fn typed_commitment_resolves_its_dimension_before_entering_the_batch() {
 }
 
 #[test]
-#[cfg(feature = "_u4-activation")]
 fn exact_pair_prequalification_matches_the_complete_future_batch_overflow() {
     let ledger = test_ledger(typed_limits());
     let probe = ledger.test_probe();

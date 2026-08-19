@@ -21,7 +21,6 @@ use super::{
     try_create_retained_block_table, try_open_publication_account,
     try_qualify_retained_block_table_plan, unreachable_final_owner_state,
 };
-#[cfg(feature = "_u4-activation")]
 use super::{AccountPoisoned, FinalizationContainmentError};
 #[cfg(test)]
 use super::{
@@ -37,7 +36,6 @@ use crate::ledger::{
     LinearWorkCompletion, LiveReservation, OutcomeEvidenceDestination, PhaseCompletionError,
     StartupAccountShareEnvelope, StartupAttributionBatchPlans, StartupRetainedAttribution,
 };
-#[cfg(feature = "_u4-activation")]
 use crate::ledger::{DimensionPolicy, DimensionSnapshot};
 use crate::{ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit};
 use std::fmt;
@@ -47,21 +45,20 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 const FAILURE_WORK_PERMIT_ABANDONED_CODE: u32 = 0x4657_5041;
 const FAILURE_WORK_PERMIT_OVERRUN_CODE: u32 = 0x4657_504f;
 const ORDINARY_WORK_PERMIT_ABANDONED_CODE: u32 = 0x4f57_5041;
-#[cfg(feature = "_u4-activation")]
 const ORDINARY_WORK_PERMIT_OVERRUN_CODE: u32 = 0x4f57_504f;
 
-#[cfg(all(test, feature = "_u4-activation"))]
+#[cfg(test)]
 thread_local! {
     static PANIC_NEXT_PUBLICATION_ACCOUNT_OPEN: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
 
-#[cfg(all(test, feature = "_u4-activation"))]
+#[cfg(test)]
 pub(crate) fn panic_next_publication_account_open() {
     PANIC_NEXT_PUBLICATION_ACCOUNT_OPEN.with(|injected| injected.set(true));
 }
 
-#[cfg(all(test, feature = "_u4-activation"))]
+#[cfg(test)]
 fn inject_publication_account_open_panic() {
     let panic = PANIC_NEXT_PUBLICATION_ACCOUNT_OPEN.with(|injected| injected.replace(false));
     if panic {
@@ -109,7 +106,6 @@ pub(crate) struct RetainedPlanningBaseline {
     active_reservations: u64,
 }
 
-#[cfg(feature = "_u4-activation")]
 impl RetainedPlanningBaseline {
     pub(crate) fn checked_apply_rebind_delta(self, before: Self, after: Self) -> Option<Self> {
         Some(Self {
@@ -142,7 +138,6 @@ impl RetainedPlanningBaseline {
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 fn checked_apply_delta(value: u64, before: u64, after: u64) -> Option<u64> {
     if after >= before {
         value.checked_add(after - before)
@@ -155,12 +150,10 @@ fn checked_apply_delta(value: u64, before: u64, after: u64) -> Option<u64> {
 ///
 /// The anchor cannot reserve, publish, or expose the account. Its sole purpose is to turn an
 /// owner-consuming unwind into typed containment while reusing the account's first poison evidence.
-#[cfg(feature = "_u4-activation")]
 pub(crate) struct RetainedPlanningContainmentAnchor {
     account: PhysicalStorageAccount,
 }
 
-#[cfg(feature = "_u4-activation")]
 impl RetainedPlanningContainmentAnchor {
     pub(crate) fn share(&self) -> Self {
         Self {
@@ -254,7 +247,6 @@ where
         record_terminal_cause_with_precedence(&mut self.sticky_terminal_cause, cause);
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn poll_terminal_control(&mut self) {
         let cause = self
             .coordinator
@@ -274,7 +266,6 @@ where
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn planning_containment_anchor(&self) -> RetainedPlanningContainmentAnchor {
         RetainedPlanningContainmentAnchor {
             account: PhysicalStorageAccount {
@@ -297,7 +288,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
     RetainedPublicationAssembly<O, P, PP, U, D, F, CanonicalBlock, EvidenceBlock>
 where
@@ -361,7 +351,6 @@ where
 /// This capability can report semantic progress, inspect narrow scalar accounting, tighten policy,
 /// and admit one linear observed-work envelope. It exposes neither raw ledger ownership nor any
 /// publication, retained-table, or terminal-evidence authority.
-#[cfg(feature = "_u4-activation")]
 pub(crate) struct RetainedProducerHost<'a, O, P, PP, U, D>
 where
     O: OperationOwner,
@@ -376,14 +365,12 @@ where
     sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(crate) enum RetainedProducerWorkStartError<D> {
     Control(ControlCause),
     Ledger(LedgerCause<D>),
     Outstanding,
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(crate) enum RetainedProducerWorkFinishError {
     Incomplete,
 }
@@ -394,7 +381,6 @@ pub(crate) enum RetainedProducerWorkFinishError {
 /// the only normal way to release an unfinished suffix. An unresolved drop records ProductGraph;
 /// forgetting the owner leaves the ledger permit active so final preparation fails closed.
 #[must_use = "observed work must finish exactly or explicitly resolve its completed prefix"]
-#[cfg(feature = "_u4-activation")]
 pub(crate) struct RetainedProducerWorkPermit<'a, O, P, PP, U, D, const N: usize>
 where
     O: OperationOwner,
@@ -438,20 +424,17 @@ where
     sticky_terminal_cause: &'a mut Option<PreparationFailureCode>,
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(crate) enum RetainedWorkStartError<D> {
     Control(ControlCause),
     Ledger(LedgerCause<D>),
     Outstanding,
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(crate) enum RetainedWorkConsumeError<D> {
     Ledger(LedgerCause<D>),
     ExceedsAttempted,
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(crate) enum RetainedWorkFinishError {
     Incomplete,
 }
@@ -461,7 +444,6 @@ pub(crate) enum RetainedWorkFinishError {
 /// Admission records the complete attempted envelope before the action begins and confirms that
 /// the same consumed prefix still fits. Completed chunks alone advance consumed evidence. Dropping
 /// the permit without explicit completion records a product-graph fault.
-#[cfg(feature = "_u4-activation")]
 #[must_use = "the ordinary work permit must be completed or remain attempted-only"]
 pub(crate) struct RetainedWorkPermit<'a, O, P, PP, U, D>
 where
@@ -480,7 +462,6 @@ where
 ///
 /// The borrowed form lets a domain callback retain its existing control while preserving the same
 /// attempted-before-action and completed-prefix accounting as the owning permit.
-#[cfg(feature = "_u4-activation")]
 #[must_use = "the borrowed work permit must be completed or explicitly resolved as partial"]
 pub(crate) struct BorrowedRetainedWorkPermit<'borrow, 'operation, O, P, PP, U, D>
 where
@@ -550,7 +531,6 @@ where
     remaining: u64,
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, P, PP, U, D> RetainedProducerHost<'_, O, P, PP, U, D>
 where
     O: OperationOwner,
@@ -772,7 +752,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, P, PP, U, D, const N: usize> RetainedProducerWorkPermit<'_, O, P, PP, U, D, N>
 where
     O: OperationOwner,
@@ -864,7 +843,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, P, PP, U, D, const N: usize> Drop for RetainedProducerWorkPermit<'_, O, P, PP, U, D, N>
 where
     O: OperationOwner,
@@ -920,7 +898,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<'a, O, P, PP, U, D> RetainedWorkControl<'a, O, P, PP, U, D>
 where
     O: OperationOwner,
@@ -1040,7 +1017,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, P, PP, U, D> BorrowedRetainedWorkPermit<'_, '_, O, P, PP, U, D>
 where
     O: OperationOwner,
@@ -1108,7 +1084,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, P, PP, U, D> Drop for BorrowedRetainedWorkPermit<'_, '_, O, P, PP, U, D>
 where
     O: OperationOwner,
@@ -1133,7 +1108,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<'a, O, P, PP, U, D> RetainedWorkPermit<'a, O, P, PP, U, D>
 where
     O: OperationOwner,
@@ -1284,7 +1258,6 @@ where
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<O, P, PP, U, D> Drop for RetainedWorkPermit<'_, O, P, PP, U, D>
 where
     O: OperationOwner,
@@ -1613,7 +1586,6 @@ where
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn producer_host(&mut self) -> RetainedProducerHost<'_, O, P, PP, U, D> {
         let Self {
             coordinator,
@@ -2012,7 +1984,6 @@ where
         })
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn try_rebind_canonical_assembly(
         &mut self,
         writer: RetainedWriterPlan<P, D>,
@@ -2283,7 +2254,7 @@ where
             )
         };
         let open_result = catch_unwind(AssertUnwindSafe(|| {
-            #[cfg(all(test, feature = "_u4-activation"))]
+            #[cfg(test)]
             inject_publication_account_open_panic();
             try_open_publication_account(
                 self.coordinator.retained_ledger(),

@@ -314,12 +314,10 @@ impl<Block> RetainedBlockMember<Block> {
         self.visit_epoch.swap(epoch.get(), Ordering::AcqRel) != epoch.get()
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn completed_in(&self, epoch: NonZeroU64) -> bool {
         self.visit_epoch.load(Ordering::Acquire) == epoch.get()
     }
 
-    #[cfg(feature = "_u4-activation")]
     fn try_complete_in(&self, epoch: NonZeroU64) -> bool {
         let previous = self.visit_epoch.load(Ordering::Acquire);
         previous != epoch.get()
@@ -1767,7 +1765,6 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
         Some(member.allocation.as_ref())
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn peek_canonical<Tag>(
         &mut self,
         slot: CanonicalRetainedSlot<CanonicalBlock, Tag>,
@@ -1791,7 +1788,6 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn complete_canonical<Tag>(
         &mut self,
         pending: RetainedPendingCanonicalMember<'a, CanonicalBlock, Tag>,
@@ -1820,7 +1816,6 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
         true
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn peek_outcome_evidence<Tag>(
         &mut self,
         slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
@@ -1844,7 +1839,6 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn complete_outcome_evidence<Tag>(
         &mut self,
         pending: RetainedPendingOutcomeEvidenceMember<'a, EvidenceBlock, Tag>,
@@ -1873,19 +1867,16 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
         true
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn invalidate(&mut self) {
         self.valid = false;
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(crate) enum RetainedCanonicalMemberVisit<'a, CanonicalBlock, Tag> {
     Completed(&'a CanonicalBlock),
     Pending(RetainedPendingCanonicalMember<'a, CanonicalBlock, Tag>),
 }
 
-#[cfg(feature = "_u4-activation")]
 #[must_use = "a pending canonical member must be completed or leave the closure incomplete"]
 pub(crate) struct RetainedPendingCanonicalMember<'a, CanonicalBlock, Tag> {
     block: &'a CanonicalBlock,
@@ -1893,20 +1884,17 @@ pub(crate) struct RetainedPendingCanonicalMember<'a, CanonicalBlock, Tag> {
     epoch: NonZeroU64,
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<'a, CanonicalBlock, Tag> RetainedPendingCanonicalMember<'a, CanonicalBlock, Tag> {
     pub(crate) const fn block(&self) -> &'a CanonicalBlock {
         self.block
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(crate) enum RetainedOutcomeEvidenceMemberVisit<'a, EvidenceBlock, Tag> {
     Completed(&'a EvidenceBlock),
     Pending(RetainedPendingOutcomeEvidenceMember<'a, EvidenceBlock, Tag>),
 }
 
-#[cfg(feature = "_u4-activation")]
 #[must_use = "a pending outcome-evidence member must be completed or leave the closure incomplete"]
 pub(crate) struct RetainedPendingOutcomeEvidenceMember<'a, EvidenceBlock, Tag> {
     block: &'a EvidenceBlock,
@@ -1914,7 +1902,6 @@ pub(crate) struct RetainedPendingOutcomeEvidenceMember<'a, EvidenceBlock, Tag> {
     epoch: NonZeroU64,
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<'a, EvidenceBlock, Tag> RetainedPendingOutcomeEvidenceMember<'a, EvidenceBlock, Tag> {
     pub(crate) const fn block(&self) -> &'a EvidenceBlock {
         self.block
@@ -1935,14 +1922,12 @@ pub(crate) struct RetainedEvidenceClosureSession<'a, EvidenceBlock> {
 }
 
 /// Result of opening one evidence member for controlled validation.
-#[cfg(feature = "_u4-activation")]
 pub(crate) enum RetainedEvidenceMemberVisit<'a, EvidenceBlock, Tag> {
     Completed(&'a EvidenceBlock),
     Pending(RetainedPendingEvidenceMember<'a, EvidenceBlock, Tag>),
 }
 
 /// Linear completion authority for one inspected evidence member.
-#[cfg(feature = "_u4-activation")]
 #[must_use = "a pending evidence member must be completed or leave the closure incomplete"]
 pub(crate) struct RetainedPendingEvidenceMember<'a, EvidenceBlock, Tag> {
     block: &'a EvidenceBlock,
@@ -1950,7 +1935,6 @@ pub(crate) struct RetainedPendingEvidenceMember<'a, EvidenceBlock, Tag> {
     epoch: NonZeroU64,
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<'a, EvidenceBlock, Tag> RetainedPendingEvidenceMember<'a, EvidenceBlock, Tag> {
     pub(crate) const fn block(&self) -> &'a EvidenceBlock {
         self.block
@@ -2004,7 +1988,6 @@ impl<'a, EvidenceBlock> RetainedEvidenceClosureSession<'a, EvidenceBlock> {
     /// A previously completed member is reported directly. A new member returns a linear pending
     /// token that must be consumed by completion after its contents are inspected. Identity,
     /// index, or tag mismatch invalidates the complete closure session.
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn peek_outcome_evidence<Tag>(
         &mut self,
         slot: OutcomeEvidenceRetainedSlot<EvidenceBlock, Tag>,
@@ -2033,7 +2016,6 @@ impl<'a, EvidenceBlock> RetainedEvidenceClosureSession<'a, EvidenceBlock> {
     /// Completion revalidates the token's epoch, complete slot identity, and backing member. A
     /// duplicate completion or competing epoch update invalidates the closure instead of
     /// increasing `seen` again.
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn complete_outcome_evidence<Tag>(
         &mut self,
         pending: RetainedPendingEvidenceMember<'a, EvidenceBlock, Tag>,
@@ -2065,7 +2047,6 @@ impl<'a, EvidenceBlock> RetainedEvidenceClosureSession<'a, EvidenceBlock> {
     }
 
     /// Invalidates the complete closure after a concrete-store projection mismatch.
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn invalidate(&mut self) {
         self.valid = false;
     }

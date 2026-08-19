@@ -592,7 +592,6 @@ impl RetainedStoreWriterRole {
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(super) const fn keys_for_publication_validation(
         self,
     ) -> (StorePhaseKey, [StoreDimensionKey; 2]) {

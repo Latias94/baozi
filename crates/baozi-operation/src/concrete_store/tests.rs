@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(feature = "_u4-activation")]
 use super::activation::{
     CanonicalActivationDescription, CanonicalActivationOutcome, CanonicalActivationPlanSealer,
     CanonicalActivationRequest, CanonicalActivationSeal, CanonicalActivationSessionPolicy,
@@ -27,14 +26,12 @@ struct TestOwner;
 
 impl OperationOwner for TestOwner {}
 
-#[cfg(feature = "_u4-activation")]
 struct TestActivationDescription<P> {
     request: CanonicalActivationRequest,
     requirements: CanonicalSuccessRequirements,
     execution: P,
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<P> TestActivationDescription<P> {
     fn new(requirements: CanonicalSuccessRequirements, execution: P) -> Self {
         let (identity, request) = mint_canonical_activation_request()
@@ -47,7 +44,6 @@ impl<P> TestActivationDescription<P> {
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 impl<P> CanonicalActivationDescription for TestActivationDescription<P> {
     type Execution = P;
 
@@ -179,7 +175,6 @@ fn test_account(factory: &PhysicalStorageAccountFactory) -> PhysicalStorageAccou
         .expect("test account")
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
     let factory = test_factory();
@@ -246,7 +241,6 @@ fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
     drop(published);
 }
 
-#[cfg(feature = "_u4-activation")]
 #[test]
 fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
     const COMPLETED: usize = 257;

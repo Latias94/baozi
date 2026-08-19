@@ -193,7 +193,6 @@ pub(super) fn classify_prepared_success<CanonicalKind, CanonicalTag, EvidenceKin
     }
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(super) fn prepared_store_success_from_raw<
     CanonicalKind,
     CanonicalTag,

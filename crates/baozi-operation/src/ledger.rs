@@ -1153,7 +1153,6 @@ where
     /// The complete prefix is validated under one ledger lock before any counter changes. Once
     /// representable, every supplied unit is non-refundable and all dimensions advance together,
     /// including when the resulting pending-capacity projection reports a terminal limit failure.
-    #[cfg(any(test, feature = "_u4-activation"))]
     pub(crate) fn complete_batch_with_outcome(
         &mut self,
         amounts: [u64; N],
@@ -2136,7 +2135,6 @@ where
     /// the future primary publication under one ledger lock before either preallocated vector
     /// changes. This is the U4 freeze-permit seam: it stages no publication counters and returns
     /// no detached positioned token.
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn try_qualify_and_push_exact_primary_commitment_pair(
         &self,
         baseline: &FallbackBatchBaseline<O, P, D>,
@@ -3344,7 +3342,6 @@ pub(crate) enum CommitmentPushError<D, Destination> {
     },
 }
 
-#[cfg(feature = "_u4-activation")]
 pub(crate) enum CommitmentPairPushError<D> {
     CanonicalBatchFull,
     OutcomeEvidenceBatchFull,
