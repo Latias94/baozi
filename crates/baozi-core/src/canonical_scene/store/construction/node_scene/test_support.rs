@@ -1,4 +1,6 @@
-use baozi_operation::__retained_store_integration::activation::CanonicalValidationProgress;
+use baozi_operation::__retained_store_integration::activation::{
+    CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner,
+};
 use baozi_operation::{OperationControl, PhysicalStorageAccount};
 
 use crate::SceneValidationLimits;
@@ -7,8 +9,8 @@ use super::super::super::production::{SceneAuthoringBatch, SceneInputEnvelope};
 use super::super::super::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT;
 use super::super::{
     SceneConstructionLimits, SceneConstructionPhase, SceneConstructionStartError,
-    SceneConstructionUnit, SceneFailureEvidenceWork, SceneStoreKeys, SceneStoreOperation,
-    final_progress, try_plan_scene_operation,
+    SceneConstructionUnit, SceneFailureEvidenceWork, SceneStoreOperation, final_progress,
+    try_plan_scene_operation,
 };
 use super::materialization::{
     NodeSceneActivationRequest, NodeScenePlanningFault, NodeSceneSessionActivationBootstrap,
@@ -18,10 +20,12 @@ use super::{NodeSceneBuildFaults, NodeSceneDraftBuild};
 
 #[must_use = "the admitted Scene input must be validated or deliberately dropped"]
 pub(in crate::canonical_scene::store) struct NodeSceneTestTransaction<'input> {
-    raw: SceneStoreOperation,
-    keys: SceneStoreKeys,
+    owner: RetainedStoreSessionOutcomeOwner<
+        super::super::SceneConstructionOwner,
+        SceneConstructionPhase,
+        SceneConstructionUnit,
+    >,
     request: NodeSceneActivationRequest<'input>,
-    bootstrap: NodeSceneSessionActivationBootstrap,
 }
 
 impl<'input> NodeSceneTestTransaction<'input> {
@@ -62,12 +66,14 @@ impl<'input> NodeSceneTestTransaction<'input> {
             account,
             start.start_plan,
         )?;
-        Ok(Self {
-            raw,
-            keys: start.keys,
-            request,
-            bootstrap,
-        })
+        let roles = node_scene_activation_roles(start.keys);
+        let (outcome_evidence_writer_limits, failure, _evidence) = bootstrap.into_parts();
+        let owner = raw.into_session_outcome_owner(
+            roles.session_policy(),
+            outcome_evidence_writer_limits,
+            failure,
+        )?;
+        Ok(Self { owner, request })
     }
 
     pub(in crate::canonical_scene::store) fn with_account_and_cancellation(
@@ -90,16 +96,9 @@ impl<'input> NodeSceneTestTransaction<'input> {
     pub(in crate::canonical_scene::store) fn finish_draft(
         self,
     ) -> Result<NodeSceneDraftBuild, super::super::SceneConstructionError> {
-        let Self {
-            raw,
-            keys,
-            request,
-            bootstrap,
-        } = self;
+        let Self { owner, request } = self;
         request.activate(
-            raw,
-            node_scene_activation_roles(keys),
-            bootstrap,
+            owner,
             CanonicalValidationProgress::new(
                 SceneConstructionPhase::Validation,
                 SceneConstructionUnit::WorkUnits,
@@ -112,17 +111,10 @@ impl<'input> NodeSceneTestTransaction<'input> {
         self,
         faults: NodeSceneBuildFaults,
     ) -> Result<NodeSceneDraftBuild, super::super::SceneConstructionError> {
-        let Self {
-            raw,
-            keys,
-            request,
-            bootstrap,
-        } = self;
+        let Self { owner, request } = self;
         activate_node_scene_with_faults_for_test(
             request,
-            raw,
-            node_scene_activation_roles(keys),
-            bootstrap,
+            owner,
             CanonicalValidationProgress::new(
                 SceneConstructionPhase::Validation,
                 SceneConstructionUnit::WorkUnits,

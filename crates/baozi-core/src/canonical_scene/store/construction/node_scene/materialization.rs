@@ -7,7 +7,7 @@ use std::cell::Cell;
 #[cfg(test)]
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
-    CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner, StoreActivationContainment,
+    CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner,
 };
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationSessionPolicy, CanonicalFailureRequirements, CanonicalLane,
@@ -15,8 +15,6 @@ use baozi_operation::__retained_store_integration::activation::{
     CanonicalReservation, CanonicalSemanticWorkSession, CanonicalValidationDecision,
     CanonicalValidationPlanning, CanonicalValidationRole, RetainedStoreWriterRole,
 };
-#[cfg(test)]
-use baozi_operation::__retained_store_integration::authority::RetainedStoreOperation;
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
     CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
@@ -456,9 +454,7 @@ impl<'input> NodeSceneActivationRequest<'input> {
     #[cfg(test)]
     pub(in crate::canonical_scene::store) fn activate<O, PP, U>(
         self,
-        operation: RetainedStoreOperation<O, PP, U>,
-        roles: NodeSceneActivationRoles,
-        bootstrap: NodeSceneSessionActivationBootstrap,
+        owner: RetainedStoreSessionOutcomeOwner<O, PP, U>,
         validation_progress: CanonicalValidationProgress<PP, U>,
         final_progress: FinalProgress<PP, U>,
     ) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
@@ -467,30 +463,9 @@ impl<'input> NodeSceneActivationRequest<'input> {
         PP: ProgressPhase,
         U: ProgressUnit,
     {
-        let activation = self.bind_operation(operation, roles, bootstrap)?;
-        activate_node_scene_scoped(activation, validation_progress, final_progress)
-    }
-
-    #[cfg(test)]
-    fn bind_operation<O, PP, U, L>(
-        self,
-        operation: RetainedStoreOperation<O, PP, U, L>,
-        roles: NodeSceneActivationRoles,
-        bootstrap: NodeSceneSessionActivationBootstrap,
-    ) -> Result<BoundNodeSceneActivation<'input, O, PP, U, L>, StoreActivationContainment>
-    where
-        O: OperationOwner,
-        PP: ProgressPhase,
-        U: ProgressUnit,
-    {
         let Self { execution } = self;
-        let (outcome_evidence_writer_limits, failure, _evidence) = bootstrap.into_parts();
-        let owner = operation.into_session_outcome_owner(
-            roles.session_policy(),
-            outcome_evidence_writer_limits,
-            failure,
-        )?;
-        Ok(BoundNodeSceneActivation { owner, execution })
+        let activation = BoundNodeSceneActivation { owner, execution };
+        activate_node_scene_scoped(activation, validation_progress, final_progress)
     }
 }
 
@@ -1578,9 +1553,7 @@ where
 #[cfg(test)]
 pub(super) fn activate_node_scene_with_faults_for_test<'input, O, PP, U>(
     request: NodeSceneActivationRequest<'input>,
-    operation: RetainedStoreOperation<O, PP, U>,
-    roles: NodeSceneActivationRoles,
-    bootstrap: NodeSceneSessionActivationBootstrap,
+    owner: RetainedStoreSessionOutcomeOwner<O, PP, U>,
     validation_progress: CanonicalValidationProgress<PP, U>,
     final_progress: FinalProgress<PP, U>,
     faults: NodeSceneBuildFaults,
@@ -1590,7 +1563,8 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let activation = request.bind_operation(operation, roles, bootstrap)?;
+    let NodeSceneActivationRequest { execution } = request;
+    let activation = BoundNodeSceneActivation { owner, execution };
     drive_node_scene_activation_deferred(activation, validation_progress, final_progress, faults)?
         .prepare_immediately()
 }

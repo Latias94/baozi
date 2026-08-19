@@ -125,6 +125,8 @@ pub(crate) enum SceneConstructionStartError {
     StorePlan(#[from] StorePlanError),
     #[error("the canonical Scene retained-store operation could not start")]
     StoreStart(#[from] RetainedStoreStartError),
+    #[error("the canonical Scene session outcome owner could not be bound")]
+    Activation(#[from] StoreActivationContainment),
 }
 
 #[derive(Debug, Error)]
