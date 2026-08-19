@@ -143,7 +143,7 @@ contract_id = "u4-legacy-scene-deletion"
 authority_adr = "docs/adr/0045-canonical-scene-ownership-construction-and-generation.md"
 conformance_status = "partial"
 evidence_subject = "baozi.u4.legacy-scene-deletion"
-evidence_revision = 2
+evidence_revision = 3
 implementation_tracers = [
   "crates/baozi-core/src/canonical_scene/store/api/scene.rs",
   "crates/baozi-import/src/config.rs",
@@ -280,6 +280,7 @@ implementation_tracers = [
   "crates/baozi-import/src/ledger.rs",
   "crates/baozi-import/src/resource_graph/mod.rs",
   "crates/baozi-import/src/resource_graph/manifest.rs",
+  "crates/baozi-import/src/resource_graph/manifest/encoding.rs",
   "crates/baozi-import/src/scope.rs",
   "crates/baozi-import/src/session.rs",
   "crates/baozi-import/src/outcome.rs",
@@ -289,6 +290,7 @@ implementation_tracers = [
 test_tracers = [
   "crates/baozi-import/src/resource_graph/mod.rs",
   "crates/baozi-import/src/resource_graph/manifest.rs",
+  "crates/baozi-import/src/resource_graph/manifest/encoding.rs",
   "crates/baozi-import/tests/authority_cache_contract.rs",
   "crates/baozi-import/tests/session_contract.rs",
   "crates/baozi/tests/obj_facade.rs",
