@@ -2,22 +2,25 @@ use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::{Arc, OnceLock};
 
+use baozi_operation::__retained_store_integration::authority::{
+    CanonicalInheritanceSource, DerivedRetainedStoreOperation, PreparedStoreFailureOutcome,
+    PreparedStoreSuccessOutcome, RetainedStoreOperation, RetainedStorePublicationPlan,
+    RetainedStoreSharePlan, RetainedStoreStartError, RetainedStoreStartPlan,
+    RetainedStoreWriterPlan,
+};
 use baozi_operation::StoreBuildError;
 use baozi_operation::{
     AccountPoisonReason, BytesPlan, CancellationToken, CanonicalSequenceRef, DimensionPolicy,
     FinalProgress, LedgerCause, LedgerLimits, OperationControl, OperationOwner,
     PhysicalStorageAccount, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
-    PhysicalStorageAccountLimits, PhysicalStorageAccountSnapshot, PreparedStoreFailureOutcome,
-    PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit, PublishedStoreFailureParts,
-    PublishedStoreSuccessParts, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
-    RetainedStoreFailureTerminalWorkPlan, RetainedStoreOperation, RetainedStorePublicationPlan,
-    RetainedStoreSharePlan, RetainedStoreStartError, RetainedStoreStartPlan,
-    RetainedStoreWriterPlan, SequencePlan, StoreBuildFailureClass, StoreDimensionKey,
-    StoreDimensionSemanticId, StoreFailureValidation, StoreFallbackEnvelope, StoreKeyDomain,
-    StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey,
-    StorePhaseSemanticId, StorePreparationFailure, StorePreparationFailureClass, StorePrepareError,
-    StoreRuntimeError, StoreSemanticCatalogId, StoreSuccessValidation, StoreTerminalCause,
-    Utf8Plan,
+    PhysicalStorageAccountLimits, PhysicalStorageAccountSnapshot, ProgressPhase, ProgressUnit,
+    PublishedStoreFailureParts, PublishedStoreSuccessParts, RecordPlan, RetainedStoreBatchLimits,
+    RetainedStoreBlockTablePlan, RetainedStoreFailureTerminalWorkPlan, SequencePlan,
+    StoreBuildFailureClass, StoreDimensionKey, StoreDimensionSemanticId, StoreFailureValidation,
+    StoreFallbackEnvelope, StoreKeyDomain, StoreLedgerEvidence, StoreLedgerPlan,
+    StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePreparationFailure,
+    StorePreparationFailureClass, StorePrepareError, StoreRuntimeError, StoreSemanticCatalogId,
+    StoreSuccessValidation, StoreTerminalCause, Utf8Plan,
 };
 
 struct TestOwner;

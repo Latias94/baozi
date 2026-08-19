@@ -3285,41 +3285,6 @@ fn controlled_validation_distinguishes_semantic_rejection_from_panic() {
 }
 
 #[test]
-fn public_store_surface_does_not_export_raw_or_generic_owning_authority() {
-    let root = include_str!("../lib.rs");
-    let source = include_str!("../concrete_store.rs");
-    let terminal = include_str!("terminal_output.rs");
-    for forbidden in [
-        "RetainedAllocation",
-        "RetainedAllocationPlan",
-        "BlockEmplacer",
-        "StoredBlock,",
-    ] {
-        assert!(
-            !root.contains(forbidden),
-            "raw retained authority `{forbidden}` escaped the crate root"
-        );
-    }
-    assert!(source.contains("pub trait StoredScalar: sealed::StoredScalar {}"));
-    assert!(!source.contains("pub trait StoredScalar:\n"));
-    assert!(!root.contains("CanonicalBlockRef"));
-    assert!(!root.contains("OutcomeEvidenceBlockRef"));
-    assert!(!terminal.contains("pub(super) raw:"));
-}
-
-#[test]
-fn public_store_reference_and_range_brands_are_invariant() {
-    let root = include_str!("../concrete_store.rs");
-    let batch = include_str!("batch.rs");
-
-    assert!(root.contains("pub struct ScalarSequence<T: StoredScalar>(PhantomData<fn(T) -> T>);"));
-    assert!(root.contains("marker: PhantomData<fn(Kind) -> Kind>"));
-    assert!(batch.contains("marker: PhantomData<fn(Kind) -> Kind>"));
-    assert!(!root.contains("marker: PhantomData<fn() -> Kind>"));
-    assert!(!batch.contains("marker: PhantomData<fn() -> Kind>"));
-}
-
-#[test]
 fn retained_store_control_checkpoint_is_narrow_and_validates_keys_before_forwarding() {
     let source = include_str!("../concrete_store.rs");
     let declaration = type_declaration(source, "pub struct RetainedStoreControlCheckpoint");

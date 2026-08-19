@@ -8,15 +8,17 @@ use std::num::{NonZeroU32, NonZeroU64};
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalFailureTerminalWorkPlan, StoreActivationContainment,
 };
+use baozi_operation::__retained_store_integration::authority::{
+    FreshStoreLineage, RetainedStoreOperation, RetainedStoreSharePlan, RetainedStoreStartError,
+    RetainedStoreStartPlan, RetainedStoreWriterPlan,
+};
 use baozi_operation::{
-    DimensionPolicy, FinalProgress, FreshStoreLineage, LedgerLimits, LedgerLimitsError,
-    OperationControl, OperationOwner, ProgressPhase, ProgressUnit, RetainedStoreBatchLimits,
+    DimensionPolicy, FinalProgress, LedgerLimits, LedgerLimitsError, OperationControl,
+    OperationOwner, ProgressPhase, ProgressUnit, RetainedStoreBatchLimits,
     RetainedStoreFailureTerminalWorkPlan, RetainedStoreFailureTerminalWorkRequirement,
-    RetainedStoreOperation, RetainedStoreSharePlan, RetainedStoreStartError,
-    RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreDimensionKey, StoreDimensionSemanticId,
-    StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerPlan, StoreLedgerPlanError,
-    StorePhaseKey, StorePhaseSemanticId, StorePlanError, StorePrepareError, StoreRuntimeError,
-    StoreSemanticCatalogId,
+    StoreDimensionKey, StoreDimensionSemanticId, StoreKeyDomain, StoreKeyDomainCreateError,
+    StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePlanError,
+    StorePrepareError, StoreRuntimeError, StoreSemanticCatalogId,
 };
 use thiserror::Error;
 

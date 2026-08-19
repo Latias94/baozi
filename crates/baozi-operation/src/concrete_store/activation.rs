@@ -3141,13 +3141,13 @@ mod scoped_transition_tests {
     use std::num::{NonZeroU32, NonZeroU64};
 
     use super::*;
+    use crate::concrete_store::{RetainedStoreSharePlan, RetainedStoreStartPlan};
     use crate::{
         DimensionPolicy, LedgerLimits, OperationControl, PhysicalStorageAccount,
         PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
         PhysicalStorageAccountLimits, RetainedStoreBatchLimits,
-        RetainedStoreFailureTerminalWorkPlan, RetainedStoreSharePlan, RetainedStoreStartPlan,
-        StoreDimensionSemanticId, StoreFallbackEnvelope, StoreLedgerPlan, StorePhaseSemanticId,
-        StoreSemanticCatalogId,
+        RetainedStoreFailureTerminalWorkPlan, StoreDimensionSemanticId, StoreFallbackEnvelope,
+        StoreLedgerPlan, StorePhaseSemanticId, StoreSemanticCatalogId,
     };
 
     struct TestOwner;

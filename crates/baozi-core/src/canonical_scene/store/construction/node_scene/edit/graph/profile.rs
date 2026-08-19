@@ -1,9 +1,10 @@
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalBuildControl, CanonicalLane,
 };
+use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::{
-    CanonicalInheritanceSource, CanonicalRecordView, OperationOwner, ProgressPhase, ProgressUnit,
-    SequenceWriter, StoreBuildError, StoreControlledError, StoreRuntimeError,
+    CanonicalRecordView, OperationOwner, ProgressPhase, ProgressUnit, SequenceWriter,
+    StoreBuildError, StoreControlledError, StoreRuntimeError,
 };
 
 use crate::canonical_scene::store::profile_provenance::{

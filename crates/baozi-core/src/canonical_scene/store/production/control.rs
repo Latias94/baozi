@@ -8,8 +8,9 @@ use std::error::Error;
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalReservation, CanonicalSemanticWorkSession,
 };
+use baozi_operation::__retained_store_integration::authority::FreshStoreLineage;
 use baozi_operation::{
-    ControlCause, FreshStoreLineage, OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError,
+    ControlCause, OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError,
 };
 use thiserror::Error;
 

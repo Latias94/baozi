@@ -9,7 +9,7 @@ use super::super::{
     StoreSuccessValidation, StoreValidationSession, StoredScalar, Utf8Block, Utf8Writer,
     ValidatedStoreFailure, ValidatedStoreSuccess,
 };
-use super::RetainedStoreExecution;
+use super::execution::RetainedStoreExecution;
 use super::{
     CounterDelta, PlannedOutcomeEvidenceBytes, PlannedOutcomeEvidenceCommit,
     PlannedOutcomeEvidenceRecords, PlannedOutcomeEvidenceSequence, PlannedOutcomeEvidenceShare,

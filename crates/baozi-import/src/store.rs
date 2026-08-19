@@ -16,17 +16,19 @@ use baozi_operation::__retained_store_integration::activation::{
     RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreSessionOutcomeOwner,
     RetainedStoreWriterRole, StoreActivationContainment,
 };
+use baozi_operation::__retained_store_integration::authority::{
+    RetainedStoreOperation, RetainedStoreReservation, RetainedStoreSharePlan,
+    RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan,
+};
 use baozi_operation::{
     ControlCause, DimensionPolicy, LedgerCause, LedgerLimits, LedgerLimitsError,
     PhysicalStorageAccount, PublishedOutcomeEvidenceStore, PublishedRichFailureStore,
     PublishedStoreFallbackOutput, RecordBlock, RetainedStoreBatchLimits,
-    RetainedStoreFailureTerminalWorkPlan, RetainedStoreOperation, RetainedStoreReservation,
-    RetainedStoreSharePlan, RetainedStoreStartError, RetainedStoreStartPlan,
-    RetainedStoreWriterPlan, StoreDimensionKey, StoreDimensionSemanticId, StoreDimensionSnapshot,
-    StoreFallbackEnvelope, StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerEvidence,
-    StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePhaseSnapshot,
-    StorePlanError, StorePreparationFailureClass, StorePrepareError, StoreRuntimeError,
-    StoreSemanticCatalogId, StoreTerminalCause,
+    RetainedStoreFailureTerminalWorkPlan, StoreDimensionKey, StoreDimensionSemanticId,
+    StoreDimensionSnapshot, StoreFallbackEnvelope, StoreKeyDomain, StoreKeyDomainCreateError,
+    StoreLedgerEvidence, StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey,
+    StorePhaseSemanticId, StorePhaseSnapshot, StorePlanError, StorePreparationFailureClass,
+    StorePrepareError, StoreRuntimeError, StoreSemanticCatalogId, StoreTerminalCause,
 };
 
 use crate::error::ScopeAbortCause;
@@ -1114,7 +1116,7 @@ impl ImportStoreVocabulary {
 /// Plan-only import host bootstrap for one future retained-store operation.
 ///
 /// This value creates neither an [`OperationCoordinator`](baozi_operation::OperationCoordinator)
-/// nor a [`RetainedStoreOperation`](baozi_operation::RetainedStoreOperation). The session cutover
+/// nor a raw retained-store operation. The session cutover
 /// consumes these plans exactly once to start the sole operation ledger.
 pub(crate) struct ImportStoreBootstrap {
     vocabulary: ImportStoreVocabulary,

@@ -1,9 +1,9 @@
 //! Hidden cross-crate integration boundary for canonical Scene transactions.
 
+use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccess;
 use baozi_operation::{
-    OperationOwner, PreparedStoreSuccess, ProgressPhase, ProgressUnit,
-    PublishedOutcomeEvidenceStore, RecordBlock, RetainedStoreFailureTerminalWorkRequirement,
-    StoreLedgerEvidence,
+    OperationOwner, ProgressPhase, ProgressUnit, PublishedOutcomeEvidenceStore, RecordBlock,
+    RetainedStoreFailureTerminalWorkRequirement, StoreLedgerEvidence,
 };
 
 use crate::validation_control::SceneValidationLimits;

@@ -3,13 +3,13 @@ use baozi_operation::__retained_store_integration::activation::{
     CanonicalMaterialization, CanonicalValidationDecision, CanonicalValidationProgress,
     RetainedStoreSessionOutcomeOwner,
 };
+use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
     CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
 };
 use baozi_operation::{
-    CanonicalInheritanceSource, OperationControl, RecordBlock, RetainedStoreBatchLimits,
-    StorePlanError, StoreRuntimeError,
+    OperationControl, RecordBlock, RetainedStoreBatchLimits, StorePlanError, StoreRuntimeError,
 };
 use thiserror::Error;
 

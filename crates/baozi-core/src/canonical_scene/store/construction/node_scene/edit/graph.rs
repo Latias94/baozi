@@ -3,10 +3,10 @@ mod profile;
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalBuildControl, CanonicalLane,
 };
+use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::{
-    CanonicalInheritanceSource, OperationOwner, ProgressPhase, ProgressUnit, RecordBlock,
-    RecordPlan, SequencePlan, SequenceWriter, StoreBuildError, StoreControlledError,
-    StoreRuntimeError,
+    OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, RecordPlan, SequencePlan,
+    SequenceWriter, StoreBuildError, StoreControlledError, StoreRuntimeError,
 };
 
 use crate::canonical_scene::store::schema::animation::{

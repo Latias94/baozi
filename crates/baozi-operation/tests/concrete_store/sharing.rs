@@ -18,8 +18,7 @@ struct PublishedSequenceGeneration {
     _evidence: SourceEvidence,
 }
 
-type DerivedTestOperation =
-    baozi_operation::DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
+type DerivedTestOperation = DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
 
 struct OwnedDerivedOperation {
     source: PublishedSource,

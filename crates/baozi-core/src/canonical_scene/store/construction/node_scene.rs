@@ -3,16 +3,19 @@ use baozi_operation::__retained_store_integration::activation::{
     InterruptedCanonicalStoreSession, NeverActivatedStoreSession, RejectedCanonicalStoreSession,
     VerifiedMinimalFallback,
 };
+use baozi_operation::__retained_store_integration::authority::{
+    FreshStoreLineage, PreparedStoreFailure, PreparedStoreFallback, PreparedStoreSuccess,
+};
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationRequest, CanonicalActivationRequestIdentity,
     mint_canonical_activation_request,
 };
 use baozi_operation::{
-    BytesPlan, ControlCause, FinalProgress, OperationOwner, PreparedStoreFallback, ProgressPhase,
-    ProgressUnit, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
-    PublishedRichFailureStore, PublishedStoreFallbackOutput, RecordBlock, RecordPlan, SequencePlan,
-    StoreFailureAssembly, StoreFailureValidation, StoreLedgerEvidence, StorePlanError,
-    StoreRuntimeError, StoredScalar, Utf8Plan, ValidatedStoreSuccess,
+    BytesPlan, ControlCause, FinalProgress, OperationOwner, ProgressPhase, ProgressUnit,
+    PublishedCanonicalStore, PublishedOutcomeEvidenceStore, PublishedRichFailureStore,
+    PublishedStoreFallbackOutput, RecordBlock, RecordPlan, SequencePlan, StoreFailureAssembly,
+    StoreFailureValidation, StoreLedgerEvidence, StorePlanError, StoreRuntimeError, StoredScalar,
+    Utf8Plan, ValidatedStoreSuccess,
 };
 use thiserror::Error;
 
@@ -270,7 +273,7 @@ type ValidatedNodeStoreSuccess = ValidatedStoreSuccess<
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
-type PreparedNodeStoreSuccess = baozi_operation::PreparedStoreSuccess<
+type PreparedNodeStoreSuccess = PreparedStoreSuccess<
     RecordBlock,
     SceneDirectorySchema,
     RecordBlock,
@@ -290,8 +293,7 @@ type NodeSceneStoreFailureValidation = StoreFailureValidation<
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
-type PreparedNodeStoreFailure =
-    baozi_operation::PreparedStoreFailure<RecordBlock, NodeSceneOutcomeEvidenceSchema>;
+type PreparedNodeStoreFailure = PreparedStoreFailure<RecordBlock, NodeSceneOutcomeEvidenceSchema>;
 type ActivatedNodeSceneCandidate<
     O = SceneConstructionOwner,
     PP = SceneConstructionPhase,
@@ -309,7 +311,7 @@ type ActivatedNodeSceneCandidate<
 >;
 type RejectedNodeSceneActivation<O, PP, U> =
     RejectedCanonicalStoreSession<O, PP, U, NodeSceneConstructionRejection<StoreRuntimeError>>;
-type NeverActivatedNodeScene<O, PP, U, L = baozi_operation::FreshStoreLineage> =
+type NeverActivatedNodeScene<O, PP, U, L = FreshStoreLineage> =
     NeverActivatedStoreSession<O, PP, U, NodeSceneConstructionRejection<StoreRuntimeError>, L>;
 type CentrallyRejectedNodeScene<O, PP, U> = CentrallyRejectedCanonicalStoreSession<
     O,
@@ -450,7 +452,7 @@ pub(in crate::canonical_scene::store) enum DeferredNodeSceneDraftBuild<
     O,
     PP,
     U,
-    L = baozi_operation::FreshStoreLineage,
+    L = FreshStoreLineage,
 > where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -475,12 +477,8 @@ pub(in crate::canonical_scene::store) enum DeferredNodeSceneDraftBuild<
     clippy::large_enum_variant,
     reason = "all linear failure states remain inline so deferred preparation cannot allocate"
 )]
-pub(in crate::canonical_scene::store) enum PendingNodeSceneFailure<
-    O,
-    PP,
-    U,
-    L = baozi_operation::FreshStoreLineage,
-> where
+pub(in crate::canonical_scene::store) enum PendingNodeSceneFailure<O, PP, U, L = FreshStoreLineage>
+where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,

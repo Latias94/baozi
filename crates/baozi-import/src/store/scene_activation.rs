@@ -14,11 +14,11 @@ use baozi_operation::__retained_store_integration::activation::{
     RootedFailureValidation, StoreCanonicalRejection, StoreNeverActivatedCause,
     VerifiedMinimalFallback,
 };
-use baozi_operation::{
-    ControlCause, FinalProgress, PreparedStoreFailure, PreparedStoreFailureOutcome,
-    PreparedStoreFallback, PreparedStoreSuccess, PreparedStoreSuccessOutcome, RecordBlock,
-    StoreRuntimeError,
+use baozi_operation::__retained_store_integration::authority::{
+    PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
+    PreparedStoreSuccessOutcome,
 };
+use baozi_operation::{ControlCause, FinalProgress, RecordBlock, StoreRuntimeError};
 
 use crate::ledger::{ImportOperationOwner, ImportProgressPhase, ImportProgressUnit};
 

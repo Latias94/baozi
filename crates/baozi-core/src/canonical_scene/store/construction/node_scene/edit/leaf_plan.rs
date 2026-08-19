@@ -1,9 +1,10 @@
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalLane, CanonicalReservation, CanonicalSemanticWorkSession,
 };
+use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::{
-    CanonicalInheritanceSource, CapacityPlan, OperationOwner, ProgressPhase, ProgressUnit,
-    ShareableStoreKind, StoreRuntimeError,
+    CapacityPlan, OperationOwner, ProgressPhase, ProgressUnit, ShareableStoreKind,
+    StoreRuntimeError,
 };
 
 use crate::canonical_scene::store::schema::geometry::{

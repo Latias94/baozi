@@ -1,13 +1,16 @@
 use super::*;
 
+use crate::concrete_store::{
+    PreparedStoreSuccessOutcome, RetainedStoreOperation, RetainedStorePublicationPlan,
+    RetainedStoreSharePlan, RetainedStoreStartPlan, RetainedStoreWriterPlan,
+};
 use crate::ledger::{LedgerCause, LedgerLimits};
 use crate::retained::test_panic_final_owner_drop_after;
 use crate::{
     DimensionPolicy, FinalProgress, OperationControl, PhysicalStorageAccount,
     PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
     PhysicalStorageAccountLimits, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
-    RetainedStoreFailureTerminalWorkPlan, RetainedStorePublicationPlan, RetainedStoreSharePlan,
-    RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreDimensionKey, StoreDimensionSemanticId,
+    RetainedStoreFailureTerminalWorkPlan, StoreDimensionKey, StoreDimensionSemanticId,
     StoreFallbackEnvelope, StoreKeyDomain, StorePhaseKey, StorePhaseSemanticId,
     StoreSemanticCatalogId,
 };
@@ -56,7 +59,7 @@ struct BatchKeys {
     failure_terminal_dimension: StoreDimensionKey,
 }
 
-type BatchOperation = crate::RetainedStoreOperation<BatchTestOwner, BatchProgress, BatchUnit>;
+type BatchOperation = RetainedStoreOperation<BatchTestOwner, BatchProgress, BatchUnit>;
 
 const fn test_catalog() -> StoreSemanticCatalogId {
     StoreSemanticCatalogId::new(
@@ -372,7 +375,7 @@ fn sequence_bytes_and_utf8_batches_publish_opaque_ranges() {
         .try_prepare(final_progress())
         .expect("batch success preparation")
     {
-        crate::PreparedStoreSuccessOutcome::Success(prepared) => prepared,
+        PreparedStoreSuccessOutcome::Success(prepared) => prepared,
         _ => panic!("batch success must remain successful"),
     };
     let published = prepared.handoff();
@@ -454,7 +457,7 @@ fn foreign_range_references_are_rejected_and_lookup_depth_is_batch_size_independ
         .try_prepare(final_progress())
         .expect("first preparation")
     {
-        crate::PreparedStoreSuccessOutcome::Success(prepared) => prepared,
+        PreparedStoreSuccessOutcome::Success(prepared) => prepared,
         _ => panic!("first publication must succeed"),
     };
     let first_published = first_prepared.handoff();
@@ -493,7 +496,7 @@ fn foreign_range_references_are_rejected_and_lookup_depth_is_batch_size_independ
         .try_prepare(final_progress())
         .expect("second preparation")
     {
-        crate::PreparedStoreSuccessOutcome::Success(prepared) => prepared,
+        PreparedStoreSuccessOutcome::Success(prepared) => prepared,
         _ => panic!("second publication must succeed"),
     };
     let second_published = second_prepared.handoff();

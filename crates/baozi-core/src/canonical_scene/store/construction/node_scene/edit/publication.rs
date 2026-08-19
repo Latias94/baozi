@@ -1,10 +1,12 @@
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalFreezePermitIssue, CanonicalJointSeal, RootedFailureValidation,
 };
+use baozi_operation::__retained_store_integration::authority::{
+    CanonicalInheritanceSource, PreparedStoreFailure, PreparedStoreFailureOutcome,
+    PreparedStoreFallback, PreparedStoreSuccess, PreparedStoreSuccessOutcome,
+};
 use baozi_operation::{
-    CanonicalInheritanceSource, FinalProgress, PreparedStoreFailureOutcome, PreparedStoreFallback,
-    PreparedStoreSuccess, PreparedStoreSuccessOutcome, PublishedOutcomeEvidenceStore, RecordBlock,
-    StoreLedgerEvidence,
+    FinalProgress, PublishedOutcomeEvidenceStore, RecordBlock, StoreLedgerEvidence,
 };
 
 use crate::canonical_scene::store::schema::{NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema};
@@ -29,8 +31,7 @@ type PreparedEditStoreSuccess = PreparedStoreSuccess<
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
-type PreparedEditStoreFailure =
-    baozi_operation::PreparedStoreFailure<RecordBlock, NodeSceneOutcomeEvidenceSchema>;
+type PreparedEditStoreFailure = PreparedStoreFailure<RecordBlock, NodeSceneOutcomeEvidenceSchema>;
 
 pub(super) struct PreparedNodeSceneEditSuccess {
     generation: ReservedSceneGeneration,

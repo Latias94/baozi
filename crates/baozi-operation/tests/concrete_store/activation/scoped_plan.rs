@@ -18,7 +18,7 @@ type DerivedScopedOutcome<E> = CanonicalActivationOutcome<
     E,
     ScalarSequence<u32>,
     SequenceTag,
-    baozi_operation::CanonicalInheritanceSource,
+    CanonicalInheritanceSource,
 >;
 
 fn bind_test_execution<P>(
@@ -416,7 +416,7 @@ fn dropping_dormant_session_outcome_owner_contains_the_operation() {
 fn derived_operation_for_scoped_activation(
     source: &SourceCanonical,
 ) -> (
-    baozi_operation::DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>,
+    DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>,
     TestKeys,
 ) {
     let TestVocabulary { domain, keys } = test_vocabulary();
@@ -461,7 +461,7 @@ fn derived_operation_with_materialization_work_limit(
     source: &SourceCanonical,
     materialization_work_limit: u64,
 ) -> (
-    baozi_operation::DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>,
+    DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>,
     TestKeys,
 ) {
     let TestVocabulary { domain, keys } = test_vocabulary();

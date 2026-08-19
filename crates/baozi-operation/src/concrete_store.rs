@@ -198,16 +198,8 @@ pub use terminal_output::{
 };
 
 pub use transcript::{
-    PlannedCanonicalBytes, PlannedCanonicalBytesBatch, PlannedCanonicalCommit,
-    PlannedCanonicalRecords, PlannedCanonicalSequence, PlannedCanonicalSequenceBatch,
-    PlannedCanonicalShare, PlannedCanonicalUtf8, PlannedCanonicalUtf8Batch,
-    PlannedOutcomeEvidenceBytes, PlannedOutcomeEvidenceCommit, PlannedOutcomeEvidenceRecords,
-    PlannedOutcomeEvidenceSequence, PlannedOutcomeEvidenceShare, PlannedOutcomeEvidenceUtf8,
-    RetainedStoreExecution, RetainedStoreTranscript, StoreExecutionError,
-    StoreFailureContinuationExecution, StoreTranscriptFailureValidation,
-    StoreTranscriptIdentityExhausted, StoreTranscriptOpenError, StoreTranscriptOpenRecovery,
-    StoreTranscriptOpenResult, StoreTranscriptPlanError, StoreTranscriptStartCause,
-    StoreTranscriptStartError, StoreTranscriptStartResult, StoreTranscriptStateError,
+    StoreExecutionError, StoreFailureContinuationExecution, StoreTranscriptFailureValidation,
+    StoreTranscriptIdentityExhausted, StoreTranscriptPlanError, StoreTranscriptStartCause,
     StoreTranscriptSuccessValidation, ValidatedTranscriptStoreSuccess,
 };
 
@@ -1821,10 +1813,6 @@ pub struct CanonicalInheritanceSource {
 /// Store operation statically bound to one exact canonical source generation.
 pub type DerivedRetainedStoreOperation<O, PP, U> =
     RetainedStoreOperation<O, PP, U, CanonicalInheritanceSource>;
-
-/// Writable publication assembly statically bound to one exact canonical source generation.
-pub type DerivedRetainedStorePublicationAssembly<O, PP, U> =
-    RetainedStorePublicationAssembly<O, PP, U, CanonicalInheritanceSource>;
 
 /// Opaque live-storage reservation owned by the concrete retained-store protocol.
 ///

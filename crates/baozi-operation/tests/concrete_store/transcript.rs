@@ -10,8 +10,7 @@ use baozi_operation::{
 
 type TranscriptCanonicalSource = PublishedCanonicalStore<ScalarSequence<u32>, CanonicalRootTag>;
 type TranscriptEvidenceSource = PublishedOutcomeEvidenceStore<ScalarSequence<u8>, EvidenceRootTag>;
-type DerivedTranscriptOperation =
-    baozi_operation::DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
+type DerivedTranscriptOperation = DerivedRetainedStoreOperation<TestOwner, TestProgress, TestUnit>;
 
 const DERIVED_TRANSCRIPT_MAX_FAILURE_EVIDENCE_MEMBERS: usize = 3;
 

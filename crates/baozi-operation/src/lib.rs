@@ -20,30 +20,18 @@ pub use capacity::{
 };
 pub use concrete_store::{
     ByteBlock, BytesBatchItem, BytesBatchPlan, BytesPlan, BytesWriter, CanonicalBytesRange,
-    CanonicalBytesRef, CanonicalInheritanceSource, CanonicalRecordRef, CanonicalRecordRowWriter,
-    CanonicalRecordView, CanonicalRecordWriter, CanonicalSequenceRange, CanonicalSequenceRef,
-    CanonicalStoreRange, CanonicalStoreRef, CanonicalUtf8Range, CanonicalUtf8Ref,
-    DerivedRetainedStoreOperation, DerivedRetainedStorePublicationAssembly, FreshStoreLineage,
-    OutcomeEvidenceBytesRef, OutcomeEvidenceRecordRef, OutcomeEvidenceRecordRowWriter,
-    OutcomeEvidenceRecordView, OutcomeEvidenceRecordWriter, OutcomeEvidenceSequenceRef,
-    OutcomeEvidenceStoreRef, OutcomeEvidenceUtf8Ref, PlannedCanonicalBytes,
-    PlannedCanonicalBytesBatch, PlannedCanonicalCommit, PlannedCanonicalRecords,
-    PlannedCanonicalSequence, PlannedCanonicalSequenceBatch, PlannedCanonicalShare,
-    PlannedCanonicalUtf8, PlannedCanonicalUtf8Batch, PlannedOutcomeEvidenceBytes,
-    PlannedOutcomeEvidenceCommit, PlannedOutcomeEvidenceRecords, PlannedOutcomeEvidenceSequence,
-    PlannedOutcomeEvidenceShare, PlannedOutcomeEvidenceUtf8, PreparedStoreFailure,
-    PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
-    PreparedStoreSuccessOutcome, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
+    CanonicalBytesRef, CanonicalRecordRef, CanonicalRecordRowWriter, CanonicalRecordView,
+    CanonicalRecordWriter, CanonicalSequenceRange, CanonicalSequenceRef, CanonicalStoreRange,
+    CanonicalStoreRef, CanonicalUtf8Range, CanonicalUtf8Ref, OutcomeEvidenceBytesRef,
+    OutcomeEvidenceRecordRef, OutcomeEvidenceRecordRowWriter, OutcomeEvidenceRecordView,
+    OutcomeEvidenceRecordWriter, OutcomeEvidenceSequenceRef, OutcomeEvidenceStoreRef,
+    OutcomeEvidenceUtf8Ref, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
     PublishedOutcomeEvidenceStoreRef, PublishedRichFailureStore, PublishedStoreFailureParts,
     PublishedStoreFallbackOutput, PublishedStoreFallbackParts, PublishedStoreSuccessParts,
     RecordBlock, RecordPlan, RetainedStoreBatchLimits, RetainedStoreBlockTablePlan,
-    RetainedStoreControlCheckpoint, RetainedStoreExecution, RetainedStoreFailureTerminalWorkPlan,
-    RetainedStoreFailureTerminalWorkRequirement, RetainedStoreOpenError, RetainedStoreOpenRecovery,
-    RetainedStoreOperation, RetainedStorePublicationAssembly, RetainedStorePublicationPlan,
-    RetainedStoreReservation, RetainedStoreSharePlan, RetainedStoreStartError,
-    RetainedStoreStartPlan, RetainedStoreTranscript, RetainedStoreWorkControl,
-    RetainedStoreWriterPlan, ScalarSequence, SequenceBatchItem, SequenceBatchPlan, SequencePlan,
-    SequenceView, SequenceWriter, ShareableStoreKind, StoreBatchRuntimeError, StoreBuildError,
+    RetainedStoreFailureTerminalWorkPlan, RetainedStoreFailureTerminalWorkRequirement,
+    ScalarSequence, SequenceBatchItem, SequenceBatchPlan, SequencePlan, SequenceView,
+    SequenceWriter, ShareableStoreKind, StoreBatchRuntimeError, StoreBuildError,
     StoreBuildFailureClass, StoreControlledError, StoreControlledSuccessValidation,
     StoreDestination, StoreDimensionKey, StoreDimensionSemanticId, StoreDimensionSnapshot,
     StoreEvidenceValidationSession, StoreExecutionError, StoreFailureAssembly,
@@ -53,9 +41,7 @@ pub use concrete_store::{
     StorePhaseSemanticId, StorePhaseSnapshot, StorePlanError, StorePreparationFailure,
     StorePreparationFailureClass, StorePrepareError, StoreRuntimeError, StoreSemanticCatalogId,
     StoreSuccessValidation, StoreTerminalCause, StoreTranscriptFailureValidation,
-    StoreTranscriptIdentityExhausted, StoreTranscriptOpenError, StoreTranscriptOpenRecovery,
-    StoreTranscriptOpenResult, StoreTranscriptPlanError, StoreTranscriptStartCause,
-    StoreTranscriptStartError, StoreTranscriptStartResult, StoreTranscriptStateError,
+    StoreTranscriptIdentityExhausted, StoreTranscriptPlanError, StoreTranscriptStartCause,
     StoreTranscriptSuccessValidation, StoreValidationSession, StoreWorkError, StoredScalar,
     Utf8BatchItem, Utf8BatchPlan, Utf8Block, Utf8Plan, Utf8Writer, ValidatedStoreFailure,
     ValidatedStoreSuccess, ValidatedTranscriptStoreSuccess,
@@ -255,6 +241,26 @@ pub use concrete_store::{
 /// }
 /// ```
 pub mod __retained_store_integration {
+    /// Internal owning-authority surface for retained-store hosts and construction drivers.
+    ///
+    /// These linear capabilities are intentionally absent from the supported crate-root API:
+    ///
+    /// ```compile_fail,E0432
+    /// use baozi_operation::{
+    ///     CanonicalInheritanceSource, PreparedStoreSuccess, RetainedStoreOperation,
+    ///     RetainedStoreReservation,
+    /// };
+    /// ```
+    pub mod authority {
+        pub use crate::concrete_store::{
+            CanonicalInheritanceSource, DerivedRetainedStoreOperation, FreshStoreLineage,
+            PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback,
+            PreparedStoreSuccess, PreparedStoreSuccessOutcome, RetainedStoreOperation,
+            RetainedStorePublicationPlan, RetainedStoreReservation, RetainedStoreSharePlan,
+            RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan,
+        };
+    }
+
     /// Consumer-facing canonical activation capabilities.
     pub mod activation {
         pub use crate::concrete_store::activation::{

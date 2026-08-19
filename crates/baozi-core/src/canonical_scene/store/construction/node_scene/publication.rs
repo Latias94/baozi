@@ -4,12 +4,14 @@ use baozi_operation::__retained_store_integration::activation::{
     FailureEvidenceValidationSession, FrozenFailureState, RootedFailureValidation,
     StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
 };
-use baozi_operation::{
-    ControlCause, CounterClass, FinalProgress, LedgerCause, OperationOwner,
+use baozi_operation::__retained_store_integration::authority::{
     PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
-    PreparedStoreSuccessOutcome, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
-    PublishedOutcomeEvidenceStore, RecordBlock, StoreBuildFailureClass, StoreLedgerEvidence,
-    StoreRuntimeError,
+    PreparedStoreSuccessOutcome,
+};
+use baozi_operation::{
+    ControlCause, CounterClass, FinalProgress, LedgerCause, OperationOwner, ProgressPhase,
+    ProgressUnit, PublishedCanonicalStore, PublishedOutcomeEvidenceStore, RecordBlock,
+    StoreBuildFailureClass, StoreLedgerEvidence, StoreRuntimeError,
 };
 use thiserror::Error;
 

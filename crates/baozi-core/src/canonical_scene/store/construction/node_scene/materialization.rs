@@ -15,12 +15,14 @@ use baozi_operation::__retained_store_integration::activation::{
     CanonicalReservation, CanonicalSemanticWorkSession, CanonicalValidationDecision,
     CanonicalValidationPlanning, CanonicalValidationRole, RetainedStoreWriterRole,
 };
+#[cfg(test)]
+use baozi_operation::__retained_store_integration::authority::RetainedStoreOperation;
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
     CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
 };
 #[cfg(test)]
-use baozi_operation::{FinalProgress, RetainedStoreOperation};
+use baozi_operation::FinalProgress;
 use baozi_operation::{
     OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit, RecordBlock,
     RecordPlan, RetainedStoreBatchLimits, SequencePlan, StoreBuildError, StoreControlledError,
