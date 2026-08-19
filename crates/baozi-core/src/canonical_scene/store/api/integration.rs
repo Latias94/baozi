@@ -8,6 +8,10 @@ use baozi_operation::{
 
 use crate::validation_control::SceneValidationLimits;
 
+pub use super::super::construction::node_scene::edit::{
+    SceneEditCompilation, SceneEditCompileError, SceneNodeTransformEditPlan,
+    SceneNodeTransformEditRequest, compile_node_transform_edit,
+};
 pub use super::super::construction::node_scene::{
     NodeSceneActivationPostflight as SceneActivationPostflight,
     NodeSceneActivationTransaction as SceneActivationTransaction,
@@ -176,5 +180,9 @@ mod tests {
             SceneHandoffToken,
             TestPreparedSceneSuccess,
         ) -> Result<ScenePublishedSuccess, SceneHandoffPairingError> = SceneHandoffToken::handoff;
+        let _: fn(
+            &ValidatedScene,
+            SceneNodeTransformEditRequest,
+        ) -> Result<SceneEditCompilation, SceneEditCompileError> = compile_node_transform_edit;
     }
 }

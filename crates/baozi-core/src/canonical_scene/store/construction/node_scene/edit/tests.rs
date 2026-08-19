@@ -6,6 +6,7 @@ use baozi_operation::{
 };
 
 use crate::SceneValidationLimits;
+use crate::canonical_scene::store::api::scene::ValidatedScene;
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, CameraAuthoring, CameraLocalId,
     DeformationAuthoringBatch, GeometryAuthoringBatch, LightAuthoring, LightLocalId,
@@ -41,6 +42,7 @@ use super::report::{CanonicalRemapSet, DerivedAbsenceReason, RemapChange};
 use super::source::{
     NodeTransformEditStart, NodeTransformEditStartError, try_begin_node_transform_edit,
 };
+use super::{SceneEditCompilation, SceneNodeTransformEditRequest, compile_node_transform_edit};
 use crate::canonical_scene::store::construction::SceneConstructionLimits;
 
 fn authored_transform_at(
@@ -191,6 +193,50 @@ fn changed_matrix(translation_x: f32) -> AuthoredTransform {
         ],
     })
     .expect("finite affine transform-edit fixture")
+}
+
+#[test]
+fn integration_transform_plan_classifies_without_starting_retained_work() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let generation_source = AtomicU64::new(1);
+    let parts = build_single_trs_scene(&account, &generation_source);
+    let NodeSceneSuccessParts { scene, report } = parts;
+    let input = ValidatedScene::from_node_scene(scene);
+    drop(report);
+    let before = account.snapshot();
+
+    let unchanged = compile_node_transform_edit(
+        &input,
+        SceneNodeTransformEditRequest::new(
+            0,
+            AuthoredTransform::identity_trs(),
+            edit_options_digest(31),
+        ),
+    )
+    .expect("an unchanged transform request must compile");
+    assert!(matches!(unchanged, SceneEditCompilation::Unchanged));
+
+    let changed = compile_node_transform_edit(
+        &input,
+        SceneNodeTransformEditRequest::new(0, changed_trs(7.0), edit_options_digest(32)),
+    )
+    .expect("a changed transform request must compile");
+    let SceneEditCompilation::Changed(plan) = changed else {
+        panic!("a different authored transform must produce a changed plan");
+    };
+    assert_eq!(plan.input_generation(), input.generation());
+
+    let after = account.snapshot();
+    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations()
+    );
+    drop(plan);
+    drop(input);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
 }
 
 fn edit_options_digest(seed: u8) -> OptionsDigest {
