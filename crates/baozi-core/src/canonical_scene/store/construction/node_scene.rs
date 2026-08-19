@@ -11,10 +11,9 @@ use baozi_operation::{
     BytesPlan, ControlCause, FinalProgress, OperationOwner, PreparedStoreFallback, ProgressPhase,
     ProgressUnit, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
     PublishedRichFailureStore, PublishedStoreFallbackOutput, RecordBlock, RecordPlan,
-    RetainedStoreOperation, RetainedStoreWorkControl, SequencePlan, StoreBuildError,
-    StoreControlledError, StoreFailureAssembly, StoreFailureValidation, StoreLedgerEvidence,
-    StorePlanError, StoreRuntimeError, StoreWorkError, StoredScalar, Utf8Plan,
-    ValidatedStoreSuccess,
+    RetainedStoreWorkControl, SequencePlan, StoreBuildError, StoreControlledError,
+    StoreFailureAssembly, StoreFailureValidation, StoreLedgerEvidence, StorePlanError,
+    StoreRuntimeError, StoreWorkError, StoredScalar, Utf8Plan, ValidatedStoreSuccess,
 };
 use thiserror::Error;
 
@@ -32,9 +31,8 @@ use super::super::schema::{
 };
 use super::super::validation::NodeSceneValidationProof;
 use super::{
-    ConstructionBrand, SceneConstructionError, SceneConstructionOwner, SceneConstructionPhase,
-    SceneConstructionStartError, SceneConstructionUnit, SceneStoreAssembly,
-    SceneStoreControlCheckpoint, SceneStoreKeys,
+    ConstructionBrand, SceneConstructionOwner, SceneConstructionPhase, SceneConstructionStartError,
+    SceneConstructionUnit, SceneStoreAssembly, SceneStoreControlCheckpoint, SceneStoreKeys,
 };
 
 pub(super) type ConstructionRequestIdentity = CanonicalActivationRequestIdentity;
@@ -801,21 +799,6 @@ impl From<PreparedNodeSceneFailure> for PreparedNodeSceneConstruction {
             PreparedNodeSceneFailure::MinimalFallback(fallback) => Self::MinimalFallback(fallback),
         }
     }
-}
-
-pub(in crate::canonical_scene::store) fn prepare_unactivated_node_scene<O, PP, U>(
-    operation: RetainedStoreOperation<O, PP, U>,
-    stable_code: u32,
-) -> Result<PreparedNodeSceneConstruction, SceneConstructionError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let store = operation.prepare_minimal_fallback(stable_code)?;
-    Ok(PreparedNodeSceneConstruction::MinimalFallback(
-        PreparedNodeSceneFallback { store },
-    ))
 }
 
 /// Private inspector over a centrally validated node-domain Scene.
