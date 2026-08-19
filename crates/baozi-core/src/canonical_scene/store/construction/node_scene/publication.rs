@@ -368,8 +368,12 @@ impl NodeSceneDraftBuild {
         self,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<NodeSceneConstructionTerminal, SceneConstructionError> {
-        self.prepare_with_generation_source_for_test(reserve_generation)
-            .map(PreparedNodeSceneConstruction::handoff)
+        match self {
+            Self::Draft { draft, owner } => owner
+                .prepare_with_generation_source(draft, reserve_generation)
+                .map(PreparedNodeSceneConstruction::handoff),
+            Self::Failure { prepared, .. } => Ok(prepared.handoff_for_test()),
+        }
     }
 
     pub(super) fn prepare_for_test(
@@ -864,14 +868,25 @@ impl PreparedNodeSceneConstruction {
                     },
                 })
             }
-            Self::Failure(PreparedNodeSceneFailure::RichFailure(prepared)) => {
+            Self::Failure(prepared) => prepared.handoff_for_test(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl PreparedNodeSceneFailure {
+    pub(in crate::canonical_scene::store) fn handoff_for_test(
+        self,
+    ) -> NodeSceneConstructionTerminal {
+        match self {
+            Self::RichFailure(prepared) => {
                 let published = prepared.store.handoff();
                 NodeSceneConstructionTerminal::RichFailure(NodeSceneRichFailure {
                     outcome_evidence: published.outcome_evidence,
                     ledger_evidence: published.ledger_evidence,
                 })
             }
-            Self::Failure(PreparedNodeSceneFailure::MinimalFallback(prepared)) => {
+            Self::MinimalFallback(prepared) => {
                 let published = prepared.store.handoff();
                 NodeSceneConstructionTerminal::MinimalFallback(NodeSceneFallback {
                     fallback: published.fallback,

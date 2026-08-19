@@ -44,7 +44,6 @@ use super::{
     NODE_SCENE_PLANNING_REJECTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults,
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
     NodeSceneDraftBuild, NodeSceneRichFailure, NodeSceneTestTransaction, PendingNodeSceneDraft,
-    PreparedNodeSceneConstruction,
 };
 
 mod chunking;
@@ -421,9 +420,9 @@ pub(super) fn test_account(
 }
 
 pub(super) fn successful_parts(
-    prepared: PreparedNodeSceneConstruction,
+    terminal: NodeSceneConstructionTerminal,
 ) -> super::NodeSceneSuccessParts {
-    match prepared.handoff() {
+    match terminal {
         NodeSceneConstructionTerminal::Success(parts) => parts,
         NodeSceneConstructionTerminal::RichFailure(failure) => {
             let store_dimension = failure
@@ -450,7 +449,7 @@ pub(super) fn successful_parts(
 
 pub(in crate::canonical_scene::store) fn build_minimal_fallback_terminal_for_probe(
     account: &baozi_operation::PhysicalStorageAccount,
-) -> PreparedNodeSceneConstruction {
+) -> NodeSceneConstructionTerminal {
     finish_node_batch_with_faults(
         account,
         test_limits(),
@@ -458,12 +457,12 @@ pub(in crate::canonical_scene::store) fn build_minimal_fallback_terminal_for_pro
         SceneValidationLimits::default(),
         NodeSceneBuildFaults::minimal_fallback(),
     )
-    .prepare_for_test()
-    .expect("aborted outcome evidence must prepare fail closed")
+    .publish_for_test()
+    .expect("aborted outcome evidence must publish fail closed")
 }
 
-fn rich_failure(prepared: PreparedNodeSceneConstruction) -> NodeSceneRichFailure {
-    match prepared.handoff() {
+fn rich_failure(terminal: NodeSceneConstructionTerminal) -> NodeSceneRichFailure {
+    match terminal {
         NodeSceneConstructionTerminal::Success(_) => {
             panic!("rejected node Scene must not publish canonical storage")
         }
@@ -600,7 +599,7 @@ fn planning_rejections_preserve_rich_evidence_without_canonical_commitment() {
             rejection,
             NodeSceneConstructionRejection::Planning(StorePlanError::InvalidBlockTable)
         ));
-        let failure = rich_failure(prepared.into());
+        let failure = rich_failure(prepared.handoff_for_test());
         assert_eq!(
             terminal_failure_code(failure.ledger_evidence()),
             NODE_SCENE_PLANNING_REJECTION_CODE
@@ -630,7 +629,7 @@ fn materialized_draft_outlives_source_buffers_before_generation_and_handoff() {
             SceneGenerationId::reserve_from(&generation_source)
         })
         .expect("owned draft must centrally prepare without source buffers");
-    let parts = successful_parts(prepared);
+    let parts = successful_parts(prepared.handoff());
     let semantic = parts
         .scene
         .semantic_view()
@@ -697,7 +696,8 @@ fn foreign_brand_descriptor_fails_before_generation_reservation() {
             .prepare_with_generation_source(mismatched, || {
                 panic!("foreign brand must fail before generation reservation")
             })
-            .expect("foreign brand must preserve rich build-invariant evidence"),
+            .expect("foreign brand must preserve rich build-invariant evidence")
+            .handoff(),
     );
     assert_eq!(
         terminal_failure_code(failure.ledger_evidence()),
@@ -731,7 +731,8 @@ fn foreign_directory_descriptor_fails_before_generation_reservation() {
             .prepare_with_generation_source(mismatched, || {
                 panic!("foreign directory must fail before generation reservation")
             })
-            .expect("foreign directory must preserve rich build-invariant evidence"),
+            .expect("foreign directory must preserve rich build-invariant evidence")
+            .handoff(),
     );
     assert_eq!(
         terminal_failure_code(failure.ledger_evidence()),
@@ -805,7 +806,7 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
     .prepare_with_generation_source_for_test(|| SceneGenerationId::reserve_from(&generation_source))
     .expect("valid source-ordered forest must prepare");
     let before_handoff = account.snapshot();
-    let parts = successful_parts(prepared);
+    let parts = successful_parts(prepared.handoff());
     let after_handoff = account.snapshot();
     let generation_after = SceneGenerationId::reserve_from(&generation_source)
         .expect("generation after node Scene construction")
@@ -999,7 +1000,7 @@ fn scene_input_admission_exceeds_the_legacy_fixed_slot_bound() {
         profile.batch(),
     );
 
-    let prepared = NodeSceneTestTransaction::with_account(
+    let terminal = NodeSceneTestTransaction::with_account(
         &account,
         test_limits(),
         input,
@@ -1008,9 +1009,9 @@ fn scene_input_admission_exceeds_the_legacy_fixed_slot_bound() {
     .expect("dynamic Scene attribution admission")
     .finish_draft()
     .expect("dynamic Scene attribution activation")
-    .prepare_for_test()
+    .publish_for_test()
     .expect("dynamic Scene attribution publication");
-    let parts = successful_parts(prepared);
+    let parts = successful_parts(terminal);
 
     let expected_canonical_block_count = 36
         + usize::try_from(SOURCE_BACKED_PROFILE_CANONICAL_BLOCK_COUNT)
@@ -1030,15 +1031,15 @@ fn present_empty_scene_publishes_every_domain_directory() {
     let account = test_account(&factory, 256);
     let roots = [];
     let nodes = [];
-    let prepared = finish_node_batch(
+    let terminal = finish_node_batch(
         &account,
         test_limits(),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
         SceneValidationLimits::default(),
     )
-    .prepare_for_test()
-    .expect("present empty node Scene must prepare");
-    let parts = successful_parts(prepared);
+    .publish_for_test()
+    .expect("present empty node Scene must publish");
+    let parts = successful_parts(terminal);
     let semantic = parts
         .scene
         .semantic_view()
@@ -1100,7 +1101,7 @@ fn canonical_logical_byte_rejection_publishes_evidence_only_rich_failure() {
             }
         ))
     ));
-    let failure = rich_failure(prepared.into());
+    let failure = rich_failure(prepared.handoff_for_test());
     assert_eq!(
         terminal_failure_code(failure.ledger_evidence()),
         NODE_SCENE_NODE_AUTHORING_REJECTION_CODE
@@ -1138,7 +1139,7 @@ fn cancelled_authoring_preserves_control_as_the_terminal_first_cause() {
     else {
         panic!("cancelled authoring must publish its control first cause")
     };
-    let failure = rich_failure(prepared.into());
+    let failure = rich_failure(prepared.handoff_for_test());
     assert_eq!(
         terminal_failure_class(failure.ledger_evidence()),
         StorePreparationFailureClass::Control
@@ -1165,7 +1166,7 @@ fn authoring_work_budget_rejection_preserves_exact_ledger_evidence() {
     else {
         panic!("exhausted authoring work budget must publish its ledger first cause")
     };
-    let failure = rich_failure(prepared.into());
+    let failure = rich_failure(prepared.handoff_for_test());
     assert_eq!(
         terminal_failure_class(failure.ledger_evidence()),
         StorePreparationFailureClass::Ledger
@@ -1206,8 +1207,8 @@ fn materialization_work_budget_interruption_publishes_rich_failure() {
 
     let failure = rich_failure(
         build
-            .prepare_for_test()
-            .expect("materialization budget interruption must prepare rich failure"),
+            .publish_for_test()
+            .expect("materialization budget interruption must publish rich failure"),
     );
     let work = failure
         .ledger_evidence()
@@ -1236,8 +1237,8 @@ fn central_validation_work_budget_interruption_publishes_rich_failure() {
 
     let failure = rich_failure(
         build
-            .prepare_for_test()
-            .expect("central validation budget interruption must prepare rich failure"),
+            .publish_for_test()
+            .expect("central validation budget interruption must publish rich failure"),
     );
     let work = failure
         .ledger_evidence()
@@ -1267,8 +1268,8 @@ fn generation_exhaustion_discards_canonical_storage_and_preserves_evidence() {
 
     let failure = rich_failure(
         build
-            .prepare_with_generation_source_for_test(|| Err(SceneGenerationError::Exhausted))
-            .expect("generation exhaustion must prepare rich failure"),
+            .publish_with_generation_source_for_test(|| Err(SceneGenerationError::Exhausted))
+            .expect("generation exhaustion must publish rich failure"),
     );
     let work = failure
         .ledger_evidence()
@@ -1298,7 +1299,7 @@ fn generation_source_panic_after_reservation_burns_the_gap_and_fails_closed() {
     let before = account.snapshot();
 
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = build.prepare_with_generation_source_for_test(|| {
+        let _ = build.publish_with_generation_source_for_test(|| {
             let _generation = SceneGenerationId::reserve_from(&generation_source)
                 .expect("the injected generation reservation must succeed");
             panic!("injected generation source panic after reservation")
@@ -1338,8 +1339,8 @@ fn invalid_authored_transform_fault_is_a_build_invariant_rich_failure() {
 
     let failure = rich_failure(
         build
-            .prepare_for_test()
-            .expect("invalid authored transform must prepare rich failure"),
+            .publish_for_test()
+            .expect("invalid authored transform must publish rich failure"),
     );
     let work = failure
         .ledger_evidence()
@@ -1373,8 +1374,8 @@ fn central_validation_rejects_each_corrupted_owner_attachment_component() {
 
         let failure = rich_failure(
             build
-                .prepare_for_test()
-                .expect("corrupted owner attachment must prepare rich failure"),
+                .publish_for_test()
+                .expect("corrupted owner attachment must publish rich failure"),
         );
         assert_eq!(
             terminal_failure_code(failure.ledger_evidence()),
@@ -1432,8 +1433,8 @@ fn central_validation_rejects_each_corrupted_profile_structure() {
 
         let failure = rich_failure(
             build
-                .prepare_for_test()
-                .unwrap_or_else(|_| panic!("{fault:?} must prepare a rich failure")),
+                .publish_for_test()
+                .unwrap_or_else(|_| panic!("{fault:?} must publish a rich failure")),
         );
         assert_eq!(
             terminal_failure_code(failure.ledger_evidence()),
@@ -1503,8 +1504,8 @@ fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
 
     let failure = rich_failure(
         build
-            .prepare_for_test()
-            .expect("invalid geometry payload must prepare rich failure"),
+            .publish_for_test()
+            .expect("invalid geometry payload must publish rich failure"),
     );
     assert_eq!(
         terminal_failure_code(failure.ledger_evidence()),
@@ -1517,7 +1518,7 @@ fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
 fn clean_validator_panic_fails_closed_as_minimal_fallback() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
-    let terminal = build_minimal_fallback_terminal_for_probe(&account).handoff();
+    let terminal = build_minimal_fallback_terminal_for_probe(&account);
     let NodeSceneConstructionTerminal::MinimalFallback(fallback) = terminal else {
         panic!("a clean validator panic must terminate as minimal fallback");
     };
@@ -1547,11 +1548,10 @@ fn canonical_publication_limit_rejection_preserves_evidence_without_reserving_ge
     );
 
     let terminal = build
-        .prepare_with_generation_source_for_test(|| {
+        .publish_with_generation_source_for_test(|| {
             SceneGenerationId::reserve_from(&generation_source)
         })
-        .expect("canonical publication rejection must prepare fail closed")
-        .handoff();
+        .expect("canonical publication rejection must publish fail closed");
     let NodeSceneConstructionTerminal::RichFailure(failure) = terminal else {
         panic!("canonical rejection must preserve validated outcome evidence");
     };
@@ -1617,7 +1617,7 @@ fn cycle_authoring_rejection_preserves_rich_evidence() {
             NodeAuthoringSemanticError::Cycle { .. }
         ))
     ));
-    assert_released(rich_failure(prepared.into()), &account);
+    assert_released(rich_failure(prepared.handoff_for_test()), &account);
 
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -1652,12 +1652,11 @@ fn physical_budget_boundaries_release_storage_for_every_terminal_class() {
                 continue;
             }
         };
-        let prepared = operation
+        let terminal = operation
             .finish_draft()
             .expect("physical output failure must retain an exact scoped outcome")
-            .prepare_for_test()
-            .expect("physical output failure must retain terminal fallback");
-        let terminal = prepared.handoff();
+            .publish_for_test()
+            .expect("physical output failure must publish a terminal outcome");
         match terminal {
             NodeSceneConstructionTerminal::Success(parts) => drop(parts),
             NodeSceneConstructionTerminal::RichFailure(failure) => {
@@ -1723,12 +1722,11 @@ fn materialization_failure_never_calls_the_generation_source() {
                 ..
             }
         ) {
-            let prepared = build
-                .prepare_with_generation_source_for_test(|| {
+            let terminal = build
+                .publish_with_generation_source_for_test(|| {
                     panic!("materialization failure must not call the generation source")
                 })
-                .expect("materialization failure must remain prepared");
-            let terminal = prepared.handoff();
+                .expect("materialization failure must publish its retained failure");
             assert!(!matches!(
                 &terminal,
                 NodeSceneConstructionTerminal::Success(_)

@@ -13,8 +13,8 @@ use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneProfileMetadataValue, NodeSceneProfileStep,
 };
 use crate::canonical_scene::store::construction::node_scene::{
-    NodeSceneConstructionTerminal, NodeSceneDraftBuild, NodeSceneSuccessParts,
-    NodeSceneTestTransaction, ValidatedNodeScene,
+    NodeSceneConstructionTerminal, NodeSceneSuccessParts, NodeSceneTestTransaction,
+    ValidatedNodeScene,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, CameraAuthoring,
@@ -35,7 +35,7 @@ use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKin
 use crate::extension::{
     ExtensionArrayRef, ExtensionMediaType, ExtensionSchemaId, ExtensionValueRef,
 };
-use crate::identity::{NodeId, SceneGenerationId};
+use crate::identity::NodeId;
 use crate::math::{Color, Mat4, Quat, Vec2, Vec3, Vec4};
 use crate::namespaced::NamespacedName;
 use crate::provenance::{
@@ -485,19 +485,10 @@ fn publish_scene_input(
     .expect("snapshot Scene input admission")
     .finish_draft()
     .expect("snapshot Scene construction");
-    let prepared = match build {
-        NodeSceneDraftBuild::Draft { draft, owner } => owner
-            .prepare_with_generation_source(draft, SceneGenerationId::reserve)
-            .expect("snapshot Scene must prepare"),
-        NodeSceneDraftBuild::Failure {
-            authoring_rejection,
-            prepared,
-        } => {
-            drop(prepared);
-            panic!("snapshot Scene construction failed: {authoring_rejection:?}");
-        }
-    };
-    match prepared.handoff() {
+    let terminal = build
+        .publish_for_test()
+        .expect("snapshot Scene must publish");
+    match terminal {
         NodeSceneConstructionTerminal::Success(parts) => parts,
         NodeSceneConstructionTerminal::RichFailure(_) => {
             panic!("valid snapshot Scene published rich failure")

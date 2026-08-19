@@ -34,9 +34,7 @@ use super::super::tests::{
     build_gltf_capability_scene_for_probe, profile_fixture, single_trs_batch, test_account,
     test_factory, test_limits,
 };
-use super::super::{
-    NodeSceneDraftBuild, NodeSceneSuccessParts, NodeSceneTestTransaction, ValidatedNodeScene,
-};
+use super::super::{NodeSceneSuccessParts, NodeSceneTestTransaction, ValidatedNodeScene};
 use super::execution::NodeSceneEditPrepareError;
 use super::plan::NodeSceneEditPlanError;
 use super::report::{CanonicalRemapSet, DerivedAbsenceReason, RemapChange};
@@ -100,18 +98,12 @@ fn try_build_single_trs_scene(
     .ok()?
     .finish_draft()
     .ok()?;
-    let prepared = match build {
-        NodeSceneDraftBuild::Draft { draft, owner } => owner
-            .prepare_with_generation_source(draft, || {
-                SceneGenerationId::reserve_from(generation_source)
-            })
-            .ok()?,
-        NodeSceneDraftBuild::Failure { prepared, .. } => {
-            drop(prepared);
-            return None;
-        }
-    };
-    match prepared.handoff() {
+    let terminal = build
+        .publish_with_generation_source_for_test(|| {
+            SceneGenerationId::reserve_from(generation_source)
+        })
+        .ok()?;
+    match terminal {
         super::super::NodeSceneConstructionTerminal::Success(parts) => Some(parts),
         terminal => {
             drop(terminal);
@@ -169,21 +161,12 @@ fn build_spatial_scene(
     .expect("spatial edit fixture admission")
     .finish_draft()
     .expect("spatial edit fixture construction");
-    let prepared = match build {
-        NodeSceneDraftBuild::Draft { draft, owner } => owner
-            .prepare_with_generation_source(draft, || {
-                SceneGenerationId::reserve_from(generation_source)
-            })
-            .expect("spatial edit fixture preparation"),
-        NodeSceneDraftBuild::Failure {
-            authoring_rejection,
-            prepared,
-        } => {
-            drop(prepared);
-            panic!("spatial edit fixture construction failed: {authoring_rejection:?}");
-        }
-    };
-    match prepared.handoff() {
+    let terminal = build
+        .publish_with_generation_source_for_test(|| {
+            SceneGenerationId::reserve_from(generation_source)
+        })
+        .expect("spatial edit fixture publication");
+    match terminal {
         super::super::NodeSceneConstructionTerminal::Success(parts) => parts,
         _ => panic!("spatial edit fixture must publish success"),
     }

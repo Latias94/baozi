@@ -14,8 +14,7 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
-    NodeSceneSuccessParts, NodeSceneTestTransaction, PreparedNodeSceneConstruction,
-    ValidatedNodeScene,
+    NodeSceneSuccessParts, NodeSceneTestTransaction, ValidatedNodeScene,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
@@ -366,13 +365,10 @@ fn build_obj_scene_with_generation_source(
         .expect("normalized OBJ Scene input admission")
         .finish_draft()
         .expect("normalized OBJ Scene draft construction");
-        let NodeSceneDraftBuild::Draft { draft, owner } = build else {
-            panic!("normalized OBJ Scene input must produce a retained draft");
-        };
-        let prepared = owner
-            .prepare_with_generation_source(draft, reserve_generation)
+        let terminal = build
+            .publish_with_generation_source_for_test(reserve_generation)
             .expect("normalized OBJ Scene publication");
-        successful_parts(prepared)
+        successful_parts(terminal)
     })
 }
 
@@ -1097,7 +1093,7 @@ fn incomplete_obj_corner_projection_is_rejected_by_central_validation() {
             other => panic!("unexpected incomplete OBJ projection rejection: {other:?}"),
         }
 
-        let terminal = PreparedNodeSceneConstruction::from(prepared).handoff();
+        let terminal = prepared.handoff_for_test();
         assert!(matches!(
             &terminal,
             NodeSceneConstructionTerminal::RichFailure(_)
@@ -1149,8 +1145,8 @@ fn obj_construction_one_short_work_limit_publishes_only_rich_failure() {
 
         let failure = rich_failure(
             build
-                .prepare_for_test()
-                .expect("one-short OBJ work limit must prepare rich failure"),
+                .publish_for_test()
+                .expect("one-short OBJ work limit must publish rich failure"),
         );
         let work = failure
             .ledger_evidence()
@@ -1195,7 +1191,8 @@ fn obj_cancellation_after_validation_publishes_only_rich_failure() {
         let failure = rich_failure(
             owner
                 .prepare_with_generation_source(draft, SceneGenerationId::reserve)
-                .expect("cancelled OBJ construction must prepare rich failure"),
+                .expect("cancelled OBJ construction must prepare rich failure")
+                .handoff(),
         );
         assert_eq!(
             terminal_failure_class(failure.ledger_evidence()),

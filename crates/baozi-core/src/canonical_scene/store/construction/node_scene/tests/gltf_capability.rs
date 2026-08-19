@@ -28,7 +28,7 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionTerminal, NodeSceneDraftBuild, NodeSceneSuccessParts,
-    NodeSceneTestTransaction, PreparedNodeSceneConstruction, ValidatedNodeScene,
+    NodeSceneTestTransaction, ValidatedNodeScene,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AnimationAuthoringFailure, AnimationAuthoringSemanticError,
@@ -1752,7 +1752,7 @@ fn build_gltf_scene_input_with_generation_source(
     mutation: GltfCapabilityMutation,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> NodeSceneSuccessParts {
-    let prepared = NodeSceneTestTransaction::with_account(
+    let terminal = NodeSceneTestTransaction::with_account(
         account,
         test_limits(),
         input,
@@ -1761,9 +1761,9 @@ fn build_gltf_scene_input_with_generation_source(
     .expect("selected normalized glTF shape admission")
     .finish_draft()
     .expect("selected normalized glTF shape activation")
-    .prepare_with_generation_source_for_test(reserve_generation)
+    .publish_with_generation_source_for_test(reserve_generation)
     .expect("selected normalized glTF shape publication");
-    match prepared.handoff() {
+    match terminal {
         NodeSceneConstructionTerminal::Success(parts) => parts,
         NodeSceneConstructionTerminal::RichFailure(_) => {
             panic!("{scope:?} glTF shape published rich failure")
@@ -3430,7 +3430,7 @@ fn reject_gltf_mutation(
             }
         });
     inspect(&rejection);
-    let terminal = PreparedNodeSceneConstruction::from(prepared).handoff();
+    let terminal = prepared.handoff_for_test();
     assert!(matches!(
         &terminal,
         NodeSceneConstructionTerminal::RichFailure(_)
@@ -3556,8 +3556,8 @@ fn gltf_construction_one_short_work_limit_publishes_only_rich_failure() {
 
             let failure = rich_failure(
                 build
-                    .prepare_for_test()
-                    .expect("one-short glTF work limit must prepare rich failure"),
+                    .publish_for_test()
+                    .expect("one-short glTF work limit must publish rich failure"),
             );
             let work = failure
                 .ledger_evidence()
@@ -3608,7 +3608,8 @@ fn gltf_cancellation_after_validation_publishes_only_rich_failure() {
             let failure = rich_failure(
                 owner
                     .prepare_with_generation_source(draft, SceneGenerationId::reserve)
-                    .expect("cancelled glTF construction must prepare rich failure"),
+                    .expect("cancelled glTF construction must prepare rich failure")
+                    .handoff(),
             );
             assert_eq!(
                 terminal_failure_class(failure.ledger_evidence()),

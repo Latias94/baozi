@@ -13,8 +13,7 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
-    NodeSceneSuccessParts, NodeSceneTestTransaction, PreparedNodeSceneConstruction,
-    PreparedNodeSceneFailure, ValidatedNodeScene,
+    NodeSceneSuccessParts, NodeSceneTestTransaction, PreparedNodeSceneFailure, ValidatedNodeScene,
 };
 use crate::canonical_scene::store::construction::{STORE_DIMENSION, SceneConstructionError};
 use crate::canonical_scene::store::production::{
@@ -154,7 +153,7 @@ impl ProfileClosureAuthoringPreflightDisposition {
                 authoring_rejection: None,
                 prepared,
             } => {
-                drop(PreparedNodeSceneConstruction::from(prepared).handoff());
+                drop(prepared.handoff_for_test());
                 panic!(
                     "profile-closure negative case {scenario_id} lost its typed authoring rejection"
                 )
@@ -188,9 +187,7 @@ impl ProfileClosureAuthoringPreflightDisposition {
 
     fn handoff(self) -> NodeSceneConstructionTerminal {
         match self {
-            Self::Rejected { prepared, .. } => {
-                PreparedNodeSceneConstruction::from(prepared).handoff()
-            }
+            Self::Rejected { prepared, .. } => prepared.handoff_for_test(),
         }
     }
 }
@@ -417,37 +414,12 @@ fn build_profile_closure_scene_variant(
         .expect("profile-closure Scene admission")
         .finish_draft()
         .expect("profile-closure Scene draft build");
-        let prepared = match build {
-            NodeSceneDraftBuild::Draft { draft, owner } => owner
-                .prepare_with_generation_source(draft, || {
-                    SceneGenerationId::reserve_from(generation_source)
-                })
-                .expect("profile-closure Scene publication"),
-            NodeSceneDraftBuild::Failure {
-                authoring_rejection,
-                prepared,
-            } => match PreparedNodeSceneConstruction::from(prepared).handoff() {
-                NodeSceneConstructionTerminal::RichFailure(failure) => {
-                    panic!(
-                        "profile-closure Scene published rich failure: rejection={authoring_rejection:?}, class={:?}, code={}",
-                        terminal_failure_class(failure.ledger_evidence()),
-                        terminal_failure_code(failure.ledger_evidence()),
-                    )
-                }
-                NodeSceneConstructionTerminal::MinimalFallback(fallback) => {
-                    panic!(
-                        "profile-closure Scene published minimal fallback: rejection={authoring_rejection:?}, class={:?}, code={}",
-                        terminal_failure_class(fallback.ledger_evidence()),
-                        terminal_failure_code(fallback.ledger_evidence()),
-                    )
-                }
-                NodeSceneConstructionTerminal::Success(_) => {
-                    unreachable!("a prepared failure cannot hand off a successful Scene")
-                }
-            },
-        };
-
-        match prepared.handoff() {
+        let terminal = build
+            .publish_with_generation_source_for_test(|| {
+                SceneGenerationId::reserve_from(generation_source)
+            })
+            .expect("profile-closure Scene publication");
+        match terminal {
             NodeSceneConstructionTerminal::Success(parts) => parts,
             NodeSceneConstructionTerminal::RichFailure(_) => {
                 panic!("profile-closure Scene published rich failure")
