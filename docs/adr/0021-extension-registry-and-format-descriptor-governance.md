@@ -15,7 +15,7 @@ related:
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
   - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
   - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
   - docs/adr/0035-text-decoding-conformance-and-recovery.md
   - docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md
   - docs/adr/0043-producer-attestation-closed-input-qualification-and-import-build-identity.md
@@ -41,7 +41,7 @@ explicit Rust extension surface, not a dynamic-plugin sandbox or stable C ABI.
 `baozi-import` owns validated `FormatDescriptor`, registry-bound capability slots for heterogeneous
 detector/parser/codec objects, the mutable registry builder, and the immutable registry snapshot. ADR
 0016 separately owns option envelopes, codec semantics, precedence, compilation, and the private
-typed store; ADR 0020 owns the exact detector/parser invocation traits, scope views, failure
+typed store; ADR 0046 owns the exact detector/parser invocation traits, scope views, failure
 transport, validation call, and lifecycle outcomes; ADR 0029 owns detection semantics and selection.
 
 Accepted freezes these ownership boundaries. It does not promote the extension trait to the stable
@@ -59,7 +59,7 @@ ADR 0016 is the sole owner of option envelope/schema/version transport, preceden
 input/output semantics, compiler scopes and budgets, compiled-value verification, and the private
 request option store. This ADR attaches that capability to a registry entry and governs its lifetime
 and failure health; it does not define another payload grammar, precedence chain, compiler scope, or
-ordinary option error taxonomy. ADR 0020 owns parse outcome composition after session creation.
+ordinary option error taxonomy. ADR 0046 owns parse outcome composition after session creation.
 
 ### Registration and Snapshot
 
@@ -172,7 +172,7 @@ creation or asset IO, and the parser never discovers an option type mismatch aft
 
 The registry and its health wrapper never construct, classify, retain, or relabel detector/parser
 domain failures. They may retain only the inert declaration needed to identify the selected
-registration. ADR 0020 owns the opaque parse transport, stable format-failure packing, lower-cause
+registration. ADR 0046 owns the opaque parse transport, stable format-failure packing, lower-cause
 preservation, validation call, and outcome composition; ADR 0029 owns detection outcomes. No registry
 snapshot or poison record retains a backend error object, callback, function pointer, native handle,
 or plugin-owned destructor.
@@ -363,7 +363,7 @@ Negative:
 
 | Contract | Testable acceptance |
 | --- | --- |
-| Object safety | Heterogeneous detector, parser, and codec objects are stored through object-safe `Send + Sync + RefUnwindSafe` capabilities; lifecycle tests under ADR 0020 own the exact detector/parser method shapes. |
+| Object safety | Heterogeneous detector, parser, and codec objects are stored through object-safe `Send + Sync + RefUnwindSafe` capabilities; lifecycle tests under ADR 0046 own the exact detector/parser method shapes. |
 | Snapshot immutability | Mutating the builder after snapshot creation cannot affect an existing request/session or its compiled-default `Arc` identity. |
 | Registration validation | Duplicate/invalid ID, malformed descriptor, schema/runtime-type mismatch, and impossible claims fail before IO. |
 | Dependency role authority | Freeze rejects malformed, duplicate, or ambiguous role tables; selected-scope tests prove calls accept only `(origin, role, hostile reference)`, derive one frozen requirement, and reject unknown/foreign roles before cache or IO. |
@@ -382,7 +382,7 @@ Negative:
 | Snapshot and unload | Builder removal cannot affect an existing snapshot/session; after those objects drop, an imported scene still validates and remaps typed descriptors without plugin code. |
 | Capability limits | Registry API-shape tests expose no mutation, health-latch, poison-reset, another codec's options, or domain failure/outcome constructor through a registered callable slot. |
 | Invocation pass-through | Instrumented integration proves the registry wrapper passes the owner-supplied invocation context unchanged, adds no coordinator, and cannot inspect or reinterpret the returned domain value. |
-| Registry-unload isolation | Outcomes composed under ADR 0020 remain printable, source-traversable, and droppable after builder, snapshot, and importer teardown without invoking a registered callable. Exact domain transport, packing, source-chain, and producer-teardown semantics remain exclusively owned by ADR 0020. |
+| Registry-unload isolation | Outcomes composed under ADR 0046 remain printable, source-traversable, and droppable after builder, snapshot, and importer teardown without invoking a registered callable. Exact domain transport, packing, source-chain, and producer-teardown semantics remain exclusively owned by ADR 0046. |
 | Backend isolation | Public facade/report/core fields, terminal errors, and stable schemas contain no registry entry, health/poison state, registered callable, or executable backend/plugin object; registry teardown cannot change an existing outcome. |
 | Trust boundary | An unwindable default-codec panic is `RegistryBuildError`, submitted-layer codec panic is `RequestError`, and detector/parser panic becomes its session-owned typed failure; docs require process isolation for hostile extensions. |
 | Reentrancy | Barrier tests share one snapshot across distinct inputs/options; concurrent results equal their serial baselines, selected options are immutable, and first-party importers contain no session-state fields or hidden serialization mutex. |

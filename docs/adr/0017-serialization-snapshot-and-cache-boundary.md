@@ -6,7 +6,7 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0005-testing-fuzzing-and-differential-oracle-strategy.md
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md

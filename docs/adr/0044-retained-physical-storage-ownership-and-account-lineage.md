@@ -5,14 +5,14 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
 supersedes:
   - docs/adr/0042-shared-canonical-storage-accounts-and-generation-lineage.md
 related:
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
   - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
 ---
@@ -34,9 +34,9 @@ The adjacent owners remain distinct:
 
 | Concern | Authority |
 | --- | --- |
-| Canonical Scene ownership and generation identity | ADR 0003 |
+| Canonical Scene ownership and generation identity | ADR 0045 |
 | Representation and sharing policy | ADR 0009 |
-| Operation work, live attribution, peaks, and committed evidence | ADR 0022 |
+| Operation work, live attribution, peaks, and committed evidence | ADR 0047 |
 | Retained physical allocation lifetime and account lineage | ADR 0044 |
 | Edit remaps, invalidation, and generation transition | ADR 0032 |
 

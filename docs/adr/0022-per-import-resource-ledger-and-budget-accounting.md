@@ -1,7 +1,7 @@
 ---
-status: accepted
+status: superseded
 date: 2026-07-09
-updated: 2026-08-05
+updated: 2026-08-19
 authors:
   - Codex
 decision_type: architecture
@@ -17,9 +17,21 @@ related:
   - docs/adr/0037-archive-and-container-security.md
   - docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md
   - docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md
+superseded_by:
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
 ---
 
 # ADR 0022: Per-Import Resource Ledger and Phase Budget Accounting
+
+## Status and Authority
+
+This ADR is superseded by
+[ADR 0047](0047-operation-ledger-evidence-and-resource-accounting.md) and owns no active
+architectural concern. ADR 0047 preserves the durable attempted, consumed, live, peak, committed,
+terminal-evidence, and phase-accounting semantics while removing private ledger typestates,
+dimension enumerations, byte transcripts, and migration-era command detail from authority.
+
+The remainder of this record is retained as historical design and implementation context.
 
 ## Context
 

@@ -7,7 +7,7 @@ authors:
 decision_type: architecture
 related:
   - docs/adr/0001-baozi-assimp-compatible-architecture.md
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
   - docs/adr/0026-validation-snapshot-and-fuzz-gates.md

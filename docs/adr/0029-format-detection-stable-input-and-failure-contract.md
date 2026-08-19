@@ -8,12 +8,12 @@ decision_type: architecture
 depends_on:
   - docs/adr/0002-runtime-concurrency-observability.md
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
 related:
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
   - docs/adr/0016-import-options-presets-and-configuration-precedence.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
   - docs/adr/0033-operation-control-and-observability.md
 ---
 
@@ -55,7 +55,7 @@ The session is created before binding the source. Public logical source identity
 
 - An IO-backed request performs one ADR 0010-authorized open, enforces the primary byte limit while
   reading, and stores the first immutable snapshot or terminal acquisition failure.
-- A direct-byte request admits the input size and live capacity under ADR 0022, copies the caller
+- A direct-byte request admits the input size and live capacity under ADR 0047, copies the caller
   slice once into session-owned immutable storage, and retains no borrow of the caller allocation.
   The caller allocation is not session live memory, and physical-open attempted/consumed evidence is
   zero.
@@ -78,7 +78,7 @@ The probe exposes only the admitted prefix/ranges and total source length needed
 beyond admitted probe bytes returns `Inconclusive(ProbeExhausted)` rather than EOF or `NoMatch`.
 Detectors cannot retain the borrowed probe after selection.
 
-The primary snapshot capacity is a live reservation under ADR 0022. Open/read/short-read/policy and
+The primary snapshot capacity is a live reservation under ADR 0047. Open/read/short-read/policy and
 allocation failures are primary failures, not importer-local detector faults.
 
 ### Detector Outcome
@@ -212,7 +212,7 @@ Negative:
 
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
-| Snapshot plus parser models multiplies memory | High | Peak-live accounting and phase release under ADR 0022. |
+| Snapshot plus parser models multiplies memory | High | Peak-live accounting and phase release under ADR 0047. |
 | A greedy detector dominates weak formats | High | Confidence conformance fixtures and ambiguity instead of arbitrary ID tie-break. |
 | Extension hint overrides content | High | Use extension only at equal confidence or unique `Maybe` fallback. |
 | Forced format becomes a validation bypass | High | Forced selection changes only routing; all parse, budget, and validation gates remain. |

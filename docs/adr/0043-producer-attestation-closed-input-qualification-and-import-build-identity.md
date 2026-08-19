@@ -9,9 +9,9 @@ depends_on:
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
   - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
   - docs/adr/0016-import-options-presets-and-configuration-precedence.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
   - docs/adr/0021-extension-registry-and-format-descriptor-governance.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0026-validation-snapshot-and-fuzz-gates.md
   - docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md
   - docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md

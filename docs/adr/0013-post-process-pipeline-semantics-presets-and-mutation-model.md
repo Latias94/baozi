@@ -6,7 +6,7 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
   - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
   - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
@@ -15,8 +15,8 @@ evidence:
   - docs/research/triangulation-backend-admission.md
 related:
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
 ---
 
 # ADR 0013: Compiled Post-Process Pipelines and Triangulation Boundary
@@ -43,7 +43,7 @@ authorities:
 
 | Contract | Authority |
 | --- | --- |
-| `SceneConstruction`, `SceneDraft`, `ValidatedScene`, and `SceneEdit` states | ADR 0003 |
+| `SceneConstruction`, `SceneDraft`, `ValidatedScene`, and `SceneEdit` states | ADR 0045 |
 | scene-space and numeric conventions | ADR 0008 |
 | primitive topology and Vertex/Corner/Face/Instance domains | ADR 0030 |
 | operation descriptors, read/write sets, remaps, loss records, invalidation, and `SceneEdit` transaction/commit/rollback | ADR 0032 |

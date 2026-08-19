@@ -8,7 +8,7 @@ decision_type: architecture
 depends_on: []
 related:
   - docs/adr/0002-runtime-concurrency-observability.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
   - docs/adr/0021-extension-registry-and-format-descriptor-governance.md
   - docs/adr/0029-format-detection-stable-input-and-failure-contract.md
   - docs/adr/0035-text-decoding-conformance-and-recovery.md
@@ -50,7 +50,7 @@ second envelope, precedence chain, compiler scope, or store.
 ADR 0021 is the sole owner of registry builder/freeze/snapshot/unload lifecycle, callable extension
 trust, unwind containment and phase mapping for codec panics, the shared registration health latch,
 and permanent poison. A codec unwind is therefore not a second option-compilation policy in this ADR:
-the registry/request integration delegates it to ADR 0021. ADR 0020 owns session lifecycle after
+the registry/request integration delegates it to ADR 0021. ADR 0046 owns session lifecycle after
 successful request compilation, and ADR 0033 owns live operation control.
 
 ### Common Configuration

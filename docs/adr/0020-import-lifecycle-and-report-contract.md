@@ -1,17 +1,17 @@
 ---
-status: accepted
+status: superseded
 date: 2026-07-09
-updated: 2026-08-05
+updated: 2026-08-19
 authors:
   - Codex
 decision_type: architecture
 depends_on:
   - docs/adr/0002-runtime-concurrency-observability.md
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
   - docs/adr/0016-import-options-presets-and-configuration-precedence.md
   - docs/adr/0021-extension-registry-and-format-descriptor-governance.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0029-format-detection-stable-input-and-failure-contract.md
   - docs/adr/0033-operation-control-and-observability.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
@@ -23,9 +23,21 @@ related:
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
   - docs/adr/0025-scene-ir-invariants-and-validation-boundaries.md
   - docs/adr/0043-producer-attestation-closed-input-qualification-and-import-build-identity.md
+superseded_by:
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
 ---
 
 # ADR 0020: Import Lifecycle, ParseScope, and Outcome Contract
+
+## Status and Authority
+
+This ADR is superseded by
+[ADR 0046](0046-import-session-lifecycle-and-outcome-ownership.md) and owns no active architectural
+concern. ADR 0046 preserves the durable session ownership, capability, terminal-outcome, cause, and
+handoff guarantees while removing private activation states, exhaustive failure matrices, and
+migration-era call sequences from authority.
+
+The remainder of this record is retained as historical design and implementation context.
 
 ## Context
 

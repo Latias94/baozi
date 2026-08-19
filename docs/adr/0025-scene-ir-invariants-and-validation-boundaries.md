@@ -6,7 +6,7 @@ authors:
   - Codex
 decision_type: architecture
 superseded_by:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
 related:
   - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
@@ -24,9 +24,9 @@ result contract.
 
 ## Supersession Decision
 
-ADR 0003 now owns the `SceneBuilder -> ValidatedScene -> SceneEdit` state model. ADR 0032 owns
+ADR 0045 now owns the opaque construction -> validated generation -> edit boundary. ADR 0032 owns
 transactional commit, remap publication, and derived-data invalidation. Direct mutation of a
-validated scene is no longer part of the canonical API.
+validated scene is no longer part of the canonical interface.
 
 ```mermaid
 stateDiagram-v2

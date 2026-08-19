@@ -7,7 +7,7 @@ authors:
 decision_type: architecture
 related:
   - docs/adr/0002-runtime-concurrency-observability.md
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0005-testing-fuzzing-and-differential-oracle-strategy.md
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
@@ -15,7 +15,7 @@ related:
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
   - docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0033-operation-control-and-observability.md
 evidence:
   - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
@@ -81,7 +81,7 @@ replacement names.
 
 `baozi-operation` is a foundation crate with no dependency on another production Baozi crate.
 `baozi-core`, `baozi-import`, and `baozi-postprocess` may depend on it and expose only the narrower
-capabilities their domain requires. ADR 0022 owns ledger semantics and ADR 0033 owns control and
+capabilities their domain requires. ADR 0047 owns ledger semantics and ADR 0033 owns control and
 delivery semantics. Import and postprocess map shared causes into their own phase-aware failures and
 remain the only owners of their reports; the operation layer cannot finalize either outcome.
 

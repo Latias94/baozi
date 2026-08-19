@@ -6,9 +6,9 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
   - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
   - docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md
@@ -31,11 +31,11 @@ cached bounds and tangents became stale. It also risks publishing a partial scen
 ADR 0013 owns pipeline and preset policy. This ADR is authoritative for structural mutation,
 transactionality, remaps, and derived-data validity.
 
-ADR 0022 remains the normative authority for `Attempted`, `Consumed`, live attribution with its
+ADR 0047 remains the normative authority for `Attempted`, `Consumed`, live attribution with its
 peak, `CommittedCanonicalOutput`, and `PublishedOutcomeEvidence` accounting invariants. Import and
 postprocess own their domain ledger semantics, policy, dimensions, phase vocabulary, and evidence.
 This ADR owns the postprocess edit meanings for replacement, scratch, and remap reservations; it
-cannot refund monotonic work or reinterpret either committed destination. ADR 0022 applies those
+cannot refund monotonic work or reinterpret either committed destination. ADR 0047 applies those
 destination commitments during preparation. Exact postprocess wrappers privately own the already
 qualified but domain-unexposed canonical and outcome-evidence owners; pure handoff only exposes/moves
 them into report-facing values and performs no attribution transition.
@@ -52,7 +52,7 @@ ledger semantics to that shared mechanism rather than defining a second mechanis
 `ValidatedScene`, shares unchanged storage, and owns all replacement buffers and scratch state. The
 input remains a valid generation throughout the operation. Final publication runs central validation,
 then atomically reserves exactly one private never-reused generation nonce for the final Scene through
-ADR 0003's `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition. Ordered
+ADR 0045's `ReservedSceneGeneration` as the final fallible pre-freeze identity acquisition. Ordered
 per-step report evidence does not consume generation nonces. Preparation attempts to freeze
 canonical/remap/report attribution only after that one reservation succeeds and returns exact
 `PreparedSuccess` only after the freeze and final control classification complete. Its pure handoff
@@ -265,7 +265,7 @@ invalid for ordinary reads.
 Postprocess success reports its `Unchanged` or `Changed` outcome, ordered steps, diagnostics, losses,
 resource statistics, entity remaps, domain remaps, and derived-data outcomes. `Unchanged` has no
 committed output or remaps and names the preserved input generation. Resource semantics are owned by
-ADR 0022: attempted and consumed work remain monotonic on success or failure; peak-live records the
+ADR 0047: attempted and consumed work remain monotonic on success or failure; peak-live records the
 transaction high-water; final preparation applies canonical and report/remap destination commitments
 with operation-live attribution at zero; and pure handoff only exposes/moves the already qualified
 owners as committed/published evidence. Failure evidence includes the last completed step plus attempted, consumed,
@@ -329,7 +329,7 @@ tools. Chosen.
 | Retained failure isolation | failed startup accepts no edit invocation; a later retained builder panic publishes no fallback, generation, proof, report, or remap; the input remains unchanged | postprocess integration against ADR 0044 terminal outcomes and input-preservation probes |
 | Remap completeness | Per-step remaps cover every affected entity/domain with exact same-report step-state endpoints, and the composed remap has exact input/final generation endpoints | split/merge/delete/generate composition tests |
 | Operation-local complexity | Private candidate validation and remap composition are `O(affected entities + affected edges + affected cells + remap cells)` | deterministic per-step scale counters |
-| Publication validation complexity | Final central validation is `O(total graph edges + total entities + total references + total payload cells)` under ADR 0003 | deterministic full-validator work counters |
+| Publication validation complexity | Final central validation is `O(total graph edges + total entities + total references + total payload cells)` under ADR 0045 | deterministic full-validator work counters |
 
 ## Acceptance Criteria
 

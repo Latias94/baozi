@@ -7,10 +7,10 @@ authors:
 decision_type: architecture
 depends_on:
   - docs/adr/0019-parser-diagnostic-streaming-and-generated-code-contract.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
 related:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
@@ -73,10 +73,10 @@ Core rules:
 
 ### ParseScope-Bound Metered Storage
 
-Format-owned parsers compose the ParseScope-bound metered storage governed exclusively by ADR 0022.
+Format-owned parsers compose the ParseScope-bound metered storage governed exclusively by ADR 0047.
 Parser tooling does not create a second capacity, reservation, transfer, rollback, or release
 protocol. A format-specific wrapper may add source semantics, but all storage accounting remains
-behind ADR 0022's `baozi-import` interface.
+behind ADR 0047's `baozi-import` interface.
 
 Recommended first choices by format shape:
 
@@ -96,7 +96,7 @@ flowchart LR
     Session[Import session owns SceneConstruction] --> Scope[Selected ParseScope]
     Scope --> Input[Immutable primary/dependency snapshots]
     Scope --> Capabilities[Options, budget, diagnostics, control]
-    Scope --> Storage[ADR 0022-owned metered storage]
+    Scope --> Storage[ADR 0047-owned metered storage]
     Input --> FormatCrate[baozi-format-*]
     Capabilities --> FormatCrate
     Storage --> FormatCrate

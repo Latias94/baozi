@@ -6,7 +6,7 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
   - docs/adr/0039-source-document-scene-selection-and-import-closure.md
@@ -19,7 +19,7 @@ related:
 
 ## Context
 
-ADR 0003 makes cameras and lights scene-owned entities attached through nodes, and ADR 0008 requires
+ADR 0045 makes cameras and lights scene-owned entities attached through nodes, and ADR 0008 requires
 coordinate conversion to transform them with the rest of the Scene. Neither decision defines their
 projection, emission, units, attachment, validation, or loss semantics. Leaving those choices to
 format adapters would make equal source facts produce incompatible canonical values.

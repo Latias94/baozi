@@ -7,12 +7,12 @@ authors:
 decision_type: architecture
 depends_on:
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0035-text-decoding-conformance-and-recovery.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
 related:
   - docs/adr/0018-parser-tooling-and-format-owned-parser-policy.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
   - docs/adr/0027-gltf-backend-ownership-and-replacement-policy.md
 ---
 

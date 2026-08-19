@@ -8,11 +8,11 @@ object model.
 This document is the explanatory entry point. Accepted ADRs remain the normative authority if this
 summary and a decision ever disagree:
 
-- [ADR 0003: Canonical Scene IR Ownership and State Model](../adr/0003-core-scene-ir-and-material-model.md)
+- [ADR 0045: Canonical Scene Ownership, Construction, and Generation](../adr/0045-canonical-scene-ownership-construction-and-generation.md)
 - [ADR 0008: Math, Coordinate, Units, and Numeric Policy](../adr/0008-math-coordinate-units-and-numeric-policy.md)
 - [ADR 0009: Data Ownership, Zero-Copy Lifetimes, and Memory Layout](../adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md)
 - [ADR 0012: Material, Image, Texture, Sampler, and Color-Space Policy](../adr/0012-material-texture-image-and-color-space-policy.md)
-- [ADR 0020: Import Lifecycle, ParseScope, and Outcome Contract](../adr/0020-import-lifecycle-and-report-contract.md)
+- [ADR 0046: Import Session Lifecycle and Outcome Ownership](../adr/0046-import-session-lifecycle-and-outcome-ownership.md)
 - [ADR 0023: Material and Custom Attribute Extension Model](../adr/0023-material-and-custom-attribute-extension-model.md)
 - [ADR 0030: Logical Mesh, Primitive, and Attribute Domain Contract](../adr/0030-logical-mesh-primitive-and-attribute-domain.md)
 - [ADR 0031: Animation, Skin, Morph, and Deformer Contract](../adr/0031-animation-skin-morph-and-deformer-contract.md)

@@ -6,7 +6,7 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
 related:
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
   - docs/adr/0011-format-support-tiers-and-compatibility-charter.md

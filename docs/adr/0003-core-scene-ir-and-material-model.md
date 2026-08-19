@@ -1,12 +1,12 @@
 ---
-status: accepted
+status: superseded
 date: 2026-07-08
-updated: 2026-08-05
+updated: 2026-08-19
 authors:
   - Codex
 decision_type: architecture
-supersedes:
-  - docs/adr/0025-scene-ir-invariants-and-validation-boundaries.md
+superseded_by:
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
 related:
   - docs/adr/0001-baozi-assimp-compatible-architecture.md
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
@@ -21,6 +21,16 @@ related:
 ---
 
 # ADR 0003: Canonical Scene IR Ownership and State Model
+
+## Status and Authority
+
+This ADR is superseded by
+[ADR 0045](0045-canonical-scene-ownership-construction-and-generation.md) and owns no active
+architectural concern. ADR 0045 preserves the durable canonical Scene ownership, construction,
+validation, generation, and edit-boundary guarantees while removing private U4 state names,
+failure matrices, command sequences, and amendment-era implementation detail from authority.
+
+The remainder of this record is retained as historical design and implementation context.
 
 ## Context
 

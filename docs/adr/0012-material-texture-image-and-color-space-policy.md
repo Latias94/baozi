@@ -6,7 +6,7 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
 related:
   - docs/adr/0023-material-and-custom-attribute-extension-model.md

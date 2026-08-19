@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-16
-updated: 2026-07-17
+updated: 2026-08-19
 authors:
   - Codex
 decision_type: architecture
@@ -9,7 +9,7 @@ depends_on:
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
   - docs/adr/0016-import-options-presets-and-configuration-precedence.md
   - docs/adr/0021-extension-registry-and-format-descriptor-governance.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0029-format-detection-stable-input-and-failure-contract.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
 related:
@@ -37,9 +37,9 @@ The ownership boundaries are deliberate:
 | --- | --- |
 | ADR 0010 | hostile reference normalization, authorization, object-bound open, resolver semantic/negative-observation identity, immutable snapshot acquisition, and atomic authority-qualified physical snapshot/failure-plus-proof caching |
 | ADR 0016 | common and format option semantics, precedence, typed compilation, and frozen policy inputs |
-| ADR 0020 | downstream import orchestration, lower-cause preservation, and concrete success/failure transport that consumes this graph contract |
+| ADR 0046 | downstream import orchestration, lower-cause preservation, and concrete success/failure transport that consumes this graph contract |
 | ADR 0021 | immutable registry snapshot and sealed dependency-role contracts |
-| ADR 0022 | attempted/consumed/live/committed accounting plus graph/proof count, byte, depth, and work dimensions |
+| ADR 0047 | attempted/consumed/live/committed accounting plus graph/proof count, byte, depth, and work dimensions |
 | ADR 0029 | binding the primary immutable snapshot and format-selection evidence |
 | ADR 0036 | public sanitized resource identity, content digest, provenance, aliases, and redaction |
 | ADR 0039 | selected source Scene projection and retained semantic-object closure inside one source document |
@@ -79,6 +79,28 @@ A successful import publishes one structurally complete `SuccessfulInputManifest
 resource and logical request mediated by that session. The manifest has a complete canonical digest
 and an input-replay status. It does not claim that trusted extension code used no ambient input and is
 not by itself a build, cache, maturity, or output identity.
+
+### Deep Module Interface
+
+The resource graph is one `baozi-import` deep module behind `ParseScope`, not a utility collection
+shared with formats. Its external interface accepts only an owner-issued origin, a frozen
+`DependencyRoleId`, and the hostile authored reference. It returns an authorized immutable snapshot
+or a typed terminal dependency outcome. Requiredness, cache identity, node/edge identity, graph
+mutation, negative-proof handling, canonical ordering, and manifest construction remain inside the
+module.
+
+The interface enforces this order for every logical request:
+
+1. validate the session issuer, origin, and frozen role before graph, cache, ledger, or IO effects;
+2. derive requiredness and admissible outcome classes from the role rather than parser input;
+3. admit graph relation, work, and retained evidence before physical acquisition;
+4. authorize and resolve relative to the declaring origin through ADR 0010;
+5. reuse or create the authority-qualified physical cache entry; and
+6. seal exactly one terminal logical edge outcome before returning to format code.
+
+Formats cannot receive a cache handle, graph builder, node identifier, manifest builder, identity
+hasher, caller-selected base path, or failure-relabeling hook. Embedded slices inside one already
+acquired document remain format-local data and do not become external graph nodes.
 
 ```mermaid
 flowchart LR
@@ -258,7 +280,7 @@ binding:
 - the managed validity rule proving the same outcome against that immutable namespace.
 
 ADR 0010 validates the proof under admitted hard canonical-byte, temporary-memory, construction-work,
-and verification-work caps. All proof work is precharged through ADR 0022 dimensions. Excess,
+and verification-work caps. All proof work is precharged through ADR 0047 dimensions. Excess,
 malformed, stale, wrong-target/class, cross-namespace, unadmitted-scheme, or executable proof values
 terminate the session before cache publication; optionality cannot recover them.
 
@@ -488,7 +510,7 @@ The `role` enum is ADR 0021's exact globally qualified `DependencyRoleId` token.
 proof-scheme, and validity-rule IDs use ADR 0010's registry. ADR 0041 owns the manifest cause-pair
 registry and delegates normative meaning for ADR 0010's exact IO/policy pairs. ADR 0041 itself owns
 the manifest-facing `baozi.budget / acquisition-bytes-exhausted` and
-`baozi.budget / acquisition-work-exhausted` pairs; they may be emitted only from ADR 0022 accounting
+`baozi.budget / acquisition-work-exhausted` pairs; they may be emitted only from ADR 0047 accounting
 facts interpreted by the import session and never grant ADR 0041 a second ledger or budget engine. A
 downstream transport cannot relabel a pair. Every ID uses `canonical-id-v1`. Requirement tokens are
 `required` and `optional`; replay status tokens are `replayable` and `observed-only`.
@@ -626,7 +648,7 @@ Negative:
 | Origin handle becomes a path alias | Critical | Low | private session-bound constructor, no comparison/rendering, and forged/stale/foreign tests |
 | Repeated online cycle checks become an algorithmic attack | High | Medium | declared worst-case bound, precharged traversal work, hard budget, and insertion-order scale fixtures |
 | Optional structural failure makes success request-order dependent | Critical | Medium | every cycle/depth/node/relation/graph/finalization failure is session-terminal |
-| Proof verification allocates or loops before admission | Critical | Medium | ADR 0010 scheme caps plus ADR 0022 byte/work precharge before verification |
+| Proof verification allocates or loops before admission | Critical | Medium | ADR 0010 scheme caps plus ADR 0047 byte/work precharge before verification |
 | Cached absence is mistaken for replay proof | Critical | High | explicit environment-dependent class and immutable proof-or-none frozen with first failure |
 | Private authority partition changes manifest | High | Medium | semantic quotient emits class relation once and excludes physical multiplicity/raw attempts |
 | Same-origin duplicate calls are inconsistently discarded | High | Medium | every admitted call increments class-local multiplicity; only folded equivalent physical origins are de-duplicated |
@@ -701,6 +723,21 @@ Negative:
   Proposed.
 
 ## Amendment History
+
+### 2026-08-19: Freeze the session-owned deep module seam
+
+- Affected: `Decision`, `Deep Module Interface`, ownership references, risks, and acceptance scope.
+- Previous: the ADR required a session graph but left too much interface ordering implicit, allowing
+  an implementation to consult cache or accounting state before validating origin and role.
+- New: one `baozi-import` deep module owns origin/role validation, requiredness, graph admission,
+  authority-qualified cache interaction, terminal edge outcomes, and manifest construction in a
+  fixed fail-closed order behind `ParseScope`.
+- Impact: format-local graphs, cache probes before origin validation, caller-supplied requiredness,
+  and manifest-builder exposure are nonconforming.
+- Review: [Post-U4 authority-reset review](../knowledge/engineering/verification/2026-08-19T152712Z-post-u4-authority-reset-review.md), required by the canonical architecture implementation plan
+  and the `resource-dependency-graph-manifest` nonconforming inventory record.
+- Rationale: U4.5 needs one narrow seam before resource-graph implementation grows across format
+  adapters; the amendment deepens the module without changing the manifest transcript.
 
 ### 2026-07-17: Close replay identity and canonical transcript ambiguity
 

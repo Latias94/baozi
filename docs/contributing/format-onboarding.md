@@ -9,7 +9,7 @@ Use this checklist before adding or promoting a `baozi-format-*` crate.
 - Read [ADR 0014](../adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md).
 - Read [ADR 0018](../adr/0018-parser-tooling-and-format-owned-parser-policy.md) and
   [ADR 0019](../adr/0019-parser-diagnostic-streaming-and-generated-code-contract.md).
-- Read [ADR 0020](../adr/0020-import-lifecycle-and-report-contract.md).
+- Read [ADR 0046](../adr/0046-import-session-lifecycle-and-outcome-ownership.md).
 - Before adding a parser helper, generator, decoder library, or optional backend, complete the
   [Parser Tool Audit Checklist](../architecture/parser-tool-audit-checklist.md).
 - Read [CI Policy](ci.md) before adding parser jobs, fuzz targets, or workflow tooling.

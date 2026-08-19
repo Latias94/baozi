@@ -5,10 +5,10 @@ schema_version = 1
 
 [[contracts]]
 contract_id = "u4-canonical-scene-lifecycle"
-authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
+authority_adr = "docs/adr/0045-canonical-scene-ownership-construction-and-generation.md"
 conformance_status = "partial"
 evidence_subject = "baozi.u4.canonical-scene-lifecycle"
-evidence_revision = 5
+evidence_revision = 6
 implementation_tracers = [
   "crates/baozi-core/Cargo.toml",
   "crates/baozi-core/src/canonical_scene/store/api/integration.rs",
@@ -33,10 +33,10 @@ gate_ids = [
 
 [[contracts]]
 contract_id = "u4-private-producer-consumer-proof"
-authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
+authority_adr = "docs/adr/0045-canonical-scene-ownership-construction-and-generation.md"
 conformance_status = "partial"
 evidence_subject = "baozi.u4.private-producer-consumer-proof"
-evidence_revision = 7
+evidence_revision = 8
 implementation_tracers = [
   "crates/baozi-core/Cargo.toml",
   "crates/baozi-core/src/canonical_scene/store/api/authoring.rs",
@@ -89,10 +89,10 @@ gate_ids = [
 
 [[contracts]]
 contract_id = "import-lifecycle-outcome"
-authority_adr = "docs/adr/0020-import-lifecycle-and-report-contract.md"
+authority_adr = "docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md"
 conformance_status = "partial"
 evidence_subject = "baozi.import.lifecycle-outcome"
-evidence_revision = 4
+evidence_revision = 5
 implementation_tracers = [
   "crates/baozi-core/Cargo.toml",
   "crates/baozi-import/src/format.rs",
@@ -115,10 +115,10 @@ gate_ids = [
 
 [[contracts]]
 contract_id = "resource-ledger-budget-accounting"
-authority_adr = "docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md"
+authority_adr = "docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md"
 conformance_status = "partial"
 evidence_subject = "baozi.resource-ledger.budget-accounting"
-evidence_revision = 2
+evidence_revision = 3
 implementation_tracers = [
   "crates/baozi-operation/src/ledger.rs",
   "crates/baozi-operation/src/concrete_store/activation.rs",
@@ -140,10 +140,10 @@ gate_ids = [
 
 [[contracts]]
 contract_id = "u4-legacy-scene-deletion"
-authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
+authority_adr = "docs/adr/0045-canonical-scene-ownership-construction-and-generation.md"
 conformance_status = "partial"
 evidence_subject = "baozi.u4.legacy-scene-deletion"
-evidence_revision = 1
+evidence_revision = 2
 implementation_tracers = [
   "crates/baozi-core/src/canonical_scene/store/api/scene.rs",
   "crates/baozi-import/src/config.rs",

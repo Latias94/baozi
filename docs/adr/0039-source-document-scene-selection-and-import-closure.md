@@ -6,14 +6,14 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0016-import-options-presets-and-configuration-precedence.md
   - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
   - docs/adr/0036-source-identity-provenance-and-metadata.md
 related:
   - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0027-gltf-backend-ownership-and-replacement-policy.md
 ---
 

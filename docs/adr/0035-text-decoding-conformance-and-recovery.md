@@ -8,7 +8,7 @@ depends_on:
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
   - docs/adr/0016-import-options-presets-and-configuration-precedence.md
   - docs/adr/0021-extension-registry-and-format-descriptor-governance.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
 related:
   - docs/adr/0019-parser-diagnostic-streaming-and-generated-code-contract.md
   - docs/adr/0027-gltf-backend-ownership-and-replacement-policy.md
@@ -118,7 +118,7 @@ the stored source or canonical value merely to compute line numbers.
 
 Raw bytes are charged when consumed. Before allocating decoded storage, the parser reserves a checked
 worst-case or exact output size. Decoded UTF-8 bytes, line-index storage, replacement diagnostics, and
-canonical retained strings are separate live/committed dimensions under ADR 0022.
+canonical retained strings are separate live/committed dimensions under ADR 0047.
 
 The reservation/ledger mechanism is owned by `baozi-operation`; `baozi-import` owns the effective
 limits and import dimension/phase interpretation. The decoder cannot consult the descriptor cap,

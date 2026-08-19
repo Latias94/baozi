@@ -7,7 +7,7 @@ decision_type: architecture
 depends_on:
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
 related:
   - docs/adr/0034-supported-targets-and-portability.md
 promotion_requires:
@@ -21,7 +21,7 @@ promotion_requires:
 This ADR is a proposal. It describes the contract an archive-backed importer should implement, but
 it is not a current Baozi guarantee and must not be used as a normative dependency by accepted ADRs.
 It owns no active archive/container capability, crate, feature, or public API. Until promotion, ADR
-0010 remains authoritative for asset IO, ADR 0014 for parser security, and ADR 0022 for resource
+0010 remains authoritative for asset IO, ADR 0014 for parser security, and ADR 0047 for resource
 accounting; none of them authorizes archive support. Promotion requires a real archive adapter,
 format tracer, malformed tests, fuzz coverage, and dependency-admission evidence.
 

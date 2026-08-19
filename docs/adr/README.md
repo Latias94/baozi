@@ -57,7 +57,7 @@ of relying on ADR number, file date, or merge order.
 | --- | --- | --- |
 | Top-level architecture and crate-family responsibility, including the shared `baozi-operation` foundation | ADR 0001 | Assigns implementation families; detailed semantics remain with their domain ADRs. |
 | Runtime neutrality, host session admission, executor capacity, and subscriber ownership | ADR 0002 | ADR 0033 governs control inside one admitted operation. |
-| Canonical Scene aggregate, construction/draft/proof/edit states, and scene-local identity | ADR 0003 | Geometry, deformation, mutation, and persistent identity are delegated below. |
+| Canonical Scene aggregate, construction/draft/proof/edit states, and scene-local identity | ADR 0045 | Geometry, deformation, mutation, and persistent identity are delegated below. |
 | Parser backend admission, isolation, and replacement | ADR 0004 | Does not own format maturity or facade features. |
 | Test layers, fixture provenance, independent oracles, and external-oracle safety | ADR 0005 | Per-field evidence mechanics belong to ADR 0026. |
 | Public compatibility, stability tiers, breaking changes, lockstep release topology, publication recovery, and versioning | ADR 0006 | Domain ADRs define semantics but cannot create a second compatibility or release policy. |
@@ -71,32 +71,33 @@ of relying on ADR number, file date, or merge order.
 | Parser trust boundaries, panic containment, unsafe code, native FFI, security-sensitive dependency admission, and isolation claims | ADR 0014 | Hostile in-process code is never treated as sandboxed; native filesystem mechanics remain under ADR 0010. |
 | Common/format option envelopes, precedence, codec compilation semantics/scopes, typed compiled store, and ordinary compile failures | ADR 0016 | Registry lifecycle, unwind mapping, and permanent poison belong to ADR 0021; live control remains outside frozen options. |
 | Rust API serialization, test snapshot, and negative prerequisites for any future persistent cache | ADR 0017 | Snapshot encoding and coverage mechanics belong to ADR 0026; this ADR authorizes no persistent-cache key, schema, owner, feature, or implementation. |
-| Format-owned parser tooling and generator selection | ADR 0018 | Parser collections use ADR 0022's `baozi-import` metered-storage owner; backend admission remains under ADR 0004. |
+| Format-owned parser tooling and generator selection | ADR 0018 | Parser collections use ADR 0047's `baozi-import` metered-storage owner; backend admission remains under ADR 0004. |
 | Diagnostic shape, parser input-consumption modes, recovery delivery, and generated-code contract | ADR 0019 | Outcome finalization belongs to the owning operation. |
-| Import lifecycle, `ParseScope`, detection permit, inert format-failure packing, phase evidence, `ImportReport`, and `ImportFailure` | ADR 0020 | Postprocess has a distinct lifecycle and result. |
-| Registry/descriptor/extension lifecycle, declaration identity, declaration `Unverified`/issuer-scoped `SelfAttested` schema and issuer validation, dependency-role contracts, snapshot/unload semantics, callable trust, unwind mapping, shared health latch, and permanent poison | ADR 0021 | Managed `BaoziVerified` maturity evidence belongs exclusively to ADR 0011 and is not stored in the registry; exact detector/parser invocation belongs to ADR 0020; options belong to ADR 0016; future producer/build identity remains non-authoritative under ADR 0043. |
-| Attempted/consumed/live-attribution/committed operation semantics, ledger dimensions, and unique ParseScope-bound metered temporary storage | ADR 0022 | `baozi-operation` provides ledger mechanisms; `baozi-import` owns parser storage wrappers; operations own phase vocabularies; retained physical allocation lifetime belongs to ADR 0044. |
+| Import lifecycle, `ParseScope`, detection permit, inert format-failure packing, phase evidence, `ImportReport`, and `ImportFailure` | ADR 0046 | Postprocess has a distinct lifecycle and result. |
+| Registry/descriptor/extension lifecycle, declaration identity, declaration `Unverified`/issuer-scoped `SelfAttested` schema and issuer validation, dependency-role contracts, snapshot/unload semantics, callable trust, unwind mapping, shared health latch, and permanent poison | ADR 0021 | Managed `BaoziVerified` maturity evidence belongs exclusively to ADR 0011 and is not stored in the registry; exact detector/parser invocation belongs to ADR 0046; options belong to ADR 0016; future producer/build identity remains non-authoritative under ADR 0043. |
+| Attempted/consumed/live-attribution/committed operation semantics, ledger dimensions, and unique ParseScope-bound metered temporary storage | ADR 0047 | `baozi-operation` provides ledger mechanisms; `baozi-import` owns parser storage wrappers; operations own phase vocabularies; retained physical allocation lifetime belongs to ADR 0044. |
 | Material/custom-attribute descriptors and bounded namespaced extensions | ADR 0023 | Canonical typed fields remain owned by their semantic ADRs. |
 | Per-field validation, stable digest, bounded preview, direct tests, and fuzz reachability | ADR 0026 | Broader portfolio/oracle policy remains under ADR 0005. |
 | glTF semantic ownership and private backend replacement boundary | ADR 0027 | General backend admission remains under ADR 0004. |
-| Format detection, shared stable primary input, direct-byte snapshot ownership, fresh session authority isolation, selection, and detection failure evidence | ADR 0029 | Direct bytes grant no dependency authority; general authorization remains under ADR 0010 and import finalization under ADR 0020. |
+| Format detection, shared stable primary input, direct-byte snapshot ownership, fresh session authority isolation, selection, and detection failure evidence | ADR 0029 | Direct bytes grant no dependency authority; general authorization remains under ADR 0010 and import finalization under ADR 0046. |
 | Logical mesh, primitive topology, attribute domains, and their cardinality | ADR 0030 | Deformer semantics belong to ADR 0031. |
 | Skin, influence, morph, animation, and deformer semantics | ADR 0031 | Structural edit/remap behavior belongs to ADR 0032. |
 | `SceneEdit` transactionality, entity/domain remaps, replay publication effects, and derived-data validity | ADR 0032 | Plan compilation/orchestration remains under ADR 0013. |
 | Operation cancellation, deadlines, progress, callback safety, and tracing semantics | ADR 0033 | Hosts still own concurrent-session admission and trace subscribers. |
 | Supported target profiles, portability promises, and promotion/demotion | ADR 0034 | Feature inventory and CI wiring remain under ADR 0007. |
 | Text decoding, source mapping, conformance, and deterministic recovery | ADR 0035 | Format options authorize only format-declared recovery. |
-| Persistent source identity, declaring-origin-relative dependency identity, provenance, lineage, aliases, redaction, and metadata | ADR 0036 | Dense scene-local identity remains under ADR 0003; authorization remains under ADR 0010. |
-| Source-document scene selection, projection closure, cross-scene references, and source-scope evidence semantics | ADR 0039 | Format ADRs own selector identities; ADR 0020 owns sealed report transport; ADR 0036 owns identity/digest/provenance/loss representations. |
-| Camera and light projection/emission semantics, attachment, validation, conversion, and loss | ADR 0040 | ADR 0003 owns aggregate membership; ADR 0008 owns generic math and `SceneSpace`. |
-| Resource dependency graph, public semantic quotient, origin-relative resolution, negative-input replay classification, and canonical successful-manifest transcript | ADR 0041 | ADR 0010 owns authorization and atomic physical failure-plus-proof caching; ADR 0020 owns outcome transport; ADR 0021 owns dependency roles; ADR 0036 owns public identity/digest types; ADR 0039 owns source-document projection. |
-| Retained physical allocation ownership, physical storage accounts, final-owner deallocation, and cross-generation account lineage | ADR 0044 | `baozi-operation` owns the deep retained-allocation protocol; domain crates receive semantic construction capabilities and non-owning projections; ADR 0022 owns operation attribution and logical committed evidence; ADR 0003/0032 own Scene generations and edit semantics. |
+| Persistent source identity, declaring-origin-relative dependency identity, provenance, lineage, aliases, redaction, and metadata | ADR 0036 | Dense scene-local identity remains under ADR 0045; authorization remains under ADR 0010. |
+| Source-document scene selection, projection closure, cross-scene references, and source-scope evidence semantics | ADR 0039 | Format ADRs own selector identities; ADR 0046 owns sealed report transport; ADR 0036 owns identity/digest/provenance/loss representations. |
+| Camera and light projection/emission semantics, attachment, validation, conversion, and loss | ADR 0040 | ADR 0045 owns aggregate membership; ADR 0008 owns generic math and `SceneSpace`. |
+| Resource dependency graph, public semantic quotient, origin-relative resolution, negative-input replay classification, and canonical successful-manifest transcript | ADR 0041 | ADR 0010 owns authorization and atomic physical failure-plus-proof caching; ADR 0046 owns outcome transport; ADR 0021 owns dependency roles; ADR 0036 owns public identity/digest types; ADR 0039 owns source-document projection. |
+| Retained physical allocation ownership, physical storage accounts, final-owner deallocation, and cross-generation account lineage | ADR 0044 | `baozi-operation` owns the deep retained-allocation protocol; domain crates receive semantic construction capabilities and non-owning projections; ADR 0047 owns operation attribution and logical committed evidence; ADR 0045/0032 own Scene generations and edit semantics. |
 | Archive/container support | None while ADR 0037 is Proposed | ADR 0037 owns no crate, feature, capability, or public promise until Accepted promotion. |
 | Export transactions and export loss | None while ADR 0038 is Proposed | ADR 0038 owns no crate, feature, capability, or public promise until Accepted promotion. |
 | Producer attestation, closed-input qualification, and import build identity | None while ADR 0043 is Proposed | ADR 0043 owns no production/default/cache/cooker/release authority until an atomic Accepted promotion satisfies its gates. |
 
-ADRs 0015, 0024, 0025, and 0042 are historical and own no active concern. Their reciprocal
-supersession links point to ADRs 0030/0031, ADR 0006, ADRs 0003/0032, and ADR 0044 respectively.
+ADRs 0003, 0015, 0020, 0022, 0024, 0025, and 0042 are historical and own no active concern. Their
+reciprocal supersession links point to ADR 0045, ADRs 0030/0031, ADR 0046, ADR 0047, ADR 0006,
+ADRs 0045/0032, and ADR 0044 respectively.
 
 ## Requirement-to-authority traceability
 
@@ -109,26 +110,26 @@ override the linked records.
 | Requirement | Canonical authority |
 | --- | --- |
 | R1 - bounded, order-independent detection | [ADR 0029](0029-format-detection-stable-input-and-failure-contract.md) |
-| R2 - bounded parser and graph work | [ADR 0003](0003-core-scene-ir-and-material-model.md), [ADR 0019](0019-parser-diagnostic-streaming-and-generated-code-contract.md), [ADR 0022](0022-per-import-resource-ledger-and-budget-accounting.md), [ADR 0041](0041-resource-dependency-graph-and-successful-input-manifest.md) |
-| R3 - object-bound dependency access | [ADR 0010](0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md), [ADR 0020](0020-import-lifecycle-and-report-contract.md) |
-| R4 - non-bypassable final validation | [ADR 0003](0003-core-scene-ir-and-material-model.md), [ADR 0020](0020-import-lifecycle-and-report-contract.md) |
-| R5 - stable primary and dependency snapshots | [ADR 0010](0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md), [ADR 0020](0020-import-lifecycle-and-report-contract.md), [ADR 0029](0029-format-detection-stable-input-and-failure-contract.md) |
-| R6 - success and failure evidence | [ADR 0020](0020-import-lifecycle-and-report-contract.md), [ADR 0029](0029-format-detection-stable-input-and-failure-contract.md), [ADR 0036](0036-source-identity-provenance-and-metadata.md), [ADR 0039](0039-source-document-scene-selection-and-import-closure.md) |
-| R7 - attempted, consumed, live, committed, peak, and retained physical accounting | [ADR 0022](0022-per-import-resource-ledger-and-budget-accounting.md), [ADR 0044](0044-retained-physical-storage-ownership-and-account-lineage.md) |
+| R2 - bounded parser and graph work | [ADR 0045](0045-canonical-scene-ownership-construction-and-generation.md), [ADR 0019](0019-parser-diagnostic-streaming-and-generated-code-contract.md), [ADR 0047](0047-operation-ledger-evidence-and-resource-accounting.md), [ADR 0041](0041-resource-dependency-graph-and-successful-input-manifest.md) |
+| R3 - object-bound dependency access | [ADR 0010](0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md), [ADR 0046](0046-import-session-lifecycle-and-outcome-ownership.md) |
+| R4 - non-bypassable final validation | [ADR 0045](0045-canonical-scene-ownership-construction-and-generation.md), [ADR 0046](0046-import-session-lifecycle-and-outcome-ownership.md) |
+| R5 - stable primary and dependency snapshots | [ADR 0010](0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md), [ADR 0046](0046-import-session-lifecycle-and-outcome-ownership.md), [ADR 0029](0029-format-detection-stable-input-and-failure-contract.md) |
+| R6 - success and failure evidence | [ADR 0046](0046-import-session-lifecycle-and-outcome-ownership.md), [ADR 0029](0029-format-detection-stable-input-and-failure-contract.md), [ADR 0036](0036-source-identity-provenance-and-metadata.md), [ADR 0039](0039-source-document-scene-selection-and-import-closure.md) |
+| R7 - attempted, consumed, live, committed, peak, and retained physical accounting | [ADR 0047](0047-operation-ledger-evidence-and-resource-accounting.md), [ADR 0044](0044-retained-physical-storage-ownership-and-account-lineage.md) |
 | R8 - configuration, registry health, source selection, and runtime-control ownership | [ADR 0016](0016-import-options-presets-and-configuration-precedence.md), [ADR 0021](0021-extension-registry-and-format-descriptor-governance.md), [ADR 0033](0033-operation-control-and-observability.md), [ADR 0035](0035-text-decoding-conformance-and-recovery.md), [ADR 0039](0039-source-document-scene-selection-and-import-closure.md) |
 | R9 - logical meshes and primitives | [ADR 0030](0030-logical-mesh-primitive-and-attribute-domain.md) |
 | R10 - domain-aware attributes | [ADR 0030](0030-logical-mesh-primitive-and-attribute-domain.md), [ADR 0023](0023-material-and-custom-attribute-extension-model.md) |
 | R11 - variable skin influences and matrix spaces | [ADR 0031](0031-animation-skin-morph-and-deformer-contract.md) |
 | R12 - morph and animation preservation | [ADR 0031](0031-animation-skin-morph-and-deformer-contract.md) |
 | R13 - appearance identities, camera/light semantics, scene space, and numeric-scope boundary | [ADR 0012](0012-material-texture-image-and-color-space-policy.md), [ADR 0008](0008-math-coordinate-units-and-numeric-policy.md), [ADR 0040](0040-camera-and-light-canonical-semantics.md) |
-| R14 - identity, provenance, proof, remap, invalidation, and generation storage lineage | [ADR 0003](0003-core-scene-ir-and-material-model.md), [ADR 0032](0032-postprocess-remap-and-derived-data-contract.md), [ADR 0036](0036-source-identity-provenance-and-metadata.md), [ADR 0044](0044-retained-physical-storage-ownership-and-account-lineage.md) |
+| R14 - identity, provenance, proof, remap, invalidation, and generation storage lineage | [ADR 0045](0045-canonical-scene-ownership-construction-and-generation.md), [ADR 0032](0032-postprocess-remap-and-derived-data-contract.md), [ADR 0036](0036-source-identity-provenance-and-metadata.md), [ADR 0044](0044-retained-physical-storage-ownership-and-account-lineage.md) |
 | R15 - first-party format semantic preservation | [ADR 0004](0004-parser-backend-and-format-coverage-policy.md), [ADR 0011](0011-format-support-tiers-and-compatibility-charter.md), [ADR 0039](0039-source-document-scene-selection-and-import-closure.md), [ADR 0040](0040-camera-and-light-canonical-semantics.md) |
 | R16 - compiled typed postprocess plans and replay | [ADR 0013](0013-post-process-pipeline-semantics-presets-and-mutation-model.md), [ADR 0033](0033-operation-control-and-observability.md) |
 | R17 - postprocess evidence and validated output | [ADR 0013](0013-post-process-pipeline-semantics-presets-and-mutation-model.md), [ADR 0032](0032-postprocess-remap-and-derived-data-contract.md) |
 | R18 - robust bounded triangulation | [ADR 0013](0013-post-process-pipeline-semantics-presets-and-mutation-model.md), [ADR 0032](0032-postprocess-remap-and-derived-data-contract.md) |
 | R19 - architecture authority, compatibility, target governance, and current conformance | [ADR governance policy](../contributing/adr-governance.md), [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0007](0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md), [ADR 0034](0034-supported-targets-and-portability.md) |
 | R20 - executable quality and maturity evidence | [ADR 0005](0005-testing-fuzzing-and-differential-oracle-strategy.md), [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0007](0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md), [ADR 0011](0011-format-support-tiers-and-compatibility-charter.md), [ADR 0026](0026-validation-snapshot-and-fuzz-gates.md), [ADR 0034](0034-supported-targets-and-portability.md), [ADR 0041](0041-resource-dependency-graph-and-successful-input-manifest.md) |
-| R21 - progressive canonical public workflow | [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0020](0020-import-lifecycle-and-report-contract.md) |
+| R21 - progressive canonical public workflow | [ADR 0006](0006-public-api-versioning-and-crate-stability-policy.md), [ADR 0046](0046-import-session-lifecycle-and-outcome-ownership.md) |
 | R22 - complete resource dependency graph and successful input manifest | [ADR 0041](0041-resource-dependency-graph-and-successful-input-manifest.md) |
 
 ## Retired ADR IDs
@@ -149,7 +150,7 @@ an ID above the maximum.
 | --- | --- | --- | --- |
 | [0001](0001-baozi-assimp-compatible-architecture.md) | Rust-Owned Canonical Import Architecture | Accepted | Normative |
 | [0002](0002-runtime-concurrency-observability.md) | Runtime Neutrality, Host Concurrency, and Execution Backends | Accepted | Normative |
-| [0003](0003-core-scene-ir-and-material-model.md) | Canonical Scene IR Ownership and State Model | Accepted | Normative |
+| [0003](0003-core-scene-ir-and-material-model.md) | Canonical Scene IR Ownership and State Model | Superseded | Historical |
 | [0004](0004-parser-backend-and-format-coverage-policy.md) | Parser Backend and Format Coverage Policy | Accepted | Normative |
 | [0005](0005-testing-fuzzing-and-differential-oracle-strategy.md) | Testing, Fuzzing, and Differential Oracle Strategy | Accepted | Normative |
 | [0006](0006-public-api-versioning-and-crate-stability-policy.md) | Public API, Versioning, and Crate Stability Policy | Accepted | Normative |
@@ -166,9 +167,9 @@ an ID above the maximum.
 | [0017](0017-serialization-snapshot-and-cache-boundary.md) | Serialization, Snapshot, and Cache Boundary | Accepted | Normative |
 | [0018](0018-parser-tooling-and-format-owned-parser-policy.md) | Parser Tooling and Format-Owned Parser Policy | Accepted | Normative |
 | [0019](0019-parser-diagnostic-streaming-and-generated-code-contract.md) | Parser Diagnostics, Input Consumption, and Generated Code | Accepted | Normative |
-| [0020](0020-import-lifecycle-and-report-contract.md) | Import Lifecycle, ParseScope, and Outcome Contract | Accepted | Normative |
+| [0020](0020-import-lifecycle-and-report-contract.md) | Import Lifecycle, ParseScope, and Outcome Contract | Superseded | Historical |
 | [0021](0021-extension-registry-and-format-descriptor-governance.md) | Extension Registry, Format Descriptor, and Codec Governance | Accepted | Normative |
-| [0022](0022-per-import-resource-ledger-and-budget-accounting.md) | Per-Import Resource Ledger and Phase Budget Accounting | Accepted | Normative |
+| [0022](0022-per-import-resource-ledger-and-budget-accounting.md) | Per-Import Resource Ledger and Phase Budget Accounting | Superseded | Historical |
 | [0023](0023-material-and-custom-attribute-extension-model.md) | Material and Custom Attribute Extension Model | Accepted | Normative |
 | [0024](0024-public-api-hardening-and-stability-tiers.md) | Public API Hardening and Stability Tiers | Superseded | Historical |
 | [0025](0025-scene-ir-invariants-and-validation-boundaries.md) | Scene IR Invariants and Validation Boundaries | Superseded | Historical |
@@ -190,3 +191,6 @@ an ID above the maximum.
 | [0042](0042-shared-canonical-storage-accounts-and-generation-lineage.md) | Shared Canonical Storage Accounts and Generation Lineage | Superseded | Historical |
 | [0043](0043-producer-attestation-closed-input-qualification-and-import-build-identity.md) | Producer Attestation, Closed-Input Qualification, and Import Build Identity | Proposed | Non-authoritative |
 | [0044](0044-retained-physical-storage-ownership-and-account-lineage.md) | Retained Physical Storage Ownership and Account Lineage | Accepted | Normative |
+| [0045](0045-canonical-scene-ownership-construction-and-generation.md) | Canonical Scene Ownership, Construction, and Generation | Accepted | Normative |
+| [0046](0046-import-session-lifecycle-and-outcome-ownership.md) | Import Session Lifecycle and Outcome Ownership | Accepted | Normative |
+| [0047](0047-operation-ledger-evidence-and-resource-accounting.md) | Operation Ledger Evidence and Resource Accounting | Accepted | Normative |

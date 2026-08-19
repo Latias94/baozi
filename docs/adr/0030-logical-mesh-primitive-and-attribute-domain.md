@@ -5,7 +5,7 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
   - docs/adr/0012-material-texture-image-and-color-space-policy.md
 supersedes:
@@ -41,8 +41,8 @@ the scene generation, owning logical-mesh dense index, and local dense index. Lo
 generation or owner before checking the local range, so equal local indices cannot be confused
 across meshes. They are remapped explicitly when a mesh's local collections change and never serve
 as source identities. Storage may retain private local index components; public access derives the
-generation and logical-mesh owner from the scene under ADR 0003 rather than trusting caller-supplied
-numbers. ADR 0003 owns generation-token publication.
+generation and logical-mesh owner from the scene under ADR 0045 rather than trusting caller-supplied
+numbers. ADR 0045 owns generation-token publication.
 
 ```mermaid
 classDiagram

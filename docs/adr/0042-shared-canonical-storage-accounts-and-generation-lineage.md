@@ -6,10 +6,10 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
 related:
   - docs/adr/0025-scene-ir-invariants-and-validation-boundaries.md
   - docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md

@@ -8,8 +8,8 @@ decision_type: architecture
 depends_on: []
 related:
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0033-operation-control-and-observability.md
 ---
 

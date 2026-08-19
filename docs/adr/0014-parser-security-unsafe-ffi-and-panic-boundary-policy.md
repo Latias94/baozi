@@ -12,7 +12,7 @@ depends_on:
 related:
   - docs/adr/0002-runtime-concurrency-observability.md
   - docs/adr/0018-parser-tooling-and-format-owned-parser-policy.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0033-operation-control-and-observability.md
   - docs/security/parser-threat-model.md
 tracers:

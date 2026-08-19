@@ -6,11 +6,11 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0019-parser-diagnostic-streaming-and-generated-code-contract.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0026-validation-snapshot-and-fuzz-gates.md
   - docs/adr/0029-format-detection-stable-input-and-failure-contract.md
   - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md

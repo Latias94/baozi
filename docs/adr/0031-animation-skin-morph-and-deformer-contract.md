@@ -6,7 +6,7 @@ authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
   - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
 supersedes:
@@ -125,7 +125,7 @@ exists only when conversion is defined; import never resamples keys merely to no
 
 #### Base Pose And Authored Transform
 
-The node base pose is the immutable authored transform preserved by ADR 0003 and ADR 0008. A TRS
+The node base pose is the immutable authored transform preserved by ADR 0045 and ADR 0008. A TRS
 channel overlays only its named component on a TRS-authored node; components without a channel retain
 the materialized base-pose values. Evaluating a clip produces an evaluation result and never mutates
 the stored base pose, provenance, or authored representation.

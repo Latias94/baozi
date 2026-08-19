@@ -1,13 +1,13 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-08-01
+updated: 2026-08-19
 authors:
   - Codex
 decision_type: architecture
 depends_on:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
   - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
 related:
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
@@ -219,7 +219,7 @@ change public `Scene` semantics.
 Parsers must avoid unbounded growth patterns on large assets:
 
 - validate declared counts and checked `count * element_size`/cell totals before reservation
-- use ADR 0022's owning-domain protocol: charge attempted work before an action, obtain live capacity
+- use ADR 0047's owning-domain protocol: charge attempted work before an action, obtain live capacity
   reservations before `try_reserve` or `try_reserve_exact`, and record committed output only at
   successful publication; these evidence classes are never interchangeable
 - propagate allocation failure as a typed resource error; input-derived `Vec::with_capacity` is
@@ -341,17 +341,32 @@ Negative:
 - Huge asset workflows may need specialized future APIs.
 - Baozi must measure allocation cost instead of assuming it is fine.
 
-## Open Questions
+## Resolved Questions
 
-1. Should mesh indices support `u64`?
-   Recommendation: not under this decision. Use `u32` and reject above limits until a measured
-   index-width proposal defines its complete processing cost.
-2. Should `ValidatedScene` implement `Clone`?
-   Recommendation: only if clone cost is explicit and large buffers share storage where appropriate.
-3. Should a borrowed inspection API exist later?
-   Recommendation: defer until stable importers reveal real demand.
+1. Canonical mesh indices and dense Scene-local identities remain `u32`. Inputs above the admitted
+   range fail before materialization. A wider index model requires a new Accepted decision covering
+   every affected payload, algorithm, limit, snapshot, and postprocess cost.
+2. `ValidatedScene` is not `Clone`. Sharing is expressed through explicit derived generations and
+   ADR 0044 physical lineage, not by an implicit owner duplication whose cost and generation
+   semantics are unclear.
+3. Inspection borrows the owning `ValidatedScene` through bounded semantic methods, snapshots, and
+   future domain views. Baozi will not introduce a second borrowed Scene model or expose retained
+   storage layout to satisfy inspection.
 
 ## Amendment History
+
+### 2026-08-19: Resolve ownership questions after the canonical cutover
+
+- Affected: `Open Questions`, renamed to `Resolved Questions`.
+- Previous: index width, `ValidatedScene` cloning, and borrowed inspection remained deferred.
+- New: canonical indices remain `u32`, `ValidatedScene` remains a unique opaque owner, and inspection
+  borrows that owner through bounded semantic interfaces without creating a second Scene model.
+- Impact: future work cannot silently add wide indices, implicit Scene cloning, or a public borrowed
+  storage representation.
+- Review: [Post-U4 authority-reset review](../knowledge/engineering/verification/2026-08-19T152712Z-post-u4-authority-reset-review.md), required by the canonical architecture implementation plan
+  and checked against the current public Scene interface and retained-lineage contract.
+- Rationale: the completed cutover provides enough implementation evidence to close these questions
+  without freezing a private container or table layout.
 
 ### 2026-08-01: Separate draft descriptors from canonical storage ownership
 

@@ -7,11 +7,11 @@ authors:
 decision_type: architecture
 depends_on:
   - docs/adr/0002-runtime-concurrency-observability.md
-  - docs/adr/0022-per-import-resource-ledger-and-budget-accounting.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
 related:
   - docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md
   - docs/adr/0019-parser-diagnostic-streaming-and-generated-code-contract.md
-  - docs/adr/0020-import-lifecycle-and-report-contract.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
   - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
 ---
 
@@ -37,7 +37,7 @@ channels with explicit ownership.
 
 The dependency-leaf `baozi-operation` crate owns `OperationControl`, cancellation/checkpoint traits,
 the owner-neutral `OperationCoordinator`, progress-delivery bounds, and the reservation/ledger
-mechanisms shared with ADR 0022. It owns no import/post-process phase enum, policy, diagnostic shape,
+mechanisms shared with ADR 0047. It owns no import/post-process phase enum, policy, diagnostic shape,
 report, or failure. `baozi-import` and `baozi-postprocess` each own their operation-specific phase
 vocabulary, limits, cause conversion, cleanup, and finalization.
 
@@ -104,8 +104,8 @@ Tests assert work counts, not wall-clock latency.
 
 Detection uses the session-created `DetectionScope` so operation control is observed immediately
 before and after each admitted detector chunk; the coordinator is not charged around one opaque
-detector call. This ADR owns the cancellation/checkpoint guarantee, ADR 0022 owns attempted/consumed
-accounting, and ADR 0020 exclusively owns the permit state machine and terminal latch.
+detector call. This ADR owns the cancellation/checkpoint guarantee, ADR 0047 owns attempted/consumed
+accounting, and ADR 0046 exclusively owns the permit state machine and terminal latch.
 
 Byte-oriented text profile, UTF-8, token-boundary, and owned-string copy loops poll at least once per
 4 KiB quantum unless they declare a stricter record boundary. Collection loops use a separately
@@ -129,7 +129,7 @@ increasing completed work, optional nondecreasing total, and operation-local seq
 Percentages are a presentation concern and are not emitted when total work is unknown.
 
 `ImportProgressPhase` is transient observer vocabulary owned by `baozi-import`. It is distinct from
-ADR 0020's sealed `ImportPhaseEvidence` and ADR 0022's `ImportLedgerPhase`. Progress events may be
+ADR 0046's sealed `ImportPhaseEvidence` and ADR 0047's `ImportLedgerPhase`. Progress events may be
 coalesced or dropped and ledger phases may revisit parser-local work; neither can advance
 `last_completed`. The import session alone advances lifecycle evidence after the mapped atomic
 boundary succeeds. Post-processing defines the analogous three distinct types under its own ADR.
@@ -250,7 +250,7 @@ Negative:
 | --- | --- |
 | Cancellation latency | Each large loop stops within its declared maximum additional work units. |
 | Full-stage cancellation | Cancellation before/during primary read, between/during detectors, during dependency read, parse, Scene construction, validation, and the pre-publication checkpoint returns failure; final progress-event cancellation cannot publish success. |
-| Detector control integration | Every ADR 0020-admitted detector chunk observes operation control before and after work, and cancellation cannot be hidden by a detector outcome. |
+| Detector control integration | Every ADR 0046-admitted detector chunk observes operation control before and after work, and cancellation cannot be hidden by a detector outcome. |
 | Text and collection checkpoints | UTF-8/profile scans, tokenizer passes, and owned-string copies poll independently at no more than 4 KiB byte intervals; collection loops prove their declared item interval. |
 | Monotonic progress | Recorded events are phase-ordered and completed/total values never regress. |
 | Bounded delivery | Huge inputs respect event count/byte caps while ledger work remains exact. |

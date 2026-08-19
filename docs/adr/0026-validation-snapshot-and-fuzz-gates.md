@@ -9,7 +9,7 @@ depends_on:
   - docs/adr/0005-testing-fuzzing-and-differential-oracle-strategy.md
   - docs/adr/0017-serialization-snapshot-and-cache-boundary.md
 related:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0025-scene-ir-invariants-and-validation-boundaries.md
 evidence:
   - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
