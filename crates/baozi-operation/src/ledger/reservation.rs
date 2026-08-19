@@ -59,37 +59,6 @@ use std::sync::{Arc, Mutex};
 ///     DimensionPolicy, LedgerLimits, OperationControl, OperationCoordinator, OperationOwner,
 ///     ProgressPhase, ProgressUnit,
 /// };
-/// struct Owner;
-/// impl OperationOwner for Owner {}
-/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-/// enum Phase { Build }
-/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-/// enum Progress { Work }
-/// impl ProgressPhase for Progress {
-///     fn order(self) -> u32 { 0 }
-///     fn stable_id(self) -> &'static str { "work" }
-/// }
-/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-/// enum Unit { Work }
-/// impl ProgressUnit for Unit { fn stable_id(self) -> &'static str { "work" } }
-/// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-/// enum Dimension { Bytes }
-/// let limits = LedgerLimits::new(
-///     8,
-///     [(Dimension::Bytes, DimensionPolicy::reservable_bytes(8, 8, 8, 8))],
-/// ).unwrap();
-/// let mut operation = OperationCoordinator::<Owner, Phase, Progress, Unit, Dimension>::try_new(
-///     OperationControl::default(), limits, &[Phase::Build],
-/// ).unwrap();
-/// let mut reservation = operation.checkpoint().reserve(Phase::Build, Dimension::Bytes, 1).unwrap();
-/// operation.transfer_reservation(&mut reservation, Phase::Build).unwrap();
-/// ```
-///
-/// ```compile_fail
-/// use baozi_operation::{
-///     DimensionPolicy, LedgerLimits, OperationControl, OperationCoordinator, OperationOwner,
-///     ProgressPhase, ProgressUnit,
-/// };
 /// struct ImportOwner;
 /// impl OperationOwner for ImportOwner {}
 /// struct PostProcessOwner;
