@@ -12,11 +12,11 @@ use baozi_operation::{
     DimensionPolicy, FinalProgress, FreshStoreLineage, LedgerLimits, LedgerLimitsError,
     OperationControl, OperationOwner, ProgressPhase, ProgressUnit, RetainedStoreBatchLimits,
     RetainedStoreFailureTerminalWorkPlan, RetainedStoreFailureTerminalWorkRequirement,
-    RetainedStoreOperation, RetainedStorePublicationAssembly, RetainedStoreSharePlan,
-    RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreDimensionKey,
-    StoreDimensionSemanticId, StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerPlan,
-    StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePlanError, StorePrepareError,
-    StoreRuntimeError, StoreSemanticCatalogId,
+    RetainedStoreOperation, RetainedStoreSharePlan, RetainedStoreStartError,
+    RetainedStoreStartPlan, RetainedStoreWriterPlan, StoreDimensionKey, StoreDimensionSemanticId,
+    StoreKeyDomain, StoreKeyDomainCreateError, StoreLedgerPlan, StoreLedgerPlanError,
+    StorePhaseKey, StorePhaseSemanticId, StorePlanError, StorePrepareError, StoreRuntimeError,
+    StoreSemanticCatalogId,
 };
 use thiserror::Error;
 
@@ -87,18 +87,6 @@ pub(in crate::canonical_scene::store) struct SceneConstructionOwner;
 impl OperationOwner for SceneConstructionOwner {}
 
 type SceneStoreOperation<L = FreshStoreLineage> = RetainedStoreOperation<
-    SceneConstructionOwner,
-    SceneConstructionPhase,
-    SceneConstructionUnit,
-    L,
->;
-type SceneStoreControlCheckpoint<'a> = baozi_operation::RetainedStoreControlCheckpoint<
-    'a,
-    SceneConstructionOwner,
-    SceneConstructionPhase,
-    SceneConstructionUnit,
->;
-type SceneStoreAssembly<L = FreshStoreLineage> = RetainedStorePublicationAssembly<
     SceneConstructionOwner,
     SceneConstructionPhase,
     SceneConstructionUnit,

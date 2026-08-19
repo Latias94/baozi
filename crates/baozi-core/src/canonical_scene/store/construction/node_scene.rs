@@ -10,14 +10,12 @@ use baozi_operation::__retained_store_integration::producer::{
 use baozi_operation::{
     BytesPlan, ControlCause, FinalProgress, OperationOwner, PreparedStoreFallback, ProgressPhase,
     ProgressUnit, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
-    PublishedRichFailureStore, PublishedStoreFallbackOutput, RecordBlock, RecordPlan,
-    RetainedStoreWorkControl, SequencePlan, StoreBuildError, StoreControlledError,
+    PublishedRichFailureStore, PublishedStoreFallbackOutput, RecordBlock, RecordPlan, SequencePlan,
     StoreFailureAssembly, StoreFailureValidation, StoreLedgerEvidence, StorePlanError,
-    StoreRuntimeError, StoreWorkError, StoredScalar, Utf8Plan, ValidatedStoreSuccess,
+    StoreRuntimeError, StoredScalar, Utf8Plan, ValidatedStoreSuccess,
 };
 use thiserror::Error;
 
-use crate::SCENE_VALIDATION_POLL_INTERVAL;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationId};
 
 use super::super::production::{
@@ -32,7 +30,7 @@ use super::super::schema::{
 use super::super::validation::NodeSceneValidationProof;
 use super::{
     ConstructionBrand, SceneConstructionOwner, SceneConstructionPhase, SceneConstructionStartError,
-    SceneConstructionUnit, SceneStoreAssembly, SceneStoreControlCheckpoint, SceneStoreKeys,
+    SceneConstructionUnit,
 };
 
 pub(super) type ConstructionRequestIdentity = CanonicalActivationRequestIdentity;
@@ -219,113 +217,6 @@ impl NodeSceneBuildFaults {
     }
 }
 
-struct NodeSceneWorkMeter {
-    started: bool,
-    work_since_poll: u64,
-}
-
-impl NodeSceneWorkMeter {
-    const fn new() -> Self {
-        Self {
-            started: false,
-            work_since_poll: 0,
-        }
-    }
-
-    fn observe(
-        &mut self,
-        control: &mut RetainedStoreWorkControl<
-            '_,
-            SceneConstructionOwner,
-            SceneConstructionPhase,
-            SceneConstructionUnit,
-        >,
-        amount: u64,
-    ) -> Result<(), StoreWorkError> {
-        if amount == 0 {
-            return Ok(());
-        }
-        if !self.started {
-            self.poll_now(control)?;
-        }
-        let mut remaining = amount;
-        while remaining != 0 {
-            let until_poll = SCENE_VALIDATION_POLL_INTERVAL - self.work_since_poll;
-            let chunk = remaining.min(until_poll);
-            control.charge_observed(chunk)?;
-            self.work_since_poll += chunk;
-            remaining -= chunk;
-            if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
-                self.poll_now(control)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(
-        &mut self,
-        control: &mut RetainedStoreWorkControl<
-            '_,
-            SceneConstructionOwner,
-            SceneConstructionPhase,
-            SceneConstructionUnit,
-        >,
-    ) -> Result<(), StoreWorkError> {
-        self.poll_now(control)
-    }
-
-    fn observe_checkpoint(
-        &mut self,
-        control: &mut SceneStoreControlCheckpoint<'_>,
-        keys: SceneStoreKeys,
-        amount: u64,
-    ) -> Result<(), StoreRuntimeError> {
-        if amount == 0 {
-            return Ok(());
-        }
-        if !self.started {
-            self.poll_checkpoint_now(control)?;
-        }
-        let mut remaining = amount;
-        while remaining != 0 {
-            let until_poll = SCENE_VALIDATION_POLL_INTERVAL - self.work_since_poll;
-            let chunk = remaining.min(until_poll);
-            control.charge_observed(keys.dimension, chunk)?;
-            self.work_since_poll += chunk;
-            remaining -= chunk;
-            if self.work_since_poll == SCENE_VALIDATION_POLL_INTERVAL {
-                self.poll_checkpoint_now(control)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn poll_now(
-        &mut self,
-        control: &mut RetainedStoreWorkControl<
-            '_,
-            SceneConstructionOwner,
-            SceneConstructionPhase,
-            SceneConstructionUnit,
-        >,
-    ) -> Result<(), StoreWorkError> {
-        control.poll()?;
-        self.started = true;
-        self.work_since_poll = 0;
-        Ok(())
-    }
-
-    fn poll_checkpoint_now(
-        &mut self,
-        control: &mut SceneStoreControlCheckpoint<'_>,
-    ) -> Result<(), StoreRuntimeError> {
-        control.poll()?;
-        self.started = true;
-        self.work_since_poll = 0;
-        Ok(())
-    }
-}
-
 fn process_slice_in_chunks<T, E>(
     values: &[T],
     chunk_size: usize,
@@ -368,56 +259,6 @@ fn process_str_in_chunks<E>(
         start = end;
     }
     Ok(())
-}
-
-fn process_slice_in_work_chunks<T>(
-    values: &[T],
-    control: &mut RetainedStoreWorkControl<
-        '_,
-        SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
-    >,
-    work: &mut NodeSceneWorkMeter,
-    failure: StoreBuildError,
-    mut process: impl FnMut(&[T]) -> Result<(), StoreBuildError>,
-) -> Result<(), StoreControlledError> {
-    let chunk_size = usize::try_from(SCENE_VALIDATION_POLL_INTERVAL).map_err(|_| failure)?;
-    process_slice_in_chunks(
-        values,
-        chunk_size,
-        || StoreControlledError::from(failure),
-        |count| {
-            work.observe(control, u64::try_from(count).map_err(|_| failure)?)?;
-            Ok(())
-        },
-        |chunk| process(chunk).map_err(Into::into),
-    )
-}
-
-fn process_str_in_work_chunks(
-    value: &str,
-    control: &mut RetainedStoreWorkControl<
-        '_,
-        SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
-    >,
-    work: &mut NodeSceneWorkMeter,
-    failure: StoreBuildError,
-    mut process: impl FnMut(&str) -> Result<(), StoreBuildError>,
-) -> Result<(), StoreControlledError> {
-    let chunk_size = usize::try_from(SCENE_VALIDATION_POLL_INTERVAL).map_err(|_| failure)?;
-    process_str_in_chunks(
-        value,
-        chunk_size,
-        || StoreControlledError::from(failure),
-        |count| {
-            work.observe(control, u64::try_from(count).map_err(|_| failure)?)?;
-            Ok(())
-        },
-        |chunk| process(chunk).map_err(Into::into),
-    )
 }
 
 type ValidatedNodeStoreSuccess = ValidatedStoreSuccess<
