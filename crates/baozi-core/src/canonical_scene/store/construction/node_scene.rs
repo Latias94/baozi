@@ -11,10 +11,10 @@ use baozi_operation::__retained_store_integration::producer::{
     mint_canonical_activation_request,
 };
 use baozi_operation::{
-    BytesPlan, ControlCause, FinalProgress, OperationOwner, ProgressPhase, ProgressUnit,
-    PublishedCanonicalStore, PublishedOutcomeEvidenceStore, PublishedRichFailureStore,
-    PublishedStoreFallbackOutput, RecordBlock, RecordPlan, SequencePlan, StoreLedgerEvidence,
-    StorePlanError, StoreRuntimeError, StoredScalar, Utf8Plan,
+    BytesPlan, FinalProgress, OperationOwner, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
+    PublishedOutcomeEvidenceStore, PublishedRichFailureStore, PublishedStoreFallbackOutput,
+    RecordBlock, RecordPlan, SequencePlan, StoreLedgerEvidence, StorePlanError, StoreRuntimeError,
+    StoredScalar, Utf8Plan,
 };
 use thiserror::Error;
 
@@ -414,35 +414,6 @@ pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild<
         // Keep the prepared physical publication last so a future rejection payload destructor
         // cannot unwind after its containment owner has already been released.
         prepared: PreparedNodeSceneFailure,
-    },
-}
-
-/// Import-specific activation result which defers terminal evidence freeze until parser-owned
-/// reservations have been released by the session.
-#[must_use = "an import Scene draft build must be installed in its session"]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "the deferred failure owner stays inline so parser unwind cannot lose containment"
-)]
-pub(in crate::canonical_scene::store) enum DeferredNodeSceneDraftBuild<
-    O,
-    PP,
-    U,
-    L = FreshStoreLineage,
-> where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    Draft {
-        draft: NodeSceneDraft,
-        owner: PendingNodeSceneDraft<O, PP, U>,
-    },
-    Failure {
-        authoring_rejected: bool,
-        draft_built: bool,
-        control_cause: Option<ControlCause>,
-        owner: PendingNodeSceneFailure<O, PP, U, L>,
     },
 }
 

@@ -26,15 +26,16 @@ use crate::identity::{ReservedSceneGeneration, SceneGenerationError};
 use super::super::{
     GENERATION_EXHAUSTED_CODE, SceneConstructionError, burn_generation_reservation,
 };
+#[cfg(test)]
+use super::NodeSceneDraftBuild;
 use super::materialization::{
     NodeSceneActivationOutput, NodeSceneEvidenceRecipe, NodeSceneLaneOutput,
     NodeSceneLaneRejection, NodeSceneLaneValidationProof, write_node_scene_evidence_row,
 };
 use super::{
-    DeferredNodeSceneDraftBuild, NODE_SCENE_BUILD_INVARIANT_CODE,
-    NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneCanonicalJointCommit,
-    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
-    NodeSceneDraftBuild, NodeSceneFallback, NodeSceneRichFailure, NodeSceneSuccessParts,
+    NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
+    NodeSceneCanonicalJointCommit, NodeSceneConstructionRejection, NodeSceneConstructionTerminal,
+    NodeSceneDraft, NodeSceneFallback, NodeSceneRichFailure, NodeSceneSuccessParts,
     NodeSceneSuccessReport, PendingNodeSceneDraft, PendingNodeSceneFailure,
     PreparedNodeSceneConstruction, PreparedNodeSceneFailure, PreparedNodeSceneFallback,
     PreparedNodeSceneRichFailure, PreparedNodeSceneSuccess, SceneEvidenceCounts,
@@ -619,28 +620,6 @@ where
             }
         };
         Ok((prepared, authoring_rejection, control_cause))
-    }
-}
-
-impl<O, PP, U, L> DeferredNodeSceneDraftBuild<O, PP, U, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    pub(in crate::canonical_scene::store) fn prepare_immediately(
-        self,
-    ) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError> {
-        match self {
-            Self::Draft { draft, owner } => Ok(NodeSceneDraftBuild::Draft { draft, owner }),
-            Self::Failure { owner, .. } => {
-                let (prepared, authoring_rejection, _control_cause) = owner.prepare()?;
-                Ok(NodeSceneDraftBuild::Failure {
-                    authoring_rejection,
-                    prepared,
-                })
-            }
-        }
     }
 }
 

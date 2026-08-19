@@ -81,8 +81,6 @@ use super::geometry::{
     retain_geometry,
 };
 use super::profile::{ProfileMaterializationPlans, retain_profile};
-#[cfg(test)]
-use super::publication::NodeActivationFailureCause;
 use super::scratch::{
     NodeSceneCentralValidationPlan, NodeSceneValidationScratchPlan,
     ScopedNodeSceneValidationScratchOwner,
@@ -90,15 +88,12 @@ use super::scratch::{
 mod spatial;
 #[cfg(test)]
 use super::NodeSceneBuildFaults;
-#[cfg(test)]
-use super::{
-    DeferredNodeSceneDraftBuild, NodeSceneDraftBuild, PendingNodeSceneDraft,
-    PendingNodeSceneFailure,
-};
 use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneConstructionRejection, NodeSceneDraft,
     SceneEvidenceCounts,
 };
+#[cfg(test)]
+use super::{NodeSceneDraftBuild, PendingNodeSceneDraft, PendingNodeSceneFailure};
 pub(in crate::canonical_scene::store) use spatial::RetainedSpatialRefs;
 use spatial::{SpatialMaterializationPlans, retain_spatial};
 
@@ -468,11 +463,12 @@ impl<'input> NodeSceneActivationRequest<'input> {
         PP: ProgressPhase,
         U: ProgressUnit,
     {
-        activate_node_scene_scoped(
+        drive_node_scene_test_activation(
             owner,
             self.into_transaction(),
             validation_progress,
             final_progress,
+            NodeSceneBuildFaults::none(),
         )
     }
 }
@@ -1577,33 +1573,6 @@ where
     lane.complete(directory.into_store(), map_output(output))
 }
 
-/// Runs one core execution payload with the caller's already policy-bound scoped outcome owner.
-///
-/// The interface accepts no raw operation, store key, account, ledger, or proof capability. Its
-/// generic vocabulary is preserved through rejection, central validation, and pending joint
-/// publication so the caller's sole session ledger remains the only ledger involved.
-#[cfg(test)]
-fn activate_node_scene_scoped<'input, O, PP, U, L>(
-    owner: RetainedStoreSessionOutcomeOwner<O, PP, U, L>,
-    transaction: NodeSceneActivationTransaction<'input>,
-    validation_progress: CanonicalValidationProgress<PP, U>,
-    final_progress: FinalProgress<PP, U>,
-) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    drive_node_scene_activation_deferred(
-        owner,
-        transaction,
-        validation_progress,
-        final_progress,
-        NodeSceneBuildFaults::none(),
-    )?
-    .prepare_immediately()
-}
-
 #[cfg(test)]
 pub(super) fn activate_node_scene_with_faults_for_test<'input, O, PP, U>(
     request: NodeSceneActivationRequest<'input>,
@@ -1617,24 +1586,23 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    drive_node_scene_activation_deferred(
+    drive_node_scene_test_activation(
         owner,
         request.into_transaction(),
         validation_progress,
         final_progress,
         faults,
-    )?
-    .prepare_immediately()
+    )
 }
 
 #[cfg(test)]
-fn drive_node_scene_activation_deferred<'input, O, PP, U, L>(
+fn drive_node_scene_test_activation<'input, O, PP, U, L>(
     owner: RetainedStoreSessionOutcomeOwner<O, PP, U, L>,
     mut transaction: NodeSceneActivationTransaction<'input>,
     validation_progress: CanonicalValidationProgress<PP, U>,
     final_progress: FinalProgress<PP, U>,
     faults: NodeSceneBuildFaults,
-) -> Result<DeferredNodeSceneDraftBuild<O, PP, U, L>, SceneConstructionError>
+) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -1698,42 +1666,29 @@ where
     let activated = match outcome {
         CanonicalActivationOutcome::Activated(activated) => activated,
         CanonicalActivationOutcome::Rejected(rejected) => {
-            let authoring_rejected = rejected.cause().is_authoring_rejection();
-            let control_cause = rejected.cause().control_cause().cloned();
-            return Ok(DeferredNodeSceneDraftBuild::Failure {
-                authoring_rejected,
-                draft_built: false,
-                control_cause,
-                owner: PendingNodeSceneFailure::ActivationRejected {
+            return prepare_node_scene_test_failure::<O, PP, U, L>(
+                PendingNodeSceneFailure::ActivationRejected {
                     owner: rejected,
                     evidence_plan: failure_evidence.record_plan(),
                     evidence_counts: failure_evidence.counts(),
                     final_progress,
                 },
-            });
+            );
         }
         CanonicalActivationOutcome::NeverActivated(never_activated) => {
-            let authoring_rejected = never_activated.cause().is_authoring_rejection();
-            let control_cause = never_activated.cause().control_cause().cloned();
-            return Ok(DeferredNodeSceneDraftBuild::Failure {
-                authoring_rejected,
-                draft_built: false,
-                control_cause,
-                owner: PendingNodeSceneFailure::NeverActivated {
+            return prepare_node_scene_test_failure::<O, PP, U, L>(
+                PendingNodeSceneFailure::NeverActivated {
                     owner: never_activated,
                     evidence_plan: failure_evidence.record_plan(),
                     evidence_counts: failure_evidence.counts(),
                     final_progress,
                 },
-            });
+            );
         }
         CanonicalActivationOutcome::Fallback(fallback) => {
-            return Ok(DeferredNodeSceneDraftBuild::Failure {
-                authoring_rejected: false,
-                draft_built: false,
-                control_cause: None,
-                owner: PendingNodeSceneFailure::PreparedFallback(fallback),
-            });
+            return prepare_node_scene_test_failure::<O, PP, U, L>(
+                PendingNodeSceneFailure::PreparedFallback(fallback),
+            );
         }
     };
 
@@ -1759,7 +1714,7 @@ where
     match outcome {
         CanonicalCentralValidationOutcome::Candidate(candidate) => {
             let draft = candidate.output().node_scene_draft();
-            Ok(DeferredNodeSceneDraftBuild::Draft {
+            Ok(NodeSceneDraftBuild::Draft {
                 draft,
                 owner: PendingNodeSceneDraft {
                     candidate,
@@ -1768,40 +1723,45 @@ where
             })
         }
         CanonicalCentralValidationOutcome::Rejected(rejected) => {
-            let authoring_rejected = rejected.cause().is_authoring_rejection();
-            Ok(DeferredNodeSceneDraftBuild::Failure {
-                authoring_rejected,
-                draft_built: true,
-                control_cause: None,
-                owner: PendingNodeSceneFailure::CentralRejected {
+            prepare_node_scene_test_failure::<O, PP, U, L>(
+                PendingNodeSceneFailure::CentralRejected {
                     owner: rejected,
                     evidence_counts: central_counts,
                     final_progress,
                 },
-            })
+            )
         }
         CanonicalCentralValidationOutcome::Interrupted(interrupted) => {
-            let control_cause = interrupted.cause().control_cause().cloned();
-            Ok(DeferredNodeSceneDraftBuild::Failure {
-                authoring_rejected: false,
-                draft_built: true,
-                control_cause,
-                owner: PendingNodeSceneFailure::CentralInterrupted {
+            prepare_node_scene_test_failure::<O, PP, U, L>(
+                PendingNodeSceneFailure::CentralInterrupted {
                     owner: interrupted,
                     evidence_counts: central_counts,
                     final_progress,
                 },
-            })
+            )
         }
         CanonicalCentralValidationOutcome::Fallback(fallback) => {
-            Ok(DeferredNodeSceneDraftBuild::Failure {
-                authoring_rejected: false,
-                draft_built: true,
-                control_cause: None,
-                owner: PendingNodeSceneFailure::PreparedFallback(fallback),
-            })
+            prepare_node_scene_test_failure::<O, PP, U, L>(
+                PendingNodeSceneFailure::PreparedFallback(fallback),
+            )
         }
     }
+}
+
+#[cfg(test)]
+fn prepare_node_scene_test_failure<O, PP, U, L>(
+    pending: PendingNodeSceneFailure<O, PP, U, L>,
+) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let (prepared, authoring_rejection, _control_cause) = pending.prepare()?;
+    Ok(NodeSceneDraftBuild::Failure {
+        authoring_rejection,
+        prepared,
+    })
 }
 
 pub(super) fn write_node_scene_evidence_row(
