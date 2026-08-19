@@ -1,5 +1,5 @@
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalCandidateStoreSession, CanonicalJointCommit, CentrallyRejectedCanonicalStoreSession,
+    CanonicalCandidateStoreSession, CentrallyRejectedCanonicalStoreSession,
     InterruptedCanonicalStoreSession, NeverActivatedStoreSession, RejectedCanonicalStoreSession,
     VerifiedMinimalFallback,
 };
@@ -299,22 +299,6 @@ type CentrallyRejectedNodeScene<O, PP, U> = CentrallyRejectedCanonicalStoreSessi
 >;
 type InterruptedNodeScene<O, PP, U> =
     InterruptedCanonicalStoreSession<O, PP, U, RecordBlock, NodeSceneOutcomeEvidenceSchema>;
-type NodeSceneCanonicalJointCommit<
-    'joint,
-    O = SceneConstructionOwner,
-    PP = SceneConstructionPhase,
-    U = SceneConstructionUnit,
-> = CanonicalJointCommit<
-    'joint,
-    O,
-    PP,
-    U,
-    RecordBlock,
-    SceneDirectorySchema,
-    RecordBlock,
-    NodeSceneOutcomeEvidenceSchema,
->;
-
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection<
     E = OperationAuthoringControlError,

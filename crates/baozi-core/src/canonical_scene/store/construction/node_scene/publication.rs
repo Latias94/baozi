@@ -29,24 +29,17 @@ use super::super::{
 #[cfg(test)]
 use super::NodeSceneDraftBuild;
 use super::materialization::{
-    NodeSceneActivationOutput, NodeSceneEvidenceRecipe, NodeSceneLaneOutput,
-    NodeSceneLaneRejection, NodeSceneLaneValidationProof, write_node_scene_evidence_row,
+    NodeSceneEvidenceRecipe, NodeSceneLaneOutput, NodeSceneLaneRejection,
+    NodeSceneLaneValidationProof, write_node_scene_evidence_row,
 };
 use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
-    NodeSceneCanonicalJointCommit, NodeSceneConstructionRejection, NodeSceneConstructionTerminal,
-    NodeSceneDraft, NodeSceneFallback, NodeSceneRichFailure, NodeSceneSuccessParts,
-    NodeSceneSuccessReport, PendingNodeSceneDraft, PendingNodeSceneFailure,
-    PreparedNodeSceneConstruction, PreparedNodeSceneFailure, PreparedNodeSceneFallback,
-    PreparedNodeSceneRichFailure, PreparedNodeSceneSuccess, SceneEvidenceCounts,
-    ValidatedNodeScene,
+    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
+    NodeSceneFallback, NodeSceneRichFailure, NodeSceneSuccessParts, NodeSceneSuccessReport,
+    PendingNodeSceneDraft, PendingNodeSceneFailure, PreparedNodeSceneConstruction,
+    PreparedNodeSceneFailure, PreparedNodeSceneFallback, PreparedNodeSceneRichFailure,
+    PreparedNodeSceneSuccess, SceneEvidenceCounts, ValidatedNodeScene,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NodeSceneGenerationRejection {
-    MissingDraft,
-    DraftMismatch,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeSceneLaneGenerationRejectionKind {
@@ -218,6 +211,33 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    consume_node_scene_freeze_permit_with_generation_source(
+        permit,
+        parser_draft,
+        crate::identity::SceneGenerationId::reserve,
+        reject,
+        prepare,
+    )
+}
+
+#[allow(clippy::type_complexity)]
+fn consume_node_scene_freeze_permit_with_generation_source<O, PP, U, R, ReserveGeneration>(
+    permit: NodeSceneLaneFreezePermit<O, PP, U>,
+    parser_draft: Option<NodeSceneDraft>,
+    reserve_generation: ReserveGeneration,
+    reject: impl FnOnce(NodeSceneFrozenGenerationRejection<O, PP, U>) -> R,
+    prepare: impl for<'joint> FnOnce(
+        NodeSceneHandoffToken,
+        NodeSceneLaneJointCommit<'joint, O, PP, U>,
+        CanonicalJointSeal<'joint>,
+    ) -> R,
+) -> Result<R, StoreActivationContainment>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    ReserveGeneration: FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
+{
     let expected_draft = permit.output().inner().draft;
     let pairing_rejection = match parser_draft {
         None => Some(NodeSceneLaneGenerationRejection::missing_draft()),
@@ -231,7 +251,7 @@ where
         return permit.reject_generation(cause, stable_code).map(reject);
     }
 
-    let generation = match crate::identity::SceneGenerationId::reserve() {
+    let generation = match reserve_generation() {
         Ok(generation) => generation,
         Err(SceneGenerationError::Exhausted) => {
             let cause = NodeSceneLaneGenerationRejection::exhausted();
@@ -282,58 +302,36 @@ macro_rules! prepare_frozen_node_failure {
     }};
 }
 
-/// Core's complete success contribution while the operation joint owner remains scoped.
-///
-/// Rust drops fields in declaration order. The generation, proof, descriptor, and seal therefore
-/// disappear before the operation-owned joint contribution observes any unwind.
-#[must_use = "the scoped node Scene joint commit must be prepared or deliberately dropped"]
-struct ScopedNodeSceneJointCommit<'joint, O, PP, U>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    generation: ReservedSceneGeneration,
-    proof: super::NodeSceneValidationProof,
-    output: NodeSceneActivationOutput,
+fn prepare_node_scene_test_joint<'joint, O, PP, U>(
+    handoff: NodeSceneHandoffToken,
+    joint: NodeSceneLaneJointCommit<'joint, O, PP, U>,
     seal: CanonicalJointSeal<'joint>,
-    joint: NodeSceneCanonicalJointCommit<'joint, O, PP, U>,
-}
-
-impl<O, PP, U> ScopedNodeSceneJointCommit<'_, O, PP, U>
+) -> Result<PreparedNodeSceneConstruction, SceneConstructionError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    fn prepare(self) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        let Self {
-            generation,
-            proof,
-            output: _,
-            seal,
-            joint,
-        } = self;
-        match joint.prepare(seal)? {
-            PreparedStoreSuccessOutcome::Success(store) => Ok(
-                PreparedNodeSceneConstruction::Success(PreparedNodeSceneSuccess {
-                    generation,
-                    proof,
-                    store,
-                }),
-            ),
-            PreparedStoreSuccessOutcome::RichFailure(store) => {
-                burn_generation_reservation(generation);
-                Ok(PreparedNodeSceneConstruction::RichFailure(
-                    PreparedNodeSceneRichFailure { store },
-                ))
-            }
-            PreparedStoreSuccessOutcome::MinimalFallback(store) => {
-                burn_generation_reservation(generation);
-                Ok(PreparedNodeSceneConstruction::MinimalFallback(
-                    PreparedNodeSceneFallback { store },
-                ))
-            }
+    let NodeSceneHandoffToken { generation, proof } = handoff;
+    match joint.prepare(seal)? {
+        PreparedStoreSuccessOutcome::Success(store) => Ok(PreparedNodeSceneConstruction::Success(
+            PreparedNodeSceneSuccess {
+                generation,
+                proof,
+                store,
+            },
+        )),
+        PreparedStoreSuccessOutcome::RichFailure(store) => {
+            burn_generation_reservation(generation);
+            Ok(PreparedNodeSceneConstruction::RichFailure(
+                PreparedNodeSceneRichFailure { store },
+            ))
+        }
+        PreparedStoreSuccessOutcome::MinimalFallback(store) => {
+            burn_generation_reservation(generation);
+            Ok(PreparedNodeSceneConstruction::MinimalFallback(
+                PreparedNodeSceneFallback { store },
+            ))
         }
     }
 }
@@ -394,44 +392,16 @@ where
     let evidence_counts = output.evidence_counts;
     match candidate.try_issue_freeze_permit(final_progress)? {
         CanonicalFreezePermitIssue::Ready(permit) => {
-            let pairing_rejection = match parser_draft {
-                None => Some(NodeSceneGenerationRejection::MissingDraft),
-                Some(draft) if !node_scene_draft_matches(draft, output.draft) => {
-                    Some(NodeSceneGenerationRejection::DraftMismatch)
-                }
-                Some(_) => None,
-            };
-            if let Some(cause) = pairing_rejection {
-                let rejected = permit.reject_generation(cause, NODE_SCENE_BUILD_INVARIANT_CODE)?;
-                return prepare_frozen_node_failure!(rejected, evidence_counts)
-                    .map(|prepared| (prepared, None));
-            }
-
             let reserve_generation = reserve_generation
                 .expect("a matching parser draft retains the generation admission callback");
-            let generation = match reserve_generation() {
-                Ok(generation) => generation,
-                Err(SceneGenerationError::Exhausted) => {
-                    let rejected = permit.reject_generation(
-                        SceneGenerationError::Exhausted,
-                        GENERATION_EXHAUSTED_CODE,
-                    )?;
-                    return prepare_frozen_node_failure!(rejected, evidence_counts)
-                        .map(|prepared| (prepared, None));
-                }
-            };
-            permit
-                .bind_joint_commit(|output, proof, joint, seal| {
-                    ScopedNodeSceneJointCommit {
-                        generation,
-                        proof: proof.into_inner(),
-                        output: output.inner(),
-                        seal,
-                        joint,
-                    }
-                    .prepare()
-                })
-                .map(|prepared| (prepared, None))
+            consume_node_scene_freeze_permit_with_generation_source(
+                permit,
+                parser_draft,
+                reserve_generation,
+                |rejected| prepare_frozen_node_failure!(rejected, evidence_counts),
+                prepare_node_scene_test_joint,
+            )?
+            .map(|prepared| (prepared, None))
         }
         CanonicalFreezePermitIssue::Interrupted(interrupted) => {
             let control_cause = interrupted.cause().control_cause().cloned();

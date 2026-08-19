@@ -16,10 +16,10 @@ use super::super::super::{
     GENERATION_EXHAUSTED_CODE, SceneConstructionError, SceneConstructionOwner,
     SceneConstructionPhase, SceneConstructionUnit, burn_generation_reservation,
 };
-use super::super::publication::validate_node_scene_failure_evidence;
+use super::super::publication::{NodeSceneLaneJointCommit, validate_node_scene_failure_evidence};
 use super::super::{
-    ActivatedNodeSceneCandidate, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneCanonicalJointCommit,
-    NodeSceneFallback, NodeSceneRichFailure, PendingNodeSceneFailure, PreparedNodeSceneFailure,
+    ActivatedNodeSceneCandidate, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneFallback,
+    NodeSceneRichFailure, PendingNodeSceneFailure, PreparedNodeSceneFailure,
     PreparedNodeSceneFallback, PreparedNodeSceneRichFailure, ValidatedNodeScene,
 };
 use super::report::{CanonicalInvalidations, CanonicalRemapSet};
@@ -124,7 +124,12 @@ struct ScopedNodeSceneEditJointCommit<'joint> {
     invalidations: CanonicalInvalidations,
     remaps: CanonicalRemapSet,
     seal: CanonicalJointSeal<'joint>,
-    joint: NodeSceneCanonicalJointCommit<'joint>,
+    joint: NodeSceneLaneJointCommit<
+        'joint,
+        SceneConstructionOwner,
+        SceneConstructionPhase,
+        SceneConstructionUnit,
+    >,
 }
 
 impl ScopedNodeSceneEditJointCommit<'_> {
