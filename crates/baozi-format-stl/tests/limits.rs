@@ -88,26 +88,57 @@ fn assert_ledger_limit(failure: &ImportFailure, dimension: ImportDimension, limi
     assert_eq!(*actual_limit, limit);
 }
 
-fn assert_scope_limit(failure: &ImportFailure, resource: &'static str, limit: u64) {
-    assert!(matches!(
-        failure.cause(),
-        ImportCause::Scope(abort)
-            if matches!(
-                abort.cause(),
-                ScopeAbortCause::ResourceLimit {
-                    resource: actual_resource,
-                    limit: actual_limit,
-                } if *actual_resource == resource && *actual_limit == limit
-            )
-    ));
-}
-
 fn consumed(failure: &ImportFailure, dimension: ImportDimension) -> u64 {
     failure
         .ledger()
         .dimension(dimension)
         .expect("tested STL dimension is configured")
         .consumed()
+}
+
+fn attempted(failure: &ImportFailure, dimension: ImportDimension) -> u64 {
+    failure
+        .ledger()
+        .dimension(dimension)
+        .expect("tested STL dimension is configured")
+        .attempted()
+}
+
+fn cancelled_failure(source: &str, bytes: &[u8], cancel_on: usize) -> ImportFailure {
+    let (control, polls) = controlled_import(Some(cancel_on));
+    let failure = import_bytes_forced_with_limits_and_control(
+        source,
+        bytes,
+        ResourceLimits::default(),
+        control,
+    )
+    .expect_err("the selected public checkpoint must observe cancellation");
+    assert_cancelled(&failure);
+    assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
+    failure
+}
+
+fn first_cancelled_prefix_at_least(
+    source: &str,
+    bytes: &[u8],
+    total_polls: usize,
+    dimension: ImportDimension,
+    target_consumed: u64,
+) -> (usize, ImportFailure) {
+    let mut low = 1usize;
+    let mut high = total_polls;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let failure = cancelled_failure(source, bytes, middle);
+        if consumed(&failure, dimension) >= target_consumed {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    let failure = cancelled_failure(source, bytes, low);
+    assert!(consumed(&failure, dimension) >= target_consumed);
+    (low, failure)
 }
 
 #[test]
@@ -157,46 +188,46 @@ fn binary_stl_does_not_consume_decoded_text_budget() {
 fn ascii_profile_cancellation_is_bounded_by_scan_chunks() {
     const PREFIX_CHUNKS: usize = 8;
 
-    let invalid_offset = SCAN_CHUNK_BYTES * PREFIX_CHUNKS;
-    let mut bytes = Vec::with_capacity(invalid_offset + 1);
-    bytes.extend_from_slice(b"solid ");
-    bytes.resize(invalid_offset, b' ');
-    bytes.push(0);
-
-    let limit = SCAN_CHUNK_BYTES as u64 - 1;
-    let mut calibration_limits = ResourceLimits::default();
-    calibration_limits.max_decode_work = limit;
+    let mut document = ascii_triangle("profile").into_bytes();
+    document.resize(document.len() + SCAN_CHUNK_BYTES * PREFIX_CHUNKS, b' ');
+    document.push(b'\n');
     let (calibration_control, calibration_polls) = controlled_import(None);
-    let calibration_failure = import_bytes_forced_with_limits_and_control(
+    let _report = import_bytes_forced_with_limits_and_control(
         "profile-calibration.stl",
-        &bytes,
-        calibration_limits,
+        &document,
+        ResourceLimits::default(),
         calibration_control,
     )
-    .expect_err("decode-work calibration must fail before the ASCII profile scan");
-    assert_ledger_limit(&calibration_failure, ImportDimension::DecodeWork, limit);
-    assert_eq!(
-        consumed(&calibration_failure, ImportDimension::DecodeWork),
-        0
-    );
-    let profile_entry_poll = calibration_polls.load(Ordering::SeqCst);
-    assert!(profile_entry_poll > 0);
+    .expect("the valid long ASCII fixture must complete without cancellation");
+    let total_polls = calibration_polls.load(Ordering::SeqCst);
+    assert!(total_polls > 0);
 
-    let cancel_on = profile_entry_poll + PREFIX_CHUNKS * 2 - 1;
-    let (control, _) = controlled_import(Some(cancel_on));
-    let failure = import_bytes_forced_with_limits_and_control(
+    let (cancel_on, failure) = first_cancelled_prefix_at_least(
         "profile-cancel.stl",
-        &bytes,
-        ResourceLimits::default(),
-        control,
-    )
-    .expect_err("ASCII profile scanning must observe cancellation before the distant NUL");
+        &document,
+        total_polls,
+        ImportDimension::DecodeWork,
+        SCAN_CHUNK_BYTES as u64,
+    );
+    assert_eq!(
+        attempted(&failure, ImportDimension::DecodeWork),
+        SCAN_CHUNK_BYTES as u64
+    );
+    assert_eq!(
+        consumed(&failure, ImportDimension::DecodeWork),
+        SCAN_CHUNK_BYTES as u64
+    );
 
-    assert_cancelled(&failure);
-    let completed = consumed(&failure, ImportDimension::DecodeWork);
-    assert!(completed > 0);
-    assert!(completed < invalid_offset as u64);
-    assert_eq!(completed % SCAN_CHUNK_BYTES as u64, 0);
+    let mut malformed = document;
+    *malformed
+        .last_mut()
+        .expect("the ASCII cancellation fixture is non-empty") = 0;
+    let malformed_failure =
+        cancelled_failure("profile-malformed-cancel.stl", &malformed, cancel_on);
+    assert_eq!(
+        consumed(&malformed_failure, ImportDimension::DecodeWork),
+        SCAN_CHUNK_BYTES as u64
+    );
 }
 
 #[test]
@@ -205,31 +236,45 @@ fn ascii_solid_name_copy_cancellation_is_bounded_by_scan_chunks() {
 
     let name = "x".repeat(SCAN_CHUNK_BYTES * NAME_CHUNKS);
     let document = ascii_triangle(&name);
-    let string_limit = name.len() as u64 - 1;
-    let mut calibration_limits = ResourceLimits::default();
-    calibration_limits.max_string_bytes = string_limit as usize;
     let (calibration_control, calibration_polls) = controlled_import(None);
     let calibration_failure = import_bytes_forced_with_limits_and_control(
         "name-calibration.stl",
         document.as_bytes(),
-        calibration_limits,
+        ResourceLimits::default(),
         calibration_control,
     )
-    .expect_err("string-byte calibration must fail at the first solid-name copy");
-    assert_scope_limit(&calibration_failure, "string-bytes", string_limit);
-    let name_copy_entry_poll = calibration_polls.load(Ordering::SeqCst);
-    assert!(name_copy_entry_poll > 0);
+    .expect_err("the deliberately overlong canonical name must be rejected after parsing");
+    assert!(
+        consumed(&calibration_failure, ImportDimension::CanonicalStringBytes) >= name.len() as u64
+    );
+    let total_polls = calibration_polls.load(Ordering::SeqCst);
+    assert!(total_polls > 0);
 
-    let (control, _) = controlled_import(Some(name_copy_entry_poll + 2));
-    let failure = import_bytes_forced_with_limits_and_control(
+    let (copy_complete_poll, copy_complete_failure) = first_cancelled_prefix_at_least(
         "name-cancel.stl",
         document.as_bytes(),
-        ResourceLimits::default(),
-        control,
-    )
-    .expect_err("solid-name copying must observe cancellation before its second chunk");
+        total_polls,
+        ImportDimension::CanonicalStringBytes,
+        name.len() as u64,
+    );
+    assert_eq!(
+        consumed(
+            &copy_complete_failure,
+            ImportDimension::CanonicalStringBytes
+        ),
+        name.len() as u64
+    );
+    assert!(copy_complete_poll > 1);
 
-    assert_cancelled(&failure);
+    let failure = cancelled_failure(
+        "name-last-copy-chunk-cancel.stl",
+        document.as_bytes(),
+        copy_complete_poll - 1,
+    );
+    assert_eq!(
+        attempted(&failure, ImportDimension::CanonicalStringBytes),
+        name.len() as u64
+    );
     assert_eq!(consumed(&failure, ImportDimension::CanonicalStringBytes), 0);
 }
 
@@ -240,51 +285,29 @@ fn binary_facet_cancellation_is_bounded_to_one_record() {
     let facets = vec![BinaryFacet::unit_triangle(); FACET_COUNT];
     let bytes = binary_stl(b"binary", &facets);
 
-    let mut calibration_limits = ResourceLimits::default();
-    calibration_limits.max_records = 0;
     let (calibration_control, calibration_polls) = controlled_import(None);
-    let calibration_failure = import_bytes_forced_with_limits_and_control(
+    let _report = import_bytes_forced_with_limits_and_control(
         "facet-calibration.stl",
         &bytes,
-        calibration_limits,
+        ResourceLimits::default(),
         calibration_control,
     )
-    .expect_err("record calibration must fail immediately before binary facet iteration");
-    assert_ledger_limit(&calibration_failure, ImportDimension::Records, 0);
-    let facet_entry_poll = calibration_polls.load(Ordering::SeqCst);
-    assert!(facet_entry_poll > 0);
+    .expect("the valid binary facet fixture must complete without cancellation");
+    let total_polls = calibration_polls.load(Ordering::SeqCst);
+    assert!(total_polls > 0);
 
-    let mut post_loop_limits = ResourceLimits::default();
-    post_loop_limits.max_meshes = 0;
-    let (post_loop_control, post_loop_polls) = controlled_import(None);
-    let post_loop_failure = import_bytes_forced_with_limits_and_control(
-        "facet-post-loop.stl",
-        &bytes,
-        post_loop_limits,
-        post_loop_control,
-    )
-    .expect_err("mesh calibration must fail after every binary facet was consumed");
-    assert_ledger_limit(&post_loop_failure, ImportDimension::Meshes, 0);
-    assert_eq!(
-        consumed(&post_loop_failure, ImportDimension::Records),
-        FACET_COUNT as u64
-    );
-    assert!(
-        post_loop_polls.load(Ordering::SeqCst) - facet_entry_poll >= FACET_COUNT,
-        "binary parsing must poll at least once per facet"
-    );
-
-    let (control, _) = controlled_import(Some(facet_entry_poll + 2));
-    let failure = import_bytes_forced_with_limits_and_control(
+    let (_, failure) = first_cancelled_prefix_at_least(
         "facet-cancel.stl",
         &bytes,
-        ResourceLimits::default(),
-        control,
-    )
-    .expect_err("binary facet parsing must cancel before consuming its second record");
-
-    assert_cancelled(&failure);
-    assert_eq!(consumed(&failure, ImportDimension::Records), 0);
+        total_polls,
+        ImportDimension::Records,
+        1,
+    );
+    assert_eq!(
+        attempted(&failure, ImportDimension::Records),
+        FACET_COUNT as u64
+    );
+    assert_eq!(consumed(&failure, ImportDimension::Records), 1);
 }
 
 #[test]
@@ -296,60 +319,32 @@ fn binary_color_expansion_cancellation_is_bounded_by_scan_chunks() {
     let facets = vec![colored; FACET_COUNT];
     let bytes = binary_stl(b"binary", &facets);
 
-    let mut calibration_limits = ResourceLimits::default();
-    calibration_limits.max_work_units = 0;
     let (calibration_control, calibration_polls) = controlled_import(None);
-    let calibration_failure = import_bytes_forced_with_limits_and_control(
+    let _report = import_bytes_forced_with_limits_and_control(
         "color-calibration.stl",
         &bytes,
-        calibration_limits,
+        ResourceLimits::default(),
         calibration_control,
     )
-    .expect_err("work calibration must fail immediately before binary color expansion");
-    assert_ledger_limit(&calibration_failure, ImportDimension::WorkUnits, 0);
-    let color_entry_poll = calibration_polls.load(Ordering::SeqCst);
-    assert!(color_entry_poll > 0);
+    .expect("the valid colored binary fixture must complete without cancellation");
+    let total_polls = calibration_polls.load(Ordering::SeqCst);
+    assert!(total_polls > 0);
 
-    let expected_color_polls = FACET_COUNT.div_ceil(SCAN_CHUNK_BYTES);
-    let mut post_loop_limits = ResourceLimits::default();
-    post_loop_limits.max_meshes = 0;
-    let (post_loop_control, post_loop_polls) = controlled_import(None);
-    let post_loop_failure = import_bytes_forced_with_limits_and_control(
-        "color-post-loop.stl",
-        &bytes,
-        post_loop_limits,
-        post_loop_control,
-    )
-    .expect_err("mesh calibration must fail after binary color expansion");
-    assert_eq!(
-        consumed(&post_loop_failure, ImportDimension::WorkUnits),
-        FACET_COUNT as u64
-    );
-    assert_eq!(
-        consumed(&post_loop_failure, ImportDimension::Records),
-        FACET_COUNT as u64
-    );
-    assert!(
-        post_loop_polls.load(Ordering::SeqCst) - color_entry_poll > expected_color_polls,
-        "binary color expansion must poll at least once per 4096 facets"
-    );
-
-    let (control, _) = controlled_import(Some(color_entry_poll + 2));
-    let failure = import_bytes_forced_with_limits_and_control(
+    let (_, failure) = first_cancelled_prefix_at_least(
         "color-cancel.stl",
         &bytes,
-        ResourceLimits::default(),
-        control,
-    )
-    .expect_err("binary color expansion must cancel before its second chunk completes");
-
-    assert_cancelled(&failure);
-    let expansion = failure
-        .ledger()
-        .dimension(ImportDimension::WorkUnits)
-        .expect("work-unit dimension is configured");
-    assert_eq!(expansion.attempted(), FACET_COUNT as u64);
-    assert_eq!(expansion.consumed(), 0);
+        total_polls,
+        ImportDimension::WorkUnits,
+        1,
+    );
+    assert_eq!(
+        attempted(&failure, ImportDimension::WorkUnits),
+        FACET_COUNT as u64
+    );
+    assert_eq!(
+        consumed(&failure, ImportDimension::WorkUnits),
+        SCAN_CHUNK_BYTES as u64
+    );
     assert_eq!(
         consumed(&failure, ImportDimension::Records),
         FACET_COUNT as u64

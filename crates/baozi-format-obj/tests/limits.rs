@@ -87,6 +87,27 @@ fn work_consumed(failure: &baozi_import::ImportFailure, dimension: ImportDimensi
         .consumed()
 }
 
+fn first_cancelled_work_prefix_at_least(
+    total_polls: usize,
+    target_consumed: u64,
+    mut run_cancelled: impl FnMut(usize) -> TestResult<baozi_import::ImportFailure>,
+) -> TestResult<(usize, baozi_import::ImportFailure)> {
+    let mut low = 1usize;
+    let mut high = total_polls;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let failure = run_cancelled(middle)?;
+        if work_consumed(&failure, ImportDimension::WorkUnits) >= target_consumed {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    let failure = run_cancelled(low)?;
+    assert!(work_consumed(&failure, ImportDimension::WorkUnits) >= target_consumed);
+    Ok((low, failure))
+}
+
 fn format_byte_offset(failure: &baozi_import::ImportFailure) -> Option<u64> {
     let ImportCause::Format(envelope) = failure.cause() else {
         return None;
@@ -448,40 +469,33 @@ fn material_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<()
         ]
     };
 
-    let mut calibration_limits = ResourceLimits::default();
-    calibration_limits.max_work_units = 0;
     let (calibration_control, calibration_polls) = controlled_import(None);
-    let calibration_failure = expected_failure(import_assets_result_with_control(
-        "model.obj",
-        assets(),
-        calibration_limits,
-        true,
-        calibration_control,
-    )?);
-    assert_ledger_limit(&calibration_failure, ImportDimension::WorkUnits);
-    assert_eq!(
-        work_consumed(&calibration_failure, ImportDimension::WorkUnits),
-        0
-    );
-    let post_failure_poll = calibration_polls.load(Ordering::SeqCst);
-    assert!(post_failure_poll > 1);
-
-    let (control, _) = controlled_import(Some(post_failure_poll + 1));
-    let failure = expected_failure(import_assets_result_with_control(
+    let _report = expected_success(import_assets_result_with_control(
         "model.obj",
         assets(),
         ResourceLimits::default(),
         true,
-        control,
+        calibration_control,
     )?);
+    let total_polls = calibration_polls.load(Ordering::SeqCst);
+    assert!(total_polls > 0);
 
-    assert_cancelled(&failure);
+    let (_, failure) =
+        first_cancelled_work_prefix_at_least(total_polls, SORT_COMPARISON_CHUNK, |cancel_on| {
+            let (control, polls) = controlled_import(Some(cancel_on));
+            let failure = expected_failure(import_assets_result_with_control(
+                "model.obj",
+                assets(),
+                ResourceLimits::default(),
+                true,
+                control,
+            )?);
+            assert_cancelled(&failure);
+            assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
+            Ok(failure)
+        })?;
     let consumed = work_consumed(&failure, ImportDimension::WorkUnits);
-    assert!(consumed > 0);
-    assert!(
-        consumed <= SORT_COMPARISON_CHUNK * 2,
-        "cancellation consumed {consumed} work units after the material sort entry"
-    );
+    assert_eq!(consumed, SORT_COMPARISON_CHUNK);
     Ok(())
 }
 
@@ -490,39 +504,34 @@ fn vertex_key_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<
     const VERTEX_COUNT: usize = 512;
     let document = polygon_document(VERTEX_COUNT);
 
-    let mut calibration_limits = ResourceLimits::default();
-    calibration_limits.max_work_units = 1;
     let (calibration_control, calibration_polls) = controlled_import(None);
-    let calibration_failure = expected_failure(import_assets_result_with_control(
-        "polygon.obj",
-        [("polygon.obj", document.as_bytes())],
-        calibration_limits,
-        false,
-        calibration_control,
-    )?);
-    assert_ledger_limit(&calibration_failure, ImportDimension::WorkUnits);
-    assert_eq!(
-        work_consumed(&calibration_failure, ImportDimension::WorkUnits),
-        1
-    );
-    let post_failure_poll = calibration_polls.load(Ordering::SeqCst);
-    assert!(post_failure_poll > 1);
-
-    let (control, _) = controlled_import(Some(post_failure_poll));
-    let failure = expected_failure(import_assets_result_with_control(
+    let _report = expected_success(import_assets_result_with_control(
         "polygon.obj",
         [("polygon.obj", document.as_bytes())],
         ResourceLimits::default(),
         false,
-        control,
+        calibration_control,
     )?);
+    let total_polls = calibration_polls.load(Ordering::SeqCst);
+    assert!(total_polls > 0);
 
-    assert_cancelled(&failure);
+    let expected_prefix = SORT_COMPARISON_CHUNK + 1;
+    let (_, failure) =
+        first_cancelled_work_prefix_at_least(total_polls, expected_prefix, |cancel_on| {
+            let (control, polls) = controlled_import(Some(cancel_on));
+            let failure = expected_failure(import_assets_result_with_control(
+                "polygon.obj",
+                [("polygon.obj", document.as_bytes())],
+                ResourceLimits::default(),
+                false,
+                control,
+            )?);
+            assert_cancelled(&failure);
+            assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
+            Ok(failure)
+        })?;
     let consumed = work_consumed(&failure, ImportDimension::WorkUnits);
-    assert!(
-        consumed <= SORT_COMPARISON_CHUNK + 1,
-        "cancellation consumed {consumed} work units after the vertex-key sort entry"
-    );
+    assert_eq!(consumed, expected_prefix);
     Ok(())
 }
 

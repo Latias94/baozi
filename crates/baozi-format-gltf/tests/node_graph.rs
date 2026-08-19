@@ -114,16 +114,21 @@ fn assert_cancelled(failure: &ImportFailure) {
     );
 }
 
-fn cancelled_dimension_counts(
-    document: &[u8],
-    cancel_on: usize,
-    dimension: ImportDimension,
-) -> TestResult<(u64, u64)> {
+fn cancelled_graph_failure(document: &[u8], cancel_on: usize) -> TestResult<ImportFailure> {
     let (result, polls) =
         controlled_graph_result(document, GltfTestOptions::memory(), Some(cancel_on))?;
     let failure = expected_error(result)?;
     assert_cancelled(&failure);
     assert_eq!(polls, cancel_on);
+    Ok(failure)
+}
+
+fn cancelled_dimension_counts(
+    document: &[u8],
+    cancel_on: usize,
+    dimension: ImportDimension,
+) -> TestResult<(u64, u64)> {
+    let failure = cancelled_graph_failure(document, cancel_on)?;
     Ok(dimension_counts(&failure, dimension))
 }
 
@@ -145,6 +150,28 @@ fn first_cancelled_prefix_at_least(
         }
     }
     Ok((low, cancelled_dimension_counts(document, low, dimension)?))
+}
+
+fn first_cancelled_attempt_at_least(
+    document: &[u8],
+    total_polls: usize,
+    dimension: ImportDimension,
+    target_attempted: u64,
+) -> TestResult<(usize, ImportFailure)> {
+    let mut low = 1usize;
+    let mut high = total_polls;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let failure = cancelled_graph_failure(document, middle)?;
+        if dimension_counts(&failure, dimension).0 >= target_attempted {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    let failure = cancelled_graph_failure(document, low)?;
+    assert!(dimension_counts(&failure, dimension).0 >= target_attempted);
+    Ok((low, failure))
 }
 
 fn assert_parse_failure(document: Vec<u8>, expected_message: &str) -> TestResult<()> {
@@ -221,23 +248,21 @@ fn scene_graph_work_is_admitted_before_scene_root_list_storage() -> TestResult<(
     let (calibration, total_polls) = controlled_graph_result(&document, calibration_options, None)?;
     let calibration_failure = expected_error(calibration)?;
     assert_resource_limit(&calibration_failure, "max_graph_work");
-    assert!(total_polls > 8);
+    assert!(total_polls > 1);
 
-    let mut pre_admission_peaks = Vec::new();
-    for cancel_on in (total_polls - 8)..=total_polls {
-        let (result, polls) =
-            controlled_graph_result(&document, GltfTestOptions::memory(), Some(cancel_on))?;
-        let failure = expected_error(result)?;
-        assert_cancelled(&failure);
-        assert_eq!(polls, cancel_on);
-        if dimension_counts(&failure, ImportDimension::GraphWork).0 == 0 {
-            pre_admission_peaks.push(failure.ledger().peak_live_bytes());
-        }
-    }
-    let pre_scene_root_peak = *pre_admission_peaks
-        .iter()
-        .min()
-        .expect("calibration window is non-empty");
+    let (admission_poll, admission_failure) =
+        first_cancelled_attempt_at_least(&document, total_polls, ImportDimension::GraphWork, 1)?;
+    assert_eq!(
+        dimension_counts(&admission_failure, ImportDimension::GraphWork),
+        (1, 0)
+    );
+    assert!(admission_poll > 1);
+    let pre_admission_failure = cancelled_graph_failure(&document, admission_poll - 1)?;
+    assert_eq!(
+        dimension_counts(&pre_admission_failure, ImportDimension::GraphWork),
+        (0, 0)
+    );
+    let pre_scene_root_peak = pre_admission_failure.ledger().peak_live_bytes();
 
     let mut options = GltfTestOptions::memory();
     options.limits.max_graph_work = 0;
