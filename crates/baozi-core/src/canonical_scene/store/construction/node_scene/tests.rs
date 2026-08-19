@@ -462,27 +462,6 @@ pub(in crate::canonical_scene::store) fn build_minimal_fallback_terminal_for_pro
     .expect("aborted outcome evidence must prepare fail closed")
 }
 
-pub(in crate::canonical_scene::store) fn build_protected_terminal_activation_for_probe(
-    account: &baozi_operation::PhysicalStorageAccount,
-) -> PreparedNodeSceneConstruction {
-    const ORDINARY_WORK_LIMIT: u64 = 10;
-
-    let build = finish_node_batch(
-        account,
-        test_limits_with_work(ORDINARY_WORK_LIMIT),
-        single_trs_batch(),
-        SceneValidationLimits::default(),
-    );
-    let NodeSceneDraftBuild::Failure {
-        authoring_rejection: None,
-        prepared,
-    } = build
-    else {
-        panic!("ordinary work exhaustion must publish its ledger first cause")
-    };
-    prepared.into()
-}
-
 fn rich_failure(prepared: PreparedNodeSceneConstruction) -> NodeSceneRichFailure {
     match prepared.handoff() {
         NodeSceneConstructionTerminal::Success(_) => {

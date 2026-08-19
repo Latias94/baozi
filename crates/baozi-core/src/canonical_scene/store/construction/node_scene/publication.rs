@@ -1,11 +1,15 @@
+#[cfg(test)]
+use baozi_operation::__retained_store_integration::activation::CanonicalFreezePermitIssue;
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalFreezePermit, CanonicalFreezePermitIssue, CanonicalJointCommit, CanonicalJointSeal,
+    CanonicalFreezePermit, CanonicalJointCommit, CanonicalJointSeal,
     CentrallyRejectedCanonicalStoreSession, FailureEvidenceMember, FailureEvidenceOutcome,
     FailureEvidenceValidationSession, FrozenFailureState, RootedFailureValidation,
     StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
 };
+#[cfg(test)]
+use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccessOutcome;
 use baozi_operation::__retained_store_integration::authority::{
-    PreparedStoreFailureOutcome, PreparedStoreSuccess, PreparedStoreSuccessOutcome,
+    PreparedStoreFailureOutcome, PreparedStoreSuccess,
 };
 use baozi_operation::{
     ControlCause, FinalProgress, OperationOwner, ProgressPhase, ProgressUnit,
@@ -23,9 +27,9 @@ use crate::canonical_scene::store::schema::{
 use crate::identity::SceneGenerationId;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError};
 
-use super::super::{
-    GENERATION_EXHAUSTED_CODE, SceneConstructionError, burn_generation_reservation,
-};
+#[cfg(test)]
+use super::super::burn_generation_reservation;
+use super::super::{GENERATION_EXHAUSTED_CODE, SceneConstructionError};
 #[cfg(test)]
 use super::NodeSceneDraftBuild;
 use super::materialization::{
@@ -34,11 +38,15 @@ use super::materialization::{
 };
 use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
-    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
-    NodeSceneFallback, NodeSceneRichFailure, NodeSceneSuccessParts, NodeSceneSuccessReport,
-    PendingNodeSceneDraft, PendingNodeSceneFailure, PreparedNodeSceneConstruction,
+    NodeSceneConstructionRejection, NodeSceneDraft, PendingNodeSceneFailure,
     PreparedNodeSceneFailure, PreparedNodeSceneFallback, PreparedNodeSceneRichFailure,
-    PreparedNodeSceneSuccess, SceneEvidenceCounts, ValidatedNodeScene,
+    SceneEvidenceCounts, ValidatedNodeScene,
+};
+#[cfg(test)]
+use super::{
+    NodeSceneConstructionTerminal, NodeSceneFallback, NodeSceneRichFailure, NodeSceneSuccessParts,
+    NodeSceneSuccessReport, PendingNodeSceneDraft, PreparedNodeSceneConstruction,
+    PreparedNodeSceneSuccess,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +282,7 @@ where
     )
 }
 
+#[cfg(test)]
 macro_rules! prepare_frozen_node_failure {
     ($rooted:expr, $counts:expr) => {{
         let validation = $rooted.validate_rich_failure(|session, root| {
@@ -302,6 +311,7 @@ macro_rules! prepare_frozen_node_failure {
     }};
 }
 
+#[cfg(test)]
 fn prepare_node_scene_test_joint<'joint, O, PP, U>(
     handoff: NodeSceneHandoffToken,
     joint: NodeSceneLaneJointCommit<'joint, O, PP, U>,
@@ -336,6 +346,7 @@ where
     }
 }
 
+#[cfg(test)]
 impl<O, PP, U> PendingNodeSceneDraft<O, PP, U>
 where
     O: OperationOwner,
@@ -373,6 +384,7 @@ impl NodeSceneDraftBuild {
     }
 }
 
+#[cfg(test)]
 fn prepare_pending_node_scene_draft<O, PP, U, ReserveGeneration>(
     owner: PendingNodeSceneDraft<O, PP, U>,
     parser_draft: Option<NodeSceneDraft>,
@@ -663,6 +675,7 @@ where
     Ok(prepared)
 }
 
+#[cfg(test)]
 fn prepare_node_ordinary_construction_failure<O, PP, U, Cause>(
     validation: RootedFailureValidation<
         O,
@@ -827,6 +840,7 @@ pub(super) const fn post_evidence_build_failure_code(class: StoreBuildFailureCla
     }
 }
 
+#[cfg(test)]
 impl PreparedNodeSceneConstruction {
     pub(in crate::canonical_scene::store) fn handoff(self) -> NodeSceneConstructionTerminal {
         match self {

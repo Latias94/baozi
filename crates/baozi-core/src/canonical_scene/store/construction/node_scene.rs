@@ -3,22 +3,27 @@ use baozi_operation::__retained_store_integration::activation::{
     InterruptedCanonicalStoreSession, NeverActivatedStoreSession, RejectedCanonicalStoreSession,
     VerifiedMinimalFallback,
 };
+#[cfg(test)]
+use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccess;
 use baozi_operation::__retained_store_integration::authority::{
-    FreshStoreLineage, PreparedStoreFailure, PreparedStoreFallback, PreparedStoreSuccess,
+    FreshStoreLineage, PreparedStoreFailure, PreparedStoreFallback,
 };
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationRequest, CanonicalActivationRequestIdentity,
     mint_canonical_activation_request,
 };
+#[cfg(test)]
+use baozi_operation::PublishedOutcomeEvidenceStore;
 use baozi_operation::{
     BytesPlan, FinalProgress, OperationOwner, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
-    PublishedOutcomeEvidenceStore, PublishedRichFailureStore, PublishedStoreFallbackOutput,
-    RecordBlock, RecordPlan, SequencePlan, StoreLedgerEvidence, StorePlanError, StoreRuntimeError,
-    StoredScalar, Utf8Plan,
+    PublishedRichFailureStore, PublishedStoreFallbackOutput, RecordBlock, RecordPlan, SequencePlan,
+    StoreLedgerEvidence, StorePlanError, StoreRuntimeError, StoredScalar, Utf8Plan,
 };
 use thiserror::Error;
 
-use crate::identity::{ReservedSceneGeneration, SceneGenerationId};
+#[cfg(test)]
+use crate::identity::ReservedSceneGeneration;
+use crate::identity::SceneGenerationId;
 
 use super::super::production::{
     AnimationAuthoringFailure, AppearanceAuthoringFailure, DeformationAuthoringFailure,
@@ -263,6 +268,7 @@ fn process_str_in_chunks<E>(
     Ok(())
 }
 
+#[cfg(test)]
 type PreparedNodeStoreSuccess = PreparedStoreSuccess<
     RecordBlock,
     SceneDirectorySchema,
@@ -361,6 +367,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneDraft {
 /// The expected directory remains private to the owner so central validation can reject a
 /// descriptor from another construction before registering commitments or allocating scratch.
 #[must_use = "a pending node Scene draft owner must be centrally prepared or deliberately dropped"]
+#[cfg(test)]
 pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft<
     O = SceneConstructionOwner,
     PP = SceneConstructionPhase,
@@ -380,6 +387,7 @@ pub(in crate::canonical_scene::store) struct PendingNodeSceneDraft<
     clippy::large_enum_variant,
     reason = "the failure owner stays inline so materialization preserves exact containment"
 )]
+#[cfg(test)]
 pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild<
     O = SceneConstructionOwner,
     PP = SceneConstructionPhase,
@@ -514,6 +522,7 @@ impl SceneEvidenceCounts {
     }
 }
 
+#[cfg(test)]
 pub(in crate::canonical_scene::store) struct PreparedNodeSceneSuccess {
     generation: ReservedSceneGeneration,
     proof: NodeSceneValidationProof,
@@ -556,12 +565,14 @@ pub(in crate::canonical_scene::store) enum PreparedNodeSceneFailure {
     clippy::large_enum_variant,
     reason = "prepared publication owners remain inline so terminal handoff is allocation-free"
 )]
+#[cfg(test)]
 pub(in crate::canonical_scene::store) enum PreparedNodeSceneConstruction {
     Success(PreparedNodeSceneSuccess),
     RichFailure(PreparedNodeSceneRichFailure),
     MinimalFallback(PreparedNodeSceneFallback),
 }
 
+#[cfg(test)]
 impl From<PreparedNodeSceneFailure> for PreparedNodeSceneConstruction {
     fn from(failure: PreparedNodeSceneFailure) -> Self {
         match failure {
@@ -580,11 +591,13 @@ pub(in crate::canonical_scene::store) struct ValidatedNodeScene {
     semantic_read_fault: Option<semantic::NodeSceneSemanticReadFault>,
 }
 
+#[cfg(test)]
 pub(in crate::canonical_scene::store) struct NodeSceneSuccessReport {
     outcome_evidence: PublishedOutcomeEvidenceStore<RecordBlock, NodeSceneOutcomeEvidenceSchema>,
     ledger_evidence: StoreLedgerEvidence,
 }
 
+#[cfg(test)]
 pub(in crate::canonical_scene::store) struct NodeSceneSuccessParts {
     pub(in crate::canonical_scene::store) scene: ValidatedNodeScene,
     pub(in crate::canonical_scene::store) report: NodeSceneSuccessReport,
@@ -600,6 +613,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneRichFailure {
     clippy::large_enum_variant,
     reason = "published Scene and evidence owners remain inline so handoff is a pure ownership move"
 )]
+#[cfg(test)]
 pub(in crate::canonical_scene::store) enum NodeSceneConstructionTerminal {
     Success(NodeSceneSuccessParts),
     RichFailure(NodeSceneRichFailure),
