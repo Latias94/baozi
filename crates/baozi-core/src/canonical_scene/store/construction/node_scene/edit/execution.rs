@@ -8,7 +8,8 @@ use baozi_operation::__retained_store_integration::producer::{
     CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
 };
 use baozi_operation::{
-    OperationControl, RecordBlock, RetainedStoreBatchLimits, StorePlanError, StoreRuntimeError,
+    FinalProgress, OperationControl, OperationOwner, ProgressPhase, ProgressUnit, RecordBlock,
+    RetainedStoreBatchLimits, StorePlanError, StoreRuntimeError,
 };
 use thiserror::Error;
 
@@ -42,21 +43,29 @@ pub(in crate::canonical_scene::store) enum NodeSceneEditPrepareError {
     Construction(#[from] SceneConstructionError),
 }
 
-struct NodeSceneEditExecutionPlan<'scope, 'scene> {
+struct NodeSceneEditExecutionPlan<'scope, 'scene, O>
+where
+    O: OperationOwner,
+{
     pending: BoundPendingNodeSceneEdit<'scene>,
-    inherited: NodeSceneInheritedLeafPlan<'scope, super::super::super::SceneConstructionOwner>,
+    inherited: NodeSceneInheritedLeafPlan<'scope, O>,
 }
 
-struct NodeSceneEditActivationDescription<'scope, 'scene> {
+struct NodeSceneEditActivationDescription<'scope, 'scene, O>
+where
+    O: OperationOwner,
+{
     activation_request: CanonicalActivationRequest,
     requirements: CanonicalSuccessRequirements,
-    execution: NodeSceneEditExecutionPlan<'scope, 'scene>,
+    execution: NodeSceneEditExecutionPlan<'scope, 'scene, O>,
 }
 
-impl<'scope, 'scene> CanonicalActivationDescription
-    for NodeSceneEditActivationDescription<'scope, 'scene>
+impl<'scope, 'scene, O> CanonicalActivationDescription
+    for NodeSceneEditActivationDescription<'scope, 'scene, O>
+where
+    O: OperationOwner,
 {
-    type Execution = NodeSceneEditExecutionPlan<'scope, 'scene>;
+    type Execution = NodeSceneEditExecutionPlan<'scope, 'scene, O>;
 
     fn seal_activation<'activation>(
         self,
@@ -151,6 +160,11 @@ impl PendingNodeSceneEdit {
             failure_evidence,
             brand,
             activation_request,
+            CanonicalValidationProgress::new(
+                SceneConstructionPhase::Validation,
+                SceneConstructionUnit::WorkUnits,
+            ),
+            final_progress(),
             reserve_generation,
         )
         .map_err(Into::into)
@@ -168,19 +182,21 @@ impl PendingNodeSceneEdit {
     }
 }
 
-fn prepare_scoped_edit(
-    owner: RetainedStoreSessionOutcomeOwner<
-        super::super::super::SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
-        CanonicalInheritanceSource,
-    >,
+fn prepare_scoped_edit<O, PP, U>(
+    owner: RetainedStoreSessionOutcomeOwner<O, PP, U, CanonicalInheritanceSource>,
     pending: BoundPendingNodeSceneEdit<'_>,
     failure_evidence: NodeSceneFailureEvidencePlan,
     brand: super::super::super::ConstructionBrand,
     activation_request: CanonicalActivationRequest,
+    validation_progress: CanonicalValidationProgress<PP, U>,
+    final_progress: FinalProgress<PP, U>,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let evidence_plan = failure_evidence.records;
     let evidence_counts = pending.counts.evidence;
     let postflight =
@@ -247,11 +263,6 @@ fn prepare_scoped_edit(
         permit.activate(move |lane, execution| materialize_edit(lane, execution, brand))
     })?;
 
-    let validation_progress = CanonicalValidationProgress::new(
-        SceneConstructionPhase::Validation,
-        SceneConstructionUnit::WorkUnits,
-    );
-    let final_progress = final_progress();
     let activated = match outcome {
         CanonicalActivationOutcome::Activated(activated) => activated,
         CanonicalActivationOutcome::Rejected(rejected) => {
@@ -271,9 +282,9 @@ fn prepare_scoped_edit(
             });
         }
         CanonicalActivationOutcome::Fallback(fallback) => {
-            return prepare_pending_edit_failure(PendingNodeSceneFailure::PreparedFallback(
-                fallback,
-            ));
+            return prepare_pending_edit_failure::<O, PP, U>(
+                PendingNodeSceneFailure::PreparedFallback(fallback),
+            );
         }
     };
 
@@ -314,7 +325,9 @@ fn prepare_scoped_edit(
             })
         }
         CanonicalCentralValidationOutcome::Fallback(fallback) => {
-            prepare_pending_edit_failure(PendingNodeSceneFailure::PreparedFallback(fallback))
+            prepare_pending_edit_failure::<O, PP, U>(PendingNodeSceneFailure::PreparedFallback(
+                fallback,
+            ))
         }
     }
 }
@@ -333,15 +346,15 @@ fn edit_success_requirements(
     .map(|requirements| requirements.with_request_identity(brand.activation_request_identity()))
 }
 
-fn materialize_edit<'lane, 'scope>(
+fn materialize_edit<'lane, 'scope, O, PP, U>(
     mut lane: baozi_operation::__retained_store_integration::activation::CanonicalLane<
         'lane,
-        super::super::super::SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
+        O,
+        PP,
+        U,
         CanonicalInheritanceSource,
     >,
-    execution: &NodeSceneEditExecutionPlan<'scope, '_>,
+    execution: &NodeSceneEditExecutionPlan<'scope, '_, O>,
     brand: super::super::super::ConstructionBrand,
 ) -> CanonicalMaterialization<
     'lane,
@@ -349,7 +362,12 @@ fn materialize_edit<'lane, 'scope>(
     NodeSceneLaneRejection,
     RecordBlock,
     SceneDirectorySchema,
-> {
+>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let graph = match try_rewrite_node_scene(&mut lane, &execution.pending, &execution.inherited) {
         Ok(graph) => graph,
         Err(cause) => {

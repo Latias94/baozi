@@ -6,15 +6,15 @@ use baozi_operation::__retained_store_integration::authority::{
     PreparedStoreFallback, PreparedStoreSuccess, PreparedStoreSuccessOutcome,
 };
 use baozi_operation::{
-    FinalProgress, PublishedOutcomeEvidenceStore, RecordBlock, StoreLedgerEvidence,
+    FinalProgress, OperationOwner, ProgressPhase, ProgressUnit, PublishedOutcomeEvidenceStore,
+    RecordBlock, StoreLedgerEvidence,
 };
 
 use crate::canonical_scene::store::schema::{NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema};
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 
 use super::super::super::{
-    GENERATION_EXHAUSTED_CODE, SceneConstructionError, SceneConstructionOwner,
-    SceneConstructionPhase, SceneConstructionUnit, burn_generation_reservation,
+    GENERATION_EXHAUSTED_CODE, SceneConstructionError, burn_generation_reservation,
 };
 use super::super::publication::{NodeSceneLaneJointCommit, validate_node_scene_failure_evidence};
 use super::super::{
@@ -118,21 +118,26 @@ macro_rules! prepare_frozen_edit_failure {
     }};
 }
 
-struct ScopedNodeSceneEditJointCommit<'joint> {
+struct ScopedNodeSceneEditJointCommit<'joint, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     generation: ReservedSceneGeneration,
     proof: crate::canonical_scene::store::validation::NodeSceneValidationProof,
     invalidations: CanonicalInvalidations,
     remaps: CanonicalRemapSet,
     seal: CanonicalJointSeal<'joint>,
-    joint: NodeSceneLaneJointCommit<
-        'joint,
-        SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
-    >,
+    joint: NodeSceneLaneJointCommit<'joint, O, PP, U>,
 }
 
-impl ScopedNodeSceneEditJointCommit<'_> {
+impl<O, PP, U> ScopedNodeSceneEditJointCommit<'_, O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     fn prepare(self) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
         let Self {
             generation,
@@ -168,13 +173,18 @@ impl ScopedNodeSceneEditJointCommit<'_> {
     }
 }
 
-pub(super) fn prepare_edit_candidate(
-    candidate: ActivatedNodeSceneCandidate,
+pub(super) fn prepare_edit_candidate<O, PP, U>(
+    candidate: ActivatedNodeSceneCandidate<O, PP, U>,
     input_generation: SceneGenerationId,
     invalidations: CanonicalInvalidations,
-    final_progress: FinalProgress<SceneConstructionPhase, SceneConstructionUnit>,
+    final_progress: FinalProgress<PP, U>,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let evidence_counts = candidate.output().inner().evidence_counts;
     match candidate.try_issue_freeze_permit(final_progress)? {
         CanonicalFreezePermitIssue::Ready(permit) => {
@@ -224,29 +234,34 @@ pub(super) fn prepare_edit_candidate(
     }
 }
 
-pub(super) fn prepare_pending_edit_failure(
-    pending: PendingNodeSceneFailure<
-        SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
-        CanonicalInheritanceSource,
-    >,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
+pub(super) fn prepare_pending_edit_failure<O, PP, U>(
+    pending: PendingNodeSceneFailure<O, PP, U, CanonicalInheritanceSource>,
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     let (prepared, _authoring_rejection, _control_cause) = pending.prepare()?;
     Ok(map_prepared_node_scene_failure(prepared))
 }
 
-fn prepare_ordinary_failure_validation<Cause>(
+fn prepare_ordinary_failure_validation<O, PP, U, Cause>(
     validation: RootedFailureValidation<
-        SceneConstructionOwner,
-        SceneConstructionPhase,
-        SceneConstructionUnit,
+        O,
+        PP,
+        U,
         Cause,
         RecordBlock,
         NodeSceneOutcomeEvidenceSchema,
     >,
-    final_progress: FinalProgress<SceneConstructionPhase, SceneConstructionUnit>,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
+    final_progress: FinalProgress<PP, U>,
+) -> Result<PreparedNodeSceneEdit, SceneConstructionError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
     match validation {
         RootedFailureValidation::Valid(validated) => {
             let (prepared, _cause) = validated.try_prepare(final_progress)?.into_parts();
