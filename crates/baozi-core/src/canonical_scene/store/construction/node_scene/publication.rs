@@ -375,24 +375,6 @@ impl NodeSceneDraftBuild {
             Self::Failure { prepared, .. } => Ok(prepared.handoff_for_test()),
         }
     }
-
-    pub(super) fn prepare_for_test(
-        self,
-    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        self.prepare_with_generation_source_for_test(SceneGenerationId::reserve)
-    }
-
-    pub(super) fn prepare_with_generation_source_for_test(
-        self,
-        reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
-    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        match self {
-            Self::Draft { draft, owner } => {
-                owner.prepare_with_generation_source(draft, reserve_generation)
-            }
-            Self::Failure { prepared, .. } => Ok(prepared.into()),
-        }
-    }
 }
 
 #[cfg(test)]

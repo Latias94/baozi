@@ -797,14 +797,20 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
         ),
     ];
     let roots = [NodeLocalId::new(3), NodeLocalId::new(1)];
-    let prepared = finish_node_batch(
+    let build = finish_node_batch(
         &account,
         test_limits(),
         NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
         SceneValidationLimits::default(),
-    )
-    .prepare_with_generation_source_for_test(|| SceneGenerationId::reserve_from(&generation_source))
-    .expect("valid source-ordered forest must prepare");
+    );
+    let NodeSceneDraftBuild::Draft { draft, owner } = build else {
+        panic!("valid source-ordered forest must retain a draft before publication")
+    };
+    let prepared = owner
+        .prepare_with_generation_source(draft, || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("valid source-ordered forest must prepare");
     let before_handoff = account.snapshot();
     let parts = successful_parts(prepared.handoff());
     let after_handoff = account.snapshot();
