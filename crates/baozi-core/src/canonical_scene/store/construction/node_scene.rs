@@ -278,22 +278,22 @@ type ActivatedNodeSceneCandidate<
     O,
     PP,
     U,
-    materialization::NodeSceneActivationOutput,
-    NodeSceneValidationProof,
+    materialization::NodeSceneLaneOutput,
+    materialization::NodeSceneLaneValidationProof,
     RecordBlock,
     SceneDirectorySchema,
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
 type RejectedNodeSceneActivation<O, PP, U> =
-    RejectedCanonicalStoreSession<O, PP, U, NodeSceneConstructionRejection<StoreRuntimeError>>;
+    RejectedCanonicalStoreSession<O, PP, U, materialization::NodeSceneLaneRejection>;
 type NeverActivatedNodeScene<O, PP, U, L = FreshStoreLineage> =
-    NeverActivatedStoreSession<O, PP, U, NodeSceneConstructionRejection<StoreRuntimeError>, L>;
+    NeverActivatedStoreSession<O, PP, U, materialization::NodeSceneLaneRejection, L>;
 type CentrallyRejectedNodeScene<O, PP, U> = CentrallyRejectedCanonicalStoreSession<
     O,
     PP,
     U,
-    NodeSceneConstructionRejection<StoreRuntimeError>,
+    materialization::NodeSceneLaneRejection,
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;

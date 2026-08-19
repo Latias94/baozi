@@ -28,7 +28,7 @@ use super::super::{
 };
 use super::materialization::{
     NodeSceneActivationOutput, NodeSceneEvidenceRecipe, NodeSceneLaneOutput,
-    NodeSceneLaneValidationProof, write_node_scene_evidence_row,
+    NodeSceneLaneRejection, NodeSceneLaneValidationProof, write_node_scene_evidence_row,
 };
 use super::{
     DeferredNodeSceneDraftBuild, NODE_SCENE_BUILD_INVARIANT_CODE,
@@ -389,7 +389,7 @@ where
         candidate,
         final_progress,
     } = owner;
-    let output = *candidate.output();
+    let output = candidate.output().inner();
     let evidence_counts = output.evidence_counts;
     match candidate.try_issue_freeze_permit(final_progress)? {
         CanonicalFreezePermitIssue::Ready(permit) => {
@@ -423,8 +423,8 @@ where
                 .bind_joint_commit(|output, proof, joint, seal| {
                     ScopedNodeSceneJointCommit {
                         generation,
-                        proof,
-                        output,
+                        proof: proof.into_inner(),
+                        output: output.inner(),
                         seal,
                         joint,
                     }
@@ -459,14 +459,12 @@ pub(super) trait NodeActivationFailureCause {
     fn into_authoring_rejection(self) -> Option<NodeSceneConstructionRejection<StoreRuntimeError>>;
 }
 
-impl NodeActivationFailureCause
-    for StoreNeverActivatedCause<NodeSceneConstructionRejection<StoreRuntimeError>>
-{
+impl NodeActivationFailureCause for StoreNeverActivatedCause<NodeSceneLaneRejection> {
     fn is_authoring_rejection(&self) -> bool {
         matches!(
             self,
             StoreNeverActivatedCause::Requested(rejection)
-                if !matches!(rejection, NodeSceneConstructionRejection::Materialization(_))
+                if rejection.is_authoring_rejection()
         )
     }
 
@@ -480,21 +478,19 @@ impl NodeActivationFailureCause
     fn into_authoring_rejection(self) -> Option<NodeSceneConstructionRejection<StoreRuntimeError>> {
         match self {
             StoreNeverActivatedCause::Requested(rejection) => {
-                retain_node_authoring_rejection(rejection)
+                retain_node_authoring_rejection(rejection.into_inner())
             }
             StoreNeverActivatedCause::Runtime(_) => None,
         }
     }
 }
 
-impl NodeActivationFailureCause
-    for StoreCanonicalRejection<NodeSceneConstructionRejection<StoreRuntimeError>>
-{
+impl NodeActivationFailureCause for StoreCanonicalRejection<NodeSceneLaneRejection> {
     fn is_authoring_rejection(&self) -> bool {
         matches!(
             self,
             StoreCanonicalRejection::Requested(rejection)
-                if !matches!(rejection, NodeSceneConstructionRejection::Materialization(_))
+                if rejection.is_authoring_rejection()
         )
     }
 
@@ -508,7 +504,7 @@ impl NodeActivationFailureCause
     fn into_authoring_rejection(self) -> Option<NodeSceneConstructionRejection<StoreRuntimeError>> {
         match self {
             StoreCanonicalRejection::Requested(rejection) => {
-                retain_node_authoring_rejection(rejection)
+                retain_node_authoring_rejection(rejection.into_inner())
             }
             StoreCanonicalRejection::Runtime(_) => None,
         }

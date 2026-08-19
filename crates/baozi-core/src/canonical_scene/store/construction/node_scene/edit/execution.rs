@@ -1,7 +1,6 @@
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
-    CanonicalMaterialization, CanonicalValidationDecision, CanonicalValidationProgress,
-    RetainedStoreSessionOutcomeOwner,
+    CanonicalMaterialization, CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner,
 };
 use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::__retained_store_integration::producer::{
@@ -14,7 +13,6 @@ use baozi_operation::{
 use thiserror::Error;
 
 use crate::canonical_scene::store::schema::{NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema};
-use crate::canonical_scene::store::validation::validate_node_scene_canonical_graph_metered;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
 
 use super::super::super::{
@@ -23,14 +21,10 @@ use super::super::super::{
     SceneStoreOperation, final_progress, try_plan_scene_operation,
 };
 use super::super::materialization::{
-    NodeSceneActivationOutput, NodeSceneFailureEvidencePlan, node_scene_activation_roles,
-    write_node_scene_evidence_row,
+    NodeSceneActivationOutput, NodeSceneActivationPostflight, NodeSceneFailureEvidencePlan,
+    NodeSceneLaneOutput, NodeSceneLaneRejection, node_scene_activation_roles,
 };
-use super::super::scratch::ScopedNodeSceneValidationScratchOwner;
-use super::super::{
-    NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneConstructionRejection, NodeSceneDraft,
-    PendingNodeSceneFailure,
-};
+use super::super::{NodeSceneConstructionRejection, NodeSceneDraft, PendingNodeSceneFailure};
 use super::graph::try_rewrite_node_scene;
 use super::leaf_plan::NodeSceneInheritedLeafPlan;
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditPlanError, PendingNodeSceneEdit};
@@ -189,6 +183,8 @@ fn prepare_scoped_edit(
 ) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     let evidence_plan = failure_evidence.records;
     let evidence_counts = pending.counts.evidence;
+    let postflight =
+        NodeSceneActivationPostflight::from_parts(brand, failure_evidence, evidence_counts);
     let input_generation = pending.input.generation();
     let invalidations = pending.invalidations;
     let mut success_requirements = Some(edit_success_requirements(&pending, brand)?);
@@ -199,9 +195,10 @@ fn prepare_scoped_edit(
         let pending = match pending.take() {
             Some(pending) => pending,
             None => {
-                let rejection = NodeSceneConstructionRejection::Materialization(
-                    StoreRuntimeError::ConstructionInvariantUnverified,
-                );
+                let rejection =
+                    NodeSceneLaneRejection::from(NodeSceneConstructionRejection::Materialization(
+                        StoreRuntimeError::ConstructionInvariantUnverified,
+                    ));
                 let stable_code = rejection.stable_code();
                 return planning.reject(rejection, stable_code);
             }
@@ -227,7 +224,9 @@ fn prepare_scoped_edit(
         let (inherited, completion) = match planned {
             Ok(planned) => planned,
             Err(cause) => {
-                let rejection = NodeSceneConstructionRejection::Materialization(cause);
+                let rejection = NodeSceneLaneRejection::from(
+                    NodeSceneConstructionRejection::Materialization(cause),
+                );
                 let stable_code = rejection.stable_code();
                 return planning.reject(rejection, stable_code);
             }
@@ -278,54 +277,19 @@ fn prepare_scoped_edit(
         }
     };
 
-    let central_counts = activated.output().evidence_counts;
+    let candidate_evidence = postflight.candidate_evidence(activated.output());
+    let central_counts = candidate_evidence.counts();
     let outcome = activated.validate_centrally(
         validation_progress,
-        |lane, output| match lane.try_retain_records(
-            evidence_plan,
+        |lane, _output| match lane.try_retain_records(
+            candidate_evidence.record_plan(),
             NodeSceneOutcomeEvidenceSchema,
-            |control| {
-                control.write_row(|row| write_node_scene_evidence_row(row, output.evidence_counts))
-            },
+            |control| control.write_row(|row| candidate_evidence.write_row(row)),
         ) {
             Ok(evidence) => lane.complete(evidence),
             Err(_) => lane.abort(),
         },
-        |planning, output| {
-            let validation_plan = output.central_validation;
-            let scratch_plan = validation_plan.scratch_plan();
-            planning.validate_with(
-                |checkpoint| {
-                    ScopedNodeSceneValidationScratchOwner::try_allocate(checkpoint, scratch_plan)
-                },
-                |session, directory, evidence, scratch| {
-                    let initialized = scratch.initialize(session, scratch_plan)?;
-                    let proof = if initialized && output.draft.brand == brand {
-                        let mut scratch = scratch.metered_view();
-                        validate_node_scene_canonical_graph_metered(
-                            session,
-                            directory,
-                            evidence,
-                            output.evidence_counts,
-                            output.refs,
-                            validation_plan,
-                            &mut scratch,
-                        )?
-                    } else {
-                        None
-                    };
-                    Ok(match proof {
-                        Some(proof) => CanonicalValidationDecision::accept(proof),
-                        None => CanonicalValidationDecision::reject(
-                            NodeSceneConstructionRejection::<StoreRuntimeError>::Materialization(
-                                StoreRuntimeError::ConstructionInvariantUnverified,
-                            ),
-                            NODE_SCENE_BUILD_INVARIANT_CODE,
-                        ),
-                    })
-                },
-            )
-        },
+        |planning, output| postflight.validate_candidate(planning, output),
     )?;
     match outcome {
         CanonicalCentralValidationOutcome::Candidate(candidate) => prepare_edit_candidate(
@@ -381,8 +345,8 @@ fn materialize_edit<'lane, 'scope>(
     brand: super::super::super::ConstructionBrand,
 ) -> CanonicalMaterialization<
     'lane,
-    NodeSceneActivationOutput,
-    NodeSceneConstructionRejection<StoreRuntimeError>,
+    NodeSceneLaneOutput,
+    NodeSceneLaneRejection,
     RecordBlock,
     SceneDirectorySchema,
 > {
@@ -391,7 +355,7 @@ fn materialize_edit<'lane, 'scope>(
         Err(cause) => {
             let rejection = NodeSceneConstructionRejection::Materialization(cause);
             let stable_code = rejection.stable_code();
-            return lane.reject(rejection, stable_code);
+            return lane.reject(NodeSceneLaneRejection::from(rejection), stable_code);
         }
     };
     let output = NodeSceneActivationOutput {
@@ -403,5 +367,8 @@ fn materialize_edit<'lane, 'scope>(
         evidence_counts: execution.pending.counts.evidence,
         central_validation: execution.pending.counts.central_validation_plan,
     };
-    lane.complete(graph.directory.into_store(), output)
+    lane.complete(
+        graph.directory.into_store(),
+        NodeSceneLaneOutput::from_inner(output),
+    )
 }

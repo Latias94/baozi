@@ -170,7 +170,7 @@ pub(super) fn prepare_edit_candidate(
     final_progress: FinalProgress<SceneConstructionPhase, SceneConstructionUnit>,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
-    let evidence_counts = candidate.output().evidence_counts;
+    let evidence_counts = candidate.output().inner().evidence_counts;
     match candidate.try_issue_freeze_permit(final_progress)? {
         CanonicalFreezePermitIssue::Ready(permit) => {
             let generation = match reserve_generation() {
@@ -198,7 +198,7 @@ pub(super) fn prepare_edit_candidate(
             permit.bind_joint_commit(|_output, proof, joint, seal| {
                 ScopedNodeSceneEditJointCommit {
                     generation,
-                    proof,
+                    proof: proof.into_inner(),
                     invalidations,
                     remaps,
                     seal,

@@ -2,9 +2,6 @@ use std::fmt;
 use std::num::NonZeroU64;
 
 #[cfg(test)]
-use std::cell::Cell;
-
-#[cfg(test)]
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
     CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner,
@@ -357,6 +354,10 @@ pub struct NodeSceneLaneOutput(NodeSceneActivationOutput);
 pub struct NodeSceneLaneValidationProof(super::NodeSceneValidationProof);
 
 impl NodeSceneLaneValidationProof {
+    pub(super) const fn from_inner(proof: super::NodeSceneValidationProof) -> Self {
+        Self(proof)
+    }
+
     pub(in crate::canonical_scene::store) const fn into_inner(
         self,
     ) -> super::NodeSceneValidationProof {
@@ -382,6 +383,10 @@ impl NodeSceneLaneRejection {
 
     pub const fn is_authoring_rejection(&self) -> bool {
         !matches!(self.0, NodeSceneConstructionRejection::Materialization(_))
+    }
+
+    pub(super) fn into_inner(self) -> NodeSceneConstructionRejection<StoreRuntimeError> {
+        self.0
     }
 }
 
@@ -463,9 +468,12 @@ impl<'input> NodeSceneActivationRequest<'input> {
         PP: ProgressPhase,
         U: ProgressUnit,
     {
-        let Self { execution } = self;
-        let activation = BoundNodeSceneActivation { owner, execution };
-        activate_node_scene_scoped(activation, validation_progress, final_progress)
+        activate_node_scene_scoped(
+            owner,
+            self.into_transaction(),
+            validation_progress,
+            final_progress,
+        )
     }
 }
 
@@ -584,19 +592,64 @@ where
         PP: ProgressPhase,
         U: ProgressUnit,
     {
+        self.materialize_mapped(
+            lane,
+            #[cfg(test)]
+            NodeSceneBuildFaults::none(),
+        )
+    }
+
+    fn materialize_mapped<'lane, PP, U, L>(
+        &self,
+        lane: CanonicalLane<'lane, O, PP, U, L>,
+        #[cfg(test)] faults: NodeSceneBuildFaults,
+    ) -> CanonicalMaterialization<
+        'lane,
+        NodeSceneLaneOutput,
+        NodeSceneLaneRejection,
+        RecordBlock,
+        SceneDirectorySchema,
+    >
+    where
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
         materialize_node_scene_mapped(
             lane,
             &self.execution,
             self.brand,
             #[cfg(test)]
-            NodeSceneBuildFaults::none(),
+            faults,
             NodeSceneLaneOutput,
             NodeSceneLaneRejection,
         )
     }
+
+    #[cfg(test)]
+    fn materialize_with_faults<'lane, PP, U, L>(
+        &self,
+        lane: CanonicalLane<'lane, O, PP, U, L>,
+        faults: NodeSceneBuildFaults,
+    ) -> CanonicalMaterialization<
+        'lane,
+        NodeSceneLaneOutput,
+        NodeSceneLaneRejection,
+        RecordBlock,
+        SceneDirectorySchema,
+    >
+    where
+        PP: ProgressPhase,
+        U: ProgressUnit,
+    {
+        self.materialize_mapped(lane, faults)
+    }
 }
 
 impl NodeSceneLaneOutput {
+    pub(super) const fn from_inner(output: NodeSceneActivationOutput) -> Self {
+        Self(output)
+    }
+
     pub(in crate::canonical_scene::store) const fn inner(self) -> NodeSceneActivationOutput {
         self.0
     }
@@ -626,6 +679,18 @@ impl NodeSceneEvidenceRecipe {
 }
 
 impl NodeSceneActivationPostflight {
+    pub(super) const fn from_parts(
+        brand: super::super::ConstructionBrand,
+        failure_evidence: NodeSceneFailureEvidencePlan,
+        evidence_counts: SceneEvidenceCounts,
+    ) -> Self {
+        Self {
+            brand,
+            failure_evidence,
+            evidence_counts,
+        }
+    }
+
     /// Returns the failure recipe for a preflight or materialization rejection.
     pub const fn failure_evidence(&self) -> NodeSceneEvidenceRecipe {
         NodeSceneEvidenceRecipe {
@@ -710,18 +775,6 @@ impl NodeSceneActivationPostflight {
             },
         )
     }
-}
-
-/// One request's execution payload structurally paired with its bound scoped outcome owner.
-#[cfg(test)]
-struct BoundNodeSceneActivation<'input, O, PP, U, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    owner: RetainedStoreSessionOutcomeOwner<O, PP, U, L>,
-    execution: NodeSceneActivationExecution<'input>,
 }
 
 impl NodeSceneSessionActivationBootstrap {
@@ -1531,7 +1584,8 @@ where
 /// publication so the caller's sole session ledger remains the only ledger involved.
 #[cfg(test)]
 fn activate_node_scene_scoped<'input, O, PP, U, L>(
-    activation: BoundNodeSceneActivation<'input, O, PP, U, L>,
+    owner: RetainedStoreSessionOutcomeOwner<O, PP, U, L>,
+    transaction: NodeSceneActivationTransaction<'input>,
     validation_progress: CanonicalValidationProgress<PP, U>,
     final_progress: FinalProgress<PP, U>,
 ) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
@@ -1541,10 +1595,10 @@ where
     U: ProgressUnit,
 {
     drive_node_scene_activation_deferred(
-        activation,
+        owner,
+        transaction,
         validation_progress,
         final_progress,
-        #[cfg(test)]
         NodeSceneBuildFaults::none(),
     )?
     .prepare_immediately()
@@ -1563,73 +1617,46 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let NodeSceneActivationRequest { execution } = request;
-    let activation = BoundNodeSceneActivation { owner, execution };
-    drive_node_scene_activation_deferred(activation, validation_progress, final_progress, faults)?
-        .prepare_immediately()
+    drive_node_scene_activation_deferred(
+        owner,
+        request.into_transaction(),
+        validation_progress,
+        final_progress,
+        faults,
+    )?
+    .prepare_immediately()
 }
 
 #[cfg(test)]
 fn drive_node_scene_activation_deferred<'input, O, PP, U, L>(
-    activation: BoundNodeSceneActivation<'input, O, PP, U, L>,
+    owner: RetainedStoreSessionOutcomeOwner<O, PP, U, L>,
+    mut transaction: NodeSceneActivationTransaction<'input>,
     validation_progress: CanonicalValidationProgress<PP, U>,
     final_progress: FinalProgress<PP, U>,
-    #[cfg(test)] faults: NodeSceneBuildFaults,
+    faults: NodeSceneBuildFaults,
 ) -> Result<DeferredNodeSceneDraftBuild<O, PP, U, L>, SceneConstructionError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    #[cfg(test)]
     let panic_central_validator = faults.panic_central_validator;
-    let BoundNodeSceneActivation { owner, execution } = activation;
-    let NodeSceneActivationExecution {
-        brand,
-        activation_request,
-        input,
-        validation_limits,
-        failure_evidence,
-    } = execution;
-    let evidence_plan = failure_evidence.records;
-    let sealed_counts = Cell::new(SceneEvidenceCounts::authoring_rejection());
-    let sealed_counts_ref = &sealed_counts;
-    let mut activation_request = Some(activation_request);
-
-    let outcome = owner.plan_and_activate_scoped(move |mut planning| {
+    let outcome = owner.plan_and_activate_scoped(|mut planning| {
         let preflight = match planning.begin_semantic_work() {
-            Ok(mut semantic) => {
-                let validation = {
-                    let mut control = ScopedAuthoringControl::new(&mut semantic);
-                    validate_and_seal_node_scene_plan(
-                        input,
-                        validation_limits,
-                        failure_evidence,
-                        brand,
-                        &mut control,
-                    )
-                };
-                match validation {
-                    Ok(plan) => match semantic.finish_exact() {
-                        Ok(completion) => Ok((plan, completion)),
-                        Err(_cause) => {
-                            drop(plan);
-                            Err(NodeSceneConstructionRejection::<StoreRuntimeError>::Materialization(
-                                StoreRuntimeError::ConstructionInvariantUnverified,
-                            ))
-                        }
-                    },
-                    Err(rejection) => {
-                        let _ = semantic.finish_rejected();
-                        Err(rejection)
+            Ok(mut semantic) => match transaction.preflight(&mut semantic) {
+                Ok(plan) => match semantic.finish_exact() {
+                    Ok(completion) => Ok((plan, completion)),
+                    Err(_cause) => {
+                        drop(plan);
+                        Err(NodeSceneLaneRejection::construction_invariant())
                     }
+                },
+                Err(rejection) => {
+                    let _ = semantic.finish_rejected();
+                    Err(rejection)
                 }
-            }
-            Err(_cause) => {
-                Err(NodeSceneConstructionRejection::<StoreRuntimeError>::Materialization(
-                    StoreRuntimeError::ConstructionInvariantUnverified,
-                ))
-            }
+            },
+            Err(_cause) => Err(NodeSceneLaneRejection::construction_invariant()),
         };
         let (plan, completion) = match preflight {
             Ok(ready) => ready,
@@ -1641,43 +1668,32 @@ where
         #[cfg(test)]
         if matches!(faults.planning, Some(NodeScenePlanningFault::SealedPlan)) {
             drop(plan);
-            let rejection = NodeSceneConstructionRejection::<StoreRuntimeError>::Planning(
-                StorePlanError::InvalidBlockTable,
-            );
+            let rejection = NodeSceneLaneRejection::from(NodeSceneConstructionRejection::<
+                StoreRuntimeError,
+            >::Planning(
+                StorePlanError::InvalidBlockTable
+            ));
             let stable_code = rejection.stable_code();
             return planning.reject(rejection, stable_code);
         }
-        sealed_counts_ref.set(plan.execution.materialization.evidence_counts());
-        #[cfg(test)]
         if matches!(faults.planning, Some(NodeScenePlanningFault::Publication)) {
             drop(plan);
-            let rejection = NodeSceneConstructionRejection::<StoreRuntimeError>::Planning(
-                StorePlanError::InvalidBlockTable,
-            );
+            let rejection = NodeSceneLaneRejection::from(NodeSceneConstructionRejection::<
+                StoreRuntimeError,
+            >::Planning(
+                StorePlanError::InvalidBlockTable
+            ));
             let stable_code = rejection.stable_code();
             return planning.reject(rejection, stable_code);
         }
-        let activation = NodeSceneLanePlan {
-            brand,
-            activation_request: activation_request
-                .take()
-                .expect("the test activation request is consumed exactly once"),
-            sealed: plan,
-        };
-        let permit = match planning.seal_activation(activation, completion) {
+        let permit = match planning.seal_activation(plan, completion) {
             CanonicalActivationSeal::Sealed(permit) => permit,
             CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
         };
-        permit.activate(move |lane, execution| {
-            materialize_node_scene(
-                lane,
-                &execution.execution,
-                brand,
-                #[cfg(test)]
-                faults,
-            )
-        })
+        permit.activate(move |lane, execution| execution.materialize_with_faults(lane, faults))
     })?;
+    let postflight = transaction.finish();
+    let failure_evidence = postflight.failure_evidence();
 
     let activated = match outcome {
         CanonicalActivationOutcome::Activated(activated) => activated,
@@ -1690,8 +1706,8 @@ where
                 control_cause,
                 owner: PendingNodeSceneFailure::ActivationRejected {
                     owner: rejected,
-                    evidence_plan,
-                    evidence_counts: sealed_counts.get(),
+                    evidence_plan: failure_evidence.record_plan(),
+                    evidence_counts: failure_evidence.counts(),
                     final_progress,
                 },
             });
@@ -1705,8 +1721,8 @@ where
                 control_cause,
                 owner: PendingNodeSceneFailure::NeverActivated {
                     owner: never_activated,
-                    evidence_plan,
-                    evidence_counts: sealed_counts.get(),
+                    evidence_plan: failure_evidence.record_plan(),
+                    evidence_counts: failure_evidence.counts(),
                     final_progress,
                 },
             });
@@ -1721,62 +1737,28 @@ where
         }
     };
 
-    let central_counts = activated.output().evidence_counts;
+    let candidate_evidence = postflight.candidate_evidence(activated.output());
+    let central_counts = candidate_evidence.counts();
     let outcome = activated.validate_centrally(
         validation_progress,
-        |lane, output| match lane.try_retain_records(
-            evidence_plan,
+        |lane, _output| match lane.try_retain_records(
+            candidate_evidence.record_plan(),
             NodeSceneOutcomeEvidenceSchema,
-            |writer| {
-                writer.write_row(|row| write_node_scene_evidence_row(row, output.evidence_counts))
-            },
+            |writer| writer.write_row(|row| candidate_evidence.write_row(row)),
         ) {
             Ok(evidence) => lane.complete(evidence),
             Err(_) => lane.abort(),
         },
         |planning, output| {
-            #[cfg(test)]
             if panic_central_validator {
                 panic!("injected clean central validator panic");
             }
-            let validation_plan = output.central_validation;
-            let scratch_plan = validation_plan.scratch_plan();
-            planning.validate_with(
-                |checkpoint| {
-                    ScopedNodeSceneValidationScratchOwner::try_allocate(checkpoint, scratch_plan)
-                },
-                |session, directory, evidence, scratch| {
-                    let initialized = scratch.initialize(session, scratch_plan)?;
-                    let proof = if initialized && output.draft.brand == brand {
-                        let mut scratch = scratch.metered_view();
-                        validate_node_scene_canonical_graph_metered(
-                            session,
-                            directory,
-                            evidence,
-                            output.evidence_counts,
-                            output.refs,
-                            validation_plan,
-                            &mut scratch,
-                        )?
-                    } else {
-                        None
-                    };
-                    Ok(match proof {
-                        Some(proof) => CanonicalValidationDecision::accept(proof),
-                        None => CanonicalValidationDecision::reject(
-                            NodeSceneConstructionRejection::<StoreRuntimeError>::Materialization(
-                                StoreRuntimeError::ConstructionInvariantUnverified,
-                            ),
-                            NODE_SCENE_BUILD_INVARIANT_CODE,
-                        ),
-                    })
-                },
-            )
+            postflight.validate_candidate(planning, output)
         },
     )?;
     match outcome {
         CanonicalCentralValidationOutcome::Candidate(candidate) => {
-            let draft = candidate.output().draft;
+            let draft = candidate.output().node_scene_draft();
             Ok(DeferredNodeSceneDraftBuild::Draft {
                 draft,
                 owner: PendingNodeSceneDraft {
