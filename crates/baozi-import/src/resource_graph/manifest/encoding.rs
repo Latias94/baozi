@@ -15,22 +15,13 @@ pub(in crate::resource_graph) enum ManifestEncodingError {
     Allocation,
 }
 
-pub(in crate::resource_graph) fn encode_node_class(
+pub(in crate::resource_graph) fn node_class_len(
     identity: &ManifestResourceIdentity,
     byte_length: u64,
     content_digest: ManifestDigest,
     outgoing_relations: &[ManifestRelation],
-) -> Result<Vec<u8>, ManifestEncodingError> {
-    let length = encoded_len(|output| {
-        write_node_class(
-            output,
-            identity,
-            byte_length,
-            content_digest,
-            outgoing_relations,
-        )
-    })?;
-    encode_vec(length, |output| {
+) -> Result<usize, ManifestEncodingError> {
+    encoded_len(|output| {
         write_node_class(
             output,
             identity,
@@ -41,17 +32,45 @@ pub(in crate::resource_graph) fn encode_node_class(
     })
 }
 
-pub(in crate::resource_graph) fn encode_relation_key(
+pub(in crate::resource_graph) fn encode_node_class_into_accounted(
+    identity: &ManifestResourceIdentity,
+    byte_length: u64,
+    content_digest: ManifestDigest,
+    outgoing_relations: &[ManifestRelation],
+    expected: usize,
+    bytes: &mut AccountedVec<u8>,
+) -> Result<(), ManifestEncodingError> {
+    let mut output = AccountedVecOutput::new(bytes, expected)?;
+    write_node_class(
+        &mut output,
+        identity,
+        byte_length,
+        content_digest,
+        outgoing_relations,
+    )?;
+    output.finish()
+}
+
+pub(in crate::resource_graph) fn relation_key_len(
     role: &DependencyRoleId,
     requirement: DependencyRequirement,
     reference: &ManifestReference,
     outcome: &ManifestRelationOutcome,
-) -> Result<Vec<u8>, ManifestEncodingError> {
-    let length =
-        encoded_len(|output| write_relation_key(output, role, requirement, reference, outcome))?;
-    encode_vec(length, |output| {
-        write_relation_key(output, role, requirement, reference, outcome)
-    })
+) -> Result<usize, ManifestEncodingError> {
+    encoded_len(|output| write_relation_key(output, role, requirement, reference, outcome))
+}
+
+pub(in crate::resource_graph) fn encode_relation_key_into_accounted(
+    role: &DependencyRoleId,
+    requirement: DependencyRequirement,
+    reference: &ManifestReference,
+    outcome: &ManifestRelationOutcome,
+    expected: usize,
+    bytes: &mut AccountedVec<u8>,
+) -> Result<(), ManifestEncodingError> {
+    let mut output = AccountedVecOutput::new(bytes, expected)?;
+    write_relation_key(&mut output, role, requirement, reference, outcome)?;
+    output.finish()
 }
 
 pub(super) fn manifest_len(
@@ -522,6 +541,7 @@ impl ManifestOutput for LengthOutput {
     }
 }
 
+#[cfg(test)]
 struct VecOutput {
     bytes: Vec<u8>,
     expected: usize,
@@ -551,6 +571,7 @@ impl<'output> AccountedVecOutput<'output> {
     }
 }
 
+#[cfg(test)]
 impl VecOutput {
     fn new(expected: usize) -> Result<Self, ManifestEncodingError> {
         let mut bytes = Vec::new();
@@ -568,6 +589,7 @@ impl VecOutput {
     }
 }
 
+#[cfg(test)]
 impl ManifestOutput for VecOutput {
     fn position(&self) -> usize {
         self.bytes.len()
@@ -639,6 +661,7 @@ fn encoded_len(
     Ok(output.length)
 }
 
+#[cfg(test)]
 fn encode_vec(
     expected: usize,
     encode: impl FnOnce(&mut VecOutput) -> Result<(), ManifestEncodingError>,

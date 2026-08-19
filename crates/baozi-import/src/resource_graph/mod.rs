@@ -27,7 +27,10 @@ use baozi_io::{AssetPath, AuthorityDomain};
 use baozi_operation::CapacityPlanError;
 use std::sync::Arc;
 
-use manifest::{ManifestEncodingError, encode_node_class, encode_relation_key};
+use manifest::{
+    ManifestEncodingError, encode_node_class_into_accounted, encode_relation_key_into_accounted,
+    node_class_len, relation_key_len,
+};
 
 #[derive(Debug)]
 pub(crate) enum ResourceGraphError {
@@ -169,11 +172,13 @@ enum GraphRelationOutcome {
 
 struct DigestedManifestRelation {
     digest: ManifestDigest,
+    canonical: AccountedVec<u8>,
     relation: ManifestRelation,
 }
 
 struct DigestedManifestNode {
     digest: ManifestDigest,
+    canonical: AccountedVec<u8>,
     source_index: usize,
     relations: AccountedVec<ManifestRelation>,
 }
@@ -748,28 +753,50 @@ impl ResourceGraph {
                 let relation = relation?;
                 charge_manifest_work(host, 1)?;
                 let relation = project_relation(relation, &digests)?;
-                let key_bytes = encode_relation_key(
+                let canonical_len = relation_key_len(
                     relation.role(),
                     relation.requirement(),
                     relation.reference(),
                     relation.outcome(),
                 )?;
+                let mut canonical =
+                    manifest_scratch_vec(host, canonical_len, "resource-manifest-relation-key")?;
+                encode_relation_key_into_accounted(
+                    relation.role(),
+                    relation.requirement(),
+                    relation.reference(),
+                    relation.outcome(),
+                    canonical_len,
+                    &mut canonical,
+                )?;
                 digested_relations.push_reserved_infallible(DigestedManifestRelation {
-                    digest: ManifestDigest::of(&key_bytes),
+                    digest: hash_manifest_bytes(host, &canonical)?,
+                    canonical,
                     relation,
                 });
             }
             let relations = fold_manifest_relations(host, digested_relations)?;
-            let node_bytes = encode_node_class(
+            let canonical_len = node_class_len(
                 &node.public_identity,
                 node.byte_length,
                 node.content_digest,
                 &relations,
             )?;
-            let digest = ManifestDigest::of(&node_bytes);
+            let mut canonical =
+                manifest_scratch_vec(host, canonical_len, "resource-manifest-node-class")?;
+            encode_node_class_into_accounted(
+                &node.public_identity,
+                node.byte_length,
+                node.content_digest,
+                &relations,
+                canonical_len,
+                &mut canonical,
+            )?;
+            let digest = hash_manifest_bytes(host, &canonical)?;
             digests[index] = Some(digest);
             physical.push_reserved_infallible(DigestedManifestNode {
                 digest,
+                canonical,
                 source_index: index,
                 relations,
             });
@@ -808,7 +835,7 @@ impl ResourceGraph {
             )
             .map_err(ResourceGraphError::Scope)?;
         provisional.write_canonical_bytes(canonical_len, &mut canonical)?;
-        let digest = ManifestDigest::of(&canonical);
+        let digest = hash_manifest_bytes(host, &canonical)?;
         charge_consumed(host, ImportDimension::InputManifestBytes, byte_count)?;
         drop(canonical);
         provisional.release_live_reservations();
@@ -1236,27 +1263,11 @@ fn fold_manifest_relations(
     let mut entries = digested.into_iter().peekable();
     while let Some(first) = entries.next() {
         let mut multiplicity = first.relation.multiplicity();
-        let mut expected = None;
         while next_digest_matches(host, entries.peek(), first.digest, |entry| entry.digest)? {
-            let expected = match expected.as_ref() {
-                Some(expected) => expected,
-                None => expected.insert(encode_relation_key(
-                    first.relation.role(),
-                    first.relation.requirement(),
-                    first.relation.reference(),
-                    first.relation.outcome(),
-                )?),
-            };
             let next = entries
                 .next()
                 .expect("a peeked manifest relation remains available");
-            let actual = encode_relation_key(
-                next.relation.role(),
-                next.relation.requirement(),
-                next.relation.reference(),
-                next.relation.outcome(),
-            )?;
-            if actual != *expected {
+            if !manifest_bytes_equal(host, &first.canonical, &next.canonical)? {
                 return Err(ResourceGraphError::DigestCollision);
             }
             multiplicity = multiplicity
@@ -1284,30 +1295,11 @@ fn fold_manifest_nodes(
         let source = graph_nodes
             .get(first.source_index)
             .ok_or(ResourceGraphError::DanglingNode)?;
-        let mut expected = None;
         while next_digest_matches(host, entries.peek(), first.digest, |entry| entry.digest)? {
-            let expected = match expected.as_ref() {
-                Some(expected) => expected,
-                None => expected.insert(encode_node_class(
-                    &source.public_identity,
-                    source.byte_length,
-                    source.content_digest,
-                    &first.relations,
-                )?),
-            };
             let next = entries
                 .next()
                 .expect("a peeked manifest node remains available");
-            let next_source = graph_nodes
-                .get(next.source_index)
-                .ok_or(ResourceGraphError::DanglingNode)?;
-            let actual = encode_node_class(
-                &next_source.public_identity,
-                next_source.byte_length,
-                next_source.content_digest,
-                &next.relations,
-            )?;
-            if actual != *expected {
+            if !manifest_bytes_equal(host, &first.canonical, &next.canonical)? {
                 return Err(ResourceGraphError::DigestCollision);
             }
         }
@@ -1385,6 +1377,38 @@ fn next_digest_matches<T>(
     };
     charge_manifest_work(host, 1)?;
     Ok(digest(next) == expected)
+}
+
+fn hash_manifest_bytes(
+    host: ImportStoreHost<'_>,
+    bytes: &[u8],
+) -> Result<ManifestDigest, ResourceGraphError> {
+    let work = u64::try_from(bytes.len()).map_err(|_| ResourceGraphError::Overflow)?;
+    charge_attempted(host, ImportDimension::InputManifestWork, work)?;
+    let digest = ManifestDigest::of(bytes);
+    charge_consumed(host, ImportDimension::InputManifestWork, work)?;
+    Ok(digest)
+}
+
+fn manifest_bytes_equal(
+    host: ImportStoreHost<'_>,
+    left: &[u8],
+    right: &[u8],
+) -> Result<bool, ResourceGraphError> {
+    charge_manifest_work(host, 1)?;
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.chunks(256).zip(right.chunks(256)) {
+        let work = u64::try_from(left.len()).map_err(|_| ResourceGraphError::Overflow)?;
+        charge_attempted(host, ImportDimension::InputManifestWork, work)?;
+        let equal = left == right;
+        charge_consumed(host, ImportDimension::InputManifestWork, work)?;
+        if !equal {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn project_relation(
@@ -1838,6 +1862,86 @@ mod tests {
         accounted
     }
 
+    fn digested_manifest_relation_for_test(
+        host: ImportStoreHost<'_>,
+        digest: ManifestDigest,
+        reference: &str,
+    ) -> DigestedManifestRelation {
+        let relation = manifest_relation_for_test(reference);
+        let canonical_len = relation_key_len(
+            relation.role(),
+            relation.requirement(),
+            relation.reference(),
+            relation.outcome(),
+        )
+        .unwrap();
+        let mut canonical =
+            manifest_scratch_vec(host, canonical_len, "resource-manifest-test-relation-key")
+                .unwrap();
+        encode_relation_key_into_accounted(
+            relation.role(),
+            relation.requirement(),
+            relation.reference(),
+            relation.outcome(),
+            canonical_len,
+            &mut canonical,
+        )
+        .unwrap();
+        DigestedManifestRelation {
+            digest,
+            canonical,
+            relation,
+        }
+    }
+
+    fn digested_manifest_node_for_test(
+        host: ImportStoreHost<'_>,
+        digest: ManifestDigest,
+        source_index: usize,
+        source: &GraphNode,
+    ) -> DigestedManifestNode {
+        let relations =
+            manifest_scratch_vec(host, 0, "resource-manifest-test-node-relations").unwrap();
+        let canonical_len = node_class_len(
+            &source.public_identity,
+            source.byte_length,
+            source.content_digest,
+            &relations,
+        )
+        .unwrap();
+        let mut canonical =
+            manifest_scratch_vec(host, canonical_len, "resource-manifest-test-node-class").unwrap();
+        encode_node_class_into_accounted(
+            &source.public_identity,
+            source.byte_length,
+            source.content_digest,
+            &relations,
+            canonical_len,
+            &mut canonical,
+        )
+        .unwrap();
+        DigestedManifestNode {
+            digest,
+            canonical,
+            source_index,
+            relations,
+        }
+    }
+
+    fn manifest_comparison_work_for_test(left: &[u8], right: &[u8]) -> u64 {
+        let mut work = 1_u64;
+        if left.len() != right.len() {
+            return work;
+        }
+        for (left, right) in left.chunks(256).zip(right.chunks(256)) {
+            work += u64::try_from(left.len()).unwrap();
+            if left != right {
+                break;
+            }
+        }
+        work
+    }
+
     fn add_available(
         graph: &mut ResourceGraph,
         host: ImportStoreHost<'_>,
@@ -2087,55 +2191,34 @@ mod tests {
         let owner = store_owner(&limits);
         let host = owner.host();
         let forced_digest = ManifestDigest::of(b"forced-relation-digest");
-        let folded = fold_manifest_relations(
-            host,
-            accounted_manifest_values(
-                host,
-                vec![
-                    DigestedManifestRelation {
-                        digest: forced_digest,
-                        relation: manifest_relation_for_test("shared.asset"),
-                    },
-                    DigestedManifestRelation {
-                        digest: forced_digest,
-                        relation: manifest_relation_for_test("shared.asset"),
-                    },
-                ],
-            ),
-        )
-        .unwrap();
+        let first = digested_manifest_relation_for_test(host, forced_digest, "shared.asset");
+        let second = digested_manifest_relation_for_test(host, forced_digest, "shared.asset");
+        let equal_work = 2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
+        let folded =
+            fold_manifest_relations(host, accounted_manifest_values(host, vec![first, second]))
+                .unwrap();
         assert_eq!(folded.len(), 1);
         assert_eq!(folded[0].multiplicity(), 2);
         let work = host
             .dimension_state(ImportDimension::InputManifestWork)
             .unwrap();
-        assert_eq!(work.attempted(), 2);
-        assert_eq!(work.consumed(), 2);
+        assert_eq!(work.attempted(), equal_work);
+        assert_eq!(work.consumed(), equal_work);
+
+        let first = digested_manifest_relation_for_test(host, forced_digest, "first.asset");
+        let second = digested_manifest_relation_for_test(host, forced_digest, "second.asset");
+        let collision_work =
+            2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
 
         assert!(matches!(
-            fold_manifest_relations(
-                host,
-                accounted_manifest_values(
-                    host,
-                    vec![
-                        DigestedManifestRelation {
-                            digest: forced_digest,
-                            relation: manifest_relation_for_test("first.asset"),
-                        },
-                        DigestedManifestRelation {
-                            digest: forced_digest,
-                            relation: manifest_relation_for_test("second.asset"),
-                        },
-                    ],
-                ),
-            ),
+            fold_manifest_relations(host, accounted_manifest_values(host, vec![first, second]),),
             Err(ResourceGraphError::DigestCollision)
         ));
         let work = host
             .dimension_state(ImportDimension::InputManifestWork)
             .unwrap();
-        assert_eq!(work.attempted(), 4);
-        assert_eq!(work.consumed(), 4);
+        assert_eq!(work.attempted(), equal_work + collision_work);
+        assert_eq!(work.consumed(), equal_work + collision_work);
     }
 
     #[test]
@@ -2150,33 +2233,12 @@ mod tests {
             graph_node_for_test(&first_authority, "first.asset", "shared.asset"),
             graph_node_for_test(&second_authority, "second.asset", "shared.asset"),
         ];
+        let first = digested_manifest_node_for_test(host, forced_digest, 0, &graph_nodes[0]);
+        let second = digested_manifest_node_for_test(host, forced_digest, 1, &graph_nodes[1]);
+        let equal_work = 2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
         let folded = fold_manifest_nodes(
             host,
-            accounted_manifest_values(
-                host,
-                vec![
-                    DigestedManifestNode {
-                        digest: forced_digest,
-                        source_index: 0,
-                        relations: manifest_scratch_vec(
-                            host,
-                            0,
-                            "resource-manifest-test-relations",
-                        )
-                        .unwrap(),
-                    },
-                    DigestedManifestNode {
-                        digest: forced_digest,
-                        source_index: 1,
-                        relations: manifest_scratch_vec(
-                            host,
-                            0,
-                            "resource-manifest-test-relations",
-                        )
-                        .unwrap(),
-                    },
-                ],
-            ),
+            accounted_manifest_values(host, vec![first, second]),
             &graph_nodes,
         )
         .unwrap();
@@ -2184,41 +2246,21 @@ mod tests {
         let work = host
             .dimension_state(ImportDimension::InputManifestWork)
             .unwrap();
-        assert_eq!(work.attempted(), 2);
-        assert_eq!(work.consumed(), 2);
+        assert_eq!(work.attempted(), equal_work);
+        assert_eq!(work.consumed(), equal_work);
 
         let graph_nodes = vec![
             graph_node_for_test(&first_authority, "first.asset", "first.asset"),
             graph_node_for_test(&second_authority, "second.asset", "second.asset"),
         ];
+        let first = digested_manifest_node_for_test(host, forced_digest, 0, &graph_nodes[0]);
+        let second = digested_manifest_node_for_test(host, forced_digest, 1, &graph_nodes[1]);
+        let collision_work =
+            2 + manifest_comparison_work_for_test(&first.canonical, &second.canonical);
         assert!(matches!(
             fold_manifest_nodes(
                 host,
-                accounted_manifest_values(
-                    host,
-                    vec![
-                        DigestedManifestNode {
-                            digest: forced_digest,
-                            source_index: 0,
-                            relations: manifest_scratch_vec(
-                                host,
-                                0,
-                                "resource-manifest-test-relations",
-                            )
-                            .unwrap(),
-                        },
-                        DigestedManifestNode {
-                            digest: forced_digest,
-                            source_index: 1,
-                            relations: manifest_scratch_vec(
-                                host,
-                                0,
-                                "resource-manifest-test-relations",
-                            )
-                            .unwrap(),
-                        },
-                    ],
-                ),
+                accounted_manifest_values(host, vec![first, second]),
                 &graph_nodes,
             ),
             Err(ResourceGraphError::DigestCollision)
@@ -2226,8 +2268,8 @@ mod tests {
         let work = host
             .dimension_state(ImportDimension::InputManifestWork)
             .unwrap();
-        assert_eq!(work.attempted(), 4);
-        assert_eq!(work.consumed(), 4);
+        assert_eq!(work.attempted(), equal_work + collision_work);
+        assert_eq!(work.consumed(), equal_work + collision_work);
     }
 
     #[test]
@@ -2243,14 +2285,8 @@ mod tests {
         let digested = accounted_manifest_values(
             host,
             vec![
-                DigestedManifestRelation {
-                    digest: forced_digest,
-                    relation: manifest_relation_for_test("first.asset"),
-                },
-                DigestedManifestRelation {
-                    digest: forced_digest,
-                    relation: manifest_relation_for_test("second.asset"),
-                },
+                digested_manifest_relation_for_test(host, forced_digest, "first.asset"),
+                digested_manifest_relation_for_test(host, forced_digest, "second.asset"),
             ],
         );
         host.tighten_dimension_policy(
@@ -2284,6 +2320,17 @@ mod tests {
         graph
             .bind_primary(host, &authority, &path, b"v 0 0 0")
             .unwrap();
+        let node = graph.nodes.first().unwrap();
+        let node_hash_work = u64::try_from(
+            node_class_len(
+                &node.public_identity,
+                node.byte_length,
+                node.content_digest,
+                &[],
+            )
+            .unwrap(),
+        )
+        .unwrap();
         graph.seal(host).unwrap();
         let manifest = graph.take_manifest().unwrap();
         let canonical = manifest.canonical_bytes().unwrap();
@@ -2301,6 +2348,12 @@ mod tests {
         assert_eq!(manifest_bytes.attempted(), 5_327);
         assert_eq!(manifest_bytes.consumed(), 5_327);
         assert_eq!(manifest_bytes.live_bytes(), 0);
+        let manifest_work = host
+            .dimension_state(ImportDimension::InputManifestWork)
+            .unwrap();
+        let expected_work = 3 + node_hash_work + 5_327;
+        assert_eq!(manifest_work.attempted(), expected_work);
+        assert_eq!(manifest_work.consumed(), expected_work);
         assert_eq!(manifest.schema_version(), 1);
         assert_eq!(manifest.counts().node_class_count(), 1);
         assert_eq!(manifest.counts().quotient_relation_record_count(), 0);
@@ -2310,6 +2363,59 @@ mod tests {
                 if reasons.as_slice()
                     == [ManifestObservedOnlyReason::UnstableResourceIdentity]
         ));
+    }
+
+    #[test]
+    fn node_hash_work_is_admitted_before_manifest_bytes() {
+        let limits = ResourceLimits::default();
+        let owner = store_owner(&limits);
+        let host = owner.host();
+        let authority = AuthorityDomain::default();
+        let path = AssetPath::new("models/main.obj").unwrap();
+        let mut graph = ResourceGraph::new(limits);
+        graph
+            .bind_primary(host, &authority, &path, b"v 0 0 0")
+            .unwrap();
+        let node = graph.nodes.first().unwrap();
+        let node_hash_work = u64::try_from(
+            node_class_len(
+                &node.public_identity,
+                node.byte_length,
+                node.content_digest,
+                &[],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let graph_storage = host
+            .dimension_state(ImportDimension::ScratchBytes)
+            .unwrap()
+            .live_bytes();
+        host.tighten_dimension_policy(
+            ImportDimension::InputManifestWork,
+            DimensionPolicy::counter(3, 3, 0),
+        )
+        .unwrap();
+
+        assert!(graph.seal(host).is_err());
+        let work = host
+            .dimension_state(ImportDimension::InputManifestWork)
+            .unwrap();
+        assert_eq!(work.attempted(), 3 + node_hash_work);
+        assert_eq!(work.consumed(), 3);
+        assert_eq!(
+            host.dimension_state(ImportDimension::InputManifestBytes)
+                .unwrap()
+                .attempted(),
+            0
+        );
+        assert_eq!(
+            host.dimension_state(ImportDimension::ScratchBytes)
+                .unwrap()
+                .live_bytes(),
+            graph_storage
+        );
+        assert!(graph.sealed_manifest.is_none());
     }
 
     #[test]

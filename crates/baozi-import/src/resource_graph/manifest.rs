@@ -6,7 +6,10 @@ use std::fmt;
 
 mod encoding;
 
-pub(super) use encoding::{ManifestEncodingError, encode_node_class, encode_relation_key};
+pub(super) use encoding::{
+    ManifestEncodingError, encode_node_class_into_accounted, encode_relation_key_into_accounted,
+    node_class_len, relation_key_len,
+};
 
 pub(super) const MANIFEST_SCHEMA_VERSION: u64 = 1;
 const MANIFEST_DOMAIN: &str = "baozi.input-manifest.v1";
