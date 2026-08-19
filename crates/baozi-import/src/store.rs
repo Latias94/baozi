@@ -5,14 +5,16 @@ use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use baozi_core::__canonical_import::{
-    SceneOutcomeEvidenceTag, maximum_scene_canonical_blocks, maximum_scene_structural_work,
+    SceneEvidenceRecipe, SceneOutcomeEvidenceTag, SceneSessionActivationBootstrap,
+    maximum_scene_canonical_blocks, maximum_scene_structural_work,
     scene_failure_evidence_field_work, scene_failure_evidence_member_count,
     scene_failure_terminal_work_requirement,
 };
 use baozi_core::{SceneValidationLimits, ValidatedScene as CanonicalValidatedScene};
 use baozi_operation::__canonical_activation::{
-    CanonicalActivationPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
-    RetainedStoreDimensionState, RetainedStoreObservedWork, StoreActivationContainment,
+    CanonicalActivationSessionPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
+    RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreSessionOutcomeOwner,
+    RetainedStoreWriterRole, StoreActivationContainment,
 };
 use baozi_operation::{
     ControlCause, DimensionPolicy, LedgerCause, LedgerLimits, LedgerLimitsError,
@@ -49,6 +51,8 @@ const IMPORT_STORE_EVIDENCE_DIMENSION_COUNT: usize =
 
 type ImportStoreOperation =
     RetainedStoreOperation<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
+type ImportStoreOutcomeOwner =
+    RetainedStoreSessionOutcomeOwner<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>;
 
 /// Import-owned terminal classification copied from the unique ledger header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1079,23 +1083,17 @@ impl ImportStoreVocabulary {
         self.phases.map(|(_, key)| key)
     }
 
-    fn activation_policy(
-        &self,
-        canonical_writer_limits: RetainedStoreBatchLimits,
-        outcome_evidence_writer_limits: RetainedStoreBatchLimits,
-    ) -> CanonicalActivationPolicy {
-        CanonicalActivationPolicy::new(
-            RetainedStoreWriterPlan::new(
+    fn activation_session_policy(&self) -> CanonicalActivationSessionPolicy {
+        CanonicalActivationSessionPolicy::new(
+            RetainedStoreWriterRole::new(
                 self.phase(ImportLedgerPhase::SceneConstruction),
                 self.dimension(ImportDimension::CanonicalOutputBytes),
                 self.dimension(ImportDimension::CanonicalOutputBytes),
-                canonical_writer_limits,
             ),
-            RetainedStoreWriterPlan::new(
+            RetainedStoreWriterRole::new(
                 self.phase(ImportLedgerPhase::OutcomeFinalization),
                 self.startup_outcome_evidence,
                 self.startup_outcome_evidence,
-                outcome_evidence_writer_limits,
             ),
             CanonicalMaterializationRole::new(
                 self.dimension(ImportDimension::WorkUnits),
@@ -1122,28 +1120,43 @@ pub(crate) struct ImportStoreBootstrap {
     vocabulary: ImportStoreVocabulary,
     ledger_plan: StoreLedgerPlan,
     start_plan: RetainedStoreStartPlan,
-}
-
-impl ImportStoreBootstrap {
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        ImportStoreVocabulary,
-        StoreLedgerPlan,
-        RetainedStoreStartPlan,
-    ) {
-        (self.vocabulary, self.ledger_plan, self.start_plan)
-    }
+    scene_activation: SceneSessionActivationBootstrap,
 }
 
 /// Sole retained-store owner for one import session before canonical activation begins.
 ///
 /// Producer-facing code borrows [`ImportStoreHost`] rather than the raw operation, store keys, or
-/// physical account. The private state slot moves the operation exactly once into the later
-/// scoped canonical outcome transaction while outstanding producer values retain this owner.
+/// physical account. The private state slot retains the session-lifetime outcome owner and its
+/// dormant Scene authority across producer work, then consumes that owner exactly once when the
+/// core-sealed Scene plan reaches activation.
 pub(crate) struct ImportStoreSessionOwner {
     state: RefCell<ImportStoreSessionState>,
     vocabulary: ImportStoreVocabulary,
+    unsubmitted_evidence: SceneEvidenceRecipe,
+}
+
+#[derive(Debug)]
+pub(crate) enum ImportStoreSessionStartError {
+    Start(RetainedStoreStartError),
+    Containment(StoreActivationContainment),
+}
+
+impl fmt::Display for ImportStoreSessionStartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Start(cause) => cause.fmt(formatter),
+            Self::Containment(cause) => cause.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ImportStoreSessionStartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Start(cause) => Some(cause),
+            Self::Containment(cause) => Some(cause),
+        }
+    }
 }
 
 #[allow(
@@ -1151,7 +1164,7 @@ pub(crate) struct ImportStoreSessionOwner {
     reason = "the sole operation and pending terminal owners stay inline so fail-closed transitions do not allocate"
 )]
 enum ImportStoreSessionState {
-    Active(ImportStoreOperation),
+    Dormant(ImportStoreOutcomeOwner),
     Transitioning,
     Pending(scene_activation::ImportPendingScene),
     Contained,
@@ -1160,7 +1173,7 @@ enum ImportStoreSessionState {
 fn inactive_store_state_error(state: &ImportStoreSessionState) -> ImportStoreHostError {
     match state {
         ImportStoreSessionState::Contained => ImportStoreHostError::OperationContained,
-        ImportStoreSessionState::Active(_)
+        ImportStoreSessionState::Dormant(_)
         | ImportStoreSessionState::Transitioning
         | ImportStoreSessionState::Pending(_) => ImportStoreHostError::OperationConsumed,
     }
@@ -1175,12 +1188,28 @@ impl ImportStoreSessionOwner {
         control: ImportOperationControl,
         account: &PhysicalStorageAccount,
         bootstrap: ImportStoreBootstrap,
-    ) -> Result<Self, RetainedStoreStartError> {
-        let (vocabulary, ledger_plan, start_plan) = bootstrap.into_parts();
-        let operation = ImportStoreOperation::try_start(control, ledger_plan, account, start_plan)?;
-        Ok(Self {
-            state: RefCell::new(ImportStoreSessionState::Active(operation)),
+    ) -> Result<Self, ImportStoreSessionStartError> {
+        let ImportStoreBootstrap {
             vocabulary,
+            ledger_plan,
+            start_plan,
+            scene_activation,
+        } = bootstrap;
+        let operation = ImportStoreOperation::try_start(control, ledger_plan, account, start_plan)
+            .map_err(ImportStoreSessionStartError::Start)?;
+        let (outcome_evidence_writer_limits, failure, unsubmitted_evidence) =
+            scene_activation.into_parts();
+        let owner = operation
+            .into_session_outcome_owner(
+                vocabulary.activation_session_policy(),
+                outcome_evidence_writer_limits,
+                failure,
+            )
+            .map_err(ImportStoreSessionStartError::Containment)?;
+        Ok(Self {
+            state: RefCell::new(ImportStoreSessionState::Dormant(owner)),
+            vocabulary,
+            unsubmitted_evidence,
         })
     }
 
@@ -1197,7 +1226,7 @@ impl ImportStoreSessionOwner {
             .try_borrow_mut()
             .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
         match &mut *state {
-            ImportStoreSessionState::Active(operation) => operation
+            ImportStoreSessionState::Dormant(owner) => owner
                 .producer_host()
                 .poll()
                 .map_err(|cause| project_store_runtime_error(&self.vocabulary, cause)),
@@ -1249,7 +1278,6 @@ pub(crate) enum ImportStoreActivationError {
     MaterializationFailed,
     Containment(StoreActivationContainment),
     Preparation(StorePrepareError),
-    Plan(StorePlanError),
 }
 
 impl fmt::Display for ImportStoreActivationError {
@@ -1265,7 +1293,6 @@ impl fmt::Display for ImportStoreActivationError {
             }
             Self::Containment(cause) => cause.fmt(formatter),
             Self::Preparation(cause) => cause.fmt(formatter),
-            Self::Plan(cause) => cause.fmt(formatter),
         }
     }
 }
@@ -1278,7 +1305,6 @@ impl std::error::Error for ImportStoreActivationError {
             Self::AuthoringRejected | Self::MaterializationFailed => None,
             Self::Containment(cause) => Some(cause),
             Self::Preparation(cause) => Some(cause),
-            Self::Plan(cause) => Some(cause),
         }
     }
 }
@@ -1327,13 +1353,15 @@ impl ImportStoreHost<'_> {
         project_store_runtime_error(self.vocabulary, cause)
     }
 
-    fn try_operation(&self) -> Result<RefMut<'_, ImportStoreOperation>, ImportStoreHostError> {
+    fn try_outcome_owner(
+        &self,
+    ) -> Result<RefMut<'_, ImportStoreOutcomeOwner>, ImportStoreHostError> {
         let state = self
             .state
             .try_borrow_mut()
             .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
         RefMut::filter_map(state, |state| match state {
-            ImportStoreSessionState::Active(operation) => Some(operation),
+            ImportStoreSessionState::Dormant(owner) => Some(owner),
             ImportStoreSessionState::Transitioning
             | ImportStoreSessionState::Pending(_)
             | ImportStoreSessionState::Contained => None,
@@ -1342,7 +1370,7 @@ impl ImportStoreHost<'_> {
     }
 
     pub(crate) fn poll(&self) -> Result<(), ImportStoreHostError> {
-        self.try_operation()?
+        self.try_outcome_owner()?
             .producer_host()
             .poll()
             .map_err(|cause| self.runtime_error(cause))
@@ -1355,7 +1383,7 @@ impl ImportStoreHost<'_> {
         completed: u64,
         total: Option<u64>,
     ) -> Result<(), ImportStoreHostError> {
-        self.try_operation()?
+        self.try_outcome_owner()?
             .producer_host()
             .report_progress(phase, unit, completed, total)
             .map_err(|cause| self.runtime_error(cause))
@@ -1366,7 +1394,7 @@ impl ImportStoreHost<'_> {
         dimension: ImportDimension,
     ) -> Result<RetainedStoreDimensionState, ImportStoreHostError> {
         let key = self.vocabulary.dimension(dimension);
-        self.try_operation()?
+        self.try_outcome_owner()?
             .producer_host()
             .dimension_state(key)
             .map_err(|cause| self.runtime_error(cause))
@@ -1380,7 +1408,7 @@ impl ImportStoreHost<'_> {
     ) -> Result<ImportStoreReservation, ImportStoreHostError> {
         let phase = self.vocabulary.phase(phase);
         let dimension = self.vocabulary.dimension(dimension);
-        self.try_operation()?
+        self.try_outcome_owner()?
             .control_checkpoint()
             .reserve(phase, dimension, bytes)
             .map(|raw| ImportStoreReservation { raw, bytes })
@@ -1392,7 +1420,7 @@ impl ImportStoreHost<'_> {
         reservation: &mut ImportStoreReservation,
         bytes: u64,
     ) -> Result<(), ImportStoreHostError> {
-        self.try_operation()?
+        self.try_outcome_owner()?
             .control_checkpoint()
             .resize(&mut reservation.raw, bytes)
             .map_err(|cause| self.runtime_error(cause))?;
@@ -1410,7 +1438,7 @@ impl ImportStoreHost<'_> {
     ) -> Result<(), ImportStoreHostError> {
         let phase = self.vocabulary.phase(phase);
         let dimension = self.vocabulary.dimension(dimension);
-        self.try_operation()?
+        self.try_outcome_owner()?
             .control_checkpoint()
             .transition(&mut reservation.raw, phase, dimension, bytes)
             .map_err(|cause| self.runtime_error(cause))?;
@@ -1423,7 +1451,7 @@ impl ImportStoreHost<'_> {
         &self,
         reservation: &ImportStoreReservation,
     ) -> Result<(), ImportStoreHostError> {
-        self.try_operation()?
+        self.try_outcome_owner()?
             .control_checkpoint()
             .validate_live_owner(&reservation.raw)
             .map_err(|cause| self.runtime_error(cause))
@@ -1435,7 +1463,7 @@ impl ImportStoreHost<'_> {
         upper_bound: DimensionPolicy,
     ) -> Result<(), ImportStoreHostError> {
         let dimension = self.vocabulary.dimension(dimension);
-        self.try_operation()?
+        self.try_outcome_owner()?
             .producer_host()
             .tighten_dimension_policy(dimension, upper_bound)
             .map_err(|cause| self.runtime_error(cause))
@@ -1447,7 +1475,7 @@ impl ImportStoreHost<'_> {
         amount: u64,
     ) -> Result<(), ImportStoreHostError> {
         let dimension = self.vocabulary.dimension(dimension);
-        self.try_operation()?
+        self.try_outcome_owner()?
             .producer_host()
             .charge_attempted(dimension, amount)
             .map_err(|cause| self.runtime_error(cause))
@@ -1459,7 +1487,7 @@ impl ImportStoreHost<'_> {
         amount: u64,
     ) -> Result<(), ImportStoreHostError> {
         let dimension = self.vocabulary.dimension(dimension);
-        self.try_operation()?
+        self.try_outcome_owner()?
             .producer_host()
             .charge_consumed(dimension, amount)
             .map_err(|cause| self.runtime_error(cause))
@@ -1471,7 +1499,7 @@ impl ImportStoreHost<'_> {
     ) -> Result<(), ImportStoreHostError> {
         let charges =
             charges.map(|(dimension, amount)| (self.vocabulary.dimension(dimension), amount));
-        self.try_operation()?
+        self.try_outcome_owner()?
             .producer_host()
             .charge_observed_batch(charges)
             .map_err(|cause| self.runtime_error(cause))
@@ -1484,7 +1512,7 @@ impl ImportStoreHost<'_> {
         let mut charges =
             charges.map(|(dimension, amount)| (self.vocabulary.dimension(dimension), amount));
         charges.sort_unstable_by_key(|(dimension, _)| *dimension);
-        self.try_operation()?
+        self.try_outcome_owner()?
             .producer_host()
             .charge_consumed_batch(charges)
             .map_err(|cause| self.runtime_error(cause))
@@ -1498,7 +1526,7 @@ impl ImportStoreHost<'_> {
         let charges =
             charges.map(|(dimension, amount)| (self.vocabulary.dimension(dimension), amount));
         let mut operation = self
-            .try_operation()
+            .try_outcome_owner()
             .map_err(ImportObservedWorkFailure::Store)?;
         let mut producer = operation.producer_host();
         let raw = producer
@@ -1757,6 +1785,7 @@ pub(crate) fn try_import_store_bootstrap(
     let domain = StoreKeyDomain::try_new(IMPORT_STORE_CATALOG)
         .map_err(ImportStoreBootstrapError::KeyDomain)?;
     let vocabulary = ImportStoreVocabulary::try_admit(&domain)?;
+    let scene_activation = SceneSessionActivationBootstrap::try_new()?;
     let canonical_retained_member_policy = requirements.canonical_retained_member_policy();
     let canonical_structural_work_policy = requirements.canonical_structural_work_policy();
     let startup_outcome_evidence_policy =
@@ -1860,6 +1889,7 @@ pub(crate) fn try_import_store_bootstrap(
         vocabulary,
         ledger_plan,
         start_plan,
+        scene_activation,
     })
 }
 
@@ -2049,19 +2079,17 @@ mod tests {
     use baozi_core::SceneValidationLimits;
     use baozi_operation::{
         CancellationOrigin, CancellationSignal, PhysicalStorageAccountFactory,
-        PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits, RetainedStoreOperation,
-        StoreTerminalCause,
+        PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits, StoreTerminalCause,
     };
 
-    use crate::ledger::{
-        ImportOperationControl, ImportOperationOwner, ImportProgressPhase, ImportProgressUnit,
-    };
+    use crate::ledger::ImportOperationControl;
 
     #[test]
     fn retained_session_owner_has_a_bounded_inline_stack_footprint() {
         const MAX_INLINE_SESSION_OWNER_BYTES: usize = 64 * 1024;
 
         assert!(size_of::<ImportStoreOperation>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportStoreOutcomeOwner>() <= MAX_INLINE_SESSION_OWNER_BYTES);
         assert!(size_of::<ImportPendingScene>() <= MAX_INLINE_SESSION_OWNER_BYTES);
         assert!(size_of::<ImportStorePreparedScene>() <= MAX_INLINE_SESSION_OWNER_BYTES);
         assert!(size_of::<ImportStoreSessionState>() <= MAX_INLINE_SESSION_OWNER_BYTES);
@@ -2260,7 +2288,12 @@ mod tests {
     fn bootstrap_maps_the_complete_import_vocabulary_into_one_store_domain() {
         let bootstrap = try_import_store_bootstrap(&ResourceLimits::default(), requirements())
             .expect("default import store bootstrap must be valid");
-        let (vocabulary, ledger_plan, _start_plan) = bootstrap.into_parts();
+        let ImportStoreBootstrap {
+            vocabulary,
+            ledger_plan,
+            start_plan: _,
+            scene_activation: _,
+        } = bootstrap;
 
         assert_eq!(ledger_plan.phase_count(), ImportLedgerPhase::ALL.len());
         assert_eq!(
@@ -2292,10 +2325,9 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_plans_start_and_finish_one_retained_store_operation() {
+    fn bootstrap_starts_and_resolves_one_session_outcome_owner() {
         let bootstrap = try_import_store_bootstrap(&ResourceLimits::default(), requirements())
             .expect("default import store bootstrap must be valid");
-        let (_vocabulary, ledger_plan, start_plan) = bootstrap.into_parts();
         let factory = PhysicalStorageAccountFactory::try_new(
             PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1)
                 .expect("test factory limits are valid"),
@@ -2307,31 +2339,28 @@ mod tests {
                     .expect("test account limits are valid"),
             )
             .expect("test physical account must allocate");
-        let operation = RetainedStoreOperation::<
-            ImportOperationOwner,
-            ImportProgressPhase,
-            ImportProgressUnit,
-        >::try_start(
+        let owner = ImportStoreSessionOwner::try_start(
             ImportOperationControl::default(),
-            ledger_plan,
             &account,
-            start_plan,
+            bootstrap,
         )
-        .expect("the bootstrap plans must start one retained store operation");
+        .expect("the bootstrap must start one dormant session outcome owner");
 
-        let published = operation
-            .prepare_minimal_fallback(IMPORT_STORE_FALLBACK_CODE)
-            .expect("the pre-admitted fallback must prepare")
+        let published = owner
+            .prepare_scene(None)
+            .expect("the session failure baseline must prepare")
             .handoff();
-        assert_eq!(
-            published.fallback.value().code(),
-            IMPORT_STORE_FALLBACK_CODE
-        );
+        let published = published.expect("the terminal evidence must project");
+        assert!(!published.is_success());
         assert!(matches!(
-            published.ledger_evidence.header().terminal_cause(),
+            published.ledger_evidence().header().terminal_cause(),
             baozi_operation::StoreTerminalCause::Failure(cause)
-                if cause.code() == IMPORT_STORE_FALLBACK_CODE
+                if cause.code() == IMPORT_SCENE_NOT_SUBMITTED_CODE
         ));
+        drop(published);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        assert!(!account.snapshot().poisoned());
     }
 
     #[test]
@@ -2405,6 +2434,37 @@ mod tests {
             .dimension_by_semantic(STARTUP_OUTCOME_EVIDENCE_SEMANTIC)
             .expect("the terminal ledger retains the private evidence destination");
         assert_eq!(outcome_evidence.published_outcome_evidence(), 2);
+
+        drop(terminal);
+        let released = account.snapshot();
+        assert_eq!(released.live_retained_bytes(), 0);
+        assert_eq!(released.live_retained_allocations(), 0);
+        assert!(!released.poisoned());
+    }
+
+    #[test]
+    fn session_owner_samples_its_activation_baseline_after_parser_reservations() {
+        let (owner, account) = start_store_owner_with_account();
+        let parser_scratch = owner
+            .host()
+            .reserve(
+                ImportLedgerPhase::FormatNormalization,
+                ImportDimension::ScratchBytes,
+                8,
+            )
+            .expect("parser scratch must remain live until Scene submission returns");
+
+        let draft = submit_two_node(&owner)
+            .expect("session-start reservations belong to the activation-entry baseline");
+        assert!(account.snapshot().live_retained_bytes() >= 8);
+        drop(parser_scratch);
+
+        let terminal = owner
+            .prepare_scene(Some(draft))
+            .expect("the quiescent validated Scene must prepare")
+            .handoff()
+            .expect("the prepared Scene terminal must project");
+        assert!(terminal.is_success());
 
         drop(terminal);
         let released = account.snapshot();
@@ -2903,6 +2963,9 @@ mod tests {
             .handoff()
             .expect("the deferred ledger terminal must project");
         assert!(!terminal.is_success());
+        let evidence = ImportStoreTerminalEvidence::try_from_terminal(&terminal)
+            .expect("the ledger rejection must project from its unique terminal evidence");
+        assert_eq!(evidence.cause().class(), ImportStoreTerminalClass::Ledger);
 
         drop(terminal);
         let released = account.snapshot();
@@ -3154,7 +3217,7 @@ mod tests {
     }
 
     #[test]
-    fn abandoned_scene_transition_becomes_explicit_containment() {
+    fn abandoned_scene_transition_quarantines_the_dormant_outcome_owner() {
         let (owner, account) = start_store_owner_with_account();
         let host = owner.host();
         let (operation, transition) = ImportStoreActivationTransition::begin(&owner.state)
@@ -3173,9 +3236,16 @@ mod tests {
                 ImportStoreHostError::OperationContained
             ))
         ));
-        let released = account.snapshot();
-        assert_eq!(released.live_retained_bytes(), 0);
-        assert_eq!(released.live_retained_allocations(), 0);
+        let contained = account.snapshot();
+        assert!(contained.poisoned());
+        assert!(contained.live_retained_bytes() > 0);
+        assert!(contained.live_retained_allocations() > 0);
+        assert_eq!(
+            contained
+                .first_poison_evidence()
+                .map(|evidence| evidence.reason()),
+            Some(baozi_operation::AccountPoisonReason::OwnershipGraphUnverified)
+        );
     }
 
     #[test]

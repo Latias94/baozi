@@ -2,9 +2,9 @@ use std::cell::{RefCell, RefMut};
 
 use crate::SceneDraft;
 use baozi_core::__canonical_import::{
-    SceneActivationOutput, SceneActivationRejection, SceneActivationRequirements,
-    SceneCanonicalRootTag, SceneConstruction, SceneEvidenceRecipe, SceneHandoffToken,
-    SceneOutcomeEvidenceTag, SceneValidationProof, consume_scene_freeze_permit,
+    SceneActivationOutput, SceneActivationRejection, SceneCanonicalRootTag, SceneConstruction,
+    SceneEvidenceRecipe, SceneHandoffToken, SceneOutcomeEvidenceTag, SceneValidationProof,
+    consume_scene_freeze_permit,
 };
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCandidateStoreSession,
@@ -24,10 +24,10 @@ use crate::ledger::{ImportOperationOwner, ImportProgressPhase, ImportProgressUni
 
 use super::{
     ImportStoreActivationError, ImportStoreFailureCauseAuthority, ImportStoreFinalizationError,
-    ImportStoreHostError, ImportStoreMinimalFallback, ImportStoreOperation, ImportStoreRichFailure,
-    ImportStoreSessionOwner, ImportStoreSessionState, ImportStoreSuccessReport,
-    ImportStoreTerminalCause, ImportStoreTerminalClass, ImportStoreTerminalEvidence,
-    ImportStoreTerminalOutcome, ImportStoreTerminalProjectionError,
+    ImportStoreHostError, ImportStoreMinimalFallback, ImportStoreOutcomeOwner,
+    ImportStoreRichFailure, ImportStoreSessionOwner, ImportStoreSessionState,
+    ImportStoreSuccessReport, ImportStoreTerminalCause, ImportStoreTerminalClass,
+    ImportStoreTerminalEvidence, ImportStoreTerminalOutcome, ImportStoreTerminalProjectionError,
 };
 
 pub(super) const IMPORT_SCENE_NOT_SUBMITTED_CODE: u32 = 0x494d_0002;
@@ -436,13 +436,13 @@ pub(super) struct ImportStoreActivationTransition<'session> {
 impl<'session> ImportStoreActivationTransition<'session> {
     pub(super) fn begin(
         state: &'session RefCell<ImportStoreSessionState>,
-    ) -> Result<(ImportStoreOperation, Self), ImportStoreHostError> {
+    ) -> Result<(ImportStoreOutcomeOwner, Self), ImportStoreHostError> {
         let mut state = state
             .try_borrow_mut()
             .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
         let previous = std::mem::replace(&mut *state, ImportStoreSessionState::Transitioning);
-        let operation = match previous {
-            ImportStoreSessionState::Active(operation) => operation,
+        let owner = match previous {
+            ImportStoreSessionState::Dormant(owner) => owner,
             ImportStoreSessionState::Contained => {
                 *state = ImportStoreSessionState::Contained;
                 return Err(ImportStoreHostError::OperationContained);
@@ -453,7 +453,7 @@ impl<'session> ImportStoreActivationTransition<'session> {
                 return Err(ImportStoreHostError::OperationConsumed);
             }
         };
-        Ok((operation, Self { state, armed: true }))
+        Ok((owner, Self { state, armed: true }))
     }
 
     fn install(mut self, pending: ImportPendingScene) {
@@ -503,7 +503,7 @@ impl ImportStoreSessionOwner {
                 completed_boundary,
                 ..
             }) => *completed_boundary,
-            ImportStoreSessionState::Active(_)
+            ImportStoreSessionState::Dormant(_)
             | ImportStoreSessionState::Transitioning
             | ImportStoreSessionState::Pending(
                 ImportPendingScene::ActivationRejected { .. }
@@ -517,23 +517,9 @@ impl ImportStoreSessionOwner {
         &self,
         construction: SceneConstruction<'input>,
     ) -> Result<SceneDraft, ImportStoreActivationError> {
-        let (operation, transition) = ImportStoreActivationTransition::begin(&self.state)
+        let (owner, transition) = ImportStoreActivationTransition::begin(&self.state)
             .map_err(ImportStoreActivationError::StoreUnavailable)?;
-        let (requirements, transaction) = construction.into_lane_parts();
-        let policy = self.vocabulary.activation_policy(
-            requirements.canonical_writer_limits(),
-            requirements.outcome_evidence_writer_limits(),
-        );
-        let owner = match operation
-            .into_scoped_session_outcome_owner(policy, requirements.into_failure_requirements())
-        {
-            Ok(owner) => owner,
-            Err(cause) => {
-                transition.contain();
-                return Err(ImportStoreActivationError::Containment(cause));
-            }
-        };
-        let mut transaction = Some(transaction);
+        let mut transaction = Some(construction.into_transaction());
         let outcome = match owner.plan_and_activate_scoped(|mut planning| {
             let transaction = transaction
                 .as_mut()
@@ -681,6 +667,7 @@ impl ImportStoreSessionOwner {
         self,
         draft: Option<SceneDraft>,
     ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
+        let unsubmitted_evidence = self.unsubmitted_evidence;
         match self.state.into_inner() {
             ImportStoreSessionState::Pending(ImportPendingScene::Candidate { owner, evidence }) => {
                 match owner
@@ -863,31 +850,17 @@ impl ImportStoreSessionOwner {
                     cause_authority: ImportStoreFailureCauseAuthority::OperationTerminal,
                 })
             }
-            ImportStoreSessionState::Active(operation) => {
-                let (requirements, evidence) = SceneActivationRequirements::try_unsubmitted()
-                    .map_err(ImportStoreActivationError::Plan)?;
-                let policy = self.vocabulary.activation_policy(
-                    requirements.canonical_writer_limits(),
-                    requirements.outcome_evidence_writer_limits(),
-                );
-                let owner = operation
-                    .into_scoped_session_outcome_owner(
-                        policy,
-                        requirements.into_failure_requirements(),
-                    )
-                    .map_err(ImportStoreActivationError::Containment)?;
+            ImportStoreSessionState::Dormant(owner) => {
                 let outcome = owner
-                    .plan_and_activate_scoped::<
+                    .reject_without_activation::<
                         SceneActivationOutput,
                         SceneActivationRejection,
                         RecordBlock,
                         SceneCanonicalRootTag,
-                    >(|planning| {
-                        planning.reject(
-                            SceneActivationRejection::construction_invariant(),
-                            IMPORT_SCENE_NOT_SUBMITTED_CODE,
-                        )
-                    })
+                    >(
+                        SceneActivationRejection::construction_invariant(),
+                        IMPORT_SCENE_NOT_SUBMITTED_CODE,
+                    )
                     .map_err(ImportStoreActivationError::Containment)?;
                 match outcome {
                     CanonicalActivationOutcome::NeverActivated(owner) => {
@@ -895,9 +868,11 @@ impl ImportStoreSessionOwner {
                         let outcome = owner
                             .build_failure_evidence(|lane| {
                                 match lane.try_retain_records(
-                                    evidence.record_plan(),
+                                    unsubmitted_evidence.record_plan(),
                                     SceneOutcomeEvidenceTag,
-                                    |writer| writer.write_row(|row| evidence.write_row(row)),
+                                    |writer| {
+                                        writer.write_row(|row| unsubmitted_evidence.write_row(row))
+                                    },
                                 ) {
                                     Ok(root) => lane.complete(root),
                                     Err(_) => lane.abort(),
@@ -906,7 +881,7 @@ impl ImportStoreSessionOwner {
                             .map_err(ImportStoreActivationError::Containment)?;
                         prepare_failure_outcome(
                             outcome,
-                            evidence,
+                            unsubmitted_evidence,
                             scene_final_progress(),
                             control_cause,
                             ImportStoreFailureCauseAuthority::OriginalImport,
@@ -926,9 +901,11 @@ impl ImportStoreSessionOwner {
                         let outcome = owner
                             .build_failure_evidence(|lane| {
                                 match lane.try_retain_records(
-                                    evidence.record_plan(),
+                                    unsubmitted_evidence.record_plan(),
                                     SceneOutcomeEvidenceTag,
-                                    |writer| writer.write_row(|row| evidence.write_row(row)),
+                                    |writer| {
+                                        writer.write_row(|row| unsubmitted_evidence.write_row(row))
+                                    },
                                 ) {
                                     Ok(root) => lane.complete(root),
                                     Err(_) => lane.abort(),
@@ -937,7 +914,7 @@ impl ImportStoreSessionOwner {
                             .map_err(ImportStoreActivationError::Containment)?;
                         prepare_failure_outcome(
                             outcome,
-                            evidence,
+                            unsubmitted_evidence,
                             scene_final_progress(),
                             control_cause,
                             ImportStoreFailureCauseAuthority::OriginalImport,

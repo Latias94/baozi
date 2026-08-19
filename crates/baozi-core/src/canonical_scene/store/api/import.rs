@@ -1,7 +1,5 @@
 //! Hidden cross-crate bridge for the U4 canonical import cutover.
 
-#[cfg(test)]
-use baozi_operation::__canonical_activation::CanonicalFailureRequirements;
 use baozi_operation::{
     OperationOwner, PreparedStoreSuccess, ProgressPhase, ProgressUnit,
     PublishedOutcomeEvidenceStore, RecordBlock, RetainedStoreFailureTerminalWorkRequirement,
@@ -11,7 +9,6 @@ use baozi_operation::{
 use crate::validation_control::SceneValidationLimits;
 
 pub use super::super::construction::node_scene::{
-    NodeSceneActivationPolicyRequirements as SceneActivationRequirements,
     NodeSceneActivationPostflight as SceneActivationPostflight,
     NodeSceneActivationTransaction as SceneActivationTransaction,
     NodeSceneEvidenceRecipe as SceneEvidenceRecipe,
@@ -23,6 +20,7 @@ pub use super::super::construction::node_scene::{
     NodeSceneLanePlan as SceneSealedActivationPlan,
     NodeSceneLaneRejection as SceneActivationRejection,
     NodeSceneLaneValidationProof as SceneValidationProof,
+    NodeSceneSessionActivationBootstrap as SceneSessionActivationBootstrap,
 };
 use super::super::construction::node_scene::{
     consume_node_scene_freeze_permit, maximum_node_scene_structural_work,
@@ -53,14 +51,9 @@ pub fn maximum_scene_structural_work(limits: SceneValidationLimits) -> Option<u6
 }
 
 impl<'input> SceneConstruction<'input> {
-    /// Splits authority-free resource requirements from the core transaction payload.
-    pub fn into_lane_parts(
-        self,
-    ) -> (
-        SceneActivationRequirements,
-        SceneActivationTransaction<'input>,
-    ) {
-        self.into_node_scene_request().into_lane_parts()
+    /// Moves the authority-free construction description into its semantic transaction.
+    pub fn into_transaction(self) -> SceneActivationTransaction<'input> {
+        self.into_node_scene_request().into_transaction()
     }
 }
 
@@ -165,11 +158,8 @@ mod tests {
     fn lane_only_bridge_exposes_authority_free_core_steps() {
         fn _split_construction<'input>(
             construction: SceneConstruction<'input>,
-        ) -> (
-            SceneActivationRequirements,
-            SceneActivationTransaction<'input>,
-        ) {
-            construction.into_lane_parts()
+        ) -> SceneActivationTransaction<'input> {
+            construction.into_transaction()
         }
 
         fn _finish_transaction<'input>(
@@ -177,12 +167,8 @@ mod tests {
         ) -> SceneActivationPostflight {
             transaction.finish()
         }
-        let _: fn(&SceneActivationRequirements) -> baozi_operation::RetainedStoreBatchLimits =
-            SceneActivationRequirements::canonical_writer_limits;
-        let _: fn(&SceneActivationRequirements) -> baozi_operation::RetainedStoreBatchLimits =
-            SceneActivationRequirements::outcome_evidence_writer_limits;
-        let _: fn(SceneActivationRequirements) -> CanonicalFailureRequirements =
-            SceneActivationRequirements::into_failure_requirements;
+        let _: fn() -> Result<SceneSessionActivationBootstrap, baozi_operation::StorePlanError> =
+            SceneSessionActivationBootstrap::try_new;
         let _: fn(&SceneActivationOutput) -> SceneDraft = SceneActivationOutput::draft;
         let _: fn(&SceneActivationRejection) -> u32 = SceneActivationRejection::stable_code;
         let _: fn(&SceneGenerationRejection) -> u32 = SceneGenerationRejection::stable_code;

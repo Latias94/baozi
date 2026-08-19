@@ -62,6 +62,27 @@ args = [
 ]
 
 [[gates]]
+gate_id = "import-authoring-boundary-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.import.authoring-boundary-tests/v1"
+evidence_paths = ["crates/baozi-import/tests/authoring_api.rs"]
+applicable_contracts = ["u4-private-producer-consumer-proof"]
+program = "cargo"
+args = [
+  "nextest",
+  "run",
+  "-j",
+  "1",
+  "--locked",
+  "-p",
+  "baozi-import",
+  "--test",
+  "authoring_api",
+]
+
+[[gates]]
 gate_id = "format-fuzz-smoke-ci"
 tracer_class = "ci"
 executor = "workflow"

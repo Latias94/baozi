@@ -6,8 +6,7 @@
 use std::num::{NonZeroU32, NonZeroU64};
 
 use baozi_operation::__canonical_activation::{
-    CanonicalActivationRequestIdentity, CanonicalFailureTerminalWorkPlan,
-    StoreActivationContainment,
+    CanonicalFailureTerminalWorkPlan, StoreActivationContainment,
 };
 use baozi_operation::{
     DimensionPolicy, FinalProgress, FreshStoreLineage, LedgerLimits, LedgerLimitsError,
@@ -153,7 +152,7 @@ pub(crate) enum SceneConstructionError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ConstructionBrand(CanonicalActivationRequestIdentity);
+pub(super) struct ConstructionBrand(node_scene::ConstructionRequestIdentity);
 
 #[derive(Clone, Copy)]
 struct SceneStoreKeys {

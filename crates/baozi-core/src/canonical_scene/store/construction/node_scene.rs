@@ -1,9 +1,12 @@
 use baozi_operation::__canonical_activation::{
-    CanonicalActivationRequestIdentity, CanonicalCandidateStoreSession, CanonicalJointCommit,
-    CentrallyRejectedCanonicalStoreSession, InterruptedCanonicalStoreSession,
-    NeverActivatedStoreSession, RejectedCanonicalStoreSession, VerifiedMinimalFallback,
+    CanonicalCandidateStoreSession, CanonicalJointCommit, CentrallyRejectedCanonicalStoreSession,
+    InterruptedCanonicalStoreSession, NeverActivatedStoreSession, RejectedCanonicalStoreSession,
+    VerifiedMinimalFallback,
 };
-use baozi_operation::__canonical_activation_producer::mint_canonical_activation_request_identity;
+use baozi_operation::__canonical_activation_producer::{
+    CanonicalActivationRequest, CanonicalActivationRequestIdentity,
+    mint_canonical_activation_request,
+};
 use baozi_operation::{
     BytesPlan, ControlCause, FinalProgress, OperationOwner, PreparedStoreFallback, ProgressPhase,
     ProgressUnit, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
@@ -34,10 +37,13 @@ use super::{
     SceneStoreControlCheckpoint, SceneStoreKeys,
 };
 
+pub(super) type ConstructionRequestIdentity = CanonicalActivationRequestIdentity;
+
 impl ConstructionBrand {
-    fn reserve() -> Result<Self, SceneConstructionStartError> {
-        mint_canonical_activation_request_identity()
-            .map(Self)
+    fn reserve_with_activation_request()
+    -> Result<(Self, CanonicalActivationRequest), SceneConstructionStartError> {
+        mint_canonical_activation_request()
+            .map(|(identity, request)| (Self(identity), request))
             .ok_or(SceneConstructionStartError::BrandExhausted)
     }
 
@@ -60,9 +66,9 @@ pub(in crate::canonical_scene::store) use materialization::maximum_node_scene_st
 pub(in crate::canonical_scene::store) use materialization::validate_node_scene_batches_for_test;
 #[cfg(feature = "_u4-import")]
 pub use materialization::{
-    NodeSceneActivationPolicyRequirements, NodeSceneActivationPostflight,
-    NodeSceneActivationTransaction, NodeSceneEvidenceRecipe, NodeSceneLaneOutput,
-    NodeSceneLanePlan, NodeSceneLaneRejection, NodeSceneLaneValidationProof,
+    NodeSceneActivationPostflight, NodeSceneActivationTransaction, NodeSceneEvidenceRecipe,
+    NodeSceneLaneOutput, NodeSceneLanePlan, NodeSceneLaneRejection, NodeSceneLaneValidationProof,
+    NodeSceneSessionActivationBootstrap,
 };
 mod profile;
 pub(in crate::canonical_scene::store) use profile::{

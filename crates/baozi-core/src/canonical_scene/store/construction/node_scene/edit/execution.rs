@@ -3,8 +3,8 @@ use baozi_operation::__canonical_activation::{
     CanonicalMaterialization, CanonicalValidationDecision, CanonicalValidationProgress,
 };
 use baozi_operation::__canonical_activation_producer::{
-    CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalSealedActivationPlan,
-    CanonicalSuccessRequirements, CanonicalTableShape,
+    CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
+    CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
 };
 use baozi_operation::{
     CanonicalInheritanceSource, OperationControl, RecordBlock, RetainedStoreBatchLimits,
@@ -53,6 +53,7 @@ struct NodeSceneEditExecutionPlan<'scope, 'scene> {
 }
 
 struct NodeSceneEditActivationDescription<'scope, 'scene> {
+    activation_request: CanonicalActivationRequest,
     requirements: CanonicalSuccessRequirements,
     execution: NodeSceneEditExecutionPlan<'scope, 'scene>,
 }
@@ -66,7 +67,7 @@ impl<'scope, 'scene> CanonicalActivationDescription
         self,
         sealer: CanonicalActivationPlanSealer<'activation>,
     ) -> CanonicalSealedActivationPlan<'activation, Self::Execution> {
-        sealer.seal(self.requirements, self.execution)
+        sealer.seal(self.activation_request, self.requirements, self.execution)
     }
 }
 
@@ -110,7 +111,8 @@ impl PendingNodeSceneEdit {
         let pending = self.bind(input)?;
         let failure_evidence =
             NodeSceneFailureEvidencePlan::try_new().map_err(SceneConstructionStartError::from)?;
-        let brand = super::super::super::ConstructionBrand::reserve()?;
+        let (brand, activation_request) =
+            super::super::super::ConstructionBrand::reserve_with_activation_request()?;
         let failure_requirements = failure_evidence
             .requirements_for(brand)
             .map_err(SceneConstructionStartError::from)?;
@@ -146,8 +148,15 @@ impl PendingNodeSceneEdit {
             .into_scoped_session_outcome_owner(policy, failure_requirements)
             .map_err(SceneConstructionError::from)?;
 
-        prepare_scoped_edit(owner, pending, failure_evidence, brand, reserve_generation)
-            .map_err(Into::into)
+        prepare_scoped_edit(
+            owner,
+            pending,
+            failure_evidence,
+            brand,
+            activation_request,
+            reserve_generation,
+        )
+        .map_err(Into::into)
     }
 
     #[cfg(test)]
@@ -172,6 +181,7 @@ fn prepare_scoped_edit(
     pending: BoundPendingNodeSceneEdit<'_>,
     failure_evidence: NodeSceneFailureEvidencePlan,
     brand: super::super::super::ConstructionBrand,
+    activation_request: CanonicalActivationRequest,
     reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
 ) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     let evidence_plan = failure_evidence.records;
@@ -180,6 +190,7 @@ fn prepare_scoped_edit(
     let invalidations = pending.invalidations;
     let mut success_requirements = Some(edit_success_requirements(&pending, brand)?);
     let mut pending = Some(pending);
+    let mut activation_request = Some(activation_request);
 
     let outcome = owner.plan_and_activate_scoped(move |mut planning| {
         let pending = match pending.take() {
@@ -219,6 +230,9 @@ fn prepare_scoped_edit(
             }
         };
         let description = NodeSceneEditActivationDescription {
+            activation_request: activation_request
+                .take()
+                .expect("the edit activation request is consumed exactly once"),
             requirements: success_requirements
                 .take()
                 .expect("the edit success requirements are consumed exactly once"),

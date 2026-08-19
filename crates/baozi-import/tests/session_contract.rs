@@ -102,6 +102,7 @@ struct RecordingImporter {
     primary_addresses: Arc<Mutex<Vec<usize>>>,
     detector_cancel: Option<CancellationToken>,
     detection: DetectionOutcome,
+    scene_name: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -125,7 +126,13 @@ impl RecordingImporter {
             primary_addresses: Arc::new(Mutex::new(Vec::new())),
             detector_cancel: None,
             detection: DetectionOutcome::Match(ReadConfidence::Certain),
+            scene_name: None,
         }
+    }
+
+    fn with_scene_name(mut self, name: &'static str) -> Self {
+        self.scene_name = Some(name);
+        self
     }
 
     fn with_dependency(
@@ -232,7 +239,10 @@ impl FormatImporter for RecordingImporter {
                 }
             }
         }
-        support::submit_minimal_scene(scope)
+        match self.scene_name {
+            Some(name) => support::submit_named_scene(scope, name),
+            None => support::submit_minimal_scene(scope),
+        }
     }
 }
 
@@ -3022,11 +3032,16 @@ fn diagnostic_storage_caps_drop_excess_without_changing_success() {
 
 #[test]
 fn complete_batch_activation_transitions_to_committed_output() {
+    const SCENE_NAME: &str = "named-node";
+
     let source = AssetPath::new("asset.complete-batch-budget").unwrap();
-    let request = request_for(RecordingImporter::plain(
-        "dev.baozi.test.complete-batch-budget",
-        "complete-batch-budget",
-    ));
+    let request = request_for(
+        RecordingImporter::plain(
+            "dev.baozi.test.complete-batch-budget",
+            "complete-batch-budget",
+        )
+        .with_scene_name(SCENE_NAME),
+    );
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
     let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
@@ -3034,6 +3049,10 @@ fn complete_batch_activation_transitions_to_committed_output() {
         .ledger()
         .dimension(ImportDimension::CanonicalOutputBytes)
         .expect("canonical output accounting");
+    let canonical_strings = report
+        .ledger()
+        .dimension(ImportDimension::CanonicalStringBytes)
+        .expect("canonical string accounting");
 
     assert!(output.peak_live_bytes() > 0);
     assert_eq!(output.committed(), 0);
@@ -3043,5 +3062,9 @@ fn complete_batch_activation_transitions_to_committed_output() {
             .expect("canonical block count fits the import ledger scalar")
     );
     assert_eq!(output.current_live_bytes(), 0);
+    assert_eq!(
+        (canonical_strings.attempted(), canonical_strings.consumed()),
+        (SCENE_NAME.len() as u64, SCENE_NAME.len() as u64)
+    );
     assert_eq!(report.ledger().current_live_bytes(), 0);
 }

@@ -17,8 +17,8 @@ use baozi_operation::__canonical_activation::{
     CanonicalValidationPlanning, CanonicalValidationRole,
 };
 use baozi_operation::__canonical_activation_producer::{
-    CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalSealedActivationPlan,
-    CanonicalSuccessRequirements, CanonicalTableShape,
+    CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
+    CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
 };
 #[cfg(test)]
 use baozi_operation::{FinalProgress, RetainedStoreOperation};
@@ -185,25 +185,34 @@ pub(super) enum NodeScenePlanningFault {
     Publication,
 }
 
-/// Core-owned, roleless request for one scoped NodeScene activation.
+/// Core-owned, authority-free description for one scoped NodeScene activation.
 ///
-/// The request derives its writer envelopes from the complete producer batch and mints the private
-/// construction brand retained by its execution payload. It carries no store key, account, ledger,
-/// or publication authority; the consuming host maps the roleless limits to its own vocabulary
-/// before it creates the scoped outcome owner. Exact canonical shape remains absent until semantic
-/// preflight seals [`NodeSceneSealedPlan`].
-#[must_use = "the NodeScene activation request must be bound to one scoped outcome owner"]
+/// The description retains the complete producer input, its private construction brand, and one
+/// non-authority activation request. Neither the request nor the sealed execution can be extracted
+/// before semantic preflight succeeds and returns [`NodeSceneLanePlan`]. It carries no store key,
+/// account, ledger, dormant authority, or publication authority.
+#[must_use = "the NodeScene activation description must complete semantic preflight"]
 pub(in crate::canonical_scene::store) struct NodeSceneActivationRequest<'input> {
     execution: NodeSceneActivationExecution<'input>,
+    #[cfg(test)]
     policy: NodeSceneActivationPolicyRequirements,
 }
 
 /// Roleless writer and failure envelopes supplied by core to the operation-owning host.
+#[cfg(test)]
 #[must_use = "the NodeScene activation policy requirements must bind one scoped outcome owner"]
-pub struct NodeSceneActivationPolicyRequirements {
+struct NodeSceneActivationPolicyRequirements {
     canonical_writer_limits: RetainedStoreBatchLimits,
     outcome_evidence_writer_limits: RetainedStoreBatchLimits,
     failure: CanonicalFailureRequirements,
+}
+
+/// Session-stable failure envelope bound before any Scene construction is submitted.
+#[must_use = "the Scene session bootstrap must bind the import session outcome owner"]
+pub struct NodeSceneSessionActivationBootstrap {
+    outcome_evidence_writer_limits: RetainedStoreBatchLimits,
+    failure: CanonicalFailureRequirements,
+    evidence: NodeSceneEvidenceRecipe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,6 +326,7 @@ impl NodeSceneActivationRoles {
 #[must_use = "the NodeScene activation execution must run with its bound scoped outcome owner"]
 struct NodeSceneActivationExecution<'input> {
     brand: super::super::ConstructionBrand,
+    activation_request: CanonicalActivationRequest,
     input: SceneAuthoringBatch<'input>,
     validation_limits: SceneValidationLimits,
     failure_evidence: NodeSceneFailureEvidencePlan,
@@ -342,6 +352,7 @@ where
     O: OperationOwner,
 {
     brand: super::super::ConstructionBrand,
+    activation_request: CanonicalActivationRequest,
     sealed: NodeSceneSealedPlan<'input, CanonicalReservation<'scope, O>>,
 }
 
@@ -431,8 +442,12 @@ impl<'input> NodeSceneActivationRequest<'input> {
         validation_limits: SceneValidationLimits,
     ) -> Result<Self, SceneConstructionStartError> {
         let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
+        #[cfg(not(test))]
+        let _ = envelope;
         let failure_evidence = NodeSceneFailureEvidencePlan::try_new()?;
-        let brand = super::super::ConstructionBrand::reserve()?;
+        let (brand, activation_request) =
+            super::super::ConstructionBrand::reserve_with_activation_request()?;
+        #[cfg(test)]
         let policy = NodeSceneActivationPolicyRequirements {
             canonical_writer_limits: RetainedStoreBatchLimits::new(
                 envelope.terminal_attribution_slots(),
@@ -444,32 +459,30 @@ impl<'input> NodeSceneActivationRequest<'input> {
         Ok(Self {
             execution: NodeSceneActivationExecution {
                 brand,
+                activation_request,
                 input,
                 validation_limits,
                 failure_evidence,
             },
+            #[cfg(test)]
             policy,
         })
     }
 
-    pub fn into_lane_parts(
-        self,
-    ) -> (
-        NodeSceneActivationPolicyRequirements,
-        NodeSceneActivationTransaction<'input>,
-    ) {
-        let Self { execution, policy } = self;
+    pub fn into_transaction(self) -> NodeSceneActivationTransaction<'input> {
+        let Self {
+            execution,
+            #[cfg(test)]
+                policy: _,
+        } = self;
         let brand = execution.brand;
         let failure_evidence = execution.failure_evidence;
-        (
-            policy,
-            NodeSceneActivationTransaction {
-                execution: Some(execution),
-                brand,
-                failure_evidence,
-                sealed_counts: SceneEvidenceCounts::authoring_rejection(),
-            },
-        )
+        NodeSceneActivationTransaction {
+            execution: Some(execution),
+            brand,
+            failure_evidence,
+            sealed_counts: SceneEvidenceCounts::authoring_rejection(),
+        }
     }
 
     #[cfg(test)]
@@ -537,6 +550,7 @@ impl<'input> NodeSceneActivationTransaction<'input> {
         })?;
         let NodeSceneActivationExecution {
             brand,
+            activation_request,
             input,
             validation_limits,
             failure_evidence,
@@ -553,7 +567,11 @@ impl<'input> NodeSceneActivationTransaction<'input> {
         }
         .map_err(NodeSceneLaneRejection::from)?;
         self.sealed_counts = sealed.execution.materialization.evidence_counts();
-        Ok(NodeSceneLanePlan { brand, sealed })
+        Ok(NodeSceneLanePlan {
+            brand,
+            activation_request,
+            sealed,
+        })
     }
 
     /// Drops any unused execution payload and returns the lifetime-free evidence/validation recipe.
@@ -574,12 +592,18 @@ where
     fn into_activation_parts(
         self,
     ) -> (
+        CanonicalActivationRequest,
         CanonicalSuccessRequirements,
         NodeSceneLaneExecutionPlan<'input, 'scope, O>,
     ) {
-        let Self { brand, sealed } = self;
+        let Self {
+            brand,
+            activation_request,
+            sealed,
+        } = self;
         let (execution, requirements) = sealed.into_seal_parts();
         (
+            activation_request,
             requirements,
             NodeSceneLaneExecutionPlan { brand, execution },
         )
@@ -596,8 +620,8 @@ where
         self,
         sealer: CanonicalActivationPlanSealer<'activation>,
     ) -> CanonicalSealedActivationPlan<'activation, Self::Execution> {
-        let (requirements, execution) = self.into_activation_parts();
-        sealer.seal(requirements, execution)
+        let (activation_request, requirements, execution) = self.into_activation_parts();
+        sealer.seal(activation_request, requirements, execution)
     }
 }
 
@@ -760,37 +784,37 @@ where
     execution: NodeSceneActivationExecution<'input>,
 }
 
-impl NodeSceneActivationPolicyRequirements {
-    /// Builds the exact failure-only policy and evidence recipe for an import that never
-    /// submitted a canonical Scene request.
-    pub fn try_unsubmitted() -> Result<(Self, NodeSceneEvidenceRecipe), StorePlanError> {
+impl NodeSceneSessionActivationBootstrap {
+    /// Builds the exact session-bound failure plan before any Scene construction is submitted.
+    pub fn try_new() -> Result<Self, StorePlanError> {
         let failure_evidence = NodeSceneFailureEvidencePlan::try_new()?;
-        Ok((
-            Self {
-                canonical_writer_limits: RetainedStoreBatchLimits::new(1, 1)?,
-                outcome_evidence_writer_limits: RetainedStoreBatchLimits::new(2, 4)?,
-                failure: failure_evidence.requirements()?,
-            },
-            NodeSceneEvidenceRecipe {
+        Ok(Self {
+            outcome_evidence_writer_limits: RetainedStoreBatchLimits::new(2, 4)?,
+            failure: failure_evidence.requirements()?,
+            evidence: NodeSceneEvidenceRecipe {
                 records: failure_evidence.records,
                 counts: SceneEvidenceCounts::authoring_rejection(),
             },
-        ))
+        })
     }
 
-    pub const fn canonical_writer_limits(&self) -> RetainedStoreBatchLimits {
-        self.canonical_writer_limits
+    pub fn into_parts(
+        self,
+    ) -> (
+        RetainedStoreBatchLimits,
+        CanonicalFailureRequirements,
+        NodeSceneEvidenceRecipe,
+    ) {
+        (
+            self.outcome_evidence_writer_limits,
+            self.failure,
+            self.evidence,
+        )
     }
+}
 
-    pub const fn outcome_evidence_writer_limits(&self) -> RetainedStoreBatchLimits {
-        self.outcome_evidence_writer_limits
-    }
-
-    pub fn into_failure_requirements(self) -> CanonicalFailureRequirements {
-        self.failure
-    }
-
-    #[cfg(test)]
+#[cfg(test)]
+impl NodeSceneActivationPolicyRequirements {
     fn into_parts(
         self,
     ) -> (
@@ -1376,6 +1400,7 @@ pub(super) fn node_scene_activation_roles(keys: SceneStoreKeys) -> NodeSceneActi
         keys.dimension,
         keys.dimension,
     )
+    .with_canonical_string_dimension(keys.dimension)
 }
 
 fn materialize_node_scene<'lane, R, O, PP, U, L>(
@@ -1638,6 +1663,7 @@ where
     let BoundNodeSceneActivation { owner, execution } = activation;
     let NodeSceneActivationExecution {
         brand,
+        activation_request,
         input,
         validation_limits,
         failure_evidence,
@@ -1645,6 +1671,7 @@ where
     let evidence_plan = failure_evidence.records;
     let sealed_counts = Cell::new(SceneEvidenceCounts::authoring_rejection());
     let sealed_counts_ref = &sealed_counts;
+    let mut activation_request = Some(activation_request);
 
     let outcome = owner.plan_and_activate_scoped(move |mut planning| {
         let preflight = match planning.begin_semantic_work() {
@@ -1709,6 +1736,9 @@ where
         }
         let activation = NodeSceneLanePlan {
             brand,
+            activation_request: activation_request
+                .take()
+                .expect("the test activation request is consumed exactly once"),
             sealed: plan,
         };
         let permit = match planning.seal_activation(activation, completion) {

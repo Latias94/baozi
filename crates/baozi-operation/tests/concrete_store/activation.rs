@@ -19,8 +19,9 @@ use baozi_operation::__canonical_activation::{
     StoreCanonicalRejection, StoreNeverActivatedCause,
 };
 use baozi_operation::__canonical_activation_producer::{
-    CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalSealedActivationPlan,
-    CanonicalSuccessRequirements, CanonicalTableShape, mint_canonical_activation_request_identity,
+    CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
+    CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
+    mint_canonical_activation_request,
 };
 use baozi_operation::{ScalarSequence, StoreDestination, StorePlanError, StoreWorkError};
 
@@ -33,8 +34,33 @@ struct TestScopedActivation {
 }
 
 struct TestActivationDescription<P> {
+    request: CanonicalActivationRequest,
     requirements: CanonicalSuccessRequirements,
     execution: P,
+}
+
+impl<P> TestActivationDescription<P> {
+    fn new(requirements: CanonicalSuccessRequirements, execution: P) -> Self {
+        let (identity, request) = mint_canonical_activation_request()
+            .expect("the test activation request identity must remain available");
+        Self::with_request(
+            request,
+            requirements.with_request_identity(identity),
+            execution,
+        )
+    }
+
+    fn with_request(
+        request: CanonicalActivationRequest,
+        requirements: CanonicalSuccessRequirements,
+        execution: P,
+    ) -> Self {
+        Self {
+            request,
+            requirements,
+            execution,
+        }
+    }
 }
 
 impl<P> CanonicalActivationDescription for TestActivationDescription<P> {
@@ -44,7 +70,7 @@ impl<P> CanonicalActivationDescription for TestActivationDescription<P> {
         self,
         sealer: CanonicalActivationPlanSealer<'scope>,
     ) -> CanonicalSealedActivationPlan<'scope, Self::Execution> {
-        sealer.seal(self.requirements, self.execution)
+        sealer.seal(self.request, self.requirements, self.execution)
     }
 }
 
@@ -103,10 +129,7 @@ fn run_scoped_activation<T, E, CanonicalKind, CanonicalTag>(
     let owner = operation
         .into_scoped_session_outcome_owner(policy, failure)
         .unwrap();
-    let mut activation_plan = Some(TestActivationDescription {
-        requirements: success,
-        execution: (),
-    });
+    let mut activation_plan = Some(TestActivationDescription::new(success, ()));
     let mut materialize = Some(materialize);
     owner.plan_and_activate_scoped(move |mut planning| {
         let mut semantic = planning.begin_semantic_work().unwrap();

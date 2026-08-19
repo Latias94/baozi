@@ -3,9 +3,10 @@ use super::*;
 #[cfg(feature = "_u4-activation")]
 use super::activation::{
     CanonicalActivationDescription, CanonicalActivationOutcome, CanonicalActivationPlanSealer,
-    CanonicalActivationPolicy, CanonicalActivationSeal, CanonicalFailureRequirements,
-    CanonicalMaterializationRole, CanonicalSealedActivationPlan, CanonicalSuccessRequirements,
-    CanonicalTableShape, CanonicalValidationRole, FailureEvidenceDecision, FailureEvidenceOutcome,
+    CanonicalActivationPolicy, CanonicalActivationRequest, CanonicalActivationSeal,
+    CanonicalFailureRequirements, CanonicalMaterializationRole, CanonicalSealedActivationPlan,
+    CanonicalSuccessRequirements, CanonicalTableShape, CanonicalValidationRole,
+    FailureEvidenceDecision, FailureEvidenceOutcome, mint_canonical_activation_request,
 };
 
 use std::num::{NonZeroU32, NonZeroU64};
@@ -28,8 +29,22 @@ impl OperationOwner for TestOwner {}
 
 #[cfg(feature = "_u4-activation")]
 struct TestActivationDescription<P> {
+    request: CanonicalActivationRequest,
     requirements: CanonicalSuccessRequirements,
     execution: P,
+}
+
+#[cfg(feature = "_u4-activation")]
+impl<P> TestActivationDescription<P> {
+    fn new(requirements: CanonicalSuccessRequirements, execution: P) -> Self {
+        let (identity, request) = mint_canonical_activation_request()
+            .expect("the test activation request identity must remain available");
+        Self {
+            request,
+            requirements: requirements.with_request_identity(identity),
+            execution,
+        }
+    }
 }
 
 #[cfg(feature = "_u4-activation")]
@@ -40,7 +55,7 @@ impl<P> CanonicalActivationDescription for TestActivationDescription<P> {
         self,
         sealer: CanonicalActivationPlanSealer<'scope>,
     ) -> CanonicalSealedActivationPlan<'scope, Self::Execution> {
-        sealer.seal(self.requirements, self.execution)
+        sealer.seal(self.request, self.requirements, self.execution)
     }
 }
 
@@ -265,12 +280,12 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
             .expect("semantic work session");
         semantic.run_unit(|| ()).expect("semantic work completion");
         let completion = semantic.finish_exact().expect("semantic completion");
-        let activation_plan = TestActivationDescription {
-            requirements: success
+        let activation_plan = TestActivationDescription::new(
+            success
                 .take()
                 .expect("the test success requirements are consumed exactly once"),
-            execution: (),
-        };
+            (),
+        );
         let permit = match planning.seal_activation(activation_plan, completion) {
             CanonicalActivationSeal::Sealed(permit) => permit,
             CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),

@@ -56,6 +56,12 @@ fn import_consumes_only_the_core_owned_opaque_scene_plan() {
         for forbidden in [
             "SceneActivationRequest",
             "SceneActivationRequestError",
+            "SceneActivationRequirements",
+            "CanonicalActivationPolicy",
+            "CanonicalActivationRequest",
+            "CanonicalActivationRequestIdentity",
+            "ScopedRetainedStoreSessionOutcomeOwner",
+            "into_scoped_session_outcome_owner",
             "__canonical_activation_producer",
             "CanonicalActivationDescription",
             "CanonicalActivationPlanSealer",

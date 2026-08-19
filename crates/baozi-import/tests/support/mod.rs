@@ -43,6 +43,22 @@ pub(crate) fn submit_node_scene(
     scope: &mut ParseScope<'_>,
     node_count: usize,
 ) -> ParseResult<SceneDraft> {
+    submit_node_scene_with_name(scope, node_count, None)
+}
+
+/// Submits one complete node-only Scene with a nonempty canonical node name.
+pub(crate) fn submit_named_scene(
+    scope: &mut ParseScope<'_>,
+    name: &str,
+) -> ParseResult<SceneDraft> {
+    submit_node_scene_with_name(scope, 1, Some(name))
+}
+
+fn submit_node_scene_with_name(
+    scope: &mut ParseScope<'_>,
+    node_count: usize,
+    name: Option<&str>,
+) -> ParseResult<SceneDraft> {
     let provenance_ids = [ProvenanceLocalId::new(0)];
     let operation_kind = OperationKind::Generated;
     let provenance_nodes = [ProvenanceNodeAuthoring::operation(
@@ -58,12 +74,16 @@ pub(crate) fn submit_node_scene(
         .collect::<Vec<_>>();
     let nodes = (0..node_count)
         .map(|_| {
-            NodeAuthoringNode::new(
+            let node = NodeAuthoringNode::new(
                 Presence::Absent,
                 AuthoredTransform::identity_trs(),
                 Presence::Absent,
                 Presence::Absent,
-            )
+            );
+            match name {
+                Some(name) => node.with_name(name),
+                None => node,
+            }
         })
         .collect::<Vec<_>>();
     let owner_provenance = std::iter::once(ProfileOwner::Scene)
