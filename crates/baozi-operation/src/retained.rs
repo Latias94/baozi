@@ -134,11 +134,12 @@ use std::sync::{Mutex, MutexGuard};
 pub(crate) use terminal::RetainedPublicationPrepareError;
 pub(crate) use terminal::RetainedSuccessJointCommitIntent;
 use terminal::{
-    DetachedTerminalEvidenceQualification, FreezeReadyDetachedTerminalEvidence,
-    FrozenSuccessPrimaryTransition, PrimaryPublicationBatches, QualifiedDetachedTerminalEvidence,
-    TerminalFallbackAttribution, TerminalFallbackGuard, TerminalPhysicalOwnershipManifest,
-    TerminalPrimaryGuard, TerminalPrimaryTransition, drop_retained_table_with_account_anchor,
-    prepare_terminal_control, terminal_evidence_catalog_is_qualified,
+    DetachedTerminalEvidenceQualification, EvidenceOnlySuccessPrimaryTransition,
+    FreezeReadyDetachedTerminalEvidence, FrozenSuccessPrimaryTransition, PrimaryPublicationBatches,
+    QualifiedDetachedTerminalEvidence, TerminalFallbackAttribution, TerminalFallbackGuard,
+    TerminalPhysicalOwnershipManifest, TerminalPrimaryGuard, TerminalPrimaryTransition,
+    drop_retained_table_with_account_anchor, prepare_terminal_control,
+    terminal_evidence_catalog_is_qualified,
 };
 use terminal_failure::{TerminalMinimalFreezeGuard, TerminalRichFreezeGuard};
 use terminal_output::RetainedPublicationPayload;
@@ -147,11 +148,12 @@ use terminal_output::RetainedPublicationPayload;
     reason = "the retained root preserves crate-private paths while canonical consumers migrate"
 )]
 pub(crate) use terminal_output::{
+    PreparedRetainedEvidenceOnlyOutcome, PreparedRetainedEvidenceOnlySuccess,
     PreparedRetainedFallback, PreparedRetainedPublication, PreparedRetainedPublicationOutcome,
     PreparedRetainedRichFailure, PreparedRetainedSuccess, PublishedCanonicalOutput,
     PublishedFallbackOutput, PublishedLedgerEvidence, PublishedOutcomeEvidenceOutput,
-    PublishedRetainedFallbackParts, PublishedRetainedRichFailureParts,
-    PublishedRetainedSuccessParts, PublishedRichFailureOutput,
+    PublishedRetainedEvidenceOnlySuccessParts, PublishedRetainedFallbackParts,
+    PublishedRetainedRichFailureParts, PublishedRetainedSuccessParts, PublishedRichFailureOutput,
 };
 use triomphe::{Arc, UniqueArc};
 
@@ -202,6 +204,8 @@ use startup::{
     StartupCrossPlaneAdmissionFailure, StartupCrossPlanePlan, StartupPhysicalManifest,
     StartupPhysicalNoMutation,
 };
+#[cfg(test)]
+pub(crate) use terminal::panic_next_evidence_only_primary_bind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CanonicalLineageAuthority {

@@ -156,9 +156,9 @@ use crate::retained::{
 };
 use terminal_output::prepared_store_success_from_raw;
 use terminal_output::{
-    classify_prepared_failure, classify_prepared_fallback, classify_prepared_success,
-    read_canonical_source_bytes, read_canonical_source_records, read_canonical_source_sequence,
-    read_canonical_source_utf8,
+    classify_prepared_evidence_only, classify_prepared_failure, classify_prepared_fallback,
+    classify_prepared_success, read_canonical_source_bytes, read_canonical_source_records,
+    read_canonical_source_sequence, read_canonical_source_utf8,
 };
 use validation::{
     map_phase_completion_error, map_publication_error, map_writer_error,
@@ -189,9 +189,11 @@ pub use vocabulary::{
 };
 
 pub use terminal_output::{
-    PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
+    PreparedStoreEvidenceOnlyOutcome, PreparedStoreEvidenceOnlySuccess, PreparedStoreFailure,
+    PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
     PreparedStoreSuccessOutcome, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
-    PublishedOutcomeEvidenceStoreRef, PublishedRichFailureStore, PublishedStoreFailureParts,
+    PublishedOutcomeEvidenceStoreRef, PublishedRichFailureStore,
+    PublishedStoreEvidenceOnlySuccessParts, PublishedStoreFailureParts,
     PublishedStoreFallbackOutput, PublishedStoreFallbackParts, PublishedStoreSuccessParts,
     StoreDimensionSnapshot, StoreLedgerEvidence, StoreLedgerEvidenceHeader, StorePhaseSnapshot,
     StorePreparationFailure, StorePreparationFailureClass, StoreTerminalCause,
@@ -2643,6 +2645,21 @@ where
                 }
             }
         }
+    }
+
+    /// Finalizes a successful read-only operation without publishing retained primary output.
+    ///
+    /// Final control rejection is converted into the already admitted minimal fallback, so the
+    /// returned outcome always owns one exact terminal state unless containment was required.
+    pub fn prepare_evidence_only_success(
+        self,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<PreparedStoreEvidenceOnlyOutcome, StorePrepareError> {
+        let domain = self.domain;
+        self.raw
+            .prepare_evidence_only_success(final_progress)
+            .map(|raw| classify_prepared_evidence_only(raw, domain))
+            .map_err(StorePrepareError::from_raw)
     }
 
     /// Publishes the pre-admitted minimal fallback without opening block tables.

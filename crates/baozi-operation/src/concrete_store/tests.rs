@@ -799,6 +799,133 @@ fn public_store_start_accepts_exact_terminal_and_startup_work_partition() {
 }
 
 #[test]
+fn evidence_only_success_freezes_work_without_publishing_primary_output() {
+    const COMPLETED_WORK: u64 = 3;
+
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (mut operation, keys) = test_operation(&account, u64::MAX);
+    operation
+        .producer_host()
+        .charge_observed_batch([(keys.work_dimension, COMPLETED_WORK)])
+        .expect("read-only work must be admitted and completed");
+
+    let prepared = match operation
+        .prepare_evidence_only_success(test_final_progress())
+        .expect("evidence-only terminal preparation")
+    {
+        PreparedStoreEvidenceOnlyOutcome::Success(prepared) => prepared,
+        PreparedStoreEvidenceOnlyOutcome::MinimalFallback(_) => {
+            panic!("completed read-only work must publish success")
+        }
+    };
+    let published = prepared.handoff();
+    let header = published.ledger_evidence.header();
+    assert_eq!(header.terminal_cause(), StoreTerminalCause::Success);
+    assert_eq!(header.current_live_bytes(), 0);
+    assert_eq!(header.active_reservations(), 0);
+
+    let work = published
+        .ledger_evidence
+        .dimension(keys.work_dimension)
+        .expect("work dimension evidence");
+    assert_eq!(
+        (work.attempted(), work.consumed()),
+        (COMPLETED_WORK, COMPLETED_WORK)
+    );
+    let primary = published
+        .ledger_evidence
+        .dimension(keys.dimension)
+        .expect("primary destination evidence");
+    assert_eq!(primary.pending_publication(), 0);
+    assert_eq!(primary.committed(), 0);
+    assert_eq!(primary.committed_canonical_output(), 0);
+    assert_eq!(
+        primary.published_outcome_evidence(),
+        1,
+        "the sole published evidence member is the terminal ledger, not a domain evidence table"
+    );
+
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn evidence_only_final_cancellation_publishes_the_admitted_fallback() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let cancellation = crate::CancellationToken::new();
+    let (operation, keys) = test_operation_with_control_and_work_limits(
+        &account,
+        u64::MAX,
+        OperationControl::default().with_cancellation(cancellation.clone()),
+        u64::MAX,
+        u64::MAX,
+    );
+    cancellation.cancel();
+
+    let prepared = match operation
+        .prepare_evidence_only_success(test_final_progress())
+        .expect("final cancellation must retain fallback authority")
+    {
+        PreparedStoreEvidenceOnlyOutcome::MinimalFallback(prepared) => prepared,
+        PreparedStoreEvidenceOnlyOutcome::Success(_) => {
+            panic!("cancelled final control cannot publish success")
+        }
+    };
+    let published = prepared.handoff();
+    assert_eq!(published.fallback.value().code(), 91);
+    let header = published.ledger_evidence.header();
+    let StoreTerminalCause::Failure(cause) = header.terminal_cause() else {
+        panic!("final cancellation must publish a failure cause")
+    };
+    assert_eq!(cause.class(), StorePreparationFailureClass::Control);
+    assert_eq!(cause.code(), 1);
+    assert_eq!(header.current_live_bytes(), 0);
+    assert_eq!(header.active_reservations(), 0);
+    assert_eq!(
+        published
+            .ledger_evidence
+            .dimension(keys.dimension)
+            .expect("primary destination evidence")
+            .committed_canonical_output(),
+        0
+    );
+
+    drop(published);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert!(!account.snapshot().poisoned());
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn evidence_only_primary_binding_panic_fails_closed() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, _) = test_operation(&account, u64::MAX);
+    crate::retained::panic_next_evidence_only_primary_bind();
+
+    assert!(matches!(
+        operation.prepare_evidence_only_success(test_final_progress()),
+        Err(StorePrepareError::FinalizationContainment(cause))
+            if cause.reason() == AccountPoisonReason::PrimaryPublicationBindingPanicked
+    ));
+    assert!(account.snapshot().poisoned());
+
+    drop(account);
+    assert_eq!(
+        factory.snapshot().live_accounts(),
+        1,
+        "uncertain attribution must remain retained after containment"
+    );
+}
+
+#[test]
 fn store_start_rejects_failure_terminal_dimension_used_by_ordinary_paths() {
     let factory = test_factory();
     let account = test_account(&factory);
@@ -3906,9 +4033,10 @@ fn prepared_store_surfaces_expose_only_consuming_classification_or_handoff() {
             "impl<EvidenceKind, EvidenceTag> PreparedStoreFailure",
         ),
         implementation_block(store, "impl PreparedStoreFallback"),
+        implementation_block(store, "impl PreparedStoreEvidenceOnlySuccess"),
     ];
     let prepared_struct_marker = ["pub struct ", "PreparedStore"].concat();
-    assert_eq!(store.matches(&prepared_struct_marker).count(), 3);
+    assert_eq!(store.matches(&prepared_struct_marker).count(), 4);
     for surface in concrete_impls {
         assert_eq!(surface.matches("pub fn ").count(), 1);
         assert!(surface.contains("pub fn handoff("));
@@ -3961,6 +4089,7 @@ fn prepared_store_surfaces_expose_only_consuming_classification_or_handoff() {
             "impl<EvidenceBlock, P, D> PreparedRetainedRichFailure",
         ),
         implementation_block(retained, "impl<F, P, D> PreparedRetainedFallback"),
+        implementation_block(retained, "impl<P, D> PreparedRetainedEvidenceOnlySuccess"),
     ];
     for surface in retained_impls {
         assert_eq!(surface.matches("pub fn ").count(), 1);

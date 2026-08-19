@@ -13,6 +13,7 @@ use super::{
 use crate::ledger::LedgerCause;
 use crate::retained::{
     PhysicalStorageAccount, PreparationFailureClass, PreparationFailureCode,
+    PreparedRetainedEvidenceOnlyOutcome, PreparedRetainedEvidenceOnlySuccess,
     PreparedRetainedFallback, PreparedRetainedPublication, PreparedRetainedPublicationOutcome,
     PreparedRetainedRichFailure, PreparedRetainedSuccess, PublishedCanonicalOutput,
     PublishedFallbackOutput, PublishedLedgerEvidence, PublishedOutcomeEvidenceOutput,
@@ -31,6 +32,8 @@ type RawPreparedStoreFailure =
     PreparedRetainedRichFailure<StoredBlock, StorePhaseKey, StoreDimensionKey>;
 type RawPreparedStoreFallback =
     PreparedRetainedFallback<StoreFallbackEnvelope, StorePhaseKey, StoreDimensionKey>;
+type RawPreparedStoreEvidenceOnlySuccess =
+    PreparedRetainedEvidenceOnlySuccess<StorePhaseKey, StoreDimensionKey>;
 
 fn reject_lookup<T>() -> Option<T> {
     None
@@ -245,6 +248,27 @@ pub(super) fn classify_prepared_fallback(
     }
 }
 
+pub(super) fn classify_prepared_evidence_only(
+    raw: PreparedRetainedEvidenceOnlyOutcome<
+        StoreFallbackEnvelope,
+        StorePhaseKey,
+        StoreDimensionKey,
+    >,
+    domain: StoreKeyDomain,
+) -> PreparedStoreEvidenceOnlyOutcome {
+    match raw {
+        PreparedRetainedEvidenceOnlyOutcome::Success(raw) => {
+            PreparedStoreEvidenceOnlyOutcome::Success(PreparedStoreEvidenceOnlySuccess {
+                raw,
+                domain,
+            })
+        }
+        PreparedRetainedEvidenceOnlyOutcome::MinimalFallback(raw) => {
+            PreparedStoreEvidenceOnlyOutcome::MinimalFallback(PreparedStoreFallback { raw, domain })
+        }
+    }
+}
+
 /// Exact preparation outcome for a success candidate.
 #[must_use = "every exact terminal branch owns the frozen publication"]
 pub enum PreparedStoreSuccessOutcome<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag> {
@@ -257,6 +281,13 @@ pub enum PreparedStoreSuccessOutcome<CanonicalKind, CanonicalTag, EvidenceKind, 
 #[must_use = "every exact terminal branch owns the frozen publication"]
 pub enum PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag> {
     RichFailure(PreparedStoreFailure<EvidenceKind, EvidenceTag>),
+    MinimalFallback(PreparedStoreFallback),
+}
+
+/// Exact preparation outcome for a success that publishes no retained primary output.
+#[must_use = "every exact terminal branch owns frozen ledger evidence"]
+pub enum PreparedStoreEvidenceOnlyOutcome {
+    Success(PreparedStoreEvidenceOnlySuccess),
     MinimalFallback(PreparedStoreFallback),
 }
 
@@ -331,6 +362,23 @@ impl PreparedStoreFallback {
     }
 }
 
+/// Exact prepared success with frozen ledger evidence and no retained primary output.
+#[must_use = "prepared evidence-only success must be handed off or deliberately dropped"]
+pub struct PreparedStoreEvidenceOnlySuccess {
+    raw: RawPreparedStoreEvidenceOnlySuccess,
+    domain: StoreKeyDomain,
+}
+
+impl PreparedStoreEvidenceOnlySuccess {
+    /// Performs the allocation-free handoff into frozen ledger evidence.
+    pub fn handoff(self) -> PublishedStoreEvidenceOnlySuccessParts {
+        let raw = self.raw.handoff();
+        PublishedStoreEvidenceOnlySuccessParts {
+            ledger_evidence: StoreLedgerEvidence::from_raw(raw.ledger_evidence, self.domain),
+        }
+    }
+}
+
 /// Exact published success owners after pure handoff.
 #[must_use = "the split contains every success owner and frozen ledger evidence"]
 pub struct PublishedStoreSuccessParts<CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag> {
@@ -350,6 +398,12 @@ pub struct PublishedStoreFailureParts<EvidenceKind, EvidenceTag> {
 #[must_use = "the split contains fallback ownership and frozen ledger evidence"]
 pub struct PublishedStoreFallbackParts {
     pub fallback: PublishedStoreFallbackOutput,
+    pub ledger_evidence: StoreLedgerEvidence,
+}
+
+/// Exact published success with no canonical or domain evidence owner.
+#[must_use = "the split contains the frozen ledger evidence"]
+pub struct PublishedStoreEvidenceOnlySuccessParts {
     pub ledger_evidence: StoreLedgerEvidence,
 }
 

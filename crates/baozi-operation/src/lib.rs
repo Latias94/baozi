@@ -254,8 +254,10 @@ pub mod __retained_store_integration {
     pub mod authority {
         pub use crate::concrete_store::{
             CanonicalInheritanceSource, DerivedRetainedStoreOperation, FreshStoreLineage,
+            PreparedStoreEvidenceOnlyOutcome, PreparedStoreEvidenceOnlySuccess,
             PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback,
-            PreparedStoreSuccess, PreparedStoreSuccessOutcome, RetainedStoreOperation,
+            PreparedStoreSuccess, PreparedStoreSuccessOutcome,
+            PublishedStoreEvidenceOnlySuccessParts, RetainedStoreOperation,
             RetainedStorePublicationPlan, RetainedStoreReservation, RetainedStoreSharePlan,
             RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan,
         };

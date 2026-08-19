@@ -42,6 +42,12 @@ pub(crate) enum PreparedRetainedPublicationOutcome<CanonicalBlock, EvidenceBlock
     MinimalFallback(PreparedRetainedFallback<F, P, D>),
 }
 
+/// Exact terminal outcome for a requested success that publishes no retained primary output.
+pub(crate) enum PreparedRetainedEvidenceOnlyOutcome<F, P, D> {
+    Success(PreparedRetainedEvidenceOnlySuccess<P, D>),
+    MinimalFallback(PreparedRetainedFallback<F, P, D>),
+}
+
 /// Exact prepared success. Its retained roots remain opaque until handoff.
 pub(crate) struct PreparedRetainedSuccess<CanonicalBlock, EvidenceBlock, P, D> {
     pub(super) canonical: PublishedCanonicalAggregate<CanonicalBlock>,
@@ -63,6 +69,11 @@ pub(crate) struct PreparedRetainedRichFailure<EvidenceBlock, P, D> {
 /// Exact prepared minimal fallback. Its payload remains opaque until handoff.
 pub(crate) struct PreparedRetainedFallback<F, P, D> {
     pub(super) part: PublishedPart<F>,
+    pub(super) evidence: PublishedPart<TerminalLedgerEvidence<P, D>>,
+}
+
+/// Exact prepared success for an operation that published no retained primary output.
+pub(crate) struct PreparedRetainedEvidenceOnlySuccess<P, D> {
     pub(super) evidence: PublishedPart<TerminalLedgerEvidence<P, D>>,
 }
 
@@ -242,6 +253,11 @@ pub(crate) struct PublishedRetainedFallbackParts<F, P, D> {
     pub(crate) ledger_evidence: PublishedLedgerEvidence<P, D>,
 }
 
+/// Exact published success for an operation that produced only frozen ledger evidence.
+pub(crate) struct PublishedRetainedEvidenceOnlySuccessParts<P, D> {
+    pub(crate) ledger_evidence: PublishedLedgerEvidence<P, D>,
+}
+
 impl<CanonicalBlock, EvidenceBlock, P, D>
     PreparedRetainedSuccess<CanonicalBlock, EvidenceBlock, P, D>
 where
@@ -311,6 +327,21 @@ where
         PublishedRetainedFallbackParts {
             fallback: PublishedFallbackOutput { part },
             ledger_evidence: PublishedLedgerEvidence { evidence },
+        }
+    }
+}
+
+impl<P, D> PreparedRetainedEvidenceOnlySuccess<P, D>
+where
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey,
+{
+    /// Performs a pure ownership handoff into frozen ledger evidence.
+    pub fn handoff(self) -> PublishedRetainedEvidenceOnlySuccessParts<P, D> {
+        PublishedRetainedEvidenceOnlySuccessParts {
+            ledger_evidence: PublishedLedgerEvidence {
+                evidence: self.evidence,
+            },
         }
     }
 }

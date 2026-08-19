@@ -5,20 +5,22 @@ use super::publication_contract::{
 use super::startup;
 use super::{
     AccountPoisonReason, AssemblyContainmentProvenance, CanonicalLineageAuthority,
-    FailureTerminalWorkState, FallbackPublicationBaseline, PhysicalStorageAccount,
-    PreparationFailureClass, PreparationFailureCode, PreparedRetainedPublication,
-    PrimaryPublicationBatches, PublishedCanonicalAggregate, QualifiedRetainedBlockTablePlan,
-    RetainedAllocationError, RetainedAllocationPlan, RetainedBatchLimits, RetainedBuildFailureCode,
-    RetainedFailureTerminalWorkPlan, RetainedHandleSharePlan, RetainedMembershipDestination,
-    RetainedOperationStartError, RetainedOperationStartPlan, RetainedOutcomeMode,
-    RetainedPublicationAssembly, RetainedPublicationOpenError, RetainedPublicationPlan,
-    RetainedPublicationPrepareError, RetainedStorageDropOutcome, RetainedWriterError,
-    RetainedWriterPlan, StartupCrossPlaneAdmissionFailure, StartupCrossPlanePlan,
-    StartupPhysicalManifest, StartupPhysicalNoMutation, StartupRetainedPartGuard,
-    StartupTerminalEvidenceBuildError, TerminalEvidenceBackingPlan, TerminalEvidenceKey,
-    TerminalFallbackAttribution, TerminalFallbackGuard, TerminalLedgerEvidence,
-    TerminalPhysicalOwnershipManifest, drop_retained_table_with_account_anchor, map_batch_error,
-    try_create_retained_block_table, try_open_publication_account,
+    EvidenceOnlySuccessPrimaryTransition, FailureTerminalWorkState, FallbackPublicationBaseline,
+    PhysicalStorageAccount, PreparationFailureClass, PreparationFailureCode,
+    PreparedRetainedEvidenceOnlyOutcome, PreparedRetainedPublication,
+    PreparedRetainedPublicationOutcome, PrimaryPublicationBatches, PublishedCanonicalAggregate,
+    QualifiedRetainedBlockTablePlan, RetainedAllocationError, RetainedAllocationPlan,
+    RetainedBatchLimits, RetainedBuildFailureCode, RetainedFailureTerminalWorkPlan,
+    RetainedHandleSharePlan, RetainedMembershipDestination, RetainedOperationStartError,
+    RetainedOperationStartPlan, RetainedOutcomeMode, RetainedPublicationAssembly,
+    RetainedPublicationOpenError, RetainedPublicationPlan, RetainedPublicationPrepareError,
+    RetainedStorageDropOutcome, RetainedWriterError, RetainedWriterPlan,
+    StartupCrossPlaneAdmissionFailure, StartupCrossPlanePlan, StartupPhysicalManifest,
+    StartupPhysicalNoMutation, StartupRetainedPartGuard, StartupTerminalEvidenceBuildError,
+    TerminalEvidenceBackingPlan, TerminalEvidenceKey, TerminalFallbackAttribution,
+    TerminalFallbackGuard, TerminalLedgerEvidence, TerminalPhysicalOwnershipManifest,
+    TerminalPrimaryGuard, drop_retained_table_with_account_anchor, map_batch_error,
+    prepare_terminal_control, try_create_retained_block_table, try_open_publication_account,
     try_qualify_retained_block_table_plan, unreachable_final_owner_state,
 };
 use super::{AccountPoisoned, FinalizationContainmentError};
@@ -37,7 +39,9 @@ use crate::ledger::{
     StartupAccountShareEnvelope, StartupAttributionBatchPlans, StartupRetainedAttribution,
 };
 use crate::ledger::{DimensionPolicy, DimensionSnapshot};
-use crate::{ControlCause, OperationControl, OperationOwner, ProgressPhase, ProgressUnit};
+use crate::{
+    ControlCause, FinalProgress, OperationControl, OperationOwner, ProgressPhase, ProgressUnit,
+};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -2107,6 +2111,77 @@ where
             operation: self,
             cause,
             disposition,
+        }
+    }
+
+    /// Freezes a successful terminal ledger without publishing canonical or domain evidence tables.
+    ///
+    /// This is the exact terminal for a read-only operation whose admitted work completed but whose
+    /// compiled result requires no retained output. The pre-admitted fallback is discarded before
+    /// terminal freeze. A final control or ledger rejection instead publishes the minimal fallback.
+    #[must_use = "the prepared evidence-only outcome must be handed off or deliberately dropped"]
+    pub fn prepare_evidence_only_success(
+        mut self,
+        final_progress: FinalProgress<PP, U>,
+    ) -> Result<PreparedRetainedEvidenceOnlyOutcome<F, P, D>, RetainedPublicationPrepareError> {
+        if let Some(cause) = prepare_terminal_control(&mut self.coordinator, final_progress) {
+            self.record_terminal_cause(PreparationFailureCode::from_control(&cause));
+        }
+        let terminal_cause = self.sticky_terminal_cause();
+        let RetainedOperation {
+            coordinator,
+            baseline,
+            ..
+        } = self;
+        let ledger = coordinator.into_ledger_for_typed_publication();
+        let (fallback, evidence, batches) = baseline.into_parts();
+        let physical = TerminalPhysicalOwnershipManifest::<P, D, F, (), ()>::new(
+            fallback, evidence, None, None, None,
+        );
+        if let Some(cause) = terminal_cause {
+            let prepared = TerminalFallbackGuard::new(
+                TerminalFallbackAttribution::new(
+                    ledger,
+                    batches,
+                    PrimaryPublicationBatches::new(None, None),
+                ),
+                physical,
+            )
+            .try_prepare(cause)?;
+            return Ok(match prepared.into_outcome() {
+                PreparedRetainedPublicationOutcome::MinimalFallback(fallback) => {
+                    PreparedRetainedEvidenceOnlyOutcome::MinimalFallback(fallback)
+                }
+                PreparedRetainedPublicationOutcome::Success(_)
+                | PreparedRetainedPublicationOutcome::RichFailure(_) => {
+                    unreachable_final_owner_state()
+                }
+            });
+        }
+
+        let primary = TerminalPrimaryGuard::new(
+            ledger,
+            batches,
+            PrimaryPublicationBatches::new(None, None),
+            physical,
+        );
+        match primary.try_advance_evidence_only_success()? {
+            EvidenceOnlySuccessPrimaryTransition::Success(success) => success
+                .into_prepared()
+                .map(PreparedRetainedEvidenceOnlyOutcome::Success)
+                .map_err(RetainedPublicationPrepareError::FinalizationContainment),
+            EvidenceOnlySuccessPrimaryTransition::Fallback(fallback, cause) => {
+                let prepared = fallback.try_prepare(cause)?;
+                Ok(match prepared.into_outcome() {
+                    PreparedRetainedPublicationOutcome::MinimalFallback(fallback) => {
+                        PreparedRetainedEvidenceOnlyOutcome::MinimalFallback(fallback)
+                    }
+                    PreparedRetainedPublicationOutcome::Success(_)
+                    | PreparedRetainedPublicationOutcome::RichFailure(_) => {
+                        unreachable_final_owner_state()
+                    }
+                })
+            }
         }
     }
 

@@ -10,7 +10,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(super) fn panic_next_evidence_only_primary_bind() {
+pub(crate) fn panic_next_evidence_only_primary_bind() {
     PANIC_NEXT_EVIDENCE_ONLY_PRIMARY_BIND.with(|panic| panic.set(true));
 }
 
@@ -412,6 +412,19 @@ where
     D: Copy + Ord,
 {
     Success(TerminalSuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
+}
+
+pub(super) enum EvidenceOnlySuccessPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    Success(TerminalEvidenceOnlySuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>),
+    Fallback(
+        TerminalFallbackGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        PreparationFailureCode,
+    ),
 }
 
 struct QualifiedSuccessGraph<O, P, D, F, CanonicalBlock, EvidenceBlock>
@@ -1252,6 +1265,553 @@ where
     }
 }
 
+pub(super) struct TerminalEvidenceOnlySuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    proof: Option<crate::ledger::TypedFreezeProof<O, P, D>>,
+    physical: Option<TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock>>,
+}
+
+struct QualifiedEvidenceOnlySuccessPhysical<P, D, F> {
+    fallback: DetachedRetainedPart<F>,
+    evidence: FreezeReadyDetachedTerminalEvidence<P, D>,
+}
+
+struct QualifiedEvidenceOnlySuccessState<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    physical: QualifiedEvidenceOnlySuccessPhysical<P, D, F>,
+    proof: QualifiedEvidenceDiscardFreezeProof<O, P, D>,
+}
+
+struct QualifiedEvidenceOnlySuccessGraph<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    state: Option<QualifiedEvidenceOnlySuccessState<O, P, D, F>>,
+}
+
+enum VerifiedEvidenceOnlySuccessDiscardState<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    Pending {
+        acknowledgement: SuccessDiscardAcknowledgement,
+        physical: QualifiedEvidenceOnlySuccessPhysical<P, D, F>,
+        proof: QualifiedEvidenceDiscardFreezeProof<O, P, D>,
+        discarded_account: PhysicalStorageAccount,
+    },
+    Acknowledged,
+}
+
+struct VerifiedEvidenceOnlySuccessDiscard<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    state: VerifiedEvidenceOnlySuccessDiscardState<O, P, D, F>,
+}
+
+struct FreezeReadyEvidenceOnlySuccessState<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    physical: QualifiedEvidenceOnlySuccessPhysical<P, D, F>,
+    proof: FreezeReadyTypedProof<O, P, D>,
+}
+
+struct FreezeReadyEvidenceOnlySuccessGraph<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    state: Option<FreezeReadyEvidenceOnlySuccessState<O, P, D, F>>,
+}
+
+struct DetachedReadyEvidenceOnlySuccessState<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    physical: QualifiedEvidenceOnlySuccessPhysical<P, D, F>,
+    proof: crate::ledger::DetachedTypedFreezeProof<O, P, D>,
+}
+
+struct EligibilityReadyEvidenceOnlySuccessPhysical<P, D> {
+    evidence: DetachedRetainedPart<TerminalLedgerEvidence<P, D>>,
+}
+
+type EligibilityReadyEvidenceOnlySuccessJointCommit<O, P, D> =
+    AccountBoundJointCommit<EligibilityReadyEvidenceOnlySuccessPhysical<P, D>, O, P, D>;
+
+struct EligibilityReadyEvidenceOnlySuccessGraph<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    state: Option<EligibilityReadyEvidenceOnlySuccessJointCommit<O, P, D>>,
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock>
+    TerminalEvidenceOnlySuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey + fmt::Debug,
+{
+    fn new(
+        proof: crate::ledger::TypedFreezeProof<O, P, D>,
+        physical: TerminalPhysicalOwnershipManifest<P, D, F, CanonicalBlock, EvidenceBlock>,
+    ) -> Self {
+        Self {
+            proof: Some(proof),
+            physical: Some(physical),
+        }
+    }
+
+    fn contain_unqualified(mut self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        let physical = self
+            .physical
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        let cause = physical.contain_new_fault(reason);
+        if let Some(proof) = self.proof.take() {
+            proof.retain_fail_closed();
+        }
+        cause
+    }
+
+    pub(super) fn into_prepared(
+        mut self,
+    ) -> Result<PreparedRetainedEvidenceOnlySuccess<P, D>, FinalizationContainmentError> {
+        let proof = self
+            .proof
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        let proof = match proof.try_into_qualified_evidence_discard() {
+            Ok(proof) => proof,
+            Err(proof) => {
+                self.proof = Some(proof);
+                return Err(
+                    self.contain_unqualified(AccountPoisonReason::TerminalEvidenceFreezeUnverified)
+                );
+            }
+        };
+        if !self
+            .physical
+            .as_ref()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+            .has_exact_fallback_shape()
+        {
+            let physical = self
+                .physical
+                .take()
+                .unwrap_or_else(|| unreachable_final_owner_state());
+            let cause = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+            proof.retain_fail_closed();
+            return Err(cause);
+        }
+        let (fallback, evidence, canonical_table, evidence_table, account) = self
+            .physical
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+            .into_parts();
+        if canonical_table.is_some() || evidence_table.is_some() || account.is_some() {
+            let physical = TerminalPhysicalOwnershipManifest::new(
+                fallback,
+                evidence,
+                canonical_table,
+                evidence_table,
+                account,
+            );
+            let cause = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+            proof.retain_fail_closed();
+            return Err(cause);
+        }
+        let evidence =
+            match QualifiedDetachedTerminalEvidence::try_from_success_proof(evidence, &proof) {
+                DetachedTerminalEvidenceQualification::Qualified(evidence) => {
+                    evidence.into_freeze_ready()
+                }
+                DetachedTerminalEvidenceQualification::Rejected(evidence)
+                | DetachedTerminalEvidenceQualification::Panicked(evidence) => {
+                    let physical = TerminalPhysicalOwnershipManifest::<P, D, F, (), ()>::new(
+                        fallback, evidence, None, None, None,
+                    );
+                    let cause = physical
+                        .contain_new_fault(AccountPoisonReason::TerminalEvidenceFreezeUnverified);
+                    proof.retain_fail_closed();
+                    return Err(cause);
+                }
+            };
+        QualifiedEvidenceOnlySuccessGraph {
+            state: Some(QualifiedEvidenceOnlySuccessState {
+                physical: QualifiedEvidenceOnlySuccessPhysical { fallback, evidence },
+                proof,
+            }),
+        }
+        .into_prepared()
+    }
+}
+
+impl<O, P, D, F, CanonicalBlock, EvidenceBlock> Drop
+    for TerminalEvidenceOnlySuccessFreezeGuard<O, P, D, F, CanonicalBlock, EvidenceBlock>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(physical) = self.physical.take() {
+            let _ = physical.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+        }
+        if let Some(proof) = self.proof.take() {
+            proof.retain_fail_closed();
+        }
+    }
+}
+
+impl<P, D, F> QualifiedEvidenceOnlySuccessPhysical<P, D, F> {
+    fn into_terminal(self) -> TerminalPhysicalOwnershipManifest<P, D, F, (), ()> {
+        TerminalPhysicalOwnershipManifest::new(
+            self.fallback,
+            self.evidence.into_unfrozen_owner(),
+            None,
+            None,
+            None,
+        )
+    }
+}
+
+impl<O, P, D, F> QualifiedEvidenceOnlySuccessGraph<O, P, D, F>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey + fmt::Debug,
+{
+    fn take_state(&mut self) -> QualifiedEvidenceOnlySuccessState<O, P, D, F> {
+        self.state
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+    }
+
+    fn contain_new_fault(mut self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        let state = self.take_state();
+        let cause = state.physical.into_terminal().contain_new_fault(reason);
+        state.proof.retain_fail_closed();
+        cause
+    }
+
+    fn contain_after_recorded(
+        mut self,
+        reason: AccountPoisonReason,
+    ) -> FinalizationContainmentError {
+        let state = self.take_state();
+        let cause = state
+            .physical
+            .into_terminal()
+            .contain_after_recorded(reason);
+        state.proof.retain_fail_closed();
+        cause
+    }
+
+    fn contain_cleanup(self, cleanup: RetainedPartCleanupError) -> FinalizationContainmentError {
+        match cleanup {
+            RetainedPartCleanupError::MissingFaultAnchor
+            | RetainedPartCleanupError::DeferredOwnershipFault => {
+                self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified)
+            }
+            RetainedPartCleanupError::NewFaultAlreadyRecorded(_)
+            | RetainedPartCleanupError::StillSharedOwnershipFault(_) => {
+                self.contain_after_recorded(AccountPoisonReason::OwnershipGraphUnverified)
+            }
+            RetainedPartCleanupError::StorageReleaseUnverified(_) => {
+                self.contain_after_recorded(AccountPoisonReason::RetainedStorageReleaseUnverified)
+            }
+            RetainedPartCleanupError::ChargeReleaseUnverified(witness) => {
+                self.contain_after_recorded(witness.reason)
+            }
+        }
+    }
+
+    fn into_prepared(
+        mut self,
+    ) -> Result<PreparedRetainedEvidenceOnlySuccess<P, D>, FinalizationContainmentError> {
+        let discarded_account = match self
+            .state
+            .as_mut()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+            .physical
+            .fallback
+            .try_discard_allocation()
+        {
+            Ok(account) => account,
+            Err(cleanup) => return Err(self.contain_cleanup(cleanup)),
+        };
+        let state = self.take_state();
+        VerifiedEvidenceOnlySuccessDiscard {
+            state: VerifiedEvidenceOnlySuccessDiscardState::Pending {
+                acknowledgement: SuccessDiscardAcknowledgement::NotStarted,
+                physical: state.physical,
+                proof: state.proof,
+                discarded_account,
+            },
+        }
+        .acknowledge()
+        .try_detach_and_freeze()
+    }
+}
+
+impl<O, P, D, F> Drop for QualifiedEvidenceOnlySuccessGraph<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            let _ = state
+                .physical
+                .into_terminal()
+                .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+            state.proof.retain_fail_closed();
+        }
+    }
+}
+
+impl<O, P, D, F> VerifiedEvidenceOnlySuccessDiscard<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn acknowledge(mut self) -> FreezeReadyEvidenceOnlySuccessGraph<O, P, D, F> {
+        let proof = match &mut self.state {
+            VerifiedEvidenceOnlySuccessDiscardState::Pending {
+                acknowledgement,
+                proof,
+                ..
+            } => {
+                *acknowledgement = SuccessDiscardAcknowledgement::InProgress;
+                proof.release_discard_after_physical_cleanup_in_place()
+            }
+            VerifiedEvidenceOnlySuccessDiscardState::Acknowledged => {
+                unreachable_final_owner_state()
+            }
+        };
+        let state = std::mem::replace(
+            &mut self.state,
+            VerifiedEvidenceOnlySuccessDiscardState::Acknowledged,
+        );
+        match state {
+            VerifiedEvidenceOnlySuccessDiscardState::Pending {
+                acknowledgement: _,
+                physical,
+                proof: _,
+                discarded_account,
+            } => {
+                drop(discarded_account);
+                FreezeReadyEvidenceOnlySuccessGraph {
+                    state: Some(FreezeReadyEvidenceOnlySuccessState { physical, proof }),
+                }
+            }
+            VerifiedEvidenceOnlySuccessDiscardState::Acknowledged => {
+                unreachable_final_owner_state()
+            }
+        }
+    }
+}
+
+impl<O, P, D, F> Drop for VerifiedEvidenceOnlySuccessDiscard<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        let state = std::mem::replace(
+            &mut self.state,
+            VerifiedEvidenceOnlySuccessDiscardState::Acknowledged,
+        );
+        if let VerifiedEvidenceOnlySuccessDiscardState::Pending {
+            acknowledgement: _,
+            physical,
+            proof,
+            discarded_account,
+        } = state
+        {
+            let _ = physical
+                .into_terminal()
+                .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+            proof.retain_fail_closed();
+            drop(discarded_account);
+        }
+    }
+}
+
+impl<O, P, D, F> FreezeReadyEvidenceOnlySuccessGraph<O, P, D, F>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey,
+{
+    fn try_detach_and_freeze(
+        mut self,
+    ) -> Result<PreparedRetainedEvidenceOnlySuccess<P, D>, FinalizationContainmentError> {
+        let state = self
+            .state
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        let proof = match state.proof.try_into_detached() {
+            Ok(proof) => proof,
+            Err(error) => {
+                let cause = state
+                    .physical
+                    .into_terminal()
+                    .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+                error.retain_fail_closed();
+                return Err(cause);
+            }
+        };
+        let state = DetachedReadyEvidenceOnlySuccessState {
+            physical: state.physical,
+            proof,
+        };
+        let mut state =
+            scopeguard::guard(state, contain_detached_ready_evidence_only_success_state);
+        let DetachedReadyEvidenceOnlySuccessState { physical, proof } = &mut *state;
+        physical
+            .evidence
+            .freeze_in_place(TerminalEvidenceCause::Success, proof.terminal_projection());
+        drop(std::mem::replace(
+            &mut state.physical.fallback,
+            DetachedRetainedPart::empty(),
+        ));
+        let state = scopeguard::ScopeGuard::into_inner(state);
+        let DetachedReadyEvidenceOnlySuccessState { physical, proof } = state;
+        let QualifiedEvidenceOnlySuccessPhysical { fallback, evidence } = physical;
+        debug_assert!(fallback.is_empty());
+        EligibilityReadyEvidenceOnlySuccessGraph {
+            state: Some(AccountBoundJointCommit::new(
+                EligibilityReadyEvidenceOnlySuccessPhysical {
+                    evidence: evidence.into_frozen_owner(),
+                },
+                proof,
+            )),
+        }
+        .try_into_prepared()
+    }
+}
+
+impl<O, P, D, F> Drop for FreezeReadyEvidenceOnlySuccessGraph<O, P, D, F>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            let _ = state
+                .physical
+                .into_terminal()
+                .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+            state.proof.retain_fail_closed();
+        }
+    }
+}
+
+fn contain_detached_ready_evidence_only_success_state<O, P, D, F>(
+    state: DetachedReadyEvidenceOnlySuccessState<O, P, D, F>,
+) where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    let _ = state
+        .physical
+        .into_terminal()
+        .contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+    state.proof.retain_fail_closed();
+}
+
+impl<O, P, D> EligibilityReadyEvidenceOnlySuccessGraph<O, P, D>
+where
+    O: OperationOwner,
+    P: TerminalEvidenceKey,
+    D: TerminalEvidenceKey,
+{
+    fn try_into_prepared(
+        mut self,
+    ) -> Result<PreparedRetainedEvidenceOnlySuccess<P, D>, FinalizationContainmentError> {
+        let state = self
+            .state
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        Ok(state.try_commit()?.into_prepared())
+    }
+}
+
+impl<O, P, D> Drop for EligibilityReadyEvidenceOnlySuccessGraph<O, P, D>
+where
+    O: OperationOwner,
+    P: Copy + Ord,
+    D: Copy + Ord,
+{
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            drop(state);
+        }
+    }
+}
+
+impl<P, D> EligibilityReadyEvidenceOnlySuccessPhysical<P, D> {
+    fn into_terminal(self) -> TerminalPhysicalOwnershipManifest<P, D, (), (), ()> {
+        TerminalPhysicalOwnershipManifest::new(
+            DetachedRetainedPart::empty(),
+            self.evidence,
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn into_prepared(self) -> PreparedRetainedEvidenceOnlySuccess<P, D> {
+        PreparedRetainedEvidenceOnlySuccess {
+            evidence: PublishedPart::from_exact_owner(self.evidence),
+        }
+    }
+}
+
+impl<P, D> AccountBoundPublicationManifest for EligibilityReadyEvidenceOnlySuccessPhysical<P, D> {
+    fn publication_account(&self) -> &PhysicalStorageAccount {
+        self.evidence.account()
+    }
+
+    fn contain_uncommitted(self, reason: AccountPoisonReason) -> FinalizationContainmentError {
+        self.into_terminal().contain_new_fault(reason)
+    }
+
+    fn contain_after_quarantine(self, quarantine: AccountPoisoned) -> FinalizationContainmentError {
+        self.into_terminal().contain_after_quarantine(quarantine)
+    }
+}
+
 pub(super) struct PrimaryPublicationBatches<O, P, D>
 where
     O: OperationOwner,
@@ -1542,6 +2102,42 @@ where
             .finish(true);
         Ok(FrozenSuccessPrimaryTransition::Success(
             TerminalSuccessFreezeGuard::new(proof, physical),
+        ))
+    }
+
+    pub(super) fn try_advance_evidence_only_success(
+        mut self,
+    ) -> Result<
+        EvidenceOnlySuccessPrimaryTransition<O, P, D, F, CanonicalBlock, EvidenceBlock>,
+        RetainedPublicationPrepareError,
+    > {
+        match self.try_bind_once(false) {
+            Err(payload) => return Err(self.contain_primary_binding_panic(payload)),
+            Ok(Err(_cause)) => {
+                return Ok(EvidenceOnlySuccessPrimaryTransition::Fallback(
+                    self.into_fallback(),
+                    PreparationFailureCode::ledger(),
+                ));
+            }
+            Ok(Ok(())) => {}
+        }
+        if !self.physical().has_exact_fallback_shape() {
+            let containment = self.contain_new_fault(AccountPoisonReason::OwnershipGraphUnverified);
+            return Err(RetainedPublicationPrepareError::FinalizationContainment(
+                containment,
+            ));
+        }
+        let physical = self
+            .physical
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state());
+        let proof = self
+            .attribution
+            .take()
+            .unwrap_or_else(|| unreachable_final_owner_state())
+            .finish(false);
+        Ok(EvidenceOnlySuccessPrimaryTransition::Success(
+            TerminalEvidenceOnlySuccessFreezeGuard::new(proof, physical),
         ))
     }
 
