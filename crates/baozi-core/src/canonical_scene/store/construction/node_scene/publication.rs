@@ -5,13 +5,12 @@ use baozi_operation::__retained_store_integration::activation::{
     StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
 };
 use baozi_operation::__retained_store_integration::authority::{
-    PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
-    PreparedStoreSuccessOutcome,
+    PreparedStoreFailureOutcome, PreparedStoreSuccess, PreparedStoreSuccessOutcome,
 };
 use baozi_operation::{
-    ControlCause, CounterClass, FinalProgress, LedgerCause, OperationOwner, ProgressPhase,
-    ProgressUnit, PublishedCanonicalStore, PublishedOutcomeEvidenceStore, RecordBlock,
-    StoreBuildFailureClass, StoreLedgerEvidence, StoreRuntimeError,
+    ControlCause, FinalProgress, OperationOwner, ProgressPhase, ProgressUnit,
+    PublishedCanonicalStore, PublishedOutcomeEvidenceStore, RecordBlock, StoreBuildFailureClass,
+    StoreLedgerEvidence, StoreRuntimeError,
 };
 use thiserror::Error;
 
@@ -33,8 +32,7 @@ use super::materialization::{
 };
 use super::{
     DeferredNodeSceneDraftBuild, NODE_SCENE_BUILD_INVARIANT_CODE,
-    NODE_SCENE_CONTROL_INTERRUPTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
-    NODE_SCENE_WORK_INTERRUPTION_CODE, NodeSceneCanonicalJointCommit,
+    NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneCanonicalJointCommit,
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
     NodeSceneDraftBuild, NodeSceneFallback, NodeSceneRichFailure, NodeSceneSuccessParts,
     NodeSceneSuccessReport, PendingNodeSceneDraft, PendingNodeSceneFailure,
@@ -352,17 +350,6 @@ where
     ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
         prepare_pending_node_scene_draft(self, Some(draft), Some(reserve_generation))
             .map(|(prepared, _)| prepared)
-    }
-
-    pub(in crate::canonical_scene::store) fn prepare_missing_draft(
-        self,
-    ) -> Result<PreparedNodeSceneConstruction, SceneConstructionError> {
-        prepare_pending_node_scene_draft(
-            self,
-            None,
-            None::<fn() -> Result<ReservedSceneGeneration, SceneGenerationError>>,
-        )
-        .map(|(prepared, _)| prepared)
     }
 }
 
@@ -742,20 +729,6 @@ where
     })
 }
 
-pub(super) fn prepare_node_central_fallback<O, PP, U>(
-    store: PreparedStoreFallback,
-) -> NodeSceneDraftBuild<O, PP, U>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    NodeSceneDraftBuild::Failure {
-        authoring_rejection: None,
-        prepared: PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store }),
-    }
-}
-
 fn prepare_node_ordinary_construction_failure<O, PP, U, Cause>(
     validation: RootedFailureValidation<
         O,
@@ -913,57 +886,11 @@ fn node_scene_evidence_values(
     values
 }
 
-pub(super) fn post_evidence_failure_code(cause: &StoreRuntimeError) -> Option<u32> {
-    match cause {
-        StoreRuntimeError::Control(_) => Some(NODE_SCENE_CONTROL_INTERRUPTION_CODE),
-        StoreRuntimeError::Build(cause) => post_evidence_build_failure_code(cause.class()),
-        StoreRuntimeError::Ledger(
-            LedgerCause::LimitExceeded {
-                class: CounterClass::Attempted | CounterClass::Consumed,
-                ..
-            }
-            | LedgerCause::ArithmeticOverflow {
-                class: CounterClass::Attempted | CounterClass::Consumed,
-                ..
-            }
-            | LedgerCause::ConsumedExceedsAttempted { .. },
-        ) => Some(NODE_SCENE_WORK_INTERRUPTION_CODE),
-        StoreRuntimeError::Ledger(
-            LedgerCause::LimitExceeded {
-                class:
-                    CounterClass::Live
-                    | CounterClass::PendingPublication
-                    | CounterClass::Committed
-                    | CounterClass::PublishedOutcomeEvidence,
-                ..
-            }
-            | LedgerCause::ArithmeticOverflow {
-                class:
-                    CounterClass::Live
-                    | CounterClass::PendingPublication
-                    | CounterClass::Committed
-                    | CounterClass::PublishedOutcomeEvidence,
-                ..
-            },
-        )
-        | StoreRuntimeError::BatchAllocationFailed
-        | StoreRuntimeError::PhysicalByteLimit { .. }
-        | StoreRuntimeError::PhysicalAllocationLimit { .. }
-        | StoreRuntimeError::AllocationFailed
-        | StoreRuntimeError::MembershipExhausted => Some(NODE_SCENE_STORAGE_REJECTION_CODE),
-        _ => None,
-    }
-}
-
 pub(super) const fn post_evidence_build_failure_code(class: StoreBuildFailureClass) -> Option<u32> {
     match class {
         StoreBuildFailureClass::AllocationFailed => Some(NODE_SCENE_STORAGE_REJECTION_CODE),
         _ => None,
     }
-}
-
-pub(super) fn node_scene_failure_code(cause: &StoreRuntimeError) -> u32 {
-    post_evidence_failure_code(cause).unwrap_or(NODE_SCENE_BUILD_INVARIANT_CODE)
 }
 
 impl PreparedNodeSceneConstruction {

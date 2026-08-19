@@ -13,9 +13,8 @@ use baozi_operation::__retained_store_integration::producer::{
 use baozi_operation::{
     BytesPlan, ControlCause, FinalProgress, OperationOwner, ProgressPhase, ProgressUnit,
     PublishedCanonicalStore, PublishedOutcomeEvidenceStore, PublishedRichFailureStore,
-    PublishedStoreFallbackOutput, RecordBlock, RecordPlan, SequencePlan, StoreFailureAssembly,
-    StoreFailureValidation, StoreLedgerEvidence, StorePlanError, StoreRuntimeError, StoredScalar,
-    Utf8Plan, ValidatedStoreSuccess,
+    PublishedStoreFallbackOutput, RecordBlock, RecordPlan, SequencePlan, StoreLedgerEvidence,
+    StorePlanError, StoreRuntimeError, StoredScalar, Utf8Plan,
 };
 use thiserror::Error;
 
@@ -264,32 +263,9 @@ fn process_str_in_chunks<E>(
     Ok(())
 }
 
-type ValidatedNodeStoreSuccess = ValidatedStoreSuccess<
-    SceneConstructionOwner,
-    SceneConstructionPhase,
-    SceneConstructionUnit,
-    RecordBlock,
-    SceneDirectorySchema,
-    RecordBlock,
-    NodeSceneOutcomeEvidenceSchema,
->;
 type PreparedNodeStoreSuccess = PreparedStoreSuccess<
     RecordBlock,
     SceneDirectorySchema,
-    RecordBlock,
-    NodeSceneOutcomeEvidenceSchema,
->;
-type NodeSceneStoreFailureAssembly = StoreFailureAssembly<
-    SceneConstructionOwner,
-    SceneConstructionPhase,
-    SceneConstructionUnit,
-    RecordBlock,
-    NodeSceneOutcomeEvidenceSchema,
->;
-type NodeSceneStoreFailureValidation = StoreFailureValidation<
-    SceneConstructionOwner,
-    SceneConstructionPhase,
-    SceneConstructionUnit,
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
