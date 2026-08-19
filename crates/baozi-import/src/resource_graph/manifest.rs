@@ -1,7 +1,12 @@
 use crate::dependency::{DependencyRequirement, DependencyRoleId};
+use crate::metered_storage::AccountedVec;
 use baozi_io::AssetPath;
 use sha2::{Digest, Sha256};
 use std::fmt;
+
+mod encoding;
+
+pub(super) use encoding::{ManifestEncodingError, encode_node_class, encode_relation_key};
 
 pub(super) const MANIFEST_SCHEMA_VERSION: u64 = 1;
 const MANIFEST_DOMAIN: &str = "baozi.input-manifest.v1";
@@ -391,479 +396,42 @@ impl SuccessfulInputManifest {
         &self.replay_status
     }
 
+    #[cfg(test)]
     pub(super) fn canonical_bytes(&self) -> Result<Vec<u8>, ManifestEncodingError> {
-        encode_manifest(
+        encoding::encode_manifest(
             self.primary,
             &self.node_classes,
             self.counts,
             &self.replay_status,
         )
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ManifestEncodingError {
-    LengthOverflow,
-    InvalidCanonicalId,
-}
-
-pub(super) fn encode_node_class(
-    identity: &ManifestResourceIdentity,
-    byte_length: u64,
-    content_digest: ManifestDigest,
-    outgoing_relations: &[ManifestRelation],
-) -> Result<Vec<u8>, ManifestEncodingError> {
-    let relations = outgoing_relations
-        .iter()
-        .map(encode_relation)
-        .collect::<Result<Vec<_>, _>>()?;
-    record_value(
-        "node-class",
-        vec![
-            field("resource-identity", encode_resource_identity(identity)?)?,
-            field("byte-length", u64_value(byte_length)?)?,
-            field("content-digest", digest_value(content_digest)?)?,
-            field("outgoing-relations", sequence_value(relations)?)?,
-        ],
-    )
-}
-
-pub(super) fn encode_relation_key(
-    role: &DependencyRoleId,
-    requirement: DependencyRequirement,
-    reference: &ManifestReference,
-    outcome: &ManifestRelationOutcome,
-) -> Result<Vec<u8>, ManifestEncodingError> {
-    record_value(
-        "relation-key",
-        vec![
-            field("role", enum_value(role.as_str())?)?,
-            field("requirement", enum_value(requirement_id(requirement))?)?,
-            field("reference", encode_reference(reference)?)?,
-            field("outcome", encode_outcome(outcome)?)?,
-        ],
-    )
-}
-
-fn encode_manifest(
-    primary: ManifestDigest,
-    node_classes: &[ManifestNodeClass],
-    counts: ResourceManifestCounts,
-    replay_status: &InputReplayStatus,
-) -> Result<Vec<u8>, ManifestEncodingError> {
-    let node_entries = node_classes
-        .iter()
-        .map(|class| {
-            record_value(
-                "node-entry",
-                vec![
-                    field("node-class-digest", digest_value(class.digest)?)?,
-                    field(
-                        "node-class",
-                        encode_node_class(
-                            &class.identity,
-                            class.byte_length,
-                            class.content_digest,
-                            &class.outgoing_relations,
-                        )?,
-                    )?,
-                ],
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    record_value(
-        "input-manifest",
-        vec![
-            field("domain", utf8_value(MANIFEST_DOMAIN.as_bytes())?)?,
-            field("schema-version", u64_value(MANIFEST_SCHEMA_VERSION)?)?,
-            field("digest-algorithm", enum_value("sha256")?)?,
-            field(
-                "primary",
-                record_value(
-                    "primary",
-                    vec![field("node-class-digest", digest_value(primary)?)?],
-                )?,
-            )?,
-            field("node-classes", sequence_value(node_entries)?)?,
-            field("counts", encode_counts(counts)?)?,
-            field("input-replay-status", encode_replay_status(replay_status)?)?,
-        ],
-    )
-}
-
-fn encode_relation(relation: &ManifestRelation) -> Result<Vec<u8>, ManifestEncodingError> {
-    record_value(
-        "relation",
-        vec![
-            field(
-                "key",
-                encode_relation_key(
-                    &relation.role,
-                    relation.requirement,
-                    &relation.reference,
-                    &relation.outcome,
-                )?,
-            )?,
-            field("multiplicity", u64_value(relation.multiplicity)?)?,
-        ],
-    )
-}
-
-fn encode_resource_identity(
-    identity: &ManifestResourceIdentity,
-) -> Result<Vec<u8>, ManifestEncodingError> {
-    let stability = match &identity.stability {
-        ManifestResourceIdentityStability::Stable {
-            owner,
-            schema,
-            version,
-        } => union_value(
-            "stable-resource-identity",
-            vec![
-                field("owner", enum_value(owner)?)?,
-                field("schema-id", enum_value(schema)?)?,
-                field("schema-version", u64_value(*version)?)?,
-            ],
-        )?,
-        ManifestResourceIdentityStability::SessionOpaque(reason) => union_value(
-            "session-opaque-resource-identity",
-            vec![field(
-                "reason",
-                enum_value(session_opaque_reason_id(*reason))?,
-            )?],
-        )?,
-    };
-    record_value(
-        "resource-identity-v1",
-        vec![
-            field("value", utf8_value(identity.value.as_str().as_bytes())?)?,
-            field("stability", stability)?,
-        ],
-    )
-}
-
-fn encode_reference(reference: &ManifestReference) -> Result<Vec<u8>, ManifestEncodingError> {
-    match reference {
-        ManifestReference::Normalized(identity) => union_value(
-            "normalized-reference",
-            vec![field(
-                "resource-identity",
-                encode_resource_identity(identity)?,
-            )?],
-        ),
-        ManifestReference::Rejected {
-            class,
-            code,
-            reference_digest,
-        } => union_value(
-            "rejected-reference",
-            vec![
-                field("class", enum_value(class.canonical_id())?)?,
-                field("code", enum_value(code.as_str())?)?,
-                field("reference-digest", digest_value(*reference_digest)?)?,
-            ],
-        ),
-    }
-}
-
-fn encode_outcome(outcome: &ManifestRelationOutcome) -> Result<Vec<u8>, ManifestEncodingError> {
-    match outcome {
-        ManifestRelationOutcome::Available {
-            target_node_class_digest,
-        } => union_value(
-            "available",
-            vec![field(
-                "target-node-class-digest",
-                digest_value(*target_node_class_digest)?,
-            )?],
-        ),
-        ManifestRelationOutcome::Unavailable {
-            class,
-            code,
-            identity_evidence,
-            replay,
-        } => union_value(
-            "unavailable",
-            vec![
-                field("class", enum_value(class.canonical_id())?)?,
-                field("code", enum_value(code.as_str())?)?,
-                field(
-                    "identity-evidence",
-                    optional_value(
-                        identity_evidence
-                            .as_ref()
-                            .map(encode_resource_identity)
-                            .transpose()?,
-                    )?,
-                )?,
-                field("replay-classification", encode_unavailable_replay(*replay)?)?,
-            ],
-        ),
-    }
-}
-
-fn encode_unavailable_replay(
-    replay: ManifestUnavailableReplay,
-) -> Result<Vec<u8>, ManifestEncodingError> {
-    match replay {
-        ManifestUnavailableReplay::UnprovenNegativeInput => union_value(
-            "unproven-negative-input",
-            vec![field("reason", enum_value("missing-negative-proof")?)?],
-        ),
-        ManifestUnavailableReplay::SessionDependent(reason) => union_value(
-            "session-dependent-unavailable",
-            vec![field(
-                "reason",
-                enum_value(session_dependent_reason_id(reason))?,
-            )?],
-        ),
-    }
-}
-
-fn encode_counts(counts: ResourceManifestCounts) -> Result<Vec<u8>, ManifestEncodingError> {
-    record_value(
-        "counts",
-        vec![
-            field("node-class-count", u64_value(counts.node_class_count)?)?,
-            field(
-                "quotient-relation-record-count",
-                u64_value(counts.quotient_relation_record_count)?,
-            )?,
-            field(
-                "relation-occurrence-count",
-                u64_value(counts.relation_occurrence_count)?,
-            )?,
-            field(
-                "available-relation-record-count",
-                u64_value(counts.available_relation_record_count)?,
-            )?,
-            field(
-                "available-relation-occurrence-count",
-                u64_value(counts.available_relation_occurrence_count)?,
-            )?,
-            field(
-                "unavailable-relation-record-count",
-                u64_value(counts.unavailable_relation_record_count)?,
-            )?,
-            field(
-                "unavailable-relation-occurrence-count",
-                u64_value(counts.unavailable_relation_occurrence_count)?,
-            )?,
-            field("maximum-depth", u64_value(counts.maximum_depth)?)?,
-        ],
-    )
-}
-
-fn encode_replay_status(
-    replay_status: &InputReplayStatus,
-) -> Result<Vec<u8>, ManifestEncodingError> {
-    let (status, reasons) = match replay_status {
-        InputReplayStatus::Replayable => ("replayable", Vec::new()),
-        InputReplayStatus::ObservedOnly(reasons) => {
-            let reasons = reasons
-                .iter()
-                .map(|reason| enum_value(reason.canonical_id()))
-                .collect::<Result<Vec<_>, _>>()?;
-            ("observed-only", reasons)
-        }
-    };
-    record_value(
-        "input-replay-status",
-        vec![
-            field("status", enum_value(status)?)?,
-            field("reasons", set_value(reasons)?)?,
-        ],
-    )
-}
-
-fn requirement_id(requirement: DependencyRequirement) -> &'static str {
-    match requirement {
-        DependencyRequirement::Required => "required",
-        DependencyRequirement::Optional => "optional",
-    }
-}
-
-fn session_opaque_reason_id(reason: ManifestSessionOpaqueReason) -> &'static str {
-    match reason {
-        ManifestSessionOpaqueReason::GeneratedReportIdentity => "generated-report-identity",
-        ManifestSessionOpaqueReason::UnregisteredCallerIdentity => "unregistered-caller-identity",
-        ManifestSessionOpaqueReason::UnregisteredResolverIdentity => {
-            "unregistered-resolver-identity"
-        }
-    }
-}
-
-fn session_dependent_reason_id(reason: ManifestSessionDependentReason) -> &'static str {
-    match reason {
-        ManifestSessionDependentReason::AcquisitionBudget => "session-dependent-acquisition-budget",
-        ManifestSessionDependentReason::MutablePolicy => "session-dependent-mutable-policy",
-        ManifestSessionDependentReason::HostCallback => "session-dependent-host-callback",
-        ManifestSessionDependentReason::ProcessState => "session-dependent-process-state",
-        ManifestSessionDependentReason::UnregisteredSemanticBasis => "unregistered-semantic-basis",
-    }
-}
-
-fn validate_canonical_id(value: &str) -> Result<(), ManifestEncodingError> {
-    if value.is_empty()
-        || value.len() > 96
-        || value.split(['.', '_', ':', '-']).any(|part| {
-            part.is_empty()
-                || part
-                    .bytes()
-                    .any(|byte| !(byte.is_ascii_lowercase() || byte.is_ascii_digit()))
-        })
-    {
-        return Err(ManifestEncodingError::InvalidCanonicalId);
-    }
-    Ok(())
-}
-
-fn checked_len(value: usize) -> Result<u64, ManifestEncodingError> {
-    u64::try_from(value).map_err(|_| ManifestEncodingError::LengthOverflow)
-}
-
-fn frame(label: &[u8], payload: &[u8]) -> Result<Vec<u8>, ManifestEncodingError> {
-    let capacity = 16_usize
-        .checked_add(label.len())
-        .and_then(|value| value.checked_add(payload.len()))
-        .ok_or(ManifestEncodingError::LengthOverflow)?;
-    let mut encoded = Vec::new();
-    encoded
-        .try_reserve_exact(capacity)
-        .map_err(|_| ManifestEncodingError::LengthOverflow)?;
-    encoded.extend_from_slice(&checked_len(label.len())?.to_be_bytes());
-    encoded.extend_from_slice(label);
-    encoded.extend_from_slice(&checked_len(payload.len())?.to_be_bytes());
-    encoded.extend_from_slice(payload);
-    Ok(encoded)
-}
-
-fn record(tag: &str, fields: Vec<Vec<u8>>) -> Result<Vec<u8>, ManifestEncodingError> {
-    let tag = frame(b"record-tag", tag.as_bytes())?;
-    let capacity = tag
-        .len()
-        .checked_add(8)
-        .and_then(|base| {
-            fields
-                .iter()
-                .try_fold(base, |sum, field| sum.checked_add(field.len()))
-        })
-        .ok_or(ManifestEncodingError::LengthOverflow)?;
-    let mut encoded = Vec::new();
-    encoded
-        .try_reserve_exact(capacity)
-        .map_err(|_| ManifestEncodingError::LengthOverflow)?;
-    encoded.extend(tag);
-    encoded.extend_from_slice(&checked_len(fields.len())?.to_be_bytes());
-    for field in fields {
-        encoded.extend(field);
-    }
-    Ok(encoded)
-}
-
-fn value(kind: &str, payload: Vec<u8>) -> Result<Vec<u8>, ManifestEncodingError> {
-    record(
-        "identity-value",
-        vec![
-            frame(b"kind", kind.as_bytes())?,
-            frame(b"payload", &payload)?,
-        ],
-    )
-}
-
-fn field(label: &str, value: Vec<u8>) -> Result<Vec<u8>, ManifestEncodingError> {
-    frame(label.as_bytes(), &value)
-}
-
-fn record_value(tag: &str, fields: Vec<Vec<u8>>) -> Result<Vec<u8>, ManifestEncodingError> {
-    value("record", record(tag, fields)?)
-}
-
-fn u64_value(value_: u64) -> Result<Vec<u8>, ManifestEncodingError> {
-    value("u64", value_.to_be_bytes().to_vec())
-}
-
-fn bytes_value(bytes: Vec<u8>) -> Result<Vec<u8>, ManifestEncodingError> {
-    value("bytes", bytes)
-}
-
-fn utf8_value(bytes: &[u8]) -> Result<Vec<u8>, ManifestEncodingError> {
-    value("utf8", bytes.to_vec())
-}
-
-fn enum_value(value_: &str) -> Result<Vec<u8>, ManifestEncodingError> {
-    validate_canonical_id(value_)?;
-    value("enum", value_.as_bytes().to_vec())
-}
-
-fn digest_value(digest: ManifestDigest) -> Result<Vec<u8>, ManifestEncodingError> {
-    record_value(
-        "digest",
-        vec![
-            field("algorithm", enum_value("sha256")?)?,
-            field("value", bytes_value(digest.0.to_vec())?)?,
-        ],
-    )
-}
-
-fn optional_value(value_: Option<Vec<u8>>) -> Result<Vec<u8>, ManifestEncodingError> {
-    match value_ {
-        None => value("optional", vec![0]),
-        Some(value_) => {
-            let mut payload = vec![1];
-            payload.extend(frame(b"some", &value_)?);
-            value("optional", payload)
-        }
-    }
-}
-
-fn sequence_value(values: Vec<Vec<u8>>) -> Result<Vec<u8>, ManifestEncodingError> {
-    let mut payload = checked_len(values.len())?.to_be_bytes().to_vec();
-    for value_ in values {
-        payload.extend(frame(b"item", &value_)?);
-    }
-    value("sequence", payload)
-}
-
-fn set_value(mut values: Vec<Vec<u8>>) -> Result<Vec<u8>, ManifestEncodingError> {
-    values.sort();
-    if values.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(ManifestEncodingError::InvalidCanonicalId);
-    }
-    let mut payload = checked_len(values.len())?.to_be_bytes().to_vec();
-    for value_ in values {
-        payload.extend(frame(b"item", &value_)?);
-    }
-    value("set", payload)
-}
-
-fn union_value(tag: &str, fields: Vec<Vec<u8>>) -> Result<Vec<u8>, ManifestEncodingError> {
-    value("union", record(tag, fields)?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn canonical_deny_parameter_record_matches_the_adr_vector() {
-        let encoded = record_value("external-policy-deny-v1", Vec::new()).unwrap();
-        assert_eq!(encoded.len(), 154);
-        assert_eq!(
-            ManifestDigest::of(&encoded).as_bytes(),
-            [
-                0x32, 0x5d, 0x32, 0xa5, 0x71, 0xf7, 0x30, 0x88, 0x38, 0xf5, 0x88, 0x79, 0xc1, 0x7d,
-                0xc5, 0xdb, 0xdb, 0x78, 0x4e, 0xb9, 0x1f, 0x23, 0x03, 0x11, 0x16, 0x02, 0xbe, 0x8b,
-                0x18, 0xf5, 0x59, 0xc9,
-            ]
-        );
+    pub(super) fn canonical_len(&self) -> Result<usize, ManifestEncodingError> {
+        encoding::manifest_len(
+            self.primary,
+            &self.node_classes,
+            self.counts,
+            &self.replay_status,
+        )
     }
 
-    #[test]
-    fn canonical_ids_reject_non_registry_grammar() {
-        assert_eq!(
-            enum_value("Debug Value"),
-            Err(ManifestEncodingError::InvalidCanonicalId)
-        );
+    pub(super) fn write_canonical_bytes(
+        &self,
+        expected: usize,
+        output: &mut AccountedVec<u8>,
+    ) -> Result<(), ManifestEncodingError> {
+        encoding::encode_manifest_into_accounted(
+            self.primary,
+            &self.node_classes,
+            self.counts,
+            &self.replay_status,
+            expected,
+            output,
+        )
+    }
+
+    pub(super) fn with_digest(mut self, digest: ManifestDigest) -> Self {
+        self.digest = digest;
+        self
     }
 }

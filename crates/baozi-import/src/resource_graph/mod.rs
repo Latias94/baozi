@@ -840,9 +840,8 @@ impl ResourceGraph {
             counts,
             replay_status,
         );
-        let canonical = provisional.canonical_bytes()?;
-        let byte_count =
-            u64::try_from(canonical.len()).map_err(|_| ResourceGraphError::Overflow)?;
+        let canonical_len = provisional.canonical_len()?;
+        let byte_count = u64::try_from(canonical_len).map_err(|_| ResourceGraphError::Overflow)?;
         if byte_count > self.limits.max_input_manifest_bytes {
             return Err(ResourceGraphError::Limit {
                 resource: "max_input_manifest_bytes",
@@ -850,16 +849,19 @@ impl ResourceGraph {
             });
         }
         charge_attempted(host, ImportDimension::InputManifestBytes, byte_count)?;
-        charge_consumed(host, ImportDimension::InputManifestBytes, byte_count)?;
+        let mut canonical = AccountedVec::new();
+        canonical
+            .try_reserve_capacity(
+                canonical_len,
+                "resource-manifest-canonical-bytes",
+                |bytes| reserve_manifest_storage(host, bytes),
+            )
+            .map_err(ResourceGraphError::Scope)?;
+        provisional.write_canonical_bytes(canonical_len, &mut canonical)?;
         let digest = ManifestDigest::of(&canonical);
-        let manifest = SuccessfulInputManifest::new(
-            digest,
-            primary_digest,
-            provisional.node_classes().to_vec(),
-            counts,
-            provisional.replay_status().clone(),
-        );
-        self.sealed_manifest = Some(manifest);
+        charge_consumed(host, ImportDimension::InputManifestBytes, byte_count)?;
+        drop(canonical);
+        self.sealed_manifest = Some(provisional.with_digest(digest));
         Ok(())
     }
 
@@ -1489,6 +1491,18 @@ fn reserve_graph_storage(
     .map_err(|cause| cause.into_scope_abort_cause())
 }
 
+fn reserve_manifest_storage(
+    host: ImportStoreHost<'_>,
+    bytes: u64,
+) -> Result<ImportStoreReservation, ScopeAbortCause> {
+    host.reserve(
+        ImportLedgerPhase::OutcomeFinalization,
+        ImportDimension::InputManifestBytes,
+        bytes,
+    )
+    .map_err(|cause| cause.into_scope_abort_cause())
+}
+
 fn dependency_cache_error(cause: DependencyCacheCapacityError) -> ResourceGraphError {
     let cause = match cause {
         DependencyCacheCapacityError::Capacity { storage, cause } => {
@@ -1599,6 +1613,7 @@ fn restore_acquisition_reservations(
 mod tests {
     use super::*;
     use crate::ledger::ImportOperationControl;
+    use crate::metered_storage::inject_next_accounted_allocation_failure;
     use crate::store::{
         ImportStoreBootstrapRequirements, ImportStoreSessionOwner, try_import_store_bootstrap,
     };
@@ -1827,6 +1842,12 @@ mod tests {
         assert_eq!(canonical.len(), 5_327);
         assert_eq!(manifest.digest().as_bytes(), expected_digest);
         assert_eq!(ManifestDigest::of(&canonical).as_bytes(), expected_digest);
+        let manifest_bytes = host
+            .dimension_state(ImportDimension::InputManifestBytes)
+            .unwrap();
+        assert_eq!(manifest_bytes.attempted(), 5_327);
+        assert_eq!(manifest_bytes.consumed(), 5_327);
+        assert_eq!(manifest_bytes.live_bytes(), 0);
         assert_eq!(manifest.schema_version(), 1);
         assert_eq!(manifest.counts().node_class_count(), 1);
         assert_eq!(manifest.counts().quotient_relation_record_count(), 0);
@@ -1835,5 +1856,33 @@ mod tests {
             InputReplayStatus::ObservedOnly(reasons)
                 if reasons == &[ManifestObservedOnlyReason::UnstableResourceIdentity]
         ));
+    }
+
+    #[test]
+    fn canonical_manifest_storage_is_admitted_before_encoding() {
+        let limits = ResourceLimits::default();
+        let owner = store_owner(&limits);
+        let host = owner.host();
+        let authority = AuthorityDomain::default();
+        let path = AssetPath::new("models/main.obj").unwrap();
+        let mut graph = ResourceGraph::new(limits);
+        graph
+            .bind_primary(host, &authority, &path, b"v 0 0 0")
+            .unwrap();
+        inject_next_accounted_allocation_failure();
+
+        assert!(matches!(
+            graph.seal(host),
+            Err(ResourceGraphError::Scope(ScopeAbortCause::Allocation {
+                resource: "resource-manifest-canonical-bytes",
+            }))
+        ));
+        let manifest_bytes = host
+            .dimension_state(ImportDimension::InputManifestBytes)
+            .unwrap();
+        assert_eq!(manifest_bytes.attempted(), 5_327);
+        assert_eq!(manifest_bytes.consumed(), 0);
+        assert_eq!(manifest_bytes.live_bytes(), 0);
+        assert!(graph.sealed_manifest.is_none());
     }
 }
