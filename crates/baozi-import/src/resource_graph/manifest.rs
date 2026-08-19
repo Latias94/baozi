@@ -210,6 +210,11 @@ impl ManifestRelation {
     pub const fn multiplicity(&self) -> u64 {
         self.multiplicity
     }
+
+    pub(super) fn with_multiplicity(mut self, multiplicity: u64) -> Self {
+        self.multiplicity = multiplicity;
+        self
+    }
 }
 
 /// One semantic node class in a successful input manifest.

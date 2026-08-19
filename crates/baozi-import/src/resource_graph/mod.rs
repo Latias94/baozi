@@ -167,6 +167,17 @@ enum GraphRelationOutcome {
     },
 }
 
+struct DigestedManifestRelation {
+    digest: ManifestDigest,
+    relation: ManifestRelation,
+}
+
+struct DigestedManifestNode {
+    digest: ManifestDigest,
+    source_index: usize,
+    relations: Vec<ManifestRelation>,
+}
+
 #[derive(Debug)]
 enum TargetAdmission {
     Existing {
@@ -728,12 +739,12 @@ impl ResourceGraph {
                 .nodes
                 .get(index)
                 .ok_or(ResourceGraphError::DanglingNode)?;
-            let mut keyed = Vec::new();
-            keyed.try_reserve_exact(node.outgoing_count).map_err(|_| {
-                ResourceGraphError::Allocation {
+            let mut digested_relations = Vec::new();
+            digested_relations
+                .try_reserve_exact(node.outgoing_count)
+                .map_err(|_| ResourceGraphError::Allocation {
                     resource: "resource-manifest-relation-order",
-                }
-            })?;
+                })?;
             for relation in self.outgoing_relations(index)? {
                 let relation = relation?;
                 charge_manifest_work(host, 1)?;
@@ -744,44 +755,12 @@ impl ResourceGraph {
                     relation.reference(),
                     relation.outcome(),
                 )?;
-                keyed.push((ManifestDigest::of(&key_bytes), key_bytes, relation));
+                digested_relations.push(DigestedManifestRelation {
+                    digest: ManifestDigest::of(&key_bytes),
+                    relation,
+                });
             }
-            keyed.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-            let mut relations: Vec<ManifestRelation> = Vec::new();
-            relations.try_reserve_exact(keyed.len()).map_err(|_| {
-                ResourceGraphError::Allocation {
-                    resource: "resource-manifest-relations",
-                }
-            })?;
-            for (key_digest, key_bytes, relation) in keyed {
-                if let Some(previous) = relations.last_mut() {
-                    let previous_bytes = encode_relation_key(
-                        previous.role(),
-                        previous.requirement(),
-                        previous.reference(),
-                        previous.outcome(),
-                    )?;
-                    let previous_digest = ManifestDigest::of(&previous_bytes);
-                    if previous_digest == key_digest {
-                        if previous_bytes != key_bytes {
-                            return Err(ResourceGraphError::DigestCollision);
-                        }
-                        let multiplicity = previous
-                            .multiplicity()
-                            .checked_add(1)
-                            .ok_or(ResourceGraphError::Overflow)?;
-                        *previous = ManifestRelation::new(
-                            previous.role().clone(),
-                            previous.requirement(),
-                            previous.reference().clone(),
-                            previous.outcome().clone(),
-                            multiplicity,
-                        );
-                        continue;
-                    }
-                }
-                relations.push(relation);
-            }
+            let relations = fold_manifest_relations(digested_relations)?;
             let node_bytes = encode_node_class(
                 &node.public_identity,
                 node.byte_length,
@@ -790,43 +769,14 @@ impl ResourceGraph {
             )?;
             let digest = ManifestDigest::of(&node_bytes);
             digests[index] = Some(digest);
-            physical.push((digest, node_bytes, index, relations));
+            physical.push(DigestedManifestNode {
+                digest,
+                source_index: index,
+                relations,
+            });
         }
 
-        physical.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-        let mut classes: Vec<ManifestNodeClass> = Vec::new();
-        classes
-            .try_reserve_exact(physical.len())
-            .map_err(|_| ResourceGraphError::Allocation {
-                resource: "resource-manifest-node-classes",
-            })?;
-        for (digest, bytes, index, relations) in physical {
-            if let Some(previous) = classes.last()
-                && previous.digest() == digest
-            {
-                let previous_bytes = encode_node_class(
-                    previous.identity(),
-                    previous.byte_length(),
-                    previous.content_digest(),
-                    previous.outgoing_relations(),
-                )?;
-                if previous_bytes != bytes {
-                    return Err(ResourceGraphError::DigestCollision);
-                }
-                continue;
-            }
-            let node = self
-                .nodes
-                .get(index)
-                .ok_or(ResourceGraphError::DanglingNode)?;
-            classes.push(ManifestNodeClass::new(
-                digest,
-                node.public_identity.clone(),
-                node.byte_length,
-                node.content_digest,
-                relations,
-            ));
-        }
+        let classes = fold_manifest_nodes(physical, &self.nodes)?;
         let primary_digest = digests
             .get(primary)
             .and_then(|digest| *digest)
@@ -1259,6 +1209,113 @@ impl ResourceGraph {
     }
 }
 
+fn fold_manifest_relations(
+    mut digested: Vec<DigestedManifestRelation>,
+) -> Result<Vec<ManifestRelation>, ResourceGraphError> {
+    digested.sort_by_key(|entry| entry.digest);
+    let mut relations = Vec::new();
+    relations
+        .try_reserve_exact(digested.len())
+        .map_err(|_| ResourceGraphError::Allocation {
+            resource: "resource-manifest-relations",
+        })?;
+    let mut entries = digested.into_iter().peekable();
+    while let Some(first) = entries.next() {
+        let mut multiplicity = first.relation.multiplicity();
+        if entries
+            .peek()
+            .is_some_and(|next| next.digest == first.digest)
+        {
+            let expected = encode_relation_key(
+                first.relation.role(),
+                first.relation.requirement(),
+                first.relation.reference(),
+                first.relation.outcome(),
+            )?;
+            while entries
+                .peek()
+                .is_some_and(|next| next.digest == first.digest)
+            {
+                let next = entries
+                    .next()
+                    .expect("a peeked manifest relation remains available");
+                let actual = encode_relation_key(
+                    next.relation.role(),
+                    next.relation.requirement(),
+                    next.relation.reference(),
+                    next.relation.outcome(),
+                )?;
+                if actual != expected {
+                    return Err(ResourceGraphError::DigestCollision);
+                }
+                multiplicity = multiplicity
+                    .checked_add(next.relation.multiplicity())
+                    .ok_or(ResourceGraphError::Overflow)?;
+            }
+        }
+        relations.push(first.relation.with_multiplicity(multiplicity));
+    }
+    Ok(relations)
+}
+
+fn fold_manifest_nodes(
+    mut digested: Vec<DigestedManifestNode>,
+    graph_nodes: &[GraphNode],
+) -> Result<Vec<ManifestNodeClass>, ResourceGraphError> {
+    digested.sort_by_key(|entry| entry.digest);
+    let mut classes = Vec::new();
+    classes
+        .try_reserve_exact(digested.len())
+        .map_err(|_| ResourceGraphError::Allocation {
+            resource: "resource-manifest-node-classes",
+        })?;
+    let mut entries = digested.into_iter().peekable();
+    while let Some(first) = entries.next() {
+        let source = graph_nodes
+            .get(first.source_index)
+            .ok_or(ResourceGraphError::DanglingNode)?;
+        if entries
+            .peek()
+            .is_some_and(|next| next.digest == first.digest)
+        {
+            let expected = encode_node_class(
+                &source.public_identity,
+                source.byte_length,
+                source.content_digest,
+                &first.relations,
+            )?;
+            while entries
+                .peek()
+                .is_some_and(|next| next.digest == first.digest)
+            {
+                let next = entries
+                    .next()
+                    .expect("a peeked manifest node remains available");
+                let next_source = graph_nodes
+                    .get(next.source_index)
+                    .ok_or(ResourceGraphError::DanglingNode)?;
+                let actual = encode_node_class(
+                    &next_source.public_identity,
+                    next_source.byte_length,
+                    next_source.content_digest,
+                    &next.relations,
+                )?;
+                if actual != expected {
+                    return Err(ResourceGraphError::DigestCollision);
+                }
+            }
+        }
+        classes.push(ManifestNodeClass::new(
+            first.digest,
+            source.public_identity.clone(),
+            source.byte_length,
+            source.content_digest,
+            first.relations,
+        ));
+    }
+    Ok(classes)
+}
+
 fn project_relation(
     relation: &GraphRelation,
     digests: &[Option<ManifestDigest>],
@@ -1640,6 +1697,44 @@ mod tests {
         DependencyIdentity::new(authority.clone(), AssetPath::new(path).unwrap())
     }
 
+    fn manifest_identity_for_test(path: &str) -> ManifestResourceIdentity {
+        ManifestResourceIdentity::new(
+            AssetPath::new(path).unwrap(),
+            ManifestResourceIdentityStability::SessionOpaque(
+                ManifestSessionOpaqueReason::UnregisteredResolverIdentity,
+            ),
+        )
+    }
+
+    fn manifest_relation_for_test(reference: &str) -> ManifestRelation {
+        ManifestRelation::new(
+            DependencyRoleId::new("test.resource").unwrap(),
+            DependencyRequirement::Required,
+            ManifestReference::Normalized(manifest_identity_for_test(reference)),
+            ManifestRelationOutcome::Available {
+                target_node_class_digest: ManifestDigest::of(b"target"),
+            },
+            1,
+        )
+    }
+
+    fn graph_node_for_test(
+        authority: &AuthorityDomain,
+        exact_path: &str,
+        public_path: &str,
+    ) -> GraphNode {
+        GraphNode {
+            exact_identity: dependency_identity(authority, exact_path),
+            public_identity: manifest_identity_for_test(public_path),
+            byte_length: 4,
+            content_digest: ManifestDigest::of(b"same"),
+            first_outgoing: None,
+            last_outgoing: None,
+            outgoing_count: 0,
+            depth: 0,
+        }
+    }
+
     fn add_available(
         graph: &mut ResourceGraph,
         host: ImportStoreHost<'_>,
@@ -1818,6 +1913,89 @@ mod tests {
         assert!(graph.nodes.is_empty());
         assert_eq!(graph.nodes.capacity_bytes(), 0);
         assert!(graph.primary.is_none());
+    }
+
+    #[test]
+    fn equal_digest_relations_fold_only_when_canonical_bytes_match() {
+        let forced_digest = ManifestDigest::of(b"forced-relation-digest");
+        let folded = fold_manifest_relations(vec![
+            DigestedManifestRelation {
+                digest: forced_digest,
+                relation: manifest_relation_for_test("shared.asset"),
+            },
+            DigestedManifestRelation {
+                digest: forced_digest,
+                relation: manifest_relation_for_test("shared.asset"),
+            },
+        ])
+        .unwrap();
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].multiplicity(), 2);
+
+        assert!(matches!(
+            fold_manifest_relations(vec![
+                DigestedManifestRelation {
+                    digest: forced_digest,
+                    relation: manifest_relation_for_test("first.asset"),
+                },
+                DigestedManifestRelation {
+                    digest: forced_digest,
+                    relation: manifest_relation_for_test("second.asset"),
+                },
+            ]),
+            Err(ResourceGraphError::DigestCollision)
+        ));
+    }
+
+    #[test]
+    fn equal_digest_nodes_fold_only_when_canonical_bytes_match() {
+        let first_authority = AuthorityDomain::new();
+        let second_authority = AuthorityDomain::new();
+        let forced_digest = ManifestDigest::of(b"forced-node-digest");
+        let graph_nodes = vec![
+            graph_node_for_test(&first_authority, "first.asset", "shared.asset"),
+            graph_node_for_test(&second_authority, "second.asset", "shared.asset"),
+        ];
+        let folded = fold_manifest_nodes(
+            vec![
+                DigestedManifestNode {
+                    digest: forced_digest,
+                    source_index: 0,
+                    relations: Vec::new(),
+                },
+                DigestedManifestNode {
+                    digest: forced_digest,
+                    source_index: 1,
+                    relations: Vec::new(),
+                },
+            ],
+            &graph_nodes,
+        )
+        .unwrap();
+        assert_eq!(folded.len(), 1);
+
+        let graph_nodes = vec![
+            graph_node_for_test(&first_authority, "first.asset", "first.asset"),
+            graph_node_for_test(&second_authority, "second.asset", "second.asset"),
+        ];
+        assert!(matches!(
+            fold_manifest_nodes(
+                vec![
+                    DigestedManifestNode {
+                        digest: forced_digest,
+                        source_index: 0,
+                        relations: Vec::new(),
+                    },
+                    DigestedManifestNode {
+                        digest: forced_digest,
+                        source_index: 1,
+                        relations: Vec::new(),
+                    },
+                ],
+                &graph_nodes,
+            ),
+            Err(ResourceGraphError::DigestCollision)
+        ));
     }
 
     #[test]
