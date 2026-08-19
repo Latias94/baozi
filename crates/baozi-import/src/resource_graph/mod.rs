@@ -8,10 +8,10 @@ mod manifest;
 
 pub use manifest::{
     InputReplayStatus, ManifestDigest, ManifestNodeClass, ManifestObservedOnlyReason,
-    ManifestReference, ManifestRelation, ManifestRelationOutcome, ManifestResourceIdentity,
-    ManifestResourceIdentityStability, ManifestSessionDependentReason, ManifestSessionOpaqueReason,
-    ManifestUnavailableClass, ManifestUnavailableCode, ManifestUnavailableReplay,
-    ResourceManifestCounts, SuccessfulInputManifest,
+    ManifestObservedOnlyReasons, ManifestReference, ManifestRelation, ManifestRelationOutcome,
+    ManifestResourceIdentity, ManifestResourceIdentityStability, ManifestSessionDependentReason,
+    ManifestSessionOpaqueReason, ManifestUnavailableClass, ManifestUnavailableCode,
+    ManifestUnavailableReplay, ResourceManifestCounts, SuccessfulInputManifest,
 };
 
 use crate::dependency::{
@@ -175,7 +175,7 @@ struct DigestedManifestRelation {
 struct DigestedManifestNode {
     digest: ManifestDigest,
     source_index: usize,
-    relations: Vec<ManifestRelation>,
+    relations: AccountedVec<ManifestRelation>,
 }
 
 #[derive(Debug)]
@@ -725,13 +725,13 @@ impl ResourceGraph {
         if postorder.len() != self.nodes.len() {
             return Err(ResourceGraphError::DanglingNode);
         }
-        let mut digests = vec![None; self.nodes.len()];
-        let mut physical = Vec::new();
-        physical.try_reserve_exact(postorder.len()).map_err(|_| {
-            ResourceGraphError::Allocation {
-                resource: "resource-manifest-node-classes",
-            }
-        })?;
+        let mut digests =
+            manifest_scratch_vec(host, self.nodes.len(), "resource-manifest-node-digests")?;
+        for _ in 0..self.nodes.len() {
+            digests.push_reserved_infallible(None);
+        }
+        let mut physical =
+            manifest_scratch_vec(host, postorder.len(), "resource-manifest-node-classes")?;
 
         for &index in postorder.iter() {
             charge_manifest_work(host, 1)?;
@@ -739,12 +739,11 @@ impl ResourceGraph {
                 .nodes
                 .get(index)
                 .ok_or(ResourceGraphError::DanglingNode)?;
-            let mut digested_relations = Vec::new();
-            digested_relations
-                .try_reserve_exact(node.outgoing_count)
-                .map_err(|_| ResourceGraphError::Allocation {
-                    resource: "resource-manifest-relation-order",
-                })?;
+            let mut digested_relations = manifest_scratch_vec(
+                host,
+                node.outgoing_count,
+                "resource-manifest-relation-order",
+            )?;
             for relation in self.outgoing_relations(index)? {
                 let relation = relation?;
                 charge_manifest_work(host, 1)?;
@@ -755,12 +754,12 @@ impl ResourceGraph {
                     relation.reference(),
                     relation.outcome(),
                 )?;
-                digested_relations.push(DigestedManifestRelation {
+                digested_relations.push_reserved_infallible(DigestedManifestRelation {
                     digest: ManifestDigest::of(&key_bytes),
                     relation,
                 });
             }
-            let relations = fold_manifest_relations(digested_relations)?;
+            let relations = fold_manifest_relations(host, digested_relations)?;
             let node_bytes = encode_node_class(
                 &node.public_identity,
                 node.byte_length,
@@ -769,7 +768,7 @@ impl ResourceGraph {
             )?;
             let digest = ManifestDigest::of(&node_bytes);
             digests[index] = Some(digest);
-            physical.push(DigestedManifestNode {
+            physical.push_reserved_infallible(DigestedManifestNode {
                 digest,
                 source_index: index,
                 relations,
@@ -777,14 +776,14 @@ impl ResourceGraph {
         }
         drop(postorder);
 
-        let classes = fold_manifest_nodes(physical, &self.nodes)?;
+        let classes = fold_manifest_nodes(host, physical, &self.nodes)?;
         let primary_digest = digests
             .get(primary)
             .and_then(|digest| *digest)
             .ok_or(ResourceGraphError::MissingPrimary)?;
         let counts = manifest_counts(&classes, self.maximum_depth())?;
         let replay_status = replay_status(&classes);
-        let provisional = SuccessfulInputManifest::new(
+        let mut provisional = SuccessfulInputManifest::new(
             ManifestDigest::zero(),
             primary_digest,
             classes,
@@ -812,6 +811,7 @@ impl ResourceGraph {
         let digest = ManifestDigest::of(&canonical);
         charge_consumed(host, ImportDimension::InputManifestBytes, byte_count)?;
         drop(canonical);
+        provisional.release_live_reservations();
         self.sealed_manifest = Some(provisional.with_digest(digest));
         Ok(())
     }
@@ -1228,15 +1228,11 @@ impl ResourceGraph {
 }
 
 fn fold_manifest_relations(
-    mut digested: Vec<DigestedManifestRelation>,
-) -> Result<Vec<ManifestRelation>, ResourceGraphError> {
+    host: ImportStoreHost<'_>,
+    mut digested: AccountedVec<DigestedManifestRelation>,
+) -> Result<AccountedVec<ManifestRelation>, ResourceGraphError> {
     digested.sort_by_key(|entry| entry.digest);
-    let mut relations = Vec::new();
-    relations
-        .try_reserve_exact(digested.len())
-        .map_err(|_| ResourceGraphError::Allocation {
-            resource: "resource-manifest-relations",
-        })?;
+    let mut relations = manifest_scratch_vec(host, digested.len(), "resource-manifest-relations")?;
     let mut entries = digested.into_iter().peekable();
     while let Some(first) = entries.next() {
         let mut multiplicity = first.relation.multiplicity();
@@ -1271,22 +1267,22 @@ fn fold_manifest_relations(
                     .ok_or(ResourceGraphError::Overflow)?;
             }
         }
-        relations.push(first.relation.with_multiplicity(multiplicity));
+        relations.push_reserved_infallible(first.relation.with_multiplicity(multiplicity));
     }
     Ok(relations)
 }
 
 fn fold_manifest_nodes(
-    mut digested: Vec<DigestedManifestNode>,
+    host: ImportStoreHost<'_>,
+    mut digested: AccountedVec<DigestedManifestNode>,
     graph_nodes: &[GraphNode],
-) -> Result<Vec<ManifestNodeClass>, ResourceGraphError> {
+) -> Result<AccountedVec<ManifestNodeClass>, ResourceGraphError> {
     digested.sort_by_key(|entry| entry.digest);
-    let mut classes = Vec::new();
-    classes
-        .try_reserve_exact(digested.len())
-        .map_err(|_| ResourceGraphError::Allocation {
-            resource: "resource-manifest-node-classes",
-        })?;
+    let mut classes = manifest_scratch_vec(
+        host,
+        digested.len(),
+        "resource-manifest-folded-node-classes",
+    )?;
     let mut entries = digested.into_iter().peekable();
     while let Some(first) = entries.next() {
         let source = graph_nodes
@@ -1323,7 +1319,7 @@ fn fold_manifest_nodes(
                 }
             }
         }
-        classes.push(ManifestNodeClass::new(
+        classes.push_reserved_infallible(ManifestNodeClass::new(
             first.digest,
             source.public_identity.clone(),
             source.byte_length,
@@ -1413,19 +1409,19 @@ fn manifest_counts(
 }
 
 fn replay_status(classes: &[ManifestNodeClass]) -> InputReplayStatus {
-    let mut reasons = Vec::new();
+    let mut reasons = ManifestObservedOnlyReasons::new();
     if classes.iter().any(|class| {
         matches!(
             class.identity().stability(),
             ManifestResourceIdentityStability::SessionOpaque(_)
         )
     }) {
-        reasons.push(ManifestObservedOnlyReason::UnstableResourceIdentity);
+        reasons.insert(ManifestObservedOnlyReason::UnstableResourceIdentity);
     }
     for class in classes {
         for relation in class.outgoing_relations() {
             if let ManifestRelationOutcome::Unavailable { replay, .. } = relation.outcome() {
-                reasons.push(match replay {
+                reasons.insert(match replay {
                     ManifestUnavailableReplay::UnprovenNegativeInput => {
                         ManifestObservedOnlyReason::UnprovenNegativeInput
                     }
@@ -1436,8 +1432,6 @@ fn replay_status(classes: &[ManifestNodeClass]) -> InputReplayStatus {
             }
         }
     }
-    reasons.sort();
-    reasons.dedup();
     if reasons.is_empty() {
         InputReplayStatus::Replayable
     } else {
@@ -1588,6 +1582,20 @@ fn reserve_manifest_scratch(
         bytes,
     )
     .map_err(|cause| cause.into_scope_abort_cause())
+}
+
+fn manifest_scratch_vec<T>(
+    host: ImportStoreHost<'_>,
+    capacity: usize,
+    resource: &'static str,
+) -> Result<AccountedVec<T>, ResourceGraphError> {
+    let mut values = AccountedVec::new();
+    values
+        .try_reserve_capacity(capacity, resource, |bytes| {
+            reserve_manifest_scratch(host, bytes)
+        })
+        .map_err(ResourceGraphError::Scope)?;
+    Ok(values)
 }
 
 fn dependency_cache_error(cause: DependencyCacheCapacityError) -> ResourceGraphError {
@@ -1762,6 +1770,15 @@ mod tests {
             outgoing_count: 0,
             depth: 0,
         }
+    }
+
+    fn accounted_manifest_values<T>(host: ImportStoreHost<'_>, values: Vec<T>) -> AccountedVec<T> {
+        let mut accounted =
+            manifest_scratch_vec(host, values.len(), "resource-manifest-test-values").unwrap();
+        for value in values {
+            accounted.push_reserved_infallible(value);
+        }
+        accounted
     }
 
     fn add_available(
@@ -2009,38 +2026,56 @@ mod tests {
 
     #[test]
     fn equal_digest_relations_fold_only_when_canonical_bytes_match() {
+        let limits = ResourceLimits::default();
+        let owner = store_owner(&limits);
+        let host = owner.host();
         let forced_digest = ManifestDigest::of(b"forced-relation-digest");
-        let folded = fold_manifest_relations(vec![
-            DigestedManifestRelation {
-                digest: forced_digest,
-                relation: manifest_relation_for_test("shared.asset"),
-            },
-            DigestedManifestRelation {
-                digest: forced_digest,
-                relation: manifest_relation_for_test("shared.asset"),
-            },
-        ])
+        let folded = fold_manifest_relations(
+            host,
+            accounted_manifest_values(
+                host,
+                vec![
+                    DigestedManifestRelation {
+                        digest: forced_digest,
+                        relation: manifest_relation_for_test("shared.asset"),
+                    },
+                    DigestedManifestRelation {
+                        digest: forced_digest,
+                        relation: manifest_relation_for_test("shared.asset"),
+                    },
+                ],
+            ),
+        )
         .unwrap();
         assert_eq!(folded.len(), 1);
         assert_eq!(folded[0].multiplicity(), 2);
 
         assert!(matches!(
-            fold_manifest_relations(vec![
-                DigestedManifestRelation {
-                    digest: forced_digest,
-                    relation: manifest_relation_for_test("first.asset"),
-                },
-                DigestedManifestRelation {
-                    digest: forced_digest,
-                    relation: manifest_relation_for_test("second.asset"),
-                },
-            ]),
+            fold_manifest_relations(
+                host,
+                accounted_manifest_values(
+                    host,
+                    vec![
+                        DigestedManifestRelation {
+                            digest: forced_digest,
+                            relation: manifest_relation_for_test("first.asset"),
+                        },
+                        DigestedManifestRelation {
+                            digest: forced_digest,
+                            relation: manifest_relation_for_test("second.asset"),
+                        },
+                    ],
+                ),
+            ),
             Err(ResourceGraphError::DigestCollision)
         ));
     }
 
     #[test]
     fn equal_digest_nodes_fold_only_when_canonical_bytes_match() {
+        let limits = ResourceLimits::default();
+        let owner = store_owner(&limits);
+        let host = owner.host();
         let first_authority = AuthorityDomain::new();
         let second_authority = AuthorityDomain::new();
         let forced_digest = ManifestDigest::of(b"forced-node-digest");
@@ -2049,18 +2084,32 @@ mod tests {
             graph_node_for_test(&second_authority, "second.asset", "shared.asset"),
         ];
         let folded = fold_manifest_nodes(
-            vec![
-                DigestedManifestNode {
-                    digest: forced_digest,
-                    source_index: 0,
-                    relations: Vec::new(),
-                },
-                DigestedManifestNode {
-                    digest: forced_digest,
-                    source_index: 1,
-                    relations: Vec::new(),
-                },
-            ],
+            host,
+            accounted_manifest_values(
+                host,
+                vec![
+                    DigestedManifestNode {
+                        digest: forced_digest,
+                        source_index: 0,
+                        relations: manifest_scratch_vec(
+                            host,
+                            0,
+                            "resource-manifest-test-relations",
+                        )
+                        .unwrap(),
+                    },
+                    DigestedManifestNode {
+                        digest: forced_digest,
+                        source_index: 1,
+                        relations: manifest_scratch_vec(
+                            host,
+                            0,
+                            "resource-manifest-test-relations",
+                        )
+                        .unwrap(),
+                    },
+                ],
+            ),
             &graph_nodes,
         )
         .unwrap();
@@ -2072,18 +2121,32 @@ mod tests {
         ];
         assert!(matches!(
             fold_manifest_nodes(
-                vec![
-                    DigestedManifestNode {
-                        digest: forced_digest,
-                        source_index: 0,
-                        relations: Vec::new(),
-                    },
-                    DigestedManifestNode {
-                        digest: forced_digest,
-                        source_index: 1,
-                        relations: Vec::new(),
-                    },
-                ],
+                host,
+                accounted_manifest_values(
+                    host,
+                    vec![
+                        DigestedManifestNode {
+                            digest: forced_digest,
+                            source_index: 0,
+                            relations: manifest_scratch_vec(
+                                host,
+                                0,
+                                "resource-manifest-test-relations",
+                            )
+                            .unwrap(),
+                        },
+                        DigestedManifestNode {
+                            digest: forced_digest,
+                            source_index: 1,
+                            relations: manifest_scratch_vec(
+                                host,
+                                0,
+                                "resource-manifest-test-relations",
+                            )
+                            .unwrap(),
+                        },
+                    ],
+                ),
                 &graph_nodes,
             ),
             Err(ResourceGraphError::DigestCollision)
@@ -2124,7 +2187,8 @@ mod tests {
         assert!(matches!(
             manifest.replay_status(),
             InputReplayStatus::ObservedOnly(reasons)
-                if reasons == &[ManifestObservedOnlyReason::UnstableResourceIdentity]
+                if reasons.as_slice()
+                    == [ManifestObservedOnlyReason::UnstableResourceIdentity]
         ));
     }
 

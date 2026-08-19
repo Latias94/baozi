@@ -17,6 +17,11 @@ pub(crate) struct AccountedVec<T> {
     capacity: Option<ImportStoreReservation>,
 }
 
+pub(crate) struct AccountedVecIntoIter<T> {
+    values: std::vec::IntoIter<T>,
+    _capacity: Option<ImportStoreReservation>,
+}
+
 pub(crate) type AccountedReservationVec = AccountedVec<ImportStoreReservation>;
 
 /// Session-bound vector storage coupled to the reservation for its complete allocation.
@@ -421,6 +426,11 @@ impl<T> AccountedVec<T> {
         std::mem::take(self)
     }
 
+    /// Releases the live operation reservation after ownership has moved into terminal storage.
+    pub(crate) fn release_capacity_reservation(&mut self) {
+        drop(self.capacity.take());
+    }
+
     pub(crate) fn into_terminal(self) -> TerminalVec<T> {
         let Self { values, capacity } = self;
         let terminal = TerminalVec { values };
@@ -452,6 +462,41 @@ impl<T> Default for AccountedVec<T> {
         Self::new()
     }
 }
+
+impl<T> IntoIterator for AccountedVec<T> {
+    type Item = T;
+    type IntoIter = AccountedVecIntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let Self { values, capacity } = self;
+        AccountedVecIntoIter {
+            values: values.into_iter(),
+            _capacity: capacity,
+        }
+    }
+}
+
+impl<T> Iterator for AccountedVecIntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.values.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.values.size_hint()
+    }
+}
+
+impl<T> ExactSizeIterator for AccountedVecIntoIter<T> {}
+
+impl<T: PartialEq> PartialEq for AccountedVec<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
+}
+
+impl<T: Eq> Eq for AccountedVec<T> {}
 
 impl<T> Deref for AccountedVec<T> {
     type Target = [T];
@@ -643,6 +688,31 @@ mod tests {
             })
             .unwrap_or_else(|_| panic!("reserved slot must accept the probe"));
 
+        drop(values);
+        assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), 0);
+    }
+
+    #[test]
+    fn consuming_iteration_holds_capacity_until_remaining_elements_drop() {
+        let store = StoreHarness::new();
+        let mut values = AccountedVec::new();
+        values
+            .try_reserve(2, "into-iter-drop-order", |bytes| {
+                store.reserve_scratch(bytes)
+            })
+            .expect("capacity admission");
+        for _ in 0..2 {
+            values
+                .try_push_reserved(DropProbe {
+                    host: store.host(),
+                    dimension: ImportDimension::ScratchBytes,
+                })
+                .unwrap_or_else(|_| panic!("reserved slot must accept the probe"));
+        }
+
+        let mut values = values.into_iter();
+        drop(values.next());
+        assert!(store.live_bytes(ImportDimension::ScratchBytes) > 0);
         drop(values);
         assert_eq!(store.live_bytes(ImportDimension::ScratchBytes), 0);
     }

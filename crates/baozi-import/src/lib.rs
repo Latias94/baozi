@@ -110,10 +110,10 @@ pub use registry::{
 pub use request::{PreparedImportRequest, RequestError};
 pub use resource_graph::{
     InputReplayStatus, ManifestDigest, ManifestNodeClass, ManifestObservedOnlyReason,
-    ManifestReference, ManifestRelation, ManifestRelationOutcome, ManifestResourceIdentity,
-    ManifestResourceIdentityStability, ManifestSessionDependentReason, ManifestSessionOpaqueReason,
-    ManifestUnavailableClass, ManifestUnavailableCode, ManifestUnavailableReplay,
-    ResourceManifestCounts, SuccessfulInputManifest,
+    ManifestObservedOnlyReasons, ManifestReference, ManifestRelation, ManifestRelationOutcome,
+    ManifestResourceIdentity, ManifestResourceIdentityStability, ManifestSessionDependentReason,
+    ManifestSessionOpaqueReason, ManifestUnavailableClass, ManifestUnavailableCode,
+    ManifestUnavailableReplay, ResourceManifestCounts, SuccessfulInputManifest,
 };
 pub use scope::{
     ImportStorageClass, ImportWorkClass, ImportWorkScope, ParseFailure, ParseResult, ParseScope,

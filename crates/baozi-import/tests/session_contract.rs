@@ -1880,7 +1880,7 @@ fn optional_failure_is_cached_once_but_charged_for_each_logical_reference() {
     assert!(matches!(
         manifest.replay_status(),
         InputReplayStatus::ObservedOnly(reasons)
-            if reasons == &[
+            if reasons.as_slice() == [
                 ManifestObservedOnlyReason::UnstableResourceIdentity,
                 ManifestObservedOnlyReason::UnprovenNegativeInput,
             ]
@@ -2009,7 +2009,7 @@ fn successful_dependency_snapshot_is_shared_and_reused_without_reopening() {
     assert!(matches!(
         manifest.replay_status(),
         InputReplayStatus::ObservedOnly(reasons)
-            if reasons == &[ManifestObservedOnlyReason::UnstableResourceIdentity]
+            if reasons.as_slice() == [ManifestObservedOnlyReason::UnstableResourceIdentity]
     ));
     assert_ne!(manifest.digest().as_bytes(), [0; 32]);
     let graph_nodes = report

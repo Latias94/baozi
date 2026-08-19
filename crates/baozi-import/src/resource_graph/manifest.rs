@@ -218,13 +218,13 @@ impl ManifestRelation {
 }
 
 /// One semantic node class in a successful input manifest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ManifestNodeClass {
     digest: ManifestDigest,
     identity: ManifestResourceIdentity,
     byte_length: u64,
     content_digest: ManifestDigest,
-    outgoing_relations: Vec<ManifestRelation>,
+    outgoing_relations: AccountedVec<ManifestRelation>,
 }
 
 impl ManifestNodeClass {
@@ -233,7 +233,7 @@ impl ManifestNodeClass {
         identity: ManifestResourceIdentity,
         byte_length: u64,
         content_digest: ManifestDigest,
-        outgoing_relations: Vec<ManifestRelation>,
+        outgoing_relations: AccountedVec<ManifestRelation>,
     ) -> Self {
         Self {
             digest,
@@ -262,6 +262,10 @@ impl ManifestNodeClass {
 
     pub fn outgoing_relations(&self) -> &[ManifestRelation] {
         &self.outgoing_relations
+    }
+
+    fn release_live_reservation(&mut self) {
+        self.outgoing_relations.release_capacity_reservation();
     }
 }
 
@@ -331,30 +335,67 @@ impl ManifestObservedOnlyReason {
     }
 }
 
+/// Complete bounded reason set for an observation-only manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManifestObservedOnlyReasons {
+    values: [ManifestObservedOnlyReason; 3],
+    len: u8,
+}
+
+impl ManifestObservedOnlyReasons {
+    pub(super) const fn new() -> Self {
+        Self {
+            values: [ManifestObservedOnlyReason::UnstableResourceIdentity; 3],
+            len: 0,
+        }
+    }
+
+    pub(super) fn insert(&mut self, reason: ManifestObservedOnlyReason) {
+        if self.as_slice().contains(&reason) {
+            return;
+        }
+        let index = usize::from(self.len);
+        assert!(
+            index < self.values.len(),
+            "the closed manifest replay reason set has three members"
+        );
+        self.values[index] = reason;
+        self.len += 1;
+    }
+
+    pub fn as_slice(&self) -> &[ManifestObservedOnlyReason] {
+        &self.values[..usize::from(self.len)]
+    }
+
+    pub(super) const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 /// Cross-session replay classification for the complete successful manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputReplayStatus {
     Replayable,
-    ObservedOnly(Vec<ManifestObservedOnlyReason>),
+    ObservedOnly(ManifestObservedOnlyReasons),
 }
 
 impl InputReplayStatus {
     pub fn observed_only_reasons(&self) -> &[ManifestObservedOnlyReason] {
         match self {
             Self::Replayable => &[],
-            Self::ObservedOnly(reasons) => reasons,
+            Self::ObservedOnly(reasons) => reasons.as_slice(),
         }
     }
 }
 
 /// Complete successful semantic input manifest.
 #[must_use = "the manifest is the replay and dependency evidence for a successful import"]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SuccessfulInputManifest {
     schema_version: u64,
     digest: ManifestDigest,
     primary: ManifestDigest,
-    node_classes: Vec<ManifestNodeClass>,
+    node_classes: AccountedVec<ManifestNodeClass>,
     counts: ResourceManifestCounts,
     replay_status: InputReplayStatus,
 }
@@ -363,7 +404,7 @@ impl SuccessfulInputManifest {
     pub(super) fn new(
         digest: ManifestDigest,
         primary: ManifestDigest,
-        node_classes: Vec<ManifestNodeClass>,
+        node_classes: AccountedVec<ManifestNodeClass>,
         counts: ResourceManifestCounts,
         replay_status: InputReplayStatus,
     ) -> Self {
@@ -438,5 +479,12 @@ impl SuccessfulInputManifest {
     pub(super) fn with_digest(mut self, digest: ManifestDigest) -> Self {
         self.digest = digest;
         self
+    }
+
+    pub(super) fn release_live_reservations(&mut self) {
+        for node_class in self.node_classes.iter_mut() {
+            node_class.release_live_reservation();
+        }
+        self.node_classes.release_capacity_reservation();
     }
 }
