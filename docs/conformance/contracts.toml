@@ -159,11 +159,34 @@ gate_ids = [
 ]
 
 [[contracts]]
+contract_id = "u4-request-wire-deletion"
+authority_adr = "docs/adr/0016-import-options-presets-and-configuration-precedence.md"
+conformance_status = "partial"
+evidence_subject = "baozi.u4.request-wire-deletion"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-import/src/lib.rs",
+  "crates/baozi-import/src/config.rs",
+  "crates/baozi-import/src/options.rs",
+  "crates/baozi-import/src/request.rs",
+]
+test_tracers = [
+  "crates/baozi-import/tests/config_contract.rs",
+  "crates/baozi-import/tests/registry_options.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "import-request-contract-tests",
+  "import-public-api-docs-ci",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
 contract_id = "repository-architecture-conformance"
 authority_adr = "docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md"
 conformance_status = "partial"
 evidence_subject = "baozi.repository.architecture-conformance"
-evidence_revision = 1
+evidence_revision = 2
 implementation_tracers = [
   "crates/baozi-xtask/src/conformance.rs",
   "crates/baozi-xtask/src/conformance/evidence.rs",

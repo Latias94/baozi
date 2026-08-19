@@ -83,6 +83,50 @@ args = [
 ]
 
 [[gates]]
+gate_id = "import-request-contract-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.import.request-contract-tests/v1"
+evidence_paths = [
+  "crates/baozi-import/src/config.rs",
+  "crates/baozi-import/src/options.rs",
+  "crates/baozi-import/src/request.rs",
+  "crates/baozi-import/tests/config_contract.rs",
+  "crates/baozi-import/tests/registry_options.rs",
+]
+applicable_contracts = ["u4-request-wire-deletion"]
+program = "cargo"
+args = [
+  "nextest",
+  "run",
+  "-j",
+  "1",
+  "--locked",
+  "-p",
+  "baozi-import",
+  "--test",
+  "config_contract",
+  "--test",
+  "registry_options",
+]
+
+[[gates]]
+gate_id = "import-public-api-docs-ci"
+tracer_class = "ci"
+executor = "workflow"
+success_condition = "required-workflow-status"
+evidence_identity = "github-actions/ci/rust/test-documentation-examples"
+evidence_paths = [
+  ".github/workflows/ci.yml",
+  "crates/baozi-import/src/lib.rs",
+]
+applicable_contracts = ["u4-request-wire-deletion"]
+workflow_path = ".github/workflows/ci.yml"
+job_id = "rust"
+step_name = "Test documentation examples"
+
+[[gates]]
 gate_id = "core-scene-integration-boundary-ci"
 tracer_class = "ci"
 executor = "workflow"
@@ -121,7 +165,7 @@ gate_id = "repository-conformance-tests"
 tracer_class = "test"
 executor = "command"
 success_condition = "process-exit-zero"
-evidence_identity = "baozi.repository-conformance-tests/v2"
+evidence_identity = "baozi.repository-conformance-tests/v3"
 evidence_paths = [
   "crates/baozi-xtask/src/conformance.rs",
   "crates/baozi-xtask/src/conformance/evidence.rs",
@@ -211,6 +255,7 @@ applicable_contracts = [
   "import-lifecycle-outcome",
   "resource-ledger-budget-accounting",
   "u4-legacy-scene-deletion",
+  "u4-request-wire-deletion",
   "postprocess-pipeline-semantics",
   "validation-snapshot-fuzz-evidence",
   "source-identity-provenance-metadata",

@@ -1,6 +1,12 @@
 #![forbid(unsafe_code)]
 
 //! Import registry, request, session, and format capability contracts.
+//!
+//! The retired pre-release request serialization protocol is not part of the package interface:
+//!
+//! ```compile_fail,E0432
+//! use baozi_import::SerializedImportRequest;
+//! ```
 
 pub use baozi_operation::{CapacityPlan, CapacityPlanError, LedgerCause};
 
