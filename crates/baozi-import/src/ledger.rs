@@ -186,6 +186,11 @@ pub enum ImportDimension {
     GraphEdges,
     GraphDepth,
     GraphWork,
+    ResourceGraphNodes,
+    ResourceGraphRelations,
+    ResourceGraphWork,
+    InputManifestBytes,
+    InputManifestWork,
     Primitives,
     AttributeStreams,
     Solids,
@@ -207,7 +212,7 @@ pub enum ImportDimension {
 }
 
 impl ImportDimension {
-    pub(crate) const ALL: [Self; 48] = [
+    pub(crate) const ALL: [Self; 53] = [
         Self::AssetOpen,
         Self::DependencyReference,
         Self::PrimaryBytes,
@@ -238,6 +243,11 @@ impl ImportDimension {
         Self::GraphEdges,
         Self::GraphDepth,
         Self::GraphWork,
+        Self::ResourceGraphNodes,
+        Self::ResourceGraphRelations,
+        Self::ResourceGraphWork,
+        Self::InputManifestBytes,
+        Self::InputManifestWork,
         Self::Primitives,
         Self::AttributeStreams,
         Self::Solids,
@@ -310,6 +320,11 @@ impl ImportDimension {
             Self::GraphEdges => counter(count(limits.max_graph_edges)),
             Self::GraphDepth => counter(count(limits.max_graph_depth)),
             Self::GraphWork => counter(count(limits.max_graph_work)),
+            Self::ResourceGraphNodes => counter(count(limits.max_resource_graph_nodes)),
+            Self::ResourceGraphRelations => counter(count(limits.max_resource_graph_relations)),
+            Self::ResourceGraphWork => counter(limits.max_resource_graph_work),
+            Self::InputManifestBytes => bytes(limits.max_input_manifest_bytes),
+            Self::InputManifestWork => counter(limits.max_input_manifest_work),
             Self::Primitives => counter(count(limits.max_primitives)),
             Self::AttributeStreams => counter(count(limits.max_total_vertex_attribute_streams)),
             Self::Solids => counter(count(limits.max_solids)),

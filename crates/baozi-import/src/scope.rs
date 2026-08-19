@@ -28,6 +28,9 @@ use crate::metered_storage::{
 };
 use crate::options::{CompiledFormatOptions, FormatOptionKey};
 use crate::registry::RegistryEntry;
+use crate::resource_graph::{
+    PendingResourceRelation, ResourceGraph, ResourceUnavailableDisposition, unavailable_disposition,
+};
 use crate::source_scope::{
     FinalizedSourceScopeRecord, LiveSourceScopeRecord, SourceScopeRecordBuilder,
 };
@@ -398,7 +401,7 @@ pub struct ParseScope<'session> {
     host: ImportStoreHost<'session>,
     diagnostics: &'session RefCell<DiagnosticSink>,
     diagnostic_line_indexes: &'session RefCell<AccountedVec<DiagnosticLineIndex>>,
-    dependencies: &'session RefCell<DependencyCache>,
+    resource_graph: &'session RefCell<ResourceGraph>,
     optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
     loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
     source_scope_record: &'session RefCell<Option<LiveSourceScopeRecord>>,
@@ -426,7 +429,7 @@ pub(crate) struct ParseScopeParts<'session> {
     pub host: ImportStoreHost<'session>,
     pub diagnostics: &'session RefCell<DiagnosticSink>,
     pub diagnostic_line_indexes: &'session RefCell<AccountedVec<DiagnosticLineIndex>>,
-    pub dependencies: &'session RefCell<DependencyCache>,
+    pub resource_graph: &'session RefCell<ResourceGraph>,
     pub optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
     pub loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
     pub source_scope_record: &'session RefCell<Option<LiveSourceScopeRecord>>,
@@ -519,7 +522,7 @@ impl<'session> ParseScope<'session> {
             host: parts.host,
             diagnostics: parts.diagnostics,
             diagnostic_line_indexes: parts.diagnostic_line_indexes,
-            dependencies: parts.dependencies,
+            resource_graph: parts.resource_graph,
             optional_dependency_evidence: parts.optional_dependency_evidence,
             loss_evidence: parts.loss_evidence,
             source_scope_record: parts.source_scope_record,
@@ -569,6 +572,11 @@ impl<'session> ParseScope<'session> {
         self.store_owner
             .poll_parser_boundary()
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
+        self.resource_graph
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?
+            .seal(self.host)
+            .map_err(|cause| self.abort(cause.into_scope_cause()))?;
         let construction = SceneConstruction::try_new(input, scene_validation_limits(self.limits))
             .map_err(|_| {
                 self.abort(ScopeAbortCause::DescriptorContract {
@@ -1791,39 +1799,51 @@ impl<'session> ParseScope<'session> {
         }
         let requirement = self.frozen_dependency_requirement(role)?;
 
-        let authorized = match origin.node() {
+        let source = match origin.node() {
             DependencyOriginNode::Primary => {
                 if !std::ptr::eq(origin.io(), self.primary_io) {
                     return Err(self.abort(ScopeAbortCause::DescriptorContract {
                         code: "dependency-origin-primary-backend-mismatch",
                     }));
                 }
-                self.charge_logical_reference()
-                    .map_err(|failure| self.abort_dependency_failure(failure))?;
-                self.authorize_dependency(
-                    origin.io(),
-                    self.primary_authority,
-                    self.primary_source,
-                    role,
-                    raw_reference,
-                )
-            }
-            DependencyOriginNode::Dependency(index) => {
-                let origin_is_live = self
-                    .dependencies
+                self.resource_graph
                     .try_borrow()
                     .map_err(|_| self.reentrant_capability_failure())?
-                    .available_identity(index)
-                    .is_some();
-                if !origin_is_live {
-                    return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                    .source_for_primary()
+                    .map_err(|cause| self.abort(cause.into_scope_cause()))?
+            }
+            DependencyOriginNode::Dependency(index) => self
+                .resource_graph
+                .try_borrow()
+                .map_err(|_| self.reentrant_capability_failure())?
+                .source_for_cache(index)
+                .map_err(|_| {
+                    self.abort(ScopeAbortCause::DescriptorContract {
                         code: "dependency-origin-stale",
-                    }));
-                }
-                self.charge_logical_reference()
-                    .map_err(|failure| self.abort_dependency_failure(failure))?;
+                    })
+                })?,
+        };
+        self.charge_logical_reference()
+            .map_err(|failure| self.abort_dependency_failure(failure))?;
+        let pending = self
+            .resource_graph
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?
+            .begin_relation(self.host, source, role, requirement, raw_reference)
+            .map_err(|cause| self.abort(cause.into_scope_cause()))?;
+
+        let authorized = match origin.node() {
+            DependencyOriginNode::Primary => self.authorize_dependency(
+                pending,
+                origin.io(),
+                self.primary_authority,
+                self.primary_source,
+                role,
+                raw_reference,
+            ),
+            DependencyOriginNode::Dependency(index) => {
                 let cache = self
-                    .dependencies
+                    .resource_graph
                     .try_borrow()
                     .map_err(|_| self.reentrant_capability_failure())?;
                 let Some(identity) = cache.available_identity(index) else {
@@ -1833,6 +1853,7 @@ impl<'session> ParseScope<'session> {
                     }));
                 };
                 self.authorize_dependency(
+                    pending,
                     origin.io(),
                     identity.authority(),
                     identity.path(),
@@ -1842,9 +1863,28 @@ impl<'session> ParseScope<'session> {
             }
         };
         let acquired = authorized
-            .and_then(|(normalized, authorized)| self.acquire_authorized(normalized, authorized));
+            .and_then(|(pending, normalized, authorized)| {
+                self.prepare_authorized_target(pending, normalized, authorized)
+            })
+            .and_then(|(pending, normalized, authorized)| {
+                self.acquire_authorized(pending, normalized, authorized)
+            });
         match (requirement, acquired) {
-            (_, Ok(snapshot)) => Ok(DependencyOutcome::available(snapshot)),
+            (_, Ok((snapshot, pending, normalized, cache_index))) => {
+                self.resource_graph
+                    .try_borrow_mut()
+                    .map_err(|_| self.reentrant_capability_failure())?
+                    .complete_available(
+                        self.host,
+                        pending,
+                        cache_index,
+                        snapshot.identity(),
+                        snapshot.bytes(),
+                        normalized.path(),
+                    )
+                    .map_err(|cause| self.abort(cause.into_scope_cause()))?;
+                Ok(DependencyOutcome::available(snapshot))
+            }
             (DependencyRequirement::Required, Err(failure)) => {
                 Err(self.abort_dependency_failure(failure))
             }
@@ -2015,11 +2055,13 @@ impl<'session> ParseScope<'session> {
 
     fn dependency_failure(
         &self,
+        relation: Option<PendingResourceRelation>,
         identity: Option<DependencyIdentity>,
         normalized_path: MeteredDependencyPath,
         cause: ScopeAbortCause,
     ) -> DependencyResolutionFailure {
         self.store_dependency_failure(DependencyResolutionContext {
+            relation,
             identity,
             normalized_path: Some(normalized_path),
             cause: DependencyResolutionCause::Owned(cause),
@@ -2029,12 +2071,14 @@ impl<'session> ParseScope<'session> {
 
     fn cached_dependency_failure(
         &self,
+        relation: PendingResourceRelation,
         identity: DependencyIdentity,
         normalized_path: MeteredDependencyPath,
         index: usize,
         cache_disposition: DependencyCacheDisposition,
     ) -> DependencyResolutionFailure {
         self.store_dependency_failure(DependencyResolutionContext {
+            relation: Some(relation),
             identity: Some(identity),
             normalized_path: Some(normalized_path),
             cause: DependencyResolutionCause::Cached { index },
@@ -2044,9 +2088,11 @@ impl<'session> ParseScope<'session> {
 
     fn dependency_failure_without_path(
         &self,
+        relation: Option<PendingResourceRelation>,
         cause: ScopeAbortCause,
     ) -> DependencyResolutionFailure {
         self.store_dependency_failure(DependencyResolutionContext {
+            relation,
             identity: None,
             normalized_path: None,
             cause: DependencyResolutionCause::Owned(cause),
@@ -2073,6 +2119,7 @@ impl<'session> ParseScope<'session> {
             .borrow_mut()
             .take()
             .unwrap_or(DependencyResolutionContext {
+                relation: None,
                 identity: None,
                 normalized_path: None,
                 cause: DependencyResolutionCause::Owned(ScopeAbortCause::DescriptorContract {
@@ -2134,18 +2181,31 @@ impl<'session> ParseScope<'session> {
 
     fn authorize_dependency<'scope>(
         &'scope self,
+        pending: PendingResourceRelation,
         origin_io: &'scope dyn AssetIo,
         origin_authority: &AuthorityDomain,
         origin_source: &AssetPath,
         role: &DependencyRoleId,
         raw_reference: &str,
-    ) -> Result<(MeteredDependencyPath, AuthorizedDependency<'scope>), DependencyResolutionFailure>
-    {
+    ) -> Result<
+        (
+            PendingResourceRelation,
+            MeteredDependencyPath,
+            AuthorizedDependency<'scope>,
+        ),
+        DependencyResolutionFailure,
+    > {
         if raw_reference.len() > self.limits.max_path_length {
-            let origin_source = self
+            let origin_source = match self
                 .clone_metered_dependency_path(origin_source, "dependency-failure-source")
-                .map_err(|cause| self.dependency_failure_without_path(cause))?;
+            {
+                Ok(origin_source) => origin_source,
+                Err(cause) => {
+                    return Err(self.dependency_failure_without_path(Some(pending), cause));
+                }
+            };
             return Err(self.dependency_failure(
+                Some(pending),
                 None,
                 origin_source,
                 ScopeAbortCause::ResourceLimit {
@@ -2157,12 +2217,21 @@ impl<'session> ParseScope<'session> {
         let normalized = match self.normalize_dependency_path_from(origin_source, raw_reference) {
             Ok(normalized) => normalized,
             Err(cause @ ScopeAbortCause::Path(_)) => {
-                let origin_source = self
+                let origin_source = match self
                     .clone_metered_dependency_path(origin_source, "dependency-failure-source")
-                    .map_err(|clone_cause| self.dependency_failure_without_path(clone_cause))?;
-                return Err(self.dependency_failure(None, origin_source, cause));
+                {
+                    Ok(origin_source) => origin_source,
+                    Err(clone_cause) => {
+                        return Err(
+                            self.dependency_failure_without_path(Some(pending), clone_cause)
+                        );
+                    }
+                };
+                return Err(self.dependency_failure(Some(pending), None, origin_source, cause));
             }
-            Err(cause) => return Err(self.dependency_failure_without_path(cause)),
+            Err(cause) => {
+                return Err(self.dependency_failure_without_path(Some(pending), cause));
+            }
         };
         let reference = DependencyReference::new(raw_reference, normalized.path());
         let authorized = match catch_unwind(AssertUnwindSafe(|| {
@@ -2172,6 +2241,7 @@ impl<'session> ParseScope<'session> {
             Err(payload) => {
                 discard_untrusted_panic_payload(payload);
                 return Err(self.dependency_failure(
+                    Some(pending),
                     None,
                     normalized,
                     ScopeAbortCause::TrustedExtension {
@@ -2182,6 +2252,7 @@ impl<'session> ParseScope<'session> {
             }
             Ok(Err(cause)) => {
                 return Err(self.dependency_failure(
+                    Some(pending),
                     None,
                     normalized,
                     ScopeAbortCause::DependencyPolicy(cause),
@@ -2190,14 +2261,50 @@ impl<'session> ParseScope<'session> {
             Ok(Ok(authorized)) => authorized,
         };
 
-        Ok((normalized, authorized))
+        Ok((pending, normalized, authorized))
+    }
+
+    fn prepare_authorized_target<'scope>(
+        &'scope self,
+        mut pending: PendingResourceRelation,
+        normalized: MeteredDependencyPath,
+        authorized: AuthorizedDependency<'scope>,
+    ) -> Result<
+        (
+            PendingResourceRelation,
+            MeteredDependencyPath,
+            AuthorizedDependency<'scope>,
+        ),
+        DependencyResolutionFailure,
+    > {
+        let prepared = match self.resource_graph.try_borrow_mut() {
+            Ok(mut graph) => graph
+                .prepare_target(self.host, &mut pending, authorized.identity())
+                .map_err(|cause| cause.into_scope_cause()),
+            Err(_) => Err(ScopeAbortCause::DescriptorContract {
+                code: "parse-capability-reentered",
+            }),
+        };
+        match prepared {
+            Ok(()) => Ok((pending, normalized, authorized)),
+            Err(cause) => Err(self.dependency_failure(Some(pending), None, normalized, cause)),
+        }
     }
 
     fn acquire_authorized<'scope>(
         &'scope self,
+        pending: PendingResourceRelation,
         normalized: MeteredDependencyPath,
         authorized: AuthorizedDependency<'scope>,
-    ) -> Result<DependencySnapshot<'scope>, DependencyResolutionFailure> {
+    ) -> Result<
+        (
+            DependencySnapshot<'scope>,
+            PendingResourceRelation,
+            MeteredDependencyPath,
+            usize,
+        ),
+        DependencyResolutionFailure,
+    > {
         let (io, identity) = authorized.into_parts();
         let backend_authority = if std::ptr::eq(io, self.primary_io) {
             self.primary_authority.clone()
@@ -2207,6 +2314,7 @@ impl<'session> ParseScope<'session> {
                 Err(payload) => {
                     discard_untrusted_panic_payload(payload);
                     return Err(self.dependency_failure(
+                        Some(pending),
                         Some(identity),
                         normalized,
                         ScopeAbortCause::TrustedExtension {
@@ -2219,6 +2327,7 @@ impl<'session> ParseScope<'session> {
         };
         if &backend_authority != identity.authority() {
             return Err(self.dependency_failure(
+                Some(pending),
                 Some(identity),
                 normalized,
                 ScopeAbortCause::TrustedExtension {
@@ -2228,13 +2337,14 @@ impl<'session> ParseScope<'session> {
             ));
         }
         let cached = {
-            let cache = self.dependencies.borrow();
+            let cache = self.resource_graph.borrow();
             match cache.get(&identity) {
                 Some((index, DependencyCacheEntry::Available(snapshot))) => {
                     Some((index, Arc::clone(&snapshot.bytes)))
                 }
                 Some((index, DependencyCacheEntry::Failed(_))) => {
                     return Err(self.cached_dependency_failure(
+                        pending,
                         identity,
                         normalized,
                         index,
@@ -2243,6 +2353,7 @@ impl<'session> ParseScope<'session> {
                 }
                 Some((_, DependencyCacheEntry::Resolving)) => {
                     return Err(self.dependency_failure(
+                        Some(pending),
                         Some(identity),
                         normalized,
                         ScopeAbortCause::DescriptorContract {
@@ -2252,6 +2363,7 @@ impl<'session> ParseScope<'session> {
                 }
                 Some((_, DependencyCacheEntry::FailureConsumed)) => {
                     return Err(self.dependency_failure(
+                        Some(pending),
                         Some(identity),
                         normalized,
                         ScopeAbortCause::DescriptorContract {
@@ -2267,34 +2379,50 @@ impl<'session> ParseScope<'session> {
                 match self.clone_dependency_identity(&identity) {
                     Ok(identity) => identity,
                     Err(cause) => {
-                        return Err(self.dependency_failure(Some(identity), normalized, cause));
+                        return Err(self.dependency_failure(
+                            Some(pending),
+                            Some(identity),
+                            normalized,
+                            cause,
+                        ));
                     }
                 };
-            return Ok(DependencySnapshot::new(
-                self.dependency_origin_issuer,
-                io,
+            return Ok((
+                DependencySnapshot::new(
+                    self.dependency_origin_issuer,
+                    io,
+                    origin_node,
+                    snapshot_identity,
+                    bytes,
+                    DependencyCacheDisposition::Reused,
+                    identity_path_reservation,
+                ),
+                pending,
+                normalized,
                 origin_node,
-                snapshot_identity,
-                bytes,
-                DependencyCacheDisposition::Reused,
-                identity_path_reservation,
             ));
         }
 
         if let Err(cause) = self.reserve_dependency_cache_capacity() {
-            return Err(self.dependency_failure(Some(identity), normalized, cause));
+            return Err(self.dependency_failure(Some(pending), Some(identity), normalized, cause));
         }
         let cache_identity_path_reservation =
             match self.reserve_dependency_storage_cause(identity.path().as_str().len() as u64) {
                 Ok(reservation) => reservation,
                 Err(cause) => {
-                    return Err(self.dependency_failure(Some(identity), normalized, cause));
+                    return Err(self.dependency_failure(
+                        Some(pending),
+                        Some(identity),
+                        normalized,
+                        cause,
+                    ));
                 }
             };
         let cache_identity = match identity.try_clone() {
             Ok(cache_identity) => cache_identity,
             Err(_) => {
                 return Err(self.dependency_failure(
+                    Some(pending),
                     Some(identity),
                     normalized,
                     ScopeAbortCause::Allocation {
@@ -2304,13 +2432,14 @@ impl<'session> ParseScope<'session> {
             }
         };
         let marked = match self
-            .dependencies
+            .resource_graph
             .borrow_mut()
             .mark_resolving(cache_identity, cache_identity_path_reservation)
         {
             Ok(marked) => marked,
             Err(()) => {
                 return Err(self.dependency_failure(
+                    Some(pending),
                     Some(identity),
                     normalized,
                     ScopeAbortCause::Allocation {
@@ -2321,6 +2450,7 @@ impl<'session> ParseScope<'session> {
         };
         if !marked {
             return Err(self.dependency_failure(
+                Some(pending),
                 Some(identity),
                 normalized,
                 ScopeAbortCause::DescriptorContract {
@@ -2340,12 +2470,13 @@ impl<'session> ParseScope<'session> {
         match acquired {
             Ok((snapshot_bytes, snapshot_identity, identity_path_reservation)) => {
                 let Some(origin_node) = self
-                    .dependencies
+                    .resource_graph
                     .borrow_mut()
                     .store_available(&identity, Arc::clone(&snapshot_bytes))
                 else {
-                    self.dependencies.borrow_mut().remove_resolving(&identity);
+                    self.resource_graph.borrow_mut().remove_resolving(&identity);
                     return Err(self.dependency_failure(
+                        Some(pending),
                         Some(identity),
                         normalized,
                         ScopeAbortCause::DescriptorContract {
@@ -2353,31 +2484,38 @@ impl<'session> ParseScope<'session> {
                         },
                     ));
                 };
-                Ok(DependencySnapshot::new(
-                    self.dependency_origin_issuer,
-                    io,
+                Ok((
+                    DependencySnapshot::new(
+                        self.dependency_origin_issuer,
+                        io,
+                        origin_node,
+                        snapshot_identity,
+                        snapshot_bytes,
+                        DependencyCacheDisposition::Fresh,
+                        identity_path_reservation,
+                    ),
+                    pending,
+                    normalized,
                     origin_node,
-                    snapshot_identity,
-                    snapshot_bytes,
-                    DependencyCacheDisposition::Fresh,
-                    identity_path_reservation,
                 ))
             }
             Err(cause) => {
-                Err(self.finish_dependency_resolution_failure(identity, normalized, cause))
+                Err(self.finish_dependency_resolution_failure(pending, identity, normalized, cause))
             }
         }
     }
 
     fn finish_dependency_resolution_failure(
         &self,
+        pending: PendingResourceRelation,
         identity: DependencyIdentity,
         normalized: MeteredDependencyPath,
         cause: ScopeAbortCause,
     ) -> DependencyResolutionFailure {
         if !cacheable_dependency_cause(&cause) {
-            if !self.dependencies.borrow_mut().remove_resolving(&identity) {
+            if !self.resource_graph.borrow_mut().remove_resolving(&identity) {
                 return self.dependency_failure(
+                    Some(pending),
                     Some(identity),
                     normalized,
                     ScopeAbortCause::DescriptorContract {
@@ -2385,23 +2523,25 @@ impl<'session> ParseScope<'session> {
                     },
                 );
             }
-            return self.dependency_failure(Some(identity), normalized, cause);
+            return self.dependency_failure(Some(pending), Some(identity), normalized, cause);
         }
 
         let cached_index = self
-            .dependencies
+            .resource_graph
             .borrow_mut()
             .store_failed(&identity, cause);
         match cached_index {
             Ok(index) => self.cached_dependency_failure(
+                pending,
                 identity,
                 normalized,
                 index,
                 DependencyCacheDisposition::Fresh,
             ),
             Err(_) => {
-                self.dependencies.borrow_mut().remove_resolving(&identity);
+                self.resource_graph.borrow_mut().remove_resolving(&identity);
                 self.dependency_failure(
+                    Some(pending),
                     Some(identity),
                     normalized,
                     ScopeAbortCause::DescriptorContract {
@@ -2471,7 +2611,7 @@ impl<'session> ParseScope<'session> {
 
     fn reserve_dependency_cache_capacity(&self) -> Result<(), ScopeAbortCause> {
         let (plan, entry_envelope, index_envelope, mut entry_reservation, mut index_reservation) = {
-            let mut cache = self.dependencies.try_borrow_mut().map_err(|_| {
+            let mut cache = self.resource_graph.try_borrow_mut().map_err(|_| {
                 ScopeAbortCause::DescriptorContract {
                     code: "parse-capability-reentered",
                 }
@@ -2535,7 +2675,7 @@ impl<'session> ParseScope<'session> {
             return Err(cause);
         }
 
-        let actual = match self.dependencies.try_borrow_mut() {
+        let actual = match self.resource_graph.try_borrow_mut() {
             Ok(mut cache) => cache
                 .apply_capacity_plan(plan)
                 .map_err(dependency_cache_capacity_cause),
@@ -2579,7 +2719,7 @@ impl<'session> ParseScope<'session> {
                 resize_failure.get_or_insert(cause);
             }
         }
-        let mut cache = self.dependencies.borrow_mut();
+        let mut cache = self.resource_graph.borrow_mut();
         cache.retain_capacity_reservation(DependencyCacheStorage::Entries, entry_reservation);
         cache.retain_capacity_reservation(DependencyCacheStorage::Index, index_reservation);
         drop(cache);
@@ -2642,7 +2782,7 @@ impl<'session> ParseScope<'session> {
                 let _ = self.host.resize(reservation, prior_bytes);
             }
         }
-        let mut cache = self.dependencies.borrow_mut();
+        let mut cache = self.resource_graph.borrow_mut();
         cache.retain_capacity_reservation(DependencyCacheStorage::Entries, entry_reservation);
         cache.retain_capacity_reservation(DependencyCacheStorage::Index, index_reservation);
     }
@@ -2658,7 +2798,7 @@ impl<'session> ParseScope<'session> {
         let Err(cause) = result else {
             return Ok(());
         };
-        Err(self.dependency_failure_without_path(cause.into_scope_abort_cause()))
+        Err(self.dependency_failure_without_path(None, cause.into_scope_abort_cause()))
     }
 
     fn charge_open_attempt(&self) -> Result<(), ScopeAbortCause> {
@@ -2684,14 +2824,18 @@ impl<'session> ParseScope<'session> {
         role: &DependencyRoleId,
         failure: DependencyResolutionFailure,
     ) -> ParseResult<DependencyOutcome<'_>> {
-        let failure = self.take_dependency_failure(failure);
-        let (eligible, owner) = {
+        let mut failure = self.take_dependency_failure(failure);
+        let (eligible, owner, disposition) = {
             let cache = self
-                .dependencies
+                .resource_graph
                 .try_borrow()
                 .map_err(|_| self.reentrant_capability_failure())?;
             let cause = failure.cause(&cache).map_err(|cause| self.abort(cause))?;
-            (optional_eligible(cause), cause.owner())
+            (
+                optional_eligible(cause),
+                cause.owner(),
+                unavailable_disposition(cause),
+            )
         };
         if !self
             .loss_policy
@@ -2734,6 +2878,7 @@ impl<'session> ParseScope<'session> {
                 }));
             }
         }
+        self.complete_unavailable_relation(&mut failure, disposition)?;
         self.emit_diagnostic(
             DiagnosticSeverity::Warning,
             DiagnosticCode::new("import.optional_dependency_unavailable")
@@ -2743,20 +2888,70 @@ impl<'session> ParseScope<'session> {
         Ok(DependencyOutcome::unavailable(evidence))
     }
 
+    fn complete_unavailable_relation(
+        &self,
+        failure: &mut DependencyResolutionContext,
+        disposition: ResourceUnavailableDisposition,
+    ) -> ParseResult<()> {
+        let relation = failure.relation.take().ok_or_else(|| {
+            self.abort(ScopeAbortCause::DescriptorContract {
+                code: "dependency-terminal-relation-missing",
+            })
+        })?;
+        self.resource_graph
+            .try_borrow_mut()
+            .map_err(|_| self.reentrant_capability_failure())?
+            .complete_unavailable(
+                self.host,
+                relation,
+                failure
+                    .normalized_path
+                    .as_ref()
+                    .map(MeteredDependencyPath::path),
+                failure.identity.as_ref(),
+                disposition,
+            )
+            .map_err(|cause| self.abort(cause.into_scope_cause()))
+    }
+
     fn abort_dependency_failure(&self, failure: DependencyResolutionFailure) -> ParseFailure {
         self.abort_dependency_context(self.take_dependency_failure(failure))
     }
 
     fn abort_dependency_context(&self, failure: DependencyResolutionContext) -> ParseFailure {
-        let (cause, normalized_path) = match self.dependencies.try_borrow_mut() {
-            Ok(mut cache) => failure.into_cause(&mut cache),
-            Err(_) => (
-                ScopeAbortCause::DescriptorContract {
+        let disposition = match self.resource_graph.try_borrow() {
+            Ok(cache) => match failure.cause(&cache) {
+                Ok(cause) => unavailable_disposition(cause),
+                Err(cause) => unavailable_disposition(&cause),
+            },
+            Err(_) => {
+                let parse_failure = self.abort(ScopeAbortCause::DescriptorContract {
                     code: "parse-capability-reentered",
-                },
-                failure.normalized_path,
-            ),
+                });
+                drop(failure);
+                return parse_failure;
+            }
         };
+        let (cause, identity, normalized_path) = match self.resource_graph.try_borrow_mut() {
+            Ok(mut graph) => {
+                let (mut cause, relation, identity, normalized_path) =
+                    failure.into_parts(&mut graph);
+                if let Some(relation) = relation
+                    && let Err(graph_cause) = graph.complete_unavailable(
+                        self.host,
+                        relation,
+                        normalized_path.as_ref().map(MeteredDependencyPath::path),
+                        identity.as_ref(),
+                        disposition,
+                    )
+                {
+                    cause = graph_cause.into_scope_cause();
+                }
+                (cause, identity, normalized_path)
+            }
+            Err(_) => unreachable!("resource graph borrow was released before mutation"),
+        };
+        drop(identity);
         let parse_failure = self.abort(cause);
         drop(normalized_path);
         parse_failure
@@ -3583,6 +3778,7 @@ impl MeteredDependencyPath {
 }
 
 struct DependencyResolutionContext {
+    relation: Option<PendingResourceRelation>,
     identity: Option<DependencyIdentity>,
     normalized_path: Option<MeteredDependencyPath>,
     cause: DependencyResolutionCause,
@@ -3611,11 +3807,18 @@ impl DependencyResolutionContext {
         }
     }
 
-    fn into_cause(
+    fn into_parts(
         self,
         cache: &mut DependencyCache,
-    ) -> (ScopeAbortCause, Option<MeteredDependencyPath>) {
+    ) -> (
+        ScopeAbortCause,
+        Option<PendingResourceRelation>,
+        Option<DependencyIdentity>,
+        Option<MeteredDependencyPath>,
+    ) {
         let Self {
+            relation,
+            identity,
             normalized_path,
             cause,
             ..
@@ -3630,7 +3833,7 @@ impl DependencyResolutionContext {
                     })
             }
         };
-        (cause, normalized_path)
+        (cause, relation, identity, normalized_path)
     }
 }
 
@@ -3641,9 +3844,14 @@ fn optional_eligible(cause: &ScopeAbortCause) -> bool {
             | ScopeAbortCause::AssetOpen(_)
             | ScopeAbortCause::AssetRead(_)
             | ScopeAbortCause::DependencyPolicy(_)
-            | ScopeAbortCause::ResourceLimit { .. }
-            | ScopeAbortCause::Allocation { .. }
-            | ScopeAbortCause::Ledger(LedgerCause::LimitExceeded { .. })
+            | ScopeAbortCause::ResourceLimit {
+                resource: "asset-bytes" | "dependency-reference-bytes",
+                ..
+            }
+            | ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                dimension: ImportDimension::DependencyBytes | ImportDimension::TotalAssetBytes,
+                ..
+            })
     )
 }
 
@@ -4163,9 +4371,17 @@ mod tests {
     }
 
     #[test]
-    fn optional_eligibility_excludes_control_and_extension_failures() {
+    fn optional_eligibility_is_limited_to_dependency_input_failures() {
         assert!(optional_eligible(&ScopeAbortCause::ResourceLimit {
-            resource: "bytes",
+            resource: "asset-bytes",
+            limit: 1,
+        }));
+        assert!(optional_eligible(&ScopeAbortCause::ResourceLimit {
+            resource: "dependency-reference-bytes",
+            limit: 1,
+        }));
+        assert!(!optional_eligible(&ScopeAbortCause::ResourceLimit {
+            resource: "resource-graph-nodes",
             limit: 1,
         }));
         assert!(!optional_eligible(&ScopeAbortCause::TrustedExtension {

@@ -5,6 +5,7 @@ use crate::error::ImportCause;
 use crate::format::DetectionOutcome;
 use crate::ledger::{ImportDimension, ImportLedgerSnapshot};
 use crate::loss::ImportLossEvidence;
+use crate::resource_graph::SuccessfulInputManifest;
 use crate::source_scope::SourceScopeRecord;
 use crate::store::{ImportStoreMinimalFallback, ImportStoreRichFailure, ImportStoreSuccessReport};
 use baozi_core::{FormatId, SceneGenerationId, ValidatedScene};
@@ -228,6 +229,7 @@ pub struct ImportEvidence {
     optional_dependency_evidence: Vec<OptionalDependencyEvidence>,
     loss_evidence: Vec<ImportLossEvidence>,
     source_scope_record: Option<SourceScopeRecord>,
+    successful_input_manifest: SuccessfulInputManifest,
     ledger: ImportLedgerSnapshot,
     last_completed: ImportPhaseEvidence,
 }
@@ -243,6 +245,7 @@ pub(crate) struct ImportReportParts {
     pub optional_dependency_evidence: Vec<OptionalDependencyEvidence>,
     pub loss_evidence: Vec<ImportLossEvidence>,
     pub source_scope_record: Option<SourceScopeRecord>,
+    pub successful_input_manifest: SuccessfulInputManifest,
     pub ledger: ImportLedgerSnapshot,
     pub last_completed: ImportPhaseEvidence,
 }
@@ -263,6 +266,7 @@ impl ImportReport {
                 optional_dependency_evidence: parts.optional_dependency_evidence,
                 loss_evidence: parts.loss_evidence,
                 source_scope_record: parts.source_scope_record,
+                successful_input_manifest: parts.successful_input_manifest,
                 ledger: parts.ledger,
                 last_completed: parts.last_completed,
             },
@@ -313,6 +317,11 @@ impl ImportReport {
 
     pub const fn source_scope_record(&self) -> Option<&SourceScopeRecord> {
         self.evidence.source_scope_record()
+    }
+
+    /// Returns the complete successful semantic resource manifest.
+    pub const fn successful_input_manifest(&self) -> &SuccessfulInputManifest {
+        self.evidence.successful_input_manifest()
     }
 
     pub const fn ledger(&self) -> &ImportLedgerSnapshot {
@@ -375,6 +384,11 @@ impl ImportEvidence {
         self.source_scope_record.as_ref()
     }
 
+    /// Returns the complete successful semantic resource manifest.
+    pub const fn successful_input_manifest(&self) -> &SuccessfulInputManifest {
+        &self.successful_input_manifest
+    }
+
     /// Returns immutable terminal ledger evidence.
     pub const fn ledger(&self) -> &ImportLedgerSnapshot {
         &self.ledger
@@ -411,6 +425,7 @@ impl fmt::Debug for ImportEvidence {
             )
             .field("loss_evidence", &self.loss_evidence)
             .field("source_scope_record", &self.source_scope_record)
+            .field("successful_input_manifest", &self.successful_input_manifest)
             .field("ledger", &self.ledger)
             .field("last_completed", &self.last_completed)
             .finish_non_exhaustive()

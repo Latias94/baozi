@@ -545,6 +545,13 @@ fn same_logical_path_in_distinct_authority_domains_has_distinct_snapshots() {
     assert_dimension(report.ledger(), ImportDimension::DependencyReference, 2, 2);
     assert_dimension(report.ledger(), ImportDimension::AssetOpen, 3, 3);
     assert_dimension(report.ledger(), ImportDimension::DependencyBytes, 22, 22);
+    let manifest = report.successful_input_manifest();
+    assert_eq!(manifest.counts().node_class_count(), 3);
+    assert_eq!(manifest.counts().quotient_relation_record_count(), 2);
+    assert_eq!(manifest.counts().relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().available_relation_record_count(), 2);
+    assert_eq!(manifest.counts().available_relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().maximum_depth(), 1);
 }
 
 #[test]

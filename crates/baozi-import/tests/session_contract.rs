@@ -10,12 +10,12 @@ use baozi_import::{
     ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind,
     ImportOperationControl, ImportPhase, ImportProgressPhase, ImportProgressUnit, ImportReport,
     ImportRequest, ImportRequestLayer, ImportResult, ImportStorageClass, ImportTerminalCause,
-    ImportTerminalFailureClass, ImportWorkClass, LossPolicy, MeteredDecodedText, MeteredString,
-    MeteredVec, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
-    ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
-    ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, TextBomPolicy, TextControlPolicy,
-    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
-    TrustedExtensionBoundary, import_asset as run_import_asset,
+    ImportTerminalFailureClass, ImportWorkClass, InputReplayStatus, LossPolicy,
+    ManifestObservedOnlyReason, MeteredDecodedText, MeteredString, MeteredVec, OptionCompileLimits,
+    ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
+    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
+    TextProfile, TextSourceEncoding, TrustedExtensionBoundary, import_asset as run_import_asset,
     import_asset_with_resolver as run_import_asset_with_resolver, import_bytes as run_import_bytes,
 };
 use baozi_io::{
@@ -1870,6 +1870,81 @@ fn optional_failure_is_cached_once_but_charged_for_each_logical_reference() {
         report.optional_dependency_evidence()[1].cache_disposition(),
         baozi_import::DependencyCacheDisposition::Reused
     );
+    let manifest = report.successful_input_manifest();
+    assert_eq!(manifest.counts().node_class_count(), 1);
+    assert_eq!(manifest.counts().quotient_relation_record_count(), 1);
+    assert_eq!(manifest.counts().relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().unavailable_relation_record_count(), 1);
+    assert_eq!(manifest.counts().unavailable_relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().maximum_depth(), 0);
+    assert!(matches!(
+        manifest.replay_status(),
+        InputReplayStatus::ObservedOnly(reasons)
+            if reasons == &[
+                ManifestObservedOnlyReason::UnstableResourceIdentity,
+                ManifestObservedOnlyReason::UnprovenNegativeInput,
+            ]
+    ));
+    let graph_nodes = report
+        .ledger()
+        .dimension(ImportDimension::ResourceGraphNodes)
+        .unwrap();
+    assert_eq!(graph_nodes.attempted(), 3);
+    assert_eq!(graph_nodes.consumed(), 1);
+    let graph_relations = report
+        .ledger()
+        .dimension(ImportDimension::ResourceGraphRelations)
+        .unwrap();
+    assert_eq!(graph_relations.attempted(), 2);
+    assert_eq!(graph_relations.consumed(), 2);
+}
+
+#[test]
+fn optional_dependency_cannot_suppress_a_structural_resource_graph_limit() {
+    let source = AssetPath::new("asset.optional-graph-limit").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain(
+        "dev.baozi.test.optional-graph-limit",
+        "optional-graph-limit",
+    )
+    .with_dependency(
+        role,
+        DependencyRequirement::Optional,
+        DependencyBehavior::OptionalTwice,
+    );
+    let mut limits = ResourceLimits::default();
+    limits.max_resource_graph_nodes = 1;
+    let request = lossy_request_for_with_limits(importer, limits);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect_err("a structural graph limit cannot be converted into optional loss");
+
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::ResourceLimit {
+                    resource: "max_resource_graph_nodes",
+                    limit: 1,
+                }
+            )
+    ));
+    assert_eq!(failure.optional_dependency_evidence().len(), 0);
+    assert_eq!(io.open_count(), 1, "the dependency backend must not open");
+    let graph_nodes = failure
+        .ledger()
+        .dimension(ImportDimension::ResourceGraphNodes)
+        .unwrap();
+    assert_eq!(graph_nodes.attempted(), 1);
+    assert_eq!(graph_nodes.consumed(), 1);
+    let graph_relations = failure
+        .ledger()
+        .dimension(ImportDimension::ResourceGraphRelations)
+        .unwrap();
+    assert_eq!(graph_relations.attempted(), 1);
+    assert_eq!(graph_relations.consumed(), 1);
 }
 
 #[test]
@@ -1924,6 +1999,37 @@ fn successful_dependency_snapshot_is_shared_and_reused_without_reopening() {
         .dimension(ImportDimension::DependencyBytes)
         .unwrap();
     assert_eq!(dependency.consumed(), 64 * 1024);
+    let manifest = report.successful_input_manifest();
+    assert_eq!(manifest.counts().node_class_count(), 2);
+    assert_eq!(manifest.counts().quotient_relation_record_count(), 1);
+    assert_eq!(manifest.counts().relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().available_relation_record_count(), 1);
+    assert_eq!(manifest.counts().available_relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().maximum_depth(), 1);
+    assert!(matches!(
+        manifest.replay_status(),
+        InputReplayStatus::ObservedOnly(reasons)
+            if reasons == &[ManifestObservedOnlyReason::UnstableResourceIdentity]
+    ));
+    assert_ne!(manifest.digest().as_bytes(), [0; 32]);
+    let graph_nodes = report
+        .ledger()
+        .dimension(ImportDimension::ResourceGraphNodes)
+        .unwrap();
+    assert_eq!(graph_nodes.attempted(), 2);
+    assert_eq!(graph_nodes.consumed(), 2);
+    let graph_relations = report
+        .ledger()
+        .dimension(ImportDimension::ResourceGraphRelations)
+        .unwrap();
+    assert_eq!(graph_relations.attempted(), 2);
+    assert_eq!(graph_relations.consumed(), 2);
+    let manifest_bytes = report
+        .ledger()
+        .dimension(ImportDimension::InputManifestBytes)
+        .unwrap();
+    assert!(manifest_bytes.consumed() > 0);
+    assert_eq!(manifest_bytes.attempted(), manifest_bytes.consumed());
 }
 
 #[test]

@@ -1,8 +1,7 @@
 use crate::SceneDraft;
 use crate::config::FormatSelection;
 use crate::dependency::{
-    DenyDependencies, DependencyCache, DependencyOriginIssuer, DependencyResolver,
-    SameAuthorityResolver,
+    DenyDependencies, DependencyOriginIssuer, DependencyResolver, SameAuthorityResolver,
 };
 use crate::detection::DetectionScope;
 use crate::diagnostic::DiagnosticSink;
@@ -23,6 +22,7 @@ use crate::outcome::{
 };
 use crate::registry::{ParseInvocationError, RegistryEntry};
 use crate::request::PreparedImportRequest;
+use crate::resource_graph::ResourceGraph;
 use crate::scope::{
     DiagnosticLineIndex, ParseFailureKind, ParseScope, ParseScopeParts, read_opened_asset,
 };
@@ -211,7 +211,7 @@ struct ImportSession<'a> {
     store: ImportStoreSessionOwner,
     diagnostics: Option<RefCell<DiagnosticSink>>,
     diagnostic_line_indexes: RefCell<AccountedVec<DiagnosticLineIndex>>,
-    dependencies: Option<RefCell<DependencyCache>>,
+    resource_graph: Option<RefCell<ResourceGraph>>,
     optional_dependency_evidence: RefCell<AccountedVec<crate::OptionalDependencyEvidence>>,
     loss_evidence: RefCell<AccountedVec<ImportLossEvidence>>,
     source_scope_record: RefCell<Option<LiveSourceScopeRecord>>,
@@ -248,7 +248,7 @@ impl<'a> ImportSession<'a> {
                 request.limits().max_attempted_diagnostic_bytes,
             ))),
             diagnostic_line_indexes: RefCell::new(AccountedVec::new()),
-            dependencies: Some(RefCell::new(DependencyCache::new())),
+            resource_graph: Some(RefCell::new(ResourceGraph::new(request.limits().clone()))),
             optional_dependency_evidence: RefCell::new(AccountedVec::new()),
             loss_evidence: RefCell::new(AccountedVec::new()),
             source_scope_record: RefCell::new(None),
@@ -323,6 +323,10 @@ impl<'a> ImportSession<'a> {
             self.request.limits().max_total_asset_bytes,
         )
         .map_err(|cause| self.scope_cause(cause))?;
+        self.resource_graph()
+            .borrow_mut()
+            .bind_primary(self.host(), &expected_domain, &self.source, &snapshot)
+            .map_err(|cause| self.scope_cause(cause.into_scope_cause()))?;
         self.primary_authority = Some(expected_domain);
         self.primary_backend_hard_limit = backend_hard_limit;
         self.primary_snapshot = Some(snapshot);
@@ -378,6 +382,10 @@ impl<'a> ImportSession<'a> {
                 })
             })?;
         self.charge_primary_bytes(byte_count, true)?;
+        self.resource_graph()
+            .borrow_mut()
+            .bind_primary(self.host(), &primary_authority, &self.source, &snapshot)
+            .map_err(|cause| self.scope_cause(cause.into_scope_cause()))?;
         self.primary_snapshot = Some(snapshot);
         self.report_boundary_progress(
             ImportProgressPhase::AcquirePrimary,
@@ -706,6 +714,12 @@ impl<'a> ImportSession<'a> {
             entry.descriptor().text_profile(),
             self.primary_backend_hard_limit,
         ));
+        if let Some(limits) = self.effective_limits.as_ref() {
+            self.resource_graph()
+                .borrow_mut()
+                .set_limits(limits.clone())
+                .map_err(|cause| self.scope_cause(cause.into_scope_cause()))?;
+        }
         let tightening = {
             let effective_limits = self.effective_limits.as_ref().ok_or_else(|| {
                 self.scope_cause(ScopeAbortCause::DescriptorContract {
@@ -766,7 +780,7 @@ impl<'a> ImportSession<'a> {
                 host: self.host(),
                 diagnostics: self.diagnostics(),
                 diagnostic_line_indexes: &self.diagnostic_line_indexes,
-                dependencies: self.dependencies(),
+                resource_graph: self.resource_graph(),
                 optional_dependency_evidence: &self.optional_dependency_evidence,
                 loss_evidence: &self.loss_evidence,
                 source_scope_record: &self.source_scope_record,
@@ -858,6 +872,24 @@ impl<'a> ImportSession<'a> {
                 code: "scene-draft-without-selected-format",
             });
         };
+        let successful_input_manifest = match match self.resource_graph.as_ref().map(|graph| {
+            graph
+                .borrow_mut()
+                .take_manifest()
+                .map_err(|cause| cause.into_scope_cause())
+        }) {
+            Some(result) => result,
+            None => Err(ScopeAbortCause::DescriptorContract {
+                code: "resource-graph-missing-at-success",
+            }),
+        } {
+            Ok(manifest) => manifest,
+            Err(cause) => {
+                drop(draft);
+                let cause = self.scope_cause(cause);
+                return self.finalize_failure(cause);
+            }
+        };
         let staging = self.take_report_staging();
         self.release_transient_live();
         let staging = staging.into_terminal();
@@ -893,6 +925,7 @@ impl<'a> ImportSession<'a> {
                     optional_dependency_evidence,
                     loss_evidence,
                     source_scope_record,
+                    successful_input_manifest,
                     ledger: crate::ImportLedgerSnapshot::from_store(evidence),
                     last_completed,
                 }))
@@ -1007,7 +1040,7 @@ impl<'a> ImportSession<'a> {
     fn release_transient_live(&mut self) {
         drop(self.primary_snapshot.take());
         drop(self.diagnostic_line_indexes.get_mut().take());
-        drop(self.dependencies.take());
+        drop(self.resource_graph.take());
     }
 
     fn take_report_staging(&mut self) -> LiveReportStaging {
@@ -1042,8 +1075,8 @@ impl<'a> ImportSession<'a> {
         self.diagnostics.as_ref().expect("session is active")
     }
 
-    fn dependencies(&self) -> &RefCell<DependencyCache> {
-        self.dependencies.as_ref().expect("session is active")
+    fn resource_graph(&self) -> &RefCell<ResourceGraph> {
+        self.resource_graph.as_ref().expect("session is active")
     }
 
     fn poll_boundary(&self) -> Result<(), ImportCause> {

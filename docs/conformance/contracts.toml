@@ -274,14 +274,28 @@ contract_id = "resource-dependency-graph-manifest"
 authority_adr = "docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md"
 conformance_status = "nonconforming"
 evidence_subject = "baozi.resource-dependency-graph-manifest"
-evidence_revision = 1
+evidence_revision = 2
 implementation_tracers = [
+  "crates/baozi-import/src/limits.rs",
+  "crates/baozi-import/src/ledger.rs",
+  "crates/baozi-import/src/resource_graph/mod.rs",
+  "crates/baozi-import/src/resource_graph/manifest.rs",
+  "crates/baozi-import/src/scope.rs",
   "crates/baozi-import/src/session.rs",
+  "crates/baozi-import/src/outcome.rs",
+  "crates/baozi-import/src/store.rs",
   "crates/baozi-format-obj/src/mtl.rs",
 ]
-test_tracers = ["crates/baozi/tests/obj_facade.rs"]
+test_tracers = [
+  "crates/baozi-import/src/resource_graph/mod.rs",
+  "crates/baozi-import/src/resource_graph/manifest.rs",
+  "crates/baozi-import/tests/authority_cache_contract.rs",
+  "crates/baozi-import/tests/session_contract.rs",
+  "crates/baozi/tests/obj_facade.rs",
+]
 ci_tracers = [".github/workflows/ci.yml"]
 gate_ids = [
+  "import-resource-graph-tests",
   "obj-resource-current-behavior-tests",
   "workspace-tests-ci",
 ]

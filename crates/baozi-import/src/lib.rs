@@ -26,6 +26,7 @@ mod options;
 mod outcome;
 mod registry;
 mod request;
+mod resource_graph;
 mod scope;
 mod session;
 mod source_scope;
@@ -107,6 +108,13 @@ pub use registry::{
     RegistrySnapshot,
 };
 pub use request::{PreparedImportRequest, RequestError};
+pub use resource_graph::{
+    InputReplayStatus, ManifestDigest, ManifestNodeClass, ManifestObservedOnlyReason,
+    ManifestReference, ManifestRelation, ManifestRelationOutcome, ManifestResourceIdentity,
+    ManifestResourceIdentityStability, ManifestSessionDependentReason, ManifestSessionOpaqueReason,
+    ManifestUnavailableClass, ManifestUnavailableCode, ManifestUnavailableReplay,
+    ResourceManifestCounts, SuccessfulInputManifest,
+};
 pub use scope::{
     ImportStorageClass, ImportWorkClass, ImportWorkScope, ParseFailure, ParseResult, ParseScope,
 };

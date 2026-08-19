@@ -59,7 +59,7 @@ fn checked_in_repository_inventory_is_structurally_valid() {
     let report = check_repository(&repository_root());
     assert!(report.violations.is_empty(), "{:#?}", report.violations);
     assert_eq!(report.contracts_checked, 12);
-    assert_eq!(report.gates_checked, 12);
+    assert_eq!(report.gates_checked, 13);
     assert_eq!(report.declared_conforming_contracts, 0);
     assert_eq!(report.self_attested_contract_bindings_matched, 0);
 
@@ -288,5 +288,5 @@ fn repository_conformance_cli_checks_only_the_structured_inventory() {
     assert_eq!(output.status.code(), Some(0), "{output:#?}");
     assert!(output.stderr.is_empty(), "{output:#?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("12 contracts, 12 gates"), "{output:#?}");
+    assert!(stdout.contains("12 contracts, 13 gates"), "{output:#?}");
 }
