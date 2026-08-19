@@ -2351,6 +2351,42 @@ fn controlled_builders_and_validation_poll_and_charge_exact_work() {
 }
 
 #[test]
+fn controlled_validation_rejects_released_preexisting_planning_reservation() {
+    let factory = test_factory();
+    let account = test_account(&factory);
+    let (operation, keys) = test_operation(&account, 16);
+    let mut assembly = operation
+        .try_publication_assembly(test_publication_plan(keys, 1, 1))
+        .expect("controlled assembly");
+    let (canonical_root, evidence_root) = test_simple_controlled_validation_graph(&mut assembly);
+    let reservation = {
+        let mut checkpoint = assembly
+            .try_control_checkpoint()
+            .expect("writable assembly checkpoint");
+        checkpoint
+            .reserve(keys.phase, keys.dimension, 1)
+            .expect("preexisting planning reservation")
+    };
+
+    let validation = assembly.validate_success_controlled(
+        keys.work_dimension,
+        keys.work_dimension,
+        canonical_root,
+        evidence_root,
+        move |session, canonical_root, evidence_root, _control| {
+            drop(reservation);
+            Ok(session.canonical_sequence(canonical_root).is_some()
+                && session.outcome_evidence_sequence(evidence_root).is_some())
+        },
+    );
+
+    assert!(matches!(
+        validation,
+        StoreControlledSuccessValidation::FallbackOnly(_)
+    ));
+}
+
+#[test]
 fn controlled_bytes_and_utf8_write_exact_payloads_and_charge_exact_work() {
     const BINARY_PAYLOAD: &[u8] = b"\0\x01\x02\x03\x04\x05";
     const TEXT_PAYLOAD: &str = "baozi!";

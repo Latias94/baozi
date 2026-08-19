@@ -103,7 +103,6 @@ where
 /// This deliberately exposes neither the ledger nor any phase/dimension key. The initial snapshot
 /// is the planning baseline; open-time snapshots derive the exact state that may remain owned by
 /// canonical and evidence publication storage.
-#[cfg(feature = "_u4-activation")]
 #[derive(Clone, Copy)]
 pub(crate) struct RetainedPlanningBaseline {
     current_live_bytes: u64,
@@ -267,7 +266,6 @@ where
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn planning_baseline(&self) -> RetainedPlanningBaseline {
         let state = self.coordinator.retained_ledger().planning_state();
         RetainedPlanningBaseline {
@@ -285,12 +283,10 @@ where
         }
     }
 
-    #[cfg(feature = "_u4-activation")]
     const fn planning_has_outstanding_work_permit(&self) -> bool {
         self.failure_work_permit_outstanding || self.ordinary_work_permit_outstanding
     }
 
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn planning_matches_baseline(&self, baseline: RetainedPlanningBaseline) -> bool {
         if self.planning_has_outstanding_work_permit() {
             return false;

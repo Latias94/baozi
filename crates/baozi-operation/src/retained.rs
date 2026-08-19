@@ -1258,7 +1258,6 @@ where
         } else if self.mode != RetainedOutcomeMode::SuccessCapable {
             Err(RetainedClosureValidationError::WrongOutcomeMode)
         } else {
-            #[cfg(feature = "_u4-activation")]
             let validation_storage_baseline = self
                 .operation
                 .as_ref()
@@ -1332,14 +1331,11 @@ where
                             }
                         };
                         let operation = self.operation.as_ref();
-                        #[cfg(feature = "_u4-activation")]
                         let storage_exact = validation_storage_baseline.is_some_and(|baseline| {
                             operation.is_some_and(|operation| {
                                 operation.planning_matches_baseline(baseline)
                             })
                         });
-                        #[cfg(not(feature = "_u4-activation"))]
-                        let storage_exact = true;
                         let permit_outstanding = operation
                             .is_none_or(|operation| operation.has_outstanding_work_permit());
                         let work_partially_resolved = operation.is_some_and(|operation| {

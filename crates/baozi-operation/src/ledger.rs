@@ -978,14 +978,12 @@ pub(crate) struct Ledger<O, P, D> {
 }
 
 /// Allocation-free scalar observation used only to prove scoped planning cleanup.
-#[cfg(feature = "_u4-activation")]
 #[derive(Clone, Copy)]
 pub(crate) struct LedgerPlanningState {
     current_live_bytes: u64,
     active_reservations: u64,
 }
 
-#[cfg(feature = "_u4-activation")]
 impl LedgerPlanningState {
     pub(crate) const fn current_live_bytes(self) -> u64 {
         self.current_live_bytes
@@ -2556,7 +2554,6 @@ where
     }
 
     /// Observes only the transaction-temporary live state under one ledger lock.
-    #[cfg(feature = "_u4-activation")]
     pub(crate) fn planning_state(&self) -> LedgerPlanningState {
         let state = lock(&self.state);
         LedgerPlanningState {
