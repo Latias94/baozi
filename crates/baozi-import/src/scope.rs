@@ -1,10 +1,9 @@
 use crate::config::{ConformancePolicy, ImportLossKind, LossPolicy};
 use crate::dependency::{
-    AuthorizedDependency, DependencyCache, DependencyCacheCapacityError,
-    DependencyCacheDisposition, DependencyCacheEntry, DependencyCacheStorage, DependencyIdentity,
-    DependencyOrigin, DependencyOriginIssuer, DependencyOriginNode, DependencyOutcome,
-    DependencyReference, DependencyRequirement, DependencyResolver, DependencyRoleId,
-    DependencySnapshot, OptionalDependencyEvidence, SharedDependencySnapshot,
+    AuthorizedDependency, DependencyCacheDisposition, DependencyIdentity, DependencyOrigin,
+    DependencyOriginIssuer, DependencyOriginNode, DependencyOutcome, DependencyReference,
+    DependencyRequirement, DependencyResolver, DependencyRoleId, DependencySnapshot,
+    OptionalDependencyEvidence, SharedDependencySnapshot,
     shared_dependency_snapshot_allocation_bytes,
 };
 use crate::descriptor::TextDecodingMode;
@@ -29,7 +28,8 @@ use crate::metered_storage::{
 use crate::options::{CompiledFormatOptions, FormatOptionKey};
 use crate::registry::RegistryEntry;
 use crate::resource_graph::{
-    PendingResourceRelation, ResourceGraph, ResourceUnavailableDisposition, unavailable_disposition,
+    PendingResourceRelation, ResourceAcquisitionState, ResourceGraph, ResourceGraphError,
+    ResourceUnavailableDisposition, unavailable_disposition,
 };
 use crate::source_scope::{
     FinalizedSourceScopeRecord, LiveSourceScopeRecord, SourceScopeRecordBuilder,
@@ -1846,7 +1846,7 @@ impl<'session> ParseScope<'session> {
                     .resource_graph
                     .try_borrow()
                     .map_err(|_| self.reentrant_capability_failure())?;
-                let Some(identity) = cache.available_identity(index) else {
+                let Some(identity) = cache.origin_identity(index) else {
                     drop(cache);
                     return Err(self.abort(ScopeAbortCause::DescriptorContract {
                         code: "dependency-origin-stale",
@@ -2337,21 +2337,21 @@ impl<'session> ParseScope<'session> {
             ));
         }
         let cached = {
-            let cache = self.resource_graph.borrow();
-            match cache.get(&identity) {
-                Some((index, DependencyCacheEntry::Available(snapshot))) => {
-                    Some((index, Arc::clone(&snapshot.bytes)))
+            let graph = self.resource_graph.borrow();
+            match graph.acquisition_state(&identity) {
+                Some(ResourceAcquisitionState::Available { cache_index, bytes }) => {
+                    Some((cache_index, bytes))
                 }
-                Some((index, DependencyCacheEntry::Failed(_))) => {
+                Some(ResourceAcquisitionState::Failed { cache_index }) => {
                     return Err(self.cached_dependency_failure(
                         pending,
                         identity,
                         normalized,
-                        index,
+                        cache_index,
                         DependencyCacheDisposition::Reused,
                     ));
                 }
-                Some((_, DependencyCacheEntry::Resolving)) => {
+                Some(ResourceAcquisitionState::Resolving) => {
                     return Err(self.dependency_failure(
                         Some(pending),
                         Some(identity),
@@ -2361,7 +2361,7 @@ impl<'session> ParseScope<'session> {
                         },
                     ));
                 }
-                Some((_, DependencyCacheEntry::FailureConsumed)) => {
+                Some(ResourceAcquisitionState::FailureConsumed) => {
                     return Err(self.dependency_failure(
                         Some(pending),
                         Some(identity),
@@ -2403,8 +2403,21 @@ impl<'session> ParseScope<'session> {
             ));
         }
 
-        if let Err(cause) = self.reserve_dependency_cache_capacity() {
-            return Err(self.dependency_failure(Some(pending), Some(identity), normalized, cause));
+        let capacity = match self.resource_graph.try_borrow_mut() {
+            Ok(mut graph) => graph.reserve_acquisition_capacity(self.host),
+            Err(_) => Err(ResourceGraphError::Scope(
+                ScopeAbortCause::DescriptorContract {
+                    code: "parse-capability-reentered",
+                },
+            )),
+        };
+        if let Err(cause) = capacity {
+            return Err(self.dependency_failure(
+                Some(pending),
+                Some(identity),
+                normalized,
+                cause.into_scope_cause(),
+            ));
         }
         let cache_identity_path_reservation =
             match self.reserve_dependency_storage_cause(identity.path().as_str().len() as u64) {
@@ -2434,17 +2447,15 @@ impl<'session> ParseScope<'session> {
         let marked = match self
             .resource_graph
             .borrow_mut()
-            .mark_resolving(cache_identity, cache_identity_path_reservation)
+            .begin_acquisition(cache_identity, cache_identity_path_reservation)
         {
             Ok(marked) => marked,
-            Err(()) => {
+            Err(cause) => {
                 return Err(self.dependency_failure(
                     Some(pending),
                     Some(identity),
                     normalized,
-                    ScopeAbortCause::Allocation {
-                        resource: "dependency-cache-entry",
-                    },
+                    cause.into_scope_cause(),
                 ));
             }
         };
@@ -2469,20 +2480,26 @@ impl<'session> ParseScope<'session> {
             });
         match acquired {
             Ok((snapshot_bytes, snapshot_identity, identity_path_reservation)) => {
-                let Some(origin_node) = self
+                let origin_node = match self
                     .resource_graph
                     .borrow_mut()
-                    .store_available(&identity, Arc::clone(&snapshot_bytes))
-                else {
-                    self.resource_graph.borrow_mut().remove_resolving(&identity);
-                    return Err(self.dependency_failure(
-                        Some(pending),
-                        Some(identity),
-                        normalized,
-                        ScopeAbortCause::DescriptorContract {
-                            code: "dependency-cache-transition-missing",
-                        },
-                    ));
+                    .complete_acquisition(&identity, Arc::clone(&snapshot_bytes))
+                {
+                    Ok(origin_node) => origin_node,
+                    Err(_) => {
+                        let _ = self
+                            .resource_graph
+                            .borrow_mut()
+                            .abandon_acquisition(&identity);
+                        return Err(self.dependency_failure(
+                            Some(pending),
+                            Some(identity),
+                            normalized,
+                            ScopeAbortCause::DescriptorContract {
+                                code: "dependency-cache-transition-missing",
+                            },
+                        ));
+                    }
                 };
                 Ok((
                     DependencySnapshot::new(
@@ -2513,7 +2530,12 @@ impl<'session> ParseScope<'session> {
         cause: ScopeAbortCause,
     ) -> DependencyResolutionFailure {
         if !cacheable_dependency_cause(&cause) {
-            if !self.resource_graph.borrow_mut().remove_resolving(&identity) {
+            if self
+                .resource_graph
+                .borrow_mut()
+                .abandon_acquisition(&identity)
+                .is_err()
+            {
                 return self.dependency_failure(
                     Some(pending),
                     Some(identity),
@@ -2529,7 +2551,7 @@ impl<'session> ParseScope<'session> {
         let cached_index = self
             .resource_graph
             .borrow_mut()
-            .store_failed(&identity, cause);
+            .complete_failed_acquisition(&identity, cause);
         match cached_index {
             Ok(index) => self.cached_dependency_failure(
                 pending,
@@ -2539,7 +2561,10 @@ impl<'session> ParseScope<'session> {
                 DependencyCacheDisposition::Fresh,
             ),
             Err(_) => {
-                self.resource_graph.borrow_mut().remove_resolving(&identity);
+                let _ = self
+                    .resource_graph
+                    .borrow_mut()
+                    .abandon_acquisition(&identity);
                 self.dependency_failure(
                     Some(pending),
                     Some(identity),
@@ -2607,184 +2632,6 @@ impl<'session> ParseScope<'session> {
                 resource: "dependency-snapshot-identity",
             })?;
         Ok((identity, reservation))
-    }
-
-    fn reserve_dependency_cache_capacity(&self) -> Result<(), ScopeAbortCause> {
-        let (plan, entry_envelope, index_envelope, mut entry_reservation, mut index_reservation) = {
-            let mut cache = self.resource_graph.try_borrow_mut().map_err(|_| {
-                ScopeAbortCause::DescriptorContract {
-                    code: "parse-capability-reentered",
-                }
-            })?;
-            let plan = cache
-                .capacity_plan()
-                .map_err(dependency_cache_capacity_cause)?;
-            if !plan.requires_apply() {
-                return Ok(());
-            }
-            let entry_envelope = plan
-                .temporary_envelope_bytes(DependencyCacheStorage::Entries)
-                .map_err(dependency_cache_capacity_cause)?;
-            let index_envelope = plan
-                .temporary_envelope_bytes(DependencyCacheStorage::Index)
-                .map_err(dependency_cache_capacity_cause)?;
-            let entry_reservation =
-                cache.take_capacity_reservation(DependencyCacheStorage::Entries);
-            let index_reservation = cache.take_capacity_reservation(DependencyCacheStorage::Index);
-            (
-                plan,
-                entry_envelope,
-                index_envelope,
-                entry_reservation,
-                index_reservation,
-            )
-        };
-
-        let entry_prior_bytes = entry_reservation
-            .as_ref()
-            .map_or(0, ImportStoreReservation::bytes);
-        let index_prior_bytes = index_reservation
-            .as_ref()
-            .map_or(0, ImportStoreReservation::bytes);
-        // Replacements overlap the live containers, so each storage class admits
-        // its temporary allocation in addition to its retained reservation.
-        if let Err(cause) = self.grow_dependency_cache_reservation(
-            DependencyCacheStorage::Entries,
-            entry_envelope,
-            &mut entry_reservation,
-        ) {
-            self.restore_dependency_cache_reservations(
-                entry_reservation,
-                entry_prior_bytes,
-                index_reservation,
-                index_prior_bytes,
-            );
-            return Err(cause);
-        }
-        if let Err(cause) = self.grow_dependency_cache_reservation(
-            DependencyCacheStorage::Index,
-            index_envelope,
-            &mut index_reservation,
-        ) {
-            self.restore_dependency_cache_reservations(
-                entry_reservation,
-                entry_prior_bytes,
-                index_reservation,
-                index_prior_bytes,
-            );
-            return Err(cause);
-        }
-
-        let actual = match self.resource_graph.try_borrow_mut() {
-            Ok(mut cache) => cache
-                .apply_capacity_plan(plan)
-                .map_err(dependency_cache_capacity_cause),
-            Err(_) => Err(ScopeAbortCause::DescriptorContract {
-                code: "parse-capability-reentered",
-            }),
-        };
-
-        let actual = match actual {
-            Ok(actual) => actual,
-            Err(cause) => {
-                self.restore_dependency_cache_reservations(
-                    entry_reservation,
-                    entry_prior_bytes,
-                    index_reservation,
-                    index_prior_bytes,
-                );
-                return Err(cause);
-            }
-        };
-
-        let mut resize_failure = None;
-        for (storage, reservation) in [
-            (DependencyCacheStorage::Entries, &mut entry_reservation),
-            (DependencyCacheStorage::Index, &mut index_reservation),
-        ] {
-            let Some(retained_bytes) = actual.retained_bytes(storage) else {
-                continue;
-            };
-            let Some(reservation) = reservation.as_mut() else {
-                resize_failure = Some(ScopeAbortCause::DescriptorContract {
-                    code: "dependency-cache-capacity-reservation-missing",
-                });
-                continue;
-            };
-            let resize = self
-                .host
-                .resize(reservation, retained_bytes)
-                .map_err(|cause| cause.into_scope_abort_cause());
-            if let Err(cause) = resize {
-                resize_failure.get_or_insert(cause);
-            }
-        }
-        let mut cache = self.resource_graph.borrow_mut();
-        cache.retain_capacity_reservation(DependencyCacheStorage::Entries, entry_reservation);
-        cache.retain_capacity_reservation(DependencyCacheStorage::Index, index_reservation);
-        drop(cache);
-        if let Some(cause) = resize_failure {
-            return Err(cause);
-        }
-        Ok(())
-    }
-
-    fn grow_dependency_cache_reservation(
-        &self,
-        storage: DependencyCacheStorage,
-        temporary_envelope: u64,
-        reservation: &mut Option<ImportStoreReservation>,
-    ) -> Result<(), ScopeAbortCause> {
-        if temporary_envelope == 0 {
-            return Ok(());
-        }
-        let prior_bytes = reservation
-            .as_ref()
-            .map_or(0, ImportStoreReservation::bytes);
-        let target = prior_bytes.checked_add(temporary_envelope).ok_or_else(|| {
-            dependency_cache_capacity_cause(DependencyCacheCapacityError::Capacity {
-                storage,
-                cause: CapacityPlanError::CapacityOverflow,
-            })
-        })?;
-        if let Some(reservation) = reservation.as_mut() {
-            self.host
-                .resize(reservation, target)
-                .map_err(|cause| cause.into_scope_abort_cause())
-        } else {
-            *reservation = Some(
-                self.host
-                    .reserve(
-                        ImportLedgerPhase::DependencyAcquisition,
-                        ImportDimension::ScratchBytes,
-                        target,
-                    )
-                    .map_err(|cause| cause.into_scope_abort_cause())?,
-            );
-            Ok(())
-        }
-    }
-
-    fn restore_dependency_cache_reservations(
-        &self,
-        mut entry_reservation: Option<ImportStoreReservation>,
-        entry_prior_bytes: u64,
-        mut index_reservation: Option<ImportStoreReservation>,
-        index_prior_bytes: u64,
-    ) {
-        for (reservation, prior_bytes) in [
-            (&mut entry_reservation, entry_prior_bytes),
-            (&mut index_reservation, index_prior_bytes),
-        ] {
-            if prior_bytes == 0 {
-                drop(reservation.take());
-            } else if let Some(reservation) = reservation.as_mut() {
-                let _ = self.host.resize(reservation, prior_bytes);
-            }
-        }
-        let mut cache = self.resource_graph.borrow_mut();
-        cache.retain_capacity_reservation(DependencyCacheStorage::Entries, entry_reservation);
-        cache.retain_capacity_reservation(DependencyCacheStorage::Index, index_reservation);
     }
 
     fn charge_logical_reference(&self) -> Result<(), DependencyResolutionFailure> {
@@ -3793,14 +3640,14 @@ enum DependencyResolutionCause {
 impl DependencyResolutionContext {
     fn cause<'a>(
         &'a self,
-        cache: &'a DependencyCache,
+        graph: &'a ResourceGraph,
     ) -> Result<&'a ScopeAbortCause, ScopeAbortCause> {
         match &self.cause {
             DependencyResolutionCause::Owned(cause) => Ok(cause),
             DependencyResolutionCause::Cached { index } => {
-                cache
-                    .failed(*index)
-                    .ok_or(ScopeAbortCause::DescriptorContract {
+                graph
+                    .cached_failure(*index)
+                    .map_err(|_| ScopeAbortCause::DescriptorContract {
                         code: "dependency-cache-failure-index-invalid",
                     })
             }
@@ -3809,7 +3656,7 @@ impl DependencyResolutionContext {
 
     fn into_parts(
         self,
-        cache: &mut DependencyCache,
+        graph: &mut ResourceGraph,
     ) -> (
         ScopeAbortCause,
         Option<PendingResourceRelation>,
@@ -3825,13 +3672,11 @@ impl DependencyResolutionContext {
         } = self;
         let cause = match cause {
             DependencyResolutionCause::Owned(cause) => cause,
-            DependencyResolutionCause::Cached { index } => {
-                cache
-                    .take_failed(index)
-                    .unwrap_or(ScopeAbortCause::DescriptorContract {
-                        code: "dependency-cache-failure-index-invalid",
-                    })
-            }
+            DependencyResolutionCause::Cached { index } => graph
+                .take_cached_failure(index)
+                .unwrap_or(ScopeAbortCause::DescriptorContract {
+                    code: "dependency-cache-failure-index-invalid",
+                }),
         };
         (cause, relation, identity, normalized_path)
     }
@@ -4150,30 +3995,6 @@ fn capacity_plan_cause(resource: &'static str, cause: CapacityPlanError) -> Scop
         _ => ScopeAbortCause::DescriptorContract {
             code: "capacity-plan-contract-failed",
         },
-    }
-}
-
-fn dependency_cache_capacity_cause(error: DependencyCacheCapacityError) -> ScopeAbortCause {
-    match error {
-        DependencyCacheCapacityError::Capacity { storage, cause } => {
-            capacity_plan_cause(dependency_cache_storage_resource(storage), cause)
-        }
-        DependencyCacheCapacityError::Allocation { storage } => ScopeAbortCause::Allocation {
-            resource: dependency_cache_storage_resource(storage),
-        },
-        DependencyCacheCapacityError::Stale => ScopeAbortCause::DescriptorContract {
-            code: "dependency-cache-capacity-plan-stale",
-        },
-        DependencyCacheCapacityError::IndexContract => ScopeAbortCause::DescriptorContract {
-            code: "dependency-cache-index-contract-failed",
-        },
-    }
-}
-
-const fn dependency_cache_storage_resource(storage: DependencyCacheStorage) -> &'static str {
-    match storage {
-        DependencyCacheStorage::Entries => "dependency-cache-entry-capacity",
-        DependencyCacheStorage::Index => "dependency-cache-index-capacity",
     }
 }
 

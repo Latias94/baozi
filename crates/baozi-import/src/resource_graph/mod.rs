@@ -15,14 +15,16 @@ pub use manifest::{
 };
 
 use crate::dependency::{
-    DependencyCache, DependencyIdentity, DependencyRequirement, DependencyRoleId,
+    DependencyCache, DependencyCacheCapacityError, DependencyCacheEntry, DependencyCacheStorage,
+    DependencyIdentity, DependencyRequirement, DependencyRoleId, SharedDependencySnapshot,
 };
 use crate::error::ScopeAbortCause;
-use crate::ledger::ImportDimension;
+use crate::ledger::{ImportDimension, ImportLedgerPhase};
 use crate::limits::ResourceLimits;
-use crate::store::ImportStoreHost;
+use crate::store::{ImportStoreHost, ImportStoreReservation};
 use baozi_io::{AssetPath, AuthorityDomain};
-use std::ops::{Deref, DerefMut};
+use baozi_operation::CapacityPlanError;
+use std::sync::Arc;
 
 use manifest::{ManifestEncodingError, encode_node_class, encode_relation_key};
 
@@ -130,6 +132,18 @@ struct DepthUpdate {
     depth: u64,
 }
 
+pub(crate) enum ResourceAcquisitionState {
+    Available {
+        cache_index: usize,
+        bytes: Arc<SharedDependencySnapshot>,
+    },
+    Failed {
+        cache_index: usize,
+    },
+    Resolving,
+    FailureConsumed,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ResourceUnavailableDisposition {
     class: ManifestUnavailableClass,
@@ -178,6 +192,188 @@ impl ResourceGraph {
         }
         self.limits = limits;
         self.validate_current_limits()
+    }
+
+    pub(crate) fn origin_identity(&self, cache_index: usize) -> Option<&DependencyIdentity> {
+        self.cache.available_identity(cache_index)
+    }
+
+    pub(crate) fn acquisition_state(
+        &self,
+        identity: &DependencyIdentity,
+    ) -> Option<ResourceAcquisitionState> {
+        self.cache
+            .get(identity)
+            .map(|(cache_index, entry)| match entry {
+                DependencyCacheEntry::Available(snapshot) => ResourceAcquisitionState::Available {
+                    cache_index,
+                    bytes: Arc::clone(&snapshot.bytes),
+                },
+                DependencyCacheEntry::Failed(_) => ResourceAcquisitionState::Failed { cache_index },
+                DependencyCacheEntry::Resolving => ResourceAcquisitionState::Resolving,
+                DependencyCacheEntry::FailureConsumed => ResourceAcquisitionState::FailureConsumed,
+            })
+    }
+
+    pub(crate) fn reserve_acquisition_capacity(
+        &mut self,
+        host: ImportStoreHost<'_>,
+    ) -> Result<(), ResourceGraphError> {
+        let plan = self.cache.capacity_plan().map_err(dependency_cache_error)?;
+        if !plan.requires_apply() {
+            return Ok(());
+        }
+        let entry_envelope = plan
+            .temporary_envelope_bytes(DependencyCacheStorage::Entries)
+            .map_err(dependency_cache_error)?;
+        let index_envelope = plan
+            .temporary_envelope_bytes(DependencyCacheStorage::Index)
+            .map_err(dependency_cache_error)?;
+        let mut entry_reservation = self
+            .cache
+            .take_capacity_reservation(DependencyCacheStorage::Entries);
+        let mut index_reservation = self
+            .cache
+            .take_capacity_reservation(DependencyCacheStorage::Index);
+        let entry_prior_bytes = entry_reservation
+            .as_ref()
+            .map_or(0, ImportStoreReservation::bytes);
+        let index_prior_bytes = index_reservation
+            .as_ref()
+            .map_or(0, ImportStoreReservation::bytes);
+
+        if let Err(cause) = grow_acquisition_reservation(
+            host,
+            DependencyCacheStorage::Entries,
+            entry_envelope,
+            &mut entry_reservation,
+        ) {
+            restore_acquisition_reservations(
+                &mut self.cache,
+                host,
+                entry_reservation,
+                entry_prior_bytes,
+                index_reservation,
+                index_prior_bytes,
+            );
+            return Err(ResourceGraphError::Scope(cause));
+        }
+        if let Err(cause) = grow_acquisition_reservation(
+            host,
+            DependencyCacheStorage::Index,
+            index_envelope,
+            &mut index_reservation,
+        ) {
+            restore_acquisition_reservations(
+                &mut self.cache,
+                host,
+                entry_reservation,
+                entry_prior_bytes,
+                index_reservation,
+                index_prior_bytes,
+            );
+            return Err(ResourceGraphError::Scope(cause));
+        }
+
+        let actual = match self.cache.apply_capacity_plan(plan) {
+            Ok(actual) => actual,
+            Err(cause) => {
+                restore_acquisition_reservations(
+                    &mut self.cache,
+                    host,
+                    entry_reservation,
+                    entry_prior_bytes,
+                    index_reservation,
+                    index_prior_bytes,
+                );
+                return Err(dependency_cache_error(cause));
+            }
+        };
+
+        let mut resize_failure = None;
+        for (storage, reservation) in [
+            (DependencyCacheStorage::Entries, &mut entry_reservation),
+            (DependencyCacheStorage::Index, &mut index_reservation),
+        ] {
+            let Some(retained_bytes) = actual.retained_bytes(storage) else {
+                continue;
+            };
+            let Some(reservation) = reservation.as_mut() else {
+                resize_failure = Some(ScopeAbortCause::DescriptorContract {
+                    code: "dependency-cache-capacity-reservation-missing",
+                });
+                continue;
+            };
+            if let Err(cause) = host.resize(reservation, retained_bytes) {
+                resize_failure.get_or_insert_with(|| cause.into_scope_abort_cause());
+            }
+        }
+        self.cache
+            .retain_capacity_reservation(DependencyCacheStorage::Entries, entry_reservation);
+        self.cache
+            .retain_capacity_reservation(DependencyCacheStorage::Index, index_reservation);
+        if let Some(cause) = resize_failure {
+            return Err(ResourceGraphError::Scope(cause));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn begin_acquisition(
+        &mut self,
+        identity: DependencyIdentity,
+        identity_path_reservation: ImportStoreReservation,
+    ) -> Result<bool, ResourceGraphError> {
+        self.cache
+            .mark_resolving(identity, identity_path_reservation)
+            .map_err(|()| ResourceGraphError::Allocation {
+                resource: "dependency-cache-entry",
+            })
+    }
+
+    pub(crate) fn complete_acquisition(
+        &mut self,
+        identity: &DependencyIdentity,
+        bytes: Arc<SharedDependencySnapshot>,
+    ) -> Result<usize, ResourceGraphError> {
+        self.cache
+            .store_available(identity, bytes)
+            .ok_or(ResourceGraphError::DanglingNode)
+    }
+
+    pub(crate) fn abandon_acquisition(
+        &mut self,
+        identity: &DependencyIdentity,
+    ) -> Result<(), ResourceGraphError> {
+        self.cache
+            .remove_resolving(identity)
+            .then_some(())
+            .ok_or(ResourceGraphError::DanglingNode)
+    }
+
+    pub(crate) fn complete_failed_acquisition(
+        &mut self,
+        identity: &DependencyIdentity,
+        cause: ScopeAbortCause,
+    ) -> Result<usize, ScopeAbortCause> {
+        self.cache.store_failed(identity, cause)
+    }
+
+    pub(crate) fn cached_failure(
+        &self,
+        cache_index: usize,
+    ) -> Result<&ScopeAbortCause, ResourceGraphError> {
+        self.cache
+            .failed(cache_index)
+            .ok_or(ResourceGraphError::DanglingNode)
+    }
+
+    pub(crate) fn take_cached_failure(
+        &mut self,
+        cache_index: usize,
+    ) -> Result<ScopeAbortCause, ResourceGraphError> {
+        self.cache
+            .take_failed(cache_index)
+            .ok_or(ResourceGraphError::DanglingNode)
     }
 
     pub(crate) fn bind_primary(
@@ -899,20 +1095,6 @@ impl ResourceGraph {
     }
 }
 
-impl Deref for ResourceGraph {
-    type Target = DependencyCache;
-
-    fn deref(&self) -> &Self::Target {
-        &self.cache
-    }
-}
-
-impl DerefMut for ResourceGraph {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.cache
-    }
-}
-
 fn project_relation(
     relation: &GraphRelation,
     digests: &[Option<ManifestDigest>],
@@ -1131,6 +1313,112 @@ fn charge_graph_work(host: ImportStoreHost<'_>, amount: u64) -> Result<(), Resou
 fn charge_manifest_work(host: ImportStoreHost<'_>, amount: u64) -> Result<(), ResourceGraphError> {
     charge_attempted(host, ImportDimension::InputManifestWork, amount)?;
     charge_consumed(host, ImportDimension::InputManifestWork, amount)
+}
+
+fn dependency_cache_error(cause: DependencyCacheCapacityError) -> ResourceGraphError {
+    let cause = match cause {
+        DependencyCacheCapacityError::Capacity { storage, cause } => {
+            dependency_cache_capacity_plan_cause(dependency_cache_storage_resource(storage), cause)
+        }
+        DependencyCacheCapacityError::Allocation { storage } => ScopeAbortCause::Allocation {
+            resource: dependency_cache_storage_resource(storage),
+        },
+        DependencyCacheCapacityError::Stale => ScopeAbortCause::DescriptorContract {
+            code: "dependency-cache-capacity-plan-stale",
+        },
+        DependencyCacheCapacityError::IndexContract => ScopeAbortCause::DescriptorContract {
+            code: "dependency-cache-index-contract-failed",
+        },
+    };
+    ResourceGraphError::Scope(cause)
+}
+
+const fn dependency_cache_storage_resource(storage: DependencyCacheStorage) -> &'static str {
+    match storage {
+        DependencyCacheStorage::Entries => "dependency-cache-entry-capacity",
+        DependencyCacheStorage::Index => "dependency-cache-index-capacity",
+    }
+}
+
+fn grow_acquisition_reservation(
+    host: ImportStoreHost<'_>,
+    storage: DependencyCacheStorage,
+    temporary_envelope: u64,
+    reservation: &mut Option<ImportStoreReservation>,
+) -> Result<(), ScopeAbortCause> {
+    if temporary_envelope == 0 {
+        return Ok(());
+    }
+    let prior_bytes = reservation
+        .as_ref()
+        .map_or(0, ImportStoreReservation::bytes);
+    let target = prior_bytes.checked_add(temporary_envelope).ok_or_else(|| {
+        dependency_cache_capacity_plan_cause(
+            dependency_cache_storage_resource(storage),
+            CapacityPlanError::CapacityOverflow,
+        )
+    })?;
+    if let Some(reservation) = reservation.as_mut() {
+        host.resize(reservation, target)
+            .map_err(|cause| cause.into_scope_abort_cause())
+    } else {
+        *reservation = Some(
+            host.reserve(
+                ImportLedgerPhase::DependencyAcquisition,
+                ImportDimension::ScratchBytes,
+                target,
+            )
+            .map_err(|cause| cause.into_scope_abort_cause())?,
+        );
+        Ok(())
+    }
+}
+
+fn dependency_cache_capacity_plan_cause(
+    resource: &'static str,
+    cause: CapacityPlanError,
+) -> ScopeAbortCause {
+    match cause {
+        CapacityPlanError::CapacityOverflow | CapacityPlanError::AllocationTooLarge { .. } => {
+            ScopeAbortCause::ResourceLimit {
+                resource,
+                limit: u64::MAX,
+            }
+        }
+        CapacityPlanError::InvalidState { .. } | CapacityPlanError::StalePlan { .. } => {
+            ScopeAbortCause::DescriptorContract {
+                code: "capacity-plan-contract-failed",
+            }
+        }
+        cause @ CapacityPlanError::CapacityEnvelopeViolated { .. } => {
+            ScopeAbortCause::CapacityEnvelope { resource, cause }
+        }
+        _ => ScopeAbortCause::DescriptorContract {
+            code: "capacity-plan-contract-failed",
+        },
+    }
+}
+
+fn restore_acquisition_reservations(
+    cache: &mut DependencyCache,
+    host: ImportStoreHost<'_>,
+    mut entry_reservation: Option<ImportStoreReservation>,
+    entry_prior_bytes: u64,
+    mut index_reservation: Option<ImportStoreReservation>,
+    index_prior_bytes: u64,
+) {
+    for (reservation, prior_bytes) in [
+        (&mut entry_reservation, entry_prior_bytes),
+        (&mut index_reservation, index_prior_bytes),
+    ] {
+        if prior_bytes == 0 {
+            drop(reservation.take());
+        } else if let Some(reservation) = reservation.as_mut() {
+            let _ = host.resize(reservation, prior_bytes);
+        }
+    }
+    cache.retain_capacity_reservation(DependencyCacheStorage::Entries, entry_reservation);
+    cache.retain_capacity_reservation(DependencyCacheStorage::Index, index_reservation);
 }
 
 #[cfg(test)]
