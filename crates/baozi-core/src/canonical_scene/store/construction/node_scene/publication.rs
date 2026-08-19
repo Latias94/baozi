@@ -516,7 +516,7 @@ impl NodeActivationFailureCause
 }
 
 type PreparedNodeSceneFailureParts = (
-    PreparedNodeSceneConstruction,
+    PreparedNodeSceneFailure,
     Option<NodeSceneConstructionRejection<StoreRuntimeError>>,
     Option<ControlCause>,
 );
@@ -531,7 +531,7 @@ where
         self,
     ) -> Result<PreparedNodeSceneFailureParts, SceneConstructionError> {
         let mut control_cause = None;
-        let build = match self {
+        let (prepared, authoring_rejection) = match self {
             Self::ActivationRejected {
                 owner,
                 evidence_plan,
@@ -588,44 +588,41 @@ where
                 owner,
                 evidence_counts,
                 final_progress,
-            } => prepare_node_central_failure(
-                owner.validate_rich_failure(|session, root| {
-                    validate_node_scene_failure_evidence(session, root, evidence_counts)
-                }),
-                final_progress,
-            )?,
+            } => (
+                prepare_node_central_failure(
+                    owner.validate_rich_failure(|session, root| {
+                        validate_node_scene_failure_evidence(session, root, evidence_counts)
+                    }),
+                    final_progress,
+                )?,
+                None,
+            ),
             Self::CentralInterrupted {
                 owner,
                 evidence_counts,
                 final_progress,
             } => {
                 control_cause = owner.cause().control_cause().cloned();
-                prepare_node_central_failure(
-                    owner.validate_rich_failure(|session, root| {
-                        validate_node_scene_failure_evidence(session, root, evidence_counts)
-                    }),
-                    final_progress,
-                )?
+                (
+                    prepare_node_central_failure(
+                        owner.validate_rich_failure(|session, root| {
+                            validate_node_scene_failure_evidence(session, root, evidence_counts)
+                        }),
+                        final_progress,
+                    )?,
+                    None,
+                )
             }
             Self::PreparedFallback(fallback) => {
                 let (store, _cause) = fallback.into_parts();
                 return Ok((
-                    PreparedNodeSceneConstruction::MinimalFallback(PreparedNodeSceneFallback {
-                        store,
-                    }),
+                    PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store }),
                     None,
                     None,
                 ));
             }
         };
-        let NodeSceneDraftBuild::Failure {
-            authoring_rejection,
-            prepared,
-        } = build
-        else {
-            unreachable!("a pending failure cannot prepare a successful Scene draft")
-        };
-        Ok((prepared.into(), authoring_rejection, control_cause))
+        Ok((prepared, authoring_rejection, control_cause))
     }
 }
 
@@ -642,17 +639,6 @@ where
             Self::Draft { draft, owner } => Ok(NodeSceneDraftBuild::Draft { draft, owner }),
             Self::Failure { owner, .. } => {
                 let (prepared, authoring_rejection, _control_cause) = owner.prepare()?;
-                let prepared = match prepared {
-                    PreparedNodeSceneConstruction::RichFailure(failure) => {
-                        PreparedNodeSceneFailure::RichFailure(failure)
-                    }
-                    PreparedNodeSceneConstruction::MinimalFallback(fallback) => {
-                        PreparedNodeSceneFailure::MinimalFallback(fallback)
-                    }
-                    PreparedNodeSceneConstruction::Success(_) => {
-                        unreachable!("a pending failure cannot prepare canonical success")
-                    }
-                };
                 Ok(NodeSceneDraftBuild::Failure {
                     authoring_rejection,
                     prepared,
@@ -679,7 +665,13 @@ pub(super) fn prepare_node_activation_failure<O, PP, U, Cause>(
     >,
     evidence_counts: SceneEvidenceCounts,
     final_progress: FinalProgress<PP, U>,
-) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
+) -> Result<
+    (
+        PreparedNodeSceneFailure,
+        Option<NodeSceneConstructionRejection<StoreRuntimeError>>,
+    ),
+    SceneConstructionError,
+>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -701,10 +693,10 @@ where
             )
         }
     };
-    Ok(NodeSceneDraftBuild::Failure {
-        authoring_rejection: cause.and_then(NodeActivationFailureCause::into_authoring_rejection),
+    Ok((
         prepared,
-    })
+        cause.and_then(NodeActivationFailureCause::into_authoring_rejection),
+    ))
 }
 
 /// Prepares an ordinary central-validation failure. The caller retains the concrete rejected or
@@ -716,17 +708,14 @@ pub(super) fn prepare_node_central_failure<O, PP, U, Cause>(
         StoreActivationContainment,
     >,
     final_progress: FinalProgress<PP, U>,
-) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
+) -> Result<PreparedNodeSceneFailure, SceneConstructionError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     let (prepared, _cause) = prepare_node_ordinary_failure_validation(validation?, final_progress)?;
-    Ok(NodeSceneDraftBuild::Failure {
-        authoring_rejection: None,
-        prepared,
-    })
+    Ok(prepared)
 }
 
 fn prepare_node_ordinary_construction_failure<O, PP, U, Cause>(

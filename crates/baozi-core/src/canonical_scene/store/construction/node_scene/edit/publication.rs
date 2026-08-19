@@ -19,9 +19,8 @@ use super::super::super::{
 use super::super::publication::validate_node_scene_failure_evidence;
 use super::super::{
     ActivatedNodeSceneCandidate, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneCanonicalJointCommit,
-    NodeSceneFallback, NodeSceneRichFailure, PendingNodeSceneFailure,
-    PreparedNodeSceneConstruction, PreparedNodeSceneFallback, PreparedNodeSceneRichFailure,
-    ValidatedNodeScene,
+    NodeSceneFallback, NodeSceneRichFailure, PendingNodeSceneFailure, PreparedNodeSceneFailure,
+    PreparedNodeSceneFallback, PreparedNodeSceneRichFailure, ValidatedNodeScene,
 };
 use super::report::{CanonicalInvalidations, CanonicalRemapSet};
 
@@ -229,7 +228,7 @@ pub(super) fn prepare_pending_edit_failure(
     >,
 ) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
     let (prepared, _authoring_rejection, _control_cause) = pending.prepare()?;
-    map_prepared_construction_failure(prepared)
+    Ok(map_prepared_node_scene_failure(prepared))
 }
 
 fn prepare_ordinary_failure_validation<Cause>(
@@ -263,19 +262,14 @@ fn prepare_ordinary_failure_validation<Cause>(
     }
 }
 
-fn map_prepared_construction_failure(
-    prepared: PreparedNodeSceneConstruction,
-) -> Result<PreparedNodeSceneEdit, SceneConstructionError> {
+fn map_prepared_node_scene_failure(prepared: PreparedNodeSceneFailure) -> PreparedNodeSceneEdit {
     match prepared {
-        PreparedNodeSceneConstruction::Success(_) => {
-            Err(SceneConstructionError::JointCommitInvariant)
+        PreparedNodeSceneFailure::RichFailure(PreparedNodeSceneRichFailure { store }) => {
+            PreparedNodeSceneEdit::rich_failure(PreparedNodeSceneEditRichFailure { store })
         }
-        PreparedNodeSceneConstruction::RichFailure(PreparedNodeSceneRichFailure { store }) => Ok(
-            PreparedNodeSceneEdit::rich_failure(PreparedNodeSceneEditRichFailure { store }),
-        ),
-        PreparedNodeSceneConstruction::MinimalFallback(PreparedNodeSceneFallback { store }) => Ok(
-            PreparedNodeSceneEdit::minimal_fallback(PreparedNodeSceneEditMinimalFallback { store }),
-        ),
+        PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store }) => {
+            PreparedNodeSceneEdit::minimal_fallback(PreparedNodeSceneEditMinimalFallback { store })
+        }
     }
 }
 
