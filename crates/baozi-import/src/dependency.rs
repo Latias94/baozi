@@ -2,8 +2,8 @@ use crate::diagnostic::DiagnosticSource;
 use crate::error::{CauseOwner, ScopeAbortCause};
 use crate::metered_storage::AccountedVec;
 use crate::store::ImportStoreReservation;
-use baozi_io::{AssetIo, AssetPath, AuthorityDomain};
-use baozi_operation::{CapacityPlan, CapacityPlanError, ReplacementCapacityPlan};
+use baozi_io::{AssetIo, AssetOpenErrorKind, AssetPath, AssetReadErrorKind, AuthorityDomain};
+use baozi_operation::{CapacityPlan, CapacityPlanError, LedgerCause, ReplacementCapacityPlan};
 use std::collections::hash_map::RandomState;
 use std::error::Error;
 use std::fmt;
@@ -795,47 +795,29 @@ impl DependencyCache {
     pub(crate) fn store_failed(
         &mut self,
         identity: &DependencyIdentity,
-        cause: ScopeAbortCause,
-    ) -> Result<usize, ScopeAbortCause> {
+        failure: CachedDependencyFailure,
+    ) -> Result<usize, CachedDependencyFailure> {
         let Some(index) = self.record_index(identity) else {
-            return Err(cause);
+            return Err(failure);
         };
         let Some(DependencyCacheRecordSlot::Occupied(record)) = self.entries.get_mut(index) else {
-            return Err(cause);
+            return Err(failure);
         };
         let entry = &mut record.entry;
         let DependencyCacheEntry::Resolving = entry else {
-            return Err(cause);
+            return Err(failure);
         };
-        *entry = DependencyCacheEntry::Failed(cause);
+        *entry = DependencyCacheEntry::Failed(Box::new(failure));
         Ok(index)
     }
 
-    pub(crate) fn failed(&self, index: usize) -> Option<&ScopeAbortCause> {
+    pub(crate) fn failed(&self, index: usize) -> Option<&CachedDependencyFailure> {
         match self.entries.get(index) {
             Some(DependencyCacheRecordSlot::Occupied(record)) => match &record.entry {
-                DependencyCacheEntry::Failed(cause) => Some(cause),
-                DependencyCacheEntry::Resolving
-                | DependencyCacheEntry::Available(_)
-                | DependencyCacheEntry::FailureConsumed => None,
+                DependencyCacheEntry::Failed(failure) => Some(failure.as_ref()),
+                DependencyCacheEntry::Resolving | DependencyCacheEntry::Available(_) => None,
             },
             Some(DependencyCacheRecordSlot::Vacant { .. }) | None => None,
-        }
-    }
-
-    pub(crate) fn take_failed(&mut self, index: usize) -> Option<ScopeAbortCause> {
-        let DependencyCacheRecordSlot::Occupied(record) = self.entries.get_mut(index)? else {
-            return None;
-        };
-        let entry = &mut record.entry;
-        if !matches!(entry, DependencyCacheEntry::Failed(_)) {
-            return None;
-        }
-        match std::mem::replace(entry, DependencyCacheEntry::FailureConsumed) {
-            DependencyCacheEntry::Failed(cause) => Some(cause),
-            DependencyCacheEntry::Resolving
-            | DependencyCacheEntry::Available(_)
-            | DependencyCacheEntry::FailureConsumed => None,
         }
     }
 
@@ -1151,12 +1133,99 @@ impl DependencyCacheCapacityActual {
 pub(crate) enum DependencyCacheEntry {
     Resolving,
     Available(CachedDependencySnapshot),
-    Failed(ScopeAbortCause),
-    FailureConsumed,
+    Failed(Box<CachedDependencyFailure>),
 }
 
 pub(crate) struct CachedDependencySnapshot {
     pub(crate) bytes: Arc<SharedDependencySnapshot>,
+}
+
+/// The first immutable unavailable result published for one physical dependency identity.
+///
+/// Construction accepts only failures that may be reused under the same authority-qualified cache
+/// key. Trusted-backend contract failures and other session-terminal causes never enter this type.
+#[derive(Debug)]
+pub(crate) struct CachedDependencyFailure {
+    cause: ScopeAbortCause,
+    unavailable: CachedDependencyUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CachedDependencyUnavailable {
+    EnvironmentDependent {
+        code: CachedDependencyIoCode,
+        observation: CachedNegativeObservation,
+    },
+    AcquisitionBudget,
+    ProcessState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CachedDependencyIoCode {
+    Missing,
+    OpenFailed,
+    ReadFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CachedNegativeObservation {
+    None,
+}
+
+impl CachedDependencyFailure {
+    pub(crate) fn try_new(cause: ScopeAbortCause) -> Result<Self, ScopeAbortCause> {
+        let unavailable = match &cause {
+            ScopeAbortCause::AssetOpen(error) => {
+                CachedDependencyUnavailable::EnvironmentDependent {
+                    code: if matches!(error.kind(), AssetOpenErrorKind::NotFound) {
+                        CachedDependencyIoCode::Missing
+                    } else {
+                        CachedDependencyIoCode::OpenFailed
+                    },
+                    observation: CachedNegativeObservation::None,
+                }
+            }
+            ScopeAbortCause::AssetRead(error)
+                if !matches!(error.kind(), AssetReadErrorKind::ContractViolation(_)) =>
+            {
+                CachedDependencyUnavailable::EnvironmentDependent {
+                    code: CachedDependencyIoCode::ReadFailed,
+                    observation: CachedNegativeObservation::None,
+                }
+            }
+            ScopeAbortCause::Ledger(LedgerCause::LimitExceeded { .. })
+            | ScopeAbortCause::ResourceLimit { .. } => {
+                CachedDependencyUnavailable::AcquisitionBudget
+            }
+            ScopeAbortCause::Allocation { .. } => CachedDependencyUnavailable::ProcessState,
+            _ => return Err(cause),
+        };
+        Ok(Self { cause, unavailable })
+    }
+
+    pub(crate) const fn cause(&self) -> &ScopeAbortCause {
+        &self.cause
+    }
+
+    pub(crate) const fn unavailable(&self) -> CachedDependencyUnavailable {
+        self.unavailable
+    }
+
+    pub(crate) fn replay_scope_cause(&self) -> ScopeAbortCause {
+        match &self.cause {
+            ScopeAbortCause::AssetOpen(error) => ScopeAbortCause::AssetOpen(error.clone()),
+            ScopeAbortCause::AssetRead(error) => ScopeAbortCause::AssetRead(error.clone()),
+            ScopeAbortCause::Ledger(cause @ LedgerCause::LimitExceeded { .. }) => {
+                ScopeAbortCause::Ledger(cause.clone())
+            }
+            ScopeAbortCause::ResourceLimit { resource, limit } => ScopeAbortCause::ResourceLimit {
+                resource,
+                limit: *limit,
+            },
+            ScopeAbortCause::Allocation { resource } => ScopeAbortCause::Allocation { resource },
+            _ => unreachable!("CachedDependencyFailure accepts only reusable dependency causes"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1168,7 +1237,9 @@ mod tests {
         ImportStoreBootstrapRequirements, ImportStoreHost, ImportStoreSessionOwner,
         try_import_store_bootstrap,
     };
-    use baozi_io::MemoryAssetIo;
+    use baozi_io::{
+        AssetOpenError, AssetOpenStage, AssetReadContractViolation, AssetReadError, MemoryAssetIo,
+    };
     use baozi_operation::{
         PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
         PhysicalStorageAccountLimits,
@@ -1511,6 +1582,75 @@ mod tests {
 
         assert!(!cache.remove_resolving(&identity));
         assert_eq!(cache.available_identity(0), Some(&identity));
+    }
+
+    #[test]
+    fn dependency_failure_cache_replays_one_immutable_negative_observation() {
+        let store = StoreHarness::new();
+        let authority = AuthorityDomain::new();
+        let identity = indexed_identity(&authority, "missing", 0);
+        let mut cache = DependencyCache::new();
+        cache.entries = Vec::with_capacity(1);
+        cache.index.slots = vec![DEPENDENCY_INDEX_EMPTY; 8];
+        assert!(
+            cache
+                .mark_resolving(identity.try_clone().unwrap(), store.reserve_scratch(1),)
+                .unwrap()
+        );
+        let failure = CachedDependencyFailure::try_new(ScopeAbortCause::AssetOpen(
+            AssetOpenError::new(AssetOpenStage::Open, AssetOpenErrorKind::NotFound),
+        ))
+        .expect("missing input is a reusable physical failure");
+        let cache_index = cache
+            .store_failed(&identity, failure)
+            .expect("the resolving cache entry must accept its first failure");
+
+        for _ in 0..2 {
+            let cached = cache
+                .failed(cache_index)
+                .expect("replaying a failure must not consume the cache entry");
+            assert_eq!(
+                cached.unavailable(),
+                CachedDependencyUnavailable::EnvironmentDependent {
+                    code: CachedDependencyIoCode::Missing,
+                    observation: CachedNegativeObservation::None,
+                }
+            );
+            assert!(matches!(
+                cached.replay_scope_cause(),
+                ScopeAbortCause::AssetOpen(error)
+                    if error.stage() == AssetOpenStage::Open
+                        && error.kind() == AssetOpenErrorKind::NotFound
+            ));
+        }
+        assert!(matches!(
+            cache.get(&identity),
+            Some((index, DependencyCacheEntry::Failed(_))) if index == cache_index
+        ));
+    }
+
+    #[test]
+    fn trusted_reader_contract_failure_cannot_enter_dependency_cache() {
+        let cause = ScopeAbortCause::AssetRead(AssetReadError::contract_violation(
+            AssetReadContractViolation::CountExceedsBuffer {
+                returned: 2,
+                capacity: 1,
+            },
+        ));
+
+        assert!(matches!(
+            CachedDependencyFailure::try_new(cause),
+            Err(ScopeAbortCause::AssetRead(error))
+                if matches!(
+                    error.kind(),
+                    AssetReadErrorKind::ContractViolation(
+                        AssetReadContractViolation::CountExceedsBuffer {
+                            returned: 2,
+                            capacity: 1,
+                        }
+                    )
+                )
+        ));
     }
 
     #[test]

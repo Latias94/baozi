@@ -15,8 +15,10 @@ pub use manifest::{
 };
 
 use crate::dependency::{
-    DependencyCache, DependencyCacheCapacityError, DependencyCacheEntry, DependencyCacheStorage,
-    DependencyIdentity, DependencyRequirement, DependencyRoleId, SharedDependencySnapshot,
+    CachedDependencyFailure, CachedDependencyIoCode, CachedDependencyUnavailable,
+    CachedNegativeObservation, DependencyCache, DependencyCacheCapacityError, DependencyCacheEntry,
+    DependencyCacheStorage, DependencyIdentity, DependencyRequirement, DependencyRoleId,
+    SharedDependencySnapshot,
 };
 use crate::error::ScopeAbortCause;
 use crate::ledger::{ImportDimension, ImportLedgerPhase};
@@ -209,7 +211,6 @@ pub(crate) enum ResourceAcquisitionState {
         cache_index: usize,
     },
     Resolving,
-    FailureConsumed,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -281,7 +282,6 @@ impl ResourceGraph {
                 },
                 DependencyCacheEntry::Failed(_) => ResourceAcquisitionState::Failed { cache_index },
                 DependencyCacheEntry::Resolving => ResourceAcquisitionState::Resolving,
-                DependencyCacheEntry::FailureConsumed => ResourceAcquisitionState::FailureConsumed,
             })
     }
 
@@ -423,26 +423,17 @@ impl ResourceGraph {
     pub(crate) fn complete_failed_acquisition(
         &mut self,
         identity: &DependencyIdentity,
-        cause: ScopeAbortCause,
-    ) -> Result<usize, ScopeAbortCause> {
-        self.cache.store_failed(identity, cause)
+        failure: CachedDependencyFailure,
+    ) -> Result<usize, CachedDependencyFailure> {
+        self.cache.store_failed(identity, failure)
     }
 
     pub(crate) fn cached_failure(
         &self,
         cache_index: usize,
-    ) -> Result<&ScopeAbortCause, ResourceGraphError> {
+    ) -> Result<&CachedDependencyFailure, ResourceGraphError> {
         self.cache
             .failed(cache_index)
-            .ok_or(ResourceGraphError::DanglingNode)
-    }
-
-    pub(crate) fn take_cached_failure(
-        &mut self,
-        cache_index: usize,
-    ) -> Result<ScopeAbortCause, ResourceGraphError> {
-        self.cache
-            .take_failed(cache_index)
             .ok_or(ResourceGraphError::DanglingNode)
     }
 
@@ -1587,6 +1578,43 @@ pub(crate) fn unavailable_disposition(cause: &ScopeAbortCause) -> ResourceUnavai
         | ScopeAbortCause::CapacityEnvelope { .. }
         | ScopeAbortCause::OptionTypeMismatch
         | ScopeAbortCause::DescriptorContract { .. } => (
+            ManifestUnavailableClass::Contract,
+            ManifestUnavailableCode::new("import-contract-failed"),
+            ManifestUnavailableReplay::SessionDependent(
+                ManifestSessionDependentReason::ProcessState,
+            ),
+        ),
+    };
+    ResourceUnavailableDisposition {
+        class,
+        code,
+        replay,
+    }
+}
+
+pub(crate) fn cached_unavailable_disposition(
+    failure: &CachedDependencyFailure,
+) -> ResourceUnavailableDisposition {
+    let (class, code, replay) = match failure.unavailable() {
+        CachedDependencyUnavailable::EnvironmentDependent { code, observation } => {
+            let code = match code {
+                CachedDependencyIoCode::Missing => ManifestUnavailableCode::new("missing"),
+                CachedDependencyIoCode::OpenFailed => ManifestUnavailableCode::new("open-failed"),
+                CachedDependencyIoCode::ReadFailed => ManifestUnavailableCode::new("read-failed"),
+            };
+            let replay = match observation {
+                CachedNegativeObservation::None => ManifestUnavailableReplay::UnprovenNegativeInput,
+            };
+            (ManifestUnavailableClass::Io, code, replay)
+        }
+        CachedDependencyUnavailable::AcquisitionBudget => (
+            ManifestUnavailableClass::Resource,
+            ManifestUnavailableCode::new("resource-limit"),
+            ManifestUnavailableReplay::SessionDependent(
+                ManifestSessionDependentReason::AcquisitionBudget,
+            ),
+        ),
+        CachedDependencyUnavailable::ProcessState => (
             ManifestUnavailableClass::Contract,
             ManifestUnavailableCode::new("import-contract-failed"),
             ManifestUnavailableReplay::SessionDependent(

@@ -20,7 +20,8 @@ use baozi_import::{
 };
 use baozi_io::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetPath,
-    AssetReadError, AssetReadErrorKind, AssetReader, AuthorityDomain, OpenedAsset,
+    AssetReadContractViolation, AssetReadError, AssetReadErrorKind, AssetReader, AuthorityDomain,
+    OpenedAsset,
 };
 use baozi_operation::{CancellationToken, LedgerCause, ProgressDecision};
 use std::cell::RefCell;
@@ -1282,6 +1283,53 @@ impl AssetIo for PartialDependencyReadIo {
     }
 }
 
+struct ContractViolatingReader;
+
+impl AssetReader for ContractViolatingReader {
+    fn read_chunk(&mut self, buffer: &mut [u8]) -> Result<usize, AssetReadError> {
+        Ok(buffer.len().saturating_add(1))
+    }
+}
+
+struct ContractViolatingDependencyIo {
+    domain: AuthorityDomain,
+    primary: AssetPath,
+    dependency: AssetPath,
+    opens: AtomicUsize,
+}
+
+impl ContractViolatingDependencyIo {
+    fn open_count(&self) -> usize {
+        self.opens.load(Ordering::Acquire)
+    }
+}
+
+impl AssetIo for ContractViolatingDependencyIo {
+    fn authority_domain(&self) -> AuthorityDomain {
+        self.domain.clone()
+    }
+
+    fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
+        self.opens.fetch_add(1, Ordering::AcqRel);
+        if path == &self.primary {
+            return Ok(OpenedAsset::new(
+                self.domain.clone(),
+                self.primary.clone(),
+                Cursor::new(&b"primary"[..]),
+                Some(AssetLength::Exact(7)),
+            ));
+        }
+
+        assert_eq!(path, &self.dependency);
+        Ok(OpenedAsset::new(
+            self.domain.clone(),
+            self.dependency.clone(),
+            ContractViolatingReader,
+            None,
+        ))
+    }
+}
+
 struct SingleAuthorityQueryIo {
     domain: AuthorityDomain,
     assets: BTreeMap<AssetPath, Arc<[u8]>>,
@@ -2080,6 +2128,53 @@ fn optional_partial_read_failure_is_cached_with_physical_byte_accounting() {
         .unwrap();
     assert_eq!(dependency_bytes.attempted(), 8);
     assert_eq!(dependency_bytes.consumed(), 3);
+}
+
+#[test]
+fn optional_reader_contract_violation_is_terminal_and_not_cacheable() {
+    let source = AssetPath::new("asset.optional-reader-contract").unwrap();
+    let dependency = AssetPath::new("missing.bin").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain(
+        "dev.baozi.test.optional-reader-contract",
+        "optional-reader-contract",
+    )
+    .with_dependency(
+        role,
+        DependencyRequirement::Optional,
+        DependencyBehavior::OptionalTwice,
+    );
+    let request = lossy_request_for(importer);
+    let io = ContractViolatingDependencyIo {
+        domain: AuthorityDomain::new(),
+        primary: source.clone(),
+        dependency,
+        opens: AtomicUsize::new(0),
+    };
+
+    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect_err("a trusted reader contract violation must terminate the session");
+
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::AssetRead(error)
+                    if matches!(
+                        error.kind(),
+                        AssetReadErrorKind::ContractViolation(
+                            AssetReadContractViolation::CountExceedsBuffer { .. }
+                        )
+                    )
+            )
+    ));
+    assert_eq!(
+        io.open_count(),
+        2,
+        "the failed physical dependency must not be retried"
+    );
+    assert!(failure.optional_dependency_evidence().is_empty());
 }
 
 #[test]

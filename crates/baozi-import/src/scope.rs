@@ -1,9 +1,9 @@
 use crate::config::{ConformancePolicy, ImportLossKind, LossPolicy};
 use crate::dependency::{
-    AuthorizedDependency, DependencyCacheDisposition, DependencyIdentity, DependencyOrigin,
-    DependencyOriginIssuer, DependencyOriginNode, DependencyOutcome, DependencyReference,
-    DependencyRequirement, DependencyResolver, DependencyRoleId, DependencySnapshot,
-    OptionalDependencyEvidence, SharedDependencySnapshot,
+    AuthorizedDependency, CachedDependencyFailure, DependencyCacheDisposition, DependencyIdentity,
+    DependencyOrigin, DependencyOriginIssuer, DependencyOriginNode, DependencyOutcome,
+    DependencyReference, DependencyRequirement, DependencyResolver, DependencyRoleId,
+    DependencySnapshot, OptionalDependencyEvidence, SharedDependencySnapshot,
     shared_dependency_snapshot_allocation_bytes,
 };
 use crate::descriptor::TextDecodingMode;
@@ -29,7 +29,7 @@ use crate::options::{CompiledFormatOptions, FormatOptionKey};
 use crate::registry::RegistryEntry;
 use crate::resource_graph::{
     PendingResourceRelation, ResourceAcquisitionState, ResourceGraph, ResourceGraphError,
-    ResourceUnavailableDisposition, unavailable_disposition,
+    ResourceUnavailableDisposition, cached_unavailable_disposition, unavailable_disposition,
 };
 use crate::source_scope::{
     FinalizedSourceScopeRecord, LiveSourceScopeRecord, SourceScopeRecordBuilder,
@@ -40,7 +40,9 @@ use crate::store::{
 use crate::{SceneDraft as CanonicalSceneDraft, authoring::SceneAuthoringBatch};
 use baozi_core::scene::integration::SceneConstruction;
 use baozi_core::{OrderedMap, OrderedMapError};
-use baozi_io::{AssetIo, AssetLength, AssetPath, AuthorityDomain, OpenedAsset, PathError};
+use baozi_io::{
+    AssetIo, AssetLength, AssetPath, AssetReadErrorKind, AuthorityDomain, OpenedAsset, PathError,
+};
 use baozi_operation::{CapacityPlan, CapacityPlanError, CounterClass, LedgerCause};
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -2361,16 +2363,6 @@ impl<'session> ParseScope<'session> {
                         },
                     ));
                 }
-                Some(ResourceAcquisitionState::FailureConsumed) => {
-                    return Err(self.dependency_failure(
-                        Some(pending),
-                        Some(identity),
-                        normalized,
-                        ScopeAbortCause::DescriptorContract {
-                            code: "dependency-cache-failure-was-consumed",
-                        },
-                    ));
-                }
                 None => None,
             }
         };
@@ -2529,29 +2521,32 @@ impl<'session> ParseScope<'session> {
         normalized: MeteredDependencyPath,
         cause: ScopeAbortCause,
     ) -> DependencyResolutionFailure {
-        if !cacheable_dependency_cause(&cause) {
-            if self
-                .resource_graph
-                .borrow_mut()
-                .abandon_acquisition(&identity)
-                .is_err()
-            {
-                return self.dependency_failure(
-                    Some(pending),
-                    Some(identity),
-                    normalized,
-                    ScopeAbortCause::DescriptorContract {
-                        code: "dependency-cache-transition-missing",
-                    },
-                );
+        let cached_failure = match CachedDependencyFailure::try_new(cause) {
+            Ok(failure) => failure,
+            Err(cause) => {
+                if self
+                    .resource_graph
+                    .borrow_mut()
+                    .abandon_acquisition(&identity)
+                    .is_err()
+                {
+                    return self.dependency_failure(
+                        Some(pending),
+                        Some(identity),
+                        normalized,
+                        ScopeAbortCause::DescriptorContract {
+                            code: "dependency-cache-transition-missing",
+                        },
+                    );
+                }
+                return self.dependency_failure(Some(pending), Some(identity), normalized, cause);
             }
-            return self.dependency_failure(Some(pending), Some(identity), normalized, cause);
-        }
+        };
 
         let cached_index = self
             .resource_graph
             .borrow_mut()
-            .complete_failed_acquisition(&identity, cause);
+            .complete_failed_acquisition(&identity, cached_failure);
         match cached_index {
             Ok(index) => self.cached_dependency_failure(
                 pending,
@@ -2678,11 +2673,10 @@ impl<'session> ParseScope<'session> {
                 .try_borrow()
                 .map_err(|_| self.reentrant_capability_failure())?;
             let cause = failure.cause(&cache).map_err(|cause| self.abort(cause))?;
-            (
-                optional_eligible(cause),
-                cause.owner(),
-                unavailable_disposition(cause),
-            )
+            let disposition = failure
+                .disposition(&cache)
+                .map_err(|cause| self.abort(cause))?;
+            (optional_eligible(cause), cause.owner(), disposition)
         };
         if !self
             .loss_policy
@@ -2766,38 +2760,39 @@ impl<'session> ParseScope<'session> {
     }
 
     fn abort_dependency_context(&self, failure: DependencyResolutionContext) -> ParseFailure {
-        let disposition = match self.resource_graph.try_borrow() {
-            Ok(cache) => match failure.cause(&cache) {
-                Ok(cause) => unavailable_disposition(cause),
-                Err(cause) => unavailable_disposition(&cause),
-            },
-            Err(_) => {
-                let parse_failure = self.abort(ScopeAbortCause::DescriptorContract {
-                    code: "parse-capability-reentered",
-                });
-                drop(failure);
-                return parse_failure;
-            }
-        };
-        let (cause, identity, normalized_path) = match self.resource_graph.try_borrow_mut() {
-            Ok(mut graph) => {
-                let (mut cause, relation, identity, normalized_path) =
-                    failure.into_parts(&mut graph);
-                if let Some(relation) = relation
-                    && let Err(graph_cause) = graph.complete_unavailable(
-                        self.host,
-                        relation,
-                        normalized_path.as_ref().map(MeteredDependencyPath::path),
-                        identity.as_ref(),
-                        disposition,
-                    )
-                {
-                    cause = graph_cause.into_scope_cause();
+        let (disposition, mut cause, relation, identity, normalized_path) = {
+            let graph = match self.resource_graph.try_borrow() {
+                Ok(graph) => graph,
+                Err(_) => {
+                    let parse_failure = self.abort(ScopeAbortCause::DescriptorContract {
+                        code: "parse-capability-reentered",
+                    });
+                    drop(failure);
+                    return parse_failure;
                 }
-                (cause, identity, normalized_path)
-            }
-            Err(_) => unreachable!("resource graph borrow was released before mutation"),
+            };
+            let disposition = failure
+                .disposition(&graph)
+                .unwrap_or_else(|cause| unavailable_disposition(&cause));
+            let (cause, relation, identity, normalized_path) = failure.into_parts(&graph);
+            (disposition, cause, relation, identity, normalized_path)
         };
+        let mut graph = self
+            .resource_graph
+            .try_borrow_mut()
+            .expect("resource graph borrow was released before mutation");
+        if let Some(relation) = relation
+            && let Err(graph_cause) = graph.complete_unavailable(
+                self.host,
+                relation,
+                normalized_path.as_ref().map(MeteredDependencyPath::path),
+                identity.as_ref(),
+                disposition,
+            )
+        {
+            cause = graph_cause.into_scope_cause();
+        }
+        drop(graph);
         drop(identity);
         let parse_failure = self.abort(cause);
         drop(normalized_path);
@@ -3644,19 +3639,33 @@ impl DependencyResolutionContext {
     ) -> Result<&'a ScopeAbortCause, ScopeAbortCause> {
         match &self.cause {
             DependencyResolutionCause::Owned(cause) => Ok(cause),
-            DependencyResolutionCause::Cached { index } => {
-                graph
-                    .cached_failure(*index)
-                    .map_err(|_| ScopeAbortCause::DescriptorContract {
-                        code: "dependency-cache-failure-index-invalid",
-                    })
-            }
+            DependencyResolutionCause::Cached { index } => graph
+                .cached_failure(*index)
+                .map(CachedDependencyFailure::cause)
+                .map_err(|_| ScopeAbortCause::DescriptorContract {
+                    code: "dependency-cache-failure-index-invalid",
+                }),
+        }
+    }
+
+    fn disposition(
+        &self,
+        graph: &ResourceGraph,
+    ) -> Result<ResourceUnavailableDisposition, ScopeAbortCause> {
+        match &self.cause {
+            DependencyResolutionCause::Owned(cause) => Ok(unavailable_disposition(cause)),
+            DependencyResolutionCause::Cached { index } => graph
+                .cached_failure(*index)
+                .map(cached_unavailable_disposition)
+                .map_err(|_| ScopeAbortCause::DescriptorContract {
+                    code: "dependency-cache-failure-index-invalid",
+                }),
         }
     }
 
     fn into_parts(
         self,
-        graph: &mut ResourceGraph,
+        graph: &ResourceGraph,
     ) -> (
         ScopeAbortCause,
         Option<PendingResourceRelation>,
@@ -3673,7 +3682,8 @@ impl DependencyResolutionContext {
         let cause = match cause {
             DependencyResolutionCause::Owned(cause) => cause,
             DependencyResolutionCause::Cached { index } => graph
-                .take_cached_failure(index)
+                .cached_failure(index)
+                .map(CachedDependencyFailure::replay_scope_cause)
                 .unwrap_or(ScopeAbortCause::DescriptorContract {
                     code: "dependency-cache-failure-index-invalid",
                 }),
@@ -3683,32 +3693,23 @@ impl DependencyResolutionContext {
 }
 
 fn optional_eligible(cause: &ScopeAbortCause) -> bool {
-    matches!(
-        cause,
+    match cause {
+        ScopeAbortCause::AssetRead(error) => {
+            !matches!(error.kind(), AssetReadErrorKind::ContractViolation(_))
+        }
         ScopeAbortCause::Path(_)
-            | ScopeAbortCause::AssetOpen(_)
-            | ScopeAbortCause::AssetRead(_)
-            | ScopeAbortCause::DependencyPolicy(_)
-            | ScopeAbortCause::ResourceLimit {
-                resource: "asset-bytes" | "dependency-reference-bytes",
-                ..
-            }
-            | ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
-                dimension: ImportDimension::DependencyBytes | ImportDimension::TotalAssetBytes,
-                ..
-            })
-    )
-}
-
-fn cacheable_dependency_cause(cause: &ScopeAbortCause) -> bool {
-    matches!(
-        cause,
-        ScopeAbortCause::AssetOpen(_)
-            | ScopeAbortCause::AssetRead(_)
-            | ScopeAbortCause::ResourceLimit { .. }
-            | ScopeAbortCause::Allocation { .. }
-            | ScopeAbortCause::Ledger(LedgerCause::LimitExceeded { .. })
-    )
+        | ScopeAbortCause::AssetOpen(_)
+        | ScopeAbortCause::DependencyPolicy(_)
+        | ScopeAbortCause::ResourceLimit {
+            resource: "asset-bytes" | "dependency-reference-bytes",
+            ..
+        }
+        | ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+            dimension: ImportDimension::DependencyBytes | ImportDimension::TotalAssetBytes,
+            ..
+        }) => true,
+        _ => false,
+    }
 }
 
 fn share_dependency_snapshot_with(
@@ -4209,6 +4210,14 @@ mod tests {
             boundary: TrustedExtensionBoundary::Importer,
             code: "panic",
         }));
+        assert!(!optional_eligible(&ScopeAbortCause::AssetRead(
+            baozi_io::AssetReadError::contract_violation(
+                baozi_io::AssetReadContractViolation::CountExceedsBuffer {
+                    returned: 2,
+                    capacity: 1,
+                },
+            ),
+        )));
     }
 
     #[test]
