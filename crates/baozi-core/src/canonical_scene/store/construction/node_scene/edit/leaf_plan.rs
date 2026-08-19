@@ -1,4 +1,4 @@
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalLane, CanonicalReservation, CanonicalSemanticWorkSession,
 };
 use baozi_operation::{

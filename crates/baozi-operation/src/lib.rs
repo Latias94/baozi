@@ -61,30 +61,29 @@ pub use concrete_store::{
     ValidatedStoreSuccess, ValidatedTranscriptStoreSuccess,
 };
 
-/// Temporary internal seam for the U4 single-owner canonical activation cutover.
+/// Internal retained-store integration surface for canonical activation.
 ///
-/// This module is intentionally excluded from the supported crate-root API. It is removed or
-/// privatized once core, import, formats, facade, snapshot, and fuzz use the same production path.
+/// This module is intentionally excluded from the supported crate-root API. It keeps the
+/// consumer-facing activation capabilities separate from the trusted producer vocabulary used by
+/// canonical construction modules.
 #[doc(hidden)]
-/// Temporary canonical activation vocabulary.
-///
 /// Raw output commitment scalars can no longer be submitted or replaced at the central-validation
 /// transition; the host binds destination roles before sealing the keyless activation request:
 ///
 /// ```compile_fail,E0432
-/// use baozi_operation::__canonical_activation::CanonicalOutputIntent;
+/// use baozi_operation::__retained_store_integration::activation::CanonicalOutputIntent;
 /// ```
 ///
 /// Validation work cannot be completed independently of inspecting stored units:
 ///
 /// ```compile_fail,E0432
-/// use baozi_operation::__canonical_activation::CanonicalValidationWork;
+/// use baozi_operation::__retained_store_integration::activation::CanonicalValidationWork;
 /// ```
 ///
 /// Scoped terminal receipts are invariant and cannot be widened into another transaction scope:
 ///
 /// ```compile_fail
-/// use baozi_operation::__canonical_activation::CanonicalScopedDisposition;
+/// use baozi_operation::__retained_store_integration::activation::CanonicalScopedDisposition;
 ///
 /// fn substitute<'short, 'long>(
 ///     receipt: CanonicalScopedDisposition<'short>,
@@ -99,7 +98,7 @@ pub use concrete_store::{
 /// The successful joint-commit binder accepts only destructor-free descriptors:
 ///
 /// ```compile_fail
-/// use baozi_operation::__canonical_activation::CanonicalFreezePermit;
+/// use baozi_operation::__retained_store_integration::activation::CanonicalFreezePermit;
 /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
 ///
 /// struct Owner;
@@ -125,7 +124,7 @@ pub use concrete_store::{
 /// ```
 ///
 /// ```compile_fail
-/// use baozi_operation::__canonical_activation::CanonicalFreezePermit;
+/// use baozi_operation::__retained_store_integration::activation::CanonicalFreezePermit;
 /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
 ///
 /// struct Owner;
@@ -153,7 +152,7 @@ pub use concrete_store::{
 /// Independent binder scopes cannot exchange their invariant seals:
 ///
 /// ```compile_fail
-/// use baozi_operation::__canonical_activation::CanonicalFreezePermit;
+/// use baozi_operation::__retained_store_integration::activation::CanonicalFreezePermit;
 /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
 ///
 /// struct Owner;
@@ -185,7 +184,7 @@ pub use concrete_store::{
 /// Scoped joint capabilities are linear: a joint contribution cannot be copied or cloned.
 ///
 /// ```compile_fail
-/// use baozi_operation::__canonical_activation::CanonicalJointCommit;
+/// use baozi_operation::__retained_store_integration::activation::CanonicalJointCommit;
 /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
 ///
 /// struct Owner;
@@ -213,7 +212,7 @@ pub use concrete_store::{
 /// ```
 ///
 /// ```compile_fail
-/// use baozi_operation::__canonical_activation::CanonicalJointCommit;
+/// use baozi_operation::__retained_store_integration::activation::CanonicalJointCommit;
 /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
 ///
 /// struct Owner;
@@ -239,7 +238,7 @@ pub use concrete_store::{
 /// ```
 ///
 /// ```compile_fail
-/// use baozi_operation::__canonical_activation::CanonicalJointSeal;
+/// use baozi_operation::__retained_store_integration::activation::CanonicalJointSeal;
 ///
 /// fn cannot_copy(seal: CanonicalJointSeal<'_>) {
 ///     let moved = seal;
@@ -249,52 +248,53 @@ pub use concrete_store::{
 /// ```
 ///
 /// ```compile_fail
-/// use baozi_operation::__canonical_activation::CanonicalJointSeal;
+/// use baozi_operation::__retained_store_integration::activation::CanonicalJointSeal;
 ///
 /// fn cannot_clone(seal: CanonicalJointSeal<'_>) {
 ///     let _clone = seal.clone();
 /// }
 /// ```
-pub mod __canonical_activation {
-    pub use crate::concrete_store::activation::{
-        CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationSeal,
-        CanonicalActivationSealFailure, CanonicalActivationSessionPolicy, CanonicalBuildControl,
-        CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome,
-        CanonicalFailureRequirements, CanonicalFailureTerminalWorkPlan,
-        CanonicalFreezeInterruption, CanonicalFreezeInterruptionClass, CanonicalFreezePermit,
-        CanonicalFreezePermitIssue, CanonicalJointCommit, CanonicalJointSeal, CanonicalLane,
-        CanonicalMaterialization, CanonicalMaterializationRole, CanonicalPlanning,
-        CanonicalRecordBuildRow, CanonicalReservation, CanonicalScopedDisposition,
-        CanonicalSemanticCompletion, CanonicalSemanticWorkSession, CanonicalValidationCheckpoint,
-        CanonicalValidationDecision, CanonicalValidationMember, CanonicalValidationPlanning,
-        CanonicalValidationPreparationError, CanonicalValidationProgress,
-        CanonicalValidationRecordRow, CanonicalValidationRole, CanonicalValidationSession,
-        CentrallyRejectedCanonicalStoreSession, FailureEvidenceDecision, FailureEvidenceMember,
-        FailureEvidenceOutcome, FailureEvidenceRecordRow, FailureEvidenceValidationSession,
-        FrozenFailureState, InterruptedCanonicalStoreSession, NeverActivatedStoreSession,
-        OutcomeEvidenceBuildControl, OutcomeEvidenceDecision, OutcomeEvidenceValidationMember,
-        OutcomeEvidenceValidationRecordRow, RejectedCanonicalStoreSession,
-        RetainedStoreSessionOutcomeOwner, RootedFailureValidation, StoreActivationContainment,
-        StoreCanonicalRejection, StoreNeverActivatedCause, VerifiedMinimalFallback,
-    };
-    pub use crate::concrete_store::{
-        RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreProducerHost,
-        RetainedStoreWriterRole,
-    };
-}
+pub mod __retained_store_integration {
+    /// Consumer-facing canonical activation capabilities.
+    pub mod activation {
+        pub use crate::concrete_store::activation::{
+            CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationSeal,
+            CanonicalActivationSealFailure, CanonicalActivationSessionPolicy,
+            CanonicalBuildControl, CanonicalCandidateStoreSession,
+            CanonicalCentralValidationOutcome, CanonicalFailureRequirements,
+            CanonicalFailureTerminalWorkPlan, CanonicalFreezeInterruptionClass,
+            CanonicalFreezePermit, CanonicalFreezePermitIssue, CanonicalJointCommit,
+            CanonicalJointSeal, CanonicalLane, CanonicalMaterialization,
+            CanonicalMaterializationRole, CanonicalRecordBuildRow, CanonicalReservation,
+            CanonicalScopedDisposition, CanonicalSemanticCompletion, CanonicalSemanticWorkSession,
+            CanonicalValidationCheckpoint, CanonicalValidationDecision, CanonicalValidationMember,
+            CanonicalValidationPlanning, CanonicalValidationPreparationError,
+            CanonicalValidationProgress, CanonicalValidationRole, CanonicalValidationSession,
+            CentrallyRejectedCanonicalStoreSession, FailureEvidenceDecision, FailureEvidenceMember,
+            FailureEvidenceOutcome, FailureEvidenceValidationSession, FrozenFailureState,
+            InterruptedCanonicalStoreSession, NeverActivatedStoreSession, OutcomeEvidenceDecision,
+            OutcomeEvidenceValidationMember, RejectedCanonicalStoreSession,
+            RetainedStoreSessionOutcomeOwner, RootedFailureValidation, StoreActivationContainment,
+            StoreCanonicalRejection, StoreNeverActivatedCause, VerifiedMinimalFallback,
+        };
+        pub use crate::concrete_store::{
+            RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreWriterRole,
+        };
+    }
 
-/// Trusted producer surface for opaque canonical construction plans.
-///
-/// Only the core canonical construction modules may use this migration seam. Operation consumers
-/// receive already opaque domain plans and cannot name or rebind their success facts. This module
-/// is temporary until those producers move behind the final canonical Scene transaction boundary.
-#[doc(hidden)]
-pub mod __canonical_activation_producer {
-    pub use crate::concrete_store::activation::{
-        CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
-        CanonicalActivationRequestIdentity, CanonicalSealedActivationPlan,
-        CanonicalSuccessRequirements, CanonicalTableShape, mint_canonical_activation_request,
-    };
+    /// Trusted producer surface for opaque canonical construction plans.
+    ///
+    /// Canonical construction implementations move one opaque description into the operation
+    /// sealer. General operation consumers receive only already sealed domain plans and cannot
+    /// name or rebind their success facts.
+    pub mod producer {
+        pub use crate::concrete_store::activation::{
+            CanonicalActivationDescription, CanonicalActivationPlanSealer,
+            CanonicalActivationRequest, CanonicalActivationRequestIdentity,
+            CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
+            mint_canonical_activation_request,
+        };
+    }
 }
 pub use control::{
     CancellationOrigin, CancellationSignal, CancellationToken, ControlCause, OperationControl,

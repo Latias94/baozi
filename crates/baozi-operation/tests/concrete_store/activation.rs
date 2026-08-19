@@ -5,7 +5,7 @@
 
 use std::cell::Cell;
 
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationSeal,
     CanonicalActivationSealFailure, CanonicalActivationSessionPolicy,
     CanonicalCentralValidationOutcome, CanonicalFailureRequirements, CanonicalFreezePermit,
@@ -18,7 +18,7 @@ use baozi_operation::__canonical_activation::{
     RetainedStoreWriterRole, RootedFailureValidation, StoreActivationContainment,
     StoreCanonicalRejection, StoreNeverActivatedCause,
 };
-use baozi_operation::__canonical_activation_producer::{
+use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
     CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
     mint_canonical_activation_request,
@@ -722,7 +722,7 @@ fn assert_controlled_writer_body_and_drop_panics_are_isolated(kind: ControlledWr
 fn rejected_session_with_one_evidence_slot(
     account: &PhysicalStorageAccount,
 ) -> (
-    baozi_operation::__canonical_activation::NeverActivatedStoreSession<
+    baozi_operation::__retained_store_integration::activation::NeverActivatedStoreSession<
         TestOwner,
         TestProgress,
         TestUnit,
@@ -737,7 +737,7 @@ fn rejected_session_with_control(
     account: &PhysicalStorageAccount,
     control: OperationControl<TestProgress, TestUnit>,
 ) -> (
-    baozi_operation::__canonical_activation::NeverActivatedStoreSession<
+    baozi_operation::__retained_store_integration::activation::NeverActivatedStoreSession<
         TestOwner,
         TestProgress,
         TestUnit,
@@ -754,7 +754,7 @@ fn rejected_session_with_failure_work_limits(
     construction_work_limit: u64,
     validation_work_limit: u64,
 ) -> (
-    baozi_operation::__canonical_activation::NeverActivatedStoreSession<
+    baozi_operation::__retained_store_integration::activation::NeverActivatedStoreSession<
         TestOwner,
         TestProgress,
         TestUnit,
@@ -772,7 +772,7 @@ fn rejected_session_from_operation(
     keys: TestKeys,
     evidence_blocks: usize,
 ) -> (
-    baozi_operation::__canonical_activation::NeverActivatedStoreSession<
+    baozi_operation::__retained_store_integration::activation::NeverActivatedStoreSession<
         TestOwner,
         TestProgress,
         TestUnit,

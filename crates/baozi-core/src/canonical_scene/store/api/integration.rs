@@ -116,9 +116,9 @@ pub fn consume_scene_freeze_permit<O, PP, U, R>(
     prepare: impl for<'joint> FnOnce(
         SceneHandoffToken,
         SceneJointCommit<'joint, O, PP, U>,
-        baozi_operation::__canonical_activation::CanonicalJointSeal<'joint>,
+        baozi_operation::__retained_store_integration::activation::CanonicalJointSeal<'joint>,
     ) -> R,
-) -> Result<R, baozi_operation::__canonical_activation::StoreActivationContainment>
+) -> Result<R, baozi_operation::__retained_store_integration::activation::StoreActivationContainment>
 where
     O: OperationOwner,
     PP: ProgressPhase,

@@ -27,7 +27,7 @@ use crate::canonical_scene::store::schema::profile::{
     ProfileLineageSourceSchema, ProfileLineageTextSchema, ProfileLineageWideSchema,
 };
 use crate::provenance::{DigestAlgorithm, OperationKind, SourceObjectKind, SourceObjectLocator};
-use baozi_operation::__canonical_activation::CanonicalLane;
+use baozi_operation::__retained_store_integration::activation::CanonicalLane;
 use baozi_operation::{
     OperationOwner, ProgressPhase, ProgressUnit, StoreBuildError, StoreRuntimeError,
 };

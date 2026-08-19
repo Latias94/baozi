@@ -11,7 +11,7 @@ use baozi_core::scene::integration::{
     scene_failure_terminal_work_requirement,
 };
 use baozi_core::{SceneValidationLimits, ValidatedScene as CanonicalValidatedScene};
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationSessionPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
     RetainedStoreDimensionState, RetainedStoreObservedWork, RetainedStoreSessionOutcomeOwner,
     RetainedStoreWriterRole, StoreActivationContainment,

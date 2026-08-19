@@ -1,4 +1,6 @@
-use baozi_operation::__canonical_activation::{CanonicalBuildControl, CanonicalLane};
+use baozi_operation::__retained_store_integration::activation::{
+    CanonicalBuildControl, CanonicalLane,
+};
 use baozi_operation::{
     CanonicalInheritanceSource, CanonicalRecordView, OperationOwner, ProgressPhase, ProgressUnit,
     SequenceWriter, StoreBuildError, StoreControlledError, StoreRuntimeError,

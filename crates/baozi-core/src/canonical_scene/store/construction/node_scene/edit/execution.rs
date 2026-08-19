@@ -1,9 +1,9 @@
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
     CanonicalMaterialization, CanonicalValidationDecision, CanonicalValidationProgress,
     RetainedStoreSessionOutcomeOwner,
 };
-use baozi_operation::__canonical_activation_producer::{
+use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
     CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
 };
@@ -370,7 +370,7 @@ fn edit_success_requirements(
 }
 
 fn materialize_edit<'lane, 'scope>(
-    mut lane: baozi_operation::__canonical_activation::CanonicalLane<
+    mut lane: baozi_operation::__retained_store_integration::activation::CanonicalLane<
         'lane,
         super::super::super::SceneConstructionOwner,
         SceneConstructionPhase,

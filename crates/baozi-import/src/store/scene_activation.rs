@@ -6,7 +6,7 @@ use baozi_core::scene::integration::{
     SceneEvidenceRecipe, SceneHandoffToken, SceneOutcomeEvidenceTag, SceneValidationProof,
     consume_scene_freeze_permit,
 };
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCandidateStoreSession,
     CanonicalCentralValidationOutcome, CanonicalFreezePermitIssue, CanonicalValidationProgress,
     CentrallyRejectedCanonicalStoreSession, FailureEvidenceOutcome, FrozenFailureState,

@@ -10,7 +10,7 @@ impl Drop for FailureCausePanicOnDrop {
 
 fn rejected_session_with_panicking_cause(
     account: &PhysicalStorageAccount,
-) -> baozi_operation::__canonical_activation::NeverActivatedStoreSession<
+) -> baozi_operation::__retained_store_integration::activation::NeverActivatedStoreSession<
     TestOwner,
     TestProgress,
     TestUnit,
@@ -284,7 +284,7 @@ fn rejected_session_with_evidence_slots(
     account: &PhysicalStorageAccount,
     blocks: usize,
 ) -> (
-    baozi_operation::__canonical_activation::NeverActivatedStoreSession<
+    baozi_operation::__retained_store_integration::activation::NeverActivatedStoreSession<
         TestOwner,
         TestProgress,
         TestUnit,

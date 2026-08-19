@@ -5,7 +5,9 @@
 //! generation-local record blocks. A future edit can therefore retain prior segment leaves while
 //! rebuilding only its relationship records.
 
-use baozi_operation::__canonical_activation::{CanonicalLane, CanonicalRecordBuildRow};
+use baozi_operation::__retained_store_integration::activation::{
+    CanonicalLane, CanonicalRecordBuildRow,
+};
 use baozi_operation::{
     ByteBlock, BytesPlan, OperationOwner, ProgressPhase, ProgressUnit, RecordPlan, ScalarSequence,
     SequencePlan, StoreBuildError, StoreControlledError, StorePlanError, StoreRuntimeError,

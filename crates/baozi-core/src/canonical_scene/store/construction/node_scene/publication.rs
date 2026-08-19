@@ -1,4 +1,4 @@
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalFreezePermit, CanonicalFreezePermitIssue, CanonicalJointCommit, CanonicalJointSeal,
     CentrallyRejectedCanonicalStoreSession, FailureEvidenceMember, FailureEvidenceOutcome,
     FailureEvidenceValidationSession, FrozenFailureState, RootedFailureValidation,

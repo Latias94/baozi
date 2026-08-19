@@ -1,8 +1,8 @@
 //! Scoped session activation for the canonical retained-store lane.
 //!
-//! The public crate surface keeps this module behind `__canonical_activation` during U4. One
-//! call owns preflight, physical open, materialization, rejection cleanup, and containment. No
-//! request token or dormant authority can escape the call.
+//! The public crate surface exposes this module only through the hidden retained-store integration
+//! boundary. One call owns preflight, physical open, materialization, rejection cleanup, and
+//! containment. No request token or dormant authority can escape the call.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -56,8 +56,8 @@ mod work_batch;
 
 pub use canonical_validation::{
     CanonicalValidationCheckpoint, CanonicalValidationMember, CanonicalValidationPlanning,
-    CanonicalValidationPreparationError, CanonicalValidationRecordRow, CanonicalValidationSession,
-    OutcomeEvidenceValidationMember, OutcomeEvidenceValidationRecordRow,
+    CanonicalValidationPreparationError, CanonicalValidationSession,
+    OutcomeEvidenceValidationMember,
 };
 
 const ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE: u32 = 0x4143_5047;
@@ -1727,8 +1727,8 @@ impl<'scope> CanonicalActivationPlanSealer<'scope> {
 
 /// Single-use construction description that owns both success facts and execution data.
 ///
-/// This is a trusted migration seam for deep canonical construction modules. Implementations must
-/// move success facts and execution data out of the same opaque description without running
+/// This is a trusted producer contract for deep canonical construction modules. Implementations
+/// must move success facts and execution data out of the same opaque description without running
 /// fallible user code. [`CanonicalPlanning::seal_activation`] proves the transaction receipt; it
 /// intentionally does not attempt to validate an arbitrary third-party implementation of this
 /// producer contract.
@@ -1901,7 +1901,7 @@ where
 
 #[allow(
     clippy::large_enum_variant,
-    reason = "the temporary U4e state keeps every linear terminal owner inline for fail-closed containment without allocation and is deleted at core cutover"
+    reason = "the scoped state keeps every linear terminal owner inline for fail-closed containment without allocation"
 )]
 enum ScopedActivationState<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>
 where

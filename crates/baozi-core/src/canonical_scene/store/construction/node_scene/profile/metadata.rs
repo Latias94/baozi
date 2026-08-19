@@ -1,4 +1,4 @@
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalBuildControl, CanonicalLane, CanonicalRecordBuildRow,
 };
 use baozi_operation::{

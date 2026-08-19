@@ -1,4 +1,4 @@
-use baozi_operation::__canonical_activation::CanonicalValidationProgress;
+use baozi_operation::__retained_store_integration::activation::CanonicalValidationProgress;
 use baozi_operation::{OperationControl, PhysicalStorageAccount};
 
 use crate::SceneValidationLimits;

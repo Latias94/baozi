@@ -5,7 +5,9 @@
 
 use std::error::Error;
 
-use baozi_operation::__canonical_activation::{CanonicalReservation, CanonicalSemanticWorkSession};
+use baozi_operation::__retained_store_integration::activation::{
+    CanonicalReservation, CanonicalSemanticWorkSession,
+};
 use baozi_operation::{
     ControlCause, FreshStoreLineage, OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError,
 };

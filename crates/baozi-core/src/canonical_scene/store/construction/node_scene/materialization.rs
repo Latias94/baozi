@@ -5,17 +5,17 @@ use std::num::NonZeroU64;
 use std::cell::Cell;
 
 #[cfg(test)]
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
     CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner, StoreActivationContainment,
 };
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationSessionPolicy, CanonicalFailureRequirements, CanonicalLane,
     CanonicalMaterialization, CanonicalMaterializationRole, CanonicalRecordBuildRow,
     CanonicalReservation, CanonicalSemanticWorkSession, CanonicalValidationDecision,
     CanonicalValidationPlanning, CanonicalValidationRole, RetainedStoreWriterRole,
 };
-use baozi_operation::__canonical_activation_producer::{
+use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
     CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
 };

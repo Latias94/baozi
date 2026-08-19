@@ -200,7 +200,7 @@ where
     clippy::result_large_err,
     clippy::too_many_arguments,
     clippy::type_complexity,
-    reason = "the scoped driver keeps every linear owner inline through the compatibility cutover"
+    reason = "the scoped driver keeps every linear owner inline across the complete activation transaction"
 )]
 fn run_scoped_activation<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
     dormant: ScopedDormantActivation<O, PP, U, L>,
@@ -393,7 +393,7 @@ where
 
     #[allow(
         clippy::type_complexity,
-        reason = "the temporary U4e migration driver returns the complete inline linear terminal owner without allocation and is deleted at core cutover"
+        reason = "the scoped driver returns the complete inline linear terminal owner without allocation"
     )]
     fn finish(
         &mut self,
@@ -756,7 +756,7 @@ impl<P, M> Drop for ScopedActivationInputs<P, M> {
 
 #[allow(
     clippy::large_enum_variant,
-    reason = "the temporary U4e transition keeps the operation or assembly owner inline to prevent ownerless unwind without allocation and is deleted at core cutover"
+    reason = "the transition keeps the operation or assembly owner inline to prevent ownerless unwind without allocation"
 )]
 enum ScopedTransitionOwner<O, PP, U, L>
 where

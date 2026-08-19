@@ -1,4 +1,4 @@
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalFreezePermitIssue, CanonicalJointSeal, RootedFailureValidation,
 };
 use baozi_operation::{

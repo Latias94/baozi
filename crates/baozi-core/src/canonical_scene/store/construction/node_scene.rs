@@ -1,9 +1,9 @@
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalCandidateStoreSession, CanonicalJointCommit, CentrallyRejectedCanonicalStoreSession,
     InterruptedCanonicalStoreSession, NeverActivatedStoreSession, RejectedCanonicalStoreSession,
     VerifiedMinimalFallback,
 };
-use baozi_operation::__canonical_activation_producer::{
+use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationRequest, CanonicalActivationRequestIdentity,
     mint_canonical_activation_request,
 };

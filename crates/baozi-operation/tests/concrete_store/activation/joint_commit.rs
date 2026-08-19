@@ -1,5 +1,5 @@
 use super::*;
-use baozi_operation::__canonical_activation::{
+use baozi_operation::__retained_store_integration::activation::{
     CanonicalFreezeInterruptionClass, CanonicalFreezePermitIssue,
 };
 use baozi_operation::StorePreparationFailureClass;
@@ -13,7 +13,7 @@ fn candidate_final_progress() -> FinalProgress<TestProgress, TestUnit> {
 }
 
 type TestCanonicalCandidate =
-    baozi_operation::__canonical_activation::CanonicalCandidateStoreSession<
+    baozi_operation::__retained_store_integration::activation::CanonicalCandidateStoreSession<
         TestOwner,
         TestProgress,
         TestUnit,
@@ -114,7 +114,7 @@ fn candidate_with_operation(
 
 fn ready_permit(
     candidate: TestCanonicalCandidate,
-) -> baozi_operation::__canonical_activation::CanonicalFreezePermit<
+) -> baozi_operation::__retained_store_integration::activation::CanonicalFreezePermit<
     TestOwner,
     TestProgress,
     TestUnit,
