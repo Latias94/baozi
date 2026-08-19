@@ -3,7 +3,7 @@ use baozi_operation::{OperationControl, PhysicalStorageAccount};
 
 use crate::SceneValidationLimits;
 
-use super::super::super::production::SceneAuthoringBatch;
+use super::super::super::production::{SceneAuthoringBatch, SceneInputEnvelope};
 use super::super::super::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT;
 use super::super::{
     SceneConstructionLimits, SceneConstructionPhase, SceneConstructionStartError,
@@ -11,8 +11,8 @@ use super::super::{
     final_progress, try_plan_scene_operation,
 };
 use super::materialization::{
-    NodeSceneActivationRequest, NodeScenePlanningFault, activate_node_scene_with_faults_for_test,
-    node_scene_activation_roles,
+    NodeSceneActivationRequest, NodeScenePlanningFault, NodeSceneSessionActivationBootstrap,
+    activate_node_scene_with_faults_for_test, node_scene_activation_roles,
 };
 use super::{NodeSceneBuildFaults, NodeSceneDraftBuild};
 
@@ -21,6 +21,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneTestTransaction<'input> {
     raw: SceneStoreOperation,
     keys: SceneStoreKeys,
     request: NodeSceneActivationRequest<'input>,
+    bootstrap: NodeSceneSessionActivationBootstrap,
 }
 
 impl<'input> NodeSceneTestTransaction<'input> {
@@ -46,12 +47,13 @@ impl<'input> NodeSceneTestTransaction<'input> {
         input: SceneAuthoringBatch<'input>,
         validation_limits: SceneValidationLimits,
     ) -> Result<Self, SceneConstructionStartError> {
+        let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
         let request = NodeSceneActivationRequest::try_new(input, validation_limits)?;
-        let terminal_attribution_slots = request.canonical_writer_limits().attribution_slots();
+        let bootstrap = NodeSceneSessionActivationBootstrap::try_new()?;
         let start = try_plan_scene_operation(
             limits,
             control,
-            terminal_attribution_slots,
+            envelope.terminal_attribution_slots(),
             SceneFailureEvidenceWork::exact_single_record(NODE_SCENE_EVIDENCE_FIELD_COUNT),
         )?;
         let raw = SceneStoreOperation::try_start(
@@ -64,6 +66,7 @@ impl<'input> NodeSceneTestTransaction<'input> {
             raw,
             keys: start.keys,
             request,
+            bootstrap,
         })
     }
 
@@ -87,10 +90,16 @@ impl<'input> NodeSceneTestTransaction<'input> {
     pub(in crate::canonical_scene::store) fn finish_draft(
         self,
     ) -> Result<NodeSceneDraftBuild, super::super::SceneConstructionError> {
-        let Self { raw, keys, request } = self;
+        let Self {
+            raw,
+            keys,
+            request,
+            bootstrap,
+        } = self;
         request.activate(
             raw,
             node_scene_activation_roles(keys),
+            bootstrap,
             CanonicalValidationProgress::new(
                 SceneConstructionPhase::Validation,
                 SceneConstructionUnit::WorkUnits,
@@ -103,11 +112,17 @@ impl<'input> NodeSceneTestTransaction<'input> {
         self,
         faults: NodeSceneBuildFaults,
     ) -> Result<NodeSceneDraftBuild, super::super::SceneConstructionError> {
-        let Self { raw, keys, request } = self;
+        let Self {
+            raw,
+            keys,
+            request,
+            bootstrap,
+        } = self;
         activate_node_scene_with_faults_for_test(
             request,
             raw,
             node_scene_activation_roles(keys),
+            bootstrap,
             CanonicalValidationProgress::new(
                 SceneConstructionPhase::Validation,
                 SceneConstructionUnit::WorkUnits,

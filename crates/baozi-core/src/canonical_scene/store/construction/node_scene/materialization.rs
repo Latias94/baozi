@@ -195,17 +195,6 @@ pub(super) enum NodeScenePlanningFault {
 #[must_use = "the NodeScene activation description must complete semantic preflight"]
 pub(in crate::canonical_scene::store) struct NodeSceneActivationRequest<'input> {
     execution: NodeSceneActivationExecution<'input>,
-    #[cfg(test)]
-    policy: NodeSceneActivationPolicyRequirements,
-}
-
-/// Roleless writer and failure envelopes supplied by core to the operation-owning host.
-#[cfg(test)]
-#[must_use = "the NodeScene activation policy requirements must bind one scoped outcome owner"]
-struct NodeSceneActivationPolicyRequirements {
-    canonical_writer_limits: RetainedStoreBatchLimits,
-    outcome_evidence_writer_limits: RetainedStoreBatchLimits,
-    failure: CanonicalFailureRequirements,
 }
 
 /// Session-stable failure envelope bound before any Scene construction is submitted.
@@ -437,20 +426,10 @@ impl<'input> NodeSceneActivationRequest<'input> {
         validation_limits: SceneValidationLimits,
     ) -> Result<Self, SceneConstructionStartError> {
         let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
-        #[cfg(not(test))]
         let _ = envelope;
         let failure_evidence = NodeSceneFailureEvidencePlan::try_new()?;
         let (brand, activation_request) =
             super::super::ConstructionBrand::reserve_with_activation_request()?;
-        #[cfg(test)]
-        let policy = NodeSceneActivationPolicyRequirements {
-            canonical_writer_limits: RetainedStoreBatchLimits::new(
-                envelope.terminal_attribution_slots(),
-                4,
-            )?,
-            outcome_evidence_writer_limits: RetainedStoreBatchLimits::new(2, 4)?,
-            failure: failure_evidence.requirements_for(brand)?,
-        };
         Ok(Self {
             execution: NodeSceneActivationExecution {
                 brand,
@@ -459,17 +438,11 @@ impl<'input> NodeSceneActivationRequest<'input> {
                 validation_limits,
                 failure_evidence,
             },
-            #[cfg(test)]
-            policy,
         })
     }
 
     pub fn into_transaction(self) -> NodeSceneActivationTransaction<'input> {
-        let Self {
-            execution,
-            #[cfg(test)]
-                policy: _,
-        } = self;
+        let Self { execution } = self;
         let brand = execution.brand;
         let failure_evidence = execution.failure_evidence;
         NodeSceneActivationTransaction {
@@ -481,17 +454,11 @@ impl<'input> NodeSceneActivationRequest<'input> {
     }
 
     #[cfg(test)]
-    pub(in crate::canonical_scene::store) const fn canonical_writer_limits(
-        &self,
-    ) -> RetainedStoreBatchLimits {
-        self.policy.canonical_writer_limits
-    }
-
-    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn activate<O, PP, U>(
         self,
         operation: RetainedStoreOperation<O, PP, U>,
         roles: NodeSceneActivationRoles,
+        bootstrap: NodeSceneSessionActivationBootstrap,
         validation_progress: CanonicalValidationProgress<PP, U>,
         final_progress: FinalProgress<PP, U>,
     ) -> Result<NodeSceneDraftBuild<O, PP, U>, SceneConstructionError>
@@ -500,7 +467,7 @@ impl<'input> NodeSceneActivationRequest<'input> {
         PP: ProgressPhase,
         U: ProgressUnit,
     {
-        let activation = self.bind_operation(operation, roles)?;
+        let activation = self.bind_operation(operation, roles, bootstrap)?;
         activate_node_scene_scoped(activation, validation_progress, final_progress)
     }
 
@@ -509,14 +476,15 @@ impl<'input> NodeSceneActivationRequest<'input> {
         self,
         operation: RetainedStoreOperation<O, PP, U, L>,
         roles: NodeSceneActivationRoles,
+        bootstrap: NodeSceneSessionActivationBootstrap,
     ) -> Result<BoundNodeSceneActivation<'input, O, PP, U, L>, StoreActivationContainment>
     where
         O: OperationOwner,
         PP: ProgressPhase,
         U: ProgressUnit,
     {
-        let Self { execution, policy } = self;
-        let (_, outcome_evidence_writer_limits, failure) = policy.into_parts();
+        let Self { execution } = self;
+        let (outcome_evidence_writer_limits, failure, _evidence) = bootstrap.into_parts();
         let owner = operation.into_session_outcome_owner(
             roles.session_policy(),
             outcome_evidence_writer_limits,
@@ -806,23 +774,6 @@ impl NodeSceneSessionActivationBootstrap {
             self.outcome_evidence_writer_limits,
             self.failure,
             self.evidence,
-        )
-    }
-}
-
-#[cfg(test)]
-impl NodeSceneActivationPolicyRequirements {
-    fn into_parts(
-        self,
-    ) -> (
-        RetainedStoreBatchLimits,
-        RetainedStoreBatchLimits,
-        CanonicalFailureRequirements,
-    ) {
-        (
-            self.canonical_writer_limits,
-            self.outcome_evidence_writer_limits,
-            self.failure,
         )
     }
 }
@@ -1629,6 +1580,7 @@ pub(super) fn activate_node_scene_with_faults_for_test<'input, O, PP, U>(
     request: NodeSceneActivationRequest<'input>,
     operation: RetainedStoreOperation<O, PP, U>,
     roles: NodeSceneActivationRoles,
+    bootstrap: NodeSceneSessionActivationBootstrap,
     validation_progress: CanonicalValidationProgress<PP, U>,
     final_progress: FinalProgress<PP, U>,
     faults: NodeSceneBuildFaults,
@@ -1638,7 +1590,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let activation = request.bind_operation(operation, roles)?;
+    let activation = request.bind_operation(operation, roles, bootstrap)?;
     drive_node_scene_activation_deferred(activation, validation_progress, final_progress, faults)?
         .prepare_immediately()
 }
