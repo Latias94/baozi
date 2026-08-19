@@ -104,6 +104,15 @@ semantic vectors. An unregistered owner/schema/version or a derivation/configura
 admits only entries whose IDs fit its `canonical-id-v1` grammar and exclusively owns their manifest
 encoding and digest vectors. Nothing in this ADR consumes that downstream adapter.
 
+The initial registry admits `baozi.asset-io / same-authority-asset-path / 1`. Its logical subject is
+the exact pair `(registered portable normalizer identity, hostile origin-relative reference)`, and
+its output is the validated normalized `AssetPath` produced before backend IO. It carries no
+authority-domain value: authority remains the private cache-isolation key. Fresh sessions must
+produce `models/textures/albedo.png` from origin `models/scene.obj` and reference
+`textures/albedo.png`, and must preserve the distinct NFC/NFD spellings fixed by ADR 0010. Only the
+static same-authority resolver profile may issue this schema; custom resolvers remain
+`SessionOpaque(UnregisteredResolverIdentity)`.
+
 A source object locator is format-defined, deterministic, and typed: for example a glTF document
 index plus object kind, an OBJ statement/segment identity, or a PLY element row. Names may be
 included for display but are never the sole identity when a stable source index exists. A content

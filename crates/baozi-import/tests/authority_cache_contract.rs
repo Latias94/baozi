@@ -7,10 +7,10 @@ use baozi_import::{
     DependencyRoleId, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
     FormatDescriptor, FormatEncoding, FormatImporter, ImportCause, ImportConfigOverlay,
     ImportDimension, ImportFailure, ImportLedgerSnapshot, ImportLossKind, ImportOperationControl,
-    ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy, OptionCompileLimits,
-    ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, SceneDraft, ScopeAbortCause,
-    import_asset_with_resolver as run_import_asset_with_resolver,
+    ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy,
+    ManifestResourceIdentityStability, OptionCompileLimits, ParseResult, ParseScope,
+    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
+    SceneDraft, ScopeAbortCause, import_asset_with_resolver as run_import_asset_with_resolver,
 };
 use baozi_io::{AssetIo, AssetOpenError, AssetPath, AuthorityDomain, MemoryAssetIo, OpenedAsset};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -552,6 +552,10 @@ fn same_logical_path_in_distinct_authority_domains_has_distinct_snapshots() {
     assert_eq!(manifest.counts().available_relation_record_count(), 2);
     assert_eq!(manifest.counts().available_relation_occurrence_count(), 2);
     assert_eq!(manifest.counts().maximum_depth(), 1);
+    assert!(manifest.node_classes().iter().all(|class| matches!(
+        class.identity().stability(),
+        ManifestResourceIdentityStability::SessionOpaque(_)
+    )));
 }
 
 #[test]

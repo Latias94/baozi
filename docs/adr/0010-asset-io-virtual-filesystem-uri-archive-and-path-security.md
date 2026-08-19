@@ -183,6 +183,22 @@ ADR 0041 adapter digest. A custom resolver or normalizer without an admitted ent
 within its capability boundary, but it cannot emit an admitted negative proof. ADR 0036 and ADR 0041
 consumers classify its public identity as session-opaque without changing the IO decision here.
 
+The initial static registry contains exactly one normalizer and one resolver profile:
+
+| Entry | Exact v1 semantic fields |
+| --- | --- |
+| Portable asset-path normalizer | contract `baozi.asset-path.resolve-from-file / 1`; namespace semantics `baozi.asset-path.portable-logical`; canonicalization profile `baozi.asset-path.portable-v1`; parameter schema `baozi.asset-path.normalizer-parameters.none / 1`; zero-field parameter record `asset-path-normalizer-parameters-v1` |
+| Same-authority resolver | contract `baozi.same-authority-resolver / 1`; namespace semantics `baozi.asset-path.portable-logical`; exact normalizer above; parameter schema `baozi.same-authority-resolver.parameters.none / 1`; zero-field parameter record `same-authority-resolver-parameters-v1`; admitted negative-proof-scheme set empty |
+
+The normalizer's independent semantic vectors are exact: origin `models/scene.obj` plus reference
+`textures/albedo.png` yields `models/textures/albedo.png`; reference `../shared/albedo.png` yields
+`shared/albedo.png`; and NFC `caf\u{e9}.png` remains byte-distinct from NFD
+`cafe\u{301}.png`. The resolver returns the normalized path unchanged as its public identity and
+binds the operational identity to the declaring `AssetIo` authority. The default asset import entry
+selects this profile inside the import session. The public custom `DependencyResolver` interface
+does not accept registry IDs, schemas, or semantic digests and therefore remains unregistered and
+session-opaque.
+
 ADR 0010 also owns the IO/policy membership and normative meaning of unavailable cause IDs. Cause
 class and code are registered as one bounded stable pair. Backend-native error numbers/text are
 mapped synchronously to a registered Baozi pair or to one registered bounded generic pair; they never

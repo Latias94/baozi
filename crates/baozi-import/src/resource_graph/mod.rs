@@ -25,6 +25,7 @@ use crate::ledger::{ImportDimension, ImportLedgerPhase};
 use crate::limits::ResourceLimits;
 use crate::metered_storage::AccountedVec;
 use crate::store::{ImportStoreHost, ImportStoreReservation};
+use baozi_io::__semantic_identity::StableResourceIdentitySchema;
 use baozi_io::{AssetPath, AuthorityDomain};
 use baozi_operation::CapacityPlanError;
 use std::sync::Arc;
@@ -206,9 +207,11 @@ pub(crate) enum ResourceAcquisitionState {
     Available {
         cache_index: usize,
         bytes: Arc<SharedDependencySnapshot>,
+        stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
     },
     Failed {
         cache_index: usize,
+        stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
     },
     Resolving,
 }
@@ -227,6 +230,26 @@ pub(crate) struct PendingResourceRelation {
     requirement: DependencyRequirement,
     raw_reference_digest: ManifestDigest,
     target: Option<TargetAdmission>,
+}
+
+pub(crate) struct AvailableResourceIdentity<'a> {
+    exact: &'a DependencyIdentity,
+    normalized: &'a AssetPath,
+    stable_schema: Option<&'static StableResourceIdentitySchema>,
+}
+
+impl<'a> AvailableResourceIdentity<'a> {
+    pub(crate) const fn new(
+        exact: &'a DependencyIdentity,
+        normalized: &'a AssetPath,
+        stable_schema: Option<&'static StableResourceIdentitySchema>,
+    ) -> Self {
+        Self {
+            exact,
+            normalized,
+            stable_schema,
+        }
+    }
 }
 
 /// One session-owned graph. `DependencyCache` remains the sole physical acquisition cache.
@@ -279,8 +302,12 @@ impl ResourceGraph {
                 DependencyCacheEntry::Available(snapshot) => ResourceAcquisitionState::Available {
                     cache_index,
                     bytes: Arc::clone(&snapshot.bytes),
+                    stable_identity_schema: snapshot.stable_identity_schema,
                 },
-                DependencyCacheEntry::Failed(_) => ResourceAcquisitionState::Failed { cache_index },
+                DependencyCacheEntry::Failed(failure) => ResourceAcquisitionState::Failed {
+                    cache_index,
+                    stable_identity_schema: failure.stable_identity_schema(),
+                },
                 DependencyCacheEntry::Resolving => ResourceAcquisitionState::Resolving,
             })
     }
@@ -404,9 +431,10 @@ impl ResourceGraph {
         &mut self,
         identity: &DependencyIdentity,
         bytes: Arc<SharedDependencySnapshot>,
+        stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
     ) -> Result<usize, ResourceGraphError> {
         self.cache
-            .store_available(identity, bytes)
+            .store_available(identity, bytes, stable_identity_schema)
             .ok_or(ResourceGraphError::DanglingNode)
     }
 
@@ -590,10 +618,12 @@ impl ResourceGraph {
         host: ImportStoreHost<'_>,
         mut pending: PendingResourceRelation,
         cache_index: usize,
-        identity: &DependencyIdentity,
         bytes: &[u8],
-        normalized: &AssetPath,
+        identity: AvailableResourceIdentity<'_>,
     ) -> Result<(), ResourceGraphError> {
+        if identity.stable_schema.is_some() && identity.exact.path() != identity.normalized {
+            return Err(ResourceGraphError::DigestCollision);
+        }
         let (target, depth_updates) = match pending
             .target
             .take()
@@ -607,7 +637,7 @@ impl ResourceGraph {
                     .nodes
                     .get(index)
                     .ok_or(ResourceGraphError::DanglingNode)?;
-                if &node.exact_identity != identity
+                if &node.exact_identity != identity.exact
                     || node.content_digest != ManifestDigest::of(bytes)
                 {
                     return Err(ResourceGraphError::DigestCollision);
@@ -617,13 +647,14 @@ impl ResourceGraph {
             TargetAdmission::New { depth } => {
                 let exact_identity =
                     identity
+                        .exact
                         .try_clone()
                         .map_err(|_| ResourceGraphError::Allocation {
                             resource: "resource-graph-node-identity",
                         })?;
-                let public_identity = manifest_identity(
-                    identity.path(),
-                    ManifestSessionOpaqueReason::UnregisteredResolverIdentity,
+                let public_identity = manifest_identity_for_resolution(
+                    identity.exact.path(),
+                    identity.stable_schema,
                     "resource-graph-node-public-identity",
                 )?;
                 let index = self.nodes.len();
@@ -647,9 +678,9 @@ impl ResourceGraph {
             }
         };
         self.bind_cache_node(host, cache_index, target)?;
-        let reference = ManifestReference::Normalized(manifest_identity(
-            normalized,
-            ManifestSessionOpaqueReason::UnregisteredResolverIdentity,
+        let reference = ManifestReference::Normalized(manifest_identity_for_resolution(
+            identity.normalized,
+            identity.stable_schema,
             "resource-graph-normalized-reference",
         )?);
         self.push_relation(
@@ -1523,6 +1554,29 @@ fn manifest_identity(
     ))
 }
 
+fn manifest_identity_for_resolution(
+    path: &AssetPath,
+    stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
+    resource: &'static str,
+) -> Result<ManifestResourceIdentity, ResourceGraphError> {
+    let Some(schema) = stable_identity_schema else {
+        return manifest_identity(
+            path,
+            ManifestSessionOpaqueReason::UnregisteredResolverIdentity,
+            resource,
+        );
+    };
+    Ok(ManifestResourceIdentity::new(
+        path.try_clone()
+            .map_err(|_| ResourceGraphError::Allocation { resource })?,
+        ManifestResourceIdentityStability::Stable {
+            owner: schema.owner(),
+            schema: schema.schema_id(),
+            version: u64::from(schema.schema_version().get()),
+        },
+    ))
+}
+
 pub(crate) fn unavailable_disposition(cause: &ScopeAbortCause) -> ResourceUnavailableDisposition {
     let (class, code, replay) = match cause {
         ScopeAbortCause::Path(_) => (
@@ -1990,7 +2044,13 @@ mod tests {
             .unwrap();
         graph.prepare_target(host, &mut pending, identity).unwrap();
         graph
-            .complete_available(host, pending, cache_index, identity, bytes, identity.path())
+            .complete_available(
+                host,
+                pending,
+                cache_index,
+                bytes,
+                AvailableResourceIdentity::new(identity, identity.path(), None),
+            )
             .unwrap();
         graph.source_for_cache(cache_index).unwrap()
     }
@@ -2065,7 +2125,13 @@ mod tests {
             .prepare_target(host, &mut pending, &identity_a)
             .unwrap();
         graph
-            .complete_available(host, pending, 0, &identity_a, b"a", identity_a.path())
+            .complete_available(
+                host,
+                pending,
+                0,
+                b"a",
+                AvailableResourceIdentity::new(&identity_a, identity_a.path(), None),
+            )
             .unwrap();
         graph.seal(host).unwrap();
 

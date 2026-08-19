@@ -6,6 +6,10 @@ use super::{
 };
 use crate::dependency::{DependencyRequirement, DependencyRoleId};
 use crate::metered_storage::AccountedVec;
+#[cfg(test)]
+use baozi_io::__semantic_identity::{
+    ReferenceNormalizerSemanticSubject, ResolverSemanticSubject, SemanticParameterSchema,
+};
 use std::cmp::Ordering;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +264,114 @@ fn write_resource_identity<O: ManifestOutput>(
                     })
                 })
             }
+        })
+    })
+}
+
+#[cfg(test)]
+fn write_semantic_parameter_record<O: ManifestOutput>(
+    output: &mut O,
+    schema: SemanticParameterSchema,
+) -> Result<(), ManifestEncodingError> {
+    write_record_value(output, schema.record_tag(), 0, |_| Ok(()))
+}
+
+#[cfg(test)]
+fn write_semantic_identity<O: ManifestOutput>(
+    output: &mut O,
+    owner: &str,
+    schema_id: &str,
+    schema_version: u64,
+    semantic_digest: ManifestDigest,
+) -> Result<(), ManifestEncodingError> {
+    write_record_value(output, "semantic-identity-v1", 4, |output| {
+        write_field(output, "owner", |output| write_enum_value(output, owner))?;
+        write_field(output, "schema-id", |output| {
+            write_enum_value(output, schema_id)
+        })?;
+        write_field(output, "schema-version", |output| {
+            write_u64_value(output, schema_version)
+        })?;
+        write_field(output, "semantic-digest", |output| {
+            write_digest_value(output, semantic_digest)
+        })
+    })
+}
+
+#[cfg(test)]
+fn write_reference_normalizer_subject<O: ManifestOutput>(
+    output: &mut O,
+    subject: ReferenceNormalizerSemanticSubject,
+    parameter_digest: ManifestDigest,
+) -> Result<(), ManifestEncodingError> {
+    let parameters = subject.parameters();
+    write_record_value(output, "reference-normalizer-subject-v1", 7, |output| {
+        write_field(output, "normalizer-contract-id", |output| {
+            write_enum_value(output, subject.contract().as_str())
+        })?;
+        write_field(output, "normalizer-contract-version", |output| {
+            write_u64_value(output, u64::from(subject.contract_version().get()))
+        })?;
+        write_field(output, "namespace-semantics-id", |output| {
+            write_enum_value(output, subject.namespace_semantics().as_str())
+        })?;
+        write_field(output, "canonicalization-profile-id", |output| {
+            write_enum_value(output, subject.canonicalization_profile().as_str())
+        })?;
+        write_field(output, "semantic-parameter-schema-id", |output| {
+            write_enum_value(output, parameters.id())
+        })?;
+        write_field(output, "semantic-parameter-schema-version", |output| {
+            write_u64_value(output, u64::from(parameters.version().get()))
+        })?;
+        write_field(output, "semantic-parameter-digest", |output| {
+            write_digest_value(output, parameter_digest)
+        })
+    })
+}
+
+#[cfg(test)]
+fn write_resolver_semantic_subject<O: ManifestOutput>(
+    output: &mut O,
+    subject: ResolverSemanticSubject,
+    normalizer_digest: ManifestDigest,
+    parameter_digest: ManifestDigest,
+) -> Result<(), ManifestEncodingError> {
+    let parameters = subject.parameters();
+    write_record_value(output, "resolver-semantic-subject-v1", 8, |output| {
+        write_field(output, "resolver-contract-id", |output| {
+            write_enum_value(output, subject.contract().as_str())
+        })?;
+        write_field(output, "resolver-contract-version", |output| {
+            write_u64_value(output, u64::from(subject.contract_version().get()))
+        })?;
+        write_field(output, "namespace-semantics-id", |output| {
+            write_enum_value(output, subject.namespace_semantics().as_str())
+        })?;
+        write_field(output, "normalizer-identity", |output| {
+            write_semantic_identity(
+                output,
+                "baozi.asset-io",
+                "reference-normalizer",
+                1,
+                normalizer_digest,
+            )
+        })?;
+        write_field(output, "semantic-parameter-schema-id", |output| {
+            write_enum_value(output, parameters.id())
+        })?;
+        write_field(output, "semantic-parameter-schema-version", |output| {
+            write_u64_value(output, u64::from(parameters.version().get()))
+        })?;
+        write_field(output, "semantic-parameter-digest", |output| {
+            write_digest_value(output, parameter_digest)
+        })?;
+        write_field(output, "proof-scheme-identities", |output| {
+            let proof_schemes = subject.proof_schemes();
+            if !proof_schemes.is_empty() {
+                return Err(ManifestEncodingError::InvalidCanonicalId);
+            }
+            write_set_value(output, 0, |_| Ok(()))
         })
     })
 }
@@ -834,6 +946,9 @@ fn checked_len(value: usize) -> Result<u64, ManifestEncodingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use baozi_io::__semantic_identity::{
+        portable_asset_path_normalizer_v1, same_authority_resolver_v1,
+    };
 
     #[test]
     fn canonical_deny_parameter_record_matches_the_adr_vector() {
@@ -878,5 +993,143 @@ mod tests {
                 ManifestObservedOnlyReason::SessionDependentUnavailable,
             ]
         );
+    }
+
+    #[test]
+    fn registered_asset_io_semantic_vectors() {
+        let normalizer = portable_asset_path_normalizer_v1().semantic_subject();
+        let normalizer_parameter_len =
+            encoded_len(|output| write_semantic_parameter_record(output, normalizer.parameters()))
+                .unwrap();
+        let normalizer_parameters = encode_vec(normalizer_parameter_len, |output| {
+            write_semantic_parameter_record(output, normalizer.parameters())
+        })
+        .unwrap();
+        let normalizer_parameter_digest = ManifestDigest::of(&normalizer_parameters);
+        let normalizer_subject_len = encoded_len(|output| {
+            write_reference_normalizer_subject(output, normalizer, normalizer_parameter_digest)
+        })
+        .unwrap();
+        let normalizer_subject = encode_vec(normalizer_subject_len, |output| {
+            write_reference_normalizer_subject(output, normalizer, normalizer_parameter_digest)
+        })
+        .unwrap();
+        let normalizer_digest = ManifestDigest::of(&normalizer_subject);
+        let normalizer_identity_len = encoded_len(|output| {
+            write_semantic_identity(
+                output,
+                "baozi.asset-io",
+                "reference-normalizer",
+                1,
+                normalizer_digest,
+            )
+        })
+        .unwrap();
+        let normalizer_identity = encode_vec(normalizer_identity_len, |output| {
+            write_semantic_identity(
+                output,
+                "baozi.asset-io",
+                "reference-normalizer",
+                1,
+                normalizer_digest,
+            )
+        })
+        .unwrap();
+
+        let resolver = same_authority_resolver_v1().semantic_subject();
+        let resolver_parameter_len =
+            encoded_len(|output| write_semantic_parameter_record(output, resolver.parameters()))
+                .unwrap();
+        let resolver_parameters = encode_vec(resolver_parameter_len, |output| {
+            write_semantic_parameter_record(output, resolver.parameters())
+        })
+        .unwrap();
+        let resolver_parameter_digest = ManifestDigest::of(&resolver_parameters);
+        let resolver_subject_len = encoded_len(|output| {
+            write_resolver_semantic_subject(
+                output,
+                resolver,
+                normalizer_digest,
+                resolver_parameter_digest,
+            )
+        })
+        .unwrap();
+        let resolver_subject = encode_vec(resolver_subject_len, |output| {
+            write_resolver_semantic_subject(
+                output,
+                resolver,
+                normalizer_digest,
+                resolver_parameter_digest,
+            )
+        })
+        .unwrap();
+        let resolver_digest = ManifestDigest::of(&resolver_subject);
+        let resolver_identity_len = encoded_len(|output| {
+            write_semantic_identity(
+                output,
+                "baozi.asset-io",
+                "resolver-semantic",
+                1,
+                resolver_digest,
+            )
+        })
+        .unwrap();
+        let resolver_identity = encode_vec(resolver_identity_len, |output| {
+            write_semantic_identity(
+                output,
+                "baozi.asset-io",
+                "resolver-semantic",
+                1,
+                resolver_digest,
+            )
+        })
+        .unwrap();
+
+        assert_eq!(normalizer_parameters.len(), 166);
+        assert_eq!(
+            normalizer_parameter_digest.as_bytes(),
+            hex_bytes("6e87a3b73673588118eb07b94d9fc9a27fb88987e9861622e690920d58a26e19")
+        );
+        assert_eq!(normalizer_subject.len(), 1592);
+        assert_eq!(
+            normalizer_digest.as_bytes(),
+            hex_bytes("848377934e7d1ceeae1585353640267ba1b25d215e8a912d05164941cbb81d8c")
+        );
+        assert_eq!(normalizer_identity.len(), 996);
+        assert_eq!(
+            ManifestDigest::of(&normalizer_identity).as_bytes(),
+            hex_bytes("738da469d79ec3a770abec5906c0d7f0faa6b3a0bb135065129ce1e8274b711e")
+        );
+        assert_eq!(resolver_parameters.len(), 168);
+        assert_eq!(
+            resolver_parameter_digest.as_bytes(),
+            hex_bytes("f31f44559bbdbc68b97c1892a5048c99197ec1e442f84392161878261e77e719")
+        );
+        assert_eq!(resolver_subject.len(), 2588);
+        assert_eq!(
+            ManifestDigest::of(&resolver_subject).as_bytes(),
+            hex_bytes("b7b6dd37bd2732279d464f724c219725412ea1412df0d864a948eeea944d2d43")
+        );
+        assert_eq!(resolver_identity.len(), 993);
+        assert_eq!(
+            ManifestDigest::of(&resolver_identity).as_bytes(),
+            hex_bytes("124d5e06ccba9d3b1a19a8d1a440270720da75a6cd9609e7948cfd3164ecdfe5")
+        );
+    }
+
+    fn hex_bytes(value: &str) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+            bytes[index] = (hex_nibble(chunk[0]) << 4) | hex_nibble(chunk[1]);
+        }
+        bytes
+    }
+
+    fn hex_nibble(value: u8) -> u8 {
+        match value {
+            b'0'..=b'9' => value - b'0',
+            b'a'..=b'f' => value - b'a' + 10,
+            _ => panic!("invalid test digest hex"),
+        }
     }
 }

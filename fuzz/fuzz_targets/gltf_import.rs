@@ -3,9 +3,7 @@
 mod support;
 
 use baozi_format_gltf::{FORMAT_ID, GltfImporter};
-use baozi_import::{
-    ImportOperationControl, PreparedImportRequest, SameAuthorityResolver, import_asset_with_resolver,
-};
+use baozi_import::{ImportOperationControl, PreparedImportRequest, import_asset};
 use baozi_io::{AssetPath, MemoryAssetIo};
 use libfuzzer_sys::fuzz_target;
 use std::sync::{Arc, OnceLock};
@@ -24,11 +22,10 @@ fuzz_target!(|data: &[u8]| {
     io.try_insert(buffer_path, Arc::<[u8]>::from(buffer_bytes))
         .expect("the dependency fuzz asset insertion must succeed");
 
-    if let Ok(report) = import_asset_with_resolver(
+    if let Ok(report) = import_asset(
         request,
         &io,
         source_path,
-        &SameAuthorityResolver,
         ImportOperationControl::default(),
     ) {
         support::assert_validated_snapshot(report.scene());

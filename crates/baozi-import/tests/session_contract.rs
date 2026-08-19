@@ -11,11 +11,12 @@ use baozi_import::{
     ImportOperationControl, ImportPhase, ImportProgressPhase, ImportProgressUnit, ImportReport,
     ImportRequest, ImportRequestLayer, ImportResult, ImportStorageClass, ImportTerminalCause,
     ImportTerminalFailureClass, ImportWorkClass, InputReplayStatus, LossPolicy,
-    ManifestObservedOnlyReason, MeteredDecodedText, MeteredString, MeteredVec, OptionCompileLimits,
-    ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
-    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
-    TextProfile, TextSourceEncoding, TrustedExtensionBoundary, import_asset as run_import_asset,
+    ManifestObservedOnlyReason, ManifestReference, ManifestResourceIdentityStability,
+    MeteredDecodedText, MeteredString, MeteredVec, OptionCompileLimits, ParseResult, ParseScope,
+    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
+    ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, TextBomPolicy,
+    TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
+    TextSourceEncoding, TrustedExtensionBoundary, import_asset as run_import_asset,
     import_asset_with_resolver as run_import_asset_with_resolver, import_bytes as run_import_bytes,
 };
 use baozi_io::{
@@ -2058,6 +2059,43 @@ fn successful_dependency_snapshot_is_shared_and_reused_without_reopening() {
         manifest.replay_status(),
         InputReplayStatus::ObservedOnly(reasons)
             if reasons.as_slice() == [ManifestObservedOnlyReason::UnstableResourceIdentity]
+    ));
+    let stable_dependency = manifest
+        .node_classes()
+        .iter()
+        .find(|class| {
+            matches!(
+                class.identity().stability(),
+                ManifestResourceIdentityStability::Stable { .. }
+            )
+        })
+        .expect("the built-in resolver must publish its registered resource identity");
+    assert_eq!(stable_dependency.identity().value().as_str(), "missing.bin");
+    assert!(matches!(
+        stable_dependency.identity().stability(),
+        ManifestResourceIdentityStability::Stable {
+            owner: "baozi.asset-io",
+            schema: "same-authority-asset-path",
+            version: 1,
+        }
+    ));
+    let normalized_reference = manifest
+        .node_classes()
+        .iter()
+        .flat_map(|class| class.outgoing_relations())
+        .find_map(|relation| match relation.reference() {
+            ManifestReference::Normalized(identity) => Some(identity),
+            ManifestReference::Rejected { .. } => None,
+        })
+        .expect("the available dependency must retain normalized-reference evidence");
+    assert_eq!(normalized_reference.value().as_str(), "missing.bin");
+    assert!(matches!(
+        normalized_reference.stability(),
+        ManifestResourceIdentityStability::Stable {
+            owner: "baozi.asset-io",
+            schema: "same-authority-asset-path",
+            version: 1,
+        }
     ));
     assert_ne!(manifest.digest().as_bytes(), [0; 32]);
     let graph_nodes = report

@@ -7,6 +7,13 @@
 //! ```compile_fail,E0432
 //! use baozi_import::SerializedImportRequest;
 //! ```
+//!
+//! The default same-authority resolver is session-owned rather than a caller-constructible
+//! semantic authority:
+//!
+//! ```compile_fail,E0432
+//! use baozi_import::SameAuthorityResolver;
+//! ```
 
 pub use baozi_operation::{CapacityPlan, CapacityPlanError, LedgerCause};
 
@@ -57,7 +64,7 @@ pub use dependency::{
     AuthorizedDependency, DenyDependencies, DependencyCacheDisposition, DependencyIdentity,
     DependencyOrigin, DependencyOutcome, DependencyPolicyError, DependencyReference,
     DependencyRequirement, DependencyResolver, DependencyRoleId, DependencyRoleIdError,
-    DependencySnapshot, OptionalDependencyEvidence, SameAuthorityResolver,
+    DependencySnapshot, OptionalDependencyEvidence,
 };
 pub use descriptor::{
     CapabilityStatus, DeclarationEvidenceAuthority, DescriptorError, FormatCapability,

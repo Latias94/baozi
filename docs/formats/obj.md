@@ -67,7 +67,7 @@ OBJ/MTL keywords, numeric fields, face references, `map_Kd` option operands, and
 `mtllib` paths resolve relative to the OBJ asset through `AssetIo`. Texture paths inside MTL resolve relative to the MTL asset. Resolver behavior depends on the facade entry point:
 
 - `Importer::read_bytes` admits only the caller-owned primary byte snapshot and uses `baozi_import::DenyDependencies`; it cannot load MTL sidecars.
-- `Importer::read_asset` uses `baozi_import::SameAuthorityResolver`, so MTL sidecars are authorized against the same `AssetIo` authority as the primary OBJ.
+- `Importer::read_asset` uses Baozi's registered same-authority resolver profile, so MTL sidecars are authorized against the same `AssetIo` authority as the primary OBJ and receive registered manifest identity evidence.
 - `Importer::read_path` is available only with `native-fs-candidate`. It opens a native-directory capability rooted at the OBJ file's parent directory, then uses the same-authority behavior of `read_asset` for sidecars.
 - `Importer::read_asset_with_resolver` accepts a prepared request and an explicit `DependencyResolver`. Use it when dependencies need a caller-defined authority policy, including `baozi_import::DenyDependencies` when every sidecar must be rejected before backend IO.
 

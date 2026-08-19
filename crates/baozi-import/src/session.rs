@@ -1,7 +1,7 @@
 use crate::SceneDraft;
 use crate::config::FormatSelection;
 use crate::dependency::{
-    DenyDependencies, DependencyOriginIssuer, DependencyResolver, SameAuthorityResolver,
+    DenyDependencies, DependencyOriginIssuer, DependencyResolver, ResolverBinding,
 };
 use crate::detection::DetectionScope;
 use crate::diagnostic::DiagnosticSink;
@@ -34,8 +34,8 @@ use crate::store::{
 };
 use baozi_core::FormatId;
 use baozi_io::{
-    AssetIo, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetPath, AuthorityDomain,
-    OpenedAsset,
+    __semantic_identity::same_authority_resolver_v1, AssetIo, AssetOpenError, AssetOpenErrorKind,
+    AssetOpenStage, AssetPath, AuthorityDomain, OpenedAsset,
 };
 use baozi_operation::{ControlCause, LedgerLimits, LedgerLimitsError};
 use std::cell::RefCell;
@@ -74,7 +74,14 @@ pub fn import_asset(
     source: AssetPath,
     control: ImportOperationControl,
 ) -> ImportResult<ImportReport> {
-    import_asset_with_resolver(request, io, source, &SameAuthorityResolver, control)
+    import_asset_with_resolver_and_ledger_limits(
+        request,
+        io,
+        source,
+        ResolverBinding::registered(same_authority_resolver_v1()),
+        control,
+        import_ledger_limits(request.limits()),
+    )
 }
 
 /// Imports through one session and an explicit dependency authority policy.
@@ -93,7 +100,7 @@ pub fn import_asset_with_resolver(
         request,
         io,
         source,
-        resolver,
+        ResolverBinding::custom(resolver),
         control,
         import_ledger_limits(request.limits()),
     )
@@ -103,11 +110,11 @@ pub fn import_asset_with_resolver(
     clippy::result_large_err,
     reason = "terminal import failures retain complete bounded session evidence without heap indirection"
 )]
-fn import_asset_with_resolver_and_ledger_limits(
+fn import_asset_with_resolver_and_ledger_limits<'a>(
     request: &PreparedImportRequest,
     io: &dyn AssetIo,
     source: AssetPath,
-    resolver: &dyn DependencyResolver,
+    resolver: ResolverBinding<'a>,
     control: ImportOperationControl,
     ledger_limits: Result<LedgerLimits<ImportDimension>, LedgerLimitsError<ImportDimension>>,
 ) -> ImportResult<ImportReport> {
@@ -144,7 +151,13 @@ pub fn import_bytes(
     let _span = tracing::info_span!("baozi.import").entered();
 
     let primary_io = DirectBytesAuthority::new();
-    let mut session = ImportSession::new(request, &primary_io, source, &DenyDependencies, store);
+    let mut session = ImportSession::new(
+        request,
+        &primary_io,
+        source,
+        ResolverBinding::custom(&DenyDependencies),
+        store,
+    );
     let execution = session.execute_bytes(bytes, SessionCreatedProof::new());
     match execution {
         Ok(draft) => session.finalize_success(draft),
@@ -206,7 +219,7 @@ struct ImportSession<'a> {
     request: &'a PreparedImportRequest,
     primary_io: &'a dyn AssetIo,
     source: AssetPath,
-    resolver: &'a dyn DependencyResolver,
+    resolver: ResolverBinding<'a>,
     dependency_origin_issuer: DependencyOriginIssuer,
     store: ImportStoreSessionOwner,
     diagnostics: Option<RefCell<DiagnosticSink>>,
@@ -231,7 +244,7 @@ impl<'a> ImportSession<'a> {
         request: &'a PreparedImportRequest,
         primary_io: &'a dyn AssetIo,
         source: AssetPath,
-        resolver: &'a dyn DependencyResolver,
+        resolver: ResolverBinding<'a>,
         store: ImportStoreSessionOwner,
     ) -> Self {
         Self {
@@ -1464,7 +1477,7 @@ mod tests {
                         &request,
                         &io,
                         source,
-                        &DenyDependencies,
+                        ResolverBinding::custom(&DenyDependencies),
                         control,
                         Err(injected.clone()),
                     )
@@ -1477,7 +1490,7 @@ mod tests {
                 &request,
                 &io,
                 source,
-                &DenyDependencies,
+                ResolverBinding::custom(&DenyDependencies),
                 control,
                 Err(injected.clone()),
             )
@@ -1539,7 +1552,7 @@ mod tests {
             &request,
             &io,
             AssetPath::new("asset.direct-reservation").expect("valid test path"),
-            &DenyDependencies,
+            ResolverBinding::custom(&DenyDependencies),
             store,
         );
         let payload =

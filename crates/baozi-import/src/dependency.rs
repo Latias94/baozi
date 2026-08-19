@@ -2,6 +2,9 @@ use crate::diagnostic::DiagnosticSource;
 use crate::error::{CauseOwner, ScopeAbortCause};
 use crate::metered_storage::AccountedVec;
 use crate::store::ImportStoreReservation;
+use baozi_io::__semantic_identity::{
+    RegisteredAssetResolution, RegisteredResolverProfile, StableResourceIdentitySchema,
+};
 use baozi_io::{AssetIo, AssetOpenErrorKind, AssetPath, AssetReadErrorKind, AuthorityDomain};
 use baozi_operation::{CapacityPlan, CapacityPlanError, LedgerCause, ReplacementCapacityPlan};
 use std::collections::hash_map::RandomState;
@@ -156,20 +159,62 @@ impl DependencyIdentity {
 pub struct AuthorizedDependency<'a> {
     io: &'a dyn AssetIo,
     identity: DependencyIdentity,
+    stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
 }
 
 impl<'a> AuthorizedDependency<'a> {
     pub fn new(io: &'a dyn AssetIo, authority: AuthorityDomain, path: AssetPath) -> Self {
         let identity = DependencyIdentity::new(authority, path);
-        Self { io, identity }
+        Self {
+            io,
+            identity,
+            stable_identity_schema: None,
+        }
+    }
+
+    pub(crate) fn from_registered(resolution: RegisteredAssetResolution<'a>) -> Self {
+        let (io, authority, stable_identity) = resolution.into_parts();
+        let schema = stable_identity.schema();
+        let path = stable_identity.into_value();
+        Self {
+            io,
+            identity: DependencyIdentity::new(authority, path),
+            stable_identity_schema: Some(schema),
+        }
     }
 
     pub fn identity(&self) -> &DependencyIdentity {
         &self.identity
     }
 
-    pub(crate) fn into_parts(self) -> (&'a dyn AssetIo, DependencyIdentity) {
-        (self.io, self.identity)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        &'a dyn AssetIo,
+        DependencyIdentity,
+        Option<&'static StableResourceIdentitySchema>,
+    ) {
+        (self.io, self.identity, self.stable_identity_schema)
+    }
+}
+
+/// The import session's resolver authority. Built-in profiles are the only source of admitted
+/// stable semantic identity; custom implementations remain session-opaque.
+#[derive(Clone, Copy)]
+pub(crate) enum ResolverBinding<'a> {
+    Registered(&'static RegisteredResolverProfile),
+    Custom(&'a dyn DependencyResolver),
+}
+
+impl<'a> ResolverBinding<'a> {
+    pub(crate) const fn registered(
+        profile: &'static RegisteredResolverProfile,
+    ) -> ResolverBinding<'static> {
+        ResolverBinding::Registered(profile)
+    }
+
+    pub(crate) const fn custom(resolver: &'a dyn DependencyResolver) -> Self {
+        Self::Custom(resolver)
     }
 }
 
@@ -187,30 +232,6 @@ pub trait DependencyResolver: Send + Sync {
         role: &DependencyRoleId,
         reference: DependencyReference<'_>,
     ) -> Result<AuthorizedDependency<'a>, DependencyPolicyError>;
-}
-
-/// Restricts dependencies to the declaring asset's backend authority namespace.
-#[derive(Debug, Default)]
-pub struct SameAuthorityResolver;
-
-impl DependencyResolver for SameAuthorityResolver {
-    fn authorize<'a>(
-        &'a self,
-        origin: &'a dyn AssetIo,
-        origin_authority: &AuthorityDomain,
-        _origin_path: &AssetPath,
-        _role: &DependencyRoleId,
-        reference: DependencyReference<'_>,
-    ) -> Result<AuthorizedDependency<'a>, DependencyPolicyError> {
-        Ok(AuthorizedDependency::new(
-            origin,
-            origin_authority.clone(),
-            reference
-                .normalized()
-                .try_clone()
-                .map_err(|_| DependencyPolicyError::AllocationFailed)?,
-        ))
-    }
 }
 
 /// Denies every external dependency before backend IO.
@@ -332,11 +353,30 @@ pub struct DependencySnapshot<'scope> {
     issuer: &'scope DependencyOriginIssuer,
     origin_io: &'scope dyn AssetIo,
     origin_node: usize,
-    identity: DependencyIdentity,
+    identity: DependencySnapshotIdentity,
     bytes: Arc<SharedDependencySnapshot>,
     cache_disposition: DependencyCacheDisposition,
-    _identity_path_reservation: ImportStoreReservation,
     scope: PhantomData<&'scope ()>,
+}
+
+pub(crate) struct DependencySnapshotIdentity {
+    exact: DependencyIdentity,
+    stable_schema: Option<&'static StableResourceIdentitySchema>,
+    _path_reservation: ImportStoreReservation,
+}
+
+impl DependencySnapshotIdentity {
+    pub(crate) const fn new(
+        exact: DependencyIdentity,
+        stable_schema: Option<&'static StableResourceIdentitySchema>,
+        path_reservation: ImportStoreReservation,
+    ) -> Self {
+        Self {
+            exact,
+            stable_schema,
+            _path_reservation: path_reservation,
+        }
+    }
 }
 
 impl<'scope> DependencySnapshot<'scope> {
@@ -344,10 +384,9 @@ impl<'scope> DependencySnapshot<'scope> {
         issuer: &'scope DependencyOriginIssuer,
         origin_io: &'scope dyn AssetIo,
         origin_node: usize,
-        identity: DependencyIdentity,
+        identity: DependencySnapshotIdentity,
         bytes: Arc<SharedDependencySnapshot>,
         cache_disposition: DependencyCacheDisposition,
-        identity_path_reservation: ImportStoreReservation,
     ) -> Self {
         Self {
             issuer,
@@ -356,13 +395,18 @@ impl<'scope> DependencySnapshot<'scope> {
             identity,
             bytes,
             cache_disposition,
-            _identity_path_reservation: identity_path_reservation,
             scope: PhantomData,
         }
     }
 
     pub fn identity(&self) -> &DependencyIdentity {
-        &self.identity
+        &self.identity.exact
+    }
+
+    pub(crate) const fn stable_identity_schema(
+        &self,
+    ) -> Option<&'static StableResourceIdentitySchema> {
+        self.identity.stable_schema
     }
 
     /// Returns the opaque origin capability for dependencies declared by this snapshot.
@@ -380,8 +424,8 @@ impl<'scope> DependencySnapshot<'scope> {
 
     pub fn diagnostic_source(&self) -> DiagnosticSource<'_> {
         DiagnosticSource::new(
-            self.identity.authority().clone(),
-            self.identity.path(),
+            self.identity.exact.authority().clone(),
+            self.identity.exact.path(),
             self.bytes(),
         )
     }
@@ -772,6 +816,7 @@ impl DependencyCache {
         &mut self,
         identity: &DependencyIdentity,
         bytes: Arc<SharedDependencySnapshot>,
+        stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
     ) -> Option<usize> {
         let index = self.record_index(identity)?;
         let Some(DependencyCacheRecordSlot::Occupied(record)) = self.entries.get_mut(index) else {
@@ -781,7 +826,10 @@ impl DependencyCache {
         let DependencyCacheEntry::Resolving = entry else {
             return None;
         };
-        *entry = DependencyCacheEntry::Available(CachedDependencySnapshot { bytes });
+        *entry = DependencyCacheEntry::Available(CachedDependencySnapshot {
+            bytes,
+            stable_identity_schema,
+        });
         Some(index)
     }
 
@@ -1138,6 +1186,7 @@ pub(crate) enum DependencyCacheEntry {
 
 pub(crate) struct CachedDependencySnapshot {
     pub(crate) bytes: Arc<SharedDependencySnapshot>,
+    pub(crate) stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
 }
 
 /// The first immutable unavailable result published for one physical dependency identity.
@@ -1148,6 +1197,7 @@ pub(crate) struct CachedDependencySnapshot {
 pub(crate) struct CachedDependencyFailure {
     cause: ScopeAbortCause,
     unavailable: CachedDependencyUnavailable,
+    stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1173,7 +1223,10 @@ pub(crate) enum CachedNegativeObservation {
 }
 
 impl CachedDependencyFailure {
-    pub(crate) fn try_new(cause: ScopeAbortCause) -> Result<Self, ScopeAbortCause> {
+    pub(crate) fn try_new(
+        cause: ScopeAbortCause,
+        stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
+    ) -> Result<Self, ScopeAbortCause> {
         let unavailable = match &cause {
             ScopeAbortCause::AssetOpen(error) => {
                 CachedDependencyUnavailable::EnvironmentDependent {
@@ -1200,7 +1253,11 @@ impl CachedDependencyFailure {
             ScopeAbortCause::Allocation { .. } => CachedDependencyUnavailable::ProcessState,
             _ => return Err(cause),
         };
-        Ok(Self { cause, unavailable })
+        Ok(Self {
+            cause,
+            unavailable,
+            stable_identity_schema,
+        })
     }
 
     pub(crate) const fn cause(&self) -> &ScopeAbortCause {
@@ -1209,6 +1266,12 @@ impl CachedDependencyFailure {
 
     pub(crate) const fn unavailable(&self) -> CachedDependencyUnavailable {
         self.unavailable
+    }
+
+    pub(crate) const fn stable_identity_schema(
+        &self,
+    ) -> Option<&'static StableResourceIdentitySchema> {
+        self.stable_identity_schema
     }
 
     pub(crate) fn replay_scope_cause(&self) -> ScopeAbortCause {
@@ -1578,7 +1641,7 @@ mod tests {
             AccountedVec::new(),
             store.reserve_scratch(1),
         ));
-        assert_eq!(cache.store_available(&identity, bytes), Some(0));
+        assert_eq!(cache.store_available(&identity, bytes, None), Some(0));
 
         assert!(!cache.remove_resolving(&identity));
         assert_eq!(cache.available_identity(0), Some(&identity));
@@ -1597,9 +1660,13 @@ mod tests {
                 .mark_resolving(identity.try_clone().unwrap(), store.reserve_scratch(1),)
                 .unwrap()
         );
-        let failure = CachedDependencyFailure::try_new(ScopeAbortCause::AssetOpen(
-            AssetOpenError::new(AssetOpenStage::Open, AssetOpenErrorKind::NotFound),
-        ))
+        let failure = CachedDependencyFailure::try_new(
+            ScopeAbortCause::AssetOpen(AssetOpenError::new(
+                AssetOpenStage::Open,
+                AssetOpenErrorKind::NotFound,
+            )),
+            None,
+        )
         .expect("missing input is a reusable physical failure");
         let cache_index = cache
             .store_failed(&identity, failure)
@@ -1639,7 +1706,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            CachedDependencyFailure::try_new(cause),
+            CachedDependencyFailure::try_new(cause, None),
             Err(ScopeAbortCause::AssetRead(error))
                 if matches!(
                     error.kind(),
@@ -1673,16 +1740,15 @@ mod tests {
             store.reserve_scratch(1),
         ));
         let origin_node = cache
-            .store_available(&identity, Arc::clone(&bytes))
+            .store_available(&identity, Arc::clone(&bytes), None)
             .expect("the resolving dependency must become available");
         let snapshot = DependencySnapshot::new(
             &issuer,
             &io,
             origin_node,
-            identity,
+            DependencySnapshotIdentity::new(identity, None, store.reserve_scratch(1)),
             bytes,
             DependencyCacheDisposition::Fresh,
-            store.reserve_scratch(1),
         );
 
         let origin = snapshot.origin();

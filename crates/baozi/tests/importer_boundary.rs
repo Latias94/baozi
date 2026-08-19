@@ -7,8 +7,8 @@ use baozi::{
     ReadConfidence, RequestError, SceneSnapshotLimits,
 };
 use baozi_import::{
-    DetectionOutcome, DetectionResult, DetectionScope, FormatImporter, ParseResult, ParseScope,
-    Probe, ReadHint, SameAuthorityResolver, SceneDraft,
+    DenyDependencies, DetectionOutcome, DetectionResult, DetectionScope, FormatImporter,
+    ParseResult, ParseScope, Probe, ReadHint, SceneDraft,
 };
 use baozi_io::OpenedAsset;
 use std::io::Cursor;
@@ -232,7 +232,7 @@ fn foreign_prepared_request_is_rejected_before_io_or_session() {
             &resolver_io,
             AssetPath::new("model.once").expect("valid source path"),
             &request,
-            &SameAuthorityResolver,
+            &DenyDependencies,
             ImportOperationControl::default(),
         )
         .expect_err("foreign request must fail before resolver or asset IO");

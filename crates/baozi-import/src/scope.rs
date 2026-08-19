@@ -2,9 +2,9 @@ use crate::config::{ConformancePolicy, ImportLossKind, LossPolicy};
 use crate::dependency::{
     AuthorizedDependency, CachedDependencyFailure, DependencyCacheDisposition, DependencyIdentity,
     DependencyOrigin, DependencyOriginIssuer, DependencyOriginNode, DependencyOutcome,
-    DependencyReference, DependencyRequirement, DependencyResolver, DependencyRoleId,
-    DependencySnapshot, OptionalDependencyEvidence, SharedDependencySnapshot,
-    shared_dependency_snapshot_allocation_bytes,
+    DependencyReference, DependencyRequirement, DependencyRoleId, DependencySnapshot,
+    DependencySnapshotIdentity, OptionalDependencyEvidence, ResolverBinding,
+    SharedDependencySnapshot, shared_dependency_snapshot_allocation_bytes,
 };
 use crate::descriptor::TextDecodingMode;
 use crate::diagnostic::{
@@ -28,8 +28,9 @@ use crate::metered_storage::{
 use crate::options::{CompiledFormatOptions, FormatOptionKey};
 use crate::registry::RegistryEntry;
 use crate::resource_graph::{
-    PendingResourceRelation, ResourceAcquisitionState, ResourceGraph, ResourceGraphError,
-    ResourceUnavailableDisposition, cached_unavailable_disposition, unavailable_disposition,
+    AvailableResourceIdentity, PendingResourceRelation, ResourceAcquisitionState, ResourceGraph,
+    ResourceGraphError, ResourceUnavailableDisposition, cached_unavailable_disposition,
+    unavailable_disposition,
 };
 use crate::source_scope::{
     FinalizedSourceScopeRecord, LiveSourceScopeRecord, SourceScopeRecordBuilder,
@@ -41,7 +42,8 @@ use crate::{SceneDraft as CanonicalSceneDraft, authoring::SceneAuthoringBatch};
 use baozi_core::scene::integration::SceneConstruction;
 use baozi_core::{OrderedMap, OrderedMapError};
 use baozi_io::{
-    AssetIo, AssetLength, AssetPath, AssetReadErrorKind, AuthorityDomain, OpenedAsset, PathError,
+    __semantic_identity::StableResourceIdentitySchema, AssetIo, AssetLength, AssetPath,
+    AssetReadErrorKind, AuthorityDomain, OpenedAsset, PathError,
 };
 use baozi_operation::{CapacityPlan, CapacityPlanError, CounterClass, LedgerCause};
 use std::cell::{Cell, RefCell};
@@ -394,7 +396,7 @@ pub struct ParseScope<'session> {
     primary_authority: &'session AuthorityDomain,
     primary_source: &'session AssetPath,
     primary_bytes: &'session [u8],
-    resolver: &'session dyn DependencyResolver,
+    resolver: ResolverBinding<'session>,
     dependency_origin_issuer: &'session DependencyOriginIssuer,
     conformance_policy: ConformancePolicy,
     loss_policy: LossPolicy,
@@ -422,7 +424,7 @@ pub(crate) struct ParseScopeParts<'session> {
     pub primary_authority: &'session AuthorityDomain,
     pub primary_source: &'session AssetPath,
     pub primary_bytes: &'session [u8],
-    pub resolver: &'session dyn DependencyResolver,
+    pub resolver: ResolverBinding<'session>,
     pub dependency_origin_issuer: &'session DependencyOriginIssuer,
     pub conformance_policy: ConformancePolicy,
     pub loss_policy: LossPolicy,
@@ -1880,9 +1882,12 @@ impl<'session> ParseScope<'session> {
                         self.host,
                         pending,
                         cache_index,
-                        snapshot.identity(),
                         snapshot.bytes(),
-                        normalized.path(),
+                        AvailableResourceIdentity::new(
+                            snapshot.identity(),
+                            normalized.path(),
+                            snapshot.stable_identity_schema(),
+                        ),
                     )
                     .map_err(|cause| self.abort(cause.into_scope_cause()))?;
                 Ok(DependencyOutcome::available(snapshot))
@@ -2216,51 +2221,152 @@ impl<'session> ParseScope<'session> {
                 },
             ));
         }
-        let normalized = match self.normalize_dependency_path_from(origin_source, raw_reference) {
-            Ok(normalized) => normalized,
-            Err(cause @ ScopeAbortCause::Path(_)) => {
-                let origin_source = match self
-                    .clone_metered_dependency_path(origin_source, "dependency-failure-source")
-                {
-                    Ok(origin_source) => origin_source,
-                    Err(clone_cause) => {
-                        return Err(
-                            self.dependency_failure_without_path(Some(pending), clone_cause)
-                        );
+        let (normalized, authorized) = match self.resolver {
+            ResolverBinding::Registered(profile) => {
+                let envelope = match dependency_normalization_capacity_envelope(
+                    origin_source,
+                    raw_reference,
+                ) {
+                    Ok(envelope) => envelope,
+                    Err(cause) => {
+                        return Err(self.dependency_failure_without_path(Some(pending), cause));
                     }
                 };
-                return Err(self.dependency_failure(Some(pending), None, origin_source, cause));
+                let reservation = match self.reserve_dependency_storage_cause(envelope) {
+                    Ok(reservation) => reservation,
+                    Err(cause) => {
+                        return Err(self.dependency_failure_without_path(Some(pending), cause));
+                    }
+                };
+                let reference = match profile
+                    .semantic_subject()
+                    .normalizer()
+                    .normalize_from_file(origin_source, raw_reference)
+                {
+                    Ok(reference) => reference,
+                    Err(PathError::AllocationFailed) => {
+                        return Err(self.dependency_failure_without_path(
+                            Some(pending),
+                            ScopeAbortCause::Allocation {
+                                resource: "dependency-path-normalization",
+                            },
+                        ));
+                    }
+                    Err(cause) => {
+                        let origin_source = match self.clone_metered_dependency_path(
+                            origin_source,
+                            "dependency-failure-source",
+                        ) {
+                            Ok(origin_source) => origin_source,
+                            Err(clone_cause) => {
+                                return Err(self
+                                    .dependency_failure_without_path(Some(pending), clone_cause));
+                            }
+                        };
+                        return Err(self.dependency_failure(
+                            Some(pending),
+                            None,
+                            origin_source,
+                            dependency_path_cause(cause),
+                        ));
+                    }
+                };
+                let path = match reference.path().try_clone() {
+                    Ok(path) => path,
+                    Err(_) => {
+                        return Err(self.dependency_failure_without_path(
+                            Some(pending),
+                            ScopeAbortCause::Allocation {
+                                resource: "dependency-path-normalization",
+                            },
+                        ));
+                    }
+                };
+                let normalized = match self.finish_metered_dependency_path(
+                    path,
+                    reservation,
+                    "dependency-path-normalization",
+                ) {
+                    Ok(normalized) => normalized,
+                    Err(cause) => {
+                        return Err(self.dependency_failure_without_path(Some(pending), cause));
+                    }
+                };
+                let resolution = match profile.resolve_same_authority(
+                    origin_io,
+                    origin_authority.clone(),
+                    reference,
+                ) {
+                    Ok(resolution) => resolution,
+                    Err(_) => {
+                        return Err(self.dependency_failure(
+                            Some(pending),
+                            None,
+                            normalized,
+                            ScopeAbortCause::DescriptorContract {
+                                code: "registered-resolver-normalizer-mismatch",
+                            },
+                        ));
+                    }
+                };
+                let authorized = AuthorizedDependency::from_registered(resolution);
+                (normalized, authorized)
             }
-            Err(cause) => {
-                return Err(self.dependency_failure_without_path(Some(pending), cause));
+            ResolverBinding::Custom(resolver) => {
+                let normalized = match self
+                    .normalize_dependency_path_from(origin_source, raw_reference)
+                {
+                    Ok(normalized) => normalized,
+                    Err(cause @ ScopeAbortCause::Path(_)) => {
+                        let origin_source = match self.clone_metered_dependency_path(
+                            origin_source,
+                            "dependency-failure-source",
+                        ) {
+                            Ok(origin_source) => origin_source,
+                            Err(clone_cause) => {
+                                return Err(self
+                                    .dependency_failure_without_path(Some(pending), clone_cause));
+                            }
+                        };
+                        return Err(self.dependency_failure(
+                            Some(pending),
+                            None,
+                            origin_source,
+                            cause,
+                        ));
+                    }
+                    Err(cause) => {
+                        return Err(self.dependency_failure_without_path(Some(pending), cause));
+                    }
+                };
+                let reference = DependencyReference::new(raw_reference, normalized.path());
+                let authorized = match catch_unwind(AssertUnwindSafe(|| {
+                    resolver.authorize(origin_io, origin_authority, origin_source, role, reference)
+                })) {
+                    Err(payload) => {
+                        discard_untrusted_panic_payload(payload);
+                        return Err(self.dependency_failure(
+                            Some(pending),
+                            None,
+                            normalized,
+                            ScopeAbortCause::TrustedExtension {
+                                boundary: TrustedExtensionBoundary::DependencyResolver,
+                                code: "resolver-panicked",
+                            },
+                        ));
+                    }
+                    Ok(Err(cause)) => {
+                        return Err(self.dependency_failure(
+                            Some(pending),
+                            None,
+                            normalized,
+                            ScopeAbortCause::DependencyPolicy(cause),
+                        ));
+                    }
+                    Ok(Ok(authorized)) => authorized,
+                };
+                (normalized, authorized)
             }
-        };
-        let reference = DependencyReference::new(raw_reference, normalized.path());
-        let authorized = match catch_unwind(AssertUnwindSafe(|| {
-            self.resolver
-                .authorize(origin_io, origin_authority, origin_source, role, reference)
-        })) {
-            Err(payload) => {
-                discard_untrusted_panic_payload(payload);
-                return Err(self.dependency_failure(
-                    Some(pending),
-                    None,
-                    normalized,
-                    ScopeAbortCause::TrustedExtension {
-                        boundary: TrustedExtensionBoundary::DependencyResolver,
-                        code: "resolver-panicked",
-                    },
-                ));
-            }
-            Ok(Err(cause)) => {
-                return Err(self.dependency_failure(
-                    Some(pending),
-                    None,
-                    normalized,
-                    ScopeAbortCause::DependencyPolicy(cause),
-                ));
-            }
-            Ok(Ok(authorized)) => authorized,
         };
 
         Ok((pending, normalized, authorized))
@@ -2307,7 +2413,7 @@ impl<'session> ParseScope<'session> {
         ),
         DependencyResolutionFailure,
     > {
-        let (io, identity) = authorized.into_parts();
+        let (io, identity, stable_identity_schema) = authorized.into_parts();
         let backend_authority = if std::ptr::eq(io, self.primary_io) {
             self.primary_authority.clone()
         } else {
@@ -2341,10 +2447,28 @@ impl<'session> ParseScope<'session> {
         let cached = {
             let graph = self.resource_graph.borrow();
             match graph.acquisition_state(&identity) {
-                Some(ResourceAcquisitionState::Available { cache_index, bytes }) => {
-                    Some((cache_index, bytes))
-                }
-                Some(ResourceAcquisitionState::Failed { cache_index }) => {
+                Some(ResourceAcquisitionState::Available {
+                    cache_index,
+                    bytes,
+                    stable_identity_schema,
+                }) => Some((cache_index, bytes, stable_identity_schema)),
+                Some(ResourceAcquisitionState::Failed {
+                    cache_index,
+                    stable_identity_schema: cached_stable_identity_schema,
+                }) => {
+                    if !stable_identity_matches(
+                        stable_identity_schema,
+                        cached_stable_identity_schema,
+                    ) {
+                        return Err(self.dependency_failure(
+                            Some(pending),
+                            Some(identity),
+                            normalized,
+                            ScopeAbortCause::DescriptorContract {
+                                code: "dependency-resolver-identity-mismatch",
+                            },
+                        ));
+                    }
                     return Err(self.cached_dependency_failure(
                         pending,
                         identity,
@@ -2366,19 +2490,30 @@ impl<'session> ParseScope<'session> {
                 None => None,
             }
         };
-        if let Some((origin_node, bytes)) = cached {
-            let (snapshot_identity, identity_path_reservation) =
-                match self.clone_dependency_identity(&identity) {
-                    Ok(identity) => identity,
-                    Err(cause) => {
-                        return Err(self.dependency_failure(
-                            Some(pending),
-                            Some(identity),
-                            normalized,
-                            cause,
-                        ));
-                    }
-                };
+        if let Some((origin_node, bytes, cached_stable_identity_schema)) = cached {
+            if !stable_identity_matches(stable_identity_schema, cached_stable_identity_schema) {
+                return Err(self.dependency_failure(
+                    Some(pending),
+                    Some(identity),
+                    normalized,
+                    ScopeAbortCause::DescriptorContract {
+                        code: "dependency-resolver-identity-mismatch",
+                    },
+                ));
+            }
+            let snapshot_identity = match self
+                .clone_dependency_snapshot_identity(&identity, cached_stable_identity_schema)
+            {
+                Ok(identity) => identity,
+                Err(cause) => {
+                    return Err(self.dependency_failure(
+                        Some(pending),
+                        Some(identity),
+                        normalized,
+                        cause,
+                    ));
+                }
+            };
             return Ok((
                 DependencySnapshot::new(
                     self.dependency_origin_issuer,
@@ -2387,7 +2522,6 @@ impl<'session> ParseScope<'session> {
                     snapshot_identity,
                     bytes,
                     DependencyCacheDisposition::Reused,
-                    identity_path_reservation,
                 ),
                 pending,
                 normalized,
@@ -2466,17 +2600,17 @@ impl<'session> ParseScope<'session> {
             .open_and_read_dependency(io, &identity)
             .and_then(|bytes| {
                 let snapshot_bytes = self.share_dependency_snapshot(bytes)?;
-                let (snapshot_identity, identity_path_reservation) =
-                    self.clone_dependency_identity(&identity)?;
-                Ok((snapshot_bytes, snapshot_identity, identity_path_reservation))
+                let snapshot_identity =
+                    self.clone_dependency_snapshot_identity(&identity, stable_identity_schema)?;
+                Ok((snapshot_bytes, snapshot_identity))
             });
         match acquired {
-            Ok((snapshot_bytes, snapshot_identity, identity_path_reservation)) => {
-                let origin_node = match self
-                    .resource_graph
-                    .borrow_mut()
-                    .complete_acquisition(&identity, Arc::clone(&snapshot_bytes))
-                {
+            Ok((snapshot_bytes, snapshot_identity)) => {
+                let origin_node = match self.resource_graph.borrow_mut().complete_acquisition(
+                    &identity,
+                    Arc::clone(&snapshot_bytes),
+                    stable_identity_schema,
+                ) {
                     Ok(origin_node) => origin_node,
                     Err(_) => {
                         let _ = self
@@ -2501,16 +2635,19 @@ impl<'session> ParseScope<'session> {
                         snapshot_identity,
                         snapshot_bytes,
                         DependencyCacheDisposition::Fresh,
-                        identity_path_reservation,
                     ),
                     pending,
                     normalized,
                     origin_node,
                 ))
             }
-            Err(cause) => {
-                Err(self.finish_dependency_resolution_failure(pending, identity, normalized, cause))
-            }
+            Err(cause) => Err(self.finish_dependency_resolution_failure(
+                pending,
+                identity,
+                stable_identity_schema,
+                normalized,
+                cause,
+            )),
         }
     }
 
@@ -2518,10 +2655,11 @@ impl<'session> ParseScope<'session> {
         &self,
         pending: PendingResourceRelation,
         identity: DependencyIdentity,
+        stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
         normalized: MeteredDependencyPath,
         cause: ScopeAbortCause,
     ) -> DependencyResolutionFailure {
-        let cached_failure = match CachedDependencyFailure::try_new(cause) {
+        let cached_failure = match CachedDependencyFailure::try_new(cause, stable_identity_schema) {
             Ok(failure) => failure,
             Err(cause) => {
                 if self
@@ -2615,10 +2753,11 @@ impl<'session> ParseScope<'session> {
         })
     }
 
-    fn clone_dependency_identity(
+    fn clone_dependency_snapshot_identity(
         &self,
         source: &DependencyIdentity,
-    ) -> Result<(DependencyIdentity, ImportStoreReservation), ScopeAbortCause> {
+        stable_schema: Option<&'static StableResourceIdentitySchema>,
+    ) -> Result<DependencySnapshotIdentity, ScopeAbortCause> {
         let reservation =
             self.reserve_dependency_storage_cause(source.path().as_str().len() as u64)?;
         let identity = source
@@ -2626,7 +2765,11 @@ impl<'session> ParseScope<'session> {
             .map_err(|_| ScopeAbortCause::Allocation {
                 resource: "dependency-snapshot-identity",
             })?;
-        Ok((identity, reservation))
+        Ok(DependencySnapshotIdentity::new(
+            identity,
+            stable_schema,
+            reservation,
+        ))
     }
 
     fn charge_logical_reference(&self) -> Result<(), DependencyResolutionFailure> {
@@ -4072,6 +4215,21 @@ fn dependency_path_cause(cause: PathError) -> ScopeAbortCause {
             resource: "dependency-path-normalization",
         },
         cause => ScopeAbortCause::Path(cause),
+    }
+}
+
+fn stable_identity_matches(
+    expected: Option<&'static StableResourceIdentitySchema>,
+    cached: Option<&'static StableResourceIdentitySchema>,
+) -> bool {
+    match (expected, cached) {
+        (Some(expected), Some(cached)) => {
+            expected.owner() == cached.owner()
+                && expected.schema_id() == cached.schema_id()
+                && expected.schema_version() == cached.schema_version()
+        }
+        (None, None) => true,
+        _ => false,
     }
 }
 

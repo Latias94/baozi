@@ -232,8 +232,10 @@ gate_id = "import-resource-graph-tests"
 tracer_class = "test"
 executor = "command"
 success_condition = "process-exit-zero"
-evidence_identity = "baozi.import.resource-graph-tests/v2"
+evidence_identity = "baozi.import.resource-graph-tests/v3"
 evidence_paths = [
+  "crates/baozi-io/src/semantic_identity.rs",
+  "crates/baozi-import/src/dependency.rs",
   "crates/baozi-import/src/resource_graph/mod.rs",
   "crates/baozi-import/src/resource_graph/manifest.rs",
   "crates/baozi-import/src/resource_graph/manifest/encoding.rs",

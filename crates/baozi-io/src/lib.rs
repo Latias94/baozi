@@ -63,6 +63,7 @@ mod path;
 ))]
 mod repository;
 mod resource;
+mod semantic_identity;
 
 #[cfg(all(
     feature = "fs-candidate",
@@ -183,6 +184,23 @@ pub use repository::{
     RepositoryRoot, RepositoryRootSpec, RepositoryUsage, RepositoryVerifyError,
 };
 pub use resource::{AssetIo, AssetLength, AssetReader, AuthorityDomain, OpenedAsset};
+/// Stable asset-IO semantic registry used by import's deep resource graph module.
+///
+/// This is intentionally hidden from the ordinary root API. Importers may provide a custom
+/// resolver, but only the import session can decide whether a registered profile is admitted into
+/// a successful-input manifest.
+#[doc(hidden)]
+pub mod __semantic_identity {
+    pub use crate::semantic_identity::{
+        CanonicalizationProfileId, NamespaceSemanticsId, NormalizedReference,
+        ReferenceNormalizerContractId, ReferenceNormalizerSemanticSubject,
+        RegisteredAssetResolution, RegisteredNegativeProofScheme, RegisteredReferenceNormalizer,
+        RegisteredResolutionError, RegisteredResolverProfile, ResolverContractId,
+        ResolverSemanticSubject, SemanticParameterSchema, StableResourceIdentity,
+        StableResourceIdentitySchema, portable_asset_path_normalizer_v1,
+        same_authority_resolver_v1,
+    };
+}
 
 #[cfg(test)]
 mod native_fs_status_tests {
