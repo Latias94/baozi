@@ -259,8 +259,9 @@ pub use concrete_store::{
 pub mod __canonical_activation {
     pub use crate::concrete_store::activation::{
         CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationPolicy,
-        CanonicalActivationSeal, CanonicalActivationSealFailure, CanonicalActivationSessionPolicy,
-        CanonicalBuildControl, CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome,
+        CanonicalActivationRequestIdentity, CanonicalActivationSeal,
+        CanonicalActivationSealFailure, CanonicalActivationSessionPolicy, CanonicalBuildControl,
+        CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome,
         CanonicalFailureRequirements, CanonicalFailureTerminalWorkPlan,
         CanonicalFreezeInterruption, CanonicalFreezeInterruptionClass, CanonicalFreezePermit,
         CanonicalFreezePermitIssue, CanonicalJointCommit, CanonicalJointSeal, CanonicalLane,
@@ -296,6 +297,7 @@ pub mod __canonical_activation_producer {
     pub use crate::concrete_store::activation::{
         CanonicalActivationDescription, CanonicalActivationPlanSealer,
         CanonicalSealedActivationPlan, CanonicalSuccessRequirements, CanonicalTableShape,
+        mint_canonical_activation_request_identity,
     };
 }
 pub use control::{

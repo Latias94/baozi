@@ -9,6 +9,7 @@ use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     ByteBlock, BytesPlan, BytesWriter, CanonicalBytesRef, CanonicalInheritanceSource,
@@ -63,6 +64,8 @@ const ACTIVATION_PRODUCT_GRAPH_FAILURE_CODE: u32 = 0x4143_5047;
 const CANONICAL_VALIDATION_CONTRACT_FAILURE_CODE: u32 = 0x4356_4346;
 const FAILURE_WORK_ENVELOPE_EXHAUSTED_CODE: u32 = 0x4657_4545;
 const FAILURE_EVIDENCE_BUILD_CHUNK_UNITS: usize = 256;
+
+static NEXT_CANONICAL_ACTIVATION_REQUEST_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1946,6 +1949,28 @@ pub struct CanonicalTableShape {
     max_new_blocks: usize,
 }
 
+/// Opaque identity shared by one producer's failure and success activation requirements.
+///
+/// Consumers may carry this value but cannot mint it. Trusted canonical producers create one
+/// identity per construction description through the producer-only facade, then bind the same
+/// identity to the failure envelope and the sealed success facts. The activation driver rejects
+/// any cross-description pairing before canonical storage can open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalActivationRequestIdentity(u64);
+
+/// Mints one producer-owned activation request identity.
+///
+/// This function is exported only through the trusted canonical producer facade. Operation
+/// consumers receive only the opaque identity already embedded in requirements.
+pub fn mint_canonical_activation_request_identity() -> Option<CanonicalActivationRequestIdentity> {
+    NEXT_CANONICAL_ACTIVATION_REQUEST_IDENTITY
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |observed| {
+            observed.checked_add(1)
+        })
+        .ok()
+        .map(CanonicalActivationRequestIdentity)
+}
+
 impl CanonicalTableShape {
     pub fn new(total_blocks: usize, max_new_blocks: usize) -> Result<Self, StorePlanError> {
         if total_blocks == 0
@@ -2004,11 +2029,24 @@ fn canonical_structural_work_requirement(
 #[must_use = "failure requirements must be bound to one scoped session outcome owner"]
 pub struct CanonicalFailureRequirements {
     outcome_evidence: CanonicalTableShape,
+    request_identity: Option<CanonicalActivationRequestIdentity>,
 }
 
 impl CanonicalFailureRequirements {
     pub const fn new(outcome_evidence: CanonicalTableShape) -> Self {
-        Self { outcome_evidence }
+        Self {
+            outcome_evidence,
+            request_identity: None,
+        }
+    }
+
+    /// Binds this failure envelope to one opaque producer construction.
+    pub const fn with_request_identity(
+        mut self,
+        request_identity: CanonicalActivationRequestIdentity,
+    ) -> Self {
+        self.request_identity = Some(request_identity);
+        self
     }
 
     /// Returns the exact operation-owned work complete before scoped authoring can begin.
@@ -2030,6 +2068,7 @@ pub struct CanonicalSuccessRequirements {
     expected_materialized_blocks: usize,
     validation_work: NonZeroU64,
     semantic_bytes: u64,
+    request_identity: Option<CanonicalActivationRequestIdentity>,
 }
 
 impl CanonicalSuccessRequirements {
@@ -2057,7 +2096,17 @@ impl CanonicalSuccessRequirements {
             expected_materialized_blocks,
             validation_work,
             semantic_bytes: 0,
+            request_identity: None,
         })
+    }
+
+    /// Binds these success facts to the same opaque producer construction as its failure envelope.
+    pub const fn with_request_identity(
+        mut self,
+        request_identity: CanonicalActivationRequestIdentity,
+    ) -> Self {
+        self.request_identity = Some(request_identity);
+        self
     }
 
     /// Binds one exact semantic-byte observation derived from the same sealed construction plan.
@@ -2071,6 +2120,9 @@ impl CanonicalSuccessRequirements {
         &self,
         failure: &CanonicalFailureRequirements,
     ) -> Result<u64, StorePlanError> {
+        if self.request_identity != failure.request_identity {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
         canonical_structural_work_requirement(self.canonical, failure.outcome_evidence)
     }
 }
@@ -2078,6 +2130,7 @@ impl CanonicalSuccessRequirements {
 struct BoundScopedFailureRequest {
     outcome_evidence_plan: RetainedStoreBlockTablePlan,
     outcome_evidence_destination_dimension: StoreDimensionKey,
+    request_identity: Option<CanonicalActivationRequestIdentity>,
 }
 
 struct BoundScopedSuccessRequest {
@@ -2225,6 +2278,7 @@ impl CanonicalActivationSessionPolicy {
                 .outcome_evidence
                 .bind(self.outcome_evidence_writer.bind(writer_limits))?,
             outcome_evidence_destination_dimension: self.outcome_evidence_destination_dimension,
+            request_identity: requirements.request_identity,
         })
     }
 

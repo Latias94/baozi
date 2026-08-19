@@ -110,8 +110,9 @@ impl PendingNodeSceneEdit {
         let pending = self.bind(input)?;
         let failure_evidence =
             NodeSceneFailureEvidencePlan::try_new().map_err(SceneConstructionStartError::from)?;
+        let brand = super::super::super::ConstructionBrand::reserve()?;
         let failure_requirements = failure_evidence
-            .requirements()
+            .requirements_for(brand)
             .map_err(SceneConstructionStartError::from)?;
         let canonical_writer_limits =
             RetainedStoreBatchLimits::new(pending.counts.canonical_attribution_slots.as_usize(), 4)
@@ -132,7 +133,6 @@ impl PendingNodeSceneEdit {
                 crate::canonical_scene::store::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT,
             ),
         )?;
-        let brand = super::super::super::ConstructionBrand::reserve()?;
         let raw = SceneStoreOperation::try_start_derived(
             start.control,
             start.ledger_plan,
@@ -178,7 +178,7 @@ fn prepare_scoped_edit(
     let evidence_counts = pending.counts.evidence;
     let input_generation = pending.input.generation();
     let invalidations = pending.invalidations;
-    let mut success_requirements = Some(edit_success_requirements(&pending)?);
+    let mut success_requirements = Some(edit_success_requirements(&pending, brand)?);
     let mut pending = Some(pending);
 
     let outcome = owner.plan_and_activate_scoped(move |mut planning| {
@@ -340,6 +340,7 @@ fn prepare_scoped_edit(
 
 fn edit_success_requirements(
     pending: &BoundPendingNodeSceneEdit<'_>,
+    brand: super::super::super::ConstructionBrand,
 ) -> Result<CanonicalSuccessRequirements, StorePlanError> {
     let total = pending.counts.canonical_blocks.as_usize();
     CanonicalSuccessRequirements::new(
@@ -348,6 +349,7 @@ fn edit_success_requirements(
         total,
         pending.counts.central_validation_plan.work(),
     )
+    .map(|requirements| requirements.with_request_identity(brand.activation_request_identity()))
 }
 
 fn materialize_edit<'lane, 'scope>(

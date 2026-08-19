@@ -5,6 +5,8 @@ use baozi_core::{OrderedMap, PreparedOrderedMapCapacity};
 
 const CANONICAL_IMPORT_BRIDGE_SOURCE: &str =
     include_str!("../src/canonical_scene/store/api/import.rs");
+const SCENE_CONSTRUCTION_SOURCE: &str =
+    include_str!("../src/canonical_scene/store/api/construction.rs");
 
 fn rust_source_files(root: &Path) -> Vec<PathBuf> {
     let mut pending = vec![root.to_path_buf()];
@@ -50,6 +52,32 @@ fn canonical_import_bridge_consumes_only_opaque_scene_plans() {
             "the import bridge must not construct generic activation facts through `{forbidden}`"
         );
     }
+}
+
+#[test]
+fn scene_construction_stays_authority_free() {
+    for forbidden in [
+        "RetainedStoreOperation",
+        "PhysicalStorageAccount",
+        "StoreDimensionKey",
+        "CanonicalLane",
+        "OperationOwner",
+    ] {
+        assert!(
+            !SCENE_CONSTRUCTION_SOURCE.contains(forbidden),
+            "SceneConstruction must not carry operation or storage authority through `{forbidden}`"
+        );
+    }
+}
+
+#[cfg(feature = "_u4-import")]
+#[test]
+fn scene_construction_is_nameable_only_as_one_opaque_value() {
+    fn accepts_construction(_: baozi_core::__canonical_import::SceneConstruction<'_>) {}
+    fn accepts_error(_: baozi_core::__canonical_import::SceneConstructionStartError) {}
+
+    let _: fn(baozi_core::__canonical_import::SceneConstruction<'_>) = accepts_construction;
+    let _: fn(baozi_core::__canonical_import::SceneConstructionStartError) = accepts_error;
 }
 
 #[test]

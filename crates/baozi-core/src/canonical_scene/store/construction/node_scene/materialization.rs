@@ -432,15 +432,15 @@ impl<'input> NodeSceneActivationRequest<'input> {
     ) -> Result<Self, SceneConstructionStartError> {
         let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
         let failure_evidence = NodeSceneFailureEvidencePlan::try_new()?;
+        let brand = super::super::ConstructionBrand::reserve()?;
         let policy = NodeSceneActivationPolicyRequirements {
             canonical_writer_limits: RetainedStoreBatchLimits::new(
                 envelope.terminal_attribution_slots(),
                 4,
             )?,
             outcome_evidence_writer_limits: RetainedStoreBatchLimits::new(2, 4)?,
-            failure: failure_evidence.requirements()?,
+            failure: failure_evidence.requirements_for(brand)?,
         };
-        let brand = super::super::ConstructionBrand::reserve()?;
         Ok(Self {
             execution: NodeSceneActivationExecution {
                 brand,
@@ -547,6 +547,7 @@ impl<'input> NodeSceneActivationTransaction<'input> {
                 input,
                 validation_limits,
                 failure_evidence,
+                brand,
                 &mut control,
             )
         }
@@ -914,13 +915,14 @@ fn validate_and_seal_node_scene_plan<'input, C>(
     input: SceneAuthoringBatch<'input>,
     limits: SceneValidationLimits,
     failure_evidence: NodeSceneFailureEvidencePlan,
+    brand: super::super::ConstructionBrand,
     control: &mut C,
 ) -> Result<NodeSceneSealedPlan<'input, C::Reservation>, NodeSceneConstructionRejection<C::Error>>
 where
     C: CanonicalAuthoringControl,
 {
     let batches = validate_node_scene_batches(input, limits, control)?;
-    NodeSceneSealedPlan::try_new(batches, failure_evidence)
+    NodeSceneSealedPlan::try_new(batches, failure_evidence, brand)
         .map_err(NodeSceneConstructionRejection::Planning)
 }
 
@@ -985,6 +987,15 @@ impl NodeSceneFailureEvidencePlan {
         Ok(CanonicalFailureRequirements::new(CanonicalTableShape::new(
             1, 1,
         )?))
+    }
+
+    pub(super) fn requirements_for(
+        self,
+        brand: super::super::ConstructionBrand,
+    ) -> Result<CanonicalFailureRequirements, StorePlanError> {
+        self.requirements().map(|requirements| {
+            requirements.with_request_identity(brand.activation_request_identity())
+        })
     }
 
     pub(super) fn validation_work_units(self) -> Result<u64, StorePlanError> {
@@ -1063,6 +1074,7 @@ impl<'input, R> NodeSceneSealedPlan<'input, R> {
     fn try_new(
         batches: ValidatedNodeSceneBatches<'input, R>,
         failure_evidence: NodeSceneFailureEvidencePlan,
+        brand: super::super::ConstructionBrand,
     ) -> Result<Self, StorePlanError> {
         let materialization = NodeSceneMaterializationPlans::new(&batches)?;
         let geometry_reference_scratch = GeometryReferenceScratchPlan::try_new(&batches.geometry)?;
@@ -1078,7 +1090,8 @@ impl<'input, R> NodeSceneSealedPlan<'input, R> {
             validation_scratch,
             materialization.validation_work_units(validation_scratch, failure_evidence)?,
         )?;
-        let success_requirements = materialization.success_requirements(central_validation)?;
+        let success_requirements =
+            materialization.success_requirements(central_validation, brand)?;
         Ok(Self {
             execution: NodeSceneExecutionPlan {
                 batches,
@@ -1104,6 +1117,7 @@ impl NodeSceneMaterializationPlans {
     fn success_requirements(
         &self,
         central_validation: NodeSceneCentralValidationPlan,
+        brand: super::super::ConstructionBrand,
     ) -> Result<CanonicalSuccessRequirements, StorePlanError> {
         let canonical_block_count = usize::try_from(self.canonical_block_count)
             .map_err(|_| StorePlanError::SizeOverflow)?;
@@ -1113,7 +1127,11 @@ impl NodeSceneMaterializationPlans {
             canonical_block_count,
             central_validation.work(),
         )
-        .map(|requirements| requirements.with_semantic_bytes(self.canonical_string_bytes))
+        .map(|requirements| {
+            requirements
+                .with_request_identity(brand.activation_request_identity())
+                .with_semantic_bytes(self.canonical_string_bytes)
+        })
     }
 
     fn validation_work_units(
@@ -1637,6 +1655,7 @@ where
                         input,
                         validation_limits,
                         failure_evidence,
+                        brand,
                         &mut control,
                     )
                 };

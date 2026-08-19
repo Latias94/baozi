@@ -206,6 +206,67 @@ fn scoped_compatibility_owner_rejects_a_foreign_success_capacity() {
 }
 
 #[test]
+fn scoped_owner_rejects_success_facts_from_another_construction() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let policy = CanonicalActivationPolicy::new(
+        writer_plan(keys, 2, 2),
+        writer_plan(keys, 2, 2),
+        CanonicalMaterializationRole::new(keys.dimension, keys.dimension),
+        CanonicalValidationRole::new(keys.phase, keys.dimension, keys.dimension),
+        keys.dimension,
+        keys.dimension,
+    );
+    let failure_identity = mint_canonical_activation_request_identity().unwrap();
+    let success_identity = mint_canonical_activation_request_identity().unwrap();
+    let failure = CanonicalFailureRequirements::new(CanonicalTableShape::new(1, 1).unwrap())
+        .with_request_identity(failure_identity);
+    let foreign_success = CanonicalSuccessRequirements::new(
+        CanonicalTableShape::new(1, 1).unwrap(),
+        2,
+        1,
+        NonZeroU64::MIN,
+    )
+    .unwrap()
+    .with_request_identity(success_identity);
+    let owner = operation
+        .into_scoped_session_outcome_owner(policy, failure)
+        .expect("compatibility owner");
+    let mut foreign_success = Some(foreign_success);
+    let dropped = Cell::new(false);
+    let poison_seen_while_dropping = Cell::new(false);
+
+    let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
+        let mut semantic = planning.begin_semantic_work().unwrap();
+        let scratch = semantic.reserve(1).unwrap();
+        semantic.validate_live_owner(&scratch).unwrap();
+        semantic.run_unit(|| ()).unwrap();
+        let completion = semantic.finish_exact().unwrap();
+        let plan = TrackedScratchPlan {
+            _marker: DropMarker {
+                dropped: &dropped,
+                account: &account,
+                poison_seen_while_dropping: &poison_seen_while_dropping,
+            },
+            _scratch: scratch,
+        };
+        match planning.seal_activation(bind_test_execution(&mut foreign_success, plan), completion)
+        {
+            CanonicalActivationSeal::Sealed(_) => {
+                panic!("success facts from another construction must not seal")
+            }
+            CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
+        }
+    });
+
+    assert!(result.is_err());
+    assert!(dropped.get());
+    assert!(!poison_seen_while_dropping.get());
+    assert_fail_closed_containment(&account);
+}
+
+#[test]
 fn dropping_dormant_session_outcome_owner_contains_the_operation() {
     let factory = factory(1);
     let account = account(&factory);

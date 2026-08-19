@@ -54,6 +54,8 @@ fn import_consumes_only_the_core_owned_opaque_scene_plan() {
     for path in rust_source_files(&source_root) {
         let source = fs::read_to_string(&path).expect("read import Rust source");
         for forbidden in [
+            "SceneActivationRequest",
+            "SceneActivationRequestError",
             "__canonical_activation_producer",
             "CanonicalActivationDescription",
             "CanonicalActivationPlanSealer",

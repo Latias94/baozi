@@ -2,8 +2,8 @@ use std::cell::{RefCell, RefMut};
 
 use crate::SceneDraft;
 use baozi_core::__canonical_import::{
-    SceneActivationOutput, SceneActivationRejection, SceneActivationRequest,
-    SceneActivationRequirements, SceneCanonicalRootTag, SceneEvidenceRecipe, SceneHandoffToken,
+    SceneActivationOutput, SceneActivationRejection, SceneActivationRequirements,
+    SceneCanonicalRootTag, SceneConstruction, SceneEvidenceRecipe, SceneHandoffToken,
     SceneOutcomeEvidenceTag, SceneValidationProof, consume_scene_freeze_permit,
 };
 use baozi_operation::__canonical_activation::{
@@ -515,11 +515,11 @@ impl ImportStoreSessionOwner {
 
     pub(crate) fn submit_scene<'input>(
         &self,
-        request: SceneActivationRequest<'input>,
+        construction: SceneConstruction<'input>,
     ) -> Result<SceneDraft, ImportStoreActivationError> {
         let (operation, transition) = ImportStoreActivationTransition::begin(&self.state)
             .map_err(ImportStoreActivationError::StoreUnavailable)?;
-        let (requirements, transaction) = request.into_lane_parts();
+        let (requirements, transaction) = construction.into_lane_parts();
         let policy = self.vocabulary.activation_policy(
             requirements.canonical_writer_limits(),
             requirements.outcome_evidence_writer_limits(),

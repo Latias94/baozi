@@ -3,6 +3,7 @@
 use super::construction::node_scene::NodeSceneDraft;
 
 pub(crate) mod authoring;
+pub(crate) mod construction;
 #[cfg(feature = "_u4-import")]
 pub(crate) mod import;
 pub(crate) mod scene;

@@ -35,7 +35,7 @@ use crate::store::{
     ImportStoreHost, ImportStoreReservation, ImportStoreSessionOwner, scene_validation_limits,
 };
 use crate::{SceneDraft as CanonicalSceneDraft, authoring::SceneAuthoringBatch};
-use baozi_core::__canonical_import::SceneActivationRequest;
+use baozi_core::__canonical_import::SceneConstruction;
 use baozi_core::{OrderedMap, OrderedMapError};
 use baozi_io::{AssetIo, AssetLength, AssetPath, AuthorityDomain, OpenedAsset, PathError};
 use baozi_operation::{CapacityPlan, CapacityPlanError, CounterClass, LedgerCause};
@@ -569,34 +569,36 @@ impl<'session> ParseScope<'session> {
         self.store_owner
             .poll_parser_boundary()
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
-        let request = SceneActivationRequest::try_new(input, scene_validation_limits(self.limits))
+        let construction = SceneConstruction::try_new(input, scene_validation_limits(self.limits))
             .map_err(|_| {
                 self.abort(ScopeAbortCause::DescriptorContract {
                     code: "canonical-scene-request-rejected",
                 })
             })?;
-        self.store_owner.submit_scene(request).map_err(|cause| {
-            let code = match cause {
-                crate::store::ImportStoreActivationError::StoreUnavailable(_) => {
-                    "canonical-scene-store-unavailable"
-                }
-                crate::store::ImportStoreActivationError::Control(cause) => {
-                    return self.abort(ScopeAbortCause::Control(cause));
-                }
-                crate::store::ImportStoreActivationError::AuthoringRejected => {
-                    "canonical-scene-authoring-rejected"
-                }
-                crate::store::ImportStoreActivationError::MaterializationFailed => {
-                    "canonical-scene-materialization-failed"
-                }
-                crate::store::ImportStoreActivationError::Containment(_)
-                | crate::store::ImportStoreActivationError::Preparation(_)
-                | crate::store::ImportStoreActivationError::Plan(_) => {
-                    "canonical-scene-activation-contained"
-                }
-            };
-            self.abort(ScopeAbortCause::DescriptorContract { code })
-        })
+        self.store_owner
+            .submit_scene(construction)
+            .map_err(|cause| {
+                let code = match cause {
+                    crate::store::ImportStoreActivationError::StoreUnavailable(_) => {
+                        "canonical-scene-store-unavailable"
+                    }
+                    crate::store::ImportStoreActivationError::Control(cause) => {
+                        return self.abort(ScopeAbortCause::Control(cause));
+                    }
+                    crate::store::ImportStoreActivationError::AuthoringRejected => {
+                        "canonical-scene-authoring-rejected"
+                    }
+                    crate::store::ImportStoreActivationError::MaterializationFailed => {
+                        "canonical-scene-materialization-failed"
+                    }
+                    crate::store::ImportStoreActivationError::Containment(_)
+                    | crate::store::ImportStoreActivationError::Preparation(_)
+                    | crate::store::ImportStoreActivationError::Plan(_) => {
+                        "canonical-scene-activation-contained"
+                    }
+                };
+                self.abort(ScopeAbortCause::DescriptorContract { code })
+            })
     }
 
     /// Starts one incremental source-selection and closure evidence record.

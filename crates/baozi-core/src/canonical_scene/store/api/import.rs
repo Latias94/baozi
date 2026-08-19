@@ -1,7 +1,5 @@
 //! Hidden cross-crate bridge for the U4 canonical import cutover.
 
-use std::fmt;
-
 #[cfg(test)]
 use baozi_operation::__canonical_activation::CanonicalFailureRequirements;
 use baozi_operation::{
@@ -27,12 +25,10 @@ pub use super::super::construction::node_scene::{
     NodeSceneLaneValidationProof as SceneValidationProof,
 };
 use super::super::construction::node_scene::{
-    NodeSceneActivationRequest, consume_node_scene_freeze_permit,
-    maximum_node_scene_structural_work,
+    consume_node_scene_freeze_permit, maximum_node_scene_structural_work,
 };
 use super::super::construction::{
-    FAILURE_TERMINAL_EVIDENCE_MEMBERS, SceneConstructionStartError,
-    failure_terminal_work_requirement,
+    FAILURE_TERMINAL_EVIDENCE_MEMBERS, failure_terminal_work_requirement,
 };
 use super::super::production::SceneInputEnvelope;
 use super::super::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT;
@@ -40,14 +36,10 @@ pub use super::super::schema::{
     NodeSceneOutcomeEvidenceSchema as SceneOutcomeEvidenceTag,
     SceneDirectorySchema as SceneCanonicalRootTag,
 };
-use super::authoring::SceneAuthoringBatch;
+pub use super::construction::{SceneConstruction, SceneConstructionStartError};
 use super::scene::ValidatedScene;
 
 pub use super::SceneDraft;
-
-/// Roleless complete-batch request which can be consumed only with one retained operation.
-#[must_use = "the Scene activation request must be consumed by one import session owner"]
-pub struct SceneActivationRequest<'input>(NodeSceneActivationRequest<'input>);
 
 /// Returns the maximum canonical block count admitted under `limits`.
 pub fn maximum_scene_canonical_blocks(limits: SceneValidationLimits) -> Option<usize> {
@@ -60,21 +52,7 @@ pub fn maximum_scene_structural_work(limits: SceneValidationLimits) -> Option<u6
     maximum_node_scene_structural_work(canonical_blocks)
 }
 
-impl<'input> SceneActivationRequest<'input> {
-    /// Validates the bounded input envelope without acquiring operation or storage authority.
-    #[allow(
-        clippy::result_large_err,
-        reason = "the authority-free request preserves the complete bounded core rejection inline"
-    )]
-    pub fn try_new(
-        input: SceneAuthoringBatch<'input>,
-        validation_limits: SceneValidationLimits,
-    ) -> Result<Self, SceneActivationRequestError> {
-        NodeSceneActivationRequest::try_new(input, validation_limits)
-            .map(Self)
-            .map_err(SceneActivationRequestError)
-    }
-
+impl<'input> SceneConstruction<'input> {
     /// Splits authority-free resource requirements from the core transaction payload.
     pub fn into_lane_parts(
         self,
@@ -82,7 +60,7 @@ impl<'input> SceneActivationRequest<'input> {
         SceneActivationRequirements,
         SceneActivationTransaction<'input>,
     ) {
-        self.0.into_lane_parts()
+        self.into_node_scene_request().into_lane_parts()
     }
 }
 
@@ -172,22 +150,6 @@ pub const fn scene_failure_evidence_field_work() -> u64 {
     NODE_SCENE_EVIDENCE_FIELD_COUNT as u64
 }
 
-/// Authority-free request construction failure.
-#[derive(Debug)]
-pub struct SceneActivationRequestError(SceneConstructionStartError);
-
-impl fmt::Display for SceneActivationRequestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl std::error::Error for SceneActivationRequestError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,13 +163,13 @@ mod tests {
 
     #[test]
     fn lane_only_bridge_exposes_authority_free_core_steps() {
-        fn _split_request<'input>(
-            request: SceneActivationRequest<'input>,
+        fn _split_construction<'input>(
+            construction: SceneConstruction<'input>,
         ) -> (
             SceneActivationRequirements,
             SceneActivationTransaction<'input>,
         ) {
-            request.into_lane_parts()
+            construction.into_lane_parts()
         }
 
         fn _finish_transaction<'input>(

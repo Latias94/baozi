@@ -4,10 +4,10 @@
 )]
 
 use std::num::{NonZeroU32, NonZeroU64};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use baozi_operation::__canonical_activation::{
-    CanonicalFailureTerminalWorkPlan, StoreActivationContainment,
+    CanonicalActivationRequestIdentity, CanonicalFailureTerminalWorkPlan,
+    StoreActivationContainment,
 };
 use baozi_operation::{
     DimensionPolicy, FinalProgress, FreshStoreLineage, LedgerLimits, LedgerLimitsError,
@@ -39,8 +39,6 @@ const FALLBACK_CODE: u32 = 0x5343_0001;
 const GENERATION_EXHAUSTED_CODE: u32 = 0x5343_0003;
 const TERMINAL_COMMITMENT_SLOTS: usize = 8;
 pub(in crate::canonical_scene::store) const FAILURE_TERMINAL_EVIDENCE_MEMBERS: usize = 1;
-
-static NEXT_CONSTRUCTION_BRAND: AtomicU64 = AtomicU64::new(1);
 
 pub(in crate::canonical_scene::store) fn failure_terminal_work_requirement()
 -> Result<RetainedStoreFailureTerminalWorkRequirement, StorePlanError> {
@@ -155,18 +153,7 @@ pub(crate) enum SceneConstructionError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ConstructionBrand(u64);
-
-impl ConstructionBrand {
-    fn reserve() -> Result<Self, SceneConstructionStartError> {
-        NEXT_CONSTRUCTION_BRAND
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |observed| {
-                observed.checked_add(1)
-            })
-            .map(Self)
-            .map_err(|_| SceneConstructionStartError::BrandExhausted)
-    }
-}
+pub(super) struct ConstructionBrand(CanonicalActivationRequestIdentity);
 
 #[derive(Clone, Copy)]
 struct SceneStoreKeys {

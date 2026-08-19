@@ -20,7 +20,7 @@ use baozi_operation::__canonical_activation::{
 };
 use baozi_operation::__canonical_activation_producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalSealedActivationPlan,
-    CanonicalSuccessRequirements, CanonicalTableShape,
+    CanonicalSuccessRequirements, CanonicalTableShape, mint_canonical_activation_request_identity,
 };
 use baozi_operation::{ScalarSequence, StoreDestination, StorePlanError, StoreWorkError};
 

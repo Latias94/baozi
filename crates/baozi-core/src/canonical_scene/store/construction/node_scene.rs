@@ -1,8 +1,9 @@
 use baozi_operation::__canonical_activation::{
-    CanonicalCandidateStoreSession, CanonicalJointCommit, CentrallyRejectedCanonicalStoreSession,
-    InterruptedCanonicalStoreSession, NeverActivatedStoreSession, RejectedCanonicalStoreSession,
-    VerifiedMinimalFallback,
+    CanonicalActivationRequestIdentity, CanonicalCandidateStoreSession, CanonicalJointCommit,
+    CentrallyRejectedCanonicalStoreSession, InterruptedCanonicalStoreSession,
+    NeverActivatedStoreSession, RejectedCanonicalStoreSession, VerifiedMinimalFallback,
 };
+use baozi_operation::__canonical_activation_producer::mint_canonical_activation_request_identity;
 use baozi_operation::{
     BytesPlan, ControlCause, FinalProgress, OperationOwner, PreparedStoreFallback, ProgressPhase,
     ProgressUnit, PublishedCanonicalStore, PublishedOutcomeEvidenceStore,
@@ -29,8 +30,21 @@ use super::super::schema::{
 use super::super::validation::NodeSceneValidationProof;
 use super::{
     ConstructionBrand, SceneConstructionError, SceneConstructionOwner, SceneConstructionPhase,
-    SceneConstructionUnit, SceneStoreAssembly, SceneStoreControlCheckpoint, SceneStoreKeys,
+    SceneConstructionStartError, SceneConstructionUnit, SceneStoreAssembly,
+    SceneStoreControlCheckpoint, SceneStoreKeys,
 };
+
+impl ConstructionBrand {
+    fn reserve() -> Result<Self, SceneConstructionStartError> {
+        mint_canonical_activation_request_identity()
+            .map(Self)
+            .ok_or(SceneConstructionStartError::BrandExhausted)
+    }
+
+    fn activation_request_identity(self) -> CanonicalActivationRequestIdentity {
+        self.0
+    }
+}
 
 mod animation;
 mod appearance;
@@ -38,7 +52,6 @@ mod deformation;
 pub(crate) mod edit;
 mod geometry;
 mod materialization;
-#[cfg(any(test, feature = "_u4-import"))]
 pub(in crate::canonical_scene::store) use materialization::NodeSceneActivationRequest;
 pub(in crate::canonical_scene::store) use materialization::NodeSceneMaterializedRefs;
 #[cfg(feature = "_u4-import")]

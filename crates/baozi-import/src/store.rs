@@ -2045,7 +2045,7 @@ mod tests {
         ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring,
         SceneAuthoringBatch, SceneSpace, SpatialAuthoringBatch,
     };
-    use baozi_core::__canonical_import::SceneActivationRequest;
+    use baozi_core::__canonical_import::SceneConstruction;
     use baozi_core::SceneValidationLimits;
     use baozi_operation::{
         CancellationOrigin, CancellationSignal, PhysicalStorageAccountFactory,
@@ -2176,9 +2176,9 @@ mod tests {
         }
     }
 
-    fn with_two_node_request_parent<R>(
+    fn with_two_node_construction_parent<R>(
         child_parent: NodeLocalId,
-        action: impl for<'input> FnOnce(SceneActivationRequest<'input>) -> R,
+        action: impl for<'input> FnOnce(SceneConstruction<'input>) -> R,
     ) -> R {
         let provenance = [ProvenanceLocalId::new(0)];
         let operation_kind = OperationKind::Generated;
@@ -2223,15 +2223,15 @@ mod tests {
                 MetadataAuthoringBatch::empty(),
             ),
         );
-        let request = SceneActivationRequest::try_new(input, SceneValidationLimits::default())
-            .expect("the complete node-only batch must form one roleless activation request");
-        action(request)
+        let construction = SceneConstruction::try_new(input, SceneValidationLimits::default())
+            .expect("the complete node-only batch must form one authority-free Scene construction");
+        action(construction)
     }
 
-    fn with_two_node_request<R>(
-        action: impl for<'input> FnOnce(SceneActivationRequest<'input>) -> R,
+    fn with_two_node_construction<R>(
+        action: impl for<'input> FnOnce(SceneConstruction<'input>) -> R,
     ) -> R {
-        with_two_node_request_parent(NodeLocalId::new(0), action)
+        with_two_node_construction_parent(NodeLocalId::new(0), action)
     }
 
     #[allow(
@@ -2241,7 +2241,7 @@ mod tests {
     fn submit_two_node(
         owner: &ImportStoreSessionOwner,
     ) -> Result<SceneDraft, ImportStoreActivationError> {
-        with_two_node_request(|request| owner.submit_scene(request))
+        with_two_node_construction(|construction| owner.submit_scene(construction))
     }
 
     #[allow(
@@ -2251,7 +2251,9 @@ mod tests {
     fn submit_invalid_parent(
         owner: &ImportStoreSessionOwner,
     ) -> Result<SceneDraft, ImportStoreActivationError> {
-        with_two_node_request_parent(NodeLocalId::new(2), |request| owner.submit_scene(request))
+        with_two_node_construction_parent(NodeLocalId::new(2), |construction| {
+            owner.submit_scene(construction)
+        })
     }
 
     #[test]

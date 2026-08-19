@@ -460,6 +460,27 @@ where
         &mut self,
         requirements: CanonicalSuccessRequirements,
     ) -> Result<BoundScopedSuccessRequest, ()> {
+        let Some((failure_identity, outcome_evidence_destination_dimension)) =
+            self.failure.as_ref().map(|failure| {
+                (
+                    failure.request_identity,
+                    failure.outcome_evidence_destination_dimension,
+                )
+            })
+        else {
+            let _ = preserve_first_fault::<()>(
+                &mut self.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+            return Err(());
+        };
+        if requirements.request_identity != failure_identity {
+            let _ = preserve_first_fault::<()>(
+                &mut self.first_fault,
+                Err(StoreRuntimeError::ConstructionInvariantUnverified),
+            );
+            return Err(());
+        }
         self.poll_final_planning_control();
         let semantic_complete = matches!(self.semantic_state, ScopedSemanticState::Complete);
         if !semantic_complete {
@@ -485,14 +506,6 @@ where
                 return Err(());
             }
         };
-        let Some(failure) = self.failure.as_ref() else {
-            let _ = preserve_first_fault::<()>(
-                &mut self.first_fault,
-                Err(StoreRuntimeError::ConstructionInvariantUnverified),
-            );
-            return Err(());
-        };
-        let outcome_evidence_destination_dimension = failure.outcome_evidence_destination_dimension;
         let semantic_bytes_dimension = roles.semantic_bytes_dimension();
         let (phase, dimensions) = request.canonical_plan.keys_for_publication_validation();
         let original_baseline = self.planning_baseline;
