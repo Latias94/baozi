@@ -40,34 +40,38 @@ mod provenance;
 mod scene_space;
 mod validation_control;
 
-/// Internal carrier for the extension-tier Scene authoring vocabulary owned by `baozi-import`.
-///
-/// This module is public only because Rust has no workspace-private visibility. It is not a
-/// canonical-model compatibility surface; importer authors should use `baozi_import::authoring`.
-#[doc(hidden)]
-pub mod __canonical_authoring {
-    pub use crate::canonical_scene::store::api::authoring::*;
-}
-
-#[cfg(not(feature = "_u4-import"))]
-/// The temporary U4 import bridge is absent from ordinary `baozi-core` builds.
+#[cfg(not(feature = "_scene-integration"))]
+/// The Scene authoring and transaction boundary is absent from ordinary `baozi-core` builds.
 ///
 /// ```compile_fail,E0432
-/// use baozi_core::__canonical_import::SceneDraft;
+/// use baozi_core::scene::integration::SceneDraft;
 /// ```
-mod canonical_import_visibility_contract {}
-
-/// Temporary cross-crate integration surface for the atomic U4 import cutover.
-///
-/// Authoring values do not belong to this transaction bridge.
 ///
 /// ```compile_fail,E0432
-/// use baozi_core::__canonical_import::SceneAuthoringBatch;
+/// use baozi_core::scene::authoring::SceneAuthoringBatch;
 /// ```
-#[cfg(feature = "_u4-import")]
+mod scene_integration_visibility_contract {}
+
+/// Canonical Scene vocabulary consumed by the importer extension tier.
+#[cfg(feature = "_scene-integration")]
 #[doc(hidden)]
-pub mod __canonical_import {
-    pub use crate::canonical_scene::store::api::import::*;
+pub mod scene {
+    /// Authority-free values used to describe one complete canonical Scene input.
+    ///
+    /// Custom format importers should use the re-export at `baozi_import::authoring` so they do not
+    /// depend on core transaction internals.
+    pub mod authoring {
+        pub use crate::canonical_scene::store::api::authoring::*;
+    }
+
+    /// Canonical Scene transaction boundary consumed only by `baozi-import`.
+    ///
+    /// Rust has no workspace-private visibility, so this module is nameable but intentionally
+    /// hidden from generated documentation and ordinary importer APIs.
+    #[doc(hidden)]
+    pub mod integration {
+        pub use crate::canonical_scene::store::api::integration::*;
+    }
 }
 
 pub use canonical_scene::store::api::scene::{

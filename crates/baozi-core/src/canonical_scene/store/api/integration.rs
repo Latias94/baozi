@@ -1,4 +1,4 @@
-//! Hidden cross-crate bridge for the U4 canonical import cutover.
+//! Hidden cross-crate integration boundary for canonical Scene transactions.
 
 use baozi_operation::{
     OperationOwner, PreparedStoreSuccess, ProgressPhase, ProgressUnit,
@@ -155,7 +155,7 @@ mod tests {
     >;
 
     #[test]
-    fn lane_only_bridge_exposes_authority_free_core_steps() {
+    fn scene_integration_exposes_authority_free_core_steps() {
         fn _split_construction<'input>(
             construction: SceneConstruction<'input>,
         ) -> SceneActivationTransaction<'input> {

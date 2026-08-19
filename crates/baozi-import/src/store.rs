@@ -4,7 +4,7 @@ use std::cell::{RefCell, RefMut};
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
-use baozi_core::__canonical_import::{
+use baozi_core::scene::integration::{
     SceneEvidenceRecipe, SceneOutcomeEvidenceTag, SceneSessionActivationBootstrap,
     maximum_scene_canonical_blocks, maximum_scene_structural_work,
     scene_failure_evidence_field_work, scene_failure_evidence_member_count,
@@ -2075,8 +2075,8 @@ mod tests {
         ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring,
         SceneAuthoringBatch, SceneSpace, SpatialAuthoringBatch,
     };
-    use baozi_core::__canonical_import::SceneConstruction;
     use baozi_core::SceneValidationLimits;
+    use baozi_core::scene::integration::SceneConstruction;
     use baozi_operation::{
         CancellationOrigin, CancellationSignal, PhysicalStorageAccountFactory,
         PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits, StoreTerminalCause,

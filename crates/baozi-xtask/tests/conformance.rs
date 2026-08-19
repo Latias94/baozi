@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -58,9 +59,13 @@ fn checked_in_repository_inventory_is_structurally_valid() {
     let report = check_repository(&repository_root());
     assert!(report.violations.is_empty(), "{:#?}", report.violations);
     assert_eq!(report.contracts_checked, 11);
-    assert_eq!(report.gates_checked, 9);
+    assert_eq!(report.gates_checked, 10);
     assert_eq!(report.declared_conforming_contracts, 0);
     assert_eq!(report.self_attested_contract_bindings_matched, 0);
+
+    let gates = fs::read_to_string(repository_root().join("docs/conformance/gates.toml"))
+        .expect("checked-in conformance gates");
+    assert!(gates.contains("gate_id = \"core-scene-integration-boundary-ci\""));
 }
 
 #[test]
@@ -283,5 +288,5 @@ fn repository_conformance_cli_checks_only_the_structured_inventory() {
     assert_eq!(output.status.code(), Some(0), "{output:#?}");
     assert!(output.stderr.is_empty(), "{output:#?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("11 contracts, 9 gates"), "{output:#?}");
+    assert!(stdout.contains("11 contracts, 10 gates"), "{output:#?}");
 }

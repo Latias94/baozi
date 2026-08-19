@@ -1,7 +1,7 @@
 use std::cell::{RefCell, RefMut};
 
 use crate::SceneDraft;
-use baozi_core::__canonical_import::{
+use baozi_core::scene::integration::{
     SceneActivationOutput, SceneActivationRejection, SceneCanonicalRootTag, SceneConstruction,
     SceneEvidenceRecipe, SceneHandoffToken, SceneOutcomeEvidenceTag, SceneValidationProof,
     consume_scene_freeze_permit,

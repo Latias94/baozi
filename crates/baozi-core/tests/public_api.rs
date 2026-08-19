@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use baozi_core::{OrderedMap, PreparedOrderedMapCapacity};
 
-const CANONICAL_IMPORT_BRIDGE_SOURCE: &str =
-    include_str!("../src/canonical_scene/store/api/import.rs");
+const SCENE_INTEGRATION_SOURCE: &str =
+    include_str!("../src/canonical_scene/store/api/integration.rs");
 const SCENE_CONSTRUCTION_SOURCE: &str =
     include_str!("../src/canonical_scene/store/api/construction.rs");
 
@@ -38,7 +38,7 @@ fn prepared_ordered_map_capacity_is_nameable_by_external_callers() {
 }
 
 #[test]
-fn canonical_import_bridge_consumes_only_opaque_scene_plans() {
+fn scene_integration_consumes_only_opaque_scene_plans() {
     for forbidden in [
         "__canonical_activation_producer",
         "CanonicalActivationDescription",
@@ -48,8 +48,8 @@ fn canonical_import_bridge_consumes_only_opaque_scene_plans() {
         "CanonicalTableShape",
     ] {
         assert!(
-            !CANONICAL_IMPORT_BRIDGE_SOURCE.contains(forbidden),
-            "the import bridge must not construct generic activation facts through `{forbidden}`"
+            !SCENE_INTEGRATION_SOURCE.contains(forbidden),
+            "the Scene integration boundary must not construct generic activation facts through `{forbidden}`"
         );
     }
 }
@@ -70,14 +70,14 @@ fn scene_construction_stays_authority_free() {
     }
 }
 
-#[cfg(feature = "_u4-import")]
+#[cfg(feature = "_scene-integration")]
 #[test]
 fn scene_construction_is_nameable_only_as_one_opaque_value() {
-    fn accepts_construction(_: baozi_core::__canonical_import::SceneConstruction<'_>) {}
-    fn accepts_error(_: baozi_core::__canonical_import::SceneConstructionStartError) {}
+    fn accepts_construction(_: baozi_core::scene::integration::SceneConstruction<'_>) {}
+    fn accepts_error(_: baozi_core::scene::integration::SceneConstructionStartError) {}
 
-    let _: fn(baozi_core::__canonical_import::SceneConstruction<'_>) = accepts_construction;
-    let _: fn(baozi_core::__canonical_import::SceneConstructionStartError) = accepts_error;
+    let _: fn(baozi_core::scene::integration::SceneConstruction<'_>) = accepts_construction;
+    let _: fn(baozi_core::scene::integration::SceneConstructionStartError) = accepts_error;
 }
 
 #[test]

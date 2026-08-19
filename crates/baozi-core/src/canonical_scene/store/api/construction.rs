@@ -21,8 +21,8 @@ use crate::validation_control::SceneValidationLimits;
 ///
 /// ```compile_fail,E0599
 /// fn duplicate(
-///     construction: baozi_core::__canonical_import::SceneConstruction<'_>,
-/// ) -> baozi_core::__canonical_import::SceneConstruction<'_> {
+///     construction: baozi_core::scene::integration::SceneConstruction<'_>,
+/// ) -> baozi_core::scene::integration::SceneConstruction<'_> {
 ///     construction.clone()
 /// }
 /// ```

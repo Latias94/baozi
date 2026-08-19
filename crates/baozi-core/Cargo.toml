@@ -15,7 +15,7 @@ default = ["std"]
 std = []
 mint = ["dep:mint"]
 tracing = ["dep:tracing"]
-_u4-import = []
+_scene-integration = []
 
 [dependencies]
 baozi-operation = { workspace = true, features = ["_u4-activation"] }

@@ -2,10 +2,11 @@
 
 use super::construction::node_scene::NodeSceneDraft;
 
+#[cfg(feature = "_scene-integration")]
 pub(crate) mod authoring;
 pub(crate) mod construction;
-#[cfg(feature = "_u4-import")]
-pub(crate) mod import;
+#[cfg(feature = "_scene-integration")]
+pub(crate) mod integration;
 pub(crate) mod scene;
 
 /// A non-owning descriptor for one materialized canonical Scene directory.

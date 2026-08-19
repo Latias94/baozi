@@ -8,15 +8,17 @@ contract_id = "u4-canonical-scene-lifecycle"
 authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
 conformance_status = "partial"
 evidence_subject = "baozi.u4.canonical-scene-lifecycle"
-evidence_revision = 4
+evidence_revision = 5
 implementation_tracers = [
-  "crates/baozi-core/src/canonical_scene/store/api/import.rs",
+  "crates/baozi-core/Cargo.toml",
+  "crates/baozi-core/src/canonical_scene/store/api/integration.rs",
   "crates/baozi-core/src/canonical_scene/store/construction.rs",
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/materialization.rs",
   "crates/baozi-core/src/canonical_scene/store/api/scene.rs",
   "crates/baozi-import/src/store.rs",
   "crates/baozi-import/src/store/scene_activation.rs",
   "crates/baozi-import/src/session.rs",
+  "crates/baozi-import/Cargo.toml",
 ]
 test_tracers = [
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests.rs",
@@ -25,6 +27,7 @@ test_tracers = [
 ci_tracers = [".github/workflows/ci.yml"]
 gate_ids = [
   "canonical-scene-behavior-tests",
+  "core-scene-integration-boundary-ci",
   "workspace-tests-ci",
 ]
 
@@ -33,14 +36,16 @@ contract_id = "u4-private-producer-consumer-proof"
 authority_adr = "docs/adr/0003-core-scene-ir-and-material-model.md"
 conformance_status = "partial"
 evidence_subject = "baozi.u4.private-producer-consumer-proof"
-evidence_revision = 6
+evidence_revision = 7
 implementation_tracers = [
+  "crates/baozi-core/Cargo.toml",
   "crates/baozi-core/src/canonical_scene/store/api/authoring.rs",
-  "crates/baozi-core/src/canonical_scene/store/api/import.rs",
+  "crates/baozi-core/src/canonical_scene/store/api/integration.rs",
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/materialization.rs",
   "crates/baozi-core/src/canonical_scene/store/production.rs",
   "crates/baozi-import/src/store.rs",
   "crates/baozi-import/src/store/scene_activation.rs",
+  "crates/baozi-import/Cargo.toml",
 ]
 test_tracers = [
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests/profile_closure.rs",
@@ -52,6 +57,7 @@ test_tracers = [
 ci_tracers = [".github/workflows/ci.yml"]
 gate_ids = [
   "canonical-scene-behavior-tests",
+  "core-scene-integration-boundary-ci",
   "import-authoring-boundary-tests",
   "workspace-tests-ci",
 ]
@@ -86,13 +92,15 @@ contract_id = "import-lifecycle-outcome"
 authority_adr = "docs/adr/0020-import-lifecycle-and-report-contract.md"
 conformance_status = "partial"
 evidence_subject = "baozi.import.lifecycle-outcome"
-evidence_revision = 3
+evidence_revision = 4
 implementation_tracers = [
+  "crates/baozi-core/Cargo.toml",
   "crates/baozi-import/src/format.rs",
   "crates/baozi-import/src/session.rs",
   "crates/baozi-import/src/store.rs",
   "crates/baozi-import/src/store/scene_activation.rs",
-  "crates/baozi-core/src/canonical_scene/store/api/import.rs",
+  "crates/baozi-core/src/canonical_scene/store/api/integration.rs",
+  "crates/baozi-import/Cargo.toml",
 ]
 test_tracers = [
   "crates/baozi-import/tests/session_contract.rs",
@@ -100,7 +108,10 @@ test_tracers = [
   "crates/baozi-import/tests/source_scope_outcome.rs",
 ]
 ci_tracers = [".github/workflows/ci.yml"]
-gate_ids = ["workspace-tests-ci"]
+gate_ids = [
+  "core-scene-integration-boundary-ci",
+  "workspace-tests-ci",
+]
 
 [[contracts]]
 contract_id = "resource-ledger-budget-accounting"

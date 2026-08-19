@@ -1,4 +1,4 @@
-//! Experimental Scene authoring values for custom format importers.
+//! Canonical Scene authoring values for custom format importers.
 //!
 //! These values describe canonical input without carrying storage, ledger, activation, or
 //! publication authority. Submit a complete batch through [`crate::ParseScope::submit_scene`].
@@ -9,4 +9,4 @@
 //! use baozi_import::SceneAuthoringBatch;
 //! ```
 
-pub use baozi_core::__canonical_authoring::*;
+pub use baozi_core::scene::authoring::*;

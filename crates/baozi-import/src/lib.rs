@@ -35,7 +35,7 @@ mod store;
 ///     draft.clone()
 /// }
 /// ```
-pub use baozi_core::__canonical_import::SceneDraft;
+pub use baozi_core::scene::integration::SceneDraft;
 pub use baozi_core::{
     SceneGenerationId, SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
 };

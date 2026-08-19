@@ -101,6 +101,11 @@ jobs:
       - name: Check workspace
         run: cargo check --locked --workspace --all-targets
 
+      - name: Check standalone core Scene boundary
+        env:
+          RUSTFLAGS: -A dead-code
+        run: cargo test --locked --doc -p baozi-core
+
       - name: Lint workspace
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 

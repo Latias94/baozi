@@ -83,6 +83,28 @@ args = [
 ]
 
 [[gates]]
+gate_id = "core-scene-integration-boundary-ci"
+tracer_class = "ci"
+executor = "workflow"
+success_condition = "required-workflow-status"
+evidence_identity = "github-actions/ci/rust/check-standalone-core-scene-boundary"
+evidence_paths = [
+  ".github/workflows/ci.yml",
+  "crates/baozi-core/Cargo.toml",
+  "crates/baozi-core/src/lib.rs",
+  "crates/baozi-core/tests/public_api.rs",
+  "crates/baozi-import/Cargo.toml",
+]
+applicable_contracts = [
+  "u4-canonical-scene-lifecycle",
+  "u4-private-producer-consumer-proof",
+  "import-lifecycle-outcome",
+]
+workflow_path = ".github/workflows/ci.yml"
+job_id = "rust"
+step_name = "Check standalone core Scene boundary"
+
+[[gates]]
 gate_id = "format-fuzz-smoke-ci"
 tracer_class = "ci"
 executor = "workflow"
