@@ -1729,7 +1729,7 @@ impl<'scope> CanonicalActivationPlanSealer<'scope> {
 ///
 /// This is a trusted producer contract for deep canonical construction modules. Implementations
 /// must move success facts and execution data out of the same opaque description without running
-/// fallible user code. [`CanonicalPlanning::seal_activation`] proves the transaction receipt; it
+/// fallible user code. [`CanonicalActivationPlanSealer::seal`] proves the transaction receipt; it
 /// intentionally does not attempt to validate an arbitrary third-party implementation of this
 /// producer contract.
 pub trait CanonicalActivationDescription {

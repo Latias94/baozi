@@ -578,9 +578,8 @@ enum StoreControlledErrorCause {
 /// Failure vocabulary available inside one operation-controlled store callback.
 ///
 /// Downstream code can create only ordinary writer failures through [`StoreBuildError`].
-/// Cancellation and budget failures originate from the borrowed
-/// [`crate::RetainedStoreWorkControl`] as [`StoreWorkError`] values and remain subject to sticky
-/// same-capability verification.
+/// Cancellation and budget failures originate from the borrowed retained-store work control as
+/// [`StoreWorkError`] values and remain subject to sticky same-capability verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreControlledError {
     cause: StoreControlledErrorCause,
