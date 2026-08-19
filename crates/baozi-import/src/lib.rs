@@ -116,9 +116,10 @@ pub use registry::{
 };
 pub use request::{PreparedImportRequest, RequestError};
 pub use resource_graph::{
-    InputReplayStatus, ManifestDigest, ManifestNodeClass, ManifestObservedOnlyReason,
-    ManifestObservedOnlyReasons, ManifestReference, ManifestRelation, ManifestRelationOutcome,
-    ManifestResourceIdentity, ManifestResourceIdentityStability, ManifestSessionDependentReason,
+    InputReplayStatus, ManifestDigest, ManifestNamespaceSnapshotProof, ManifestNodeClass,
+    ManifestObservedOnlyReason, ManifestObservedOnlyReasons, ManifestPerReferenceProof,
+    ManifestReference, ManifestRelation, ManifestRelationOutcome, ManifestResourceIdentity,
+    ManifestResourceIdentityStability, ManifestSemanticIdentity, ManifestSessionDependentReason,
     ManifestSessionOpaqueReason, ManifestUnavailableClass, ManifestUnavailableCode,
     ManifestUnavailableReplay, ResourceManifestCounts, SuccessfulInputManifest,
 };

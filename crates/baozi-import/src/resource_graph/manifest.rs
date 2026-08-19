@@ -6,9 +6,10 @@ use std::fmt;
 
 mod encoding;
 
+pub(crate) use encoding::registered_negative_proof_canonical_len;
 pub(super) use encoding::{
     ManifestEncodingError, encode_node_class_into_accounted, encode_relation_key_into_accounted,
-    node_class_len, relation_key_len,
+    node_class_len, registered_negative_proof_replay, relation_key_len,
 };
 
 pub(super) const MANIFEST_SCHEMA_VERSION: u64 = 1;
@@ -29,6 +30,10 @@ impl ManifestDigest {
 
     pub(super) const fn zero() -> Self {
         Self([0; 32])
+    }
+
+    pub(super) const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 }
 
@@ -134,10 +139,183 @@ pub enum ManifestSessionDependentReason {
     UnregisteredSemanticBasis,
 }
 
+/// One stable semantic identity embedded by the successful-input manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ManifestSemanticIdentity {
+    owner: &'static str,
+    schema: &'static str,
+    version: u64,
+    digest: ManifestDigest,
+}
+
+impl ManifestSemanticIdentity {
+    pub(super) const fn new(
+        owner: &'static str,
+        schema: &'static str,
+        version: u64,
+        digest: ManifestDigest,
+    ) -> Self {
+        Self {
+            owner,
+            schema,
+            version,
+            digest,
+        }
+    }
+
+    pub const fn owner(self) -> &'static str {
+        self.owner
+    }
+
+    pub const fn schema(self) -> &'static str {
+        self.schema
+    }
+
+    pub const fn version(self) -> u64 {
+        self.version
+    }
+
+    pub const fn digest(self) -> ManifestDigest {
+        self.digest
+    }
+}
+
+/// An admitted namespace-snapshot negative proof.
+///
+/// The exact target identity comes from the enclosing unavailable outcome. The proof retains the
+/// registered cause class/code that its digest binds, which can be narrower than the manifest's
+/// outer relation classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ManifestNamespaceSnapshotProof {
+    scheme: &'static str,
+    version: u64,
+    validity_rule: &'static str,
+    resolver_identity: ManifestSemanticIdentity,
+    namespace_snapshot_digest: ManifestDigest,
+    cause: ManifestRegisteredUnavailableCause,
+    proof_digest: ManifestDigest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct ManifestRegisteredUnavailableCause {
+    class: &'static str,
+    code: &'static str,
+}
+
+impl ManifestRegisteredUnavailableCause {
+    pub(super) const fn new(class: &'static str, code: &'static str) -> Self {
+        Self { class, code }
+    }
+}
+
+impl ManifestNamespaceSnapshotProof {
+    pub(super) const fn new(
+        scheme: &'static str,
+        version: u64,
+        validity_rule: &'static str,
+        resolver_identity: ManifestSemanticIdentity,
+        namespace_snapshot_digest: ManifestDigest,
+        cause: ManifestRegisteredUnavailableCause,
+        proof_digest: ManifestDigest,
+    ) -> Self {
+        Self {
+            scheme,
+            version,
+            validity_rule,
+            resolver_identity,
+            namespace_snapshot_digest,
+            cause,
+            proof_digest,
+        }
+    }
+
+    pub const fn scheme(self) -> &'static str {
+        self.scheme
+    }
+
+    pub const fn version(self) -> u64 {
+        self.version
+    }
+
+    pub const fn validity_rule(self) -> &'static str {
+        self.validity_rule
+    }
+
+    pub const fn resolver_identity(self) -> ManifestSemanticIdentity {
+        self.resolver_identity
+    }
+
+    pub const fn namespace_snapshot_digest(self) -> ManifestDigest {
+        self.namespace_snapshot_digest
+    }
+
+    pub const fn cause_class(self) -> &'static str {
+        self.cause.class
+    }
+
+    pub const fn cause_code(self) -> &'static str {
+        self.cause.code
+    }
+
+    pub const fn proof_digest(self) -> ManifestDigest {
+        self.proof_digest
+    }
+}
+
+/// An admitted per-reference negative proof.
+///
+/// V1 reserves this closed union member even though the initial registry has no producer for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ManifestPerReferenceProof {
+    scheme: &'static str,
+    version: u64,
+    validity_rule: &'static str,
+    resolver_identity: ManifestSemanticIdentity,
+    assertion_digest: ManifestDigest,
+    cause: ManifestRegisteredUnavailableCause,
+    proof_digest: ManifestDigest,
+}
+
+impl ManifestPerReferenceProof {
+    pub const fn scheme(self) -> &'static str {
+        self.scheme
+    }
+
+    pub const fn version(self) -> u64 {
+        self.version
+    }
+
+    pub const fn validity_rule(self) -> &'static str {
+        self.validity_rule
+    }
+
+    pub const fn resolver_identity(self) -> ManifestSemanticIdentity {
+        self.resolver_identity
+    }
+
+    pub const fn assertion_digest(self) -> ManifestDigest {
+        self.assertion_digest
+    }
+
+    pub const fn cause_class(self) -> &'static str {
+        self.cause.class
+    }
+
+    pub const fn cause_code(self) -> &'static str {
+        self.cause.code
+    }
+
+    pub const fn proof_digest(self) -> ManifestDigest {
+        self.proof_digest
+    }
+}
+
 /// Why an unavailable relation cannot be replayed from immutable proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum ManifestUnavailableReplay {
+    NamespaceSnapshotProof(ManifestNamespaceSnapshotProof),
+    PerReferenceProof(ManifestPerReferenceProof),
     UnprovenNegativeInput,
     SessionDependent(ManifestSessionDependentReason),
 }
@@ -155,6 +333,10 @@ pub enum ManifestReference {
 
 /// Terminal outcome of one logical dependency relation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+// The manifest arena accounts the complete inline relation size. Boxing the
+// bounded proof union would introduce a fallible allocation outside that
+// reservation and weaken the manifest's ownership model.
+#[allow(clippy::large_enum_variant)]
 pub enum ManifestRelationOutcome {
     Available {
         target_node_class_digest: ManifestDigest,

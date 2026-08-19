@@ -3,7 +3,8 @@ use crate::error::{CauseOwner, ScopeAbortCause};
 use crate::metered_storage::AccountedVec;
 use crate::store::ImportStoreReservation;
 use baozi_io::__semantic_identity::{
-    RegisteredAssetResolution, RegisteredResolverProfile, StableResourceIdentitySchema,
+    RegisteredAssetResolution, RegisteredResolverProfile, RegisteredUnavailableCause,
+    StableResourceIdentitySchema, VerifiedNegativeInputProof, VerifiedNegativeInputProofBinding,
 };
 use baozi_io::{AssetIo, AssetOpenErrorKind, AssetPath, AssetReadErrorKind, AuthorityDomain};
 use baozi_operation::{CapacityPlan, CapacityPlanError, LedgerCause, ReplacementCapacityPlan};
@@ -160,6 +161,7 @@ pub struct AuthorizedDependency<'a> {
     io: &'a dyn AssetIo,
     identity: DependencyIdentity,
     stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
+    registered_resolver: Option<&'static RegisteredResolverProfile>,
 }
 
 impl<'a> AuthorizedDependency<'a> {
@@ -169,10 +171,12 @@ impl<'a> AuthorizedDependency<'a> {
             io,
             identity,
             stable_identity_schema: None,
+            registered_resolver: None,
         }
     }
 
     pub(crate) fn from_registered(resolution: RegisteredAssetResolution<'a>) -> Self {
+        let registered_resolver = resolution.resolver();
         let (io, authority, stable_identity) = resolution.into_parts();
         let schema = stable_identity.schema();
         let path = stable_identity.into_value();
@@ -180,6 +184,7 @@ impl<'a> AuthorizedDependency<'a> {
             io,
             identity: DependencyIdentity::new(authority, path),
             stable_identity_schema: Some(schema),
+            registered_resolver: Some(registered_resolver),
         }
     }
 
@@ -193,8 +198,14 @@ impl<'a> AuthorizedDependency<'a> {
         &'a dyn AssetIo,
         DependencyIdentity,
         Option<&'static StableResourceIdentitySchema>,
+        Option<&'static RegisteredResolverProfile>,
     ) {
-        (self.io, self.identity, self.stable_identity_schema)
+        (
+            self.io,
+            self.identity,
+            self.stable_identity_schema,
+            self.registered_resolver,
+        )
     }
 }
 
@@ -843,26 +854,36 @@ impl DependencyCache {
     pub(crate) fn store_failed(
         &mut self,
         identity: &DependencyIdentity,
-        failure: CachedDependencyFailure,
-    ) -> Result<usize, CachedDependencyFailure> {
+        cause: ScopeAbortCause,
+        stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
+        observation: PendingNegativeObservation<'_>,
+    ) -> Result<usize, ScopeAbortCause> {
         let Some(index) = self.record_index(identity) else {
-            return Err(failure);
+            return Err(ScopeAbortCause::DescriptorContract {
+                code: "dependency-cache-transition-missing",
+            });
         };
         let Some(DependencyCacheRecordSlot::Occupied(record)) = self.entries.get_mut(index) else {
-            return Err(failure);
+            return Err(ScopeAbortCause::DescriptorContract {
+                code: "dependency-cache-transition-missing",
+            });
         };
         let entry = &mut record.entry;
         let DependencyCacheEntry::Resolving = entry else {
-            return Err(failure);
+            return Err(ScopeAbortCause::DescriptorContract {
+                code: "dependency-cache-transition-missing",
+            });
         };
-        *entry = DependencyCacheEntry::Failed(Box::new(failure));
+        let failure =
+            CachedDependencyFailure::try_new(identity, cause, stable_identity_schema, observation)?;
+        *entry = DependencyCacheEntry::Failed(failure);
         Ok(index)
     }
 
     pub(crate) fn failed(&self, index: usize) -> Option<&CachedDependencyFailure> {
         match self.entries.get(index) {
             Some(DependencyCacheRecordSlot::Occupied(record)) => match &record.entry {
-                DependencyCacheEntry::Failed(failure) => Some(failure.as_ref()),
+                DependencyCacheEntry::Failed(failure) => Some(failure),
                 DependencyCacheEntry::Resolving | DependencyCacheEntry::Available(_) => None,
             },
             Some(DependencyCacheRecordSlot::Vacant { .. }) | None => None,
@@ -964,6 +985,10 @@ impl DependencyCache {
     }
 }
 
+// The cache reservation covers `size_of::<DependencyCacheRecordSlot>()` for
+// every slot. Keeping the bounded failure evidence inline avoids a second,
+// unmetered heap allocation for occupied records.
+#[allow(clippy::large_enum_variant)]
 enum DependencyCacheRecordSlot {
     Occupied(DependencyCacheRecord),
     Vacant { next: Option<usize> },
@@ -1181,7 +1206,7 @@ impl DependencyCacheCapacityActual {
 pub(crate) enum DependencyCacheEntry {
     Resolving,
     Available(CachedDependencySnapshot),
-    Failed(Box<CachedDependencyFailure>),
+    Failed(CachedDependencyFailure),
 }
 
 pub(crate) struct CachedDependencySnapshot {
@@ -1220,37 +1245,69 @@ pub(crate) enum CachedDependencyIoCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CachedNegativeObservation {
     None,
+    Proof(VerifiedNegativeInputProof),
+}
+
+pub(crate) enum PendingNegativeObservation<'target> {
+    None,
+    Proof(VerifiedNegativeInputProofBinding<'target>),
 }
 
 impl CachedDependencyFailure {
-    pub(crate) fn try_new(
+    fn try_new(
+        identity: &DependencyIdentity,
         cause: ScopeAbortCause,
         stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
+        observation: PendingNegativeObservation<'_>,
     ) -> Result<Self, ScopeAbortCause> {
         let unavailable = match &cause {
             ScopeAbortCause::AssetOpen(error) => {
+                let code = if matches!(error.kind(), AssetOpenErrorKind::NotFound) {
+                    CachedDependencyIoCode::Missing
+                } else {
+                    CachedDependencyIoCode::OpenFailed
+                };
                 CachedDependencyUnavailable::EnvironmentDependent {
-                    code: if matches!(error.kind(), AssetOpenErrorKind::NotFound) {
-                        CachedDependencyIoCode::Missing
-                    } else {
-                        CachedDependencyIoCode::OpenFailed
-                    },
-                    observation: CachedNegativeObservation::None,
+                    code,
+                    observation: seal_negative_observation(
+                        identity,
+                        stable_identity_schema,
+                        code,
+                        observation,
+                    )?,
                 }
             }
             ScopeAbortCause::AssetRead(error)
                 if !matches!(error.kind(), AssetReadErrorKind::ContractViolation(_)) =>
             {
+                let code = CachedDependencyIoCode::ReadFailed;
                 CachedDependencyUnavailable::EnvironmentDependent {
-                    code: CachedDependencyIoCode::ReadFailed,
-                    observation: CachedNegativeObservation::None,
+                    code,
+                    observation: seal_negative_observation(
+                        identity,
+                        stable_identity_schema,
+                        code,
+                        observation,
+                    )?,
                 }
             }
             ScopeAbortCause::Ledger(LedgerCause::LimitExceeded { .. })
             | ScopeAbortCause::ResourceLimit { .. } => {
+                if !matches!(observation, PendingNegativeObservation::None) {
+                    return Err(ScopeAbortCause::DescriptorContract {
+                        code: "negative-proof-non-environment-cause",
+                    });
+                }
                 CachedDependencyUnavailable::AcquisitionBudget
             }
-            ScopeAbortCause::Allocation { .. } => CachedDependencyUnavailable::ProcessState,
+            ScopeAbortCause::Allocation { .. } => {
+                if !matches!(observation, PendingNegativeObservation::None) {
+                    return Err(ScopeAbortCause::DescriptorContract {
+                        code: "negative-proof-non-environment-cause",
+                    });
+                }
+                CachedDependencyUnavailable::ProcessState
+            }
             _ => return Err(cause),
         };
         Ok(Self {
@@ -1291,6 +1348,44 @@ impl CachedDependencyFailure {
     }
 }
 
+fn seal_negative_observation(
+    identity: &DependencyIdentity,
+    stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
+    code: CachedDependencyIoCode,
+    observation: PendingNegativeObservation<'_>,
+) -> Result<CachedNegativeObservation, ScopeAbortCause> {
+    match observation {
+        PendingNegativeObservation::None => Ok(CachedNegativeObservation::None),
+        PendingNegativeObservation::Proof(binding) => {
+            let identity_schema =
+                stable_identity_schema.ok_or(ScopeAbortCause::DescriptorContract {
+                    code: "registered-negative-proof-missing-stable-identity",
+                })?;
+            let proof = binding
+                .seal_subject(
+                    identity_schema,
+                    identity.authority(),
+                    identity.path(),
+                    code.registered_cause(),
+                )
+                .map_err(|_| ScopeAbortCause::DescriptorContract {
+                    code: "registered-negative-proof-cache-subject-mismatch",
+                })?;
+            Ok(CachedNegativeObservation::Proof(proof))
+        }
+    }
+}
+
+impl CachedDependencyIoCode {
+    pub(crate) const fn registered_cause(self) -> RegisteredUnavailableCause {
+        match self {
+            Self::Missing => RegisteredUnavailableCause::Missing,
+            Self::OpenFailed => RegisteredUnavailableCause::OpenFailed,
+            Self::ReadFailed => RegisteredUnavailableCause::ReadFailed,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1300,8 +1395,10 @@ mod tests {
         ImportStoreBootstrapRequirements, ImportStoreHost, ImportStoreSessionOwner,
         try_import_store_bootstrap,
     };
+    use baozi_io::__semantic_identity::same_authority_resolver_v1;
     use baozi_io::{
-        AssetOpenError, AssetOpenStage, AssetReadContractViolation, AssetReadError, MemoryAssetIo,
+        AssetOpenError, AssetOpenStage, AssetReadContractViolation, AssetReadError,
+        ImmutableMemoryAssetIo, MemoryAssetIo,
     };
     use baozi_operation::{
         PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
@@ -1371,6 +1468,13 @@ mod tests {
         let path = AssetPath::new(format!("assets/{prefix}-{index:05}.bin"))
             .expect("generated dependency path must be valid");
         DependencyIdentity::new(authority.clone(), path)
+    }
+
+    fn missing_dependency_cause() -> ScopeAbortCause {
+        ScopeAbortCause::AssetOpen(AssetOpenError::new(
+            AssetOpenStage::Open,
+            AssetOpenErrorKind::NotFound,
+        ))
     }
 
     #[test]
@@ -1660,16 +1764,16 @@ mod tests {
                 .mark_resolving(identity.try_clone().unwrap(), store.reserve_scratch(1),)
                 .unwrap()
         );
-        let failure = CachedDependencyFailure::try_new(
-            ScopeAbortCause::AssetOpen(AssetOpenError::new(
-                AssetOpenStage::Open,
-                AssetOpenErrorKind::NotFound,
-            )),
-            None,
-        )
-        .expect("missing input is a reusable physical failure");
         let cache_index = cache
-            .store_failed(&identity, failure)
+            .store_failed(
+                &identity,
+                ScopeAbortCause::AssetOpen(AssetOpenError::new(
+                    AssetOpenStage::Open,
+                    AssetOpenErrorKind::NotFound,
+                )),
+                None,
+                PendingNegativeObservation::None,
+            )
             .expect("the resolving cache entry must accept its first failure");
 
         for _ in 0..2 {
@@ -1694,6 +1798,254 @@ mod tests {
             cache.get(&identity),
             Some((index, DependencyCacheEntry::Failed(_))) if index == cache_index
         ));
+
+        let namespace = ImmutableMemoryAssetIo::try_from_entries(vec![(
+            AssetPath::new("primary.bin").unwrap(),
+            Arc::from(&b"primary"[..]),
+        )])
+        .unwrap();
+        let replacement_identity = DependencyIdentity::new(
+            namespace.authority_domain(),
+            AssetPath::new("missing.bin").unwrap(),
+        );
+        let mut replacement_cache = DependencyCache::new();
+        replacement_cache.entries = Vec::with_capacity(1);
+        replacement_cache.index.slots = vec![DEPENDENCY_INDEX_EMPTY; 8];
+        assert!(
+            replacement_cache
+                .mark_resolving(
+                    replacement_identity.try_clone().unwrap(),
+                    store.reserve_scratch(1),
+                )
+                .unwrap()
+        );
+        let replacement_index = replacement_cache
+            .store_failed(
+                &replacement_identity,
+                missing_dependency_cause(),
+                Some(same_authority_resolver_v1().identity_schema()),
+                PendingNegativeObservation::None,
+            )
+            .unwrap();
+        let replacement_binding = same_authority_resolver_v1()
+            .plan_negative_proof(
+                &namespace,
+                replacement_identity.path(),
+                RegisteredUnavailableCause::Missing,
+            )
+            .unwrap()
+            .verify(
+                replacement_identity.path(),
+                RegisteredUnavailableCause::Missing,
+            )
+            .unwrap();
+        assert!(matches!(
+            replacement_cache.store_failed(
+                &replacement_identity,
+                missing_dependency_cause(),
+                Some(same_authority_resolver_v1().identity_schema()),
+                PendingNegativeObservation::Proof(replacement_binding),
+            ),
+            Err(ScopeAbortCause::DescriptorContract {
+                code: "dependency-cache-transition-missing"
+            })
+        ));
+        assert_eq!(
+            replacement_cache
+                .failed(replacement_index)
+                .expect("the original none observation remains cached")
+                .unavailable(),
+            CachedDependencyUnavailable::EnvironmentDependent {
+                code: CachedDependencyIoCode::Missing,
+                observation: CachedNegativeObservation::None,
+            }
+        );
+    }
+
+    #[test]
+    fn dependency_failure_cache_rejects_cross_subject_and_authority_negative_proof() {
+        let namespace = ImmutableMemoryAssetIo::try_from_entries(vec![(
+            AssetPath::new("primary.bin").unwrap(),
+            Arc::from(&b"primary"[..]),
+        )])
+        .unwrap();
+        let resolver = same_authority_resolver_v1();
+        let authority = namespace.authority_domain();
+        let proved_identity = DependencyIdentity::new(
+            authority.clone(),
+            AssetPath::new("proved-missing.bin").unwrap(),
+        );
+        let foreign_identity =
+            DependencyIdentity::new(authority, AssetPath::new("other-missing.bin").unwrap());
+        let foreign_namespace = ImmutableMemoryAssetIo::try_from_entries(vec![(
+            AssetPath::new("authority-mismatch.bin").unwrap(),
+            Arc::from(&b"present"[..]),
+        )])
+        .unwrap();
+        let foreign_authority_identity = DependencyIdentity::new(
+            foreign_namespace.authority_domain(),
+            AssetPath::new("authority-mismatch.bin").unwrap(),
+        );
+        let store = StoreHarness::new();
+        let mut cache = DependencyCache::new();
+        cache.entries = Vec::with_capacity(3);
+        cache.index.slots = vec![DEPENDENCY_INDEX_EMPTY; 8];
+        for identity in [
+            &proved_identity,
+            &foreign_identity,
+            &foreign_authority_identity,
+        ] {
+            assert!(
+                cache
+                    .mark_resolving(identity.try_clone().unwrap(), store.reserve_scratch(1))
+                    .unwrap()
+            );
+        }
+        let foreign_binding = resolver
+            .plan_negative_proof(
+                &namespace,
+                proved_identity.path(),
+                RegisteredUnavailableCause::Missing,
+            )
+            .unwrap()
+            .verify(proved_identity.path(), RegisteredUnavailableCause::Missing)
+            .unwrap();
+        assert!(matches!(
+            cache.store_failed(
+                &foreign_identity,
+                missing_dependency_cause(),
+                Some(resolver.identity_schema()),
+                PendingNegativeObservation::Proof(foreign_binding),
+            ),
+            Err(ScopeAbortCause::DescriptorContract {
+                code: "registered-negative-proof-cache-subject-mismatch"
+            })
+        ));
+        assert!(matches!(
+            cache.get(&foreign_identity),
+            Some((_, DependencyCacheEntry::Resolving))
+        ));
+
+        let foreign_authority_binding = resolver
+            .plan_negative_proof(
+                &namespace,
+                foreign_authority_identity.path(),
+                RegisteredUnavailableCause::Missing,
+            )
+            .unwrap()
+            .verify(
+                foreign_authority_identity.path(),
+                RegisteredUnavailableCause::Missing,
+            )
+            .unwrap();
+        assert!(matches!(
+            cache.store_failed(
+                &foreign_authority_identity,
+                missing_dependency_cause(),
+                Some(resolver.identity_schema()),
+                PendingNegativeObservation::Proof(foreign_authority_binding),
+            ),
+            Err(ScopeAbortCause::DescriptorContract {
+                code: "registered-negative-proof-cache-subject-mismatch"
+            })
+        ));
+        assert!(matches!(
+            cache.get(&foreign_authority_identity),
+            Some((_, DependencyCacheEntry::Resolving))
+        ));
+
+        let wrong_cause_binding = resolver
+            .plan_negative_proof(
+                &namespace,
+                proved_identity.path(),
+                RegisteredUnavailableCause::Missing,
+            )
+            .unwrap()
+            .verify(proved_identity.path(), RegisteredUnavailableCause::Missing)
+            .unwrap();
+        assert!(matches!(
+            cache.store_failed(
+                &proved_identity,
+                ScopeAbortCause::AssetOpen(AssetOpenError::new(
+                    AssetOpenStage::Open,
+                    AssetOpenErrorKind::Backend,
+                )),
+                Some(resolver.identity_schema()),
+                PendingNegativeObservation::Proof(wrong_cause_binding),
+            ),
+            Err(ScopeAbortCause::DescriptorContract {
+                code: "registered-negative-proof-cache-subject-mismatch"
+            })
+        ));
+
+        let correct_binding = resolver
+            .plan_negative_proof(
+                &namespace,
+                proved_identity.path(),
+                RegisteredUnavailableCause::Missing,
+            )
+            .unwrap()
+            .verify(proved_identity.path(), RegisteredUnavailableCause::Missing)
+            .unwrap();
+        let proof_index = cache
+            .store_failed(
+                &proved_identity,
+                missing_dependency_cause(),
+                Some(resolver.identity_schema()),
+                PendingNegativeObservation::Proof(correct_binding),
+            )
+            .expect("the correct proof must publish");
+        let proof_observation = cache
+            .failed(proof_index)
+            .expect("the proof failure must be retained")
+            .unavailable();
+
+        assert!(matches!(
+            cache.store_failed(
+                &proved_identity,
+                missing_dependency_cause(),
+                Some(resolver.identity_schema()),
+                PendingNegativeObservation::None,
+            ),
+            Err(ScopeAbortCause::DescriptorContract {
+                code: "dependency-cache-transition-missing"
+            })
+        ));
+        assert_eq!(
+            cache
+                .failed(proof_index)
+                .expect("the proof failure must remain after a rejected replacement")
+                .unavailable(),
+            proof_observation
+        );
+
+        let replacement_binding = resolver
+            .plan_negative_proof(
+                &namespace,
+                proved_identity.path(),
+                RegisteredUnavailableCause::Missing,
+            )
+            .unwrap()
+            .verify(proved_identity.path(), RegisteredUnavailableCause::Missing)
+            .unwrap();
+        assert!(matches!(
+            cache.store_failed(
+                &proved_identity,
+                missing_dependency_cause(),
+                Some(resolver.identity_schema()),
+                PendingNegativeObservation::Proof(replacement_binding),
+            ),
+            Err(ScopeAbortCause::DescriptorContract {
+                code: "dependency-cache-transition-missing"
+            })
+        ));
+        assert_eq!(
+            cache
+                .failed(proof_index)
+                .expect("the proof failure must remain after a second rejected replacement")
+                .unavailable(),
+            proof_observation
+        );
     }
 
     #[test]
@@ -1706,7 +2058,12 @@ mod tests {
         ));
 
         assert!(matches!(
-            CachedDependencyFailure::try_new(cause, None),
+            CachedDependencyFailure::try_new(
+                &indexed_identity(&AuthorityDomain::new(), "contract", 0),
+                cause,
+                None,
+                PendingNegativeObservation::None,
+            ),
             Err(ScopeAbortCause::AssetRead(error))
                 if matches!(
                     error.kind(),

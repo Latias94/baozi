@@ -1,4 +1,5 @@
 use crate::{AssetOpenError, AssetPath, AssetReadContractViolation, AssetReadError};
+use std::any::Any;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
@@ -264,7 +265,7 @@ impl fmt::Debug for OpenedAsset {
 /// Baozi may catch an unwind from a shared call and later use the capability in
 /// another import session. A hostile implementation still requires process
 /// isolation; this trait is not a sandbox boundary.
-pub trait AssetIo: Send + Sync + RefUnwindSafe + 'static {
+pub trait AssetIo: Any + Send + Sync + RefUnwindSafe + 'static {
     fn authority_domain(&self) -> AuthorityDomain;
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError>;

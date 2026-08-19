@@ -1,4 +1,7 @@
+use crate::ImmutableMemoryAssetIo;
 use crate::{AssetIo, AssetPath, AuthorityDomain, PathError};
+use sha2::{Digest, Sha256};
+use std::any::Any;
 use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU32;
@@ -51,6 +54,156 @@ impl NamespaceSemanticsId {
     /// Returns the canonical registry identifier.
     pub const fn as_str(self) -> &'static str {
         self.0
+    }
+}
+
+/// A registered negative-proof scheme identifier.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NegativeProofSchemeId(&'static str);
+
+impl NegativeProofSchemeId {
+    /// Returns the canonical registry identifier.
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl fmt::Debug for NegativeProofSchemeId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("NegativeProofSchemeId")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+/// A registered managed validity-rule identifier.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NegativeProofValidityRuleId(&'static str);
+
+impl NegativeProofValidityRuleId {
+    /// Returns the canonical registry identifier.
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl fmt::Debug for NegativeProofValidityRuleId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("NegativeProofValidityRuleId")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+/// The subject bound by one admitted negative proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum NegativeProofSubjectKind {
+    /// The proof is valid against one complete immutable namespace snapshot.
+    NamespaceSnapshot,
+    /// The proof is valid for one independently immutable reference assertion.
+    PerReference,
+}
+
+impl NegativeProofSubjectKind {
+    /// Returns the canonical registry identifier.
+    pub const fn canonical_id(self) -> &'static str {
+        match self {
+            Self::NamespaceSnapshot => "namespace-snapshot",
+            Self::PerReference => "per-reference",
+        }
+    }
+}
+
+/// The digest algorithm fixed by one proof payload schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum NegativeProofDigestAlgorithm {
+    Sha256,
+}
+
+impl NegativeProofDigestAlgorithm {
+    /// Returns the canonical registry identifier.
+    pub const fn canonical_id(self) -> &'static str {
+        match self {
+            Self::Sha256 => "sha256",
+        }
+    }
+}
+
+/// Hard per-proof resource caps owned by the registered scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NegativeProofResourceCaps {
+    canonical_bytes: u64,
+    temporary_bytes: u64,
+    construction_work: u64,
+    verification_work: u64,
+}
+
+impl NegativeProofResourceCaps {
+    pub const fn canonical_bytes(self) -> u64 {
+        self.canonical_bytes
+    }
+
+    pub const fn temporary_bytes(self) -> u64 {
+        self.temporary_bytes
+    }
+
+    pub const fn construction_work(self) -> u64 {
+        self.construction_work
+    }
+
+    pub const fn verification_work(self) -> u64 {
+        self.verification_work
+    }
+}
+
+/// The complete typed semantic subject for one registered negative-proof scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NegativeProofSchemeSemanticSubject {
+    scheme: NegativeProofSchemeId,
+    version: NonZeroU32,
+    validity_rule: NegativeProofValidityRuleId,
+    subject_kind: NegativeProofSubjectKind,
+    payload_schema_id: &'static str,
+    payload_schema_version: NonZeroU32,
+    digest_algorithm: NegativeProofDigestAlgorithm,
+    caps: NegativeProofResourceCaps,
+}
+
+impl NegativeProofSchemeSemanticSubject {
+    pub const fn scheme(self) -> NegativeProofSchemeId {
+        self.scheme
+    }
+
+    pub const fn version(self) -> NonZeroU32 {
+        self.version
+    }
+
+    pub const fn validity_rule(self) -> NegativeProofValidityRuleId {
+        self.validity_rule
+    }
+
+    pub const fn subject_kind(self) -> NegativeProofSubjectKind {
+        self.subject_kind
+    }
+
+    pub const fn payload_schema_id(self) -> &'static str {
+        self.payload_schema_id
+    }
+
+    pub const fn payload_schema_version(self) -> NonZeroU32 {
+        self.payload_schema_version
+    }
+
+    pub const fn digest_algorithm(self) -> NegativeProofDigestAlgorithm {
+        self.digest_algorithm
+    }
+
+    pub const fn caps(self) -> NegativeProofResourceCaps {
+        self.caps
     }
 }
 
@@ -116,17 +269,31 @@ impl SemanticParameterSchema {
     }
 }
 
+#[derive(Debug)]
+struct NegativeProofSchemeEntry {
+    subject: NegativeProofSchemeSemanticSubject,
+}
+
 /// One registered negative-proof scheme.
 ///
-/// The initial same-authority resolver registers no proof scheme. This opaque type reserves the
-/// typed registry boundary without allowing callers to construct or self-register schemes.
+/// Construction remains private so custom resolvers cannot self-admit a proof scheme.
 pub struct RegisteredNegativeProofScheme {
-    _private: (),
+    entry: &'static NegativeProofSchemeEntry,
+}
+
+impl RegisteredNegativeProofScheme {
+    /// Returns the complete registered semantic subject.
+    pub const fn semantic_subject(&self) -> NegativeProofSchemeSemanticSubject {
+        self.entry.subject
+    }
 }
 
 impl fmt::Debug for RegisteredNegativeProofScheme {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RegisteredNegativeProofScheme")
+        formatter
+            .debug_struct("RegisteredNegativeProofScheme")
+            .field("subject", &self.entry.subject)
+            .finish()
     }
 }
 
@@ -372,6 +539,11 @@ impl RegisteredResolverProfile {
         self.entry.subject
     }
 
+    /// Returns the stable public resource-identity schema issued by this resolver.
+    pub const fn identity_schema(&self) -> &'static StableResourceIdentitySchema {
+        self.entry.identity_schema
+    }
+
     /// Executes the v1 same-authority resolution after registered normalization.
     pub fn resolve_same_authority<'io>(
         &'static self,
@@ -390,6 +562,31 @@ impl RegisteredResolverProfile {
                 schema: self.entry.identity_schema,
             },
             resolver: self,
+        })
+    }
+
+    /// Plans a registered immutable negative proof without executing proof work.
+    ///
+    /// The exact concrete backend check is owned here. A custom `AssetIo` implementation cannot
+    /// opt itself into this path by forwarding a trait method or returning a registry identifier.
+    pub fn plan_negative_proof<'target>(
+        &'static self,
+        io: &'target dyn AssetIo,
+        target: &'target AssetPath,
+        cause: RegisteredUnavailableCause,
+    ) -> Option<RegisteredNegativeProofPlan<'target>> {
+        if !std::ptr::eq(self, &SAME_AUTHORITY_RESOLVER)
+            || cause != RegisteredUnavailableCause::Missing
+        {
+            return None;
+        }
+        let backend = (io as &dyn Any).downcast_ref::<ImmutableMemoryAssetIo>()?;
+        Some(RegisteredNegativeProofPlan {
+            backend,
+            target,
+            resolver: self,
+            scheme: immutable_memory_namespace_absence_v1(),
+            cause,
         })
     }
 }
@@ -450,6 +647,228 @@ impl fmt::Debug for RegisteredAssetResolution<'_> {
     }
 }
 
+/// Exact unavailable cause bound by a registered negative proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RegisteredUnavailableCause {
+    Missing,
+    OpenFailed,
+    ReadFailed,
+}
+
+impl RegisteredUnavailableCause {
+    pub const fn class_id(self) -> &'static str {
+        "baozi.io"
+    }
+
+    pub const fn code_id(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::OpenFailed => "open-failed",
+            Self::ReadFailed => "read-failed",
+        }
+    }
+}
+
+/// One allocation-free registered proof plan bound to an exact backend and target.
+pub struct RegisteredNegativeProofPlan<'target> {
+    backend: &'target ImmutableMemoryAssetIo,
+    target: &'target AssetPath,
+    resolver: &'static RegisteredResolverProfile,
+    scheme: &'static RegisteredNegativeProofScheme,
+    cause: RegisteredUnavailableCause,
+}
+
+impl<'target> RegisteredNegativeProofPlan<'target> {
+    pub const fn scheme(&self) -> &'static RegisteredNegativeProofScheme {
+        self.scheme
+    }
+
+    pub const fn resolver(&self) -> &'static RegisteredResolverProfile {
+        self.resolver
+    }
+
+    pub const fn target(&self) -> &AssetPath {
+        self.target
+    }
+
+    pub const fn cause(&self) -> RegisteredUnavailableCause {
+        self.cause
+    }
+
+    /// Verifies the exact target and cause after the caller has admitted the scheme's work caps.
+    pub fn verify(
+        self,
+        target: &AssetPath,
+        cause: RegisteredUnavailableCause,
+    ) -> Result<VerifiedNegativeInputProofBinding<'target>, RegisteredNegativeProofError> {
+        if target != self.target {
+            return Err(RegisteredNegativeProofError::TargetMismatch);
+        }
+        if cause != self.cause {
+            return Err(RegisteredNegativeProofError::CauseMismatch);
+        }
+        if self.backend.contains(target) {
+            return Err(RegisteredNegativeProofError::TargetAvailable);
+        }
+        let namespace_snapshot_digest = self.backend.namespace_snapshot_digest();
+        Ok(VerifiedNegativeInputProofBinding {
+            backend: self.backend,
+            target: self.target,
+            proof: VerifiedNegativeInputProof {
+                resolver: self.resolver,
+                scheme: self.scheme,
+                namespace_snapshot_digest,
+                cause,
+                proof_digest: immutable_memory_absence_proof_digest(
+                    self.resolver,
+                    self.scheme,
+                    namespace_snapshot_digest,
+                    target,
+                    cause,
+                ),
+            },
+        })
+    }
+}
+
+impl fmt::Debug for RegisteredNegativeProofPlan<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RegisteredNegativeProofPlan")
+            .field("target", &self.target)
+            .field("resolver", &self.resolver)
+            .field("scheme", &self.scheme)
+            .field("cause", &self.cause)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One verified inert negative proof issued by the sealed asset-IO registry.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifiedNegativeInputProof {
+    resolver: &'static RegisteredResolverProfile,
+    scheme: &'static RegisteredNegativeProofScheme,
+    namespace_snapshot_digest: [u8; 32],
+    cause: RegisteredUnavailableCause,
+    proof_digest: [u8; 32],
+}
+
+impl PartialEq for VerifiedNegativeInputProof {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.resolver, other.resolver)
+            && std::ptr::eq(self.scheme, other.scheme)
+            && self.namespace_snapshot_digest == other.namespace_snapshot_digest
+            && self.cause == other.cause
+            && self.proof_digest == other.proof_digest
+    }
+}
+
+impl Eq for VerifiedNegativeInputProof {}
+
+/// A verified proof still bound to the exact target object used by its proof plan.
+///
+/// This linear wrapper crosses the import work callback, then is consumed at the cache transition.
+/// The retained proof cannot be extracted until the cache supplies the same authority, target
+/// object, cause, and registered identity schema. That makes publication an allocation-free O(1)
+/// check instead of an unmetered second proof hash.
+pub struct VerifiedNegativeInputProofBinding<'target> {
+    backend: &'target ImmutableMemoryAssetIo,
+    target: &'target AssetPath,
+    proof: VerifiedNegativeInputProof,
+}
+
+impl VerifiedNegativeInputProofBinding<'_> {
+    /// Consumes the binding only when the cache presents the exact planned subject.
+    pub fn seal_subject(
+        self,
+        identity_schema: &'static StableResourceIdentitySchema,
+        authority: &AuthorityDomain,
+        target: &AssetPath,
+        cause: RegisteredUnavailableCause,
+    ) -> Result<VerifiedNegativeInputProof, RegisteredNegativeProofError> {
+        if self.backend.authority() != authority {
+            return Err(RegisteredNegativeProofError::AuthorityMismatch);
+        }
+        if !std::ptr::eq(self.target, target) {
+            return Err(RegisteredNegativeProofError::TargetMismatch);
+        }
+        if !std::ptr::eq(identity_schema, self.proof.resolver.identity_schema()) {
+            return Err(RegisteredNegativeProofError::IdentitySchemaMismatch);
+        }
+        if cause != self.proof.cause {
+            return Err(RegisteredNegativeProofError::CauseMismatch);
+        }
+        Ok(self.proof)
+    }
+}
+
+impl fmt::Debug for VerifiedNegativeInputProofBinding<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedNegativeInputProofBinding")
+            .field("authority", self.backend.authority())
+            .field("target", &self.target)
+            .field("proof", &self.proof)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VerifiedNegativeInputProof {
+    pub const fn resolver(self) -> &'static RegisteredResolverProfile {
+        self.resolver
+    }
+
+    pub const fn scheme(self) -> &'static RegisteredNegativeProofScheme {
+        self.scheme
+    }
+
+    pub const fn namespace_snapshot_digest(self) -> [u8; 32] {
+        self.namespace_snapshot_digest
+    }
+
+    pub const fn cause(self) -> RegisteredUnavailableCause {
+        self.cause
+    }
+
+    pub const fn proof_digest(self) -> [u8; 32] {
+        self.proof_digest
+    }
+}
+
+/// A registered proof plan did not validate the exact cached failure subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RegisteredNegativeProofError {
+    AuthorityMismatch,
+    TargetMismatch,
+    CauseMismatch,
+    IdentitySchemaMismatch,
+    TargetAvailable,
+}
+
+impl fmt::Display for RegisteredNegativeProofError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthorityMismatch => {
+                formatter.write_str("negative proof authority does not match the issuing namespace")
+            }
+            Self::TargetMismatch => {
+                formatter.write_str("negative proof target does not match the planned target")
+            }
+            Self::CauseMismatch => {
+                formatter.write_str("negative proof cause does not match the planned cause")
+            }
+            Self::IdentitySchemaMismatch => formatter
+                .write_str("negative proof identity schema does not match the issuing resolver"),
+            Self::TargetAvailable => formatter
+                .write_str("negative proof namespace contains the allegedly missing target"),
+        }
+    }
+}
+
+impl Error for RegisteredNegativeProofError {}
+
 /// A registered resolver rejected evidence from another normalizer profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -473,6 +892,33 @@ impl Error for RegisteredResolutionError {}
 const V1: NonZeroU32 = NonZeroU32::MIN;
 const PORTABLE_LOGICAL_NAMESPACE: NamespaceSemanticsId =
     NamespaceSemanticsId("baozi.asset-path.portable-logical");
+const IMMUTABLE_MEMORY_ABSENCE_PROOF_DOMAIN: &[u8] =
+    b"baozi.immutable-memory-namespace-absence-proof.v1";
+
+static IMMUTABLE_MEMORY_ABSENCE_SCHEME_ENTRY: NegativeProofSchemeEntry = NegativeProofSchemeEntry {
+    subject: NegativeProofSchemeSemanticSubject {
+        scheme: NegativeProofSchemeId("baozi.immutable-memory-namespace-absence"),
+        version: V1,
+        validity_rule: NegativeProofValidityRuleId(
+            "baozi.immutable-memory-namespace-membership-v1",
+        ),
+        subject_kind: NegativeProofSubjectKind::NamespaceSnapshot,
+        payload_schema_id: "baozi.immutable-memory-namespace-absence-proof",
+        payload_schema_version: V1,
+        digest_algorithm: NegativeProofDigestAlgorithm::Sha256,
+        caps: NegativeProofResourceCaps {
+            canonical_bytes: 16 * 1024,
+            temporary_bytes: 0,
+            construction_work: 1,
+            verification_work: 1,
+        },
+    },
+};
+
+static SAME_AUTHORITY_NEGATIVE_PROOF_SCHEMES: &[RegisteredNegativeProofScheme] =
+    &[RegisteredNegativeProofScheme {
+        entry: &IMMUTABLE_MEMORY_ABSENCE_SCHEME_ENTRY,
+    }];
 
 static PORTABLE_ASSET_PATH_NORMALIZER_ENTRY: ReferenceNormalizerEntry = ReferenceNormalizerEntry {
     subject: ReferenceNormalizerSemanticSubject {
@@ -501,8 +947,6 @@ static SAME_AUTHORITY_RESOURCE_IDENTITY_SCHEMA: StableResourceIdentitySchema =
         entry: &SAME_AUTHORITY_RESOURCE_IDENTITY_SCHEMA_ENTRY,
     };
 
-static NO_NEGATIVE_PROOF_SCHEMES: &[RegisteredNegativeProofScheme] = &[];
-
 static SAME_AUTHORITY_RESOLVER_ENTRY: ResolverEntry = ResolverEntry {
     subject: ResolverSemanticSubject {
         contract: ResolverContractId("baozi.same-authority-resolver"),
@@ -510,7 +954,7 @@ static SAME_AUTHORITY_RESOLVER_ENTRY: ResolverEntry = ResolverEntry {
         namespace_semantics: PORTABLE_LOGICAL_NAMESPACE,
         normalizer: &PORTABLE_ASSET_PATH_NORMALIZER,
         parameters: SemanticParameterSchema::SameAuthorityResolverV1,
-        proof_schemes: NO_NEGATIVE_PROOF_SCHEMES,
+        proof_schemes: SAME_AUTHORITY_NEGATIVE_PROOF_SCHEMES,
     },
     identity_schema: &SAME_AUTHORITY_RESOURCE_IDENTITY_SCHEMA,
 };
@@ -529,10 +973,49 @@ pub const fn same_authority_resolver_v1() -> &'static RegisteredResolverProfile 
     &SAME_AUTHORITY_RESOLVER
 }
 
+/// Returns the v1 immutable-memory namespace absence proof scheme.
+pub const fn immutable_memory_namespace_absence_v1() -> &'static RegisteredNegativeProofScheme {
+    &SAME_AUTHORITY_NEGATIVE_PROOF_SCHEMES[0]
+}
+
+fn immutable_memory_absence_proof_digest(
+    resolver: &RegisteredResolverProfile,
+    scheme: &RegisteredNegativeProofScheme,
+    namespace_snapshot_digest: [u8; 32],
+    target: &AssetPath,
+    cause: RegisteredUnavailableCause,
+) -> [u8; 32] {
+    let identity_schema = resolver.identity_schema();
+    let resolver = resolver.semantic_subject();
+    let scheme = scheme.semantic_subject();
+    let mut digest = Sha256::new();
+    update_proof_frame(&mut digest, IMMUTABLE_MEMORY_ABSENCE_PROOF_DOMAIN);
+    update_proof_frame(&mut digest, resolver.contract().as_str().as_bytes());
+    digest.update(u64::from(resolver.contract_version().get()).to_be_bytes());
+    update_proof_frame(&mut digest, scheme.scheme().as_str().as_bytes());
+    digest.update(u64::from(scheme.version().get()).to_be_bytes());
+    update_proof_frame(&mut digest, scheme.validity_rule().as_str().as_bytes());
+    update_proof_frame(&mut digest, identity_schema.owner().as_bytes());
+    update_proof_frame(&mut digest, identity_schema.schema_id().as_bytes());
+    digest.update(u64::from(identity_schema.schema_version().get()).to_be_bytes());
+    digest.update(namespace_snapshot_digest);
+    update_proof_frame(&mut digest, target.as_str().as_bytes());
+    update_proof_frame(&mut digest, cause.class_id().as_bytes());
+    update_proof_frame(&mut digest, cause.code_id().as_bytes());
+    digest.finalize().into()
+}
+
+fn update_proof_frame(digest: &mut Sha256, bytes: &[u8]) {
+    let length = u64::try_from(bytes.len()).expect("usize fits in u64 on supported Rust targets");
+    digest.update(length.to_be_bytes());
+    digest.update(bytes);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MemoryAssetIo;
+    use crate::{ImmutableMemoryAssetIo, MemoryAssetIo};
+    use std::sync::Arc;
 
     #[test]
     fn portable_normalizer_preserves_exact_unicode_and_registered_semantics() {
@@ -581,7 +1064,11 @@ mod tests {
             subject.normalizer(),
             portable_asset_path_normalizer_v1()
         ));
-        assert!(subject.proof_schemes().is_empty());
+        assert_eq!(subject.proof_schemes().len(), 1);
+        assert!(std::ptr::eq(
+            &subject.proof_schemes()[0],
+            immutable_memory_namespace_absence_v1()
+        ));
 
         let io = MemoryAssetIo::new();
         let authority = io.authority_domain();
@@ -606,5 +1093,101 @@ mod tests {
             "same-authority-asset-path"
         );
         assert_eq!(resolution.identity().schema().schema_version(), V1);
+        assert!(
+            resolver
+                .plan_negative_proof(
+                    &io,
+                    &AssetPath::new("models/textures/missing.png").unwrap(),
+                    RegisteredUnavailableCause::Missing,
+                )
+                .is_none(),
+            "the mutable memory namespace cannot issue immutable absence proof"
+        );
+    }
+
+    #[test]
+    fn immutable_memory_absence_proof_is_exact_and_namespace_bound() {
+        assert_eq!(RegisteredUnavailableCause::Missing.class_id(), "baozi.io");
+        assert_eq!(RegisteredUnavailableCause::Missing.code_id(), "missing");
+        let first = ImmutableMemoryAssetIo::try_from_entries(vec![(
+            AssetPath::new("models/scene.obj").unwrap(),
+            Arc::from(&b"primary"[..]),
+        )])
+        .unwrap();
+        let second = ImmutableMemoryAssetIo::try_from_entries(vec![
+            (
+                AssetPath::new("models/scene.obj").unwrap(),
+                Arc::from(&b"primary"[..]),
+            ),
+            (
+                AssetPath::new("models/other.bin").unwrap(),
+                Arc::from(&b"other"[..]),
+            ),
+        ])
+        .unwrap();
+        let target = AssetPath::new("models/missing.bin").unwrap();
+        let wrong = AssetPath::new("models/other-missing.bin").unwrap();
+        let resolver = same_authority_resolver_v1();
+
+        let wrong_target = resolver
+            .plan_negative_proof(&first, &target, RegisteredUnavailableCause::Missing)
+            .expect("immutable namespace supports the registered scheme")
+            .verify(&wrong, RegisteredUnavailableCause::Missing);
+        assert!(matches!(
+            wrong_target,
+            Err(RegisteredNegativeProofError::TargetMismatch)
+        ));
+
+        let wrong_cause = resolver
+            .plan_negative_proof(&first, &target, RegisteredUnavailableCause::Missing)
+            .unwrap()
+            .verify(&target, RegisteredUnavailableCause::OpenFailed);
+        assert!(matches!(
+            wrong_cause,
+            Err(RegisteredNegativeProofError::CauseMismatch)
+        ));
+
+        let first_proof = resolver
+            .plan_negative_proof(&first, &target, RegisteredUnavailableCause::Missing)
+            .unwrap()
+            .verify(&target, RegisteredUnavailableCause::Missing)
+            .unwrap();
+        let repeated = resolver
+            .plan_negative_proof(&first, &target, RegisteredUnavailableCause::Missing)
+            .unwrap()
+            .verify(&target, RegisteredUnavailableCause::Missing)
+            .unwrap();
+        let other_namespace = resolver
+            .plan_negative_proof(&second, &target, RegisteredUnavailableCause::Missing)
+            .unwrap()
+            .verify(&target, RegisteredUnavailableCause::Missing)
+            .unwrap();
+
+        assert_eq!(
+            first_proof.proof.proof_digest(),
+            repeated.proof.proof_digest()
+        );
+        assert_eq!(
+            first_proof.proof.namespace_snapshot_digest(),
+            repeated.proof.namespace_snapshot_digest()
+        );
+        assert_ne!(
+            first_proof.proof.namespace_snapshot_digest(),
+            other_namespace.proof.namespace_snapshot_digest()
+        );
+        assert_ne!(
+            first_proof.proof.proof_digest(),
+            other_namespace.proof.proof_digest()
+        );
+
+        let present = AssetPath::new("models/scene.obj").unwrap();
+        let present_result = resolver
+            .plan_negative_proof(&first, &present, RegisteredUnavailableCause::Missing)
+            .unwrap()
+            .verify(&present, RegisteredUnavailableCause::Missing);
+        assert!(matches!(
+            present_result,
+            Err(RegisteredNegativeProofError::TargetAvailable)
+        ));
     }
 }

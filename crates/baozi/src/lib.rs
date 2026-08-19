@@ -21,11 +21,17 @@ pub use baozi_import::{
     ImportLedgerSnapshot, ImportLossKind, ImportOperationControl, ImportPhase, ImportPhaseEvidence,
     ImportPreset, ImportProgressPhase, ImportProgressUnit, ImportReport, ImportRequest,
     ImportRequestBuildError, ImportRequestLayer, ImportRunError, ImportTerminalCause,
-    ImportTerminalFailure, ImportTerminalFailureClass, LossPolicy, OptionCompileLimits,
-    PreparedImportRequest, ReadConfidence, RegistryBuildError, RegistryBuildLimits,
-    RegistryRegistrationError, RequestError, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot,
-    SceneSnapshotError, SceneSnapshotLimits, ScopeAbort, ScopeAbortCause, TrustedExtensionBoundary,
-    ValidatedScene,
+    ImportTerminalFailure, ImportTerminalFailureClass, InputReplayStatus, LossPolicy,
+    ManifestDigest, ManifestNamespaceSnapshotProof, ManifestNodeClass, ManifestObservedOnlyReason,
+    ManifestObservedOnlyReasons, ManifestPerReferenceProof, ManifestReference, ManifestRelation,
+    ManifestRelationOutcome, ManifestResourceIdentity, ManifestResourceIdentityStability,
+    ManifestSemanticIdentity, ManifestSessionDependentReason, ManifestSessionOpaqueReason,
+    ManifestUnavailableClass, ManifestUnavailableCode, ManifestUnavailableReplay,
+    OptionCompileLimits, PreparedImportRequest, ReadConfidence, RegistryBuildError,
+    RegistryBuildLimits, RegistryRegistrationError, RequestError, ResourceLimits,
+    ResourceLimitsOverlay, ResourceManifestCounts, SceneSnapshot, SceneSnapshotError,
+    SceneSnapshotLimits, ScopeAbort, ScopeAbortCause, SuccessfulInputManifest,
+    TrustedExtensionBoundary, ValidatedScene,
 };
 use baozi_import::{
     RegistryBuilder, RegistrySnapshot, import_asset, import_asset_with_resolver, import_bytes,
@@ -33,9 +39,9 @@ use baozi_import::{
 pub use baozi_io::{
     AssetIo, AssetLength, AssetObjectKind, AssetOpenError, AssetOpenErrorKind, AssetOpenStage,
     AssetPath, AssetReadContractViolation, AssetReadError, AssetReadErrorKind, AuthorityDomain,
-    MemoryAssetInsertError, MemoryAssetIo, NATIVE_FS_CANDIDATE_TARGETS,
-    NATIVE_FS_REGISTERED_TARGETS, NATIVE_FS_SUPPORT_STATUS, NativeFsSupportStatus, OpenedAsset,
-    PathError, PathErrorCode,
+    ImmutableMemoryAssetBuildError, ImmutableMemoryAssetIo, MemoryAssetInsertError, MemoryAssetIo,
+    NATIVE_FS_CANDIDATE_TARGETS, NATIVE_FS_REGISTERED_TARGETS, NATIVE_FS_SUPPORT_STATUS,
+    NativeFsSupportStatus, OpenedAsset, PathError, PathErrorCode,
 };
 #[cfg(feature = "native-fs-candidate")]
 pub use baozi_io::{FileSystemAssetIo, NativeDirectoryCapability};
@@ -71,6 +77,9 @@ pub enum Error {
 
     #[error(transparent)]
     MemoryAssetInsert(#[from] MemoryAssetInsertError),
+
+    #[error(transparent)]
+    ImmutableMemoryAssetBuild(#[from] ImmutableMemoryAssetBuildError),
 
     #[cfg(feature = "native-fs-candidate")]
     #[error("native directory capability could not be opened")]

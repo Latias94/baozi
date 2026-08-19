@@ -130,6 +130,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "rustix",
+ "sha2",
  "thiserror",
 ]
 

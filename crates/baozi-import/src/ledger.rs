@@ -209,10 +209,14 @@ pub enum ImportDimension {
     ArchiveBytes,
     CompressedBytes,
     DecompressedBytes,
+    NegativeProofCanonicalBytes,
+    NegativeProofTemporaryBytes,
+    NegativeProofConstructionWork,
+    NegativeProofVerificationWork,
 }
 
 impl ImportDimension {
-    pub(crate) const ALL: [Self; 53] = [
+    pub(crate) const ALL: [Self; 57] = [
         Self::AssetOpen,
         Self::DependencyReference,
         Self::PrimaryBytes,
@@ -266,6 +270,10 @@ impl ImportDimension {
         Self::ArchiveBytes,
         Self::CompressedBytes,
         Self::DecompressedBytes,
+        Self::NegativeProofCanonicalBytes,
+        Self::NegativeProofTemporaryBytes,
+        Self::NegativeProofConstructionWork,
+        Self::NegativeProofVerificationWork,
     ];
 
     fn policy(self, limits: &ResourceLimits) -> DimensionPolicy {
@@ -346,12 +354,21 @@ impl ImportDimension {
             Self::ArchiveBytes | Self::CompressedBytes | Self::DecompressedBytes => {
                 bytes(limits.max_total_asset_bytes)
             }
+            Self::NegativeProofCanonicalBytes => counter(limits.max_negative_proof_canonical_bytes),
+            Self::NegativeProofTemporaryBytes => bytes(limits.max_negative_proof_temporary_bytes),
+            Self::NegativeProofConstructionWork => {
+                counter(limits.max_negative_proof_construction_work)
+            }
+            Self::NegativeProofVerificationWork => {
+                counter(limits.max_negative_proof_verification_work)
+            }
         }
     }
 }
 
-const _: () =
-    assert!(ImportDimension::ALL.len() == ImportDimension::DecompressedBytes as usize + 1);
+const _: () = assert!(
+    ImportDimension::ALL.len() == ImportDimension::NegativeProofVerificationWork as usize + 1
+);
 
 pub(crate) fn import_ledger_limits(
     limits: &ResourceLimits,

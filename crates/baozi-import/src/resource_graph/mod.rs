@@ -6,10 +6,13 @@
 
 mod manifest;
 
+pub(crate) use manifest::registered_negative_proof_canonical_len;
+
 pub use manifest::{
-    InputReplayStatus, ManifestDigest, ManifestNodeClass, ManifestObservedOnlyReason,
-    ManifestObservedOnlyReasons, ManifestReference, ManifestRelation, ManifestRelationOutcome,
-    ManifestResourceIdentity, ManifestResourceIdentityStability, ManifestSessionDependentReason,
+    InputReplayStatus, ManifestDigest, ManifestNamespaceSnapshotProof, ManifestNodeClass,
+    ManifestObservedOnlyReason, ManifestObservedOnlyReasons, ManifestPerReferenceProof,
+    ManifestReference, ManifestRelation, ManifestRelationOutcome, ManifestResourceIdentity,
+    ManifestResourceIdentityStability, ManifestSemanticIdentity, ManifestSessionDependentReason,
     ManifestSessionOpaqueReason, ManifestUnavailableClass, ManifestUnavailableCode,
     ManifestUnavailableReplay, ResourceManifestCounts, SuccessfulInputManifest,
 };
@@ -18,7 +21,7 @@ use crate::dependency::{
     CachedDependencyFailure, CachedDependencyIoCode, CachedDependencyUnavailable,
     CachedNegativeObservation, DependencyCache, DependencyCacheCapacityError, DependencyCacheEntry,
     DependencyCacheStorage, DependencyIdentity, DependencyRequirement, DependencyRoleId,
-    SharedDependencySnapshot,
+    PendingNegativeObservation, SharedDependencySnapshot,
 };
 use crate::error::ScopeAbortCause;
 use crate::ledger::{ImportDimension, ImportLedgerPhase};
@@ -30,9 +33,11 @@ use baozi_io::{AssetPath, AuthorityDomain};
 use baozi_operation::CapacityPlanError;
 use std::sync::Arc;
 
+#[cfg(test)]
+use manifest::ManifestRegisteredUnavailableCause;
 use manifest::{
     ManifestEncodingError, encode_node_class_into_accounted, encode_relation_key_into_accounted,
-    node_class_len, relation_key_len,
+    node_class_len, registered_negative_proof_replay, relation_key_len,
 };
 
 #[derive(Debug)]
@@ -161,6 +166,9 @@ impl<'graph> Iterator for OutgoingRelations<'graph> {
 }
 
 #[derive(Debug)]
+// Graph relation storage is capacity-planned with this complete inline type;
+// the bounded proof evidence must not escape into an unmetered allocation.
+#[allow(clippy::large_enum_variant)]
 enum GraphRelationOutcome {
     Available {
         target: usize,
@@ -221,6 +229,7 @@ pub(crate) struct ResourceUnavailableDisposition {
     class: ManifestUnavailableClass,
     code: ManifestUnavailableCode,
     replay: ManifestUnavailableReplay,
+    stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
 }
 
 /// One admitted logical request that must reach exactly one terminal relation.
@@ -451,9 +460,12 @@ impl ResourceGraph {
     pub(crate) fn complete_failed_acquisition(
         &mut self,
         identity: &DependencyIdentity,
-        failure: CachedDependencyFailure,
-    ) -> Result<usize, CachedDependencyFailure> {
-        self.cache.store_failed(identity, failure)
+        cause: ScopeAbortCause,
+        stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
+        observation: PendingNegativeObservation<'_>,
+    ) -> Result<usize, ScopeAbortCause> {
+        self.cache
+            .store_failed(identity, cause, stable_identity_schema, observation)
     }
 
     pub(crate) fn cached_failure(
@@ -704,11 +716,12 @@ impl ResourceGraph {
             class,
             code,
             replay,
+            stable_identity_schema,
         } = disposition;
         let reference = match normalized {
-            Some(path) => ManifestReference::Normalized(manifest_identity(
+            Some(path) => ManifestReference::Normalized(manifest_identity_for_resolution(
                 path,
-                ManifestSessionOpaqueReason::UnregisteredResolverIdentity,
+                stable_identity_schema,
                 "resource-graph-normalized-reference",
             )?),
             None => ManifestReference::Rejected {
@@ -719,9 +732,9 @@ impl ResourceGraph {
         };
         let identity_evidence = identity
             .map(|identity| {
-                manifest_identity(
+                manifest_identity_for_resolution(
                     identity.path(),
-                    ManifestSessionOpaqueReason::UnregisteredResolverIdentity,
+                    stable_identity_schema,
                     "resource-graph-unavailable-identity",
                 )
             })
@@ -830,8 +843,8 @@ impl ResourceGraph {
             .get(primary)
             .and_then(|digest| *digest)
             .ok_or(ResourceGraphError::MissingPrimary)?;
-        let counts = manifest_counts(&classes, self.maximum_depth())?;
-        let replay_status = replay_status(&classes);
+        let (counts, replay_status) =
+            manifest_counts_and_replay_status(&classes, self.maximum_depth())?;
         let mut provisional = SuccessfulInputManifest::new(
             ManifestDigest::zero(),
             primary_digest,
@@ -1465,17 +1478,22 @@ fn project_relation(
     ))
 }
 
-fn manifest_counts(
+fn manifest_counts_and_replay_status(
     classes: &[ManifestNodeClass],
     maximum_depth: u64,
-) -> Result<ResourceManifestCounts, ResourceGraphError> {
+) -> Result<(ResourceManifestCounts, InputReplayStatus), ResourceGraphError> {
     let mut counts = ResourceManifestCounts {
         node_class_count: u64::try_from(classes.len()).map_err(|_| ResourceGraphError::Overflow)?,
         maximum_depth,
         ..ResourceManifestCounts::default()
     };
+    let mut reasons = ManifestObservedOnlyReasons::new();
     for class in classes {
+        note_unstable_identity(&mut reasons, class.identity());
         for relation in class.outgoing_relations() {
+            if let ManifestReference::Normalized(identity) = relation.reference() {
+                note_unstable_identity(&mut reasons, identity);
+            }
             counts.quotient_relation_record_count = counts
                 .quotient_relation_record_count
                 .checked_add(1)
@@ -1495,7 +1513,11 @@ fn manifest_counts(
                         .checked_add(relation.multiplicity())
                         .ok_or(ResourceGraphError::Overflow)?;
                 }
-                ManifestRelationOutcome::Unavailable { .. } => {
+                ManifestRelationOutcome::Unavailable {
+                    identity_evidence,
+                    replay,
+                    ..
+                } => {
                     counts.unavailable_relation_record_count = counts
                         .unavailable_relation_record_count
                         .checked_add(1)
@@ -1504,41 +1526,40 @@ fn manifest_counts(
                         .unavailable_relation_occurrence_count
                         .checked_add(relation.multiplicity())
                         .ok_or(ResourceGraphError::Overflow)?;
+                    if let Some(identity) = identity_evidence {
+                        note_unstable_identity(&mut reasons, identity);
+                    }
+                    match replay {
+                        ManifestUnavailableReplay::NamespaceSnapshotProof(_)
+                        | ManifestUnavailableReplay::PerReferenceProof(_) => {}
+                        ManifestUnavailableReplay::UnprovenNegativeInput => {
+                            reasons.insert(ManifestObservedOnlyReason::UnprovenNegativeInput);
+                        }
+                        ManifestUnavailableReplay::SessionDependent(_) => {
+                            reasons.insert(ManifestObservedOnlyReason::SessionDependentUnavailable);
+                        }
+                    }
                 }
             }
         }
     }
-    Ok(counts)
-}
-
-fn replay_status(classes: &[ManifestNodeClass]) -> InputReplayStatus {
-    let mut reasons = ManifestObservedOnlyReasons::new();
-    if classes.iter().any(|class| {
-        matches!(
-            class.identity().stability(),
-            ManifestResourceIdentityStability::SessionOpaque(_)
-        )
-    }) {
-        reasons.insert(ManifestObservedOnlyReason::UnstableResourceIdentity);
-    }
-    for class in classes {
-        for relation in class.outgoing_relations() {
-            if let ManifestRelationOutcome::Unavailable { replay, .. } = relation.outcome() {
-                reasons.insert(match replay {
-                    ManifestUnavailableReplay::UnprovenNegativeInput => {
-                        ManifestObservedOnlyReason::UnprovenNegativeInput
-                    }
-                    ManifestUnavailableReplay::SessionDependent(_) => {
-                        ManifestObservedOnlyReason::SessionDependentUnavailable
-                    }
-                });
-            }
-        }
-    }
-    if reasons.is_empty() {
+    let replay_status = if reasons.is_empty() {
         InputReplayStatus::Replayable
     } else {
         InputReplayStatus::ObservedOnly(reasons)
+    };
+    Ok((counts, replay_status))
+}
+
+fn note_unstable_identity(
+    reasons: &mut ManifestObservedOnlyReasons,
+    identity: &ManifestResourceIdentity,
+) {
+    if matches!(
+        identity.stability(),
+        ManifestResourceIdentityStability::SessionOpaque(_)
+    ) {
+        reasons.insert(ManifestObservedOnlyReason::UnstableResourceIdentity);
     }
 }
 
@@ -1643,14 +1664,16 @@ pub(crate) fn unavailable_disposition(cause: &ScopeAbortCause) -> ResourceUnavai
         class,
         code,
         replay,
+        stable_identity_schema: None,
     }
 }
 
 pub(crate) fn cached_unavailable_disposition(
     failure: &CachedDependencyFailure,
-) -> ResourceUnavailableDisposition {
+) -> Result<ResourceUnavailableDisposition, ScopeAbortCause> {
     let (class, code, replay) = match failure.unavailable() {
         CachedDependencyUnavailable::EnvironmentDependent { code, observation } => {
+            let registered_cause = code.registered_cause();
             let code = match code {
                 CachedDependencyIoCode::Missing => ManifestUnavailableCode::new("missing"),
                 CachedDependencyIoCode::OpenFailed => ManifestUnavailableCode::new("open-failed"),
@@ -1658,6 +1681,17 @@ pub(crate) fn cached_unavailable_disposition(
             };
             let replay = match observation {
                 CachedNegativeObservation::None => ManifestUnavailableReplay::UnprovenNegativeInput,
+                CachedNegativeObservation::Proof(proof) => {
+                    let identity_schema = failure.stable_identity_schema().ok_or(
+                        ScopeAbortCause::DescriptorContract {
+                            code: "registered-negative-proof-manifest-missing-stable-identity",
+                        },
+                    )?;
+                    registered_negative_proof_replay(proof, identity_schema, registered_cause)
+                        .map_err(|_| ScopeAbortCause::DescriptorContract {
+                            code: "registered-negative-proof-manifest-mismatch",
+                        })?
+                }
             };
             (ManifestUnavailableClass::Io, code, replay)
         }
@@ -1676,11 +1710,12 @@ pub(crate) fn cached_unavailable_disposition(
             ),
         ),
     };
-    ResourceUnavailableDisposition {
+    Ok(ResourceUnavailableDisposition {
         class,
         code,
         replay,
-    }
+        stable_identity_schema: failure.stable_identity_schema(),
+    })
 }
 
 fn charge_attempted(
@@ -1906,6 +1941,17 @@ mod tests {
         )
     }
 
+    fn stable_manifest_identity_for_test(path: &str) -> ManifestResourceIdentity {
+        ManifestResourceIdentity::new(
+            AssetPath::new(path).unwrap(),
+            ManifestResourceIdentityStability::Stable {
+                owner: "dev.baozi.test",
+                schema: "resource-identity",
+                version: 1,
+            },
+        )
+    }
+
     fn manifest_relation_for_test(reference: &str) -> ManifestRelation {
         ManifestRelation::new(
             DependencyRoleId::new("test.resource").unwrap(),
@@ -1933,6 +1979,20 @@ mod tests {
             outgoing_count: 0,
             depth: 0,
         }
+    }
+
+    fn replay_status_for_relation(
+        host: ImportStoreHost<'_>,
+        relation: ManifestRelation,
+    ) -> InputReplayStatus {
+        let class = ManifestNodeClass::new(
+            ManifestDigest::of(b"class"),
+            stable_manifest_identity_for_test("primary.bin"),
+            7,
+            ManifestDigest::of(b"primary"),
+            accounted_manifest_values(host, vec![relation]),
+        );
+        manifest_counts_and_replay_status(&[class], 0).unwrap().1
     }
 
     fn accounted_manifest_values<T>(host: ImportStoreHost<'_>, values: Vec<T>) -> AccountedVec<T> {
@@ -2364,6 +2424,59 @@ mod tests {
             .unwrap();
         assert_eq!(work.attempted(), equal_work + collision_work);
         assert_eq!(work.consumed(), equal_work + collision_work);
+    }
+
+    #[test]
+    fn replay_status_checks_reference_and_unavailable_identity_stability() {
+        let limits = ResourceLimits::default();
+        let owner = store_owner(&limits);
+        let host = owner.host();
+        let normalized_unstable = ManifestRelation::new(
+            DependencyRoleId::new("test.resource").unwrap(),
+            DependencyRequirement::Required,
+            ManifestReference::Normalized(manifest_identity_for_test("dependency.bin")),
+            ManifestRelationOutcome::Available {
+                target_node_class_digest: ManifestDigest::of(b"target"),
+            },
+            1,
+        );
+        assert!(matches!(
+            replay_status_for_relation(host, normalized_unstable),
+            InputReplayStatus::ObservedOnly(reasons)
+                if reasons.as_slice() == [ManifestObservedOnlyReason::UnstableResourceIdentity]
+        ));
+
+        let proof = ManifestNamespaceSnapshotProof::new(
+            "dev.baozi.test.absence",
+            1,
+            "dev.baozi.test.membership-v1",
+            ManifestSemanticIdentity::new(
+                "dev.baozi.test",
+                "resolver",
+                1,
+                ManifestDigest::of(b"resolver"),
+            ),
+            ManifestDigest::of(b"namespace"),
+            ManifestRegisteredUnavailableCause::new("baozi.io", "missing"),
+            ManifestDigest::of(b"proof"),
+        );
+        let unavailable_identity_unstable = ManifestRelation::new(
+            DependencyRoleId::new("test.resource").unwrap(),
+            DependencyRequirement::Required,
+            ManifestReference::Normalized(stable_manifest_identity_for_test("dependency.bin")),
+            ManifestRelationOutcome::Unavailable {
+                class: ManifestUnavailableClass::Io,
+                code: ManifestUnavailableCode::new("missing"),
+                identity_evidence: Some(manifest_identity_for_test("dependency.bin")),
+                replay: ManifestUnavailableReplay::NamespaceSnapshotProof(proof),
+            },
+            1,
+        );
+        assert!(matches!(
+            replay_status_for_relation(host, unavailable_identity_unstable),
+            InputReplayStatus::ObservedOnly(reasons)
+                if reasons.as_slice() == [ManifestObservedOnlyReason::UnstableResourceIdentity]
+        ));
     }
 
     #[test]

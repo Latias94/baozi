@@ -1,22 +1,166 @@
 use super::{
-    InputReplayStatus, MANIFEST_DOMAIN, MANIFEST_SCHEMA_VERSION, ManifestDigest, ManifestNodeClass,
-    ManifestObservedOnlyReason, ManifestReference, ManifestRelation, ManifestRelationOutcome,
-    ManifestResourceIdentity, ManifestResourceIdentityStability, ManifestSessionDependentReason,
+    InputReplayStatus, MANIFEST_DOMAIN, MANIFEST_SCHEMA_VERSION, ManifestDigest,
+    ManifestNamespaceSnapshotProof, ManifestNodeClass, ManifestObservedOnlyReason,
+    ManifestPerReferenceProof, ManifestReference, ManifestRegisteredUnavailableCause,
+    ManifestRelation, ManifestRelationOutcome, ManifestResourceIdentity,
+    ManifestResourceIdentityStability, ManifestSemanticIdentity, ManifestSessionDependentReason,
     ManifestSessionOpaqueReason, ManifestUnavailableReplay, ResourceManifestCounts,
 };
 use crate::dependency::{DependencyRequirement, DependencyRoleId};
 use crate::metered_storage::AccountedVec;
 #[cfg(test)]
 use baozi_io::__semantic_identity::{
-    ReferenceNormalizerSemanticSubject, ResolverSemanticSubject, SemanticParameterSchema,
+    NegativeProofSchemeSemanticSubject, ReferenceNormalizerSemanticSubject,
+    ResolverSemanticSubject, SemanticParameterSchema,
+};
+use baozi_io::__semantic_identity::{
+    RegisteredNegativeProofPlan, RegisteredResolverProfile, RegisteredUnavailableCause,
+    StableResourceIdentitySchema, VerifiedNegativeInputProof,
+    immutable_memory_namespace_absence_v1, same_authority_resolver_v1,
 };
 use std::cmp::Ordering;
 
+const SAME_AUTHORITY_RESOLVER_SEMANTIC_DIGEST: ManifestDigest = ManifestDigest::from_bytes([
+    0x3b, 0xcc, 0x55, 0xc9, 0x5e, 0xb4, 0xb5, 0xaa, 0x15, 0x35, 0x1c, 0xbc, 0xbe, 0xd7, 0x3d, 0xea,
+    0x8e, 0x82, 0xbf, 0x23, 0x7c, 0x97, 0x7e, 0xb2, 0x9d, 0x6d, 0x5c, 0x31, 0x4c, 0x1d, 0x19, 0xb8,
+]);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::resource_graph) enum ManifestEncodingError {
+pub(crate) enum ManifestEncodingError {
     LengthOverflow,
     InvalidCanonicalId,
     Allocation,
+}
+
+pub(crate) fn registered_negative_proof_canonical_len(
+    plan: &RegisteredNegativeProofPlan<'_>,
+    stable_schema: &'static StableResourceIdentitySchema,
+) -> Result<u64, ManifestEncodingError> {
+    // Both digests have fixed-width encodings, so zero values produce the exact canonical length
+    // without constructing public proof evidence or verifying the target before ledger admission.
+    let encoding = registered_namespace_snapshot_proof_encoding(
+        plan.resolver(),
+        plan.scheme(),
+        plan.cause(),
+        [0; 32],
+        [0; 32],
+    )?;
+    let (class, code) = registered_unavailable_cause(plan.cause());
+    let stability = ManifestResourceIdentityStability::Stable {
+        owner: stable_schema.owner(),
+        schema: stable_schema.schema_id(),
+        version: u64::from(stable_schema.schema_version().get()),
+    };
+    let length = encoded_len(|output| {
+        write_namespace_snapshot_proof_encoding(
+            output,
+            class,
+            code,
+            plan.target(),
+            &stability,
+            encoding,
+        )
+    })?;
+    u64::try_from(length).map_err(|_| ManifestEncodingError::LengthOverflow)
+}
+
+pub(in crate::resource_graph) fn registered_negative_proof_replay(
+    proof: VerifiedNegativeInputProof,
+    stable_schema: &'static StableResourceIdentitySchema,
+    cause: RegisteredUnavailableCause,
+) -> Result<ManifestUnavailableReplay, ManifestEncodingError> {
+    if !std::ptr::eq(stable_schema, proof.resolver().identity_schema())
+        || cause != RegisteredUnavailableCause::Missing
+        || proof.cause() != RegisteredUnavailableCause::Missing
+    {
+        return Err(ManifestEncodingError::InvalidCanonicalId);
+    }
+    Ok(ManifestUnavailableReplay::NamespaceSnapshotProof(
+        registered_namespace_snapshot_proof(
+            proof.resolver(),
+            proof.scheme(),
+            cause,
+            proof.namespace_snapshot_digest(),
+            proof.proof_digest(),
+        )?,
+    ))
+}
+
+fn registered_namespace_snapshot_proof(
+    resolver: &'static RegisteredResolverProfile,
+    scheme: &'static baozi_io::__semantic_identity::RegisteredNegativeProofScheme,
+    cause: RegisteredUnavailableCause,
+    namespace_snapshot_digest: [u8; 32],
+    proof_digest: [u8; 32],
+) -> Result<ManifestNamespaceSnapshotProof, ManifestEncodingError> {
+    let encoding = registered_namespace_snapshot_proof_encoding(
+        resolver,
+        scheme,
+        cause,
+        namespace_snapshot_digest,
+        proof_digest,
+    )?;
+    Ok(ManifestNamespaceSnapshotProof::new(
+        encoding.scheme,
+        encoding.version,
+        encoding.validity_rule,
+        encoding.resolver_identity,
+        encoding.namespace_snapshot_digest,
+        encoding.cause,
+        encoding.proof_digest,
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct NamespaceSnapshotProofEncoding {
+    scheme: &'static str,
+    version: u64,
+    validity_rule: &'static str,
+    resolver_identity: ManifestSemanticIdentity,
+    namespace_snapshot_digest: ManifestDigest,
+    cause: ManifestRegisteredUnavailableCause,
+    proof_digest: ManifestDigest,
+}
+
+fn registered_namespace_snapshot_proof_encoding(
+    resolver: &'static RegisteredResolverProfile,
+    scheme: &'static baozi_io::__semantic_identity::RegisteredNegativeProofScheme,
+    cause: RegisteredUnavailableCause,
+    namespace_snapshot_digest: [u8; 32],
+    proof_digest: [u8; 32],
+) -> Result<NamespaceSnapshotProofEncoding, ManifestEncodingError> {
+    if !std::ptr::eq(resolver, same_authority_resolver_v1())
+        || !std::ptr::eq(scheme, immutable_memory_namespace_absence_v1())
+    {
+        return Err(ManifestEncodingError::InvalidCanonicalId);
+    }
+    let subject = scheme.semantic_subject();
+    Ok(NamespaceSnapshotProofEncoding {
+        scheme: subject.scheme().as_str(),
+        version: u64::from(subject.version().get()),
+        validity_rule: subject.validity_rule().as_str(),
+        resolver_identity: ManifestSemanticIdentity::new(
+            "baozi.asset-io",
+            "resolver-semantic",
+            1,
+            SAME_AUTHORITY_RESOLVER_SEMANTIC_DIGEST,
+        ),
+        namespace_snapshot_digest: ManifestDigest::from_bytes(namespace_snapshot_digest),
+        cause: ManifestRegisteredUnavailableCause::new(cause.class_id(), cause.code_id()),
+        proof_digest: ManifestDigest::from_bytes(proof_digest),
+    })
+}
+
+fn registered_unavailable_cause(
+    cause: RegisteredUnavailableCause,
+) -> (
+    super::ManifestUnavailableClass,
+    super::ManifestUnavailableCode,
+) {
+    (
+        super::ManifestUnavailableClass::Io,
+        super::ManifestUnavailableCode::new(cause.code_id()),
+    )
 }
 
 pub(in crate::resource_graph) fn node_class_len(
@@ -239,11 +383,19 @@ fn write_resource_identity<O: ManifestOutput>(
     output: &mut O,
     identity: &ManifestResourceIdentity,
 ) -> Result<(), ManifestEncodingError> {
+    write_resource_identity_parts(output, &identity.value, &identity.stability)
+}
+
+fn write_resource_identity_parts<O: ManifestOutput>(
+    output: &mut O,
+    value: &baozi_io::AssetPath,
+    stability: &ManifestResourceIdentityStability,
+) -> Result<(), ManifestEncodingError> {
     write_record_value(output, "resource-identity-v1", 2, |output| {
         write_field(output, "value", |output| {
-            write_utf8_value(output, identity.value.as_str().as_bytes())
+            write_utf8_value(output, value.as_str().as_bytes())
         })?;
-        write_field(output, "stability", |output| match &identity.stability {
+        write_field(output, "stability", |output| match stability {
             ManifestResourceIdentityStability::Stable {
                 owner,
                 schema,
@@ -276,7 +428,6 @@ fn write_semantic_parameter_record<O: ManifestOutput>(
     write_record_value(output, schema.record_tag(), 0, |_| Ok(()))
 }
 
-#[cfg(test)]
 fn write_semantic_identity<O: ManifestOutput>(
     output: &mut O,
     owner: &str,
@@ -331,11 +482,55 @@ fn write_reference_normalizer_subject<O: ManifestOutput>(
 }
 
 #[cfg(test)]
+fn write_negative_proof_scheme_subject<O: ManifestOutput>(
+    output: &mut O,
+    subject: NegativeProofSchemeSemanticSubject,
+) -> Result<(), ManifestEncodingError> {
+    let caps = subject.caps();
+    write_record_value(output, "negative-proof-scheme-subject-v1", 11, |output| {
+        write_field(output, "scheme", |output| {
+            write_enum_value(output, subject.scheme().as_str())
+        })?;
+        write_field(output, "version", |output| {
+            write_u64_value(output, u64::from(subject.version().get()))
+        })?;
+        write_field(output, "validity-rule-id", |output| {
+            write_enum_value(output, subject.validity_rule().as_str())
+        })?;
+        write_field(output, "subject-kind", |output| {
+            write_enum_value(output, subject.subject_kind().canonical_id())
+        })?;
+        write_field(output, "proof-payload-schema-id", |output| {
+            write_enum_value(output, subject.payload_schema_id())
+        })?;
+        write_field(output, "proof-payload-schema-version", |output| {
+            write_u64_value(output, u64::from(subject.payload_schema_version().get()))
+        })?;
+        write_field(output, "proof-digest-algorithm", |output| {
+            write_enum_value(output, subject.digest_algorithm().canonical_id())
+        })?;
+        write_field(output, "canonical-byte-cap", |output| {
+            write_u64_value(output, caps.canonical_bytes())
+        })?;
+        write_field(output, "temporary-byte-cap", |output| {
+            write_u64_value(output, caps.temporary_bytes())
+        })?;
+        write_field(output, "construction-work-cap", |output| {
+            write_u64_value(output, caps.construction_work())
+        })?;
+        write_field(output, "verification-work-cap", |output| {
+            write_u64_value(output, caps.verification_work())
+        })
+    })
+}
+
+#[cfg(test)]
 fn write_resolver_semantic_subject<O: ManifestOutput>(
     output: &mut O,
     subject: ResolverSemanticSubject,
     normalizer_digest: ManifestDigest,
     parameter_digest: ManifestDigest,
+    proof_scheme_digest: ManifestDigest,
 ) -> Result<(), ManifestEncodingError> {
     let parameters = subject.parameters();
     write_record_value(output, "resolver-semantic-subject-v1", 8, |output| {
@@ -368,10 +563,22 @@ fn write_resolver_semantic_subject<O: ManifestOutput>(
         })?;
         write_field(output, "proof-scheme-identities", |output| {
             let proof_schemes = subject.proof_schemes();
-            if !proof_schemes.is_empty() {
+            if proof_schemes.len() != 1
+                || !std::ptr::eq(&proof_schemes[0], immutable_memory_namespace_absence_v1())
+            {
                 return Err(ManifestEncodingError::InvalidCanonicalId);
             }
-            write_set_value(output, 0, |_| Ok(()))
+            write_set_value(output, 1, |output| {
+                write_item(output, |output| {
+                    write_semantic_identity(
+                        output,
+                        "baozi.asset-io",
+                        "negative-proof-scheme",
+                        1,
+                        proof_scheme_digest,
+                    )
+                })
+            })
         })
     })
 }
@@ -438,7 +645,7 @@ fn write_outcome<O: ManifestOutput>(
                 }
             })?;
             write_field(output, "replay-classification", |output| {
-                write_unavailable_replay(output, *replay)
+                write_unavailable_replay(output, *class, *code, identity_evidence.as_ref(), *replay)
             })
         }),
     }
@@ -446,9 +653,18 @@ fn write_outcome<O: ManifestOutput>(
 
 fn write_unavailable_replay<O: ManifestOutput>(
     output: &mut O,
+    class: super::ManifestUnavailableClass,
+    code: super::ManifestUnavailableCode,
+    identity_evidence: Option<&ManifestResourceIdentity>,
     replay: ManifestUnavailableReplay,
 ) -> Result<(), ManifestEncodingError> {
     match replay {
+        ManifestUnavailableReplay::NamespaceSnapshotProof(proof) => {
+            write_namespace_snapshot_proof(output, class, code, identity_evidence, proof)
+        }
+        ManifestUnavailableReplay::PerReferenceProof(proof) => {
+            write_per_reference_proof(output, class, code, identity_evidence, proof)
+        }
         ManifestUnavailableReplay::UnprovenNegativeInput => {
             write_union_value(output, "unproven-negative-input", 1, |output| {
                 write_field(output, "reason", |output| {
@@ -464,6 +680,172 @@ fn write_unavailable_replay<O: ManifestOutput>(
             })
         }
     }
+}
+
+fn write_namespace_snapshot_proof<O: ManifestOutput>(
+    output: &mut O,
+    class: super::ManifestUnavailableClass,
+    code: super::ManifestUnavailableCode,
+    identity_evidence: Option<&ManifestResourceIdentity>,
+    proof: ManifestNamespaceSnapshotProof,
+) -> Result<(), ManifestEncodingError> {
+    let target = stable_proof_target(identity_evidence)?;
+    write_namespace_snapshot_proof_parts(
+        output,
+        class,
+        code,
+        target.value(),
+        target.stability(),
+        proof,
+    )
+}
+
+fn write_namespace_snapshot_proof_parts<O: ManifestOutput>(
+    output: &mut O,
+    class: super::ManifestUnavailableClass,
+    code: super::ManifestUnavailableCode,
+    target_value: &baozi_io::AssetPath,
+    target_stability: &ManifestResourceIdentityStability,
+    proof: ManifestNamespaceSnapshotProof,
+) -> Result<(), ManifestEncodingError> {
+    write_namespace_snapshot_proof_encoding(
+        output,
+        class,
+        code,
+        target_value,
+        target_stability,
+        NamespaceSnapshotProofEncoding {
+            scheme: proof.scheme(),
+            version: proof.version(),
+            validity_rule: proof.validity_rule(),
+            resolver_identity: proof.resolver_identity(),
+            namespace_snapshot_digest: proof.namespace_snapshot_digest(),
+            cause: ManifestRegisteredUnavailableCause::new(proof.cause_class(), proof.cause_code()),
+            proof_digest: proof.proof_digest(),
+        },
+    )
+}
+
+fn write_namespace_snapshot_proof_encoding<O: ManifestOutput>(
+    output: &mut O,
+    class: super::ManifestUnavailableClass,
+    code: super::ManifestUnavailableCode,
+    target_value: &baozi_io::AssetPath,
+    target_stability: &ManifestResourceIdentityStability,
+    proof: NamespaceSnapshotProofEncoding,
+) -> Result<(), ManifestEncodingError> {
+    validate_registered_proof_cause(class, code, proof.cause.class, proof.cause.code)?;
+    write_union_value(output, "namespace-snapshot-proof", 9, |output| {
+        write_field(output, "scheme", |output| {
+            write_enum_value(output, proof.scheme)
+        })?;
+        write_field(output, "version", |output| {
+            write_u64_value(output, proof.version)
+        })?;
+        write_field(output, "validity-rule-id", |output| {
+            write_enum_value(output, proof.validity_rule)
+        })?;
+        write_field(output, "resolver-identity", |output| {
+            let identity = proof.resolver_identity;
+            write_semantic_identity(
+                output,
+                identity.owner(),
+                identity.schema(),
+                identity.version(),
+                identity.digest(),
+            )
+        })?;
+        write_field(output, "namespace-snapshot-digest", |output| {
+            write_digest_value(output, proof.namespace_snapshot_digest)
+        })?;
+        write_field(output, "target-identity", |output| {
+            write_resource_identity_parts(output, target_value, target_stability)
+        })?;
+        write_field(output, "class", |output| {
+            write_enum_value(output, proof.cause.class)
+        })?;
+        write_field(output, "code", |output| {
+            write_enum_value(output, proof.cause.code)
+        })?;
+        write_field(output, "proof-digest", |output| {
+            write_digest_value(output, proof.proof_digest)
+        })
+    })
+}
+
+fn write_per_reference_proof<O: ManifestOutput>(
+    output: &mut O,
+    class: super::ManifestUnavailableClass,
+    code: super::ManifestUnavailableCode,
+    identity_evidence: Option<&ManifestResourceIdentity>,
+    proof: ManifestPerReferenceProof,
+) -> Result<(), ManifestEncodingError> {
+    let target = stable_proof_target(identity_evidence)?;
+    validate_registered_proof_cause(class, code, proof.cause_class(), proof.cause_code())?;
+    write_union_value(output, "per-reference-proof", 9, |output| {
+        write_field(output, "scheme", |output| {
+            write_enum_value(output, proof.scheme())
+        })?;
+        write_field(output, "version", |output| {
+            write_u64_value(output, proof.version())
+        })?;
+        write_field(output, "validity-rule-id", |output| {
+            write_enum_value(output, proof.validity_rule())
+        })?;
+        write_field(output, "resolver-identity", |output| {
+            let identity = proof.resolver_identity();
+            write_semantic_identity(
+                output,
+                identity.owner(),
+                identity.schema(),
+                identity.version(),
+                identity.digest(),
+            )
+        })?;
+        write_field(output, "assertion-digest", |output| {
+            write_digest_value(output, proof.assertion_digest())
+        })?;
+        write_field(output, "target-identity", |output| {
+            write_resource_identity(output, target)
+        })?;
+        write_field(output, "class", |output| {
+            write_enum_value(output, proof.cause_class())
+        })?;
+        write_field(output, "code", |output| {
+            write_enum_value(output, proof.cause_code())
+        })?;
+        write_field(output, "proof-digest", |output| {
+            write_digest_value(output, proof.proof_digest())
+        })
+    })
+}
+
+fn validate_registered_proof_cause(
+    outer_class: super::ManifestUnavailableClass,
+    outer_code: super::ManifestUnavailableCode,
+    proof_class: &str,
+    proof_code: &str,
+) -> Result<(), ManifestEncodingError> {
+    if outer_class != super::ManifestUnavailableClass::Io
+        || proof_class != RegisteredUnavailableCause::Missing.class_id()
+        || outer_code.as_str() != proof_code
+    {
+        return Err(ManifestEncodingError::InvalidCanonicalId);
+    }
+    Ok(())
+}
+
+fn stable_proof_target(
+    identity_evidence: Option<&ManifestResourceIdentity>,
+) -> Result<&ManifestResourceIdentity, ManifestEncodingError> {
+    let identity = identity_evidence.ok_or(ManifestEncodingError::InvalidCanonicalId)?;
+    if !matches!(
+        identity.stability(),
+        ManifestResourceIdentityStability::Stable { .. }
+    ) {
+        return Err(ManifestEncodingError::InvalidCanonicalId);
+    }
+    Ok(identity)
 }
 
 fn write_counts<O: ManifestOutput>(
@@ -949,6 +1331,8 @@ mod tests {
     use baozi_io::__semantic_identity::{
         portable_asset_path_normalizer_v1, same_authority_resolver_v1,
     };
+    use baozi_io::{AssetPath, ImmutableMemoryAssetIo};
+    use std::sync::Arc;
 
     #[test]
     fn canonical_deny_parameter_record_matches_the_adr_vector() {
@@ -1045,12 +1429,44 @@ mod tests {
         })
         .unwrap();
         let resolver_parameter_digest = ManifestDigest::of(&resolver_parameters);
+
+        let proof_scheme = immutable_memory_namespace_absence_v1().semantic_subject();
+        let proof_scheme_subject_len =
+            encoded_len(|output| write_negative_proof_scheme_subject(output, proof_scheme))
+                .unwrap();
+        let proof_scheme_subject = encode_vec(proof_scheme_subject_len, |output| {
+            write_negative_proof_scheme_subject(output, proof_scheme)
+        })
+        .unwrap();
+        let proof_scheme_digest = ManifestDigest::of(&proof_scheme_subject);
+        let proof_scheme_identity_len = encoded_len(|output| {
+            write_semantic_identity(
+                output,
+                "baozi.asset-io",
+                "negative-proof-scheme",
+                1,
+                proof_scheme_digest,
+            )
+        })
+        .unwrap();
+        let proof_scheme_identity = encode_vec(proof_scheme_identity_len, |output| {
+            write_semantic_identity(
+                output,
+                "baozi.asset-io",
+                "negative-proof-scheme",
+                1,
+                proof_scheme_digest,
+            )
+        })
+        .unwrap();
+
         let resolver_subject_len = encoded_len(|output| {
             write_resolver_semantic_subject(
                 output,
                 resolver,
                 normalizer_digest,
                 resolver_parameter_digest,
+                proof_scheme_digest,
             )
         })
         .unwrap();
@@ -1060,6 +1476,7 @@ mod tests {
                 resolver,
                 normalizer_digest,
                 resolver_parameter_digest,
+                proof_scheme_digest,
             )
         })
         .unwrap();
@@ -1105,15 +1522,79 @@ mod tests {
             resolver_parameter_digest.as_bytes(),
             hex_bytes("f31f44559bbdbc68b97c1892a5048c99197ec1e442f84392161878261e77e719")
         );
-        assert_eq!(resolver_subject.len(), 2588);
+        assert_eq!(proof_scheme_subject.len(), 1774);
         assert_eq!(
-            ManifestDigest::of(&resolver_subject).as_bytes(),
-            hex_bytes("b7b6dd37bd2732279d464f724c219725412ea1412df0d864a948eeea944d2d43")
+            proof_scheme_digest.as_bytes(),
+            hex_bytes("d8d0243d206a40768a7c0b678499851e10621008171eab02330b97e14d9c4c51")
+        );
+        assert_eq!(proof_scheme_identity.len(), 997);
+        assert_eq!(
+            ManifestDigest::of(&proof_scheme_identity).as_bytes(),
+            hex_bytes("b548fb0ca1165d2e8df579088aa2bede6d169e0f36976565d8af6f1a436e9a32")
+        );
+        assert_eq!(resolver_subject.len(), 3605);
+        assert_eq!(
+            resolver_digest.as_bytes(),
+            hex_bytes("3bcc55c95eb4b5aa15351cbcbed73dea8e82bf237c977eb29d6d5c314c1d19b8")
         );
         assert_eq!(resolver_identity.len(), 993);
         assert_eq!(
             ManifestDigest::of(&resolver_identity).as_bytes(),
-            hex_bytes("124d5e06ccba9d3b1a19a8d1a440270720da75a6cd9609e7948cfd3164ecdfe5")
+            hex_bytes("4818855ff42a7e14fbeb3b0a0c56a95369baeca20758b6a0b1bba571c83927b5")
+        );
+    }
+
+    #[test]
+    fn namespace_absence_replay_matches_the_adr_vector() {
+        let backend = ImmutableMemoryAssetIo::try_from_entries(vec![(
+            AssetPath::new("primary.bin").unwrap(),
+            Arc::from(&b"primary"[..]),
+        )])
+        .unwrap();
+        let target = AssetPath::new("missing.bin").unwrap();
+        let resolver = same_authority_resolver_v1();
+        let binding = resolver
+            .plan_negative_proof(&backend, &target, RegisteredUnavailableCause::Missing)
+            .unwrap()
+            .verify(&target, RegisteredUnavailableCause::Missing)
+            .unwrap();
+        let proof = binding
+            .seal_subject(
+                resolver.identity_schema(),
+                &baozi_io::AssetIo::authority_domain(&backend),
+                &target,
+                RegisteredUnavailableCause::Missing,
+            )
+            .unwrap();
+        let replay = registered_negative_proof_replay(
+            proof,
+            resolver.identity_schema(),
+            RegisteredUnavailableCause::Missing,
+        )
+        .unwrap();
+        let identity = ManifestResourceIdentity::new(
+            target,
+            ManifestResourceIdentityStability::Stable {
+                owner: resolver.identity_schema().owner(),
+                schema: resolver.identity_schema().schema_id(),
+                version: u64::from(resolver.identity_schema().schema_version().get()),
+            },
+        );
+        let class = super::super::ManifestUnavailableClass::Io;
+        let code = super::super::ManifestUnavailableCode::new("missing");
+        let length = encoded_len(|output| {
+            write_unavailable_replay(output, class, code, Some(&identity), replay)
+        })
+        .unwrap();
+        let encoded = encode_vec(length, |output| {
+            write_unavailable_replay(output, class, code, Some(&identity), replay)
+        })
+        .unwrap();
+
+        assert_eq!(encoded.len(), 3_669);
+        assert_eq!(
+            ManifestDigest::of(&encoded).as_bytes(),
+            hex_bytes("aa3e197a1d96c9815f58653ae1ba4f38fd94ec5fd6965ee420accb04ac42e0b6")
         );
     }
 

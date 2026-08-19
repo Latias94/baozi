@@ -11,18 +11,19 @@ use baozi_import::{
     ImportOperationControl, ImportPhase, ImportProgressPhase, ImportProgressUnit, ImportReport,
     ImportRequest, ImportRequestLayer, ImportResult, ImportStorageClass, ImportTerminalCause,
     ImportTerminalFailureClass, ImportWorkClass, InputReplayStatus, LossPolicy,
-    ManifestObservedOnlyReason, ManifestReference, ManifestResourceIdentityStability,
-    MeteredDecodedText, MeteredString, MeteredVec, OptionCompileLimits, ParseResult, ParseScope,
-    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, TextBomPolicy,
-    TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile,
-    TextSourceEncoding, TrustedExtensionBoundary, import_asset as run_import_asset,
+    ManifestObservedOnlyReason, ManifestReference, ManifestRelationOutcome,
+    ManifestResourceIdentityStability, ManifestUnavailableReplay, MeteredDecodedText,
+    MeteredString, MeteredVec, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
+    ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
+    ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, TextBomPolicy, TextControlPolicy,
+    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    TrustedExtensionBoundary, import_asset as run_import_asset,
     import_asset_with_resolver as run_import_asset_with_resolver, import_bytes as run_import_bytes,
 };
 use baozi_io::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetPath,
     AssetReadContractViolation, AssetReadError, AssetReadErrorKind, AssetReader, AuthorityDomain,
-    OpenedAsset,
+    ImmutableMemoryAssetIo, OpenedAsset,
 };
 use baozi_operation::{CancellationToken, LedgerCause, ProgressDecision};
 use std::cell::RefCell;
@@ -1949,6 +1950,252 @@ fn optional_failure_is_cached_once_but_charged_for_each_logical_reference() {
 }
 
 #[test]
+fn immutable_namespace_negative_proof_is_cached_once_and_removes_unproven_reason() {
+    let source = AssetPath::new("asset.opt").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain("dev.baozi.test.optional-proof", "opt")
+        .with_dependency(
+            role,
+            DependencyRequirement::Optional,
+            DependencyBehavior::OptionalTwice,
+        );
+    let request = lossy_request_for(importer);
+    let io = ImmutableMemoryAssetIo::try_from_entries(vec![(
+        source.clone(),
+        Arc::from(&b"primary"[..]),
+    )])
+    .expect("unique immutable namespace");
+
+    let report = import_asset(
+        &request,
+        &io,
+        source.clone(),
+        ImportOperationControl::default(),
+    )
+    .expect("an admitted immutable absence proof permits optional continuation");
+    let repeated = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect("a fresh session must reproduce the same immutable proof manifest");
+    let independent_io = ImmutableMemoryAssetIo::try_from_entries(vec![(
+        AssetPath::new("asset.opt").unwrap(),
+        Arc::from(&b"primary"[..]),
+    )])
+    .expect("an independently constructed immutable namespace");
+    let independent = import_asset(
+        &request,
+        &independent_io,
+        AssetPath::new("asset.opt").unwrap(),
+        ImportOperationControl::default(),
+    )
+    .expect("the same immutable namespace contents must reproduce the proof manifest");
+
+    assert_eq!(
+        report.successful_input_manifest(),
+        repeated.successful_input_manifest()
+    );
+    assert_eq!(
+        report.successful_input_manifest(),
+        independent.successful_input_manifest()
+    );
+
+    assert_eq!(
+        report.optional_dependency_evidence()[0].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Fresh
+    );
+    assert_eq!(
+        report.optional_dependency_evidence()[1].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Reused
+    );
+    let manifest = report.successful_input_manifest();
+    assert!(matches!(
+        manifest.replay_status(),
+        InputReplayStatus::ObservedOnly(reasons)
+            if reasons.as_slice() == [ManifestObservedOnlyReason::UnstableResourceIdentity]
+    ));
+    let relation = &manifest.node_classes()[0].outgoing_relations()[0];
+    assert_eq!(relation.multiplicity(), 2);
+    assert!(matches!(
+        relation.reference(),
+        ManifestReference::Normalized(identity)
+            if identity.value().as_str() == "missing.bin"
+                && matches!(
+                    identity.stability(),
+                    ManifestResourceIdentityStability::Stable {
+                        owner: "baozi.asset-io",
+                        schema: "same-authority-asset-path",
+                        version: 1,
+                    }
+                )
+    ));
+    let ManifestRelationOutcome::Unavailable {
+        code,
+        identity_evidence: Some(identity_evidence),
+        replay: ManifestUnavailableReplay::NamespaceSnapshotProof(proof),
+        ..
+    } = relation.outcome()
+    else {
+        panic!("expected one namespace-snapshot absence proof")
+    };
+    assert_eq!(code.as_str(), "missing");
+    assert_eq!(identity_evidence.value().as_str(), "missing.bin");
+    assert_eq!(proof.scheme(), "baozi.immutable-memory-namespace-absence");
+    assert_eq!(proof.version(), 1);
+    assert_eq!(proof.cause_class(), "baozi.io");
+    assert_eq!(proof.cause_code(), "missing");
+    assert_eq!(
+        proof.validity_rule(),
+        "baozi.immutable-memory-namespace-membership-v1"
+    );
+    assert_eq!(
+        proof.namespace_snapshot_digest().as_bytes(),
+        io.namespace_snapshot_digest()
+    );
+    assert_ne!(proof.proof_digest().as_bytes(), [0; 32]);
+    let resolver_identity = proof.resolver_identity();
+    assert_eq!(resolver_identity.owner(), "baozi.asset-io");
+    assert_eq!(resolver_identity.schema(), "resolver-semantic");
+    assert_eq!(resolver_identity.version(), 1);
+    assert_eq!(
+        resolver_identity.digest().as_bytes(),
+        [
+            0x3b, 0xcc, 0x55, 0xc9, 0x5e, 0xb4, 0xb5, 0xaa, 0x15, 0x35, 0x1c, 0xbc, 0xbe, 0xd7,
+            0x3d, 0xea, 0x8e, 0x82, 0xbf, 0x23, 0x7c, 0x97, 0x7e, 0xb2, 0x9d, 0x6d, 0x5c, 0x31,
+            0x4c, 0x1d, 0x19, 0xb8,
+        ]
+    );
+
+    let proof_bytes = report
+        .ledger()
+        .dimension(ImportDimension::NegativeProofCanonicalBytes)
+        .expect("negative-proof canonical-byte evidence");
+    assert!(proof_bytes.consumed() > 0);
+    assert_eq!(proof_bytes.attempted(), proof_bytes.consumed());
+    for (dimension, expected) in [
+        (ImportDimension::NegativeProofTemporaryBytes, 0),
+        (ImportDimension::NegativeProofConstructionWork, 1),
+        (ImportDimension::NegativeProofVerificationWork, 1),
+    ] {
+        let evidence = report
+            .ledger()
+            .dimension(dimension)
+            .expect("registered negative-proof dimension");
+        assert_eq!(evidence.attempted(), expected, "{dimension:?}");
+        assert_eq!(evidence.consumed(), expected, "{dimension:?}");
+    }
+}
+
+#[test]
+fn immutable_negative_proof_honors_exact_and_rejected_budgets() {
+    #[allow(
+        clippy::result_large_err,
+        reason = "the contract test inspects complete bounded failure evidence at the budget edge"
+    )]
+    fn run(limits: ResourceLimits) -> Result<ImportReport, ImportFailure> {
+        let source = AssetPath::new("asset.proof-budget").unwrap();
+        let role = DependencyRoleId::new("material.library").unwrap();
+        let importer =
+            RecordingImporter::plain("dev.baozi.test.optional-proof-budget", "proof-budget")
+                .with_dependency(
+                    role,
+                    DependencyRequirement::Optional,
+                    DependencyBehavior::OptionalTwice,
+                );
+        let request = lossy_request_for_with_limits(importer, limits);
+        let io = ImmutableMemoryAssetIo::try_from_entries(vec![(
+            source.clone(),
+            Arc::from(&b"primary"[..]),
+        )])
+        .expect("unique immutable namespace");
+        import_asset(&request, &io, source, ImportOperationControl::default())
+    }
+
+    let baseline = run(ResourceLimits::default()).expect("baseline proof import");
+    let required = baseline
+        .ledger()
+        .dimension(ImportDimension::NegativeProofCanonicalBytes)
+        .expect("negative-proof byte evidence")
+        .consumed();
+    assert!(required > 0);
+
+    let mut exact_limits = ResourceLimits::default();
+    exact_limits.max_negative_proof_canonical_bytes = required;
+    let exact = run(exact_limits).expect("the exact proof-byte budget must succeed");
+    let exact_bytes = exact
+        .ledger()
+        .dimension(ImportDimension::NegativeProofCanonicalBytes)
+        .unwrap();
+    assert_eq!(exact_bytes.attempted(), required);
+    assert_eq!(exact_bytes.consumed(), required);
+
+    let mut one_short_limits = ResourceLimits::default();
+    one_short_limits.max_negative_proof_canonical_bytes = required - 1;
+    let failure = run(one_short_limits).expect_err("one byte below proof admission must fail");
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                    dimension: ImportDimension::NegativeProofCanonicalBytes,
+                    ..
+                })
+            )
+    ));
+    let rejected_bytes = failure
+        .ledger()
+        .dimension(ImportDimension::NegativeProofCanonicalBytes)
+        .unwrap();
+    assert_eq!(rejected_bytes.attempted(), required);
+    assert_eq!(rejected_bytes.consumed(), 0);
+    for (dimension, attempted) in [
+        (ImportDimension::NegativeProofTemporaryBytes, 0),
+        (ImportDimension::NegativeProofConstructionWork, 1),
+        (ImportDimension::NegativeProofVerificationWork, 1),
+    ] {
+        let evidence = failure.ledger().dimension(dimension).unwrap();
+        assert_eq!(evidence.attempted(), attempted, "{dimension:?}");
+        assert_eq!(evidence.consumed(), 0, "{dimension:?}");
+    }
+
+    for rejected_dimension in [
+        ImportDimension::NegativeProofConstructionWork,
+        ImportDimension::NegativeProofVerificationWork,
+    ] {
+        let mut limits = ResourceLimits::default();
+        match rejected_dimension {
+            ImportDimension::NegativeProofConstructionWork => {
+                limits.max_negative_proof_construction_work = 0;
+            }
+            ImportDimension::NegativeProofVerificationWork => {
+                limits.max_negative_proof_verification_work = 0;
+            }
+            _ => unreachable!("the loop contains only proof-work dimensions"),
+        }
+        let failure = run(limits).expect_err("zero proof-work capacity must reject admission");
+        assert!(matches!(
+            failure.cause(),
+            ImportCause::Scope(abort)
+                if matches!(
+                    abort.cause(),
+                    ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                        dimension,
+                        ..
+                    }) if *dimension == rejected_dimension
+                )
+        ));
+        for (dimension, attempted) in [
+            (ImportDimension::NegativeProofCanonicalBytes, required),
+            (ImportDimension::NegativeProofTemporaryBytes, 0),
+            (ImportDimension::NegativeProofConstructionWork, 1),
+            (ImportDimension::NegativeProofVerificationWork, 1),
+        ] {
+            let evidence = failure.ledger().dimension(dimension).unwrap();
+            assert_eq!(evidence.attempted(), attempted, "{dimension:?}");
+            assert_eq!(evidence.consumed(), 0, "{dimension:?}");
+        }
+    }
+}
+
+#[test]
 fn optional_dependency_cannot_suppress_a_structural_resource_graph_limit() {
     let source = AssetPath::new("asset.optional-graph-limit").unwrap();
     let role = DependencyRoleId::new("material.library").unwrap();
@@ -2064,10 +2311,11 @@ fn successful_dependency_snapshot_is_shared_and_reused_without_reopening() {
         .node_classes()
         .iter()
         .find(|class| {
-            matches!(
-                class.identity().stability(),
-                ManifestResourceIdentityStability::Stable { .. }
-            )
+            class.identity().value().as_str() == "missing.bin"
+                && matches!(
+                    class.identity().stability(),
+                    ManifestResourceIdentityStability::Stable { .. }
+                )
         })
         .expect("the built-in resolver must publish its registered resource identity");
     assert_eq!(stable_dependency.identity().value().as_str(), "missing.bin");

@@ -1,7 +1,7 @@
 use baozi::{
-    AssetPath, Error, ImportFailure, ImportReport, ImportRequest, ImportRunError, Importer,
-    ImporterBuilder, MemoryAssetIo, PreparedImportRequest, SceneSnapshot, SceneSnapshotError,
-    SceneSnapshotLimits, ValidatedScene,
+    AssetPath, Error, ImmutableMemoryAssetIo, ImportFailure, ImportReport, ImportRequest,
+    ImportRunError, Importer, ImporterBuilder, MemoryAssetIo, PreparedImportRequest, SceneSnapshot,
+    SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
 };
 
 fn assert_send_sync<T: Send + Sync>() {}
@@ -29,6 +29,7 @@ fn frozen_import_surfaces_are_send_sync() {
 #[test]
 fn io_contract_types_are_send_sync() {
     assert_send_sync::<AssetPath>();
+    assert_send_sync::<ImmutableMemoryAssetIo>();
     assert_send_sync::<MemoryAssetIo>();
 }
 

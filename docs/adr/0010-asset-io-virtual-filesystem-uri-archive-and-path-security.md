@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-26
+updated: 2026-08-19
 authors:
   - Codex
 decision_type: architecture
@@ -24,6 +24,12 @@ evidence:
 tracers:
   - crates/baozi-io/src/lib.rs
   - crates/baozi-io/src/fs.rs
+  - crates/baozi-io/src/immutable_memory.rs
+  - crates/baozi-io/src/semantic_identity.rs
+  - crates/baozi-import/src/dependency.rs
+  - crates/baozi-import/src/scope.rs
+  - crates/baozi-import/src/resource_graph/manifest/encoding.rs
+  - crates/baozi-import/tests/session_contract.rs
 ---
 
 # ADR 0010: Asset IO, Virtual Filesystem, URI, and Path Security
@@ -183,12 +189,14 @@ ADR 0041 adapter digest. A custom resolver or normalizer without an admitted ent
 within its capability boundary, but it cannot emit an admitted negative proof. ADR 0036 and ADR 0041
 consumers classify its public identity as session-opaque without changing the IO decision here.
 
-The initial static registry contains exactly one normalizer and one resolver profile:
+The initial static registry contains exactly one normalizer, one resolver profile, and one negative-
+proof scheme:
 
 | Entry | Exact v1 semantic fields |
 | --- | --- |
 | Portable asset-path normalizer | contract `baozi.asset-path.resolve-from-file / 1`; namespace semantics `baozi.asset-path.portable-logical`; canonicalization profile `baozi.asset-path.portable-v1`; parameter schema `baozi.asset-path.normalizer-parameters.none / 1`; zero-field parameter record `asset-path-normalizer-parameters-v1` |
-| Same-authority resolver | contract `baozi.same-authority-resolver / 1`; namespace semantics `baozi.asset-path.portable-logical`; exact normalizer above; parameter schema `baozi.same-authority-resolver.parameters.none / 1`; zero-field parameter record `same-authority-resolver-parameters-v1`; admitted negative-proof-scheme set empty |
+| Same-authority resolver | contract `baozi.same-authority-resolver / 1`; namespace semantics `baozi.asset-path.portable-logical`; exact normalizer above; parameter schema `baozi.same-authority-resolver.parameters.none / 1`; zero-field parameter record `same-authority-resolver-parameters-v1`; admitted negative-proof-scheme set contains exactly the immutable-memory namespace-absence scheme below |
+| Immutable-memory namespace absence | scheme `baozi.immutable-memory-namespace-absence / 1`; validity rule `baozi.immutable-memory-namespace-membership-v1`; subject kind `namespace-snapshot`; payload schema `baozi.immutable-memory-namespace-absence-proof / 1`; digest algorithm `sha256`; caps `canonical bytes = 16,384`, `temporary bytes = 0`, `construction work = 1`, `verification work = 1` |
 
 The normalizer's independent semantic vectors are exact: origin `models/scene.obj` plus reference
 `textures/albedo.png` yields `models/textures/albedo.png`; reference `../shared/albedo.png` yields
@@ -198,6 +206,15 @@ binds the operational identity to the declaring `AssetIo` authority. The default
 selects this profile inside the import session. The public custom `DependencyResolver` interface
 does not accept registry IDs, schemas, or semantic digests and therefore remains unregistered and
 session-opaque.
+
+The initial proof producer is the concrete immutable in-memory namespace. Construction consumes its
+complete unique path table, canonicalizes it by exact `AssetPath` order, and seals both the table and
+its SHA-256 namespace-snapshot digest behind one shared authority. Mutable `MemoryAssetIo`, custom
+`AssetIo` implementations, and wrappers cannot self-admit this proof merely by reproducing its data
+shape or stable IDs. A missing target is verified by exact downcast to that sealed backend, exact
+target absence, exact registered resolver/scheme/cause identity, and a proof digest framed from the
+resolver, scheme, namespace digest, target bytes, and cause. ADR 0041 owns the canonical public proof
+record and its resolver semantic digest.
 
 ADR 0010 also owns the IO/policy membership and normative meaning of unavailable cause IDs. Cause
 class and code are registered as one bounded stable pair. Backend-native error numbers/text are
@@ -703,6 +720,23 @@ Negative:
 - Host-provided in-process resolvers remain part of the trusted computing base.
 
 ## Amendment History
+
+### 2026-08-19: Admit immutable-memory namespace absence proofs
+
+- Affected: `Identity and Authority`, registry membership, proof admission, success metrics,
+  acceptance criteria, and implementation verification.
+- Previous: the same-authority resolver advertised no proof scheme, so even a fully immutable
+  in-memory namespace could only publish an unproven negative input.
+- New: the registry admits one namespace-snapshot absence scheme with exact semantic fields and hard
+  caps. Only `ImmutableMemoryAssetIo` can produce it; mutable/custom backends remain no-proof. The
+  import session pre-admits all four proof dimensions, verifies the exact target/cause/namespace,
+  and atomically freezes the proof with the first physical failure.
+- Impact: repeated missing optional dependencies reuse one immutable proof without reopening or
+  re-verifying. The proof removes the unproven-negative-input reason, but an ordinary caller-named
+  primary remains session-opaque under ADR 0036 until a separate caller-identity schema is admitted.
+- Review: U4.5 resource-graph implementation against ADR 0010 and ADR 0041.
+- Rationale: replayable absence needs a concrete immutable authority and independently frozen
+  semantics, not a callback assertion from an arbitrary backend.
 
 ### 2026-07-26: Separate bounded repository evidence capture from runtime asset IO
 

@@ -42,7 +42,7 @@ pub(crate) use scene_activation::ImportStoreSceneBoundary;
 
 const IMPORT_STORE_CATALOG: StoreSemanticCatalogId =
     StoreSemanticCatalogId::new(*b"baozi-import-led", NonZeroU32::MIN);
-const IMPORT_DIMENSION_COUNT: usize = ImportDimension::DecompressedBytes as usize + 1;
+const IMPORT_DIMENSION_COUNT: usize = ImportDimension::NegativeProofVerificationWork as usize + 1;
 const IMPORT_STORE_FALLBACK_CODE: u32 = 0x494d_0001;
 const MIN_CANONICAL_RETAINED_MEMBER_LIMIT: u64 = 1;
 const STARTUP_OUTCOME_EVIDENCE_AMOUNT: u64 = 1;
@@ -1034,6 +1034,10 @@ impl ImportStoreVocabulary {
             admit_dimension(domain, ImportDimension::ArchiveBytes)?,
             admit_dimension(domain, ImportDimension::CompressedBytes)?,
             admit_dimension(domain, ImportDimension::DecompressedBytes)?,
+            admit_dimension(domain, ImportDimension::NegativeProofCanonicalBytes)?,
+            admit_dimension(domain, ImportDimension::NegativeProofTemporaryBytes)?,
+            admit_dimension(domain, ImportDimension::NegativeProofConstructionWork)?,
+            admit_dimension(domain, ImportDimension::NegativeProofVerificationWork)?,
         ];
         let startup_outcome_evidence = domain
             .try_admit_dimension(STARTUP_OUTCOME_EVIDENCE_SEMANTIC)
@@ -3464,7 +3468,8 @@ mod tests {
             CANONICAL_RETAINED_MEMBERS_SEMANTIC,
             CANONICAL_STRUCTURAL_WORK_SEMANTIC,
         ];
-        for dimension in ImportDimension::AssetOpen as u8..=ImportDimension::DecompressedBytes as u8
+        for dimension in
+            ImportDimension::AssetOpen as u8..=ImportDimension::NegativeProofVerificationWork as u8
         {
             for role in private_roles {
                 assert_ne!(u64::from(dimension) + 1, role.local().get());

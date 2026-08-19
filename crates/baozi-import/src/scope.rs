@@ -3,8 +3,8 @@ use crate::dependency::{
     AuthorizedDependency, CachedDependencyFailure, DependencyCacheDisposition, DependencyIdentity,
     DependencyOrigin, DependencyOriginIssuer, DependencyOriginNode, DependencyOutcome,
     DependencyReference, DependencyRequirement, DependencyRoleId, DependencySnapshot,
-    DependencySnapshotIdentity, OptionalDependencyEvidence, ResolverBinding,
-    SharedDependencySnapshot, shared_dependency_snapshot_allocation_bytes,
+    DependencySnapshotIdentity, OptionalDependencyEvidence, PendingNegativeObservation,
+    ResolverBinding, SharedDependencySnapshot, shared_dependency_snapshot_allocation_bytes,
 };
 use crate::descriptor::TextDecodingMode;
 use crate::diagnostic::{
@@ -30,20 +30,25 @@ use crate::registry::RegistryEntry;
 use crate::resource_graph::{
     AvailableResourceIdentity, PendingResourceRelation, ResourceAcquisitionState, ResourceGraph,
     ResourceGraphError, ResourceUnavailableDisposition, cached_unavailable_disposition,
-    unavailable_disposition,
+    registered_negative_proof_canonical_len, unavailable_disposition,
 };
 use crate::source_scope::{
     FinalizedSourceScopeRecord, LiveSourceScopeRecord, SourceScopeRecordBuilder,
 };
 use crate::store::{
-    ImportStoreHost, ImportStoreReservation, ImportStoreSessionOwner, scene_validation_limits,
+    ImportObservedWorkFailure, ImportStoreHost, ImportStoreHostError, ImportStoreReservation,
+    ImportStoreSessionOwner, scene_validation_limits,
 };
 use crate::{SceneDraft as CanonicalSceneDraft, authoring::SceneAuthoringBatch};
 use baozi_core::scene::integration::SceneConstruction;
 use baozi_core::{OrderedMap, OrderedMapError};
 use baozi_io::{
-    __semantic_identity::StableResourceIdentitySchema, AssetIo, AssetLength, AssetPath,
-    AssetReadErrorKind, AuthorityDomain, OpenedAsset, PathError,
+    __semantic_identity::{
+        RegisteredNegativeProofError, RegisteredResolverProfile, RegisteredUnavailableCause,
+        StableResourceIdentitySchema,
+    },
+    AssetIo, AssetLength, AssetOpenErrorKind, AssetPath, AssetReadErrorKind, AuthorityDomain,
+    OpenedAsset, PathError,
 };
 use baozi_operation::{CapacityPlan, CapacityPlanError, CounterClass, LedgerCause};
 use std::cell::{Cell, RefCell};
@@ -56,6 +61,29 @@ use std::sync::Arc;
 
 pub type ParseResult<T> = Result<T, ParseFailure>;
 type AssetSnapshotResult = Result<AccountedVec<u8>, ScopeAbortCause>;
+
+enum NegativeProofActionError {
+    Store(ImportStoreHostError),
+    Proof(RegisteredNegativeProofError),
+}
+
+fn registered_negative_proof_error(cause: RegisteredNegativeProofError) -> ScopeAbortCause {
+    let code = match cause {
+        RegisteredNegativeProofError::AuthorityMismatch => {
+            "registered-negative-proof-authority-mismatch"
+        }
+        RegisteredNegativeProofError::TargetMismatch => "registered-negative-proof-target-mismatch",
+        RegisteredNegativeProofError::CauseMismatch => "registered-negative-proof-cause-mismatch",
+        RegisteredNegativeProofError::IdentitySchemaMismatch => {
+            "registered-negative-proof-identity-schema-mismatch"
+        }
+        RegisteredNegativeProofError::TargetAvailable => {
+            "registered-negative-proof-target-available"
+        }
+        _ => "registered-negative-proof-unrecognized-failure",
+    };
+    ScopeAbortCause::DescriptorContract { code }
+}
 
 /// Opaque parser transport. Only a selected [`ParseScope`] can create it.
 #[derive(Debug)]
@@ -2413,7 +2441,7 @@ impl<'session> ParseScope<'session> {
         ),
         DependencyResolutionFailure,
     > {
-        let (io, identity, stable_identity_schema) = authorized.into_parts();
+        let (io, identity, stable_identity_schema, registered_resolver) = authorized.into_parts();
         let backend_authority = if std::ptr::eq(io, self.primary_io) {
             self.primary_authority.clone()
         } else {
@@ -2644,7 +2672,11 @@ impl<'session> ParseScope<'session> {
             Err(cause) => Err(self.finish_dependency_resolution_failure(
                 pending,
                 identity,
-                stable_identity_schema,
+                DependencyFailureObservationContext {
+                    stable_identity_schema,
+                    registered_resolver,
+                    io,
+                },
                 normalized,
                 cause,
             )),
@@ -2655,12 +2687,59 @@ impl<'session> ParseScope<'session> {
         &self,
         pending: PendingResourceRelation,
         identity: DependencyIdentity,
-        stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
+        observation_context: DependencyFailureObservationContext<'_>,
         normalized: MeteredDependencyPath,
         cause: ScopeAbortCause,
     ) -> DependencyResolutionFailure {
-        let cached_failure = match CachedDependencyFailure::try_new(cause, stable_identity_schema) {
-            Ok(failure) => failure,
+        let observation = match self.registered_negative_observation(
+            observation_context.registered_resolver,
+            observation_context.io,
+            &identity,
+            observation_context.stable_identity_schema,
+            &cause,
+        ) {
+            Ok(observation) => observation,
+            Err(proof_cause) => {
+                if self
+                    .resource_graph
+                    .borrow_mut()
+                    .abandon_acquisition(&identity)
+                    .is_err()
+                {
+                    return self.dependency_failure(
+                        Some(pending),
+                        Some(identity),
+                        normalized,
+                        ScopeAbortCause::DescriptorContract {
+                            code: "dependency-cache-transition-missing",
+                        },
+                    );
+                }
+                return self.dependency_failure(
+                    Some(pending),
+                    Some(identity),
+                    normalized,
+                    proof_cause,
+                );
+            }
+        };
+        let cached_index = self
+            .resource_graph
+            .borrow_mut()
+            .complete_failed_acquisition(
+                &identity,
+                cause,
+                observation_context.stable_identity_schema,
+                observation,
+            );
+        match cached_index {
+            Ok(index) => self.cached_dependency_failure(
+                pending,
+                identity,
+                normalized,
+                index,
+                DependencyCacheDisposition::Fresh,
+            ),
             Err(cause) => {
                 if self
                     .resource_graph
@@ -2677,35 +2756,92 @@ impl<'session> ParseScope<'session> {
                         },
                     );
                 }
-                return self.dependency_failure(Some(pending), Some(identity), normalized, cause);
+                self.dependency_failure(Some(pending), Some(identity), normalized, cause)
             }
-        };
+        }
+    }
 
-        let cached_index = self
-            .resource_graph
-            .borrow_mut()
-            .complete_failed_acquisition(&identity, cached_failure);
-        match cached_index {
-            Ok(index) => self.cached_dependency_failure(
-                pending,
-                identity,
-                normalized,
-                index,
-                DependencyCacheDisposition::Fresh,
+    fn registered_negative_observation<'target>(
+        &self,
+        registered_resolver: Option<&'static RegisteredResolverProfile>,
+        io: &'target dyn AssetIo,
+        identity: &'target DependencyIdentity,
+        stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
+        cause: &ScopeAbortCause,
+    ) -> Result<PendingNegativeObservation<'target>, ScopeAbortCause> {
+        let Some(resolver) = registered_resolver else {
+            return Ok(PendingNegativeObservation::None);
+        };
+        let registered_cause = match cause {
+            ScopeAbortCause::AssetOpen(error) if error.kind() == AssetOpenErrorKind::NotFound => {
+                RegisteredUnavailableCause::Missing
+            }
+            ScopeAbortCause::AssetOpen(_) => RegisteredUnavailableCause::OpenFailed,
+            ScopeAbortCause::AssetRead(error)
+                if !matches!(error.kind(), AssetReadErrorKind::ContractViolation(_)) =>
+            {
+                RegisteredUnavailableCause::ReadFailed
+            }
+            _ => return Ok(PendingNegativeObservation::None),
+        };
+        let Some(plan) = resolver.plan_negative_proof(io, identity.path(), registered_cause) else {
+            return Ok(PendingNegativeObservation::None);
+        };
+        let stable_identity_schema =
+            stable_identity_schema.ok_or(ScopeAbortCause::DescriptorContract {
+                code: "registered-negative-proof-missing-stable-identity",
+            })?;
+        let canonical_bytes =
+            registered_negative_proof_canonical_len(&plan, stable_identity_schema).map_err(
+                |_| ScopeAbortCause::DescriptorContract {
+                    code: "registered-negative-proof-canonical-shape",
+                },
+            )?;
+        let caps = plan.scheme().semantic_subject().caps();
+        if canonical_bytes > caps.canonical_bytes() {
+            return Err(ScopeAbortCause::DescriptorContract {
+                code: "registered-negative-proof-scheme-cap-exceeded",
+            });
+        }
+        let charges = [
+            (
+                ImportDimension::NegativeProofCanonicalBytes,
+                canonical_bytes,
             ),
-            Err(_) => {
-                let _ = self
-                    .resource_graph
-                    .borrow_mut()
-                    .abandon_acquisition(&identity);
-                self.dependency_failure(
-                    Some(pending),
-                    Some(identity),
-                    normalized,
-                    ScopeAbortCause::DescriptorContract {
-                        code: "dependency-cache-transition-missing",
-                    },
-                )
+            (
+                ImportDimension::NegativeProofTemporaryBytes,
+                caps.temporary_bytes(),
+            ),
+            (
+                ImportDimension::NegativeProofConstructionWork,
+                caps.construction_work(),
+            ),
+            (
+                ImportDimension::NegativeProofVerificationWork,
+                caps.verification_work(),
+            ),
+        ];
+        let proof = self.host.with_observed_work(charges, |work| {
+            let proof = plan
+                .verify(identity.path(), registered_cause)
+                .map_err(NegativeProofActionError::Proof)?;
+            work.complete([
+                canonical_bytes,
+                caps.temporary_bytes(),
+                caps.construction_work(),
+                caps.verification_work(),
+            ])
+            .map_err(NegativeProofActionError::Store)?;
+            Ok(proof)
+        });
+        match proof {
+            Ok(proof) => Ok(PendingNegativeObservation::Proof(proof)),
+            Err(ImportObservedWorkFailure::Store(cause))
+            | Err(ImportObservedWorkFailure::Action(NegativeProofActionError::Store(cause))) => {
+                Err(cause.into_scope_abort_cause())
+            }
+            Err(ImportObservedWorkFailure::Action(NegativeProofActionError::Proof(cause))) => {
+                Err(registered_negative_proof_error(cause))
             }
         }
     }
@@ -3744,6 +3880,12 @@ impl ImportLiveReservation<'_> {
 
 struct DependencyResolutionFailure;
 
+struct DependencyFailureObservationContext<'io> {
+    stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
+    registered_resolver: Option<&'static RegisteredResolverProfile>,
+    io: &'io dyn AssetIo,
+}
+
 struct MeteredDependencyPath {
     path: AssetPath,
     _reservation: ImportStoreReservation,
@@ -3799,10 +3941,10 @@ impl DependencyResolutionContext {
             DependencyResolutionCause::Owned(cause) => Ok(unavailable_disposition(cause)),
             DependencyResolutionCause::Cached { index } => graph
                 .cached_failure(*index)
-                .map(cached_unavailable_disposition)
                 .map_err(|_| ScopeAbortCause::DescriptorContract {
                     code: "dependency-cache-failure-index-invalid",
-                }),
+                })
+                .and_then(cached_unavailable_disposition),
         }
     }
 

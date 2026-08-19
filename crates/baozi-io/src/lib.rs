@@ -33,6 +33,7 @@ mod error;
     )
 ))]
 mod fs;
+mod immutable_memory;
 mod memory;
 mod path;
 #[cfg(all(
@@ -119,8 +120,8 @@ pub const NATIVE_FS_CANDIDATE_TARGETS: &[&str] = &[
 
 pub use error::{
     AssetObjectKind, AssetOpenError, AssetOpenErrorKind, AssetOpenStage,
-    AssetReadContractViolation, AssetReadError, AssetReadErrorKind, MemoryAssetInsertError,
-    PathError, PathErrorCode,
+    AssetReadContractViolation, AssetReadError, AssetReadErrorKind, ImmutableMemoryAssetBuildError,
+    MemoryAssetInsertError, PathError, PathErrorCode,
 };
 #[cfg(all(
     feature = "fs-candidate",
@@ -149,6 +150,7 @@ pub use error::{
     )
 ))]
 pub use fs::{FileSystemAssetIo, NativeDirectoryCapability};
+pub use immutable_memory::ImmutableMemoryAssetIo;
 pub use memory::MemoryAssetIo;
 pub use path::AssetPath;
 #[cfg(all(
@@ -192,13 +194,17 @@ pub use resource::{AssetIo, AssetLength, AssetReader, AuthorityDomain, OpenedAss
 #[doc(hidden)]
 pub mod __semantic_identity {
     pub use crate::semantic_identity::{
-        CanonicalizationProfileId, NamespaceSemanticsId, NormalizedReference,
+        CanonicalizationProfileId, NamespaceSemanticsId, NegativeProofDigestAlgorithm,
+        NegativeProofResourceCaps, NegativeProofSchemeId, NegativeProofSchemeSemanticSubject,
+        NegativeProofSubjectKind, NegativeProofValidityRuleId, NormalizedReference,
         ReferenceNormalizerContractId, ReferenceNormalizerSemanticSubject,
-        RegisteredAssetResolution, RegisteredNegativeProofScheme, RegisteredReferenceNormalizer,
-        RegisteredResolutionError, RegisteredResolverProfile, ResolverContractId,
+        RegisteredAssetResolution, RegisteredNegativeProofError, RegisteredNegativeProofPlan,
+        RegisteredNegativeProofScheme, RegisteredReferenceNormalizer, RegisteredResolutionError,
+        RegisteredResolverProfile, RegisteredUnavailableCause, ResolverContractId,
         ResolverSemanticSubject, SemanticParameterSchema, StableResourceIdentity,
-        StableResourceIdentitySchema, portable_asset_path_normalizer_v1,
-        same_authority_resolver_v1,
+        StableResourceIdentitySchema, VerifiedNegativeInputProof,
+        VerifiedNegativeInputProofBinding, immutable_memory_namespace_absence_v1,
+        portable_asset_path_normalizer_v1, same_authority_resolver_v1,
     };
 }
 

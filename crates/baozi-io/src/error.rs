@@ -97,6 +97,14 @@ pub enum MemoryAssetInsertError {
     AllocationFailed,
 }
 
+/// Failure to freeze one immutable in-memory asset namespace.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ImmutableMemoryAssetBuildError {
+    #[error("immutable memory asset paths must be unique")]
+    DuplicatePath,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssetOpenStage {
     RootCapability,
