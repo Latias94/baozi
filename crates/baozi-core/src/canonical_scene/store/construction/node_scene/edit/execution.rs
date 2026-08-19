@@ -1,6 +1,7 @@
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
     CanonicalMaterialization, CanonicalValidationDecision, CanonicalValidationProgress,
+    RetainedStoreSessionOutcomeOwner,
 };
 use baozi_operation::__canonical_activation_producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
@@ -142,10 +143,12 @@ impl PendingNodeSceneEdit {
             start.start_plan,
         )
         .map_err(SceneConstructionStartError::from)?;
-        let policy = node_scene_activation_roles(start.keys)
-            .bind(canonical_writer_limits, outcome_evidence_writer_limits);
         let owner = raw
-            .into_scoped_session_outcome_owner(policy, failure_requirements)
+            .into_session_outcome_owner(
+                node_scene_activation_roles(start.keys).session_policy(),
+                outcome_evidence_writer_limits,
+                failure_requirements,
+            )
             .map_err(SceneConstructionError::from)?;
 
         prepare_scoped_edit(
@@ -172,7 +175,7 @@ impl PendingNodeSceneEdit {
 }
 
 fn prepare_scoped_edit(
-    owner: baozi_operation::__canonical_activation::ScopedRetainedStoreSessionOutcomeOwner<
+    owner: RetainedStoreSessionOutcomeOwner<
         super::super::super::SceneConstructionOwner,
         SceneConstructionPhase,
         SceneConstructionUnit,

@@ -7,14 +7,13 @@ use std::cell::Cell;
 #[cfg(test)]
 use baozi_operation::__canonical_activation::{
     CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
-    CanonicalValidationProgress, ScopedRetainedStoreSessionOutcomeOwner,
-    StoreActivationContainment,
+    CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner, StoreActivationContainment,
 };
 use baozi_operation::__canonical_activation::{
-    CanonicalActivationPolicy, CanonicalFailureRequirements, CanonicalLane,
+    CanonicalActivationSessionPolicy, CanonicalFailureRequirements, CanonicalLane,
     CanonicalMaterialization, CanonicalMaterializationRole, CanonicalRecordBuildRow,
     CanonicalReservation, CanonicalSemanticWorkSession, CanonicalValidationDecision,
-    CanonicalValidationPlanning, CanonicalValidationRole,
+    CanonicalValidationPlanning, CanonicalValidationRole, RetainedStoreWriterRole,
 };
 use baozi_operation::__canonical_activation_producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
@@ -24,9 +23,9 @@ use baozi_operation::__canonical_activation_producer::{
 use baozi_operation::{FinalProgress, RetainedStoreOperation};
 use baozi_operation::{
     OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit, RecordBlock,
-    RecordPlan, RetainedStoreBatchLimits, RetainedStoreWriterPlan, SequencePlan, StoreBuildError,
-    StoreControlledError, StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError,
-    StoreWorkError, StoredScalar, Utf8Plan,
+    RecordPlan, RetainedStoreBatchLimits, SequencePlan, StoreBuildError, StoreControlledError,
+    StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError, StoreWorkError,
+    StoredScalar, Utf8Plan,
 };
 
 use crate::SceneValidationLimits;
@@ -235,12 +234,11 @@ impl NodeSceneWriterRoles {
         }
     }
 
-    const fn bind(self, limits: RetainedStoreBatchLimits) -> RetainedStoreWriterPlan {
-        RetainedStoreWriterPlan::new(
+    const fn role(self) -> RetainedStoreWriterRole {
+        RetainedStoreWriterRole::new(
             self.phase,
             self.capacity_dimension,
             self.attribution_dimension,
-            limits,
         )
     }
 }
@@ -294,15 +292,10 @@ impl NodeSceneActivationRoles {
         self
     }
 
-    pub(super) const fn bind(
-        self,
-        canonical_writer_limits: RetainedStoreBatchLimits,
-        outcome_evidence_writer_limits: RetainedStoreBatchLimits,
-    ) -> CanonicalActivationPolicy {
-        let policy = CanonicalActivationPolicy::new(
-            self.canonical_writer.bind(canonical_writer_limits),
-            self.outcome_evidence_writer
-                .bind(outcome_evidence_writer_limits),
+    pub(super) const fn session_policy(self) -> CanonicalActivationSessionPolicy {
+        let policy = CanonicalActivationSessionPolicy::new(
+            self.canonical_writer.role(),
+            self.outcome_evidence_writer.role(),
             CanonicalMaterializationRole::new(
                 self.materialization_work_dimension,
                 self.materialization_scratch_dimension,
@@ -521,10 +514,12 @@ impl<'input> NodeSceneActivationRequest<'input> {
         U: ProgressUnit,
     {
         let Self { execution, policy } = self;
-        let (canonical_writer_limits, outcome_evidence_writer_limits, failure) =
-            policy.into_parts();
-        let policy = roles.bind(canonical_writer_limits, outcome_evidence_writer_limits);
-        let owner = operation.into_scoped_session_outcome_owner(policy, failure)?;
+        let (_, outcome_evidence_writer_limits, failure) = policy.into_parts();
+        let owner = operation.into_session_outcome_owner(
+            roles.session_policy(),
+            outcome_evidence_writer_limits,
+            failure,
+        )?;
         Ok(BoundNodeSceneActivation { owner, execution })
     }
 }
@@ -780,7 +775,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    owner: ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, L>,
+    owner: RetainedStoreSessionOutcomeOwner<O, PP, U, L>,
     execution: NodeSceneActivationExecution<'input>,
 }
 
