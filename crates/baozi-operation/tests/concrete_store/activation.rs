@@ -6,8 +6,8 @@
 use std::cell::Cell;
 
 use baozi_operation::__canonical_activation::{
-    CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationPolicy,
-    CanonicalActivationSeal, CanonicalActivationSealFailure, CanonicalActivationSessionPolicy,
+    CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationSeal,
+    CanonicalActivationSealFailure, CanonicalActivationSessionPolicy,
     CanonicalCentralValidationOutcome, CanonicalFailureRequirements, CanonicalFreezePermit,
     CanonicalJointCommit, CanonicalJointSeal, CanonicalLane, CanonicalMaterialization,
     CanonicalMaterializationRole, CanonicalReservation, CanonicalScopedDisposition,
@@ -28,9 +28,89 @@ use baozi_operation::{ScalarSequence, StoreDestination, StorePlanError, StoreWor
 use super::*;
 
 struct TestScopedActivation {
-    policy: CanonicalActivationPolicy,
+    policy: TestActivationPolicy,
     failure: CanonicalFailureRequirements,
     success: CanonicalSuccessRequirements,
+}
+
+#[derive(Clone, Copy)]
+struct TestEvidenceWriter {
+    role: RetainedStoreWriterRole,
+    limits: RetainedStoreBatchLimits,
+}
+
+impl TestEvidenceWriter {
+    fn new(keys: TestKeys, attributions: usize, commitments: usize) -> Self {
+        Self {
+            role: RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+            limits: RetainedStoreBatchLimits::new(attributions, commitments).unwrap(),
+        }
+    }
+}
+
+struct TestActivationPolicy {
+    session: CanonicalActivationSessionPolicy,
+    outcome_evidence_writer_limits: RetainedStoreBatchLimits,
+}
+
+impl TestActivationPolicy {
+    fn new(
+        canonical_writer: RetainedStoreWriterRole,
+        outcome_evidence_writer: TestEvidenceWriter,
+        materialization: CanonicalMaterializationRole,
+        validation: CanonicalValidationRole,
+        canonical_destination_dimension: StoreDimensionKey,
+        outcome_evidence_destination_dimension: StoreDimensionKey,
+    ) -> Self {
+        Self {
+            session: CanonicalActivationSessionPolicy::new(
+                canonical_writer,
+                outcome_evidence_writer.role,
+                materialization,
+                validation,
+                canonical_destination_dimension,
+                outcome_evidence_destination_dimension,
+            ),
+            outcome_evidence_writer_limits: outcome_evidence_writer.limits,
+        }
+    }
+
+    fn with_semantic_bytes_dimension(mut self, dimension: StoreDimensionKey) -> Self {
+        self.session = self.session.with_semantic_bytes_dimension(dimension);
+        self
+    }
+}
+
+trait IntoTestSessionOutcomeOwner<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn into_test_session_outcome_owner(
+        self,
+        policy: TestActivationPolicy,
+        failure: CanonicalFailureRequirements,
+    ) -> Result<RetainedStoreSessionOutcomeOwner<O, PP, U, L>, StoreActivationContainment>;
+}
+
+impl<O, PP, U, L> IntoTestSessionOutcomeOwner<O, PP, U, L> for RetainedStoreOperation<O, PP, U, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn into_test_session_outcome_owner(
+        self,
+        policy: TestActivationPolicy,
+        failure: CanonicalFailureRequirements,
+    ) -> Result<RetainedStoreSessionOutcomeOwner<O, PP, U, L>, StoreActivationContainment> {
+        let TestActivationPolicy {
+            session,
+            outcome_evidence_writer_limits,
+        } = policy;
+        self.into_session_outcome_owner(session, outcome_evidence_writer_limits, failure)
+    }
 }
 
 struct TestActivationDescription<P> {
@@ -127,7 +207,7 @@ fn run_scoped_activation<T, E, CanonicalKind, CanonicalTag>(
         success,
     } = activation;
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut activation_plan = Some(TestActivationDescription::new(success, ()));
     let mut materialize = Some(materialize);
@@ -331,9 +411,9 @@ fn scoped_activation_shape_with_dimensions_and_validation_work(
         canonical_destination_dimension,
         outcome_evidence_destination_dimension,
     ] = dimensions;
-    let policy = CanonicalActivationPolicy::new(
-        writer_plan(keys, canonical_blocks + 1, 2),
-        writer_plan(keys, evidence_blocks + 1, 2),
+    let policy = TestActivationPolicy::new(
+        RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+        TestEvidenceWriter::new(keys, evidence_blocks + 1, 2),
         CanonicalMaterializationRole::new(
             materialization_work_dimension,
             materialization_work_dimension,
@@ -706,7 +786,7 @@ fn rejected_session_from_operation(
         success: _,
     } = scoped_activation_shape(keys, 1, evidence_blocks);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let outcome: CanonicalActivationOutcome<
         TestOwner,

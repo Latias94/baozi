@@ -328,96 +328,13 @@ fn session_outcome_owner_resolves_an_unsubmitted_request_without_success_capacit
 }
 
 #[test]
-fn scoped_compatibility_owner_preserves_its_creation_time_baseline() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let (mut operation, keys) = operation(&account);
-    let producer_reservation = operation
-        .control_checkpoint()
-        .reserve(keys.phase, keys.dimension, 1)
-        .expect("producer reservation before compatibility owner creation");
-    let TestScopedActivation {
-        policy,
-        failure,
-        success: _,
-    } = scoped_activation_shape(keys, 1, 1);
-    let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
-        .expect("compatibility owner");
-
-    drop(producer_reservation);
-
-    let result: Result<ScopedOutcome<()>, _> =
-        owner.plan_and_activate_scoped(|planning| planning.reject((), 42));
-    assert!(result.is_err());
-    assert!(account.snapshot().poisoned());
-}
-
-#[test]
-fn scoped_compatibility_owner_rejects_a_foreign_success_capacity() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let (operation, keys) = operation(&account);
-    let policy = CanonicalActivationPolicy::new(
-        writer_plan(keys, 2, 2),
-        writer_plan(keys, 2, 2),
-        CanonicalMaterializationRole::new(keys.dimension, keys.dimension),
-        CanonicalValidationRole::new(keys.phase, keys.dimension, keys.dimension),
-        keys.dimension,
-        keys.dimension,
-    );
-    let failure = CanonicalFailureRequirements::new(CanonicalTableShape::new(1, 1).unwrap());
-    let foreign_success = CanonicalSuccessRequirements::new(
-        CanonicalTableShape::new(1, 1).unwrap(),
-        3,
-        1,
-        NonZeroU64::MIN,
-    )
-    .unwrap();
-    let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
-        .expect("compatibility owner");
-    let mut foreign_success = Some(foreign_success);
-    let dropped = Cell::new(false);
-    let poison_seen_while_dropping = Cell::new(false);
-
-    let result: Result<ScopedOutcome<()>, _> = owner.plan_and_activate_scoped(|mut planning| {
-        let mut semantic = planning.begin_semantic_work().unwrap();
-        let scratch = semantic.reserve(1).unwrap();
-        semantic.validate_live_owner(&scratch).unwrap();
-        semantic.run_unit(|| ()).unwrap();
-        let completion = semantic.finish_exact().unwrap();
-        let plan = TrackedScratchPlan {
-            _marker: DropMarker {
-                dropped: &dropped,
-                account: &account,
-                poison_seen_while_dropping: &poison_seen_while_dropping,
-            },
-            _scratch: scratch,
-        };
-        match planning.seal_activation(bind_test_execution(&mut foreign_success, plan), completion)
-        {
-            CanonicalActivationSeal::Sealed(_) => {
-                panic!("a foreign writer capacity must not seal through the adapter")
-            }
-            CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
-        }
-    });
-
-    assert!(result.is_err());
-    assert!(dropped.get());
-    assert!(!poison_seen_while_dropping.get());
-    assert_fail_closed_containment(&account);
-}
-
-#[test]
 fn scoped_owner_rejects_success_facts_from_another_construction() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
-    let policy = CanonicalActivationPolicy::new(
-        writer_plan(keys, 2, 2),
-        writer_plan(keys, 2, 2),
+    let policy = TestActivationPolicy::new(
+        RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+        TestEvidenceWriter::new(keys, 2, 2),
         CanonicalMaterializationRole::new(keys.dimension, keys.dimension),
         CanonicalValidationRole::new(keys.phase, keys.dimension, keys.dimension),
         keys.dimension,
@@ -436,8 +353,8 @@ fn scoped_owner_rejects_success_facts_from_another_construction() {
     .unwrap()
     .with_request_identity(success_identity);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
-        .expect("compatibility owner");
+        .into_test_session_outcome_owner(policy, failure)
+        .expect("session owner");
     let mut foreign_success = Some(foreign_success);
     let dropped = Cell::new(false);
     let poison_seen_while_dropping = Cell::new(false);
@@ -833,7 +750,7 @@ fn derived_scoped_activation_shares_only_from_its_exact_source() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
 
@@ -909,9 +826,9 @@ fn derived_scoped_activation_accepts_destination_total_larger_than_new_capacity(
     let source_baseline = account.snapshot();
     let (operation, keys) = derived_operation_for_scoped_activation(&source.canonical);
     let activation = TestScopedActivation {
-        policy: CanonicalActivationPolicy::new(
-            writer_plan(keys, DESTINATION_BLOCKS + 1, 2),
-            writer_plan(keys, 2, 2),
+        policy: TestActivationPolicy::new(
+            RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+            TestEvidenceWriter::new(keys, 2, 2),
             CanonicalMaterializationRole::new(keys.dimension, keys.dimension),
             CanonicalValidationRole::new(keys.phase, keys.dimension, keys.dimension),
             keys.dimension,
@@ -927,7 +844,7 @@ fn derived_scoped_activation_accepts_destination_total_larger_than_new_capacity(
         .unwrap(),
     };
     let owner = operation
-        .into_scoped_session_outcome_owner(activation.policy, activation.failure)
+        .into_test_session_outcome_owner(activation.policy, activation.failure)
         .unwrap();
     let mut success = Some(activation.success);
 
@@ -1045,7 +962,7 @@ fn derived_scoped_sequence_rewrite_admits_exact_plan_work() {
         keys.dimension,
     );
     let owner = operation
-        .into_scoped_session_outcome_owner(activation.policy, activation.failure)
+        .into_test_session_outcome_owner(activation.policy, activation.failure)
         .unwrap();
     let mut success = Some(activation.success);
 
@@ -1109,7 +1026,7 @@ fn derived_scoped_sequence_rewrite_rejects_one_short_before_the_builder() {
         keys.dimension,
     );
     let owner = operation
-        .into_scoped_session_outcome_owner(activation.policy, activation.failure)
+        .into_test_session_outcome_owner(activation.policy, activation.failure)
         .unwrap();
     let mut success = Some(activation.success);
     let builder_called = Cell::new(false);
@@ -1177,7 +1094,7 @@ fn derived_scoped_record_copy_maps_the_exact_source_prefix() {
         keys.dimension,
     );
     let owner = operation
-        .into_scoped_session_outcome_owner(activation.policy, activation.failure)
+        .into_test_session_outcome_owner(activation.policy, activation.failure)
         .unwrap();
     let mut success = Some(activation.success);
 
@@ -1245,7 +1162,7 @@ fn derived_scoped_record_copy_appends_inside_the_destination_plan() {
         keys.dimension,
     );
     let owner = operation
-        .into_scoped_session_outcome_owner(activation.policy, activation.failure)
+        .into_test_session_outcome_owner(activation.policy, activation.failure)
         .unwrap();
     let mut success = Some(activation.success);
 
@@ -1317,7 +1234,7 @@ fn derived_scoped_activation_contains_a_same_shape_sibling_source() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
 
@@ -1369,7 +1286,7 @@ fn recoverable_materialization_fault_then_sibling_bind_is_contained() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
 
@@ -1446,7 +1363,7 @@ fn recoverable_materialization_fault_then_sibling_share_is_contained() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
 
@@ -1521,7 +1438,7 @@ fn scoped_activation_permit_retains_the_core_plan_through_activation() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
 
@@ -1588,7 +1505,7 @@ fn scoped_semantic_rejection_binds_only_failure_shape_and_never_allocates_canoni
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
@@ -1687,7 +1604,7 @@ fn dropping_an_unconsumed_scoped_outcome_owner_fails_closed() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     drop(owner);
@@ -1706,7 +1623,7 @@ fn abandoning_a_scoped_activation_releases_scratch_before_containment() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
     let dropped = Cell::new(false);
@@ -1774,17 +1691,18 @@ fn scoped_constructor_validates_every_role_before_authoring_authority_exists() {
             dimension: foreign_dimension(),
             ..keys
         };
-        let policy = CanonicalActivationPolicy::new(
-            writer_plan(
-                if matches!(fault, ScopedRoleFault::CanonicalWriter) {
-                    foreign_writer_keys
-                } else {
-                    keys
-                },
-                2,
-                2,
+        let canonical_writer_keys = if matches!(fault, ScopedRoleFault::CanonicalWriter) {
+            foreign_writer_keys
+        } else {
+            keys
+        };
+        let policy = TestActivationPolicy::new(
+            RetainedStoreWriterRole::new(
+                canonical_writer_keys.phase,
+                canonical_writer_keys.dimension,
+                canonical_writer_keys.dimension,
             ),
-            writer_plan(
+            TestEvidenceWriter::new(
                 if matches!(fault, ScopedRoleFault::EvidenceWriter) {
                     foreign_writer_keys
                 } else {
@@ -1835,7 +1753,7 @@ fn scoped_constructor_validates_every_role_before_authoring_authority_exists() {
         );
         let failure = CanonicalFailureRequirements::new(CanonicalTableShape::new(1, 1).unwrap());
 
-        let result = operation.into_scoped_session_outcome_owner(policy, failure);
+        let result = operation.into_test_session_outcome_owner(policy, failure);
 
         assert!(result.is_err());
         assert_fail_closed_containment(&account);
@@ -1853,7 +1771,7 @@ fn scoped_materialization_panic_drops_the_plan_before_account_containment() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
     let dropped = Cell::new(false);
@@ -1943,7 +1861,7 @@ fn panic_after_pending_never_activated_is_fail_closed() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     let result: Result<ScopedOutcome<PreflightRejection>, _> =
@@ -1967,7 +1885,7 @@ fn panic_after_pending_rejected_is_fail_closed() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
 
@@ -2005,7 +1923,7 @@ fn panic_after_pending_activated_is_fail_closed() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
 
@@ -2052,7 +1970,7 @@ fn control_interruption_then_reject_preserves_runtime_never_activated() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     cancellation.cancel();
     let action_executed = Cell::new(false);
@@ -2102,7 +2020,7 @@ fn ledger_interruption_then_reject_preserves_runtime_never_activated() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
@@ -2207,7 +2125,7 @@ fn runtime_fault_before_semantic_completion_resolves_without_activation() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     cancellation.cancel();
 
@@ -2253,7 +2171,7 @@ fn forgetting_a_semantic_session_cannot_publish_a_requested_disposition() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     let result: Result<ScopedOutcome<PreflightRejection>, _> =
@@ -2283,7 +2201,7 @@ fn assert_forgotten_reservation_is_contained(terminal: ForgottenReservationTermi
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
 
@@ -2345,7 +2263,7 @@ fn scoped_semantic_case(execute_limit: u64, cancel_after: Option<u64>) -> (u64, 
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let executed = Cell::new(0_u64);
     let interrupted = Cell::new(false);
@@ -2422,7 +2340,7 @@ fn scoped_semantic_baseline() -> (u64, u64) {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
@@ -2500,7 +2418,7 @@ fn semantic_work_is_admitted_per_action_at_exact_one_short_and_zero_capacity() {
             keys.dimension,
         );
         let owner = operation
-            .into_scoped_session_outcome_owner(policy, failure)
+            .into_test_session_outcome_owner(policy, failure)
             .unwrap();
         let executed = Cell::new(0_u64);
 
@@ -2576,7 +2494,7 @@ fn semantic_domain_rejection_consumes_the_returned_action_unit() {
         keys.dimension,
     );
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
@@ -2638,7 +2556,7 @@ fn caught_semantic_action_panic_cannot_be_downgraded_to_requested() {
             keys.dimension,
         );
         let owner = operation
-            .into_scoped_session_outcome_owner(policy, failure)
+            .into_test_session_outcome_owner(policy, failure)
             .unwrap();
         let completed = Cell::new(0_u64);
 
@@ -2688,7 +2606,7 @@ fn cancellation_in_the_last_semantic_action_precedes_requested_rejection() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
@@ -2756,7 +2674,7 @@ fn due_control_poll_precedes_scratch_reservation_after_the_checkpoint() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
@@ -2855,7 +2773,7 @@ fn due_control_poll_precedes_live_owner_validation_after_the_checkpoint() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
@@ -2927,7 +2845,7 @@ fn due_control_poll_precedes_scratch_resize_after_the_checkpoint() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
@@ -2999,7 +2917,7 @@ fn cancellation_before_direct_reject_precedes_the_requested_cause() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
 
     let outcome: ScopedOutcome<PreflightRejection> = owner
@@ -3023,7 +2941,7 @@ fn empty_semantic_work_cannot_issue_a_completion() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let baseline_allocations = account.snapshot().live_retained_allocations();
 
@@ -3058,7 +2976,7 @@ fn cancellation_after_finish_exact_prevents_success_from_sealing() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
 
@@ -3093,7 +3011,7 @@ fn cancelled_seal_releases_scoped_plan_before_never_activated() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
     let dropped = Cell::new(false);
@@ -3141,7 +3059,7 @@ fn semantic_action_panics_are_contained_after_the_exact_completed_prefix() {
             success: _,
         } = scoped_activation_shape(keys, 1, 1);
         let owner = operation
-            .into_scoped_session_outcome_owner(policy, failure)
+            .into_test_session_outcome_owner(policy, failure)
             .unwrap();
         let completed = Cell::new(0_u64);
 
@@ -3174,7 +3092,7 @@ fn semantic_action_body_and_capture_drop_panics_are_isolated() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let capture_dropped = Cell::new(false);
     let capture = PanicDropProbe(&capture_dropped);
@@ -3264,7 +3182,7 @@ fn scoped_transaction_body_and_capture_drop_panics_are_isolated() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let capture_dropped = Cell::new(false);
     let capture = PanicDropProbe(&capture_dropped);
@@ -3290,7 +3208,7 @@ fn trusted_producer_seal_panic_drops_the_description_before_containment() {
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let description_dropped = Cell::new(false);
 
@@ -3343,7 +3261,7 @@ fn scoped_materialization_body_and_plan_drop_panics_are_isolated() {
         success,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
     let plan_dropped = Cell::new(false);
@@ -3453,9 +3371,9 @@ fn scoped_seal_is_storage_pure_until_owner_consuming_activation() {
     let account = account(&factory);
     let (operation, keys) = operation_with_terminal_attribution_slots(&account, 2);
     let activation = TestScopedActivation {
-        policy: CanonicalActivationPolicy::new(
-            writer_plan(keys, CANONICAL_BLOCKS + 1, 2),
-            writer_plan(keys, 2, 2),
+        policy: TestActivationPolicy::new(
+            RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+            TestEvidenceWriter::new(keys, 2, 2),
             CanonicalMaterializationRole::new(keys.dimension, keys.dimension),
             CanonicalValidationRole::new(keys.phase, keys.dimension, keys.dimension),
             keys.dimension,
@@ -3476,7 +3394,7 @@ fn scoped_seal_is_storage_pure_until_owner_consuming_activation() {
         success,
     } = activation;
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
 
@@ -3527,9 +3445,9 @@ fn scoped_success_rebinds_minimal_startup_writer_to_exact_canonical_shape() {
     let account = account(&factory);
     let (operation, keys) = operation_with_terminal_attribution_slots(&account, 2);
     let activation = TestScopedActivation {
-        policy: CanonicalActivationPolicy::new(
-            writer_plan(keys, CANONICAL_BLOCKS + 1, 2),
-            writer_plan(keys, 2, 2),
+        policy: TestActivationPolicy::new(
+            RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+            TestEvidenceWriter::new(keys, 2, 2),
             CanonicalMaterializationRole::new(keys.dimension, keys.dimension),
             CanonicalValidationRole::new(keys.phase, keys.dimension, keys.dimension),
             keys.dimension,
@@ -3754,7 +3672,7 @@ fn scoped_invalid_failure_shape_is_contained_before_materialization() {
         success,
     } = scoped_activation_shape(keys, 1, TEST_MAX_FAILURE_EVIDENCE_MEMBERS + 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let mut success = Some(success);
     let materialized = Cell::new(false);

@@ -1220,22 +1220,6 @@ where
     failure_work: FailureEvidenceWorkBudget,
 }
 
-/// Compatibility adapter for the U4 scoped activation surface.
-///
-/// New session owners bind only the exact canonical limits supplied by a sealed request. This
-/// wrapper preserves the old single-call shape until the import cutover deletes the scoped rail.
-#[must_use = "the scoped session outcome owner must run its activation transaction"]
-pub struct ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, L = FreshStoreLineage>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    owner: RetainedStoreSessionOutcomeOwner<O, PP, U, L>,
-    canonical_writer_limits: RetainedStoreBatchLimits,
-    planning_baseline: RetainedPlanningBaseline,
-}
-
 fn finish_rejected_session<O, PP, U, E, L>(
     assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
     failure_work: FailureEvidenceWorkBudget,
@@ -2331,64 +2315,8 @@ impl CanonicalActivationSessionPolicy {
     }
 }
 
-/// Compatibility policy consumed by the U4 scoped adapter.
-///
-/// Core and format code never receive this value. The session owner validates and seals all role
-/// keys before binding a keyless request to concrete retained-table plans.
-#[must_use = "the activation policy must be consumed by one retained-store operation"]
-pub struct CanonicalActivationPolicy {
-    session: CanonicalActivationSessionPolicy,
-    canonical_writer_limits: RetainedStoreBatchLimits,
-    outcome_evidence_writer_limits: RetainedStoreBatchLimits,
-}
-
-impl CanonicalActivationPolicy {
-    pub const fn new(
-        canonical_writer: RetainedStoreWriterPlan,
-        outcome_evidence_writer: RetainedStoreWriterPlan,
-        materialization: CanonicalMaterializationRole,
-        validation: CanonicalValidationRole,
-        canonical_destination_dimension: StoreDimensionKey,
-        outcome_evidence_destination_dimension: StoreDimensionKey,
-    ) -> Self {
-        Self {
-            session: CanonicalActivationSessionPolicy::new(
-                canonical_writer.role(),
-                outcome_evidence_writer.role(),
-                materialization,
-                validation,
-                canonical_destination_dimension,
-                outcome_evidence_destination_dimension,
-            ),
-            canonical_writer_limits: canonical_writer.limits(),
-            outcome_evidence_writer_limits: outcome_evidence_writer.limits(),
-        }
-    }
-
-    /// Projects exact sealed semantic bytes into one host-owned accounting dimension.
-    pub const fn with_semantic_bytes_dimension(mut self, dimension: StoreDimensionKey) -> Self {
-        self.session.semantic_bytes_dimension = Some(dimension);
-        self
-    }
-
-    fn into_session_parts(
-        self,
-    ) -> (
-        CanonicalActivationSessionPolicy,
-        RetainedStoreBatchLimits,
-        RetainedStoreBatchLimits,
-    ) {
-        (
-            self.session,
-            self.canonical_writer_limits,
-            self.outcome_evidence_writer_limits,
-        )
-    }
-}
-
 struct BoundActivationRoles {
     policy: CanonicalActivationSessionPolicy,
-    compatibility_canonical_writer_limits: Option<RetainedStoreBatchLimits>,
     expected_request_identity: Option<CanonicalActivationRequestIdentity>,
 }
 
@@ -2407,17 +2335,6 @@ impl BoundActivationRoles {
             || self
                 .expected_request_identity
                 .is_some_and(|expected| expected != request_identity)
-        {
-            return Err(StorePlanError::InvalidBlockTable);
-        }
-        if self
-            .compatibility_canonical_writer_limits
-            .is_some_and(|limits| {
-                limits.attribution_slots()
-                    < requirements.canonical_writer_limits.attribution_slots()
-                    || limits.commitment_slots()
-                        != requirements.canonical_writer_limits.commitment_slots()
-            })
         {
             return Err(StorePlanError::InvalidBlockTable);
         }
@@ -3461,19 +3378,21 @@ mod scoped_transition_tests {
     fn scoped_shape(
         keys: TestKeys,
     ) -> (
-        CanonicalActivationPolicy,
+        CanonicalActivationSessionPolicy,
+        RetainedStoreBatchLimits,
         CanonicalFailureRequirements,
         CanonicalSuccessRequirements,
     ) {
         (
-            CanonicalActivationPolicy::new(
-                writer_plan(keys, 2, 2),
-                writer_plan(keys, 2, 2),
+            CanonicalActivationSessionPolicy::new(
+                RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+                RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
                 CanonicalMaterializationRole::new(keys.dimension, keys.dimension),
                 CanonicalValidationRole::new(keys.phase, keys.dimension, keys.dimension),
                 keys.dimension,
                 keys.dimension,
             ),
+            RetainedStoreBatchLimits::new(2, 2).unwrap(),
             CanonicalFailureRequirements::new(CanonicalTableShape::new(1, 1).unwrap()),
             CanonicalSuccessRequirements::new(
                 CanonicalTableShape::new(1, 1).unwrap(),
@@ -3514,13 +3433,11 @@ mod scoped_transition_tests {
     fn assert_owner_consuming_transition_panic_is_contained(point: ScopedTransitionPanicPoint) {
         let account = account();
         let (operation, keys) = operation(&account);
-        let (policy, failure, success) = scoped_shape(keys);
+        let (policy, evidence_limits, failure, success) = scoped_shape(keys);
         let (request_identity, request) = mint_canonical_activation_request().unwrap();
         let success = success.with_request_identity(request_identity);
-        let (session_policy, _canonical_writer_limits, outcome_evidence_writer_limits) =
-            policy.into_session_parts();
         let owner = operation
-            .into_session_outcome_owner(session_policy, outcome_evidence_writer_limits, failure)
+            .into_session_outcome_owner(policy, evidence_limits, failure)
             .unwrap();
         let mut success = Some(success);
 
@@ -3581,9 +3498,9 @@ mod scoped_transition_tests {
     fn panic_inside_try_open_activation_drops_scoped_inputs_before_containment() {
         let account = account();
         let (operation, keys) = operation(&account);
-        let (policy, failure, success) = scoped_shape(keys);
+        let (policy, evidence_limits, failure, success) = scoped_shape(keys);
         let owner = operation
-            .into_scoped_session_outcome_owner(policy, failure)
+            .into_session_outcome_owner(policy, evidence_limits, failure)
             .unwrap();
         let mut success = Some(success);
         let physical_baseline = account.snapshot();
@@ -3683,9 +3600,9 @@ mod scoped_transition_tests {
     fn fail_closed_publication_open_releases_scoped_inputs_before_final_containment() {
         let account = account();
         let (operation, keys) = operation(&account);
-        let (policy, failure, success) = scoped_shape(keys);
+        let (policy, evidence_limits, failure, success) = scoped_shape(keys);
         let owner = operation
-            .into_scoped_session_outcome_owner(policy, failure)
+            .into_session_outcome_owner(policy, evidence_limits, failure)
             .unwrap();
         let mut success = Some(success);
         let physical_baseline = account.snapshot();

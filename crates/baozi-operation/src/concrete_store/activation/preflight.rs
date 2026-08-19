@@ -92,28 +92,6 @@ where
             failure_work: FailureEvidenceWorkBudget::new(failure_work),
         })
     }
-
-    /// Moves the operation into the single scoped planning-and-activation transaction.
-    pub fn into_scoped_session_outcome_owner(
-        self,
-        policy: CanonicalActivationPolicy,
-        failure_requirements: CanonicalFailureRequirements,
-    ) -> Result<ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, L>, StoreActivationContainment>
-    {
-        let (session_policy, canonical_writer_limits, outcome_evidence_writer_limits) =
-            policy.into_session_parts();
-        let owner = self.into_session_outcome_owner(
-            session_policy,
-            outcome_evidence_writer_limits,
-            failure_requirements,
-        )?;
-        let planning_baseline = owner.dormant.operation().raw.planning_baseline();
-        Ok(ScopedRetainedStoreSessionOutcomeOwner {
-            owner,
-            canonical_writer_limits,
-            planning_baseline,
-        })
-    }
 }
 
 impl<O, PP, U, L> RetainedStoreSessionOutcomeOwner<O, PP, U, L>
@@ -181,7 +159,7 @@ where
         CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         StoreActivationContainment,
     > {
-        self.run_plan_and_activate_scoped(None, None, transaction)
+        self.run_plan_and_activate_scoped(transaction)
     }
 
     #[allow(
@@ -191,8 +169,6 @@ where
     )]
     fn run_plan_and_activate_scoped<T, E, CanonicalKind, CanonicalTag>(
         self,
-        compatibility_canonical_writer_limits: Option<RetainedStoreBatchLimits>,
-        planning_baseline: Option<RetainedPlanningBaseline>,
         transaction: impl for<'scope> FnMut(
             CanonicalPlanning<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
         ) -> CanonicalScopedDisposition<'scope>,
@@ -211,41 +187,10 @@ where
             dormant,
             BoundActivationRoles {
                 policy,
-                compatibility_canonical_writer_limits,
                 expected_request_identity,
             },
             scoped_failure,
             failure_work,
-            planning_baseline,
-            transaction,
-        )
-    }
-}
-
-impl<O, PP, U, L> ScopedRetainedStoreSessionOutcomeOwner<O, PP, U, L>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    /// Runs one higher-ranked planning transaction whose core plan owns all scoped scratch.
-    #[allow(
-        clippy::result_large_err,
-        clippy::type_complexity,
-        reason = "the HRTB transaction preserves the exact linear outcome owner"
-    )]
-    pub fn plan_and_activate_scoped<T, E, CanonicalKind, CanonicalTag>(
-        self,
-        transaction: impl for<'scope> FnMut(
-            CanonicalPlanning<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
-        ) -> CanonicalScopedDisposition<'scope>,
-    ) -> Result<
-        CanonicalActivationOutcome<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
-        StoreActivationContainment,
-    > {
-        self.owner.run_plan_and_activate_scoped(
-            Some(self.canonical_writer_limits),
-            Some(self.planning_baseline),
             transaction,
         )
     }
@@ -262,7 +207,6 @@ fn run_scoped_activation<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>(
     roles: BoundActivationRoles,
     scoped_failure: BoundScopedFailureRequest,
     failure_work: FailureEvidenceWorkBudget,
-    planning_baseline: Option<RetainedPlanningBaseline>,
     transaction: impl for<'scope> FnMut(
         CanonicalPlanning<'scope, O, PP, U, T, E, CanonicalKind, CanonicalTag, L>,
     ) -> CanonicalScopedDisposition<'scope>,
@@ -275,8 +219,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let planning_baseline =
-        planning_baseline.unwrap_or_else(|| dormant.operation().raw.planning_baseline());
+    let planning_baseline = dormant.operation().raw.planning_baseline();
     let containment_anchor = dormant.containment_anchor.share();
     let mut transaction = ManuallyDrop::new(Some(transaction));
     let receipt_brand = ScopedReceiptBrand { _private: 0 };

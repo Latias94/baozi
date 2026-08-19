@@ -173,9 +173,13 @@ fn scoped_activation_shape_with_capacity(
     evidence_blocks: usize,
 ) -> TestScopedActivation {
     TestScopedActivation {
-        policy: CanonicalActivationPolicy::new(
-            writer_plan(canonical_keys, canonical_capacity + 1, 2),
-            writer_plan(evidence_keys, evidence_blocks + 1, 2),
+        policy: TestActivationPolicy::new(
+            RetainedStoreWriterRole::new(
+                canonical_keys.phase,
+                canonical_keys.dimension,
+                canonical_keys.dimension,
+            ),
+            TestEvidenceWriter::new(evidence_keys, evidence_blocks + 1, 2),
             CanonicalMaterializationRole::new(canonical_keys.dimension, canonical_keys.dimension),
             CanonicalValidationRole::new(
                 canonical_keys.phase,

@@ -623,20 +623,6 @@ impl RetainedStoreWriterPlan {
         RetainedStoreWriterRole::new(phase, capacity_dimension, attribution_dimension).bind(limits)
     }
 
-    #[cfg(feature = "_u4-activation")]
-    pub(super) const fn role(self) -> RetainedStoreWriterRole {
-        RetainedStoreWriterRole::new(
-            self.phase,
-            self.capacity_dimension,
-            self.attribution_dimension,
-        )
-    }
-
-    #[cfg(feature = "_u4-activation")]
-    pub(super) const fn limits(self) -> RetainedStoreBatchLimits {
-        self.limits
-    }
-
     pub(super) const fn into_raw(self) -> RetainedWriterPlan<StorePhaseKey, StoreDimensionKey> {
         RetainedWriterPlan::new(
             self.phase,

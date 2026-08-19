@@ -3,7 +3,7 @@ use super::*;
 #[cfg(feature = "_u4-activation")]
 use super::activation::{
     CanonicalActivationDescription, CanonicalActivationOutcome, CanonicalActivationPlanSealer,
-    CanonicalActivationPolicy, CanonicalActivationRequest, CanonicalActivationSeal,
+    CanonicalActivationRequest, CanonicalActivationSeal, CanonicalActivationSessionPolicy,
     CanonicalFailureRequirements, CanonicalMaterializationRole, CanonicalSealedActivationPlan,
     CanonicalSuccessRequirements, CanonicalTableShape, CanonicalValidationRole,
     FailureEvidenceDecision, FailureEvidenceOutcome, mint_canonical_activation_request,
@@ -188,17 +188,21 @@ fn activation_rich_failure_open_recovery_upgrades_the_requested_cause() {
     let failure = CanonicalFailureRequirements::new(
         CanonicalTableShape::new(1, 1).expect("activation evidence shape"),
     );
-    let policy = CanonicalActivationPolicy::new(
-        test_writer_plan(keys, 2, 2),
-        test_writer_plan(keys, 2, 2),
+    let policy = CanonicalActivationSessionPolicy::new(
+        RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+        RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
         CanonicalMaterializationRole::new(keys.work_dimension, keys.work_dimension),
         CanonicalValidationRole::new(keys.phase, keys.work_dimension, keys.work_dimension),
         keys.dimension,
         keys.dimension,
     );
     let outcome_owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
-        .expect("scoped activation owner");
+        .into_session_outcome_owner(
+            policy,
+            RetainedStoreBatchLimits::new(2, 2).unwrap(),
+            failure,
+        )
+        .expect("session activation owner");
     let outcome: CanonicalActivationOutcome<
         TestOwner,
         TestProgress,
@@ -260,17 +264,21 @@ fn activation_builder_panic_preserves_the_exact_completed_work_prefix() {
         NonZeroU64::MIN,
     )
     .expect("activation success requirements");
-    let policy = CanonicalActivationPolicy::new(
-        test_writer_plan(keys, 2, 2),
-        test_writer_plan(keys, 2, 2),
+    let policy = CanonicalActivationSessionPolicy::new(
+        RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
+        RetainedStoreWriterRole::new(keys.phase, keys.dimension, keys.dimension),
         CanonicalMaterializationRole::new(keys.work_dimension, keys.work_dimension),
         CanonicalValidationRole::new(keys.phase, keys.work_dimension, keys.work_dimension),
         keys.dimension,
         keys.dimension,
     );
     let outcome_owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
-        .expect("scoped activation owner");
+        .into_session_outcome_owner(
+            policy,
+            RetainedStoreBatchLimits::new(2, 2).unwrap(),
+            failure,
+        )
+        .expect("session activation owner");
     let mut success = Some(success);
     let mut ledger = None;
 

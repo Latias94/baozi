@@ -23,7 +23,7 @@ fn rejected_session_with_panicking_cause(
         success: _,
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
-        .into_scoped_session_outcome_owner(policy, failure)
+        .into_test_session_outcome_owner(policy, failure)
         .unwrap();
     let outcome: CanonicalActivationOutcome<
         TestOwner,
