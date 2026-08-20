@@ -2093,14 +2093,30 @@ mod tests {
         identity: &DependencyIdentity,
         bytes: &[u8],
     ) -> usize {
+        add_available_with_requirement(
+            graph,
+            host,
+            source,
+            role,
+            DependencyRequirement::Required,
+            cache_index,
+            identity,
+            bytes,
+        )
+    }
+
+    fn add_available_with_requirement(
+        graph: &mut ResourceGraph,
+        host: ImportStoreHost<'_>,
+        source: usize,
+        role: &DependencyRoleId,
+        requirement: DependencyRequirement,
+        cache_index: usize,
+        identity: &DependencyIdentity,
+        bytes: &[u8],
+    ) -> usize {
         let mut pending = graph
-            .begin_relation(
-                host,
-                source,
-                role,
-                DependencyRequirement::Required,
-                identity.path().as_str(),
-            )
+            .begin_relation(host, source, role, requirement, identity.path().as_str())
             .unwrap();
         graph.prepare_target(host, &mut pending, identity).unwrap();
         graph
@@ -2113,6 +2129,121 @@ mod tests {
             )
             .unwrap();
         graph.source_for_cache(cache_index).unwrap()
+    }
+
+    #[derive(Clone, Copy)]
+    struct AvailableEdgeFixture {
+        role: &'static str,
+        requirement: DependencyRequirement,
+        path: &'static str,
+        bytes: &'static [u8],
+    }
+
+    fn available_edge(
+        role: &'static str,
+        path: &'static str,
+        bytes: &'static [u8],
+    ) -> AvailableEdgeFixture {
+        AvailableEdgeFixture {
+            role,
+            requirement: DependencyRequirement::Required,
+            path,
+            bytes,
+        }
+    }
+
+    fn sealed_root_available_manifest(edges: &[AvailableEdgeFixture]) -> SuccessfulInputManifest {
+        let limits = ResourceLimits::default();
+        let owner = store_owner(&limits);
+        let host = owner.host();
+        let authority = AuthorityDomain::default();
+        let primary_path = AssetPath::new("main.asset").unwrap();
+        let mut graph = ResourceGraph::new(limits);
+        graph
+            .bind_primary(host, &authority, &primary_path, b"primary")
+            .unwrap();
+        let primary = graph.source_for_primary().unwrap();
+        for (cache_index, edge) in edges.iter().enumerate() {
+            let role = DependencyRoleId::new(edge.role).unwrap();
+            let identity = dependency_identity(&authority, edge.path);
+            add_available_with_requirement(
+                &mut graph,
+                host,
+                primary,
+                &role,
+                edge.requirement,
+                cache_index,
+                &identity,
+                edge.bytes,
+            );
+        }
+        graph.seal(host).unwrap();
+        graph.take_manifest().unwrap()
+    }
+
+    fn sealed_origin_manifest(nested: bool) -> SuccessfulInputManifest {
+        let limits = ResourceLimits::default();
+        let owner = store_owner(&limits);
+        let host = owner.host();
+        let authority = AuthorityDomain::default();
+        let primary_path = AssetPath::new("main.asset").unwrap();
+        let role = DependencyRoleId::new("test.resource").unwrap();
+        let mut graph = ResourceGraph::new(limits);
+        graph
+            .bind_primary(host, &authority, &primary_path, b"primary")
+            .unwrap();
+        let primary = graph.source_for_primary().unwrap();
+        let identity_a = dependency_identity(&authority, "a.asset");
+        let node_a = add_available(&mut graph, host, primary, &role, 0, &identity_a, b"a");
+        let identity_b = dependency_identity(&authority, "b.asset");
+        let source = if nested { node_a } else { primary };
+        add_available(&mut graph, host, source, &role, 1, &identity_b, b"b");
+        graph.seal(host).unwrap();
+        graph.take_manifest().unwrap()
+    }
+
+    fn sealed_unavailable_manifest(
+        class: ManifestUnavailableClass,
+        code: &'static str,
+        replay: ManifestUnavailableReplay,
+    ) -> SuccessfulInputManifest {
+        let limits = ResourceLimits::default();
+        let owner = store_owner(&limits);
+        let host = owner.host();
+        let authority = AuthorityDomain::default();
+        let primary_path = AssetPath::new("main.asset").unwrap();
+        let dependency = dependency_identity(&authority, "missing.asset");
+        let role = DependencyRoleId::new("test.resource").unwrap();
+        let mut graph = ResourceGraph::new(limits);
+        graph
+            .bind_primary(host, &authority, &primary_path, b"primary")
+            .unwrap();
+        let primary = graph.source_for_primary().unwrap();
+        let pending = graph
+            .begin_relation(
+                host,
+                primary,
+                &role,
+                DependencyRequirement::Optional,
+                dependency.path().as_str(),
+            )
+            .unwrap();
+        graph
+            .complete_unavailable(
+                host,
+                pending,
+                Some(dependency.path()),
+                Some(&dependency),
+                ResourceUnavailableDisposition {
+                    class,
+                    code: ManifestUnavailableCode::new(code),
+                    replay,
+                    stable_identity_schema: None,
+                },
+            )
+            .unwrap();
+        graph.seal(host).unwrap();
+        graph.take_manifest().unwrap()
     }
 
     fn shared_depth_prefix(
@@ -2196,6 +2327,82 @@ mod tests {
         graph.seal(host).unwrap();
 
         assert_eq!(graph.take_manifest().unwrap().counts().maximum_depth(), 3);
+    }
+
+    #[test]
+    fn manifest_digest_is_stable_across_dependency_insertion_order() {
+        let material = available_edge("test.material", "materials/mat.asset", b"material");
+        let texture = available_edge("test.texture", "textures/albedo.asset", b"texture");
+
+        let forward = sealed_root_available_manifest(&[material, texture]);
+        let reverse = sealed_root_available_manifest(&[texture, material]);
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.digest(), reverse.digest());
+        assert_eq!(forward.counts().node_class_count(), 3);
+        assert_eq!(forward.counts().available_relation_occurrence_count(), 2);
+    }
+
+    #[test]
+    fn manifest_digest_changes_for_one_field_resource_graph_mutations() {
+        let baseline = sealed_root_available_manifest(&[available_edge(
+            "test.material",
+            "materials/mat.asset",
+            b"material",
+        )]);
+
+        let role = sealed_root_available_manifest(&[available_edge(
+            "test.texture",
+            "materials/mat.asset",
+            b"material",
+        )]);
+        assert_ne!(baseline.digest(), role.digest(), "role");
+
+        let requirement = sealed_root_available_manifest(&[AvailableEdgeFixture {
+            role: "test.material",
+            requirement: DependencyRequirement::Optional,
+            path: "materials/mat.asset",
+            bytes: b"material",
+        }]);
+        assert_ne!(baseline.digest(), requirement.digest(), "requirement");
+
+        let identity = sealed_root_available_manifest(&[available_edge(
+            "test.material",
+            "materials/renamed.asset",
+            b"material",
+        )]);
+        assert_ne!(baseline.digest(), identity.digest(), "resource identity");
+
+        let target_bytes = sealed_root_available_manifest(&[available_edge(
+            "test.material",
+            "materials/mat.asset",
+            b"material-v2",
+        )]);
+        assert_ne!(baseline.digest(), target_bytes.digest(), "target bytes");
+
+        let flat_origin = sealed_origin_manifest(false);
+        let nested_origin = sealed_origin_manifest(true);
+        assert_ne!(flat_origin.digest(), nested_origin.digest(), "origin");
+        assert_eq!(flat_origin.counts().maximum_depth(), 1);
+        assert_eq!(nested_origin.counts().maximum_depth(), 2);
+
+        let unproven = sealed_unavailable_manifest(
+            ManifestUnavailableClass::Io,
+            "missing",
+            ManifestUnavailableReplay::UnprovenNegativeInput,
+        );
+        let terminal_outcome = sealed_unavailable_manifest(
+            ManifestUnavailableClass::Resource,
+            "resource-limit",
+            ManifestUnavailableReplay::SessionDependent(
+                ManifestSessionDependentReason::AcquisitionBudget,
+            ),
+        );
+        assert_ne!(
+            unproven.digest(),
+            terminal_outcome.digest(),
+            "terminal outcome"
+        );
     }
 
     #[test]

@@ -1996,6 +1996,28 @@ fn immutable_namespace_negative_proof_is_cached_once_and_removes_unproven_reason
         report.successful_input_manifest(),
         independent.successful_input_manifest()
     );
+    let changed_namespace_io = ImmutableMemoryAssetIo::try_from_entries(vec![
+        (
+            AssetPath::new("asset.opt").unwrap(),
+            Arc::from(&b"primary"[..]),
+        ),
+        (
+            AssetPath::new("unrelated.asset").unwrap(),
+            Arc::from(&b"unrelated"[..]),
+        ),
+    ])
+    .expect("a changed immutable namespace");
+    let changed_namespace = import_asset(
+        &request,
+        &changed_namespace_io,
+        AssetPath::new("asset.opt").unwrap(),
+        ImportOperationControl::default(),
+    )
+    .expect("the changed namespace still proves absence, but with a different proof digest");
+    assert_ne!(
+        report.successful_input_manifest().digest(),
+        changed_namespace.successful_input_manifest().digest()
+    );
 
     assert_eq!(
         report.optional_dependency_evidence()[0].cache_disposition(),
@@ -2531,6 +2553,108 @@ fn optional_dependency_work_budget_exhaustion_is_session_dependent_omission() {
         .unwrap();
     assert_eq!(dependency_bytes.attempted(), 0);
     assert_eq!(dependency_bytes.consumed(), 0);
+}
+
+fn available_dependency_manifest_digest(
+    format_id: &'static str,
+    extension: &'static str,
+    behavior: DependencyBehavior,
+    duplicate_registry_order: bool,
+) -> ([u8; 32], u64, u64) {
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let main = RecordingImporter::plain(format_id, extension).with_dependency(
+        role,
+        DependencyRequirement::Required,
+        behavior,
+    );
+    let noise = RecordingImporter::plain("dev.baozi.test.manifest-permutation.noise", "noise");
+    let request = if duplicate_registry_order {
+        request_for_all(vec![noise, main])
+    } else {
+        request_for_all(vec![main, noise])
+    };
+    let source = AssetPath::new("asset.manifest-permutation").unwrap();
+    let dependency = AssetPath::new("missing.bin").unwrap();
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])])
+        .with_asset(dependency, [Arc::from(&b"dependency"[..])]);
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect("available dependency manifest import");
+
+    assert_eq!(io.open_count(), 2, "primary plus one dependency open");
+    let manifest = report.successful_input_manifest();
+    let relation = manifest
+        .node_classes()
+        .iter()
+        .flat_map(|class| class.outgoing_relations())
+        .next()
+        .expect("dependency relation");
+    (
+        manifest.digest().as_bytes(),
+        relation.multiplicity(),
+        manifest.counts().available_relation_occurrence_count(),
+    )
+}
+
+#[test]
+fn manifest_digest_is_stable_across_registry_cache_and_task_order() {
+    let first = available_dependency_manifest_digest(
+        "dev.baozi.test.manifest-permutation",
+        "manifest-permutation",
+        DependencyBehavior::RequiredAvailableTwice,
+        false,
+    );
+    let reversed_registry = available_dependency_manifest_digest(
+        "dev.baozi.test.manifest-permutation",
+        "manifest-permutation",
+        DependencyBehavior::RequiredAvailableTwice,
+        true,
+    );
+    assert_eq!(first, reversed_registry);
+    assert_eq!(first.1, 2);
+    assert_eq!(first.2, 2);
+
+    let left = std::thread::spawn(|| {
+        available_dependency_manifest_digest(
+            "dev.baozi.test.manifest-permutation",
+            "manifest-permutation",
+            DependencyBehavior::RequiredAvailableTwice,
+            false,
+        )
+    });
+    let right = std::thread::spawn(|| {
+        available_dependency_manifest_digest(
+            "dev.baozi.test.manifest-permutation",
+            "manifest-permutation",
+            DependencyBehavior::RequiredAvailableTwice,
+            true,
+        )
+    });
+
+    assert_eq!(first, left.join().expect("left import thread"));
+    assert_eq!(first, right.join().expect("right import thread"));
+}
+
+#[test]
+fn manifest_digest_changes_when_dependency_multiplicity_changes() {
+    let single = available_dependency_manifest_digest(
+        "dev.baozi.test.manifest-multiplicity.single",
+        "manifest-permutation",
+        DependencyBehavior::RequiredAvailableWithDiagnostic,
+        false,
+    );
+    let repeated = available_dependency_manifest_digest(
+        "dev.baozi.test.manifest-multiplicity.repeated",
+        "manifest-permutation",
+        DependencyBehavior::RequiredAvailableTwice,
+        false,
+    );
+
+    assert_eq!(single.1, 1);
+    assert_eq!(single.2, 1);
+    assert_eq!(repeated.1, 2);
+    assert_eq!(repeated.2, 2);
+    assert_ne!(single.0, repeated.0);
 }
 
 #[test]
