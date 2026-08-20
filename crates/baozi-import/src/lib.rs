@@ -38,6 +38,7 @@ mod scope;
 mod session;
 mod source_scope;
 mod store;
+mod text_input;
 
 /// Opaque descriptor returned after a parser submits one complete canonical Scene batch.
 ///
@@ -131,4 +132,8 @@ pub use source_scope::{
     FinalizedSourceScopeRecord, SourceScopeCounts, SourceScopeDetail, SourceScopeDetailState,
     SourceScopeDetails, SourceScopeDigest, SourceScopeDisposition, SourceScopeEntityKind,
     SourceScopeRecord, SourceScopeRecordBuilder,
+};
+pub use text_input::{
+    ConformedTextInput, TextConformanceResult, TextConformanceViolation,
+    TextConformanceViolationKind, TextInputBom, TextInputOptions, TextInputReplacement,
 };

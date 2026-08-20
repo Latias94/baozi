@@ -39,6 +39,7 @@ use crate::store::{
     ImportObservedWorkFailure, ImportStoreHost, ImportStoreHostError, ImportStoreReservation,
     ImportStoreSessionOwner, scene_validation_limits,
 };
+use crate::text_input::{TextConformanceResult, TextInputOptions};
 use crate::{SceneDraft as CanonicalSceneDraft, authoring::SceneAuthoringBatch};
 use baozi_core::scene::integration::SceneConstruction;
 use baozi_core::{OrderedMap, OrderedMapError};
@@ -583,6 +584,19 @@ impl<'session> ParseScope<'session> {
         self.primary_bytes
     }
 
+    pub fn conform_text_input(
+        &self,
+        bytes: &[u8],
+        options: TextInputOptions,
+    ) -> ParseResult<TextConformanceResult<'_>> {
+        crate::text_input::conform_text_input(
+            self,
+            self.entry.descriptor().text_profile(),
+            bytes,
+            options,
+        )
+    }
+
     pub fn diagnostic_source(&self) -> DiagnosticSource<'_> {
         DiagnosticSource::new(
             self.primary_authority.clone(),
@@ -934,6 +948,13 @@ impl<'session> ParseScope<'session> {
             return failure;
         }
         self.abort(ScopeAbortCause::ResourceLimit { resource, limit })
+    }
+
+    pub(crate) fn descriptor_contract_failure(&self, code: &'static str) -> ParseFailure {
+        if let Err(failure) = self.preflight_active() {
+            return failure;
+        }
+        self.abort(ScopeAbortCause::DescriptorContract { code })
     }
 
     pub fn report_progress(
