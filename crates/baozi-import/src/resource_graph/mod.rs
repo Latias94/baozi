@@ -2340,6 +2340,50 @@ mod tests {
     }
 
     #[test]
+    fn dependency_cache_preallocation_failure_is_bookkeeping_not_structural_graph_limit() {
+        let limits = ResourceLimits::default();
+        let owner = store_owner(&limits);
+        let host = owner.host();
+        host.tighten_dimension_policy(
+            ImportDimension::ScratchBytes,
+            DimensionPolicy::reservable_bytes(0, 0, 0, 0),
+        )
+        .unwrap();
+        let mut graph = ResourceGraph::new(limits);
+
+        let failure = graph
+            .reserve_acquisition_capacity(host)
+            .expect_err("dependency-cache capacity must be admitted before cache mutation");
+
+        match failure {
+            ResourceGraphError::Scope(ScopeAbortCause::Ledger(
+                baozi_operation::LedgerCause::LimitExceeded {
+                    dimension: ImportDimension::ScratchBytes,
+                    ..
+                },
+            )) => {}
+            ResourceGraphError::Limit {
+                resource:
+                    "max_resource_graph_nodes"
+                    | "max_resource_graph_relations"
+                    | "max_resource_graph_depth",
+                ..
+            } => panic!("cache preallocation failure was relabeled as a structural graph limit"),
+            other => panic!("unexpected dependency-cache preallocation failure: {other:?}"),
+        }
+        assert_eq!(
+            host.dimension_state(ImportDimension::ScratchBytes)
+                .unwrap()
+                .live_bytes(),
+            0
+        );
+        assert!(
+            graph.cache.capacity_plan().unwrap().requires_apply(),
+            "failed preallocation must leave cache growth unapplied"
+        );
+    }
+
+    #[test]
     fn equal_digest_relations_fold_only_when_canonical_bytes_match() {
         let limits = ResourceLimits::default();
         let owner = store_owner(&limits);

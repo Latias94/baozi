@@ -2195,52 +2195,166 @@ fn immutable_negative_proof_honors_exact_and_rejected_budgets() {
     }
 }
 
-#[test]
-fn optional_dependency_cannot_suppress_a_structural_resource_graph_limit() {
-    let source = AssetPath::new("asset.optional-graph-limit").unwrap();
-    let role = DependencyRoleId::new("material.library").unwrap();
-    let importer = RecordingImporter::plain(
-        "dev.baozi.test.optional-graph-limit",
-        "optional-graph-limit",
-    )
-    .with_dependency(
-        role,
-        DependencyRequirement::Optional,
-        DependencyBehavior::OptionalTwice,
-    );
-    let mut limits = ResourceLimits::default();
-    limits.max_resource_graph_nodes = 1;
-    let request = lossy_request_for_with_limits(importer, limits);
-    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+#[derive(Debug, Clone, Copy)]
+enum OptionalStructuralGraphLimitCase {
+    Node,
+    Relation,
+    Depth,
+    Work,
+}
 
-    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
-        .expect_err("a structural graph limit cannot be converted into optional loss");
+impl OptionalStructuralGraphLimitCase {
+    const ALL: [Self; 4] = [Self::Node, Self::Relation, Self::Depth, Self::Work];
 
-    assert!(matches!(
-        failure.cause(),
-        ImportCause::Scope(abort)
-            if matches!(
-                abort.cause(),
+    const fn source(self) -> &'static str {
+        match self {
+            Self::Node => "asset.optional-graph-node-limit",
+            Self::Relation => "asset.optional-graph-relation-limit",
+            Self::Depth => "asset.optional-graph-depth-limit",
+            Self::Work => "asset.optional-graph-work-limit",
+        }
+    }
+
+    const fn format_id(self) -> &'static str {
+        match self {
+            Self::Node => "dev.baozi.test.optional-graph-node-limit",
+            Self::Relation => "dev.baozi.test.optional-graph-relation-limit",
+            Self::Depth => "dev.baozi.test.optional-graph-depth-limit",
+            Self::Work => "dev.baozi.test.optional-graph-work-limit",
+        }
+    }
+
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::Node => "optional-graph-node-limit",
+            Self::Relation => "optional-graph-relation-limit",
+            Self::Depth => "optional-graph-depth-limit",
+            Self::Work => "optional-graph-work-limit",
+        }
+    }
+
+    fn configure(self, limits: &mut ResourceLimits) {
+        match self {
+            Self::Node => limits.max_resource_graph_nodes = 1,
+            Self::Relation => limits.max_resource_graph_relations = 0,
+            Self::Depth => limits.max_resource_graph_depth = 0,
+            Self::Work => limits.max_resource_graph_work = 0,
+        }
+    }
+
+    fn assert_cause(self, cause: &ScopeAbortCause) {
+        match self {
+            Self::Node => assert!(matches!(
+                cause,
                 ScopeAbortCause::ResourceLimit {
                     resource: "max_resource_graph_nodes",
                     limit: 1,
                 }
-            )
-    ));
-    assert_eq!(failure.optional_dependency_evidence().len(), 0);
-    assert_eq!(io.open_count(), 1, "the dependency backend must not open");
-    let graph_nodes = failure
-        .ledger()
-        .dimension(ImportDimension::ResourceGraphNodes)
-        .unwrap();
-    assert_eq!(graph_nodes.attempted(), 1);
-    assert_eq!(graph_nodes.consumed(), 1);
-    let graph_relations = failure
-        .ledger()
-        .dimension(ImportDimension::ResourceGraphRelations)
-        .unwrap();
-    assert_eq!(graph_relations.attempted(), 1);
-    assert_eq!(graph_relations.consumed(), 1);
+            )),
+            Self::Relation => assert!(matches!(
+                cause,
+                ScopeAbortCause::ResourceLimit {
+                    resource: "max_resource_graph_relations",
+                    limit: 0,
+                }
+            )),
+            Self::Depth => assert!(matches!(
+                cause,
+                ScopeAbortCause::ResourceLimit {
+                    resource: "max_resource_graph_depth",
+                    limit: 0,
+                }
+            )),
+            Self::Work => assert!(matches!(
+                cause,
+                ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                    dimension: ImportDimension::ResourceGraphWork,
+                    value: 1,
+                    limit: 0,
+                    ..
+                })
+            )),
+        }
+    }
+
+    fn assert_ledger(self, failure: &ImportFailure) {
+        match self {
+            Self::Node => {
+                let graph_nodes = failure
+                    .ledger()
+                    .dimension(ImportDimension::ResourceGraphNodes)
+                    .unwrap();
+                assert_eq!(graph_nodes.attempted(), 1);
+                assert_eq!(graph_nodes.consumed(), 1);
+                let graph_relations = failure
+                    .ledger()
+                    .dimension(ImportDimension::ResourceGraphRelations)
+                    .unwrap();
+                assert_eq!(graph_relations.attempted(), 1);
+                assert_eq!(graph_relations.consumed(), 1);
+            }
+            Self::Relation => {
+                let graph_relations = failure
+                    .ledger()
+                    .dimension(ImportDimension::ResourceGraphRelations)
+                    .unwrap();
+                assert_eq!(graph_relations.attempted(), 0);
+                assert_eq!(graph_relations.consumed(), 0);
+            }
+            Self::Depth => {
+                let graph_relations = failure
+                    .ledger()
+                    .dimension(ImportDimension::ResourceGraphRelations)
+                    .unwrap();
+                assert_eq!(graph_relations.attempted(), 1);
+                assert_eq!(graph_relations.consumed(), 1);
+            }
+            Self::Work => {
+                let graph_work = failure
+                    .ledger()
+                    .dimension(ImportDimension::ResourceGraphWork)
+                    .unwrap();
+                assert_eq!(graph_work.attempted(), 1);
+                assert_eq!(graph_work.consumed(), 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn optional_dependency_cannot_suppress_structural_resource_graph_limits() {
+    for case in OptionalStructuralGraphLimitCase::ALL {
+        let source = AssetPath::new(case.source()).unwrap();
+        let role = DependencyRoleId::new("material.library").unwrap();
+        let importer = RecordingImporter::plain(case.format_id(), case.extension())
+            .with_dependency(
+                role,
+                DependencyRequirement::Optional,
+                DependencyBehavior::OptionalTwice,
+            );
+        let mut limits = ResourceLimits::default();
+        case.configure(&mut limits);
+        let request = lossy_request_for_with_limits(importer, limits);
+        let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+        let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+            .expect_err("a structural graph limit cannot be converted into optional loss");
+
+        let ImportCause::Scope(abort) = failure.cause() else {
+            panic!(
+                "expected scope failure for {case:?}, got {:?}",
+                failure.cause()
+            );
+        };
+        case.assert_cause(abort.cause());
+        assert_eq!(failure.optional_dependency_evidence().len(), 0, "{case:?}");
+        assert_eq!(
+            io.open_count(),
+            1,
+            "the dependency backend must not open for {case:?}"
+        );
+        case.assert_ledger(&failure);
+    }
 }
 
 #[test]
