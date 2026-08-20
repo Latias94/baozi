@@ -2329,6 +2329,97 @@ fn optional_dependency_byte_budget_exhaustion_is_session_dependent_omission() {
 }
 
 #[test]
+fn optional_dependency_work_budget_exhaustion_is_session_dependent_omission() {
+    let source = AssetPath::new("asset.optional-dependency-work-budget").unwrap();
+    let dependency = AssetPath::new("missing.bin").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain(
+        "dev.baozi.test.optional-dependency-work-budget",
+        "optional-dependency-work-budget",
+    )
+    .with_dependency(
+        role,
+        DependencyRequirement::Optional,
+        DependencyBehavior::OptionalTwice,
+    );
+    let mut limits = ResourceLimits::default();
+    limits.max_dependency_acquisition_work = 0;
+    let request = lossy_request_for_with_limits(importer, limits);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])])
+        .with_asset(dependency, [Arc::from(&b"dependency"[..])]);
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect("optional dependency-work budget exhaustion must remain a successful omission");
+
+    assert_eq!(
+        io.open_count(),
+        2,
+        "the cached work failure must avoid reopening the dependency"
+    );
+    assert_eq!(report.optional_dependency_evidence().len(), 2);
+    assert_eq!(
+        report.optional_dependency_evidence()[0].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Fresh
+    );
+    assert_eq!(
+        report.optional_dependency_evidence()[1].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Reused
+    );
+    assert!(
+        report
+            .optional_dependency_evidence()
+            .iter()
+            .all(|evidence| evidence.identity().is_some())
+    );
+
+    let manifest = report.successful_input_manifest();
+    assert!(matches!(
+        manifest.replay_status(),
+        InputReplayStatus::ObservedOnly(reasons)
+            if reasons.as_slice() == [
+                ManifestObservedOnlyReason::UnstableResourceIdentity,
+                ManifestObservedOnlyReason::SessionDependentUnavailable,
+            ]
+    ));
+    assert_eq!(manifest.counts().node_class_count(), 1);
+    assert_eq!(manifest.counts().quotient_relation_record_count(), 1);
+    assert_eq!(manifest.counts().relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().unavailable_relation_record_count(), 1);
+    assert_eq!(manifest.counts().unavailable_relation_occurrence_count(), 2);
+
+    let relation = &manifest.node_classes()[0].outgoing_relations()[0];
+    assert_eq!(relation.multiplicity(), 2);
+    assert!(matches!(
+        relation.reference(),
+        ManifestReference::Normalized(identity) if identity.value().as_str() == "missing.bin"
+    ));
+    assert!(matches!(
+        relation.outcome(),
+        ManifestRelationOutcome::Unavailable {
+            class: ManifestUnavailableClass::Resource,
+            code,
+            identity_evidence: Some(identity),
+            replay: ManifestUnavailableReplay::SessionDependent(
+                ManifestSessionDependentReason::AcquisitionBudget
+            ),
+        } if code.as_str() == "resource-limit"
+            && identity.value().as_str() == "missing.bin"
+    ));
+    let dependency_work = report
+        .ledger()
+        .dimension(ImportDimension::DependencyAcquisitionWork)
+        .unwrap();
+    assert_eq!(dependency_work.attempted(), 1);
+    assert_eq!(dependency_work.consumed(), 0);
+    let dependency_bytes = report
+        .ledger()
+        .dimension(ImportDimension::DependencyBytes)
+        .unwrap();
+    assert_eq!(dependency_bytes.attempted(), 0);
+    assert_eq!(dependency_bytes.consumed(), 0);
+}
+
+#[test]
 fn successful_dependency_snapshot_is_shared_and_reused_without_reopening() {
     let source = AssetPath::new("asset.dependency-cache").unwrap();
     let dependency = AssetPath::new("missing.bin").unwrap();

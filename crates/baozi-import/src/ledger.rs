@@ -213,10 +213,11 @@ pub enum ImportDimension {
     NegativeProofTemporaryBytes,
     NegativeProofConstructionWork,
     NegativeProofVerificationWork,
+    DependencyAcquisitionWork,
 }
 
 impl ImportDimension {
-    pub(crate) const ALL: [Self; 57] = [
+    pub(crate) const ALL: [Self; 58] = [
         Self::AssetOpen,
         Self::DependencyReference,
         Self::PrimaryBytes,
@@ -274,6 +275,7 @@ impl ImportDimension {
         Self::NegativeProofTemporaryBytes,
         Self::NegativeProofConstructionWork,
         Self::NegativeProofVerificationWork,
+        Self::DependencyAcquisitionWork,
     ];
 
     fn policy(self, limits: &ResourceLimits) -> DimensionPolicy {
@@ -286,6 +288,13 @@ impl ImportDimension {
         match self {
             Self::AssetOpen => counter(limits.max_open_assets),
             Self::DependencyReference => counter(limits.max_dependency_references),
+            Self::DependencyAcquisitionWork => DimensionPolicy::counter(
+                limits
+                    .max_dependency_references
+                    .max(limits.max_dependency_acquisition_work),
+                limits.max_dependency_acquisition_work,
+                0,
+            ),
             Self::PrimaryBytes => bytes(limits.max_primary_asset_bytes),
             // The per-dependency bound is enforced locally. This dimension is aggregate.
             Self::DependencyBytes => bytes(limits.max_total_asset_bytes),
@@ -366,9 +375,8 @@ impl ImportDimension {
     }
 }
 
-const _: () = assert!(
-    ImportDimension::ALL.len() == ImportDimension::NegativeProofVerificationWork as usize + 1
-);
+const _: () =
+    assert!(ImportDimension::ALL.len() == ImportDimension::DependencyAcquisitionWork as usize + 1);
 
 pub(crate) fn import_ledger_limits(
     limits: &ResourceLimits,

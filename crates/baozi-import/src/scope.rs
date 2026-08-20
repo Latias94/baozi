@@ -2881,7 +2881,8 @@ impl<'session> ParseScope<'session> {
             });
         }
         self.charge_open_consumed()?;
-        read_opened_asset(
+        self.admit_dependency_acquisition_work()?;
+        let bytes = read_opened_asset(
             self.host,
             opened,
             ImportLedgerPhase::DependencyAcquisition,
@@ -2889,7 +2890,9 @@ impl<'session> ParseScope<'session> {
             ImportDimension::DependencyBytes,
             self.limits.max_dependency_asset_bytes,
             self.limits.max_total_asset_bytes,
-        )
+        )?;
+        self.charge_dependency_acquisition_work_consumed()?;
+        Ok(bytes)
     }
 
     fn share_dependency_snapshot(
@@ -2943,6 +2946,37 @@ impl<'session> ParseScope<'session> {
     fn charge_open_consumed(&self) -> Result<(), ScopeAbortCause> {
         self.host
             .charge_consumed(ImportDimension::AssetOpen, 1)
+            .map_err(|cause| cause.into_scope_abort_cause())
+    }
+
+    fn admit_dependency_acquisition_work(&self) -> Result<(), ScopeAbortCause> {
+        self.host
+            .charge_attempted(ImportDimension::DependencyAcquisitionWork, 1)
+            .map_err(|cause| cause.into_scope_abort_cause())?;
+        let state = self
+            .host
+            .dimension_state(ImportDimension::DependencyAcquisitionWork)
+            .map_err(|cause| cause.into_scope_abort_cause())?;
+        let value = state.consumed().checked_add(1).ok_or({
+            ScopeAbortCause::Ledger(LedgerCause::ArithmeticOverflow {
+                class: CounterClass::Consumed,
+                dimension: ImportDimension::DependencyAcquisitionWork,
+            })
+        })?;
+        if value > self.limits.max_dependency_acquisition_work {
+            return Err(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                class: CounterClass::Consumed,
+                dimension: ImportDimension::DependencyAcquisitionWork,
+                value,
+                limit: self.limits.max_dependency_acquisition_work,
+            }));
+        }
+        Ok(())
+    }
+
+    fn charge_dependency_acquisition_work_consumed(&self) -> Result<(), ScopeAbortCause> {
+        self.host
+            .charge_consumed(ImportDimension::DependencyAcquisitionWork, 1)
             .map_err(|cause| cause.into_scope_abort_cause())
     }
 
@@ -4026,7 +4060,10 @@ fn optional_eligible(cause: &ScopeAbortCause) -> bool {
             ..
         }
         | ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
-            dimension: ImportDimension::DependencyBytes | ImportDimension::TotalAssetBytes,
+            dimension:
+                ImportDimension::DependencyBytes
+                | ImportDimension::TotalAssetBytes
+                | ImportDimension::DependencyAcquisitionWork,
             ..
         }) => true,
         _ => false,

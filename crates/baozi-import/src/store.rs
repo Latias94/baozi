@@ -42,7 +42,7 @@ pub(crate) use scene_activation::ImportStoreSceneBoundary;
 
 const IMPORT_STORE_CATALOG: StoreSemanticCatalogId =
     StoreSemanticCatalogId::new(*b"baozi-import-led", NonZeroU32::MIN);
-const IMPORT_DIMENSION_COUNT: usize = ImportDimension::NegativeProofVerificationWork as usize + 1;
+const IMPORT_DIMENSION_COUNT: usize = ImportDimension::DependencyAcquisitionWork as usize + 1;
 const IMPORT_STORE_FALLBACK_CODE: u32 = 0x494d_0001;
 const MIN_CANONICAL_RETAINED_MEMBER_LIMIT: u64 = 1;
 const STARTUP_OUTCOME_EVIDENCE_AMOUNT: u64 = 1;
@@ -1038,6 +1038,7 @@ impl ImportStoreVocabulary {
             admit_dimension(domain, ImportDimension::NegativeProofTemporaryBytes)?,
             admit_dimension(domain, ImportDimension::NegativeProofConstructionWork)?,
             admit_dimension(domain, ImportDimension::NegativeProofVerificationWork)?,
+            admit_dimension(domain, ImportDimension::DependencyAcquisitionWork)?,
         ];
         let startup_outcome_evidence = domain
             .try_admit_dimension(STARTUP_OUTCOME_EVIDENCE_SEMANTIC)
@@ -3469,7 +3470,7 @@ mod tests {
             CANONICAL_STRUCTURAL_WORK_SEMANTIC,
         ];
         for dimension in
-            ImportDimension::AssetOpen as u8..=ImportDimension::NegativeProofVerificationWork as u8
+            ImportDimension::AssetOpen as u8..=ImportDimension::DependencyAcquisitionWork as u8
         {
             for role in private_roles {
                 assert_ne!(u64::from(dimension) + 1, role.local().get());
