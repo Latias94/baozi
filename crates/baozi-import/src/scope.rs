@@ -2098,7 +2098,22 @@ impl<'session> ParseScope<'session> {
         self.store_dependency_failure(DependencyResolutionContext {
             relation,
             identity,
-            normalized_path: Some(normalized_path),
+            evidence: DependencyFailureEvidence::Normalized(normalized_path),
+            cause: DependencyResolutionCause::Owned(cause),
+            cache_disposition: DependencyCacheDisposition::Fresh,
+        })
+    }
+
+    fn dependency_failure_with_rejected_reference(
+        &self,
+        relation: Option<PendingResourceRelation>,
+        evidence_path: MeteredDependencyPath,
+        cause: ScopeAbortCause,
+    ) -> DependencyResolutionFailure {
+        self.store_dependency_failure(DependencyResolutionContext {
+            relation,
+            identity: None,
+            evidence: DependencyFailureEvidence::Rejected(Some(evidence_path)),
             cause: DependencyResolutionCause::Owned(cause),
             cache_disposition: DependencyCacheDisposition::Fresh,
         })
@@ -2115,7 +2130,7 @@ impl<'session> ParseScope<'session> {
         self.store_dependency_failure(DependencyResolutionContext {
             relation: Some(relation),
             identity: Some(identity),
-            normalized_path: Some(normalized_path),
+            evidence: DependencyFailureEvidence::Normalized(normalized_path),
             cause: DependencyResolutionCause::Cached { index },
             cache_disposition,
         })
@@ -2129,7 +2144,7 @@ impl<'session> ParseScope<'session> {
         self.store_dependency_failure(DependencyResolutionContext {
             relation,
             identity: None,
-            normalized_path: None,
+            evidence: DependencyFailureEvidence::Rejected(None),
             cause: DependencyResolutionCause::Owned(cause),
             cache_disposition: DependencyCacheDisposition::Fresh,
         })
@@ -2156,7 +2171,7 @@ impl<'session> ParseScope<'session> {
             .unwrap_or(DependencyResolutionContext {
                 relation: None,
                 identity: None,
-                normalized_path: None,
+                evidence: DependencyFailureEvidence::Rejected(None),
                 cause: DependencyResolutionCause::Owned(ScopeAbortCause::DescriptorContract {
                     code: "dependency-failure-marker-without-context",
                 }),
@@ -2239,9 +2254,8 @@ impl<'session> ParseScope<'session> {
                     return Err(self.dependency_failure_without_path(Some(pending), cause));
                 }
             };
-            return Err(self.dependency_failure(
+            return Err(self.dependency_failure_with_rejected_reference(
                 Some(pending),
-                None,
                 origin_source,
                 ScopeAbortCause::ResourceLimit {
                     resource: "dependency-reference-bytes",
@@ -2291,9 +2305,8 @@ impl<'session> ParseScope<'session> {
                                     .dependency_failure_without_path(Some(pending), clone_cause));
                             }
                         };
-                        return Err(self.dependency_failure(
+                        return Err(self.dependency_failure_with_rejected_reference(
                             Some(pending),
-                            None,
                             origin_source,
                             dependency_path_cause(cause),
                         ));
@@ -2356,9 +2369,8 @@ impl<'session> ParseScope<'session> {
                                     .dependency_failure_without_path(Some(pending), clone_cause));
                             }
                         };
-                        return Err(self.dependency_failure(
+                        return Err(self.dependency_failure_with_rejected_reference(
                             Some(pending),
-                            None,
                             origin_source,
                             cause,
                         ));
@@ -2964,18 +2976,18 @@ impl<'session> ParseScope<'session> {
         {
             return Err(self.abort_dependency_context(failure));
         }
-        let Some(normalized_path) = failure.normalized_path.as_ref() else {
+        let Some(evidence_path) = failure.evidence.evidence_path() else {
             return Err(self.abort_dependency_context(failure));
         };
         let evidence = self.clone_optional_dependency_evidence(
             failure.identity.as_ref(),
-            normalized_path.path(),
+            evidence_path.path(),
             &owner,
             failure.cache_disposition,
         )?;
         let retained_evidence = self.clone_optional_dependency_evidence(
             failure.identity.as_ref(),
-            normalized_path.path(),
+            evidence_path.path(),
             &owner,
             failure.cache_disposition,
         )?;
@@ -3018,16 +3030,14 @@ impl<'session> ParseScope<'session> {
                 code: "dependency-terminal-relation-missing",
             })
         })?;
+        let normalized_reference = failure.normalized_manifest_reference();
         self.resource_graph
             .try_borrow_mut()
             .map_err(|_| self.reentrant_capability_failure())?
             .complete_unavailable(
                 self.host,
                 relation,
-                failure
-                    .normalized_path
-                    .as_ref()
-                    .map(MeteredDependencyPath::path),
+                normalized_reference,
                 failure.identity.as_ref(),
                 disposition,
             )
@@ -3039,7 +3049,7 @@ impl<'session> ParseScope<'session> {
     }
 
     fn abort_dependency_context(&self, failure: DependencyResolutionContext) -> ParseFailure {
-        let (disposition, mut cause, relation, identity, normalized_path) = {
+        let (disposition, mut cause, relation, identity, evidence) = {
             let graph = match self.resource_graph.try_borrow() {
                 Ok(graph) => graph,
                 Err(_) => {
@@ -3053,18 +3063,19 @@ impl<'session> ParseScope<'session> {
             let disposition = failure
                 .disposition(&graph)
                 .unwrap_or_else(|cause| unavailable_disposition(&cause));
-            let (cause, relation, identity, normalized_path) = failure.into_parts(&graph);
-            (disposition, cause, relation, identity, normalized_path)
+            let (cause, relation, identity, evidence) = failure.into_parts(&graph);
+            (disposition, cause, relation, identity, evidence)
         };
         let mut graph = self
             .resource_graph
             .try_borrow_mut()
             .expect("resource graph borrow was released before mutation");
+        let normalized_reference = evidence.manifest_reference();
         if let Some(relation) = relation
             && let Err(graph_cause) = graph.complete_unavailable(
                 self.host,
                 relation,
-                normalized_path.as_ref().map(MeteredDependencyPath::path),
+                normalized_reference,
                 identity.as_ref(),
                 disposition,
             )
@@ -3074,7 +3085,7 @@ impl<'session> ParseScope<'session> {
         drop(graph);
         drop(identity);
         let parse_failure = self.abort(cause);
-        drop(normalized_path);
+        drop(evidence);
         parse_failure
     }
 
@@ -3907,9 +3918,30 @@ impl MeteredDependencyPath {
 struct DependencyResolutionContext {
     relation: Option<PendingResourceRelation>,
     identity: Option<DependencyIdentity>,
-    normalized_path: Option<MeteredDependencyPath>,
+    evidence: DependencyFailureEvidence,
     cause: DependencyResolutionCause,
     cache_disposition: DependencyCacheDisposition,
+}
+
+enum DependencyFailureEvidence {
+    Normalized(MeteredDependencyPath),
+    Rejected(Option<MeteredDependencyPath>),
+}
+
+impl DependencyFailureEvidence {
+    fn evidence_path(&self) -> Option<&MeteredDependencyPath> {
+        match self {
+            Self::Normalized(path) => Some(path),
+            Self::Rejected(path) => path.as_ref(),
+        }
+    }
+
+    fn manifest_reference(&self) -> Option<&AssetPath> {
+        match self {
+            Self::Normalized(path) => Some(path.path()),
+            Self::Rejected(_) => None,
+        }
+    }
 }
 
 enum DependencyResolutionCause {
@@ -3955,12 +3987,12 @@ impl DependencyResolutionContext {
         ScopeAbortCause,
         Option<PendingResourceRelation>,
         Option<DependencyIdentity>,
-        Option<MeteredDependencyPath>,
+        DependencyFailureEvidence,
     ) {
         let Self {
             relation,
             identity,
-            normalized_path,
+            evidence,
             cause,
             ..
         } = self;
@@ -3973,7 +4005,11 @@ impl DependencyResolutionContext {
                     code: "dependency-cache-failure-index-invalid",
                 }),
         };
-        (cause, relation, identity, normalized_path)
+        (cause, relation, identity, evidence)
+    }
+
+    fn normalized_manifest_reference(&self) -> Option<&AssetPath> {
+        self.evidence.manifest_reference()
     }
 }
 

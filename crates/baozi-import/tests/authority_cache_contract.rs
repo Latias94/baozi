@@ -7,10 +7,12 @@ use baozi_import::{
     DependencyRoleId, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
     FormatDescriptor, FormatEncoding, FormatImporter, ImportCause, ImportConfigOverlay,
     ImportDimension, ImportFailure, ImportLedgerSnapshot, ImportLossKind, ImportOperationControl,
-    ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy,
-    ManifestResourceIdentityStability, OptionCompileLimits, ParseResult, ParseScope,
-    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, ScopeAbortCause, import_asset_with_resolver as run_import_asset_with_resolver,
+    ImportReport, ImportRequest, ImportRequestLayer, ImportResult, LossPolicy, ManifestReference,
+    ManifestRelationOutcome, ManifestResourceIdentityStability, ManifestSessionDependentReason,
+    ManifestUnavailableClass, ManifestUnavailableReplay, OptionCompileLimits, ParseResult,
+    ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuilder, SceneDraft, ScopeAbortCause,
+    import_asset_with_resolver as run_import_asset_with_resolver,
 };
 use baozi_io::{AssetIo, AssetOpenError, AssetPath, AuthorityDomain, MemoryAssetIo, OpenedAsset};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -809,6 +811,67 @@ fn denied_alias_is_authorized_before_an_allowed_cache_entry_can_be_reused() {
     assert_dimension(report.ledger(), ImportDimension::AssetOpen, 2, 2);
     assert_dimension(report.ledger(), ImportDimension::DependencyBytes, 7, 7);
     assert_eq!(report.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn optional_normalization_rejection_is_a_rejected_manifest_reference() {
+    let source = AssetPath::new("models/asset.invalid-reference").unwrap();
+    let role = role("material.optional");
+    let importer = DependencySequenceImporter::new(
+        "dev.baozi.test.invalid-reference",
+        "invalid-reference",
+        vec![(role.clone(), DependencyRequirement::Optional)],
+        vec![optional(&role, "/outside.bin")],
+    );
+    let request = prepared_request(
+        importer,
+        ImportConfigOverlay::default().with_loss_policy(
+            LossPolicy::preserve_or_fail().allow(ImportLossKind::OptionalDependencyUnavailable),
+        ),
+    );
+    let resolver = RoutingResolver::new(Vec::new(), Vec::new(), None);
+    let primary = primary_io(&source);
+
+    let report = import_with_resolver(&request, &primary, source.clone(), &resolver)
+        .expect("optional normalization rejection must produce a successful lossy import");
+
+    assert_eq!(
+        resolver.call_count(),
+        0,
+        "normalization rejection must happen before dependency authorization"
+    );
+    assert_eq!(report.optional_dependency_evidence().len(), 1);
+    let evidence = &report.optional_dependency_evidence()[0];
+    assert!(evidence.identity().is_none());
+    assert_eq!(evidence.owner(), &CauseOwner::Io);
+
+    let manifest = report.successful_input_manifest();
+    assert_eq!(manifest.counts().node_class_count(), 1);
+    assert_eq!(manifest.counts().quotient_relation_record_count(), 1);
+    assert_eq!(manifest.counts().unavailable_relation_record_count(), 1);
+    let relation = &manifest.node_classes()[0].outgoing_relations()[0];
+    let ManifestReference::Rejected {
+        class,
+        code,
+        reference_digest,
+    } = relation.reference()
+    else {
+        panic!("normalization rejection must not masquerade as a normalized resource identity");
+    };
+    assert_eq!(*class, ManifestUnavailableClass::Reference);
+    assert_eq!(code.as_str(), "path-rejected");
+    assert_ne!(reference_digest.as_bytes(), [0; 32]);
+    assert!(matches!(
+        relation.outcome(),
+        ManifestRelationOutcome::Unavailable {
+            class: ManifestUnavailableClass::Reference,
+            code,
+            identity_evidence: None,
+            replay: ManifestUnavailableReplay::SessionDependent(
+                ManifestSessionDependentReason::UnregisteredSemanticBasis
+            ),
+        } if code.as_str() == "path-rejected"
+    ));
 }
 
 #[test]
