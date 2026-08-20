@@ -16,7 +16,8 @@ use baozi_import::authoring::{
 use baozi_import::{
     DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
     ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredString, MeteredVec, ParseFailure,
-    ParseResult, ParseScope, SceneDraft,
+    ParseResult, ParseScope, SceneDraft, TextConformanceViolation, TextConformanceViolationKind,
+    TextDecodingMode, TextInputOptions, TextInputRecordCursor,
 };
 use std::cell::RefCell;
 use std::fmt;
@@ -45,7 +46,12 @@ fn body_completion(index: usize, amount: u64) -> [u64; BODY_WORK_ENTRIES] {
 
 pub(crate) fn read_ply(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
     let bytes = scope.primary_bytes();
-    let header = parse_header(scope, bytes)?;
+    let options = TextInputOptions::new(TextDecodingMode::RejectInvalid, "ply-text-input")
+        .with_decoded_resource("ply-decoded-text-record")
+        .with_line_resource("max_line_bytes")
+        .with_line_index_resource("ply-line-index-bytes");
+    let mut text = scope.text_input_record_cursor(scope.diagnostic_source(), options)?;
+    let header = parse_header(scope, bytes, &mut text)?;
     let decoded_utf8_bytes = match header.format {
         PlyFormat::Ascii => bytes.len(),
         PlyFormat::BinaryLittleEndian | PlyFormat::BinaryBigEndian => header.data_start,
@@ -55,7 +61,7 @@ pub(crate) fn read_ply(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         usize_amount(scope, decoded_utf8_bytes, "ply-decoded-utf8-bytes")?,
         scope.limits().max_decoded_utf8_bytes,
     )?;
-    let parsed = parse_body(scope, bytes, &header)?;
+    let parsed = parse_body(scope, bytes, &header, &mut text)?;
     scene_from_parsed(scope, header, parsed)
 }
 
@@ -142,6 +148,12 @@ impl BodyWorkPlan {
         Self { amounts }
     }
 
+    fn for_ascii_element(element: &Element<'_>) -> Self {
+        let mut plan = Self::for_element(element);
+        plan.amounts[BODY_RECORDS] = 0;
+        plan
+    }
+
     const fn charges(self) -> [(ImportWorkClass, u64); BODY_WORK_ENTRIES] {
         [
             (ImportWorkClass::Records, self.amounts[BODY_RECORDS]),
@@ -222,19 +234,23 @@ struct VertexPropertyProfile {
     stream_count: usize,
 }
 
-struct ProfiledAsciiLine<'scope> {
-    value: MeteredString<'scope>,
-}
-
-impl ProfiledAsciiLine<'_> {
-    fn as_str(&self) -> &str {
-        self.value.as_str()
-    }
-}
-
-fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResult<Header<'scope>> {
-    let mut offset = 0usize;
-    let first = next_line(ctx, bytes, &mut offset)?.ok_or_else(|| {
+fn parse_header<'scope>(
+    ctx: &'scope ParseScope<'_>,
+    bytes: &[u8],
+    text: &mut TextInputRecordCursor<'_, '_, '_>,
+) -> ParseResult<Header<'scope>> {
+    with_next_ascii_record(ctx, text, AsciiTextSurface::Header, |line, _| {
+        if line != "ply" {
+            return Err(ply_parse_error(
+                ctx,
+                PlyFailureCode::InvalidHeader,
+                Some(0),
+                "PLY header must start with 'ply'",
+            ));
+        }
+        Ok(())
+    })?
+    .ok_or_else(|| {
         ply_parse_error(
             ctx,
             PlyFailureCode::InvalidHeader,
@@ -242,22 +258,6 @@ fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResul
             "PLY input is empty",
         )
     })?;
-    let first = ascii_profile_line(
-        ctx,
-        first,
-        0,
-        line_terminated_by_lf(bytes, offset),
-        AsciiTextSurface::Header,
-    )?;
-    if first.as_str() != "ply" {
-        return Err(ply_parse_error(
-            ctx,
-            PlyFailureCode::InvalidHeader,
-            Some(0),
-            "PLY header must start with 'ply'",
-        ));
-    }
-    drop(first);
 
     let mut format = None;
     let mut elements = ctx.metered_vec(
@@ -282,191 +282,193 @@ fn parse_header<'scope>(ctx: &'scope ParseScope<'_>, bytes: &[u8]) -> ParseResul
         header_line_index = header_line_index
             .checked_add(1)
             .ok_or_else(|| ctx.resource_limit_exceeded("ply-header-lines", u64::MAX))?;
-        let line_offset = offset;
-        let Some(line) = next_line(ctx, bytes, &mut offset)? else {
-            return Err(ply_parse_error(
-                ctx,
-                PlyFailureCode::InvalidHeader,
-                None,
-                "PLY header has no end_header",
-            ));
-        };
-        let line = ascii_profile_line(
-            ctx,
-            line,
-            line_offset,
-            line_terminated_by_lf(bytes, offset),
-            AsciiTextSurface::Header,
-        )?;
-        if line.as_str().is_empty() {
-            continue;
-        }
-        if line.as_str() == "end_header" {
-            if let Some(element) = current_element.take() {
-                elements.try_push(element)?;
-            }
-            break;
-        }
-        if let Some(comment) = line.as_str().strip_prefix("comment ") {
-            let comment = bounded_string(ctx, comment, "comment")?;
-            comments.try_push(comment)?;
-            continue;
-        }
-        if let Some(info) = line.as_str().strip_prefix("obj_info ") {
-            let info = bounded_string(ctx, info, "obj_info")?;
-            obj_infos.try_push(info)?;
-            continue;
-        }
-        let tokens = checked_tokens(ctx, line.as_str())?;
-        match tokens.as_slice() {
-            ["format", value, version] => {
-                if format.is_some() {
-                    return Err(ply_parse_error(
-                        ctx,
-                        PlyFailureCode::InvalidHeader,
-                        Some(line_offset),
-                        "PLY header has multiple format lines",
-                    ));
+        let ended =
+            with_next_ascii_record(ctx, text, AsciiTextSurface::Header, |line, line_offset| {
+                if line.is_empty() {
+                    return Ok(false);
                 }
-                if *version != "1.0" {
-                    return Err(format_failure(
-                        ctx,
-                        PlyFailureCode::UnsupportedEncoding,
-                        "unsupported PLY version",
-                        Some(line_offset),
-                        Some("format-version"),
-                    ));
+                if line == "end_header" {
+                    if let Some(element) = current_element.take() {
+                        elements.try_push(element)?;
+                    }
+                    return Ok(true);
                 }
-                format = Some(match *value {
-                    "ascii" => PlyFormat::Ascii,
-                    "binary_little_endian" => PlyFormat::BinaryLittleEndian,
-                    "binary_big_endian" => PlyFormat::BinaryBigEndian,
-                    other => {
-                        let _ = other;
+                if let Some(comment) = line.strip_prefix("comment ") {
+                    let comment = bounded_string(ctx, comment, "comment")?;
+                    comments.try_push(comment)?;
+                    return Ok(false);
+                }
+                if let Some(info) = line.strip_prefix("obj_info ") {
+                    let info = bounded_string(ctx, info, "obj_info")?;
+                    obj_infos.try_push(info)?;
+                    return Ok(false);
+                }
+                let tokens = checked_tokens(ctx, line)?;
+                match tokens.as_slice() {
+                    ["format", value, version] => {
+                        if format.is_some() {
+                            return Err(ply_parse_error(
+                                ctx,
+                                PlyFailureCode::InvalidHeader,
+                                Some(line_offset),
+                                "PLY header has multiple format lines",
+                            ));
+                        }
+                        if *version != "1.0" {
+                            return Err(format_failure(
+                                ctx,
+                                PlyFailureCode::UnsupportedEncoding,
+                                "unsupported PLY version",
+                                Some(line_offset),
+                                Some("format-version"),
+                            ));
+                        }
+                        format = Some(match *value {
+                            "ascii" => PlyFormat::Ascii,
+                            "binary_little_endian" => PlyFormat::BinaryLittleEndian,
+                            "binary_big_endian" => PlyFormat::BinaryBigEndian,
+                            other => {
+                                let _ = other;
+                                return Err(format_failure(
+                                    ctx,
+                                    PlyFailureCode::UnsupportedEncoding,
+                                    "unsupported PLY encoding",
+                                    Some(line_offset),
+                                    Some("format-encoding"),
+                                ));
+                            }
+                        });
+                    }
+                    ["element", name, count] => {
+                        if let Some(element) = current_element.take() {
+                            elements.try_push(element)?;
+                        }
+                        let count = parse_count(ctx, count, line_offset)?;
+                        match *name {
+                            "vertex" => {
+                                if saw_vertex_element {
+                                    return Err(ply_parse_error(
+                                        ctx,
+                                        PlyFailureCode::InvalidSchema,
+                                        Some(line_offset),
+                                        "multiple PLY vertex elements are not supported",
+                                    ));
+                                }
+                                saw_vertex_element = true;
+                                preflight_limit(
+                                    ctx,
+                                    count,
+                                    ctx.limits().max_vertices,
+                                    ImportWorkClass::Vertices,
+                                )?;
+                            }
+                            "face" => {
+                                if saw_face_element {
+                                    return Err(ply_parse_error(
+                                        ctx,
+                                        PlyFailureCode::InvalidSchema,
+                                        Some(line_offset),
+                                        "multiple PLY face elements are not supported",
+                                    ));
+                                }
+                                saw_face_element = true;
+                                preflight_limit(
+                                    ctx,
+                                    count,
+                                    ctx.limits().max_faces,
+                                    ImportWorkClass::Faces,
+                                )?;
+                            }
+                            _ => {}
+                        }
+                        current_element = Some(Element {
+                            name: bounded_string(ctx, name, "element name")?,
+                            count,
+                            properties: ctx.metered_vec(
+                                ImportStorageClass::FormatNormalization,
+                                "ply-header-properties",
+                            ),
+                            next_custom_attribute: 0,
+                            source_offset: line_offset,
+                        });
+                    }
+                    ["property", "list", count_ty, item_ty, name] => {
+                        let Some(element) = current_element.as_mut() else {
+                            return Err(ply_parse_error(
+                                ctx,
+                                PlyFailureCode::InvalidSchema,
+                                Some(line_offset),
+                                "PLY property appeared before an element",
+                            ));
+                        };
+                        let property = Property::List {
+                            name: bounded_string(ctx, name, "property name")?,
+                            count_ty: parse_scalar_type(ctx, count_ty, line_offset)?,
+                            item_ty: parse_scalar_type(ctx, item_ty, line_offset)?,
+                            source_offset: line_offset,
+                        };
+                        element.properties.try_push(property)?;
+                    }
+                    ["property", ty, name] => {
+                        let Some(element) = current_element.as_mut() else {
+                            return Err(ply_parse_error(
+                                ctx,
+                                PlyFailureCode::InvalidSchema,
+                                Some(line_offset),
+                                "PLY property appeared before an element",
+                            ));
+                        };
+                        let name = bounded_string(ctx, name, "property name")?;
+                        let custom_attribute = if element.name.as_str() == "vertex"
+                            && !is_builtin_vertex_property(name.as_str())
+                        {
+                            let slot = element.next_custom_attribute;
+                            element.next_custom_attribute =
+                                slot.checked_add(1).ok_or_else(|| {
+                                    resource_limit_failure(
+                                        ctx,
+                                        "max_vertex_attribute_streams_per_mesh",
+                                        ctx.limits().max_vertex_attribute_streams_per_mesh,
+                                    )
+                                })?;
+                            Some(slot)
+                        } else {
+                            None
+                        };
+                        let property = Property::Scalar {
+                            name,
+                            ty: parse_scalar_type(ctx, ty, line_offset)?,
+                            custom_attribute,
+                            source_offset: line_offset,
+                        };
+                        element.properties.try_push(property)?;
+                    }
+                    _ => {
                         return Err(format_failure(
                             ctx,
-                            PlyFailureCode::UnsupportedEncoding,
-                            "unsupported PLY encoding",
+                            PlyFailureCode::InvalidHeader,
+                            "unsupported PLY header line",
                             Some(line_offset),
-                            Some("format-encoding"),
+                            Some("header-line"),
                         ));
                     }
-                });
-            }
-            ["element", name, count] => {
-                if let Some(element) = current_element.take() {
-                    elements.try_push(element)?;
                 }
-                let count = parse_count(ctx, count, line_offset)?;
-                match *name {
-                    "vertex" => {
-                        if saw_vertex_element {
-                            return Err(ply_parse_error(
-                                ctx,
-                                PlyFailureCode::InvalidSchema,
-                                Some(line_offset),
-                                "multiple PLY vertex elements are not supported",
-                            ));
-                        }
-                        saw_vertex_element = true;
-                        preflight_limit(
-                            ctx,
-                            count,
-                            ctx.limits().max_vertices,
-                            ImportWorkClass::Vertices,
-                        )?;
-                    }
-                    "face" => {
-                        if saw_face_element {
-                            return Err(ply_parse_error(
-                                ctx,
-                                PlyFailureCode::InvalidSchema,
-                                Some(line_offset),
-                                "multiple PLY face elements are not supported",
-                            ));
-                        }
-                        saw_face_element = true;
-                        preflight_limit(
-                            ctx,
-                            count,
-                            ctx.limits().max_faces,
-                            ImportWorkClass::Faces,
-                        )?;
-                    }
-                    _ => {}
-                }
-                current_element = Some(Element {
-                    name: bounded_string(ctx, name, "element name")?,
-                    count,
-                    properties: ctx.metered_vec(
-                        ImportStorageClass::FormatNormalization,
-                        "ply-header-properties",
-                    ),
-                    next_custom_attribute: 0,
-                    source_offset: line_offset,
-                });
-            }
-            ["property", "list", count_ty, item_ty, name] => {
-                let Some(element) = current_element.as_mut() else {
-                    return Err(ply_parse_error(
-                        ctx,
-                        PlyFailureCode::InvalidSchema,
-                        Some(line_offset),
-                        "PLY property appeared before an element",
-                    ));
-                };
-                let property = Property::List {
-                    name: bounded_string(ctx, name, "property name")?,
-                    count_ty: parse_scalar_type(ctx, count_ty, line_offset)?,
-                    item_ty: parse_scalar_type(ctx, item_ty, line_offset)?,
-                    source_offset: line_offset,
-                };
-                element.properties.try_push(property)?;
-            }
-            ["property", ty, name] => {
-                let Some(element) = current_element.as_mut() else {
-                    return Err(ply_parse_error(
-                        ctx,
-                        PlyFailureCode::InvalidSchema,
-                        Some(line_offset),
-                        "PLY property appeared before an element",
-                    ));
-                };
-                let name = bounded_string(ctx, name, "property name")?;
-                let custom_attribute = if element.name.as_str() == "vertex"
-                    && !is_builtin_vertex_property(name.as_str())
-                {
-                    let slot = element.next_custom_attribute;
-                    element.next_custom_attribute = slot.checked_add(1).ok_or_else(|| {
-                        resource_limit_failure(
-                            ctx,
-                            "max_vertex_attribute_streams_per_mesh",
-                            ctx.limits().max_vertex_attribute_streams_per_mesh,
-                        )
-                    })?;
-                    Some(slot)
-                } else {
-                    None
-                };
-                let property = Property::Scalar {
-                    name,
-                    ty: parse_scalar_type(ctx, ty, line_offset)?,
-                    custom_attribute,
-                    source_offset: line_offset,
-                };
-                element.properties.try_push(property)?;
-            }
-            _ => {
-                return Err(format_failure(
+                Ok(false)
+            })?
+            .ok_or_else(|| {
+                ply_parse_error(
                     ctx,
                     PlyFailureCode::InvalidHeader,
-                    "unsupported PLY header line",
-                    Some(line_offset),
-                    Some("header-line"),
-                ));
-            }
+                    None,
+                    "PLY header has no end_header",
+                )
+            })?;
+        if ended {
+            break;
         }
     }
+
+    let offset = raw_offset_usize(ctx, text.raw_offset(), "ply-header-data-offset")?;
 
     validate_face_topology_schemas(ctx, elements.as_slice())?;
 
@@ -649,6 +651,7 @@ fn parse_body<'scope>(
     ctx: &'scope ParseScope<'_>,
     bytes: &[u8],
     header: &Header<'scope>,
+    text: &mut TextInputRecordCursor<'_, '_, '_>,
 ) -> ParseResult<ParsedPly<'scope>> {
     let mut vertex_element = None;
     let mut face_count = 0usize;
@@ -719,7 +722,7 @@ fn parse_body<'scope>(
     };
 
     match header.format {
-        PlyFormat::Ascii => parse_ascii_body(ctx, bytes, header, &mut parsed)?,
+        PlyFormat::Ascii => parse_ascii_body(ctx, header, &mut parsed, text)?,
         PlyFormat::BinaryLittleEndian => parse_binary_body(ctx, bytes, header, false, &mut parsed)?,
         PlyFormat::BinaryBigEndian => parse_binary_body(ctx, bytes, header, true, &mut parsed)?,
     }
@@ -729,25 +732,26 @@ fn parse_body<'scope>(
 
 fn parse_ascii_body<'scope>(
     ctx: &'scope ParseScope<'_>,
-    bytes: &[u8],
     header: &Header<'_>,
     parsed: &mut ParsedPly<'scope>,
+    text: &mut TextInputRecordCursor<'_, '_, '_>,
 ) -> ParseResult<()> {
-    let mut offset = header.data_start;
     for (element_index, element) in header.elements.as_slice().iter().enumerate() {
         poll_collection(ctx, element_index)?;
         warn_for_element_schema(ctx, element)?;
         for record_index in 0..element.count {
             poll_collection(ctx, record_index)?;
-            let line_offset = offset;
-            let plan = peek_line(bytes, offset).map_or_else(
-                BodyWorkPlan::record_only,
-                |(line, terminated_by_lf)| {
-                    plan_ascii_row(ctx, line, terminated_by_lf, element, parsed)
-                },
-            );
-            ctx.with_work_group(plan.charges(), |work| -> ParseResult<()> {
-                let line = next_line(ctx, bytes, &mut offset)?.ok_or_else(|| {
+            let line_offset = raw_offset_usize(ctx, text.raw_offset(), "ply-text-byte-offset")?;
+            ctx.with_parent_work(ImportWorkClass::Records, 1, || {
+                with_next_ascii_record(ctx, text, AsciiTextSurface::Body, |line, line_offset| {
+                    let plan = plan_ascii_row(ctx, line, element, parsed);
+                    ctx.with_work_group(plan.charges(), |work| -> ParseResult<()> {
+                        let mut cursor = AsciiRow::new(line, line_offset);
+                        parse_row(ctx, element, &mut cursor, parsed, plan, work)?;
+                        cursor.finish(ctx, element.name.as_str(), work)
+                    })
+                })?
+                .ok_or_else(|| {
                     format_failure(
                         ctx,
                         PlyFailureCode::TruncatedPayload,
@@ -755,17 +759,7 @@ fn parse_ascii_body<'scope>(
                         Some(line_offset),
                         Some("ascii-element-row"),
                     )
-                })?;
-                let text = ascii_profile_line(
-                    ctx,
-                    line,
-                    line_offset,
-                    line_terminated_by_lf(bytes, offset),
-                    AsciiTextSurface::Body,
-                )?;
-                let mut cursor = AsciiRow::new(text.as_str(), line_offset);
-                parse_row(ctx, element, &mut cursor, parsed, plan, work)?;
-                cursor.finish(ctx, element.name.as_str(), work)
+                })
             })?;
         }
     }
@@ -794,29 +788,13 @@ fn parse_binary_body<'scope>(
     Ok(())
 }
 
-fn peek_line(bytes: &[u8], offset: usize) -> Option<(&[u8], bool)> {
-    if offset >= bytes.len() {
-        return None;
-    }
-    let remaining = bytes.get(offset..)?;
-    let newline = remaining.iter().position(|byte| *byte == b'\n');
-    Some(match newline {
-        Some(end) => (&remaining[..end], true),
-        None => (remaining, false),
-    })
-}
-
 fn plan_ascii_row(
     ctx: &ParseScope<'_>,
-    raw_line: &[u8],
-    terminated_by_lf: bool,
+    line: &str,
     element: &Element<'_>,
     parsed: &ParsedPly<'_>,
 ) -> BodyWorkPlan {
-    let Some(line) = planned_ascii_body_text(ctx, raw_line, terminated_by_lf) else {
-        return BodyWorkPlan::record_only();
-    };
-    let mut plan = BodyWorkPlan::for_element(element);
+    let mut plan = BodyWorkPlan::for_ascii_element(element);
     let mut tokens = line.split_ascii_whitespace();
     for property in element.properties.as_slice() {
         match property {
@@ -828,12 +806,7 @@ fn plan_ascii_row(
                     return plan;
                 }
             }
-            Property::List {
-                name,
-                count_ty,
-                item_ty: _,
-                ..
-            } => {
+            Property::List { name, count_ty, .. } => {
                 let Some(count_token) = tokens.next() else {
                     return plan;
                 };
@@ -861,34 +834,6 @@ fn plan_ascii_row(
         let _ = plan.add_token(trailing);
     }
     plan
-}
-
-fn planned_ascii_body_text<'line>(
-    ctx: &ParseScope<'_>,
-    raw_line: &'line [u8],
-    terminated_by_lf: bool,
-) -> Option<&'line str> {
-    if raw_line.len() > ctx.limits().max_line_bytes || !raw_line.is_ascii() {
-        return None;
-    }
-    for (index, byte) in raw_line.iter().copied().enumerate() {
-        let trailing_cr = byte == b'\r'
-            && terminated_by_lf
-            && index
-                .checked_add(1)
-                .is_some_and(|end| end == raw_line.len());
-        if (byte == b'\r' && !trailing_cr)
-            || (byte.is_ascii_control() && !matches!(byte, b'\t' | b'\r'))
-        {
-            return None;
-        }
-    }
-    let line = std::str::from_utf8(raw_line).ok()?;
-    if terminated_by_lf {
-        Some(line.strip_suffix('\r').unwrap_or(line))
-    } else {
-        Some(line)
-    }
 }
 
 fn planned_ascii_list_count(token: &str, ty: ScalarType) -> Option<usize> {
@@ -2762,43 +2707,6 @@ fn compute_bounds(
     )
 }
 
-fn next_line<'a>(
-    ctx: &ParseScope<'_>,
-    bytes: &'a [u8],
-    offset: &mut usize,
-) -> ParseResult<Option<&'a [u8]>> {
-    if *offset >= bytes.len() {
-        return Ok(None);
-    }
-    let start = *offset;
-    let mut end = bytes.len();
-    while *offset < bytes.len() {
-        let byte = bytes[*offset];
-        *offset += 1;
-        let line_bytes = *offset - start;
-        if byte != b'\n' && line_bytes > ctx.limits().max_line_bytes {
-            ctx.enforce_resource_limit(
-                "max_line_bytes",
-                usize_amount(ctx, line_bytes, "ply-line-bytes")?,
-                usize_amount(ctx, ctx.limits().max_line_bytes, "ply-line-byte-limit")?,
-            )?;
-        }
-        if line_bytes.is_multiple_of(4096) {
-            ctx.poll()?;
-        }
-        if byte == b'\n' {
-            end = (*offset).saturating_sub(1);
-            break;
-        }
-    }
-    ctx.enforce_resource_limit(
-        "max_line_bytes",
-        usize_amount(ctx, end.saturating_sub(start), "ply-line-bytes")?,
-        usize_amount(ctx, ctx.limits().max_line_bytes, "ply-line-byte-limit")?,
-    )?;
-    Ok(Some(&bytes[start..end]))
-}
-
 #[derive(Debug, Clone, Copy)]
 enum AsciiTextSurface {
     Header,
@@ -2835,119 +2743,105 @@ impl AsciiTextSurface {
     }
 }
 
-fn ascii_profile_line<'scope>(
-    ctx: &'scope ParseScope<'_>,
-    raw_line: &[u8],
-    line_offset: usize,
-    terminated_by_lf: bool,
+fn with_next_ascii_record<T>(
+    ctx: &ParseScope<'_>,
+    text: &mut TextInputRecordCursor<'_, '_, '_>,
     surface: AsciiTextSurface,
-) -> ParseResult<ProfiledAsciiLine<'scope>> {
-    if matches!(surface, AsciiTextSurface::Header)
-        && line_offset == 0
-        && raw_line.starts_with(&[0xef, 0xbb, 0xbf])
-    {
-        return Err(ctx.format_failure(
-            PlyFailure::new(
-                PlyFailureCode::InvalidHeader,
-                "PLY text profile forbids a UTF-8 byte order mark",
-            )
-            .with_context("header-bom")
-            .at_byte(0),
-        ));
-    }
-
-    let strips_trailing_cr = terminated_by_lf && raw_line.last() == Some(&b'\r');
-    let output_length = raw_line
-        .len()
-        .checked_sub(usize::from(strips_trailing_cr))
-        .ok_or_else(|| ctx.resource_limit_exceeded("ply-profiled-line-bytes", u64::MAX))?;
-    let mut value =
-        ctx.metered_string(ImportStorageClass::BackendDecode, "ply-profiled-ascii-line");
-    value.try_reserve(output_length)?;
-
-    let mut chunk_start = 0usize;
-    while chunk_start < raw_line.len() {
-        ctx.poll()?;
-        let chunk_end = chunk_start
-            .checked_add(SCAN_QUANTUM)
-            .map_or(raw_line.len(), |end| end.min(raw_line.len()));
-        let chunk = raw_line.get(chunk_start..chunk_end).ok_or_else(|| {
+    action: impl for<'line> FnOnce(&'line str, usize) -> ParseResult<T>,
+) -> ParseResult<Option<T>> {
+    match text.with_next_record(|input, _recoveries| {
+        let mut lines = input.lines();
+        let line = lines.next().ok_or_else(|| {
             ctx.format_failure(PlyFailure::new(
                 PlyFailureCode::InternalInvariant,
-                "PLY text profile scan range is invalid",
+                "PLY text record produced no shared line view",
             ))
         })?;
-        ctx.poll()?;
-        for (relative, byte) in chunk.iter().copied().enumerate() {
-            let line_relative = chunk_start
-                .checked_add(relative)
-                .ok_or_else(|| ctx.resource_limit_exceeded("ply-text-byte-offset", u64::MAX))?;
-            let context = if !byte.is_ascii() {
-                Some(surface.ascii_context())
-            } else if byte == b'\r'
-                && !(terminated_by_lf
-                    && line_relative
-                        .checked_add(1)
-                        .is_some_and(|end| end == raw_line.len()))
-            {
-                Some(surface.newline_context())
-            } else if byte.is_ascii_control() && !matches!(byte, b'\t' | b'\r') {
-                Some(surface.control_context())
-            } else {
-                None
-            };
-            let Some(context) = context else {
-                continue;
-            };
-            let offending_offset = line_offset
-                .checked_add(line_relative)
-                .ok_or_else(|| ctx.resource_limit_exceeded("ply-text-byte-offset", u64::MAX))?;
-            let failure = PlyFailure::new(
+        if lines.next().is_some() {
+            return Err(ctx.format_failure(PlyFailure::new(
+                PlyFailureCode::InternalInvariant,
+                "PLY text record produced multiple shared line views",
+            )));
+        }
+        let line_offset = raw_offset_usize(
+            ctx,
+            line.raw_content_range().start(),
+            "ply-text-byte-offset",
+        )?;
+        action(line.text(), line_offset)
+    })? {
+        Ok(value) => Ok(value),
+        Err(violation) => Err(text_conformance_failure(ctx, surface, violation)),
+    }
+}
+
+fn text_conformance_failure(
+    ctx: &ParseScope<'_>,
+    surface: AsciiTextSurface,
+    violation: TextConformanceViolation,
+) -> ParseFailure {
+    let raw_offset = violation.raw_range().map(DiagnosticByteRange::start);
+    match violation.kind() {
+        TextConformanceViolationKind::ForbiddenBom => match raw_offset {
+            Some(offset) => ctx.format_failure(
+                PlyFailure::new(
+                    PlyFailureCode::InvalidHeader,
+                    "PLY text profile forbids a UTF-8 byte order mark",
+                )
+                .with_context("header-bom")
+                .at_byte(offset),
+            ),
+            None => internal_text_conformance_failure(ctx, "forbidden-bom-range-missing"),
+        },
+        TextConformanceViolationKind::InvalidUtf8 | TextConformanceViolationKind::NonAscii => {
+            byte_text_conformance_failure(ctx, surface, raw_offset, surface.ascii_context())
+        }
+        TextConformanceViolationKind::UnsupportedNewline => {
+            byte_text_conformance_failure(ctx, surface, raw_offset, surface.newline_context())
+        }
+        TextConformanceViolationKind::ForbiddenControl => {
+            byte_text_conformance_failure(ctx, surface, raw_offset, surface.control_context())
+        }
+        TextConformanceViolationKind::MissingTextProfile => {
+            internal_text_conformance_failure(ctx, "missing-text-profile")
+        }
+        TextConformanceViolationKind::UnsupportedSourceEncoding => {
+            internal_text_conformance_failure(ctx, "unsupported-source-encoding")
+        }
+        TextConformanceViolationKind::DecodingModeNotDeclared => {
+            internal_text_conformance_failure(ctx, "decoding-mode-not-declared")
+        }
+        _ => internal_text_conformance_failure(ctx, "unknown-violation"),
+    }
+}
+
+fn byte_text_conformance_failure(
+    ctx: &ParseScope<'_>,
+    surface: AsciiTextSurface,
+    raw_offset: Option<u64>,
+    context: &'static str,
+) -> ParseFailure {
+    match raw_offset {
+        Some(offset) => ctx.format_failure(
+            PlyFailure::new(
                 surface.failure_code(),
                 "PLY input violates its ASCII text profile",
             )
             .with_context(context)
-            .at_byte(usize_amount(ctx, offending_offset, "ply-text-byte-offset")?);
-            return Err(ctx.format_failure(failure));
-        }
-
-        ctx.poll()?;
-        let chunk_text = std::str::from_utf8(chunk).map_err(|_| {
-            ctx.format_failure(PlyFailure::new(
-                PlyFailureCode::InternalInvariant,
-                "ASCII-profiled PLY chunk is not UTF-8",
-            ))
-        })?;
-        let chunk_text = if strips_trailing_cr && chunk_end == raw_line.len() {
-            chunk_text.strip_suffix('\r').ok_or_else(|| {
-                format_failure(
-                    ctx,
-                    PlyFailureCode::InternalInvariant,
-                    "PLY CRLF profile lost its trailing carriage return",
-                    Some(line_offset),
-                    Some("profiled-line-copy"),
-                )
-            })?
-        } else {
-            chunk_text
-        };
-        value.try_push_str(chunk_text)?;
-        chunk_start = chunk_end;
+            .at_byte(offset),
+        ),
+        None => internal_text_conformance_failure(ctx, "text-violation-range-missing"),
     }
-    if value.len() != output_length {
-        return Err(format_failure(
-            ctx,
-            PlyFailureCode::InternalInvariant,
-            "PLY profiled line copy length changed",
-            Some(line_offset),
-            Some("profiled-line-copy"),
-        ));
-    }
-    Ok(ProfiledAsciiLine { value })
 }
 
-fn line_terminated_by_lf(bytes: &[u8], offset: usize) -> bool {
-    offset.checked_sub(1).and_then(|index| bytes.get(index)) == Some(&b'\n')
+fn internal_text_conformance_failure(ctx: &ParseScope<'_>, context: &'static str) -> ParseFailure {
+    ctx.format_failure(
+        PlyFailure::new(
+            PlyFailureCode::InternalInvariant,
+            "PLY shared text conformance contract failed",
+        )
+        .with_context(context),
+    )
 }
 
 fn warn(
@@ -3026,6 +2920,14 @@ fn parse_error(
 
 fn usize_amount(ctx: &ParseScope<'_>, value: usize, resource: &'static str) -> ParseResult<u64> {
     u64::try_from(value).map_err(|_| ctx.resource_limit_exceeded(resource, u64::MAX))
+}
+
+fn raw_offset_usize(
+    ctx: &ParseScope<'_>,
+    value: u64,
+    resource: &'static str,
+) -> ParseResult<usize> {
+    usize::try_from(value).map_err(|_| ctx.resource_limit_exceeded(resource, u64::MAX))
 }
 
 fn canonical_u32(ctx: &ParseScope<'_>, value: usize, resource: &'static str) -> ParseResult<u32> {

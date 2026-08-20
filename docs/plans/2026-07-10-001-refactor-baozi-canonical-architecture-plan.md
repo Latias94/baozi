@@ -930,7 +930,7 @@ new Accepted authorities.
 - **Current U4.6 execution checklist:**
   - [x] Establish the source-bound `ConformedTextInput` line/span and format-owned recovery protocol, then migrate OBJ and MTL without changing comment-sensitive recovery or dependency diagnostic ownership.
   - [x] Migrate STL ASCII decoding, text-profile detection, and line iteration while preserving exact binary-first dispatch, stable STL diagnostics, content-only CRLF line limits, and zero text storage on the binary path.
-  - [ ] Migrate PLY ASCII header/body text handling and remove its duplicate UTF-8, line, and decoded-copy state machines without changing binary PLY dispatch or typed property parsing.
+  - [x] Migrate PLY ASCII header/body text handling and remove its duplicate UTF-8, line, and decoded-copy state machines without changing binary PLY dispatch or typed property parsing.
   - [ ] Complete the repository-wide text-parser audit, classifying glTF preflight work under U6 before declaring the U4.6 verification gate complete.
 
 ### U5. Deepen STL, OBJ, and PLY Source Semantics

@@ -67,6 +67,7 @@ fn forbidden_header_controls_are_rejected_at_their_first_raw_offset() -> TestRes
 fn non_ascii_ascii_body_grammar_is_rejected_at_first_raw_byte() -> TestResult<()> {
     for (label, offending) in [
         ("unicode-whitespace", "\u{00a0}".as_bytes()),
+        ("utf8-bom", [0xef, 0xbb, 0xbf].as_slice()),
         ("invalid-utf8", [0xff].as_slice()),
     ] {
         let mut bytes = b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0".to_vec();
@@ -141,9 +142,7 @@ fn trailing_invalid_utf8_preserves_inert_evidence_offset_and_failed_record_accou
 #[test]
 fn forbidden_bom_is_terminal_at_raw_offset_zero() -> TestResult<()> {
     let mut bytes = vec![0xef, 0xbb, 0xbf];
-    bytes.extend_from_slice(
-        b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n",
-    );
+    bytes.extend(std::iter::repeat_n(b'x', SCAN_CHUNK_BYTES * 3));
 
     let failure = expected_error(import_bytes_forced_result(
         "bom.ply",
@@ -155,6 +154,11 @@ fn forbidden_bom_is_terminal_at_raw_offset_zero() -> TestResult<()> {
     assert_eq!(ply_string_detail(envelope, "context"), Some("header-bom"));
     assert_eq!(ply_unsigned_detail(envelope, "byte_offset"), Some(0));
     assert_eq!(failure.source_identity().as_str(), "bom.ply");
+    let decode = failure
+        .ledger()
+        .dimension(ImportDimension::DecodeWork)
+        .expect("forbidden BOM classification must publish bounded decode work");
+    assert_eq!((decode.attempted(), decode.consumed()), (3, 3));
     Ok(())
 }
 
@@ -314,6 +318,139 @@ fn binary_body_bytes_are_not_scanned_as_ascii_text() -> TestResult<()> {
     )?)?;
     let snapshot = scene_snapshot(&report)?;
     assert!(snapshot_line(&snapshot, "attribute[0]").contains("elements=3"));
+    Ok(())
+}
+
+#[test]
+fn binary_payload_boundaries_preserve_first_bytes_and_constant_text_evidence() -> TestResult<()> {
+    const LF_HEADER: &[u8] = b"ply\nformat binary_little_endian 1.0\nelement vertex 1\nproperty uchar x\nproperty uchar y\nproperty uchar z\nend_header\n";
+    const CRLF_HEADER: &[u8] = b"ply\r\nformat binary_little_endian 1.0\r\nelement vertex 1\r\nproperty uchar x\r\nproperty uchar y\r\nproperty uchar z\r\nend_header\r\n";
+
+    for (newline, header) in [("lf", LF_HEADER), ("crlf", CRLF_HEADER)] {
+        let mut expected_text_evidence = None;
+        for marker in [b'\n', b'\r', b' ', 0x00, 0xff] {
+            let mut bytes = header.to_vec();
+            bytes.extend_from_slice(&[marker, 0, 0]);
+            if marker == 0xff {
+                bytes.extend(std::iter::repeat_n(0xff, SCAN_CHUNK_BYTES * 2));
+                bytes.extend_from_slice(b"\r\0\xef\xbb\xbf");
+            }
+            let source = format!("binary-{newline}-first-{marker:02x}.ply");
+            let report = expected_report(import_bytes_forced_result(
+                &source,
+                &bytes,
+                ResourceLimits::default(),
+            )?)?;
+            let snapshot = scene_snapshot(&report)?;
+            let expected_position = format!(
+                "values(present,total=3)=[0x{:08x},0x00000000,0x00000000]",
+                f32::from(marker).to_bits()
+            );
+            assert!(snapshot_line(&snapshot, "attribute[0]").contains(&expected_position));
+
+            let decode = report
+                .ledger()
+                .dimension(ImportDimension::DecodeWork)
+                .expect("binary header must publish decode work");
+            let decoded = report
+                .ledger()
+                .dimension(ImportDimension::DecodedTextBytes)
+                .expect("binary header must publish decoded storage");
+            let line_index = report
+                .ledger()
+                .dimension(ImportDimension::LineIndexBytes)
+                .expect("binary header must publish line-index storage");
+            let text_evidence = (
+                decode.attempted(),
+                decode.consumed(),
+                decoded.peak_live_bytes(),
+                line_index.peak_live_bytes(),
+            );
+            match expected_text_evidence {
+                Some(expected) => assert_eq!(text_evidence, expected),
+                None => expected_text_evidence = Some(text_evidence),
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn declared_ascii_records_leave_trailing_invalid_bytes_unobserved() -> TestResult<()> {
+    let mut bytes = b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n1 2 3\n".to_vec();
+    bytes.extend_from_slice(b"\xff\0\r\xef\xbb\xbf");
+
+    let report = expected_report(import_bytes_forced_result(
+        "ascii-trailing-bytes.ply",
+        &bytes,
+        ResourceLimits::default(),
+    )?)?;
+    let snapshot = scene_snapshot(&report)?;
+    assert!(snapshot_line(&snapshot, "attribute[0]").contains("elements=1"));
+    Ok(())
+}
+
+#[test]
+fn earlier_ascii_record_error_precedes_later_text_violation() -> TestResult<()> {
+    const HEADER: &[u8] = b"ply\nformat ascii 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\nend_header\n";
+    let mut bytes = HEADER.to_vec();
+    bytes.extend_from_slice(b"not-a-number 0 0\n\xff 0 0\n");
+
+    let failure = expected_error(import_bytes_forced_result(
+        "ascii-error-priority.ply",
+        &bytes,
+        ResourceLimits::default(),
+    )?)?;
+    let envelope = expected_ply_failure(&failure, PlyFailureCode::InvalidScalar);
+    assert_eq!(ply_string_detail(envelope, "context"), Some("float"));
+    assert_eq!(
+        ply_unsigned_detail(envelope, "byte_offset"),
+        Some(HEADER.len() as u64)
+    );
+    Ok(())
+}
+
+#[test]
+fn lf_and_crlf_line_limits_count_content_only() -> TestResult<()> {
+    const LINE_BYTES: usize = 32;
+    for newline in ["\n", "\r\n"] {
+        let header = [
+            "ply",
+            "format ascii 1.0",
+            "element vertex 1",
+            "property int x",
+            "property int y",
+            "property int z",
+            "end_header",
+            "",
+        ]
+        .join(newline);
+        let mut limits = ResourceLimits::default();
+        limits.max_line_bytes = LINE_BYTES;
+
+        let exact = format!(
+            "{header}{} 0 0{}",
+            "0".repeat(LINE_BYTES - " 0 0".len()),
+            newline
+        );
+        expected_report(import_bytes_forced_result(
+            "line-content-exact.ply",
+            exact.as_bytes(),
+            limits.clone(),
+        )?)?;
+
+        let excess = format!(
+            "{header}{} 0 0{}",
+            "0".repeat(LINE_BYTES + 1 - " 0 0".len()),
+            newline
+        );
+        let failure = expected_error(import_bytes_forced_result(
+            "line-content-excess.ply",
+            excess.as_bytes(),
+            limits,
+        )?)?;
+        assert_scope_resource_limit(&failure, "max_line_bytes", LINE_BYTES as u64);
+    }
     Ok(())
 }
 

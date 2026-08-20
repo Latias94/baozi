@@ -14,6 +14,7 @@ use baozi_import::{
     TextInputOptions, TextInputRecoveryTracker, TextLexicalMode, TextNewline, TextProfile,
     TextSourceEncoding, import_bytes as run_import_bytes,
 };
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -50,6 +51,15 @@ struct ExpectedAccepted {
     bom: Option<(u64, u64, bool)>,
     lines: &'static [ExpectedLine],
     replacements: &'static [ExpectedReplacement],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExpectedRecord {
+    text: &'static str,
+    raw_start: u64,
+    raw_end: u64,
+    raw_record_end: u64,
+    newline: Option<TextNewline>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +106,18 @@ enum ParserBehavior {
         options: TextInputOptions,
         line_count: usize,
         replacement_count: usize,
+    },
+    ExpectRecordCursor {
+        options: TextInputOptions,
+        expected: &'static [ExpectedRecord],
+        expected_raw_offset: u64,
+        expect_exhausted: bool,
+    },
+    ExerciseRecordCursorTransactions {
+        options: TextInputOptions,
+    },
+    PropagateRecordCursorFailure {
+        options: TextInputOptions,
     },
 }
 
@@ -398,6 +420,104 @@ impl FormatImporter for TextInputImporter {
                     )?
                     .expect("test text input shape must conform");
                 support::submit_minimal_scene(scope)
+            }
+            ParserBehavior::ExpectRecordCursor {
+                options,
+                expected,
+                expected_raw_offset,
+                expect_exhausted,
+            } => {
+                let mut cursor =
+                    scope.text_input_record_cursor(scope.diagnostic_source(), options)?;
+                for expected in expected {
+                    cursor
+                        .with_next_record(|accepted, recoveries| {
+                            let mut lines = accepted.lines();
+                            let line = lines
+                                .next()
+                                .expect("each nonempty raw record must expose one line");
+                            assert!(lines.next().is_none());
+                            assert_eq!(line.number(), 1);
+                            assert_eq!(line.text(), expected.text);
+                            assert_eq!(
+                                line.raw_content_range(),
+                                DiagnosticByteRange::new(expected.raw_start, expected.raw_end)
+                                    .expect("expected content range must be valid")
+                            );
+                            assert_eq!(
+                                line.raw_record_range(),
+                                DiagnosticByteRange::new(
+                                    expected.raw_start,
+                                    expected.raw_record_end,
+                                )
+                                .expect("expected record range must be valid")
+                            );
+                            assert_eq!(line.newline(), expected.newline);
+                            authorize_text_obligations(recoveries, accepted)
+                        })?
+                        .expect("cursor record must conform")
+                        .expect("cursor fixture must contain the expected record");
+                }
+                assert_eq!(cursor.raw_offset(), expected_raw_offset);
+                if expect_exhausted {
+                    assert!(
+                        cursor
+                            .with_next_record(|_accepted, _recoveries| -> ParseResult<()> {
+                                panic!("an exhausted cursor must not invoke the callback")
+                            },)?
+                            .expect("cursor exhaustion is not a conformance violation")
+                            .is_none()
+                    );
+                }
+                support::submit_minimal_scene(scope)
+            }
+            ParserBehavior::ExerciseRecordCursorTransactions { options } => {
+                let mut cursor =
+                    scope.text_input_record_cursor(scope.diagnostic_source(), options)?;
+                let caught = catch_unwind(AssertUnwindSafe(|| {
+                    cursor.with_next_record(|_accepted, _recoveries| -> ParseResult<()> {
+                        panic!("record callback panic")
+                    })
+                }));
+                assert!(caught.is_err());
+                assert_eq!(cursor.raw_offset(), 0);
+
+                cursor
+                    .with_next_record(|accepted, recoveries| {
+                        let line = accepted
+                            .lines()
+                            .next()
+                            .expect("retry must expose first record");
+                        assert_eq!(line.text(), "a");
+                        authorize_text_obligations(recoveries, accepted)
+                    })?
+                    .expect("the valid retry must conform")
+                    .expect("the valid retry must invoke the callback");
+                assert_eq!(cursor.raw_offset(), 2);
+
+                for _ in 0..2 {
+                    let violation = cursor
+                        .with_next_record(|_accepted, _recoveries| -> ParseResult<()> {
+                            panic!("an invalid record must not invoke the callback")
+                        })?
+                        .expect_err("the invalid record must remain a conformance violation");
+                    assert_eq!(violation.kind(), TextConformanceViolationKind::InvalidUtf8);
+                    assert_eq!(
+                        violation.raw_range(),
+                        Some(
+                            DiagnosticByteRange::new(2, 3)
+                                .expect("expected retry range must be valid")
+                        )
+                    );
+                    assert_eq!(cursor.raw_offset(), 2);
+                }
+                support::submit_minimal_scene(scope)
+            }
+            ParserBehavior::PropagateRecordCursorFailure { options } => {
+                let mut cursor =
+                    scope.text_input_record_cursor(scope.diagnostic_source(), options)?;
+                let _unexpected = cursor.with_next_record(|_accepted, _recoveries| Ok(()))?;
+                panic!("the record cursor fixture must fail before invoking its callback")
             }
         }
     }
@@ -1283,6 +1403,16 @@ fn text_input_source_range_rejects_invalid_offsets_before_conformance() {
                 .with_raw_base(u64::MAX),
             "text-input-source-offset-out-of-bounds",
         ),
+        (
+            TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text").with_raw_end(2),
+            "text-input-source-offset-out-of-bounds",
+        ),
+        (
+            TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text")
+                .with_raw_base(1)
+                .with_raw_end(0),
+            "text-input-source-offset-out-of-bounds",
+        ),
     ] {
         let (importer, parse_calls) = TextInputImporter::new(
             descriptor(profile.clone()),
@@ -1297,6 +1427,259 @@ fn text_input_source_range_rejects_invalid_offsets_before_conformance() {
         assert_no_decode_work(&failure);
         assert_no_text_storage(&failure);
     }
+}
+
+#[test]
+fn bounded_source_range_conforms_only_the_selected_bytes() {
+    let profile = text_profile(
+        TextBomPolicy::Forbidden,
+        [TextNewline::Lf, TextNewline::CrLf],
+        [TextDecodingMode::RejectInvalid],
+        TextControlPolicy::RejectAll,
+    );
+    let (accepted_importer, accepted_calls) = TextInputImporter::new(
+        descriptor(profile.clone()),
+        ParserBehavior::ExpectAccepted {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text")
+                .with_raw_base(1)
+                .with_raw_end(4),
+            expected: ExpectedAccepted {
+                text: "A\r\n",
+                bom: None,
+                lines: &[ExpectedLine {
+                    text: "A",
+                    raw_start: 1,
+                    raw_end: 2,
+                    raw_record_end: 4,
+                    decoded_start: 0,
+                    decoded_end: 1,
+                    decoded_record_end: 3,
+                    newline: Some(TextNewline::CrLf),
+                    replacement_count: 0,
+                }],
+                replacements: &[],
+            },
+        },
+    );
+    let accepted_request = request_for(accepted_importer, ResourceLimits::default());
+    import_bytes(&accepted_request, b"xA\r\n\xff")
+        .expect("bytes outside the bounded range must remain untouched");
+    assert_eq!(accepted_calls.load(Ordering::Acquire), 1);
+
+    let (rejected_importer, rejected_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::ExpectRejected {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text")
+                .with_raw_base(1)
+                .with_raw_end(5),
+            expected_kind: TextConformanceViolationKind::InvalidUtf8,
+            expected_range: Some((4, 5)),
+        },
+    );
+    let rejected_request = request_for(rejected_importer, ResourceLimits::default());
+    import_bytes(&rejected_request, b"xA\r\n\xff")
+        .expect_err("extending the range must expose the invalid byte");
+    assert_eq!(rejected_calls.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn record_cursor_preserves_exact_ranges_and_can_stop_before_invalid_suffix() {
+    let profile = text_profile(
+        TextBomPolicy::Forbidden,
+        [TextNewline::Lf, TextNewline::CrLf],
+        [TextDecodingMode::RejectInvalid],
+        TextControlPolicy::RejectAll,
+    );
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::ExpectRecordCursor {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text"),
+            expected: &[
+                ExpectedRecord {
+                    text: "a",
+                    raw_start: 0,
+                    raw_end: 1,
+                    raw_record_end: 3,
+                    newline: Some(TextNewline::CrLf),
+                },
+                ExpectedRecord {
+                    text: "",
+                    raw_start: 3,
+                    raw_end: 3,
+                    raw_record_end: 4,
+                    newline: Some(TextNewline::Lf),
+                },
+            ],
+            expected_raw_offset: 4,
+            expect_exhausted: false,
+        },
+    );
+    let request = request_for(importer, ResourceLimits::default());
+
+    import_bytes(&request, b"a\r\n\nb\xff")
+        .expect("stopping the cursor must not inspect the invalid suffix");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn bounded_record_cursor_exhausts_at_its_absolute_end() {
+    let profile = text_profile(
+        TextBomPolicy::Forbidden,
+        [TextNewline::Lf],
+        [TextDecodingMode::RejectInvalid],
+        TextControlPolicy::RejectAll,
+    );
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::ExpectRecordCursor {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text")
+                .with_raw_base(1)
+                .with_raw_end(4),
+            expected: &[
+                ExpectedRecord {
+                    text: "a",
+                    raw_start: 1,
+                    raw_end: 2,
+                    raw_record_end: 3,
+                    newline: Some(TextNewline::Lf),
+                },
+                ExpectedRecord {
+                    text: "b",
+                    raw_start: 3,
+                    raw_end: 4,
+                    raw_record_end: 4,
+                    newline: None,
+                },
+            ],
+            expected_raw_offset: 4,
+            expect_exhausted: true,
+        },
+    );
+    let request = request_for(importer, ResourceLimits::default());
+
+    import_bytes(&request, b"xa\nb\xff")
+        .expect("the cursor must stop at its configured absolute end");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn record_cursor_enforces_the_complete_selected_raw_range_before_iteration() {
+    let profile = text_profile(
+        TextBomPolicy::Forbidden,
+        [TextNewline::Lf],
+        [TextDecodingMode::RejectInvalid],
+        TextControlPolicy::RejectAll,
+    );
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::ExpectRecordCursor {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text")
+                .with_raw_limit("cursor-raw-bytes", 1),
+            expected: &[],
+            expected_raw_offset: 0,
+            expect_exhausted: false,
+        },
+    );
+    let request = request_for(importer, ResourceLimits::default());
+
+    let failure = import_bytes(&request, b"a\n")
+        .expect_err("the cursor must not split a complete selected raw limit across records");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::ResourceLimit {
+                    resource: "cursor-raw-bytes",
+                    limit: 1,
+                }
+            )
+    ));
+    assert_no_decode_work(&failure);
+    assert_no_text_storage(&failure);
+}
+
+#[test]
+fn record_cursor_failure_paths_leave_the_current_record_transactional() {
+    let profile = text_profile(
+        TextBomPolicy::Forbidden,
+        [TextNewline::Lf],
+        [TextDecodingMode::RejectInvalid],
+        TextControlPolicy::RejectAll,
+    );
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::ExerciseRecordCursorTransactions {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text"),
+        },
+    );
+    let request = request_for(importer, ResourceLimits::default());
+
+    let report = import_bytes(&request, b"a\n\xff\n")
+        .expect("panic and conformance failure must leave the current record retryable");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn record_cursor_stops_an_overlong_ascii_record_at_the_shared_line_limit() {
+    let profile = text_profile_with_lexical(
+        TextBomPolicy::Forbidden,
+        [TextNewline::Lf],
+        [TextDecodingMode::RejectInvalid],
+        TextLexicalMode::AsciiOnly,
+        TextControlPolicy::RejectAll,
+    );
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::PropagateRecordCursorFailure {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text"),
+        },
+    );
+    let mut limits = ResourceLimits::default();
+    limits.max_line_bytes = 4;
+    let request = request_for(importer, limits);
+
+    let failure = import_bytes(&request, b"abcdefghijklmnopqrstuvwxyz")
+        .expect_err("the cursor must not scan an entire overlong ASCII record");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+    assert_scope_resource_limit(&failure, 4);
+    assert_decode_work(&failure, 5, 5);
+    assert_no_text_storage(&failure);
+}
+
+#[test]
+fn record_cursor_line_probe_does_not_reclassify_split_utf8() {
+    let profile = text_profile_with_lexical(
+        TextBomPolicy::Forbidden,
+        [TextNewline::Lf],
+        [TextDecodingMode::RejectInvalid],
+        TextLexicalMode::AsciiOnly,
+        TextControlPolicy::RejectAll,
+    );
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::PropagateRecordCursorFailure {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text"),
+        },
+    );
+    let mut limits = ResourceLimits::default();
+    limits.max_line_bytes = 1;
+    let request = request_for(importer, limits);
+
+    let failure = import_bytes(&request, b"a\xc3\xa9\n")
+        .expect_err("the line limit must win before a probe can split a UTF-8 scalar");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+    assert_scope_resource_limit(&failure, 1);
+    assert_decode_work(&failure, 2, 2);
+    assert_no_text_storage(&failure);
 }
 
 #[test]

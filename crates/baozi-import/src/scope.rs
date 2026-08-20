@@ -245,6 +245,7 @@ pub struct ImportWorkScope<'work, 'session, const N: usize> {
     item_limits: [Option<(&'static str, u64)>; N],
     admitted: [u64; N],
     completed: [u64; N],
+    parent: bool,
     active: bool,
     finished: bool,
 }
@@ -368,7 +369,11 @@ impl<const N: usize> ImportWorkScope<'_, '_, N> {
 
     fn release(&mut self) {
         if self.active {
-            self.scope.work_outstanding.set(false);
+            if self.parent {
+                self.scope.parent_work_outstanding.set(false);
+            } else {
+                self.scope.work_outstanding.set(false);
+            }
             self.active = false;
         }
         self.finished = true;
@@ -377,9 +382,14 @@ impl<const N: usize> ImportWorkScope<'_, '_, N> {
 
 impl<const N: usize> Drop for ImportWorkScope<'_, '_, N> {
     fn drop(&mut self) {
-        if !self.finished && self.active && self.scope.work_outstanding.replace(false) {
+        if !self.finished && self.active {
+            let was_outstanding = if self.parent {
+                self.scope.parent_work_outstanding.replace(false)
+            } else {
+                self.scope.work_outstanding.replace(false)
+            };
             debug_assert!(
-                std::thread::panicking(),
+                was_outstanding && std::thread::panicking(),
                 "the private parser work scope may only be abandoned by unwinding"
             );
         }
@@ -445,6 +455,7 @@ pub struct ParseScope<'session> {
     dependency_failure: RefCell<Option<DependencyResolutionContext>>,
     callback_active: Cell<bool>,
     work_outstanding: Cell<bool>,
+    parent_work_outstanding: Cell<bool>,
     terminal: &'session RefCell<Option<ScopeAbortCause>>,
     not_send_or_sync: PhantomData<Rc<()>>,
 }
@@ -566,6 +577,7 @@ impl<'session> ParseScope<'session> {
             dependency_failure: RefCell::new(None),
             callback_active: Cell::new(false),
             work_outstanding: Cell::new(false),
+            parent_work_outstanding: Cell::new(false),
             terminal: parts.terminal,
             not_send_or_sync: PhantomData,
         }
@@ -606,6 +618,20 @@ impl<'session> ParseScope<'session> {
             source,
             options,
             action,
+        )
+    }
+
+    /// Creates a source-bound cursor that conforms one physical text record at a time.
+    pub fn text_input_record_cursor<'scope, 'source>(
+        &'scope self,
+        source: DiagnosticSource<'source>,
+        options: TextInputOptions,
+    ) -> ParseResult<crate::text_input::TextInputRecordCursor<'scope, 'session, 'source>> {
+        crate::text_input::TextInputRecordCursor::new(
+            self,
+            self.entry.descriptor().text_profile(),
+            source,
+            options,
         )
     }
 
@@ -857,6 +883,45 @@ impl<'session> ParseScope<'session> {
         self.with_work_group([(class, amount)], action)
     }
 
+    /// Runs a semantic parent action whose callback may admit sequential child work.
+    ///
+    /// The parent amount is attempted before the callback starts and remains incomplete when any
+    /// child decode, token, allocation, cancellation, or format action fails. Ordinary work scopes
+    /// remain non-nestable. Parent completion is sealed inside this method so callers cannot publish
+    /// it before every child action succeeds.
+    pub fn with_parent_work<T, E>(
+        &self,
+        class: ImportWorkClass,
+        amount: u64,
+        action: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<ParseFailure>,
+    {
+        let mut work = self
+            .begin_work_group([(class, amount)], true)
+            .map_err(E::from)?;
+        match action() {
+            Ok(value) => {
+                if let Err(failure) = self.poll_active() {
+                    work.finish_partial();
+                    return Err(E::from(failure));
+                }
+                if let Err(failure) = work.complete_all() {
+                    work.finish_partial();
+                    return Err(E::from(failure));
+                }
+                work.finish_exact().map_err(E::from)?;
+                Ok(value)
+            }
+            Err(cause) => {
+                work.finish_partial();
+                let _ = self.poll_active();
+                Err(cause)
+            }
+        }
+    }
+
     /// Runs one callback-scoped parser action across an exact fixed work group.
     pub fn with_work_group<const N: usize, T, E>(
         &self,
@@ -866,7 +931,7 @@ impl<'session> ParseScope<'session> {
     where
         E: From<ParseFailure>,
     {
-        let mut work = self.begin_work_group(charges).map_err(E::from)?;
+        let mut work = self.begin_work_group(charges, false).map_err(E::from)?;
         match action(&mut work) {
             Ok(value) => {
                 if work.remaining().into_iter().any(|amount| amount != 0) {
@@ -890,9 +955,10 @@ impl<'session> ParseScope<'session> {
     fn begin_work_group<const N: usize>(
         &self,
         charges: [(ImportWorkClass, u64); N],
+        parent: bool,
     ) -> ParseResult<ImportWorkScope<'_, 'session, N>> {
         self.preflight_active()?;
-        if self.work_outstanding.get() {
+        if self.work_outstanding.get() || (parent && self.parent_work_outstanding.get()) {
             return Err(self.abort(ScopeAbortCause::DescriptorContract {
                 code: "parse-work-already-in-progress",
             }));
@@ -920,13 +986,18 @@ impl<'session> ParseScope<'session> {
         }
 
         let admitted = accounted.map(|(_, _, amount)| amount);
-        self.work_outstanding.set(true);
+        if parent {
+            self.parent_work_outstanding.set(true);
+        } else {
+            self.work_outstanding.set(true);
+        }
         Ok(ImportWorkScope {
             scope: self,
             dimensions: accounted.map(|(dimension, _, _)| dimension),
             item_limits: accounted.map(|(_, item_limit, _)| item_limit),
             admitted,
             completed: [0; N],
+            parent,
             active: true,
             finished: false,
         })

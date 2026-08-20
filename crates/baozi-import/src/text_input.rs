@@ -26,6 +26,7 @@ pub struct TextInputOptions {
     line_resource: &'static str,
     line_index_resource: &'static str,
     raw_base: u64,
+    raw_end: Option<u64>,
     raw_limit: Option<TextRawLimit>,
 }
 
@@ -44,6 +45,7 @@ impl TextInputOptions {
             line_resource: resource,
             line_index_resource: resource,
             raw_base: 0,
+            raw_end: None,
             raw_limit: None,
         }
     }
@@ -54,6 +56,15 @@ impl TextInputOptions {
     /// offset is decoded as ordinary text.
     pub const fn with_raw_base(mut self, raw_base: u64) -> Self {
         self.raw_base = raw_base;
+        self
+    }
+
+    /// Selects an exclusive absolute raw byte end for this conformance operation.
+    ///
+    /// The end must not precede [`Self::with_raw_base`] and both offsets must fall within the
+    /// source capability. Omitting the end keeps the existing source-suffix behavior.
+    pub const fn with_raw_end(mut self, raw_end: u64) -> Self {
+        self.raw_end = Some(raw_end);
         self
     }
 
@@ -128,6 +139,260 @@ impl ConformedTextInput<'_> {
             line_index: 0,
             replacement_index: 0,
         }
+    }
+}
+
+/// Source-bound incremental cursor over physical text records.
+///
+/// Each successful step conforms exactly one LF, CRLF, or CR terminated record, or the final
+/// unterminated record. Stopping the cursor leaves every following byte untouched, which allows
+/// mixed text/binary formats to transfer ownership at an exact record boundary.
+/// Reject-invalid ASCII profiles stop an overlong record after the first byte beyond the shared
+/// line limit. Aggregate decoded limits remain the format's responsibility when it intentionally
+/// consumes only a prefix of the selected source range.
+pub struct TextInputRecordCursor<'scope, 'session, 'source> {
+    scope: &'scope ParseScope<'session>,
+    profile: Option<&'scope TextProfile>,
+    source: DiagnosticSource<'source>,
+    options: TextInputOptions,
+    raw_offset: u64,
+    raw_end: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextInputRecordBoundary {
+    Complete(u64),
+    ConformanceProbe(u64),
+}
+
+impl TextInputRecordBoundary {
+    const fn raw_end(self) -> u64 {
+        match self {
+            Self::Complete(raw_end) | Self::ConformanceProbe(raw_end) => raw_end,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextInputRecordScanLimit {
+    ForbiddenBom { probe_len: usize },
+    LineBytes { probe_len: usize, limit: usize },
+}
+
+impl TextInputRecordScanLimit {
+    const fn probe_len(self) -> usize {
+        match self {
+            Self::ForbiddenBom { probe_len } | Self::LineBytes { probe_len, .. } => probe_len,
+        }
+    }
+
+    const fn reached(self, bytes_len: usize) -> bool {
+        bytes_len >= self.probe_len()
+    }
+}
+
+impl<'scope, 'session, 'source> TextInputRecordCursor<'scope, 'session, 'source> {
+    pub(crate) fn new(
+        scope: &'scope ParseScope<'session>,
+        profile: Option<&'scope TextProfile>,
+        source: DiagnosticSource<'source>,
+        options: TextInputOptions,
+    ) -> ParseResult<Self> {
+        let range = text_input_range(scope, &source, options)?;
+        let raw_len = usize_to_u64(scope, range.len(), options.resource)?;
+        let raw_limit = options.raw_limit.unwrap_or(TextRawLimit {
+            resource: options.resource,
+            limit: scope.limits().max_primary_asset_bytes,
+        });
+        scope.enforce_resource_limit(raw_limit.resource, raw_len, raw_limit.limit)?;
+        let raw_offset = usize_to_u64(scope, range.start, options.resource)?;
+        let raw_end = usize_to_u64(scope, range.end, options.resource)?;
+        Ok(Self {
+            scope,
+            profile,
+            source,
+            options,
+            raw_offset,
+            raw_end,
+        })
+    }
+
+    /// Returns the absolute raw offset where the next record begins.
+    pub const fn raw_offset(&self) -> u64 {
+        self.raw_offset
+    }
+
+    /// Conforms and processes the next physical record without allowing decoded borrows to escape.
+    pub fn with_next_record<T>(
+        &mut self,
+        action: impl for<'input> FnOnce(
+            &'input ConformedTextInput<'scope>,
+            &mut TextInputRecoveryTracker<'input, 'session>,
+        ) -> ParseResult<T>,
+    ) -> ParseResult<TextConformanceResult<Option<T>>> {
+        let Some(boundary) = self.next_record_boundary()? else {
+            return Ok(Ok(None));
+        };
+        let raw_end = boundary.raw_end();
+        let options = self
+            .options
+            .with_raw_base(self.raw_offset)
+            .with_raw_end(raw_end);
+        let source = DiagnosticSource::new(
+            self.source.authority().clone(),
+            self.source.path(),
+            self.source.bytes(),
+        );
+        let conformed = match boundary {
+            TextInputRecordBoundary::Complete(_) => {
+                with_conformed_text_input(self.scope, self.profile, source, options, action)?
+            }
+            TextInputRecordBoundary::ConformanceProbe(_) => with_conformed_text_input(
+                self.scope,
+                self.profile,
+                source,
+                options,
+                |_input, _recoveries| {
+                    Err(self.scope.descriptor_contract_failure(
+                        "text-input-conformance-probe-unexpectedly-accepted",
+                    ))
+                },
+            )?,
+        };
+        match conformed {
+            Ok(value) => {
+                self.raw_offset = raw_end;
+                Ok(Ok(Some(value)))
+            }
+            Err(violation) => Ok(Err(violation)),
+        }
+    }
+
+    fn next_record_boundary(&self) -> ParseResult<Option<TextInputRecordBoundary>> {
+        if self.raw_offset == self.raw_end {
+            return Ok(None);
+        }
+        let start = usize::try_from(self.raw_offset).map_err(|_| {
+            self.scope
+                .descriptor_contract_failure("text-input-source-offset-out-of-bounds")
+        })?;
+        let end = usize::try_from(self.raw_end).map_err(|_| {
+            self.scope
+                .descriptor_contract_failure("text-input-source-offset-out-of-bounds")
+        })?;
+        let bytes = self.source.bytes().get(start..end).ok_or_else(|| {
+            self.scope
+                .descriptor_contract_failure("text-input-source-offset-out-of-bounds")
+        })?;
+        let scan_limit = self.record_scan_limit(bytes);
+        let scan_end = scan_limit.map_or(bytes.len(), |limit| limit.probe_len().min(bytes.len()));
+        let mut chunk_start = 0usize;
+        while chunk_start < scan_end {
+            self.scope.poll()?;
+            let chunk_end = chunk_start
+                .checked_add(TEXT_INPUT_WORK_CHUNK_BYTES)
+                .map_or(scan_end, |candidate| candidate.min(scan_end));
+            let chunk = bytes.get(chunk_start..chunk_end).ok_or_else(|| {
+                self.scope
+                    .descriptor_contract_failure("text-input-record-scan-range-invalid")
+            })?;
+            if let Some(relative) = chunk.iter().position(|byte| matches!(*byte, b'\r' | b'\n')) {
+                let newline = chunk_start.checked_add(relative).ok_or_else(|| {
+                    self.scope
+                        .resource_limit_exceeded(self.options.resource, u64::MAX)
+                })?;
+                let newline_len = usize::from(
+                    bytes.get(newline) == Some(&b'\r')
+                        && bytes.get(newline.saturating_add(1)) == Some(&b'\n'),
+                ) + 1;
+                let record_len = newline.checked_add(newline_len).ok_or_else(|| {
+                    self.scope
+                        .resource_limit_exceeded(self.options.resource, u64::MAX)
+                })?;
+                return self
+                    .absolute_record_end(record_len)
+                    .map(TextInputRecordBoundary::Complete)
+                    .map(Some);
+            }
+            chunk_start = chunk_end;
+        }
+        if let Some(limit) = scan_limit.filter(|limit| limit.reached(bytes.len())) {
+            match limit {
+                TextInputRecordScanLimit::ForbiddenBom { .. } => {
+                    return self
+                        .absolute_record_end(scan_end)
+                        .map(TextInputRecordBoundary::ConformanceProbe)
+                        .map(Some);
+                }
+                TextInputRecordScanLimit::LineBytes { probe_len, limit } => {
+                    return Err(self.line_limit_failure(probe_len, limit));
+                }
+            }
+        }
+        Ok(Some(TextInputRecordBoundary::Complete(self.raw_end)))
+    }
+
+    fn record_scan_limit(&self, bytes: &[u8]) -> Option<TextInputRecordScanLimit> {
+        let profile = self.profile?;
+        let starts_with_bom = self.raw_offset == 0 && bytes.starts_with(&[0xef, 0xbb, 0xbf]);
+        if starts_with_bom && profile.bom_policy() == TextBomPolicy::Forbidden {
+            return Some(TextInputRecordScanLimit::ForbiddenBom { probe_len: 3 });
+        }
+        if self.options.decoding_mode != TextDecodingMode::RejectInvalid
+            || profile.lexical_mode() != TextLexicalMode::AsciiOnly
+        {
+            return None;
+        }
+        let bom_len = usize::from(starts_with_bom) * 3;
+        let probe_len = self
+            .scope
+            .limits()
+            .max_line_bytes
+            .checked_add(bom_len)?
+            .checked_add(1)?;
+        Some(TextInputRecordScanLimit::LineBytes {
+            probe_len,
+            limit: self.scope.limits().max_line_bytes,
+        })
+    }
+
+    fn line_limit_failure(&self, processed: usize, limit: usize) -> ParseFailure {
+        let processed = match usize_to_u64(self.scope, processed, self.options.resource) {
+            Ok(processed) => processed,
+            Err(failure) => return failure,
+        };
+        let limit = match usize_to_u64(self.scope, limit, self.options.line_resource) {
+            Ok(limit) => limit,
+            Err(failure) => return failure,
+        };
+        match self.scope.with_work(
+            ImportWorkClass::DecodeWork,
+            processed,
+            |work| -> ParseResult<()> {
+                work.complete_all()?;
+                self.scope
+                    .enforce_resource_limit(self.options.line_resource, processed, limit)
+            },
+        ) {
+            Ok(()) => self
+                .scope
+                .descriptor_contract_failure("text-input-line-limit-probe-accepted"),
+            Err(failure) => failure,
+        }
+    }
+
+    fn absolute_record_end(&self, record_len: usize) -> ParseResult<u64> {
+        let record_len = usize_to_u64(self.scope, record_len, self.options.resource)?;
+        let end = self.raw_offset.checked_add(record_len).ok_or_else(|| {
+            self.scope
+                .resource_limit_exceeded(self.options.resource, u64::MAX)
+        })?;
+        if end > self.raw_end {
+            return Err(self
+                .scope
+                .descriptor_contract_failure("text-input-record-end-out-of-bounds"));
+        }
+        Ok(end)
     }
 }
 
@@ -566,12 +831,30 @@ fn text_input_bytes<'source>(
     source: &'source DiagnosticSource<'_>,
     options: TextInputOptions,
 ) -> ParseResult<&'source [u8]> {
-    let start = usize::try_from(options.raw_base)
-        .map_err(|_| scope.descriptor_contract_failure("text-input-source-offset-out-of-bounds"))?;
+    let range = text_input_range(scope, source, options)?;
     source
         .bytes()
-        .get(start..)
+        .get(range)
         .ok_or_else(|| scope.descriptor_contract_failure("text-input-source-offset-out-of-bounds"))
+}
+
+fn text_input_range(
+    scope: &ParseScope<'_>,
+    source: &DiagnosticSource<'_>,
+    options: TextInputOptions,
+) -> ParseResult<Range<usize>> {
+    let start = usize::try_from(options.raw_base)
+        .map_err(|_| scope.descriptor_contract_failure("text-input-source-offset-out-of-bounds"))?;
+    let end = match options.raw_end {
+        Some(raw_end) => usize::try_from(raw_end).map_err(|_| {
+            scope.descriptor_contract_failure("text-input-source-offset-out-of-bounds")
+        })?,
+        None => source.bytes().len(),
+    };
+    if start > end || end > source.bytes().len() {
+        return Err(scope.descriptor_contract_failure("text-input-source-offset-out-of-bounds"));
+    }
+    Ok(start..end)
 }
 
 fn conform_text_input<'scope>(

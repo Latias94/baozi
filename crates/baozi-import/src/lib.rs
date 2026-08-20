@@ -136,5 +136,5 @@ pub use source_scope::{
 pub use text_input::{
     ConformedTextInput, TextConformanceResult, TextConformanceViolation,
     TextConformanceViolationKind, TextInputBom, TextInputLine, TextInputOptions,
-    TextInputRecoveryTracker, TextInputReplacement,
+    TextInputRecordCursor, TextInputRecoveryTracker, TextInputReplacement,
 };

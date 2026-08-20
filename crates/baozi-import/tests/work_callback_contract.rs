@@ -37,6 +37,10 @@ enum WorkCase {
     CallbackError,
     Incomplete,
     Nested,
+    ParentNestedSuccess,
+    ParentChildFailure,
+    CaughtParentPanic,
+    ParentCancelBeforeCompletion,
     PrematureReplenish,
     ItemLimitedReplenish,
     GroupItemLimit,
@@ -62,6 +66,10 @@ impl WorkImporter {
             WorkCase::CallbackError => "dev.baozi.test.work-callback-error",
             WorkCase::Incomplete => "dev.baozi.test.work-callback-incomplete",
             WorkCase::Nested => "dev.baozi.test.work-callback-nested",
+            WorkCase::ParentNestedSuccess => "dev.baozi.test.work-parent-success",
+            WorkCase::ParentChildFailure => "dev.baozi.test.work-parent-child-failure",
+            WorkCase::CaughtParentPanic => "dev.baozi.test.work-parent-caught-panic",
+            WorkCase::ParentCancelBeforeCompletion => "dev.baozi.test.work-parent-cancel",
             WorkCase::PrematureReplenish => "dev.baozi.test.work-callback-replenish",
             WorkCase::ItemLimitedReplenish => "dev.baozi.test.work-callback-item-limit",
             WorkCase::GroupItemLimit => "dev.baozi.test.work-callback-group-limit",
@@ -82,6 +90,10 @@ impl WorkImporter {
             WorkCase::CallbackError => "work-error",
             WorkCase::Incomplete => "work-incomplete",
             WorkCase::Nested => "work-nested",
+            WorkCase::ParentNestedSuccess => "work-parent-success",
+            WorkCase::ParentChildFailure => "work-parent-failure",
+            WorkCase::CaughtParentPanic => "work-parent-caught-panic",
+            WorkCase::ParentCancelBeforeCompletion => "work-parent-cancel",
             WorkCase::PrematureReplenish => "work-replenish",
             WorkCase::ItemLimitedReplenish => "work-item-limit",
             WorkCase::GroupItemLimit => "work-group-limit",
@@ -190,6 +202,40 @@ impl FormatImporter for WorkImporter {
                             .is_err()
                     );
                     work.complete_all()
+                })?;
+            }
+            WorkCase::ParentNestedSuccess => {
+                scope.with_parent_work(ImportWorkClass::Records, 1, || {
+                    scope.with_work(ImportWorkClass::Tokens, 2, |child| child.complete_all())
+                })?;
+            }
+            WorkCase::ParentChildFailure => {
+                scope.with_parent_work(ImportWorkClass::Records, 1, || {
+                    scope.with_work(ImportWorkClass::WorkUnits, 2, |child| {
+                        child.complete([1])?;
+                        scope.enforce_resource_limit("parent-child-failure", 2, 1)
+                    })
+                })?;
+            }
+            WorkCase::CaughtParentPanic => {
+                let caught = catch_unwind(AssertUnwindSafe(|| {
+                    scope.with_parent_work(ImportWorkClass::Records, 1, || -> ParseResult<()> {
+                        panic!("caught parent work panic")
+                    })
+                }));
+                assert!(caught.is_err());
+                scope.with_parent_work(ImportWorkClass::Records, 1, || {
+                    scope.with_work(ImportWorkClass::Tokens, 1, |child| child.complete_all())
+                })?;
+            }
+            WorkCase::ParentCancelBeforeCompletion => {
+                let cancellation = self
+                    .cancellation
+                    .as_ref()
+                    .expect("parent cancellation case owns a token");
+                scope.with_parent_work(ImportWorkClass::Records, 1, || {
+                    cancellation.cancel();
+                    Ok(())
                 })?;
             }
             WorkCase::PrematureReplenish => {
@@ -460,6 +506,57 @@ fn nested_work_is_rejected_before_inner_admission() {
 }
 
 #[test]
+fn parent_work_can_span_child_work_and_completes_only_after_the_child() {
+    let report = run_case(WorkCase::ParentNestedSuccess, None)
+        .expect("explicit parent work may contain sequential child work");
+    let records = report
+        .ledger()
+        .dimension(ImportDimension::Records)
+        .expect("parent record evidence");
+    let tokens = report
+        .ledger()
+        .dimension(ImportDimension::Tokens)
+        .expect("child token evidence");
+    assert_eq!((records.attempted(), records.consumed()), (1, 1));
+    assert_eq!((tokens.attempted(), tokens.consumed()), (2, 2));
+}
+
+#[test]
+fn child_failure_leaves_parent_work_attempted_but_incomplete() {
+    let failure = run_case(WorkCase::ParentChildFailure, None)
+        .expect_err("a child failure must terminate its parent action");
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::ResourceLimit {
+                    resource: "parent-child-failure",
+                    limit: 1,
+                }
+            )
+    ));
+    assert_dimension(&failure, ImportDimension::Records, 1, 0);
+    assert_dimension(&failure, ImportDimension::WorkUnits, 2, 1);
+}
+
+#[test]
+fn a_caught_parent_panic_releases_the_parent_and_child_channels() {
+    let report = run_case(WorkCase::CaughtParentPanic, None)
+        .expect("a locally caught parent panic leaves both work channels reusable");
+    let records = report
+        .ledger()
+        .dimension(ImportDimension::Records)
+        .expect("parent record evidence");
+    let tokens = report
+        .ledger()
+        .dimension(ImportDimension::Tokens)
+        .expect("child token evidence");
+    assert_eq!((records.attempted(), records.consumed()), (2, 1));
+    assert_eq!((tokens.attempted(), tokens.consumed()), (1, 1));
+}
+
+#[test]
 fn a_dynamic_chunk_cannot_replace_unfinished_work() {
     let failure = run_case(WorkCase::PrematureReplenish, None)
         .expect_err("unfinished work cannot be replaced by another chunk");
@@ -622,6 +719,28 @@ fn cancellation_after_the_last_action_reconciles_to_control() {
     ));
     assert_eq!(failure.cause().owner(), CauseOwner::Operation);
     assert_dimension(&failure, ImportDimension::WorkUnits, 2, 2);
+}
+
+#[test]
+fn parent_cancellation_precedes_automatic_parent_completion() {
+    let cancellation = CancellationToken::new();
+    let request = request_for(WorkImporter {
+        case: WorkCase::ParentCancelBeforeCompletion,
+        cancellation: Some(cancellation.clone()),
+    });
+    let failure = operation_result(import_bytes(
+        &request,
+        AssetPath::new("asset.work-parent-cancel").expect("valid cancellation source"),
+        b"fixture",
+        ImportOperationControl::default().with_cancellation(cancellation),
+    ))
+    .expect_err("cancellation must stop the sealed parent completion");
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort) if matches!(abort.cause(), ScopeAbortCause::Control(_))
+    ));
+    assert_eq!(failure.cause().owner(), CauseOwner::Operation);
+    assert_dimension(&failure, ImportDimension::Records, 1, 0);
 }
 
 #[test]
