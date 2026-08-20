@@ -1190,4 +1190,110 @@ mod tests {
             Err(RegisteredNegativeProofError::TargetAvailable)
         ));
     }
+
+    #[test]
+    fn negative_proof_binding_rejects_stale_subjects_and_unadmitted_inputs() {
+        static FOREIGN_SCHEMA_ENTRY: StableResourceIdentitySchemaEntry =
+            StableResourceIdentitySchemaEntry {
+                owner: "dev.baozi.test",
+                schema_id: "foreign-resource-identity",
+                schema_version: NonZeroU32::MIN,
+            };
+        static FOREIGN_SCHEMA: StableResourceIdentitySchema = StableResourceIdentitySchema {
+            entry: &FOREIGN_SCHEMA_ENTRY,
+        };
+
+        let namespace = ImmutableMemoryAssetIo::try_from_entries(vec![(
+            AssetPath::new("models/scene.obj").unwrap(),
+            Arc::from(&b"primary"[..]),
+        )])
+        .unwrap();
+        let foreign_namespace = ImmutableMemoryAssetIo::try_from_entries(vec![(
+            AssetPath::new("models/other.bin").unwrap(),
+            Arc::from(&b"other"[..]),
+        )])
+        .unwrap();
+        let mutable = MemoryAssetIo::new();
+        let resolver = same_authority_resolver_v1();
+        let target = AssetPath::new("models/missing.bin").unwrap();
+        let equal_target = AssetPath::new("models/missing.bin").unwrap();
+
+        assert!(
+            resolver
+                .plan_negative_proof(&mutable, &target, RegisteredUnavailableCause::Missing)
+                .is_none(),
+            "mutable or custom backends cannot self-admit the immutable proof scheme"
+        );
+        for cause in [
+            RegisteredUnavailableCause::OpenFailed,
+            RegisteredUnavailableCause::ReadFailed,
+        ] {
+            assert!(
+                resolver
+                    .plan_negative_proof(&namespace, &target, cause)
+                    .is_none(),
+                "only missing inputs have a registered immutable absence proof"
+            );
+        }
+
+        let wrong_target_binding = resolver
+            .plan_negative_proof(&namespace, &target, RegisteredUnavailableCause::Missing)
+            .unwrap()
+            .verify(&target, RegisteredUnavailableCause::Missing)
+            .unwrap();
+        assert!(matches!(
+            wrong_target_binding.seal_subject(
+                resolver.identity_schema(),
+                namespace.authority(),
+                &equal_target,
+                RegisteredUnavailableCause::Missing,
+            ),
+            Err(RegisteredNegativeProofError::TargetMismatch)
+        ));
+
+        let wrong_authority_binding = resolver
+            .plan_negative_proof(&namespace, &target, RegisteredUnavailableCause::Missing)
+            .unwrap()
+            .verify(&target, RegisteredUnavailableCause::Missing)
+            .unwrap();
+        assert!(matches!(
+            wrong_authority_binding.seal_subject(
+                resolver.identity_schema(),
+                foreign_namespace.authority(),
+                &target,
+                RegisteredUnavailableCause::Missing,
+            ),
+            Err(RegisteredNegativeProofError::AuthorityMismatch)
+        ));
+
+        let wrong_schema_binding = resolver
+            .plan_negative_proof(&namespace, &target, RegisteredUnavailableCause::Missing)
+            .unwrap()
+            .verify(&target, RegisteredUnavailableCause::Missing)
+            .unwrap();
+        assert!(matches!(
+            wrong_schema_binding.seal_subject(
+                &FOREIGN_SCHEMA,
+                namespace.authority(),
+                &target,
+                RegisteredUnavailableCause::Missing,
+            ),
+            Err(RegisteredNegativeProofError::IdentitySchemaMismatch)
+        ));
+
+        let wrong_cause_binding = resolver
+            .plan_negative_proof(&namespace, &target, RegisteredUnavailableCause::Missing)
+            .unwrap()
+            .verify(&target, RegisteredUnavailableCause::Missing)
+            .unwrap();
+        assert!(matches!(
+            wrong_cause_binding.seal_subject(
+                resolver.identity_schema(),
+                namespace.authority(),
+                &target,
+                RegisteredUnavailableCause::OpenFailed,
+            ),
+            Err(RegisteredNegativeProofError::CauseMismatch)
+        ));
+    }
 }
