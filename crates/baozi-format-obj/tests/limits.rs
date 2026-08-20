@@ -1,17 +1,18 @@
 mod common;
 
+use baozi_format_obj::{ObjImportOptions, ObjTextDecodingMode};
 use baozi_import::{
-    FormatFailureDetailValue, ImportCause, ImportDimension, ImportOperationControl,
-    ImportProgressPhase, ImportProgressUnit, ImportTerminalCause, ImportTerminalFailureClass,
-    ResourceLimits, ScopeAbortCause,
+    ConformancePolicy, FormatFailureDetailValue, ImportCause, ImportDimension,
+    ImportOperationControl, ImportProgressPhase, ImportProgressUnit, ImportTerminalCause,
+    ImportTerminalFailureClass, ResourceLimits, ScopeAbortCause,
 };
 use baozi_operation::{
     CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
 };
 use common::{
     TestResult, expected_failure, expected_success, import_assets_result,
-    import_assets_result_with_control, import_bytes_result, scene_snapshot,
-    snapshot_line_containing,
+    import_assets_result_with_control, import_assets_result_with_text_policy_and_control,
+    import_bytes_result, scene_snapshot, snapshot_line_containing,
 };
 use std::sync::{
     Arc,
@@ -67,16 +68,20 @@ fn controlled_import_from_phase(
 }
 
 fn assert_cancelled(failure: &baozi_import::ImportFailure) {
-    assert!(matches!(
-        failure.cause(),
-        ImportCause::Scope(abort)
-            if matches!(
-                abort.cause(),
-                ScopeAbortCause::Control(ControlCause::Cancelled {
-                    origin: CancellationOrigin::Signal,
-                })
-            )
-    ));
+    assert!(
+        matches!(
+            failure.cause(),
+            ImportCause::Scope(abort)
+                if matches!(
+                    abort.cause(),
+                    ScopeAbortCause::Control(ControlCause::Cancelled {
+                        origin: CancellationOrigin::Signal,
+                    })
+                )
+        ),
+        "expected signal cancellation, got {:?}",
+        failure.cause()
+    );
 }
 
 fn work_consumed(failure: &baozi_import::ImportFailure, dimension: ImportDimension) -> u64 {
@@ -87,8 +92,9 @@ fn work_consumed(failure: &baozi_import::ImportFailure, dimension: ImportDimensi
         .consumed()
 }
 
-fn first_cancelled_work_prefix_at_least(
+fn first_cancelled_dimension_prefix_at_least(
     total_polls: usize,
+    dimension: ImportDimension,
     target_consumed: u64,
     mut run_cancelled: impl FnMut(usize) -> TestResult<baozi_import::ImportFailure>,
 ) -> TestResult<(usize, baozi_import::ImportFailure)> {
@@ -97,14 +103,14 @@ fn first_cancelled_work_prefix_at_least(
     while low < high {
         let middle = low + (high - low) / 2;
         let failure = run_cancelled(middle)?;
-        if work_consumed(&failure, ImportDimension::WorkUnits) >= target_consumed {
+        if work_consumed(&failure, dimension) >= target_consumed {
             high = middle;
         } else {
             low = middle + 1;
         }
     }
     let failure = run_cancelled(low)?;
-    assert!(work_consumed(&failure, ImportDimension::WorkUnits) >= target_consumed);
+    assert!(work_consumed(&failure, dimension) >= target_consumed);
     Ok((low, failure))
 }
 
@@ -120,6 +126,35 @@ fn format_byte_offset(failure: &baozi_import::ImportFailure) -> Option<u64> {
             FormatFailureDetailValue::Unsigned(value) => Some(value),
             _ => None,
         })
+}
+
+fn import_atomic_frontier_document(
+    document: &[u8],
+    limits: ResourceLimits,
+    replace_invalid_utf8: bool,
+    control: ImportOperationControl,
+) -> TestResult<Result<baozi_import::ImportReport, baozi_import::ImportFailure>> {
+    if replace_invalid_utf8 {
+        let options = ObjImportOptions::default()
+            .with_text_decoding_mode(ObjTextDecodingMode::ReplaceInvalidUtf8);
+        return import_assets_result_with_text_policy_and_control(
+            "cross-boundary-cancel.obj",
+            [("cross-boundary-cancel.obj", document)],
+            limits,
+            false,
+            Some(options),
+            ConformancePolicy::AllowDeclaredRecovery,
+            true,
+            control,
+        );
+    }
+    import_assets_result_with_control(
+        "cross-boundary-cancel.obj",
+        [("cross-boundary-cancel.obj", document)],
+        limits,
+        false,
+        control,
+    )
 }
 
 fn reverse_material_library(material_count: usize) -> String {
@@ -287,6 +322,64 @@ fn primary_ascii_decode_adds_only_chunk_bounded_polls() -> TestResult<()> {
         cancel_control,
     )?);
     assert_cancelled(&cancelled);
+    Ok(())
+}
+
+#[test]
+fn decode_polls_before_atomic_text_units_cross_the_four_kib_frontier() -> TestResult<()> {
+    let mut utf8 = vec![b'#'; SCAN_CHUNK_BYTES - 1];
+    utf8.extend_from_slice("\u{1f642}".as_bytes());
+    let mut crlf = vec![b'#'; SCAN_CHUNK_BYTES - 1];
+    crlf.extend_from_slice(b"\r\n");
+    let mut replacement = vec![b'#'; SCAN_CHUNK_BYTES - 1];
+    replacement.extend_from_slice(&[0xe2, 0x82, b'A']);
+
+    for (label, document, replace_invalid_utf8) in [
+        ("utf8", utf8, false),
+        ("crlf", crlf, false),
+        ("replacement", replacement, true),
+    ] {
+        let mut limits = ResourceLimits::default();
+        limits.max_records = 0;
+        let (calibration_control, calibration_polls) = controlled_import(None);
+        let calibration = expected_failure(import_atomic_frontier_document(
+            document.as_slice(),
+            limits.clone(),
+            replace_invalid_utf8,
+            calibration_control,
+        )?);
+        assert_ledger_limit(&calibration, ImportDimension::Records);
+        let total_polls = calibration_polls.load(Ordering::SeqCst);
+        assert!(total_polls > 0);
+
+        let planning_prefix = (SCAN_CHUNK_BYTES - 1) as u64;
+        let build_prefix = u64::try_from(document.len())? + planning_prefix;
+        for (pass, expected_prefix) in [("planning", planning_prefix), ("build", build_prefix)] {
+            let (_, failure) = first_cancelled_dimension_prefix_at_least(
+                total_polls,
+                ImportDimension::DecodeWork,
+                expected_prefix,
+                |cancel_on| {
+                    let (control, polls) = controlled_import(Some(cancel_on));
+                    let failure = expected_failure(import_atomic_frontier_document(
+                        document.as_slice(),
+                        limits.clone(),
+                        replace_invalid_utf8,
+                        control,
+                    )?);
+                    assert_cancelled(&failure);
+                    assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
+                    Ok(failure)
+                },
+            )?;
+
+            assert_eq!(
+                work_consumed(&failure, ImportDimension::DecodeWork),
+                expected_prefix,
+                "{label} {pass} cancellation must be observed before consuming the atomic text unit"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -480,8 +573,11 @@ fn material_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<()
     let total_polls = calibration_polls.load(Ordering::SeqCst);
     assert!(total_polls > 0);
 
-    let (_, failure) =
-        first_cancelled_work_prefix_at_least(total_polls, SORT_COMPARISON_CHUNK, |cancel_on| {
+    let (_, failure) = first_cancelled_dimension_prefix_at_least(
+        total_polls,
+        ImportDimension::WorkUnits,
+        SORT_COMPARISON_CHUNK,
+        |cancel_on| {
             let (control, polls) = controlled_import(Some(cancel_on));
             let failure = expected_failure(import_assets_result_with_control(
                 "model.obj",
@@ -493,7 +589,8 @@ fn material_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<()
             assert_cancelled(&failure);
             assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
             Ok(failure)
-        })?;
+        },
+    )?;
     let consumed = work_consumed(&failure, ImportDimension::WorkUnits);
     assert_eq!(consumed, SORT_COMPARISON_CHUNK);
     Ok(())
@@ -516,8 +613,11 @@ fn vertex_key_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<
     assert!(total_polls > 0);
 
     let expected_prefix = SORT_COMPARISON_CHUNK + 1;
-    let (_, failure) =
-        first_cancelled_work_prefix_at_least(total_polls, expected_prefix, |cancel_on| {
+    let (_, failure) = first_cancelled_dimension_prefix_at_least(
+        total_polls,
+        ImportDimension::WorkUnits,
+        expected_prefix,
+        |cancel_on| {
             let (control, polls) = controlled_import(Some(cancel_on));
             let failure = expected_failure(import_assets_result_with_control(
                 "polygon.obj",
@@ -529,7 +629,8 @@ fn vertex_key_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<
             assert_cancelled(&failure);
             assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
             Ok(failure)
-        })?;
+        },
+    )?;
     let consumed = work_consumed(&failure, ImportDimension::WorkUnits);
     assert_eq!(consumed, expected_prefix);
     Ok(())

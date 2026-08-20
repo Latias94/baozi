@@ -1,7 +1,8 @@
 use crate::{ObjFailure, mtl, parser};
 use baozi_import::authoring::{Vec2, Vec3};
 use baozi_import::{
-    ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec, ParseResult, ParseScope,
+    ConformedTextInput, ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec,
+    ParseResult, ParseScope, TextInputLine, TextInputRecoveryTracker,
 };
 
 use parser::usize_amount;
@@ -54,7 +55,8 @@ impl ParsedObj<'_> {
 
 pub(crate) fn parse<'scope>(
     scope: &'scope ParseScope<'_>,
-    text: &parser::DecodedText<'_>,
+    text: &ConformedTextInput<'_>,
+    recoveries: &mut TextInputRecoveryTracker<'_, '_>,
 ) -> ParseResult<ParsedObj<'scope>> {
     let mut parser = ObjParser {
         scope,
@@ -76,13 +78,15 @@ pub(crate) fn parse<'scope>(
         smoothing: None,
     };
 
-    parser::scan_lines(scope, text, |line, line_number| {
+    for line in text.lines() {
+        let line_number = u32::try_from(line.number())
+            .map_err(|_| scope.resource_limit_exceeded("line-count", u64::from(u32::MAX)))?;
         let line = scope.with_work(ImportWorkClass::Records, 1, |work| -> ParseResult<_> {
             work.complete_all()?;
             Ok(line)
         })?;
-        parser.parse_line(&line, line_number)
-    })?;
+        parser.parse_line(recoveries, &line, line_number)?;
+    }
 
     Ok(parser.parsed)
 }
@@ -106,12 +110,14 @@ struct Token<'line> {
 
 struct TokenBuffer<'scope, 'line> {
     values: MeteredVec<'scope, Token<'line>>,
+    comment_start: Option<usize>,
 }
 
 impl<'scope> ObjParser<'scope, '_> {
     fn parse_line(
         &mut self,
-        decoded_line: &parser::DecodedLine<'_>,
+        recoveries: &mut TextInputRecoveryTracker<'_, '_>,
+        decoded_line: &TextInputLine<'_>,
         line_number: u32,
     ) -> ParseResult<()> {
         let raw_line = decoded_line.text();
@@ -123,10 +129,10 @@ impl<'scope> ObjParser<'scope, '_> {
         });
         parser::authorize_line_recoveries(
             self.scope,
+            recoveries,
             decoded_line,
             allowed_value,
-            decoded_line.comment_start(),
-            || self.scope.diagnostic_source(),
+            tokens.comment_start,
         )?;
         let Some(first) = token_values.first() else {
             return Ok(());
@@ -344,15 +350,16 @@ fn parse_state_name<'scope>(
 
 fn tokenize<'scope, 'line>(
     scope: &'scope ParseScope<'_>,
-    decoded_line: &'line parser::DecodedLine<'_>,
+    decoded_line: &'line TextInputLine<'_>,
     line_number: u32,
 ) -> ParseResult<TokenBuffer<'scope, 'line>> {
     let line = decoded_line.text();
     let mut tokens = TokenBuffer {
         values: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-tokens"),
+        comment_start: None,
     };
 
-    parser::scan_token_ranges(
+    tokens.comment_start = parser::scan_token_ranges(
         scope,
         line,
         "obj-token-scan-work",

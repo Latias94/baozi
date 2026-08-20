@@ -431,6 +431,46 @@ fn comments_drop_invalid_bytes_without_false_loss() -> TestResult<()> {
 }
 
 #[test]
+fn inline_obj_comments_discard_invalid_bytes_after_semantic_recovery() -> TestResult<()> {
+    let mut bytes = Vec::from(b"o recovered".as_slice());
+    bytes.push(0xff);
+    bytes.extend_from_slice(b" # ignored ");
+    bytes.push(0x80);
+    bytes.push(b'\n');
+    bytes.extend_from_slice(GEOMETRY);
+    let semantic_offset = bytes
+        .iter()
+        .position(|byte| *byte == 0xff)
+        .expect("fixture contains a semantic replacement") as u64;
+    let comment_offset = bytes
+        .iter()
+        .position(|byte| *byte == 0x80)
+        .expect("fixture contains a comment replacement") as u64;
+
+    let report = import_recovered_obj(&bytes)?;
+
+    assert_eq!(
+        ranges(&report),
+        vec![(semantic_offset, semantic_offset + 1)]
+    );
+    assert_eq!(report.diagnostics().len(), 1);
+    assert_eq!(
+        report.diagnostics()[0].code().as_str(),
+        "obj.invalid_utf8_replaced"
+    );
+    assert_eq!(report.diagnostics()[0].source().as_str(), "recovered.obj");
+    let diagnostic_range = report.diagnostics()[0]
+        .byte_range()
+        .expect("semantic recovery diagnostic retains a byte range");
+    assert_eq!(
+        (diagnostic_range.start(), diagnostic_range.end()),
+        (semantic_offset, semantic_offset + 1)
+    );
+    assert!(!ranges(&report).contains(&(comment_offset, comment_offset + 1)));
+    Ok(())
+}
+
+#[test]
 fn mtl_comments_drop_invalid_bytes_without_false_loss() -> TestResult<()> {
     let obj = b"mtllib material.mtl\nusemtl red\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
     let mtl = b"# ignored \xff\x80\nnewmtl red\nKd 1 0 0\n";
@@ -449,6 +489,57 @@ fn mtl_comments_drop_invalid_bytes_without_false_loss() -> TestResult<()> {
 
     assert!(report.loss_evidence().is_empty());
     assert!(report.diagnostics().is_empty());
+    Ok(())
+}
+
+#[test]
+fn inline_mtl_comments_discard_invalid_bytes_after_semantic_recovery() -> TestResult<()> {
+    let obj = "mtllib material.mtl\nusemtl r\u{fffd}d\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let mut mtl = Vec::from(b"newmtl r".as_slice());
+    mtl.push(0xff);
+    mtl.extend_from_slice(b"d # ignored ");
+    mtl.push(0x80);
+    mtl.extend_from_slice(b"\nKd 1 0 0\n");
+    let semantic_offset = mtl
+        .iter()
+        .position(|byte| *byte == 0xff)
+        .expect("fixture contains a semantic replacement") as u64;
+    let comment_offset = mtl
+        .iter()
+        .position(|byte| *byte == 0x80)
+        .expect("fixture contains a comment replacement") as u64;
+
+    let report = expected_success(import_assets_result_with_text_policy(
+        "model.obj",
+        [
+            ("model.obj", obj.as_bytes()),
+            ("material.mtl", mtl.as_slice()),
+        ],
+        ResourceLimits::default(),
+        true,
+        Some(replacement_options()),
+        ConformancePolicy::AllowDeclaredRecovery,
+        true,
+    )?);
+
+    assert_eq!(
+        ranges(&report),
+        vec![(semantic_offset, semantic_offset + 1)]
+    );
+    assert_eq!(report.diagnostics().len(), 1);
+    assert_eq!(
+        report.diagnostics()[0].code().as_str(),
+        "obj.invalid_utf8_replaced"
+    );
+    assert_eq!(report.diagnostics()[0].source().as_str(), "material.mtl");
+    let diagnostic_range = report.diagnostics()[0]
+        .byte_range()
+        .expect("semantic recovery diagnostic retains a byte range");
+    assert_eq!(
+        (diagnostic_range.start(), diagnostic_range.end()),
+        (semantic_offset, semantic_offset + 1)
+    );
+    assert!(!ranges(&report).contains(&(comment_offset, comment_offset + 1)));
     Ok(())
 }
 

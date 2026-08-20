@@ -1,10 +1,10 @@
 use crate::material_library_role;
-use crate::parser::{self, TextDecodeFailure};
+use crate::parser;
 use baozi_import::authoring::Color;
 use baozi_import::{
-    DependencyOrigin, DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
-    ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredOrderedMap, MeteredString,
-    MeteredVec, ParseFailure, ParseResult, ParseScope,
+    ConformedTextInput, DependencyOrigin, DependencySnapshot, DiagnosticCode, DiagnosticSeverity,
+    ImportProgressPhase, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredOrderedMap,
+    MeteredString, MeteredVec, ParseFailure, ParseResult, ParseScope, TextInputLine,
 };
 use std::cmp::Ordering;
 use std::fmt;
@@ -308,22 +308,15 @@ pub(crate) fn load_libraries<'scope>(
             Ok(snapshot) => {
                 let origin = library.origins.len();
                 let dependency_origin = snapshot.origin();
-                let text = match parser::decode_utf8(scope, snapshot.bytes(), "obj-mtl-text") {
-                    Ok(text) => text,
-                    Err(TextDecodeFailure::Scope(failure)) => return Err(failure),
-                    Err(TextDecodeFailure::InvalidUtf8 {
-                        source,
-                        base_offset,
-                    }) => {
-                        let failure = crate::ObjFailure::invalid_utf8_at(source, base_offset)
-                            .ok_or_else(|| {
-                                scope.allocation_failure("obj-mtl-invalid-utf8-byte-offset")
-                            })?;
-                        return Err(scope.format_failure(failure));
-                    }
-                };
-                parse_mtl(scope, &snapshot, &text, origin, &mut library)?;
-                drop(text);
+                parser::with_obj_dependency_text_limit(
+                    scope,
+                    snapshot.diagnostic_source(),
+                    "obj-mtl-text",
+                    scope.limits().max_dependency_asset_bytes,
+                    |text, recoveries| {
+                        parse_mtl(scope, &snapshot, text, recoveries, origin, &mut library)
+                    },
+                )?;
                 drop(snapshot);
                 library.origins.try_push_reserved(dependency_origin)?;
             }
@@ -365,13 +358,16 @@ impl<'scope> MaterialLibrary<'scope> {
 fn parse_mtl<'scope>(
     scope: &'scope ParseScope<'_>,
     snapshot: &DependencySnapshot<'_>,
-    text: &parser::DecodedText<'_>,
+    text: &ConformedTextInput<'_>,
+    recoveries: &mut baozi_import::TextInputRecoveryTracker<'_, '_>,
     origin: usize,
     library: &mut MaterialLibrary<'scope>,
 ) -> ParseResult<()> {
     let mut current = None;
 
-    parser::scan_lines(scope, text, |decoded_line, line_number| {
+    for decoded_line in text.lines() {
+        let line_number = u32::try_from(decoded_line.number())
+            .map_err(|_| scope.resource_limit_exceeded("line-count", u64::from(u32::MAX)))?;
         // A decoded line becomes a consumed record as soon as this parser admits it for
         // processing. Child token, string, and resolution work starts only after that admission.
         let raw_line = scope.with_work(ImportWorkClass::Records, 1, |work| {
@@ -388,13 +384,13 @@ fn parse_mtl<'scope>(
         };
         parser::authorize_line_recoveries(
             scope,
+            recoveries,
             &decoded_line,
             allowed_value,
-            decoded_line.comment_start(),
-            || snapshot.diagnostic_source(),
+            tokens.comment_start,
         )?;
         let Some(keyword) = keyword else {
-            return Ok(());
+            continue;
         };
 
         match keyword {
@@ -539,8 +535,7 @@ fn parse_mtl<'scope>(
                 format_args!("MTL statement '{keyword}' is not recognized"),
             )?,
         }
-        Ok(())
-    })?;
+    }
 
     flush_material(scope, library, current)
 }
@@ -607,6 +602,7 @@ struct MtlToken<'line> {
 
 struct MtlTokenBuffer<'scope, 'line> {
     values: MeteredVec<'scope, MtlToken<'line>>,
+    comment_start: Option<usize>,
 }
 
 impl<'line> std::ops::Deref for MtlTokenBuffer<'_, 'line> {
@@ -619,13 +615,14 @@ impl<'line> std::ops::Deref for MtlTokenBuffer<'_, 'line> {
 
 fn tokenize_mtl<'scope, 'line>(
     scope: &'scope ParseScope<'_>,
-    decoded_line: &'line parser::DecodedLine<'_>,
+    decoded_line: &'line TextInputLine<'_>,
 ) -> ParseResult<MtlTokenBuffer<'scope, 'line>> {
     let line = decoded_line.text();
     let mut tokens = MtlTokenBuffer {
         values: scope.metered_vec(ImportStorageClass::FormatNormalization, "obj-mtl-tokens"),
+        comment_start: None,
     };
-    parser::scan_token_ranges(
+    tokens.comment_start = parser::scan_token_ranges(
         scope,
         line,
         "obj-mtl-token-scan-work",

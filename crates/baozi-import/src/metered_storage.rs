@@ -2,7 +2,7 @@ use crate::error::ScopeAbortCause;
 use crate::scope::ImportStorageClass;
 use crate::store::{ImportStoreHost, ImportStoreReservation};
 use baozi_core::OrderedMap;
-use baozi_operation::{CapacityPlanError, ReplacementCapacityPlan};
+use baozi_operation::{CapacityPlan, CapacityPlanError, ReplacementCapacityPlan};
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
@@ -23,6 +23,32 @@ pub(crate) struct AccountedVecIntoIter<T> {
 }
 
 pub(crate) type AccountedReservationVec = AccountedVec<ImportStoreReservation>;
+
+pub(crate) fn metered_replacement_plans_with_element_size(
+    len: usize,
+    capacity: usize,
+    required_capacity: usize,
+    element_size: usize,
+) -> Result<(CapacityPlan, CapacityPlan), CapacityPlanError> {
+    let desired = capacity.saturating_mul(2).max(required_capacity).max(4);
+    let growth = CapacityPlan::with_element_size(len, capacity, desired, element_size)?;
+    let replacement =
+        CapacityPlan::with_element_size(0, 0, growth.envelope_capacity(), element_size)?;
+    Ok((growth, replacement))
+}
+
+pub(crate) fn metered_vec_replacement_plans<T>(
+    len: usize,
+    capacity: usize,
+    required_capacity: usize,
+) -> Result<(CapacityPlan, CapacityPlan), CapacityPlanError> {
+    metered_replacement_plans_with_element_size(
+        len,
+        capacity,
+        required_capacity,
+        std::mem::size_of::<T>(),
+    )
+}
 
 /// Session-bound vector storage coupled to the reservation for its complete allocation.
 ///
@@ -672,6 +698,40 @@ mod tests {
                 "element storage must drop before its capacity reservation"
             );
         }
+    }
+
+    #[test]
+    fn shared_replacement_capacity_policy_is_exact_at_one_four_and_five_elements() {
+        fn assert_typed_policy<T>() {
+            for (required, expected_desired, expected_envelope) in [(1, 4, 4), (4, 4, 4), (5, 5, 8)]
+            {
+                let (growth, replacement) = metered_vec_replacement_plans::<T>(0, 0, required)
+                    .expect("small vector capacity plan must fit");
+                assert_eq!(growth.desired_capacity(), expected_desired);
+                assert_eq!(growth.envelope_capacity(), expected_envelope);
+                assert_eq!(replacement.desired_capacity(), expected_envelope);
+                assert_eq!(replacement.envelope_capacity(), expected_envelope);
+                assert_eq!(
+                    replacement
+                        .envelope_delta_bytes()
+                        .expect("small vector envelope bytes must fit"),
+                    u64::try_from(
+                        expected_envelope
+                            .checked_mul(std::mem::size_of::<T>())
+                            .expect("small vector envelope bytes must fit usize")
+                    )
+                    .expect("small vector envelope bytes must fit u64")
+                );
+            }
+        }
+
+        assert_typed_policy::<u8>();
+        assert_typed_policy::<[usize; 3]>();
+
+        let (_, replacement) = metered_replacement_plans_with_element_size(0, 0, 5, 1)
+            .expect("small string capacity plan must fit");
+        assert_eq!(replacement.envelope_capacity(), 8);
+        assert_eq!(replacement.envelope_delta_bytes().unwrap(), 8);
     }
 
     #[test]

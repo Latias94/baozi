@@ -23,7 +23,8 @@ use crate::limits::ResourceLimits;
 use crate::loss::{ImportLossDisposition, ImportLossEvidence, ImportLossSubject};
 use crate::metered_storage::{
     AccountedVec, MeteredDecodedText, MeteredOpaqueAllowance, MeteredOrderedMap, MeteredString,
-    MeteredVec, StorageMeter,
+    MeteredVec, StorageMeter, metered_replacement_plans_with_element_size,
+    metered_vec_replacement_plans,
 };
 use crate::options::{CompiledFormatOptions, FormatOptionKey};
 use crate::registry::RegistryEntry;
@@ -39,7 +40,9 @@ use crate::store::{
     ImportObservedWorkFailure, ImportStoreHost, ImportStoreHostError, ImportStoreReservation,
     ImportStoreSessionOwner, scene_validation_limits,
 };
-use crate::text_input::{TextConformanceResult, TextInputOptions};
+use crate::text_input::{
+    ConformedTextInput, TextConformanceResult, TextInputOptions, TextInputRecoveryTracker,
+};
 use crate::{SceneDraft as CanonicalSceneDraft, authoring::SceneAuthoringBatch};
 use baozi_core::scene::integration::SceneConstruction;
 use baozi_core::{OrderedMap, OrderedMapError};
@@ -584,16 +587,25 @@ impl<'session> ParseScope<'session> {
         self.primary_bytes
     }
 
-    pub fn conform_text_input(
-        &self,
-        bytes: &[u8],
+    /// Conforms the source suffix selected by `options` and runs a format-owned grammar action.
+    ///
+    /// The source capability is the sole byte authority. Recovery diagnostics cannot be rebound to
+    /// a separately supplied slice or a different dependency.
+    pub fn with_conformed_text_input<'scope, 'source, T>(
+        &'scope self,
+        source: DiagnosticSource<'source>,
         options: TextInputOptions,
-    ) -> ParseResult<TextConformanceResult<'_>> {
-        crate::text_input::conform_text_input(
+        action: impl for<'input> FnOnce(
+            &'input ConformedTextInput<'scope>,
+            &mut TextInputRecoveryTracker<'input, 'session>,
+        ) -> ParseResult<T>,
+    ) -> ParseResult<TextConformanceResult<T>> {
+        crate::text_input::with_conformed_text_input(
             self,
             self.entry.descriptor().text_profile(),
-            bytes,
+            source,
             options,
+            action,
         )
     }
 
@@ -3341,7 +3353,23 @@ pub(crate) const METERED_COPY_POLL_INTERVAL: usize = 4 * 1024;
 
 #[cfg(test)]
 std::thread_local! {
+    static FAIL_NEXT_METERED_ALLOCATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_NEXT_METERED_QUALIFICATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn fail_next_metered_allocation() -> bool {
+    FAIL_NEXT_METERED_ALLOCATION.with(|fault| fault.replace(false))
+}
+
+#[cfg(test)]
+pub(crate) fn inject_next_metered_allocation_failure() {
+    FAIL_NEXT_METERED_ALLOCATION.with(|fault| fault.set(true));
+}
+
+#[cfg(not(test))]
+const fn fail_next_metered_allocation() -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -3480,16 +3508,9 @@ impl<T> MeteredVec<'_, T> {
             return Ok(());
         }
 
-        let desired = self
-            .values
-            .capacity()
-            .saturating_mul(2)
-            .max(required)
-            .max(4);
-        let plan = CapacityPlan::for_type::<T>(self.values.len(), self.values.capacity(), desired)
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
-        let replacement_plan = CapacityPlan::for_type::<T>(0, 0, plan.envelope_capacity())
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        let (plan, replacement_plan) =
+            metered_vec_replacement_plans::<T>(self.values.len(), self.values.capacity(), required)
+                .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
         let admitted = replacement_plan
             .envelope_delta_bytes()
             .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
@@ -3500,6 +3521,9 @@ impl<T> MeteredVec<'_, T> {
             .verify_preflight(0, 0)
             .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
         let mut replacement = Vec::new();
+        if fail_next_metered_allocation() {
+            return Err(self.meter.allocation_failure(self.resource));
+        }
         replacement
             .try_reserve_exact(replacement_plan.allocator_additional())
             .map_err(|_| self.meter.allocation_failure(self.resource))?;
@@ -3765,12 +3789,13 @@ impl MeteredString<'_> {
             return Ok(());
         }
 
-        let desired = self.value.capacity().saturating_mul(2).max(required).max(4);
-        let plan =
-            CapacityPlan::with_element_size(self.value.len(), self.value.capacity(), desired, 1)
-                .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
-        let replacement_plan = CapacityPlan::with_element_size(0, 0, plan.envelope_capacity(), 1)
-            .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
+        let (plan, replacement_plan) = metered_replacement_plans_with_element_size(
+            self.value.len(),
+            self.value.capacity(),
+            required,
+            1,
+        )
+        .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;
         let admitted = replacement_plan
             .envelope_delta_bytes()
             .map_err(|cause| self.meter.capacity_error(self.resource, cause))?;

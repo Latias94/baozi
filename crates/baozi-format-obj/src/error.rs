@@ -1,6 +1,5 @@
 use baozi_import::{FormatFailureDetailSink, FormatFailureEvidenceProducer};
 use std::fmt;
-use std::str::Utf8Error;
 
 /// Stable classification of an OBJ-owned content failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -43,17 +42,15 @@ pub(crate) struct ObjFailure {
 }
 
 impl ObjFailure {
-    pub(crate) fn invalid_utf8_at(error: Utf8Error, base_offset: u64) -> Option<Self> {
-        let valid_up_to = u64::try_from(error.valid_up_to()).ok()?;
-        let byte_offset = base_offset.checked_add(valid_up_to)?;
-        Some(Self {
+    pub(crate) const fn invalid_utf8_at(byte_offset: u64) -> Self {
+        Self {
             code: ObjFailureCode::InvalidUtf8,
             line: None,
             column: None,
             byte_offset: Some(byte_offset),
             subject: Some("document"),
             reason: Some("invalid-utf8"),
-        })
+        }
     }
 
     pub(crate) const fn invalid_document_byte(reason: &'static str, byte_offset: u64) -> Self {
@@ -213,23 +210,11 @@ mod tests {
 
     #[test]
     fn utf8_failure_retains_stable_offset_evidence() {
-        let mut bytes = [0_u8];
-        bytes[0] = u8::MAX;
-        let error = std::str::from_utf8(&bytes).expect_err("fixture is invalid UTF-8");
-        let failure = ObjFailure::invalid_utf8_at(error, 4_096)
-            .expect("fixture offset remains representable");
+        let failure = ObjFailure::invalid_utf8_at(4_096);
 
         assert_eq!(failure.byte_offset, Some(4_096));
         assert_eq!(failure.subject, Some("document"));
         assert_eq!(failure.reason, Some("invalid-utf8"));
-    }
-
-    #[test]
-    fn utf8_failure_offset_addition_is_checked() {
-        let error = std::str::from_utf8(&[b'a', u8::MAX])
-            .expect_err("fixture is invalid UTF-8 after one byte");
-
-        assert!(ObjFailure::invalid_utf8_at(error, u64::MAX).is_none());
     }
 
     #[test]
