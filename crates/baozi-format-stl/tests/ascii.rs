@@ -116,6 +116,10 @@ fn empty_ascii_solid_preserves_diagnostic_and_typed_failure() {
     assert_eq!(failure.diagnostics().len(), 1);
     assert_eq!(failure.diagnostics()[0].code().as_str(), "stl.empty_solid");
     assert_eq!(
+        failure.diagnostics()[0].source().as_str(),
+        "empty-ascii.stl"
+    );
+    assert_eq!(
         failure.diagnostics()[0]
             .line_column()
             .expect("empty solid location")

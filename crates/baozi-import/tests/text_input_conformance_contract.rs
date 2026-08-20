@@ -1646,6 +1646,33 @@ fn ascii_only_rejects_non_ascii_with_shifted_raw_range() {
 }
 
 #[test]
+fn ascii_only_reports_invalid_utf8_before_non_ascii_classification() {
+    let profile = text_profile_with_lexical(
+        TextBomPolicy::Forbidden,
+        [TextNewline::Lf],
+        [TextDecodingMode::RejectInvalid],
+        TextLexicalMode::AsciiOnly,
+        TextControlPolicy::RejectAll,
+    );
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::ExpectRejected {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text"),
+            expected_kind: TextConformanceViolationKind::InvalidUtf8,
+            expected_range: Some((3, 4)),
+        },
+    );
+    let request = request_for(importer, ResourceLimits::default());
+
+    let failure = import_bytes(&request, b"caf\xff")
+        .expect_err("ASCII-only text must distinguish invalid UTF-8 from valid non-ASCII text");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+    assert_format_violation(&failure);
+    assert_decode_work(&failure, 4, 4);
+}
+
+#[test]
 fn line_index_limit_fails_after_newline_scan_without_partial_text_storage() {
     let profile = text_profile(
         TextBomPolicy::Forbidden,
@@ -1653,6 +1680,15 @@ fn line_index_limit_fails_after_newline_scan_without_partial_text_storage() {
         [TextDecodingMode::RejectInvalid],
         TextControlPolicy::RejectAll,
     );
+    let one_line = import_text_shape(
+        b"a",
+        TextDecodingMode::RejectInvalid,
+        1,
+        0,
+        ResourceLimits::default(),
+    )
+    .expect("one line must establish the first line-index capacity");
+    let first_line_index_bytes = line_index_peak(&one_line);
     let (importer, parse_calls) = TextInputImporter::new(
         descriptor(profile),
         ParserBehavior::PropagateScopeFailure {
@@ -1660,15 +1696,15 @@ fn line_index_limit_fails_after_newline_scan_without_partial_text_storage() {
         },
     );
     let mut limits = ResourceLimits::default();
-    limits.max_line_index_bytes = 31;
+    limits.max_line_index_bytes = first_line_index_bytes;
     let request = request_for(importer, limits);
 
-    let failure = import_bytes(&request, b"a\nb")
-        .expect_err("line-index cap must reject the second raw line start");
+    let failure = import_bytes(&request, b"a\nb\nc\nd\ne")
+        .expect_err("line-index cap must reject the first capacity growth");
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
-    assert_scope_resource_limit(&failure, 31);
-    assert_decode_work(&failure, 3, 2);
+    assert_scope_resource_limit(&failure, first_line_index_bytes);
+    assert_decode_work(&failure, 9, 8);
     assert_no_text_storage(&failure);
 }
 

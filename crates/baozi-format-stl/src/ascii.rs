@@ -2,161 +2,98 @@ use crate::error::{StlFailure, StlFailureCode};
 use crate::parser::{ParsedMesh, ParsedStl};
 use baozi_import::authoring::Vec3;
 use baozi_import::{
-    DetectionResult, DetectionScope, DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity,
-    ImportProgressPhase, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredDecodedText,
-    MeteredString, MeteredVec, ParseFailure, ParseResult, ParseScope,
+    ConformedTextInput, DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity,
+    ImportProgressPhase, ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec,
+    ParseFailure, ParseResult, ParseScope, TextConformanceViolation, TextConformanceViolationKind,
+    TextDecodingMode, TextInputLine, TextInputOptions,
 };
 
 const CHECKPOINT_CHUNK_BYTES: usize = 4 * 1024;
 
-pub(crate) fn parse<'scope>(
-    scope: &'scope ParseScope<'_>,
-    bytes: &[u8],
-) -> ParseResult<ParsedStl<'scope>> {
-    let text = validate_text_profile_scoped(scope, bytes)?;
-    AsciiParser::new(scope).parse(text.as_str())
+pub(crate) fn parse<'scope>(scope: &'scope ParseScope<'_>) -> ParseResult<ParsedStl<'scope>> {
+    let options = TextInputOptions::new(TextDecodingMode::RejectInvalid, "stl-text-input")
+        .with_decoded_resource("stl-decoded-text")
+        .with_line_resource("line-bytes")
+        .with_line_index_resource("stl-line-index-bytes");
+    scope
+        .with_conformed_text_input(scope.diagnostic_source(), options, |input, _recoveries| {
+            AsciiParser::new(scope).parse(input)
+        })?
+        .map_err(|violation| text_conformance_failure(scope, violation))
 }
 
-pub(crate) fn validate_text_profile_for_detection<'bytes>(
-    scope: &DetectionScope<'_>,
-    bytes: &'bytes [u8],
-) -> DetectionResult<Option<&'bytes str>> {
-    let profile = account_detection_work(scope, bytes.len(), || {
-        validate_text_profile_range(bytes, 0, bytes.len())
-    })?;
-    if profile.is_err() {
-        return Ok(None);
-    }
-
-    let text = account_detection_work(scope, bytes.len(), || std::str::from_utf8(bytes))?;
-    Ok(text.ok())
-}
-
-fn account_detection_work<T>(
-    scope: &DetectionScope<'_>,
-    byte_count: usize,
-    work: impl FnOnce() -> T,
-) -> DetectionResult<T> {
-    if byte_count == 0 {
-        return Ok(work());
-    }
-    scope.with_work(byte_count as u64, || Ok(work()))
-}
-
-fn validate_text_profile_scoped<'scope>(
-    scope: &'scope ParseScope<'_>,
-    bytes: &[u8],
-) -> ParseResult<MeteredDecodedText<'scope>> {
-    let mut decoded = None;
-    let mut start = 0usize;
-    while start < bytes.len() {
-        let end = start
-            .checked_add(CHECKPOINT_CHUNK_BYTES)
-            .map_or(bytes.len(), |end| end.min(bytes.len()));
-        let chunk_bytes = usize_amount(scope, end - start, "stl-decode-work")?;
-        scope.with_work(
-            ImportWorkClass::DecodeWork,
-            chunk_bytes,
-            |work| -> ParseResult<()> {
-                if decoded.is_none() {
-                    decoded = Some(scope.metered_decoded_text(bytes.len(), "stl-decoded-text")?);
-                }
-                validate_text_profile_range(bytes, start, end)
-                    .map_err(|failure| scope.format_failure(failure))?;
-                let chunk = bytes.get(start..end).ok_or_else(|| {
-                    scope.format_failure(StlFailure::content(
-                        StlFailureCode::InternalInvariant,
-                        "ascii-profile-range",
-                        "invalid-decode-range",
-                    ))
-                })?;
-                let chunk = match std::str::from_utf8(chunk) {
-                    Ok(chunk) => chunk,
-                    Err(source) => {
-                        let byte_offset = start
-                            .checked_add(source.valid_up_to())
-                            .and_then(|offset| u64::try_from(offset).ok())
-                            .ok_or_else(|| scope.allocation_failure("stl-utf8-byte-offset"))?;
-                        return Err(scope.format_failure(StlFailure::invalid_utf8_at(byte_offset)));
-                    }
-                };
-                let Some(decoded) = decoded.as_mut() else {
-                    return Err(scope.format_failure(StlFailure::content(
-                        StlFailureCode::InternalInvariant,
-                        "ascii-profile-buffer",
-                        "missing-decoded-buffer",
-                    )));
-                };
-                decoded.try_push_str(chunk)?;
-                work.complete_all()
+fn text_conformance_failure(
+    scope: &ParseScope<'_>,
+    violation: TextConformanceViolation,
+) -> ParseFailure {
+    let raw_offset = violation.raw_range().map(DiagnosticByteRange::start);
+    match violation.kind() {
+        TextConformanceViolationKind::ForbiddenBom => {
+            byte_conformance_failure(scope, raw_offset, "forbidden-bom-range-missing", |offset| {
+                StlFailure::non_ascii(offset, "forbidden-bom")
+            })
+        }
+        TextConformanceViolationKind::InvalidUtf8 => byte_conformance_failure(
+            scope,
+            raw_offset,
+            "invalid-utf8-range-missing",
+            StlFailure::invalid_utf8_at,
+        ),
+        TextConformanceViolationKind::UnsupportedNewline => byte_conformance_failure(
+            scope,
+            raw_offset,
+            "unsupported-newline-range-missing",
+            |offset| StlFailure::invalid_control(offset, "bare-cr"),
+        ),
+        TextConformanceViolationKind::ForbiddenControl => byte_conformance_failure(
+            scope,
+            raw_offset,
+            "forbidden-control-range-missing",
+            |offset| {
+                let reason = usize::try_from(offset)
+                    .ok()
+                    .and_then(|offset| scope.primary_bytes().get(offset))
+                    .filter(|&&byte| byte == b'\0')
+                    .map_or("forbidden-control", |_| "nul-byte");
+                StlFailure::invalid_control(offset, reason)
             },
-        )?;
-        start = end;
-    }
-
-    match decoded {
-        Some(decoded) => decoded.finish_exact(),
-        None => scope
-            .metered_decoded_text(0, "stl-decoded-text")?
-            .finish_exact(),
+        ),
+        TextConformanceViolationKind::NonAscii => {
+            byte_conformance_failure(scope, raw_offset, "non-ascii-range-missing", |offset| {
+                StlFailure::non_ascii(offset, "non-ascii-byte")
+            })
+        }
+        TextConformanceViolationKind::MissingTextProfile => {
+            internal_text_conformance_failure(scope, "missing-text-profile")
+        }
+        TextConformanceViolationKind::UnsupportedSourceEncoding => {
+            internal_text_conformance_failure(scope, "unsupported-source-encoding")
+        }
+        TextConformanceViolationKind::DecodingModeNotDeclared => {
+            internal_text_conformance_failure(scope, "decoding-mode-not-declared")
+        }
+        _ => internal_text_conformance_failure(scope, "unknown-violation"),
     }
 }
 
-fn validate_text_profile_range(bytes: &[u8], start: usize, end: usize) -> Result<(), StlFailure> {
-    if start == 0 && bytes.starts_with(b"\xef\xbb\xbf") {
-        return Err(StlFailure::non_ascii(0, "forbidden-bom"));
+fn byte_conformance_failure(
+    scope: &ParseScope<'_>,
+    raw_offset: Option<u64>,
+    missing_range_reason: &'static str,
+    failure: impl FnOnce(u64) -> StlFailure,
+) -> ParseFailure {
+    match raw_offset {
+        Some(offset) => scope.format_failure(failure(offset)),
+        None => internal_text_conformance_failure(scope, missing_range_reason),
     }
-
-    let chunk = bytes.get(start..end).ok_or_else(|| {
-        StlFailure::content(
-            StlFailureCode::InternalInvariant,
-            "ascii-profile-range",
-            "invalid-scan-range",
-        )
-    })?;
-    for (relative, byte) in chunk.iter().copied().enumerate() {
-        let offset = start.checked_add(relative).ok_or_else(|| {
-            StlFailure::content(
-                StlFailureCode::InternalInvariant,
-                "ascii-profile-offset",
-                "byte-offset-overflow",
-            )
-        })?;
-        if !byte.is_ascii() {
-            return Err(non_ascii_failure(bytes, offset));
-        }
-
-        let reason = match byte {
-            b'\t' | b'\n' => None,
-            b'\r' if offset.checked_add(1).and_then(|next| bytes.get(next)) == Some(&b'\n') => None,
-            b'\r' => Some("bare-cr"),
-            b'\0' => Some("nul-byte"),
-            value if value.is_ascii_control() => Some("forbidden-control"),
-            _ => None,
-        };
-        if let Some(reason) = reason {
-            return Err(StlFailure::invalid_control(offset as u64, reason));
-        }
-    }
-
-    Ok(())
 }
 
-fn non_ascii_failure(bytes: &[u8], offset: usize) -> StlFailure {
-    const MAX_UTF8_SEQUENCE_BYTES: usize = 4;
-
-    let end = offset
-        .checked_add(MAX_UTF8_SEQUENCE_BYTES)
-        .map_or(bytes.len(), |end| end.min(bytes.len()));
-    if bytes
-        .get(offset..end)
-        .and_then(|window| std::str::from_utf8(window).err())
-        .filter(|source| source.valid_up_to() == 0)
-        .is_some()
-    {
-        return StlFailure::invalid_utf8_at(offset as u64);
-    }
-    StlFailure::non_ascii(offset as u64, "non-ascii-byte")
+fn internal_text_conformance_failure(scope: &ParseScope<'_>, reason: &'static str) -> ParseFailure {
+    scope.format_failure(StlFailure::content(
+        StlFailureCode::InternalInvariant,
+        "text-conformance",
+        reason,
+    ))
 }
 
 struct AsciiParser<'scope, 'session> {
@@ -179,30 +116,14 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
         }
     }
 
-    fn parse(mut self, text: &str) -> ParseResult<ParsedStl<'scope>> {
-        let mut byte_offset = 0usize;
-        let mut line_number = 0u32;
+    fn parse(mut self, input: &ConformedTextInput<'_>) -> ParseResult<ParsedStl<'scope>> {
         let mut token_buffer = TokenBuffer::new(self.scope);
-        while byte_offset < text.len() {
-            let line_record =
-                self.scope
-                    .with_work(ImportWorkClass::Records, 1, |work| -> ParseResult<_> {
-                        let line_record = next_line(self.scope, text, byte_offset, work)?;
-                        work.complete_all()?;
-                        Ok(line_record)
-                    })?;
-            line_number = line_number
-                .checked_add(1)
-                .ok_or_else(|| self.scope.allocation_failure("stl-line-number"))?;
-            let line = line_record.text;
-            self.parse_line(
-                line,
-                line_number,
-                byte_offset,
-                line_record.raw_line_bytes,
-                &mut token_buffer,
-            )?;
-            byte_offset = line_record.next_offset;
+        for line in input.lines() {
+            self.scope
+                .with_work(ImportWorkClass::Records, 1, |work| work.complete_all())?;
+            let line_number = u32::try_from(line.number())
+                .map_err(|_| self.scope.allocation_failure("stl-line-number"))?;
+            self.parse_line(&line, line_number, &mut token_buffer)?;
         }
         self.finish_file()?;
         Ok(self.parsed)
@@ -210,14 +131,13 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
 
     fn parse_line(
         &mut self,
-        line: &str,
+        line: &TextInputLine<'_>,
         line_number: u32,
-        line_byte_offset: usize,
-        raw_line_bytes: usize,
         token_buffer: &mut TokenBuffer<'scope>,
     ) -> ParseResult<()> {
-        account_line_bytes(self.scope, line, raw_line_bytes)?;
-        let tokens = tokenize(self.scope, line, token_buffer)?;
+        let text = line.text();
+        account_line_bytes(self.scope, text)?;
+        let tokens = tokenize(self.scope, text, token_buffer)?;
         if tokens.is_empty() {
             return Ok(());
         }
@@ -225,7 +145,9 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
 
         let state = std::mem::replace(&mut self.state, State::Start);
         match state {
-            State::Start => self.parse_start_line(line, &tokens, line_number, line_byte_offset),
+            State::Start => {
+                self.parse_start_line(text, &tokens, line_number, line.raw_content_range().start())
+            }
             State::InSolid => self.parse_solid_line(&tokens, line_number),
             State::NeedOuterLoop { normal } => {
                 if tokens_match(&tokens, &["outer", "loop"]) {
@@ -304,7 +226,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
         line: &str,
         tokens: &TokenLine<'_, '_>,
         line_number: u32,
-        line_byte_offset: usize,
+        line_byte_offset: u64,
     ) -> ParseResult<()> {
         let first = required_token(self.scope, tokens, 0)?;
         if !keyword_is(first, "solid") {
@@ -350,7 +272,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
         &mut self,
         line: &str,
         tokens: &TokenLine<'_, '_>,
-        line_byte_offset: usize,
+        line_byte_offset: u64,
     ) -> ParseResult<()> {
         let scope = self.scope;
         let name_value = trailing_text_after_first_token(line, tokens);
@@ -376,13 +298,20 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
                     None => None,
                 };
                 let first = required_token(scope, tokens, 0)?;
-                let token_offset = usize::try_from(first.column)
-                    .ok()
-                    .and_then(|column| column.checked_sub(1))
-                    .and_then(|column| line_byte_offset.checked_add(column))
+                let column_offset = first
+                    .column
+                    .checked_sub(1)
+                    .map(u64::from)
+                    .ok_or_else(|| scope.allocation_failure("stl-solid-byte-offset"))?;
+                let token_offset = line_byte_offset
+                    .checked_add(column_offset)
                     .ok_or_else(|| scope.allocation_failure("stl-solid-byte-offset"))?;
                 let token_end = token_offset
-                    .checked_add(first.text.len())
+                    .checked_add(usize_amount(
+                        scope,
+                        first.text.len(),
+                        "stl-solid-byte-range",
+                    )?)
                     .ok_or_else(|| scope.allocation_failure("stl-solid-byte-range"))?;
                 let start = diagnostic_range(scope, token_offset, token_end)?;
                 self.current = Some(SolidBuilder::new(scope, name, start));
@@ -494,91 +423,18 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
     }
 }
 
-struct LineRecord<'text> {
-    text: &'text str,
-    raw_line_bytes: usize,
-    next_offset: usize,
-}
-
-fn account_line_bytes(
-    scope: &ParseScope<'_>,
-    line: &str,
-    raw_line_bytes: usize,
-) -> ParseResult<()> {
-    let amount = usize_amount(scope, raw_line_bytes, "stl-line-bytes")?;
+fn account_line_bytes(scope: &ParseScope<'_>, line: &str) -> ParseResult<()> {
+    let amount = usize_amount(scope, line.len(), "stl-line-bytes")?;
     scope.with_work(
         ImportWorkClass::LineBytes,
         amount,
         |work| -> ParseResult<()> {
-            let mut next_poll = CHECKPOINT_CHUNK_BYTES;
-            for (index, _) in line.char_indices() {
-                if index >= next_poll {
-                    work.poll()?;
-                    next_poll = next_poll.saturating_add(CHECKPOINT_CHUNK_BYTES);
-                }
+            for _ in (CHECKPOINT_CHUNK_BYTES..line.len()).step_by(CHECKPOINT_CHUNK_BYTES) {
+                work.poll()?;
             }
             work.complete_all()
         },
     )
-}
-
-fn next_line<'text>(
-    scope: &ParseScope<'_>,
-    text: &'text str,
-    start: usize,
-    work: &mut ImportWorkScope<'_, '_, 1>,
-) -> ParseResult<LineRecord<'text>> {
-    let bytes = text.as_bytes();
-    let mut cursor = start;
-    let mut next_poll = start.saturating_add(4096);
-    loop {
-        if cursor == bytes.len() || bytes[cursor] == b'\n' {
-            let raw_line_bytes = cursor - start;
-            let content_end = if cursor > start && bytes[cursor - 1] == b'\r' {
-                cursor - 1
-            } else {
-                cursor
-            };
-            let line = text.get(start..content_end).ok_or_else(|| {
-                scope.format_failure(StlFailure::content(
-                    StlFailureCode::InternalInvariant,
-                    "ascii-line",
-                    "invalid-utf8-boundary",
-                ))
-            })?;
-            let next_offset = if cursor < bytes.len() {
-                cursor
-                    .checked_add(1)
-                    .ok_or_else(|| scope.allocation_failure("stl-line-byte-offset"))?
-            } else {
-                cursor
-            };
-            return Ok(LineRecord {
-                text: line,
-                raw_line_bytes,
-                next_offset,
-            });
-        }
-
-        cursor += 1;
-        let line_bytes = cursor - start;
-        if line_bytes > scope.limits().max_line_bytes {
-            scope.enforce_resource_limit(
-                "line-bytes",
-                usize_amount(scope, line_bytes, "stl-line-bytes")?,
-                usize_amount(scope, scope.limits().max_line_bytes, "stl-line-bytes")?,
-            )?;
-            return Err(scope.format_failure(StlFailure::content(
-                StlFailureCode::InternalInvariant,
-                "ascii-line",
-                "line-limit-did-not-reject",
-            )));
-        }
-        if cursor >= next_poll {
-            work.poll()?;
-            next_poll = next_poll.saturating_add(4096);
-        }
-    }
 }
 
 struct SolidBuilder<'scope> {
@@ -689,12 +545,12 @@ fn tokenize<'line, 'buffer, 'scope>(
     let mut start = None;
     let mut next_poll = 4096usize;
 
-    for (index, ch) in line.char_indices() {
+    for (index, byte) in line.bytes().enumerate() {
         if index >= next_poll {
             scope.poll()?;
             next_poll = next_poll.saturating_add(4096);
         }
-        if ch.is_whitespace() {
+        if byte.is_ascii_whitespace() {
             if let Some(token_start) = start.take() {
                 push_token(scope, tokens, line, token_start, index)?;
             }
@@ -836,11 +692,9 @@ fn usize_amount(
 
 fn diagnostic_range(
     scope: &ParseScope<'_>,
-    start: usize,
-    end: usize,
+    start: u64,
+    end: u64,
 ) -> ParseResult<DiagnosticByteRange> {
-    let start = usize_amount(scope, start, "stl-diagnostic-byte-range")?;
-    let end = usize_amount(scope, end, "stl-diagnostic-byte-range")?;
     DiagnosticByteRange::new(start, end).map_err(|_| {
         scope.format_failure(StlFailure::content(
             StlFailureCode::InternalInvariant,

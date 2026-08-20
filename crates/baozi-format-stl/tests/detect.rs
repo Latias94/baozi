@@ -98,6 +98,27 @@ fn random_bytes_are_not_stl() {
 }
 
 #[test]
+fn empty_probe_preserves_extension_fallback_without_a_scope_contract_failure() {
+    let unsupported =
+        detect("empty.mesh", Vec::new(), 4096).expect_err("empty non-STL input must not match");
+    assert!(matches!(
+        unsupported.cause(),
+        ImportCause::UnsupportedFormat
+    ));
+
+    let failure = detect("empty.stl", Vec::new(), 4096)
+        .expect_err("the extension fallback selects STL before the empty document fails parsing");
+    assert!(matches!(failure.cause(), ImportCause::Format(_)));
+    let [evidence] = failure.detection_evidence() else {
+        panic!("empty STL input must retain one detector outcome");
+    };
+    assert!(matches!(
+        evidence.outcome(),
+        DetectionOutcome::Match(ReadConfidence::Maybe)
+    ));
+}
+
+#[test]
 fn short_binary_probe_is_inconclusive() {
     let bytes = binary_stl(b"binary", &[BinaryFacet::unit_triangle()]);
     let error = detect("triangle.stl", bytes, 83).expect_err("facet count is outside probe");

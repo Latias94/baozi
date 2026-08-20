@@ -1,7 +1,9 @@
 mod common;
 
 use baozi_format_stl::StlFailureCode;
-use baozi_import::{DetectionOutcome, ImportCause, ReadConfidence, ResourceLimits};
+use baozi_import::{
+    DetectionInconclusive, DetectionOutcome, ImportCause, ReadConfidence, ResourceLimits,
+};
 use common::{
     ascii_triangle, expected_stl_failure, import_bytes_forced_with_limits, scene_snapshot,
     stl_string_detail, stl_unsigned_detail,
@@ -63,6 +65,35 @@ fn invalid_utf8_before_ascii_magic_is_terminal_at_raw_offset_zero() {
 }
 
 #[test]
+fn truncated_utf8_at_eof_is_terminal_at_its_lead_byte() {
+    let mut bytes = ascii_triangle("truncated").into_bytes();
+    let offset = bytes.len() as u64;
+    bytes.extend_from_slice(&[0xe2, 0x82]);
+
+    assert_profile_failure(
+        &bytes,
+        StlFailureCode::InvalidUtf8.as_str(),
+        offset,
+        "invalid-utf8",
+        ReadConfidence::Maybe,
+    );
+}
+
+#[test]
+fn invalid_utf8_at_the_scan_chunk_boundary_reports_its_lead_byte() {
+    let mut bytes = vec![b' '; 4095];
+    bytes.push(0xff);
+
+    assert_profile_failure(
+        &bytes,
+        StlFailureCode::InvalidUtf8.as_str(),
+        4095,
+        "invalid-utf8",
+        ReadConfidence::Maybe,
+    );
+}
+
+#[test]
 fn bare_carriage_return_is_terminal_at_its_raw_offset() {
     let bytes = ascii_triangle("bare\rcr");
 
@@ -118,6 +149,32 @@ fn crlf_and_horizontal_tab_remain_valid_ascii_stl() {
             .expect("strict-profile STL semantic snapshot")
             .logical_mesh_count(),
         1
+    );
+}
+
+#[test]
+fn crlf_crossing_the_probe_chunk_boundary_remains_one_newline() {
+    let mut bytes = vec![b' '; 4095];
+    bytes.extend_from_slice(b"\r\n");
+    bytes.extend_from_slice(ascii_triangle("chunk-boundary").as_bytes());
+
+    let report =
+        import_bytes_forced_with_limits("chunk-boundary.stl", &bytes, ResourceLimits::default())
+            .expect("formal parsing must keep a CRLF pair intact across the probe boundary");
+    assert_eq!(
+        scene_snapshot(&report)
+            .expect("chunk-boundary STL semantic snapshot")
+            .logical_mesh_count(),
+        1
+    );
+    let evidence = report
+        .detection_evidence()
+        .iter()
+        .find(|evidence| evidence.format().as_str() == "org.baozi.stl")
+        .expect("successful import must retain STL detector evidence");
+    assert_eq!(
+        evidence.outcome(),
+        &DetectionOutcome::Inconclusive(DetectionInconclusive::ProbeExhausted)
     );
 }
 

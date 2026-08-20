@@ -89,6 +89,7 @@ impl TextInputOptions {
 pub struct ConformedTextInput<'scope> {
     text: MeteredDecodedText<'scope>,
     bom: Option<TextInputBom>,
+    raw_start: u64,
     raw_end: u64,
     line_starts: MeteredVec<'scope, TextInputLineStart>,
     replacements: MeteredVec<'scope, TextInputReplacement>,
@@ -100,6 +101,7 @@ impl fmt::Debug for ConformedTextInput<'_> {
             .debug_struct("ConformedTextInput")
             .field("text", &self.text.as_str())
             .field("bom", &self.bom)
+            .field("raw_start", &self.raw_start)
             .field("raw_end", &self.raw_end)
             .field("line_starts", &self.line_starts.as_slice())
             .field("replacements", &self.replacements.as_slice())
@@ -119,19 +121,19 @@ impl ConformedTextInput<'_> {
     pub fn lines(&self) -> impl Iterator<Item = TextInputLine<'_>> + '_ {
         TextInputLines {
             text: self.text.as_str(),
+            raw_start: self.raw_start,
             raw_end: self.raw_end,
             line_starts: self.line_starts.as_slice(),
             replacements: self.replacements.as_slice(),
             line_index: 0,
+            replacement_index: 0,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TextInputLineStart {
-    raw_offset: u64,
     decoded_offset: usize,
-    replacement_offset: usize,
 }
 
 #[derive(Debug)]
@@ -182,10 +184,12 @@ impl TextInputLine<'_> {
 
 struct TextInputLines<'input> {
     text: &'input str,
+    raw_start: u64,
     raw_end: u64,
     line_starts: &'input [TextInputLineStart],
     replacements: &'input [TextInputReplacement],
     line_index: usize,
+    replacement_index: usize,
 }
 
 impl<'input> Iterator for TextInputLines<'input> {
@@ -194,7 +198,6 @@ impl<'input> Iterator for TextInputLines<'input> {
     fn next(&mut self) -> Option<Self::Item> {
         let start = *self.line_starts.get(self.line_index)?;
         let next = self.line_starts.get(self.line_index + 1).copied();
-        let terminated_raw_end = next.map_or(self.raw_end, |line| line.raw_offset);
         let terminated_decoded_end = next.map_or(self.text.len(), |line| line.decoded_offset);
 
         let record = self
@@ -209,29 +212,42 @@ impl<'input> Iterator for TextInputLines<'input> {
         } else {
             (record, None, 0)
         };
-        let raw_end = terminated_raw_end.checked_sub(raw_newline_len)?;
         let decoded_end = start.decoded_offset.checked_add(text.len())?;
-        let replacement_end = next.map_or(self.replacements.len(), |line| line.replacement_offset);
+        let mut replacement_end = self.replacement_index;
+        while let Some(replacement) = self.replacements.get(replacement_end) {
+            if replacement.decoded_start < start.decoded_offset {
+                return None;
+            }
+            if replacement.decoded_start >= decoded_end {
+                break;
+            }
+            if replacement.decoded_end > decoded_end {
+                return None;
+            }
+            replacement_end = replacement_end.checked_add(1)?;
+        }
         let replacements = self
             .replacements
-            .get(start.replacement_offset..replacement_end)?;
-        if replacements
-            .first()
-            .is_some_and(|replacement| replacement.decoded_start < start.decoded_offset)
-        {
+            .get(self.replacement_index..replacement_end)?;
+        if next.is_none() && replacement_end != self.replacements.len() {
             return None;
         }
-        if replacements
-            .last()
-            .is_some_and(|replacement| replacement.decoded_end > decoded_end)
-        {
+        let raw_content_end = mapped_raw_end(
+            self.raw_start,
+            start.decoded_offset,
+            decoded_end,
+            replacements,
+        )?;
+        let raw_record_end = raw_content_end.checked_add(raw_newline_len)?;
+        if raw_record_end > self.raw_end || (next.is_none() && raw_record_end != self.raw_end) {
             return None;
         }
-        let raw_content_range = DiagnosticByteRange::new(start.raw_offset, raw_end).ok()?;
-        let raw_record_range =
-            DiagnosticByteRange::new(start.raw_offset, terminated_raw_end).ok()?;
+        let raw_content_range = DiagnosticByteRange::new(self.raw_start, raw_content_end).ok()?;
+        let raw_record_range = DiagnosticByteRange::new(self.raw_start, raw_record_end).ok()?;
         let number = u64::try_from(self.line_index).ok()?.checked_add(1)?;
         self.line_index = self.line_index.checked_add(1)?;
+        self.replacement_index = replacement_end;
+        self.raw_start = raw_record_end;
         Some(TextInputLine {
             number,
             text,
@@ -243,6 +259,27 @@ impl<'input> Iterator for TextInputLines<'input> {
             replacements,
         })
     }
+}
+
+fn mapped_raw_end(
+    raw_start: u64,
+    decoded_start: usize,
+    decoded_end: usize,
+    replacements: &[TextInputReplacement],
+) -> Option<u64> {
+    let mut raw_offset = raw_start;
+    let mut decoded_offset = decoded_start;
+    for replacement in replacements {
+        let valid_len = replacement.decoded_start.checked_sub(decoded_offset)?;
+        raw_offset = raw_offset.checked_add(u64::try_from(valid_len).ok()?)?;
+        if raw_offset != replacement.raw_range.start() {
+            return None;
+        }
+        raw_offset = replacement.raw_range.end();
+        decoded_offset = replacement.decoded_end;
+    }
+    let trailing_len = decoded_end.checked_sub(decoded_offset)?;
+    raw_offset.checked_add(u64::try_from(trailing_len).ok()?)
 }
 
 #[derive(Debug)]
@@ -543,24 +580,10 @@ fn conform_text_input<'scope>(
     bytes: &[u8],
     options: TextInputOptions,
 ) -> ParseResult<TextConformanceResult<ConformedTextInput<'scope>>> {
-    let Some(profile) = profile else {
-        return Ok(Err(TextConformanceViolation::without_range(
-            TextConformanceViolationKind::MissingTextProfile,
-        )));
+    let facts = match text_profile_facts(profile, options.decoding_mode) {
+        Ok(facts) => facts,
+        Err(violation) => return Ok(Err(violation)),
     };
-    if !profile
-        .source_encodings()
-        .any(|encoding| encoding == TextSourceEncoding::Utf8)
-    {
-        return Ok(Err(TextConformanceViolation::without_range(
-            TextConformanceViolationKind::UnsupportedSourceEncoding,
-        )));
-    }
-    if !profile.allows_decoding_mode(options.decoding_mode) {
-        return Ok(Err(TextConformanceViolation::without_range(
-            TextConformanceViolationKind::DecodingModeNotDeclared,
-        )));
-    }
 
     let raw_len = usize_to_u64(scope, bytes.len(), options.resource)?;
     let raw_limit = options.raw_limit.unwrap_or(TextRawLimit {
@@ -569,13 +592,84 @@ fn conform_text_input<'scope>(
     });
     scope.enforce_resource_limit(raw_limit.resource, raw_len, raw_limit.limit)?;
 
-    let facts = TextProfileFacts::new(profile);
     let plan = match plan_text_input(scope, &facts, bytes, options) {
         Ok(plan) => plan,
         Err(TextInputScanError::Scope(failure)) => return Err(failure),
         Err(TextInputScanError::Violation(violation)) => return Ok(Err(violation)),
     };
     build_text_input(scope, &facts, bytes, options, plan).map(Ok)
+}
+
+pub(crate) fn check_text_input_conformance(
+    profile: &TextProfile,
+    bytes: &[u8],
+    decoding_mode: TextDecodingMode,
+) -> TextConformanceResult<()> {
+    let facts = text_profile_facts(Some(profile), decoding_mode)?;
+    check_text_input_units(&facts, bytes, decoding_mode)
+}
+
+fn text_profile_facts(
+    profile: Option<&TextProfile>,
+    decoding_mode: TextDecodingMode,
+) -> TextConformanceResult<TextProfileFacts> {
+    let Some(profile) = profile else {
+        return Err(TextConformanceViolation::without_range(
+            TextConformanceViolationKind::MissingTextProfile,
+        ));
+    };
+    if !profile
+        .source_encodings()
+        .any(|encoding| encoding == TextSourceEncoding::Utf8)
+    {
+        return Err(TextConformanceViolation::without_range(
+            TextConformanceViolationKind::UnsupportedSourceEncoding,
+        ));
+    }
+    if !profile.allows_decoding_mode(decoding_mode) {
+        return Err(TextConformanceViolation::without_range(
+            TextConformanceViolationKind::DecodingModeNotDeclared,
+        ));
+    }
+    Ok(TextProfileFacts::new(profile))
+}
+
+fn check_text_input_units(
+    facts: &TextProfileFacts,
+    bytes: &[u8],
+    decoding_mode: TextDecodingMode,
+) -> TextConformanceResult<()> {
+    let mut offset = 0usize;
+    if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        if facts.bom_policy == TextBomPolicy::Forbidden {
+            return Err(TextConformanceViolation::at(
+                TextConformanceViolationKind::ForbiddenBom,
+                detection_raw_range(0, 3),
+            ));
+        }
+        offset = 3;
+    }
+
+    while offset < bytes.len() {
+        match classify_text_unit(facts, decoding_mode, bytes, offset) {
+            TextUnit::Valid { raw_len, .. } | TextUnit::Replacement { raw_len } => {
+                offset += raw_len;
+            }
+            TextUnit::Violation { kind, raw_len } => {
+                return Err(TextConformanceViolation::at(
+                    kind,
+                    detection_raw_range(offset, offset + raw_len),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn detection_raw_range(start: usize, end: usize) -> DiagnosticByteRange {
+    let start = u64::try_from(start).expect("bounded detector byte offset must fit in u64");
+    let end = u64::try_from(end).expect("bounded detector byte offset must fit in u64");
+    DiagnosticByteRange::new(start, end).expect("ordered detector byte range must be valid")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -867,6 +961,7 @@ fn build_text_input<'scope>(
         scope.metered_vec(ImportStorageClass::LineIndex, options.line_index_resource);
     replacements.try_reserve(plan.replacements.len)?;
     let mut text = scope.metered_decoded_text(plan.decoded_len, options.decoded_resource)?;
+    let raw_start = raw_offset(scope, options, plan.input_start)?;
     let raw_end = raw_offset(scope, options, bytes.len())?;
 
     let work_amount = usize_to_u64(scope, bytes.len(), options.resource)?;
@@ -876,11 +971,7 @@ fn build_text_input<'scope>(
         |work| -> ParseResult<()> {
             let mut cursor = WorkCursor::new();
             if plan.line_starts.len != 0 {
-                line_starts.try_push_reserved(TextInputLineStart {
-                    raw_offset: raw_offset(scope, options, plan.input_start)?,
-                    decoded_offset: 0,
-                    replacement_offset: 0,
-                })?;
+                line_starts.try_push_reserved(TextInputLineStart { decoded_offset: 0 })?;
             }
             let mut offset = plan.input_start;
             let mut valid_run_start = offset;
@@ -897,9 +988,7 @@ fn build_text_input<'scope>(
                             append_valid_run(scope, &mut text, bytes, valid_run_start, unit_end)?;
                             if unit_end < bytes.len() {
                                 line_starts.try_push_reserved(TextInputLineStart {
-                                    raw_offset: raw_offset(scope, options, unit_end)?,
                                     decoded_offset: text.len(),
-                                    replacement_offset: replacements.len(),
                                 })?;
                             }
                             valid_run_start = unit_end;
@@ -950,6 +1039,7 @@ fn build_text_input<'scope>(
     Ok(ConformedTextInput {
         text,
         bom: plan.bom,
+        raw_start,
         raw_end,
         line_starts,
         replacements,
@@ -1001,12 +1091,6 @@ fn classify_text_unit(
             raw_len: 1,
         };
     };
-    if facts.lexical_mode == TextLexicalMode::AsciiOnly && !byte.is_ascii() {
-        return TextUnit::Violation {
-            kind: TextConformanceViolationKind::NonAscii,
-            raw_len: 1,
-        };
-    }
     if let Some((newline, raw_len)) = newline_at(bytes, offset) {
         return if facts.allows_newline(newline) {
             TextUnit::Valid {
@@ -1035,6 +1119,12 @@ fn classify_text_unit(
 
     match classify_utf8_unit(bytes, offset) {
         Utf8Unit::Valid(raw_len) => {
+            if facts.lexical_mode == TextLexicalMode::AsciiOnly {
+                return TextUnit::Violation {
+                    kind: TextConformanceViolationKind::NonAscii,
+                    raw_len: 1,
+                };
+            }
             let Some(unit) = bytes.get(offset..offset.saturating_add(raw_len)) else {
                 return TextUnit::Violation {
                     kind: TextConformanceViolationKind::InvalidUtf8,
@@ -1388,6 +1478,14 @@ mod tests {
                 .expect("the allocation fixture must otherwise conform");
             panic!("injected allocation failure must stop text construction")
         }
+    }
+
+    #[test]
+    fn line_start_index_retains_only_one_machine_word_per_line() {
+        assert_eq!(
+            std::mem::size_of::<TextInputLineStart>(),
+            std::mem::size_of::<usize>()
+        );
     }
 
     #[test]

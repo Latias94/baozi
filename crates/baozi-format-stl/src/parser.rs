@@ -53,7 +53,7 @@ pub(crate) fn read_stl(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
     let bytes = scope.primary_bytes();
     let parsed = match exact_binary_facets(bytes) {
         Some(facets) => binary::parse(scope, bytes, facets)?,
-        None => ascii::parse(scope, bytes)?,
+        None => ascii::parse(scope)?,
     };
     scene_from_parsed(scope, parsed)
 }

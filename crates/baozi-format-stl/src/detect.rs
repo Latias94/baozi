@@ -1,7 +1,6 @@
-use crate::ascii;
 use baozi_import::{
     DetectionInconclusive, DetectionOutcome, DetectionResult, DetectionScope, Probe,
-    ReadConfidence, ReadHint,
+    ReadConfidence, ReadHint, TextDecodingMode,
 };
 
 pub(crate) const HEADER_BYTES: usize = 80;
@@ -20,7 +19,11 @@ pub(crate) fn detect(
     if binary.is_some() {
         return Ok(DetectionOutcome::Match(ReadConfidence::Certain));
     }
-    if ascii::validate_text_profile_for_detection(scope, probe.bytes())?.is_some() {
+    let profile = crate::text_profile();
+    if scope
+        .check_text_input_conformance(&profile, probe.bytes(), TextDecodingMode::RejectInvalid)?
+        .is_ok()
+    {
         let starts_with_solid = account_detection_work(scope, probe.bytes().len(), || {
             starts_with_ascii_solid(probe.bytes(), probe.is_complete())
         })?;

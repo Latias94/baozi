@@ -35,9 +35,9 @@ Status values: `Supported`, `Partial`, `ParsedLossy`, `IgnoredWithDiagnostic`, `
 ## Import Behavior
 
 - Raw import behavior: binary STL is detected by exact `84 + 50 * facet_count` length; the detector
-  recognizes an ASCII candidate by a leading `solid` token after optional UTF-8 BOM and whitespace.
-  Binary detection wins when a binary header starts with `solid`; a selected ASCII parser still
-  rejects the BOM under its stricter text profile.
+  recognizes an ASCII candidate only when its probe conforms to the STL text profile and has a
+  leading `solid` token after ASCII whitespace. The profile forbids a UTF-8 BOM. Binary detection
+  wins when a binary header starts with `solid`.
 - Default coordinate behavior: coordinates are imported unchanged.
 - Unit handling: STL is unitless; Baozi does not infer meters, millimeters, or inches.
 - UV origin handling: STL has no UV data.
@@ -89,16 +89,19 @@ because there is no renderable STL geometry.
 - The complete ASCII STL input is the decoded text surface. Its exact byte length is admitted against
   `max_decoded_utf8_bytes`, materialized into an owned `String`, and retained under a live
   `DecodedText` reservation while the ASCII parser uses it. Allocator slack is reserved separately.
-- Binary STL has no decoded text surface and consumes zero decoded-text attempted, consumed, or live
-  evidence, including when the binary header begins with `solid`.
-- ASCII profile validation and decoded-text copying poll operation control for every at-most-4-KiB
-  chunk. Owned solid-name and other string copies use UTF-8-boundary-safe chunks with the same bound.
+- ASCII STL line starts are retained through the import-owned text-input line index. Line limits count
+  content bytes only, so neither LF nor the CRLF terminator reduces the admitted content budget.
+- Binary STL has no decoded text surface or line index and consumes zero corresponding attempted,
+  consumed, or live evidence, including when the binary header begins with `solid`.
+- ASCII text-input planning and decoded-text construction each poll operation control for every
+  at-most-4-KiB chunk. Owned solid-name and other string copies use UTF-8-boundary-safe chunks with
+  the same bound.
 - Binary facet parsing checks control at each 50-byte record. The optional facet-color expansion pass
   checks control at least once per 4096 facets.
 
-Exact decoded-text admission, one-byte-under rejection, binary-zero accounting, distant profile
-failure cancellation, long solid-name copying, per-facet cancellation, and color-expansion bounds are
-covered by `crates/baozi-format-stl/tests/limits.rs`.
+Exact decoded-text and line-index admission, one-byte-under rejection, binary-zero accounting, CRLF
+content limits, distant profile failure cancellation, long solid-name copying, per-facet cancellation,
+and color-expansion bounds are covered by `crates/baozi-format-stl/tests/limits.rs`.
 
 ## Known Limitations
 

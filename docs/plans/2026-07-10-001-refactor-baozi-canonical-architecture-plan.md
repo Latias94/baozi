@@ -927,6 +927,11 @@ new Accepted authorities.
 - **Approach:** Centralize BOM classification, UTF-8 validation/recovery primitives, newline accounting, source-byte to decoded-span mapping, and their metered storage/work limits in `baozi-import`. Keep tokenization, grammar, semantic recovery choices, diagnostics, and normalized format models in each format crate. Do not introduce a generic parser framework or move format grammar into import.
 - **Test scenarios:** BOM/no-BOM, LF/CRLF/CR, malformed and truncated UTF-8, multibyte span boundaries, recovery-disabled failure, recovery-enabled exact loss evidence, byte/work budget edges, cancellation, and allocation failure; OBJ/MTL and other text formats produce identical spans and line accounting for the same byte sequences without sharing grammar code.
 - **Verification:** No first-party text parser owns a duplicate decode/newline/span state machine, all text storage is covered by the import-owned metered construction protocol, and format-local grammar/recovery tests remain authoritative.
+- **Current U4.6 execution checklist:**
+  - [x] Establish the source-bound `ConformedTextInput` line/span and format-owned recovery protocol, then migrate OBJ and MTL without changing comment-sensitive recovery or dependency diagnostic ownership.
+  - [x] Migrate STL ASCII decoding, text-profile detection, and line iteration while preserving exact binary-first dispatch, stable STL diagnostics, content-only CRLF line limits, and zero text storage on the binary path.
+  - [ ] Migrate PLY ASCII header/body text handling and remove its duplicate UTF-8, line, and decoded-copy state machines without changing binary PLY dispatch or typed property parsing.
+  - [ ] Complete the repository-wide text-parser audit, classifying glTF preflight work under U6 before declaring the U4.6 verification gate complete.
 
 ### U5. Deepen STL, OBJ, and PLY Source Semantics
 

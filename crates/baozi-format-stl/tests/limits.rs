@@ -69,6 +69,24 @@ fn assert_cancelled(failure: &ImportFailure) {
     ));
 }
 
+fn assert_resource_limit(failure: &ImportFailure, resource: &'static str, limit: u64) {
+    let ImportCause::Scope(abort) = failure.cause() else {
+        panic!(
+            "expected scope-owned resource failure, got {:?}",
+            failure.cause()
+        );
+    };
+    let ScopeAbortCause::ResourceLimit {
+        resource: actual_resource,
+        limit: actual_limit,
+    } = abort.cause()
+    else {
+        panic!("expected resource limit failure, got {:?}", abort.cause());
+    };
+    assert_eq!(*actual_resource, resource);
+    assert_eq!(*actual_limit, limit);
+}
+
 fn assert_ledger_limit(failure: &ImportFailure, dimension: ImportDimension, limit: u64) {
     let ImportCause::Scope(abort) = failure.cause() else {
         panic!(
@@ -163,7 +181,113 @@ fn ascii_decoded_text_budget_is_exact() {
     let failure =
         import_bytes_forced_with_limits("decoded-over-limit.stl", document.as_bytes(), below)
             .expect_err("one byte below the decoded ASCII length must fail before parsing");
-    assert_ledger_limit(&failure, ImportDimension::DecodedTextBytes, limit);
+    assert_resource_limit(&failure, "stl-decoded-text", limit);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn ascii_text_input_decode_work_budget_is_exact_before_line_work() {
+    let document = ascii_triangle("decode-work-budget");
+    let input_bytes = document.len() as u64;
+    let required = input_bytes * 2;
+
+    let mut exact = ResourceLimits::default();
+    exact.max_decode_work = required;
+    let exact_failure =
+        import_bytes_forced_with_limits("decode-work-exact.stl", document.as_bytes(), exact)
+            .expect_err("line parsing must require work beyond the two text-input passes");
+    assert_ledger_limit(&exact_failure, ImportDimension::DecodeWork, required);
+    assert!(
+        attempted(&exact_failure, ImportDimension::DecodeWork) > required,
+        "the first line-work admission must occur after both text-input passes"
+    );
+    assert_eq!(
+        consumed(&exact_failure, ImportDimension::DecodeWork),
+        required
+    );
+    assert_eq!(exact_failure.ledger().current_live_bytes(), 0);
+
+    let mut below = ResourceLimits::default();
+    below.max_decode_work = required - 1;
+    let failure =
+        import_bytes_forced_with_limits("decode-work-over-limit.stl", document.as_bytes(), below)
+            .expect_err("one work unit below two complete text-input passes must fail");
+    assert_ledger_limit(&failure, ImportDimension::DecodeWork, required - 1);
+    assert_eq!(attempted(&failure, ImportDimension::DecodeWork), required);
+    assert_eq!(consumed(&failure, ImportDimension::DecodeWork), input_bytes);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn ascii_stl_uses_shared_line_index_storage() {
+    let document = ascii_triangle("line-index");
+
+    let report = import_bytes_forced_with_limits(
+        "line-index.stl",
+        document.as_bytes(),
+        ResourceLimits::default(),
+    )
+    .expect("ASCII STL must parse through the shared text-input line index");
+    let line_index = report
+        .ledger()
+        .dimension(ImportDimension::LineIndexBytes)
+        .expect("line-index dimension is configured");
+
+    let required = line_index.peak_live_bytes();
+    assert!(required > 0);
+    assert_eq!(line_index.current_live_bytes(), 0);
+
+    let mut exact_limits = ResourceLimits::default();
+    exact_limits.max_line_index_bytes = required;
+    let exact =
+        import_bytes_forced_with_limits("line-index-exact.stl", document.as_bytes(), exact_limits)
+            .expect("the exact shared line-index budget must admit ASCII STL");
+    assert_eq!(
+        exact
+            .ledger()
+            .dimension(ImportDimension::LineIndexBytes)
+            .expect("line-index dimension is configured")
+            .peak_live_bytes(),
+        required
+    );
+
+    let mut below_limits = ResourceLimits::default();
+    below_limits.max_line_index_bytes = required - 1;
+    let failure = import_bytes_forced_with_limits(
+        "line-index-over-limit.stl",
+        document.as_bytes(),
+        below_limits,
+    )
+    .expect_err("one byte below the shared line-index requirement must fail before allocation");
+    assert_resource_limit(&failure, "stl-line-index-bytes", required - 1);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn crlf_line_limit_counts_content_bytes_without_the_newline() {
+    let lf_document = ascii_triangle("crlf-line-limit");
+    let max_content_bytes = lf_document
+        .lines()
+        .map(str::len)
+        .max()
+        .expect("the ASCII STL fixture has lines");
+    let document = lf_document.replace('\n', "\r\n");
+    let mut limits = ResourceLimits::default();
+    limits.max_line_bytes = max_content_bytes;
+
+    import_bytes_forced_with_limits("crlf-line-limit.stl", document.as_bytes(), limits)
+        .expect("CRLF bytes must not reduce the admitted line-content budget");
+
+    let mut below = ResourceLimits::default();
+    below.max_line_bytes = max_content_bytes - 1;
+    let failure =
+        import_bytes_forced_with_limits("crlf-line-over-limit.stl", document.as_bytes(), below)
+            .expect_err("one byte below the longest CRLF line content must fail");
+    assert_resource_limit(
+        &failure,
+        "line-bytes",
+        u64::try_from(max_content_bytes - 1).expect("test line length must fit in u64"),
+    );
     assert_eq!(failure.ledger().current_live_bytes(), 0);
 }
 
@@ -182,6 +306,24 @@ fn binary_stl_does_not_consume_decoded_text_budget() {
     assert_eq!(decoded.attempted(), 0);
     assert_eq!(decoded.consumed(), 0);
     assert_eq!(decoded.peak_live_bytes(), 0);
+}
+
+#[test]
+fn binary_stl_does_not_consume_line_index_budget() {
+    let bytes = binary_stl(b"binary", &[BinaryFacet::unit_triangle()]);
+    let mut limits = ResourceLimits::default();
+    limits.max_line_index_bytes = 0;
+
+    let report = import_bytes_forced_with_limits("binary-no-line-index.stl", &bytes, limits)
+        .expect("binary STL must not require text line-index storage");
+    let line_index = report
+        .ledger()
+        .dimension(ImportDimension::LineIndexBytes)
+        .expect("line-index dimension is configured");
+
+    assert_eq!(line_index.attempted(), 0);
+    assert_eq!(line_index.consumed(), 0);
+    assert_eq!(line_index.peak_live_bytes(), 0);
 }
 
 #[test]
@@ -211,12 +353,29 @@ fn ascii_profile_cancellation_is_bounded_by_scan_chunks() {
     );
     assert_eq!(
         attempted(&failure, ImportDimension::DecodeWork),
-        SCAN_CHUNK_BYTES as u64
+        document.len() as u64
     );
     assert_eq!(
         consumed(&failure, ImportDimension::DecodeWork),
         SCAN_CHUNK_BYTES as u64
     );
+
+    let (_, build_failure) = first_cancelled_prefix_at_least(
+        "profile-build-cancel.stl",
+        &document,
+        total_polls,
+        ImportDimension::DecodeWork,
+        document.len() as u64 + SCAN_CHUNK_BYTES as u64,
+    );
+    assert_eq!(
+        attempted(&build_failure, ImportDimension::DecodeWork),
+        2 * document.len() as u64
+    );
+    assert_eq!(
+        consumed(&build_failure, ImportDimension::DecodeWork),
+        document.len() as u64 + SCAN_CHUNK_BYTES as u64
+    );
+    assert_eq!(build_failure.ledger().current_live_bytes(), 0);
 
     let mut malformed = document;
     *malformed
@@ -224,6 +383,10 @@ fn ascii_profile_cancellation_is_bounded_by_scan_chunks() {
         .expect("the ASCII cancellation fixture is non-empty") = 0;
     let malformed_failure =
         cancelled_failure("profile-malformed-cancel.stl", &malformed, cancel_on);
+    assert_eq!(
+        attempted(&malformed_failure, ImportDimension::DecodeWork),
+        malformed.len() as u64
+    );
     assert_eq!(
         consumed(&malformed_failure, ImportDimension::DecodeWork),
         SCAN_CHUNK_BYTES as u64

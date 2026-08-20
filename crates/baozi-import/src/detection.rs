@@ -1,8 +1,10 @@
 use crate::config::MAX_DETECTOR_WORK_BETWEEN_POLLS;
+use crate::descriptor::{TextDecodingMode, TextProfile};
 use crate::error::{ScopeAbort, ScopeAbortCause};
 use crate::format::DetectionOutcome;
 use crate::ledger::ImportDimension;
 use crate::store::{ImportObservedWorkFailure, ImportStoreHost, ImportStoreHostError};
+use crate::text_input::TextConformanceResult;
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::marker::PhantomData;
@@ -153,6 +155,34 @@ impl<'session> DetectionScope<'session> {
             }
             Err(ImportObservedWorkFailure::Store(cause)) => Err(self.abort_store(cause)),
         }
+    }
+
+    /// Checks a bounded probe against a text profile without allocating decoded text or line state.
+    ///
+    /// Formal parsing must still use `ParseScope::with_conformed_text_input`; this method exists so
+    /// detectors can share the same BOM, UTF-8, newline, lexical, and control classification.
+    pub fn check_text_input_conformance(
+        &self,
+        profile: &TextProfile,
+        bytes: &[u8],
+        decoding_mode: TextDecodingMode,
+    ) -> DetectionResult<TextConformanceResult<()>> {
+        if bytes.is_empty() {
+            return Ok(crate::text_input::check_text_input_conformance(
+                profile,
+                bytes,
+                decoding_mode,
+            ));
+        }
+
+        let work = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        self.with_work(work, || {
+            Ok(crate::text_input::check_text_input_conformance(
+                profile,
+                bytes,
+                decoding_mode,
+            ))
+        })
     }
 
     pub(crate) fn into_terminal_abort(self) -> Option<ScopeAbort> {
