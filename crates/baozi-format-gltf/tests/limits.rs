@@ -9,8 +9,9 @@ use baozi_operation::{
     CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
 };
 use common::{
-    GltfTestOptions, TestResult, assert_gltf_failure, expected_error,
-    import_assets_result_with_control, sidecar_options, triangle_gltf_with_buffer_uri,
+    GltfTestOptions, TestResult, append_glb_chunk, assert_gltf_failure, expected_error,
+    glb_with_json, import_assets_result_with_control, sidecar_options,
+    triangle_gltf_with_buffer_uri,
 };
 use std::sync::{
     Arc,
@@ -256,6 +257,83 @@ fn whole_json_utf8_preflight_cancellation_is_bounded_by_scan_chunks() -> TestRes
     assert_eq!(
         dimension_consumed(&malformed_failure, ImportDimension::DecodeWork),
         SCAN_CHUNK_BYTES as u64
+    );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    Ok(())
+}
+
+#[test]
+fn glb_json_surface_cancellation_is_bounded_by_scan_chunks() -> TestResult<()> {
+    let json = json_document_with_scan_chunks(CANCELLATION_FIXTURE_CHUNKS);
+    let json_bytes = u64::try_from(json.len())?;
+    let document = glb_with_json(&json);
+    let (calibration_control, calibration_polls) = controlled_import(None);
+    let (calibration_result, calibration_diagnostics) = import_assets_result_with_control(
+        "glb-utf8-preflight-calibration.glb",
+        [("glb-utf8-preflight-calibration.glb", document.clone())],
+        GltfTestOptions::memory(),
+        calibration_control,
+    )?;
+    assert!(calibration_diagnostics.is_empty());
+    let _report = calibration_result?;
+
+    let total_polls = calibration_polls.load(Ordering::SeqCst);
+    let (_cancel_on, failure) = first_cancelled_prefix_at_least(
+        "glb-utf8-preflight-cancel.glb",
+        &document,
+        total_polls,
+        ImportDimension::DecodeWork,
+        SCAN_CHUNK_BYTES as u64,
+    )?;
+
+    assert_eq!(
+        dimension_attempted(&failure, ImportDimension::DecodeWork),
+        json_bytes
+    );
+    assert_eq!(
+        dimension_consumed(&failure, ImportDimension::DecodeWork),
+        SCAN_CHUNK_BYTES as u64
+    );
+    assert_eq!(
+        dimension_attempted(&failure, ImportDimension::DecodedTextBytes),
+        0
+    );
+    assert_eq!(
+        dimension_attempted(&failure, ImportDimension::LineIndexBytes),
+        0
+    );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    Ok(())
+}
+
+#[test]
+fn glb_container_chunk_scan_respects_the_work_budget() -> TestResult<()> {
+    let json = br#"{"asset":{"version":"2.0"}}"#;
+    let document = append_glb_chunk(
+        append_glb_chunk(
+            append_glb_chunk(glb_with_json(json), b"BIN\0", &[0, 0, 0, 0]),
+            b"ONE1",
+            &[0, 0, 0, 0],
+        ),
+        b"TWO2",
+        &[0, 0, 0, 0],
+    );
+    let mut options = GltfTestOptions::memory();
+    options.limits.max_work_units = 3;
+
+    let (result, diagnostics) = import_assets_result_with_control(
+        "chunk-work-limit.glb",
+        [("chunk-work-limit.glb", document)],
+        options,
+        ImportOperationControl::default(),
+    )?;
+    let failure = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_ledger_limit(&failure, ImportDimension::WorkUnits, 3);
+    assert_eq!(
+        dimension_attempted(&failure, ImportDimension::DecodeWork),
+        0
     );
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     Ok(())

@@ -1,4 +1,5 @@
-use crate::{FORMAT_ID, GltfFailure, external_buffer_role, external_image_role};
+use crate::admission::JsonSurface;
+use crate::{FORMAT_ID, GltfFailure, admission, external_buffer_role, external_image_role};
 use baozi_import::authoring::{
     AlphaMode, AnimationAuthoringBatch, AppearanceAuthoringBatch, AttributeDomain,
     AttributeSemantic, AuthoredTransform, AuthoringRange, CameraAuthoring, CameraLocalId,
@@ -35,16 +36,12 @@ use gltf::json::validation::Checked;
 use gltf::mesh::Mode;
 use gltf::texture::{MagFilter, MinFilter, WrappingMode};
 use std::fmt;
-use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 type Result<T> = std::result::Result<T, ContentError>;
 
 const GLTF_BACKEND_FIXED_ALLOWANCE: u64 = 64 * 1024;
 const GLTF_JSON_EXPANSION_ALLOWANCE: u64 = 64;
-const GLB_HEADER_BYTES: usize = 12;
-const GLB_CHUNK_HEADER_BYTES: usize = 8;
-const GLB_JSON_OFFSET: usize = GLB_HEADER_BYTES + GLB_CHUNK_HEADER_BYTES;
 const PARSER_POLL_INTERVAL: usize = 4_096;
 
 #[derive(Debug)]
@@ -149,24 +146,18 @@ fn checked_add_with_limit(
 }
 
 fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
-    let bytes = ctx.primary_bytes();
-    let primary_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    let glb_candidate = bytes.get(..4) == Some(b"glTF");
-    if glb_candidate {
-        if let Some(json) = glb_json_surface(bytes) {
-            preflight_json_utf8(ctx, json, GLB_JSON_OFFSET as u64)?;
-        }
-    } else {
-        preflight_json_utf8(ctx, bytes, 0)?;
-    }
+    let surface = admission::admit(ctx)?;
+    let primary_len = to_u64(surface.document_bytes().len());
     let (parsed, _document_allowance) = ctx.with_work(
         ImportWorkClass::DecodeWork,
         primary_len,
         |work| -> Result<_> {
-            let backend_allowance = gltf_backend_allocation_allowance(ctx, bytes)?;
+            let backend_allowance = gltf_backend_allocation_allowance(ctx, surface)?;
             let document_allowance =
                 ctx.metered_opaque_allowance(ImportStorageClass::BackendDecode, backend_allowance)?;
-            let parsed = safe_gltf(ctx, "glTF document parse", || gltf::Gltf::from_slice(bytes))?;
+            let parsed = safe_gltf(ctx, "glTF document parse", || {
+                gltf::Gltf::from_slice(surface.document_bytes())
+            })?;
             work.complete_all()?;
             Ok((parsed, document_allowance))
         },
@@ -189,90 +180,14 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
     )
 }
 
-fn preflight_json_utf8(ctx: &ParseScope<'_>, bytes: &[u8], raw_base: u64) -> Result<()> {
-    ctx.enforce_resource_limit(
-        "gltf-decoded-utf8-bytes",
-        to_u64(bytes.len()),
-        ctx.limits().max_decoded_utf8_bytes,
-    )?;
-    ctx.with_work(
-        ImportWorkClass::DecodeWork,
-        to_u64(bytes.len()),
-        |work| -> Result<()> {
-            if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
-                work.complete([3])?;
-                return Err(GltfFailure::forbidden_bom(raw_base).into());
-            }
-
-            let mut window_start = 0usize;
-            while window_start < bytes.len() {
-                work.poll()?;
-                let window_end = window_start
-                    .saturating_add(PARSER_POLL_INTERVAL)
-                    .min(bytes.len());
-                let Err(source) = std::str::from_utf8(&bytes[window_start..window_end]) else {
-                    work.complete([to_u64(window_end - window_start)])?;
-                    window_start = window_end;
-                    continue;
-                };
-                let valid_prefix = source.valid_up_to();
-                if valid_prefix != 0 {
-                    work.complete([to_u64(valid_prefix)])?;
-                }
-                let invalid_start = window_start
-                    .checked_add(valid_prefix)
-                    .ok_or_else(|| ctx.allocation_failure("gltf-json-byte-offset"))?;
-                if source.error_len().is_none() && window_end != bytes.len() {
-                    debug_assert!(window_end.saturating_sub(invalid_start) <= 3);
-                    window_start = invalid_start;
-                    continue;
-                }
-                let relative_offset = u64::try_from(invalid_start)
-                    .map_err(|_| ctx.allocation_failure("gltf-json-byte-offset"))?;
-                let byte_offset = raw_base
-                    .checked_add(relative_offset)
-                    .ok_or_else(|| ctx.allocation_failure("gltf-json-byte-offset"))?;
-                return Err(GltfFailure::invalid_utf8(source, byte_offset).into());
-            }
-            Ok(())
-        },
-    )
-}
-
-fn glb_json_surface(bytes: &[u8]) -> Option<&[u8]> {
-    if bytes.get(..4) != Some(b"glTF") || !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    if read_glb_u32(bytes, 4)? != 2 {
-        return None;
-    }
-    let declared_length = usize::try_from(read_glb_u32(bytes, 8)?).ok()?;
-    if declared_length != bytes.len() || declared_length < GLB_JSON_OFFSET {
-        return None;
-    }
-    let chunk_length = usize::try_from(read_glb_u32(bytes, GLB_HEADER_BYTES)?).ok()?;
-    if chunk_length % 4 != 0 || bytes.get(GLB_HEADER_BYTES + 4..GLB_JSON_OFFSET) != Some(b"JSON") {
-        return None;
-    }
-    let chunk_end = GLB_JSON_OFFSET.checked_add(chunk_length)?;
-    if chunk_end > declared_length {
-        return None;
-    }
-    bytes.get(GLB_JSON_OFFSET..chunk_end)
-}
-
-fn read_glb_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    let end = offset.checked_add(size_of::<u32>())?;
-    let encoded: [u8; 4] = bytes.get(offset..end)?.try_into().ok()?;
-    Some(u32::from_le_bytes(encoded))
-}
-
-fn gltf_backend_allocation_allowance(ctx: &ParseScope<'_>, bytes: &[u8]) -> Result<u64> {
-    let input_bytes = u64::try_from(bytes.len())
+fn gltf_backend_allocation_allowance(
+    ctx: &ParseScope<'_>,
+    surface: JsonSurface<'_>,
+) -> Result<u64> {
+    let input_bytes = u64::try_from(surface.document_bytes().len())
         .map_err(|_| ctx.allocation_failure("gltf-backend-input-bytes"))?;
-    let json_bytes = glb_json_surface(bytes)
-        .map(|json| u64::try_from(json.len()).unwrap_or(u64::MAX))
-        .unwrap_or(input_bytes);
+    let json_bytes = u64::try_from(surface.json_bytes().len())
+        .map_err(|_| ctx.allocation_failure("gltf-backend-json-bytes"))?;
 
     // The gltf/serde object graph is opaque to the import ledger. Retain the
     // input-sized payload allowance plus a declared structural expansion cap.

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod admission;
 mod detect;
 mod error;
 mod parser;

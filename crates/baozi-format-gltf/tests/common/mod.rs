@@ -151,6 +151,42 @@ pub fn sidecar_options() -> GltfTestOptions {
     options
 }
 
+pub fn glb_with_json(json: &[u8]) -> Vec<u8> {
+    let mut json = json.to_vec();
+    while !json.len().is_multiple_of(4) {
+        json.push(b' ');
+    }
+    let total_len = 20usize
+        .checked_add(json.len())
+        .expect("test GLB size must fit usize");
+    let encoded_total_len = u32::try_from(total_len).expect("test GLB size must fit u32");
+    let encoded_json_len = u32::try_from(json.len()).expect("test JSON chunk size must fit u32");
+    let mut document = Vec::with_capacity(total_len);
+    document.extend_from_slice(b"glTF");
+    document.extend_from_slice(&2_u32.to_le_bytes());
+    document.extend_from_slice(&encoded_total_len.to_le_bytes());
+    document.extend_from_slice(&encoded_json_len.to_le_bytes());
+    document.extend_from_slice(b"JSON");
+    document.extend_from_slice(&json);
+    document
+}
+
+pub fn append_glb_chunk(mut document: Vec<u8>, chunk_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let padded_len = payload
+        .len()
+        .checked_add(3)
+        .expect("test GLB chunk size must fit usize")
+        & !3;
+    let encoded_len = u32::try_from(padded_len).expect("test GLB chunk size must fit u32");
+    document.extend_from_slice(&encoded_len.to_le_bytes());
+    document.extend_from_slice(chunk_type);
+    document.extend_from_slice(payload);
+    document.resize(document.len() + (padded_len - payload.len()), 0);
+    let total_len = u32::try_from(document.len()).expect("test GLB size must fit u32");
+    document[8..12].copy_from_slice(&total_len.to_le_bytes());
+    document
+}
+
 pub fn gltf_failure(error: &ImportFailure) -> TestResult<&FormatFailureEnvelope> {
     match error.cause() {
         ImportCause::Format(envelope) if envelope.format().as_str() == FORMAT_ID => Ok(envelope),
