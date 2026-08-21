@@ -16,7 +16,7 @@
 
 | Capability | Status | Notes | Tests |
 | --- | --- | --- | --- |
-| Geometry | Supported | Imports static face meshes from `v`, `vt`, `vn`, and `f`, including OBJ tuple remapping and negative indices. | `crates/baozi-format-obj/tests/geometry.rs` |
+| Geometry | Supported | Imports static face meshes from `v`, `vt`, `vn`, and `f`, preserving independent Corner-domain UV/normal indices and negative indices without duplicating shared positions. | `crates/baozi-format-obj/tests/geometry.rs` |
 | Hierarchy and transforms | Partial | Preserves object/group changes by splitting mesh segments and attaching child nodes. OBJ has no general transform stack. | `geometry.rs`, facade tests |
 | Materials | Partial | Loads `newmtl`, `Kd`, `d`, `Tr`, `Ke`, `Ns`, `Ni`, `illum`, `Ka`, and `Ks` where the current IR can express or preserve them. | `materials.rs` |
 | Textures and sidecars | Partial | Resolves `mtllib` through `AssetIo`; records `map_Kd` as an external texture URI without decoding image bytes. | `materials.rs`, `crates/baozi/tests/obj_facade.rs` |
@@ -44,7 +44,7 @@ Status values: `Supported`, `Partial`, `ParsedLossy`, `IgnoredWithDiagnostic`, `
 - Post-process boundary: raw OBJ parsing preserves polygon topology. Canonical triangulation belongs
   in `baozi-postprocess`, but no transformation request is currently admitted while the retained
   edit, remap, and evidence rail is being completed.
-- Attribute remapping: OBJ's separate position/UV/normal indices are remapped into Baozi's vertex-indexed SoA mesh streams by unique `(position, texcoord, normal)` tuples.
+- Attribute projection: positions are compacted per mesh segment by source position index, while UV and normal source tables are projected in face-corner order as Corner-domain attributes. UV or normal seams therefore remain distinguishable without duplicating shared positions. A segment that mixes present and missing values for one channel emits a diagnostic and omits that incomplete channel.
 - Mesh splitting: material and object/group boundaries may split one OBJ file into multiple Baozi meshes. Polygon topology is preserved within each segment, and smoothing remains per-face data.
 
 ### Text Decoding and Recovery

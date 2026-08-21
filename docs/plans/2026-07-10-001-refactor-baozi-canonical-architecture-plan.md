@@ -947,7 +947,7 @@ new Accepted authorities.
 - **Verification:** All three format crates, facade feature tests, and affected fuzz targets pass or compile at their declared gate; raw goldens agree with independent source expectations and preserve source distinctions; OBJ/MTL nested dependencies produce the complete origin-correct manifest through the central session; no format bypasses session IO/graph, shared metered storage, budgets, diagnostics, or final validation, and no first-party format-local accounting or dependency-graph state machine remains.
 - **Current U5 execution checklist:**
   - [x] Use OBJ smoothing as the first locality pilot: parse only `off`, `0`, and positive `u32` groups; preserve explicit state as a dense Face-domain attribute; keep absent smoothing distinct from explicit `off`; stop smoothing-only mesh splits and remove the duplicate metadata authority; enforce cell/stream limits before allocation; and cover late declarations, segment-state persistence, strict recovery, exact limits, snapshots, facade behavior, and core capability integration.
-  - [ ] Preserve OBJ UV and normal tuples as Corner-domain attributes without duplicating shared positions, then delete the tuple-expanded vertex projection and its algorithm-specific cancellation tests.
+  - [x] Preserve OBJ UV and normal tuples as Corner-domain attributes without duplicating shared positions, then delete the tuple-expanded vertex projection and its algorithm-specific cancellation tests.
 
 ### U6. Harden and Admit glTF as the Complex IR Proof Format
 

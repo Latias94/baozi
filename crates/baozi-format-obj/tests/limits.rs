@@ -165,16 +165,48 @@ fn reverse_material_library(material_count: usize) -> String {
     library
 }
 
-fn polygon_document(vertex_count: usize) -> String {
+fn corner_projection_document(position_count: usize) -> String {
     let mut document = String::new();
-    for vertex in 0..vertex_count {
-        document.push_str(&format!("v {vertex} 0 0\n"));
+    for position in 0..position_count {
+        document.push_str(&format!("v {position} 0 0\n"));
     }
-    document.push('f');
-    for vertex in (1..=vertex_count).rev() {
-        document.push_str(&format!(" {vertex}"));
+    for texcoord in 0..position_count {
+        document.push_str(&format!("vt {texcoord} 0\n"));
+    }
+    document.push_str("vn 0 0 1\nf");
+    for reference in (1..=position_count).rev() {
+        document.push_str(&format!(" {reference}/{reference}/1"));
     }
     document.push('\n');
+    document
+}
+
+fn segmented_corner_projection_document(source_count: usize, segment_count: usize) -> String {
+    assert!(source_count >= 3);
+    let mut document = String::from("v 0 0 0\nv 1 0 0\nv 0 1 0\n");
+    for source in 0..source_count {
+        document.push_str(&format!("vt {source} 0\n"));
+        document.push_str(&format!("vn 0 0 {}\n", source + 1));
+    }
+    for segment in 0..segment_count {
+        document.push_str(&format!("g segment-{segment}\n"));
+        document.push_str("f 1/1/1 2/2/2 3/3/3\n");
+    }
+    document
+}
+
+fn sparse_corner_projection_document(source_count: usize, projected: bool) -> String {
+    assert!(source_count >= 3);
+    let mut document = String::from("v 0 0 0\nv 1 0 0\nv 0 1 0\n");
+    for source in 0..source_count {
+        document.push_str(&format!("vt {source} 0\n"));
+        document.push_str(&format!("vn 0 0 {}\n", source + 1));
+    }
+    if projected {
+        document.push_str("f 1/1/1 2/2/2 3/3/3\n");
+    } else {
+        document.push_str("f 1 2 3\n");
+    }
     document
 }
 
@@ -650,14 +682,14 @@ fn material_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<()
 }
 
 #[test]
-fn vertex_key_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<()> {
-    const VERTEX_COUNT: usize = 512;
-    let document = polygon_document(VERTEX_COUNT);
+fn corner_projection_cancellation_releases_all_import_storage() -> TestResult<()> {
+    const POSITION_COUNT: usize = 512;
+    let document = corner_projection_document(POSITION_COUNT);
 
     let (calibration_control, calibration_polls) = controlled_import(None);
     let _report = expected_success(import_assets_result_with_control(
-        "polygon.obj",
-        [("polygon.obj", document.as_bytes())],
+        "corner-projection.obj",
+        [("corner-projection.obj", document.as_bytes())],
         ResourceLimits::default(),
         false,
         calibration_control,
@@ -665,16 +697,17 @@ fn vertex_key_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<
     let total_polls = calibration_polls.load(Ordering::SeqCst);
     assert!(total_polls > 0);
 
-    let expected_prefix = SORT_COMPARISON_CHUNK + 1;
+    let target_vertices = u64::try_from(POSITION_COUNT * 2)
+        .expect("test vertex prefix must fit the ledger amount type");
     let (_, failure) = first_cancelled_dimension_prefix_at_least(
         total_polls,
-        ImportDimension::WorkUnits,
-        expected_prefix,
+        ImportDimension::Vertices,
+        target_vertices,
         |cancel_on| {
             let (control, polls) = controlled_import(Some(cancel_on));
             let failure = expected_failure(import_assets_result_with_control(
-                "polygon.obj",
-                [("polygon.obj", document.as_bytes())],
+                "corner-projection.obj",
+                [("corner-projection.obj", document.as_bytes())],
                 ResourceLimits::default(),
                 false,
                 control,
@@ -684,8 +717,124 @@ fn vertex_key_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<
             Ok(failure)
         },
     )?;
-    let consumed = work_consumed(&failure, ImportDimension::WorkUnits);
-    assert_eq!(consumed, expected_prefix);
+
+    assert!(work_consumed(&failure, ImportDimension::Vertices) >= target_vertices);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    Ok(())
+}
+
+#[test]
+fn corner_projection_work_does_not_revalidate_global_sources_per_segment() -> TestResult<()> {
+    const SMALL_SOURCE_COUNT: usize = 16;
+    const LARGE_SOURCE_COUNT: usize = 64;
+    const FEW_SEGMENTS: usize = 4;
+    const MANY_SEGMENTS: usize = 32;
+
+    let measure = |source_count, segment_count| -> TestResult<u64> {
+        let document = segmented_corner_projection_document(source_count, segment_count);
+        let report = expected_success(import_bytes_result(
+            "segmented-corner-projection.obj",
+            document.as_bytes(),
+            ResourceLimits::default(),
+        )?);
+        Ok(report
+            .ledger()
+            .dimension(ImportDimension::WorkUnits)
+            .expect("work evidence remains queryable")
+            .consumed())
+    };
+
+    let few_small = measure(SMALL_SOURCE_COUNT, FEW_SEGMENTS)?;
+    let few_large = measure(LARGE_SOURCE_COUNT, FEW_SEGMENTS)?;
+    let many_small = measure(SMALL_SOURCE_COUNT, MANY_SEGMENTS)?;
+    let many_large = measure(LARGE_SOURCE_COUNT, MANY_SEGMENTS)?;
+    let few_source_growth = few_large
+        .checked_sub(few_small)
+        .expect("more source rows must not reduce measured work");
+    let many_source_growth = many_large
+        .checked_sub(many_small)
+        .expect("more source rows must not reduce measured work");
+
+    assert!(
+        many_source_growth <= few_source_growth.saturating_add(1),
+        "global source growth was revalidated per segment: few={few_source_growth}, many={many_source_growth}"
+    );
+    Ok(())
+}
+
+#[test]
+fn corner_projection_scratch_does_not_scale_with_unreferenced_sources() -> TestResult<()> {
+    const SMALL_SOURCE_COUNT: usize = 16;
+    const LARGE_SOURCE_COUNT: usize = 4_096;
+    const ALLOCATOR_TOLERANCE: u64 = 8 * 1024;
+
+    let measure = |source_count, projected| -> TestResult<u64> {
+        let document = sparse_corner_projection_document(source_count, projected);
+        let report = expected_success(import_bytes_result(
+            "sparse-corner-projection.obj",
+            document.as_bytes(),
+            ResourceLimits::default(),
+        )?);
+        Ok(report
+            .ledger()
+            .dimension(ImportDimension::ScratchBytes)
+            .expect("scratch evidence remains queryable")
+            .peak_live_bytes())
+    };
+
+    let small_delta =
+        measure(SMALL_SOURCE_COUNT, true)?.saturating_sub(measure(SMALL_SOURCE_COUNT, false)?);
+    let large_delta =
+        measure(LARGE_SOURCE_COUNT, true)?.saturating_sub(measure(LARGE_SOURCE_COUNT, false)?);
+
+    assert!(
+        large_delta <= small_delta.saturating_add(ALLOCATOR_TOLERANCE),
+        "unreferenced source rows inflated projection scratch: small={small_delta}, large={large_delta}"
+    );
+    Ok(())
+}
+
+#[test]
+fn corner_projection_obeys_the_exact_work_budget() -> TestResult<()> {
+    let document = corner_projection_document(128);
+    let baseline = expected_success(import_bytes_result(
+        "corner-work.obj",
+        document.as_bytes(),
+        ResourceLimits::default(),
+    )?);
+    let required = baseline
+        .ledger()
+        .dimension(ImportDimension::WorkUnits)
+        .expect("work evidence remains queryable")
+        .consumed();
+    assert!(required > 0);
+
+    let mut exact = ResourceLimits::default();
+    exact.max_work_units = required;
+    let report = expected_success(import_bytes_result(
+        "corner-work.obj",
+        document.as_bytes(),
+        exact,
+    )?);
+    assert_eq!(
+        report
+            .ledger()
+            .dimension(ImportDimension::WorkUnits)
+            .expect("work evidence remains queryable")
+            .consumed(),
+        required
+    );
+
+    let mut one_short = ResourceLimits::default();
+    one_short.max_work_units = required - 1;
+    let failure = expected_failure(import_bytes_result(
+        "corner-work.obj",
+        document.as_bytes(),
+        one_short,
+    )?);
+    assert_ledger_limit(&failure, ImportDimension::WorkUnits);
     Ok(())
 }
 
@@ -864,6 +1013,44 @@ fn generated_vertex_limit_is_aggregate_across_segments() -> TestResult<()> {
 }
 
 #[test]
+fn corner_attribute_seams_do_not_consume_tuple_expanded_vertices() -> TestResult<()> {
+    let bytes = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvt 1 1\nvn 0 0 1\nvn 0 0 -1\nf 1/1/1 2/2/1 3/3/1\nf 1/4/2 3/3/2 2/2/2\n";
+
+    let mut exact = ResourceLimits::default();
+    exact.max_vertices = 6;
+    let report = expected_success(import_bytes_result("corner-seams-exact.obj", bytes, exact)?);
+    assert!(report.diagnostics().is_empty());
+    let snapshot = scene_snapshot(&report)?;
+    assert!(
+        snapshot_line_containing(&snapshot, "primitive[0]")
+            .contains("vertices=3 corners=6 faces=2")
+    );
+    let vertices = report
+        .ledger()
+        .dimension(ImportDimension::Vertices)
+        .expect("vertex evidence remains queryable");
+    assert_eq!(vertices.attempted(), 6);
+    assert_eq!(vertices.consumed(), 6);
+
+    let mut excess = ResourceLimits::default();
+    excess.max_vertices = 5;
+    let failure = expected_failure(import_bytes_result(
+        "corner-seams-excess.obj",
+        bytes,
+        excess,
+    )?);
+    assert_ledger_limit(&failure, ImportDimension::Vertices);
+    let vertices = failure
+        .ledger()
+        .dimension(ImportDimension::Vertices)
+        .expect("vertex evidence remains queryable");
+    assert_eq!(vertices.attempted(), 6);
+    assert_eq!(vertices.consumed(), 3);
+    assert!(failure.diagnostics().is_empty());
+    Ok(())
+}
+
+#[test]
 fn face_limit_is_enforced() -> TestResult<()> {
     let mut limits = ResourceLimits::default();
     limits.max_faces = 0;
@@ -925,23 +1112,58 @@ fn topology_cell_limit_includes_polygon_face_counts_at_the_exact_boundary() -> T
 }
 
 #[test]
-fn canonical_attribute_cells_are_charged_at_the_exact_boundary() -> TestResult<()> {
-    let bytes =
-        b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2/1 3/3/1\n";
+fn corner_attribute_cells_are_charged_at_the_exact_boundary() -> TestResult<()> {
+    let bytes = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2/1 3/3/1\nf 1/1/1 2/2/1 3/3/1\n";
 
     let mut exact = ResourceLimits::default();
-    exact.max_total_vertex_attribute_cells = 10;
+    exact.max_total_vertex_attribute_cells = 16;
     let report = expected_success(import_bytes_result("attribute-exact.obj", bytes, exact)?);
     assert!(report.diagnostics().is_empty());
     let snapshot = scene_snapshot(&report)?;
     assert_eq!(snapshot.attribute_count(), 3);
-    assert!(snapshot_line_containing(&snapshot, "semantic=texcoord").contains("elements=3"));
-    assert!(snapshot_line_containing(&snapshot, "semantic=normal").contains("elements=3"));
+    assert!(snapshot_line_containing(&snapshot, "semantic=texcoord").contains("elements=6"));
+    assert!(snapshot_line_containing(&snapshot, "semantic=normal").contains("elements=6"));
+    let cells = report
+        .ledger()
+        .dimension(ImportDimension::AttributeCells)
+        .expect("attribute cell evidence remains queryable");
+    assert_eq!(cells.attempted(), 16);
+    assert_eq!(cells.consumed(), 16);
 
     let mut excess = ResourceLimits::default();
-    excess.max_total_vertex_attribute_cells = 9;
+    excess.max_total_vertex_attribute_cells = 15;
     let failure = expected_failure(import_bytes_result("attribute-excess.obj", bytes, excess)?);
     assert_ledger_limit(&failure, ImportDimension::AttributeCells);
+    Ok(())
+}
+
+#[test]
+fn corner_attribute_cell_limit_precedes_projection_allocation() -> TestResult<()> {
+    const CORNER_COUNT: usize = 80;
+    const SOURCE_CELL_COUNT: usize = CORNER_COUNT + 1;
+    let document = corner_projection_document(CORNER_COUNT);
+    let mut limits = ResourceLimits::default();
+    limits.max_total_vertex_attribute_cells = SOURCE_CELL_COUNT;
+
+    let failure = expected_failure(import_bytes_result(
+        "corner-cell-admission.obj",
+        document.as_bytes(),
+        limits,
+    )?);
+
+    assert_ledger_limit(&failure, ImportDimension::AttributeCells);
+    let cells = failure
+        .ledger()
+        .dimension(ImportDimension::AttributeCells)
+        .expect("attribute cell evidence remains queryable");
+    assert_eq!(
+        cells.attempted(),
+        (SOURCE_CELL_COUNT + CORNER_COUNT * 2) as u64
+    );
+    assert_eq!(cells.consumed(), SOURCE_CELL_COUNT as u64);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
     Ok(())
 }
 

@@ -39,6 +39,8 @@ enum WorkCase {
     Nested,
     ParentNestedSuccess,
     ParentChildFailure,
+    ParentGroupNestedSuccess,
+    ParentGroupChildFailure,
     CaughtParentPanic,
     ParentCancelBeforeCompletion,
     PrematureReplenish,
@@ -68,6 +70,8 @@ impl WorkImporter {
             WorkCase::Nested => "dev.baozi.test.work-callback-nested",
             WorkCase::ParentNestedSuccess => "dev.baozi.test.work-parent-success",
             WorkCase::ParentChildFailure => "dev.baozi.test.work-parent-child-failure",
+            WorkCase::ParentGroupNestedSuccess => "dev.baozi.test.work-parent-group-success",
+            WorkCase::ParentGroupChildFailure => "dev.baozi.test.work-parent-group-child-failure",
             WorkCase::CaughtParentPanic => "dev.baozi.test.work-parent-caught-panic",
             WorkCase::ParentCancelBeforeCompletion => "dev.baozi.test.work-parent-cancel",
             WorkCase::PrematureReplenish => "dev.baozi.test.work-callback-replenish",
@@ -92,6 +96,8 @@ impl WorkImporter {
             WorkCase::Nested => "work-nested",
             WorkCase::ParentNestedSuccess => "work-parent-success",
             WorkCase::ParentChildFailure => "work-parent-failure",
+            WorkCase::ParentGroupNestedSuccess => "work-parent-group-success",
+            WorkCase::ParentGroupChildFailure => "work-parent-group-failure",
             WorkCase::CaughtParentPanic => "work-parent-caught-panic",
             WorkCase::ParentCancelBeforeCompletion => "work-parent-cancel",
             WorkCase::PrematureReplenish => "work-replenish",
@@ -216,6 +222,29 @@ impl FormatImporter for WorkImporter {
                         scope.enforce_resource_limit("parent-child-failure", 2, 1)
                     })
                 })?;
+            }
+            WorkCase::ParentGroupNestedSuccess => {
+                scope.with_parent_work_group(
+                    [
+                        (ImportWorkClass::Records, 1),
+                        (ImportWorkClass::AttributeCells, 2),
+                    ],
+                    || scope.with_work(ImportWorkClass::Tokens, 3, |child| child.complete_all()),
+                )?;
+            }
+            WorkCase::ParentGroupChildFailure => {
+                scope.with_parent_work_group(
+                    [
+                        (ImportWorkClass::Records, 1),
+                        (ImportWorkClass::AttributeCells, 2),
+                    ],
+                    || {
+                        scope.with_work(ImportWorkClass::WorkUnits, 2, |child| {
+                            child.complete([1])?;
+                            scope.enforce_resource_limit("parent-group-child-failure", 2, 1)
+                        })
+                    },
+                )?;
             }
             WorkCase::CaughtParentPanic => {
                 let caught = catch_unwind(AssertUnwindSafe(|| {
@@ -537,6 +566,46 @@ fn child_failure_leaves_parent_work_attempted_but_incomplete() {
             )
     ));
     assert_dimension(&failure, ImportDimension::Records, 1, 0);
+    assert_dimension(&failure, ImportDimension::WorkUnits, 2, 1);
+}
+
+#[test]
+fn parent_work_group_completes_all_dimensions_only_after_the_child() {
+    let report = run_case(WorkCase::ParentGroupNestedSuccess, None)
+        .expect("an explicit parent group may contain sequential child work");
+    for (dimension, expected) in [
+        (ImportDimension::Records, 1),
+        (ImportDimension::AttributeCells, 2),
+        (ImportDimension::Tokens, 3),
+    ] {
+        let evidence = report
+            .ledger()
+            .dimension(dimension)
+            .expect("parent group evidence remains queryable");
+        assert_eq!(
+            (evidence.attempted(), evidence.consumed()),
+            (expected, expected)
+        );
+    }
+}
+
+#[test]
+fn child_failure_leaves_every_parent_group_dimension_incomplete() {
+    let failure = run_case(WorkCase::ParentGroupChildFailure, None)
+        .expect_err("a child failure must terminate its parent group action");
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::ResourceLimit {
+                    resource: "parent-group-child-failure",
+                    limit: 1,
+                }
+            )
+    ));
+    assert_dimension(&failure, ImportDimension::Records, 1, 0);
+    assert_dimension(&failure, ImportDimension::AttributeCells, 2, 0);
     assert_dimension(&failure, ImportDimension::WorkUnits, 2, 1);
 }
 

@@ -52,8 +52,8 @@ fn imports_quad_as_polygon_with_face_counts() -> TestResult<()> {
 }
 
 #[test]
-fn remaps_separate_position_uv_normal_indices() -> TestResult<()> {
-    let bytes = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvt 1 1\nvn 0 0 1\nvn 0 0 -1\nf 1/1/1 2/2/1 3/3/1\nf 1/4/2 3/3/2 2/2/2\n";
+fn preserves_corner_uv_and_normal_domains_without_duplicating_positions() -> TestResult<()> {
+    let bytes = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvt 1 1\nvt 0.25 0.25\nvn 0 0 1\nvn 0 0 -1\nvn 1 0 0\nf 1/1/1 2/2/1 3/3/1\nf 1/4/2 3/3/2 2/2/2\n";
 
     let report = import_bytes("remap.obj", bytes)?;
     let snapshot = scene_snapshot(&report)?;
@@ -61,20 +61,130 @@ fn remaps_separate_position_uv_normal_indices() -> TestResult<()> {
     assert!(report.diagnostics().is_empty());
     assert_eq!(snapshot.attribute_count(), 3);
     assert_eq!(snapshot.primitive_index_count(), 6);
+    assert_eq!(snapshot.f32_scalar_count(), 39);
     let primitive = snapshot_line(&snapshot, "primitive[0]");
     assert!(
-        primitive.contains("topology=triangle_list vertices=6 corners=6 faces=2")
-            && primitive.contains("indices(present,total=6)=[0,1,2,3,4,5]"),
+        primitive.contains("topology=triangle_list vertices=3 corners=6 faces=2")
+            && primitive.contains("indices(present,total=6)=[0,1,2,0,2,1]"),
         "unexpected canonical primitive: {primitive}"
     );
-    assert!(snapshot_line_containing(&snapshot, "semantic=position").contains("elements=6"));
+    let position = snapshot_line_containing(&snapshot, "semantic=position");
+    assert!(position.contains("domain=vertex scalar=f32 lanes=3"));
+    assert!(position.contains("payload=dense elements=3 explicit=3 canonical_scalars=9"));
+
+    let texcoord = snapshot_line_containing(&snapshot, "semantic=texcoord");
+    assert!(texcoord.contains("domain=corner scalar=f32 lanes=2"));
+    assert!(texcoord.contains("payload=dense elements=6 explicit=6 canonical_scalars=12"));
+    assert!(texcoord.contains(concat!(
+        "values(present,total=12)=[",
+        "0x00000000,0x00000000,0x3f800000,0x00000000,",
+        "0x00000000,0x3f800000,0x3f800000,0x3f800000,",
+        "0x00000000,0x3f800000,0x3f800000,0x00000000]"
+    )));
+
+    let normal = snapshot_line_containing(&snapshot, "semantic=normal");
+    assert!(normal.contains("domain=corner scalar=f32 lanes=3"));
+    assert!(normal.contains("payload=dense elements=6 explicit=6 canonical_scalars=18"));
+    assert!(normal.contains(concat!(
+        "values(present,total=18)=[",
+        "0x00000000,0x00000000,0x3f800000,",
+        "0x00000000,0x00000000,0x3f800000,",
+        "0x00000000,0x00000000,0x3f800000,",
+        "0x00000000,0x00000000,0xbf800000,",
+        "0x00000000,0x00000000,0xbf800000,",
+        "0x00000000,0x00000000,0xbf800000]"
+    )));
+    Ok(())
+}
+
+#[test]
+fn isolates_corner_source_projection_between_segments() -> TestResult<()> {
+    let bytes = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 1 0\nvt 2 0\nvt 3 0\nvt 4 0\nvn 1 0 0\nvn 2 0 0\nvn 3 0 0\nvn 4 0 0\ng first\nf 1/1/1 2/2/2 3/3/3\ng second\nf 1/3/3 3/4/4 2/1/1\n";
+
+    let report = import_bytes("segment-remap.obj", bytes)?;
+    let snapshot = scene_snapshot(&report)?;
+
+    assert!(report.diagnostics().is_empty());
+    assert_eq!(snapshot.logical_mesh_count(), 2);
+    assert_eq!(snapshot.attribute_count(), 6);
+    assert!(snapshot_line(&snapshot, "attribute[1]").contains(concat!(
+        "semantic=normal semantic_set=0 domain=corner scalar=f32 lanes=3 ",
+        "normalization=none payload=dense elements=3 explicit=3 canonical_scalars=9 ",
+        "values(present,total=9)=[",
+        "0x3f800000,0x00000000,0x00000000,",
+        "0x40000000,0x00000000,0x00000000,",
+        "0x40400000,0x00000000,0x00000000]"
+    )));
+    assert!(snapshot_line(&snapshot, "attribute[2]").contains(concat!(
+        "semantic=texcoord semantic_set=0 domain=corner scalar=f32 lanes=2 ",
+        "normalization=none payload=dense elements=3 explicit=3 canonical_scalars=6 ",
+        "values(present,total=6)=[",
+        "0x3f800000,0x00000000,0x40000000,0x00000000,",
+        "0x40400000,0x00000000]"
+    )));
+    assert!(snapshot_line(&snapshot, "attribute[4]").contains(concat!(
+        "semantic=normal semantic_set=0 domain=corner scalar=f32 lanes=3 ",
+        "normalization=none payload=dense elements=3 explicit=3 canonical_scalars=9 ",
+        "values(present,total=9)=[",
+        "0x40400000,0x00000000,0x00000000,",
+        "0x40800000,0x00000000,0x00000000,",
+        "0x3f800000,0x00000000,0x00000000]"
+    )));
+    assert!(snapshot_line(&snapshot, "attribute[5]").contains(concat!(
+        "semantic=texcoord semantic_set=0 domain=corner scalar=f32 lanes=2 ",
+        "normalization=none payload=dense elements=3 explicit=3 canonical_scalars=6 ",
+        "values(present,total=6)=[",
+        "0x40400000,0x00000000,0x40800000,0x00000000,",
+        "0x3f800000,0x00000000]"
+    )));
+    Ok(())
+}
+
+#[test]
+fn retains_complete_texcoords_when_normals_are_partial() -> TestResult<()> {
+    let bytes = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2 3/3/1\n";
+
+    let report = import_bytes("partial-normal.obj", bytes)?;
+    let snapshot = scene_snapshot(&report)?;
+
+    assert_eq!(snapshot.attribute_count(), 2);
+    assert!(snapshot.preview().contains("semantic=texcoord"));
+    assert!(!snapshot.preview().contains("semantic=normal"));
     assert!(
-        snapshot_line_containing(&snapshot, "semantic=texcoord").contains("0x3f800000,0x3f800000")
+        snapshot_line_containing(&snapshot, "semantic=texcoord").contains(concat!(
+            "domain=corner scalar=f32 lanes=2 normalization=none ",
+            "payload=dense elements=3 explicit=3 canonical_scalars=6"
+        ))
     );
-    assert!(
-        snapshot_line_containing(&snapshot, "semantic=normal")
-            .contains("0x00000000,0x00000000,0xbf800000")
+    assert_eq!(report.diagnostics().len(), 1);
+    assert_eq!(
+        report.diagnostics()[0].code().as_str(),
+        "obj.partial_normal_channel"
     );
+    Ok(())
+}
+
+#[test]
+fn preserves_corner_uv_and_normal_cardinality_for_polygons() -> TestResult<()> {
+    let bytes = b"v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2/1 3/3/1 4/4/1\n";
+
+    let report = import_bytes("corner-polygon.obj", bytes)?;
+    let snapshot = scene_snapshot(&report)?;
+
+    assert!(report.diagnostics().is_empty());
+    assert_eq!(snapshot.attribute_count(), 3);
+    assert_eq!(snapshot.f32_scalar_count(), 32);
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains(concat!(
+        "topology=polygons vertices=4 corners=4 faces=1 ",
+        "polygon_boundaries(present,total=1)=[4] ",
+        "indices(present,total=4)=[0,1,2,3]"
+    )));
+    let texcoord = snapshot_line_containing(&snapshot, "semantic=texcoord");
+    assert!(texcoord.contains("domain=corner scalar=f32 lanes=2"));
+    assert!(texcoord.contains("payload=dense elements=4"));
+    let normal = snapshot_line_containing(&snapshot, "semantic=normal");
+    assert!(normal.contains("domain=corner scalar=f32 lanes=3"));
+    assert!(normal.contains("payload=dense elements=4"));
     Ok(())
 }
 
@@ -98,8 +208,7 @@ fn supports_negative_face_indices() -> TestResult<()> {
 
 #[test]
 fn partial_uv_and_normal_channels_are_diagnosed_and_omitted() -> TestResult<()> {
-    let bytes =
-        b"g mixed\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2 3//1\n";
+    let bytes = b"g mixed\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2/1 3/3/1\nf 1 2 3\n";
 
     let report = import_bytes("partial.obj", bytes)?;
     let snapshot = scene_snapshot(&report)?;
@@ -107,6 +216,7 @@ fn partial_uv_and_normal_channels_are_diagnosed_and_omitted() -> TestResult<()> 
 
     assert_eq!(snapshot.logical_mesh_count(), 1);
     assert_eq!(snapshot.attribute_count(), 1);
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains("vertices=3 corners=6 faces=2"));
     assert!(!snapshot.preview().contains("semantic=texcoord"));
     assert!(!snapshot.preview().contains("semantic=normal"));
     assert_eq!(diagnostics.len(), 2);

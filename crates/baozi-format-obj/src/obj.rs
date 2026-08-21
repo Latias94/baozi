@@ -1,5 +1,5 @@
 use crate::{ObjFailure, mtl, parser};
-use baozi_import::authoring::{Vec2, Vec3};
+use baozi_import::authoring::Vec3;
 use baozi_import::{
     ConformedTextInput, ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec,
     ParseResult, ParseScope, TextInputLine, TextInputRecoveryTracker,
@@ -13,8 +13,8 @@ const MAX_FACE_REFERENCE_BYTES: usize = MAX_NUMERIC_LITERAL_BYTES * 3 + 2;
 
 pub(crate) struct ParsedObj<'scope> {
     pub positions: MeteredVec<'scope, Vec3>,
-    pub texcoords: MeteredVec<'scope, Vec2>,
-    pub normals: MeteredVec<'scope, Vec3>,
+    pub texcoords: MeteredVec<'scope, [f32; 2]>,
+    pub normals: MeteredVec<'scope, [f32; 3]>,
     pub faces: MeteredVec<'scope, Face<'scope>>,
     pub mtllibs: MeteredVec<'scope, MeteredString<'scope>>,
     state_names: MeteredVec<'scope, MeteredString<'scope>>,
@@ -229,10 +229,10 @@ impl<'scope> ObjParser<'scope, '_> {
             1,
             |work| -> ParseResult<()> {
                 work.run_all(|| {
-                    self.parsed.texcoords.try_push(Vec2::new(
+                    self.parsed.texcoords.try_push([
                         parse_f32(self.scope, "texcoord", tokens[1], line_number)?,
                         parse_f32(self.scope, "texcoord", tokens[2], line_number)?,
-                    ))
+                    ])
                 })
             },
         )
@@ -245,11 +245,11 @@ impl<'scope> ObjParser<'scope, '_> {
             1,
             |work| -> ParseResult<()> {
                 work.run_all(|| {
-                    self.parsed.normals.try_push(Vec3::new(
+                    self.parsed.normals.try_push([
                         parse_f32(self.scope, "normal", tokens[1], line_number)?,
                         parse_f32(self.scope, "normal", tokens[2], line_number)?,
                         parse_f32(self.scope, "normal", tokens[3], line_number)?,
-                    ))
+                    ])
                 })
             },
         )

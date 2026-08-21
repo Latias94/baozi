@@ -870,9 +870,23 @@ impl<'session> ParseScope<'session> {
     where
         E: From<ParseFailure>,
     {
-        let mut work = self
-            .begin_work_group([(class, amount)], true)
-            .map_err(E::from)?;
+        self.with_parent_work_group([(class, amount)], action)
+    }
+
+    /// Runs a semantic parent action spanning an exact fixed work group.
+    ///
+    /// Every parent amount is attempted before the callback starts. The group remains incomplete
+    /// when any child decode, token, allocation, cancellation, or format action fails, and completes
+    /// atomically only after the callback and final cancellation check both succeed.
+    pub fn with_parent_work_group<const N: usize, T, E>(
+        &self,
+        charges: [(ImportWorkClass, u64); N],
+        action: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<ParseFailure>,
+    {
+        let mut work = self.begin_work_group(charges, true).map_err(E::from)?;
         match action() {
             Ok(value) => {
                 if let Err(failure) = self.poll_active() {
