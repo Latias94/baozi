@@ -3,6 +3,7 @@
 mod admission;
 mod detect;
 mod error;
+mod json_syntax;
 mod parser;
 
 pub(crate) use error::GltfFailure;

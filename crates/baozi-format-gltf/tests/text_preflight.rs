@@ -79,6 +79,7 @@ fn gltf_invalid_utf8_is_a_typed_format_failure_at_the_raw_offset() -> TestResult
         unsigned_detail(envelope, "byte_offset"),
         Some(invalid_offset)
     );
+    assert_eq!(unsigned_detail(envelope, "byte_length"), Some(1));
     assert_eq!(string_detail(envelope, "subject"), Some("json-document"));
     assert!(
         string_detail(envelope, "reason").is_some_and(|reason| reason.contains("invalid UTF-8"))
@@ -102,6 +103,7 @@ fn gltf_bom_is_a_typed_format_failure_at_the_json_surface() -> TestResult<()> {
     assert!(diagnostics.is_empty());
     assert_eq!(envelope.code(), "gltf.forbidden_bom");
     assert_eq!(unsigned_detail(envelope, "byte_offset"), Some(0));
+    assert_eq!(unsigned_detail(envelope, "byte_length"), Some(3));
     assert_eq!(string_detail(envelope, "subject"), Some("json-document"));
     Ok(())
 }
@@ -127,6 +129,7 @@ fn glb_invalid_utf8_reports_the_container_relative_raw_offset() -> TestResult<()
         unsigned_detail(envelope, "byte_offset"),
         Some(invalid_offset)
     );
+    assert_eq!(unsigned_detail(envelope, "byte_length"), Some(1));
     Ok(())
 }
 
@@ -153,6 +156,7 @@ fn glb_invalid_utf8_is_reported_when_the_sequence_crosses_a_scan_chunk() -> Test
         unsigned_detail(envelope, "byte_offset"),
         Some(invalid_offset)
     );
+    assert_eq!(unsigned_detail(envelope, "byte_length"), Some(1));
     Ok(())
 }
 
@@ -173,6 +177,7 @@ fn glb_bom_reports_the_json_surface_container_offset() -> TestResult<()> {
     assert!(diagnostics.is_empty());
     assert_eq!(envelope.code(), GltfFailureCode::ForbiddenBom.as_str());
     assert_eq!(unsigned_detail(envelope, "byte_offset"), Some(20));
+    assert_eq!(unsigned_detail(envelope, "byte_length"), Some(3));
     assert_eq!(string_detail(envelope, "subject"), Some("json-document"));
     Ok(())
 }

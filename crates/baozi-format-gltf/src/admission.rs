@@ -1,4 +1,5 @@
 use crate::GltfFailure;
+use crate::json_syntax;
 use baozi_import::{ImportWorkClass, ParseResult, ParseScope};
 
 const GLB_MAGIC: &[u8; 4] = b"glTF";
@@ -7,8 +8,6 @@ const GLB_HEADER_BYTES: usize = 12;
 const GLB_CHUNK_HEADER_BYTES: usize = 8;
 const GLB_JSON_CHUNK: &[u8; 4] = b"JSON";
 const GLB_BIN_CHUNK: &[u8; 4] = b"BIN\0";
-const UTF8_BOM: &[u8; 3] = &[0xef, 0xbb, 0xbf];
-const SCAN_CHUNK_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Copy)]
 pub(crate) struct JsonSurface<'bytes> {
@@ -33,17 +32,18 @@ impl<'bytes> JsonSurface<'bytes> {
 
 pub(crate) fn admit<'bytes>(ctx: &'bytes ParseScope<'_>) -> ParseResult<JsonSurface<'bytes>> {
     let document_bytes = ctx.primary_bytes();
-    let (json_bytes, json_raw_base) = if document_bytes.starts_with(GLB_MAGIC) {
-        locate_glb_json(ctx, document_bytes)?
+    let (json_bytes, json_raw_base, is_glb) = if document_bytes.starts_with(GLB_MAGIC) {
+        let (json_bytes, json_raw_base) = locate_glb_json(ctx, document_bytes)?;
+        (json_bytes, json_raw_base, true)
     } else {
-        (document_bytes, 0)
+        (document_bytes, 0, false)
     };
     let surface = JsonSurface {
         document_bytes,
         json_bytes,
         json_raw_base,
     };
-    admit_json_text(ctx, surface)?;
+    json_syntax::admit(ctx, surface.json_bytes(), surface.json_raw_base(), is_glb)?;
     Ok(surface)
 }
 
@@ -170,57 +170,6 @@ fn read_glb_chunk<'bytes>(
     })
 }
 
-fn admit_json_text(ctx: &ParseScope<'_>, surface: JsonSurface<'_>) -> ParseResult<()> {
-    let bytes = surface.json_bytes();
-    let raw_base = surface.json_raw_base();
-    ctx.enforce_resource_limit(
-        "gltf-decoded-utf8-bytes",
-        to_u64(bytes.len()),
-        ctx.limits().max_decoded_utf8_bytes,
-    )?;
-    ctx.with_work(
-        ImportWorkClass::DecodeWork,
-        to_u64(bytes.len()),
-        |work| -> ParseResult<()> {
-            if bytes.starts_with(UTF8_BOM) {
-                work.complete([3])?;
-                return Err(ctx.format_failure(GltfFailure::forbidden_bom(raw_base)));
-            }
-
-            let mut window_start = 0usize;
-            while window_start < bytes.len() {
-                work.poll()?;
-                let window_end = window_start
-                    .saturating_add(SCAN_CHUNK_BYTES)
-                    .min(bytes.len());
-                let Err(source) = std::str::from_utf8(&bytes[window_start..window_end]) else {
-                    work.complete([to_u64(window_end - window_start)])?;
-                    window_start = window_end;
-                    continue;
-                };
-                let valid_prefix = source.valid_up_to();
-                if valid_prefix != 0 {
-                    work.complete([to_u64(valid_prefix)])?;
-                }
-                let invalid_start = window_start
-                    .checked_add(valid_prefix)
-                    .ok_or_else(|| ctx.allocation_failure("gltf-json-byte-offset"))?;
-                if source.error_len().is_none() && window_end != bytes.len() {
-                    window_start = invalid_start;
-                    continue;
-                }
-                let relative_offset = u64::try_from(invalid_start)
-                    .map_err(|_| ctx.allocation_failure("gltf-json-byte-offset"))?;
-                let byte_offset = raw_base
-                    .checked_add(relative_offset)
-                    .ok_or_else(|| ctx.allocation_failure("gltf-json-byte-offset"))?;
-                return Err(ctx.format_failure(GltfFailure::invalid_utf8(source, byte_offset)));
-            }
-            Ok(())
-        },
-    )
-}
-
 fn invalid_glb(ctx: &ParseScope<'_>, reason: &'static str) -> baozi_import::ParseFailure {
     ctx.format_failure(GltfFailure::invalid_document(reason))
 }
@@ -229,8 +178,4 @@ fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     let end = offset.checked_add(4)?;
     let encoded: [u8; 4] = bytes.get(offset..end)?.try_into().ok()?;
     Some(u32::from_le_bytes(encoded))
-}
-
-fn to_u64(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
 }

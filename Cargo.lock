@@ -80,6 +80,7 @@ dependencies = [
  "baozi-test-support",
  "base64",
  "gltf",
+ "sha2",
 ]
 
 [[package]]

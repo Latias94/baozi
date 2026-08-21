@@ -7,6 +7,7 @@ const MAX_REASON_BYTES: usize = 70;
 const FAILURE_CODE_MASK: u8 = 0x0f;
 const FAILURE_HAS_INDEX: u8 = 0x10;
 const FAILURE_HAS_BYTE_OFFSET: u8 = 0x20;
+const FAILURE_HAS_BYTE_LENGTH: u8 = 0x40;
 const REASON_LENGTH_MASK: u8 = 0x7f;
 const REASON_TRUNCATED: u8 = 0x80;
 const REASON_UNAVAILABLE: u8 = u8::MAX;
@@ -77,6 +78,7 @@ pub(crate) struct GltfFailure {
     subject: Option<&'static str>,
     index: u64,
     byte_offset: u64,
+    byte_length: u64,
     reason: BoundedReason,
 }
 
@@ -101,18 +103,42 @@ impl GltfFailure {
         }
     }
 
+    pub const fn byte_length(&self) -> Option<u64> {
+        if self.metadata & FAILURE_HAS_BYTE_LENGTH != 0 {
+            Some(self.byte_length)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn invalid_document(reason: impl fmt::Display) -> Self {
         Self::new(GltfFailureCode::InvalidDocument, None, None, reason)
     }
 
-    pub(crate) fn invalid_utf8(source: Utf8Error, byte_offset: u64) -> Self {
+    pub(crate) fn invalid_json(
+        subject: &'static str,
+        byte_offset: u64,
+        byte_length: u64,
+        reason: impl fmt::Display,
+    ) -> Self {
+        let mut failure = Self::new(
+            GltfFailureCode::InvalidDocument,
+            Some(subject),
+            None,
+            reason,
+        );
+        failure.set_byte_range(byte_offset, byte_length);
+        failure
+    }
+
+    pub(crate) fn invalid_utf8(source: Utf8Error, byte_offset: u64, byte_length: u64) -> Self {
         let mut failure = Self::new(
             GltfFailureCode::InvalidUtf8,
             Some("json-document"),
             None,
             format_args!("glTF JSON contains invalid UTF-8: {source}"),
         );
-        failure.set_byte_offset(byte_offset);
+        failure.set_byte_range(byte_offset, byte_length);
         failure
     }
 
@@ -123,7 +149,7 @@ impl GltfFailure {
             None,
             "glTF JSON must not begin with a UTF-8 byte order mark",
         );
-        failure.set_byte_offset(byte_offset);
+        failure.set_byte_range(byte_offset, 3);
         failure
     }
 
@@ -191,6 +217,7 @@ impl GltfFailure {
             subject,
             index,
             byte_offset: 0,
+            byte_length: 0,
             reason: BoundedReason::new(reason),
         }
     }
@@ -198,6 +225,12 @@ impl GltfFailure {
     fn set_byte_offset(&mut self, byte_offset: u64) {
         self.byte_offset = byte_offset;
         self.metadata |= FAILURE_HAS_BYTE_OFFSET;
+    }
+
+    fn set_byte_range(&mut self, byte_offset: u64, byte_length: u64) {
+        self.set_byte_offset(byte_offset);
+        self.byte_length = byte_length;
+        self.metadata |= FAILURE_HAS_BYTE_LENGTH;
     }
 }
 
@@ -221,6 +254,9 @@ impl FormatFailureEvidenceProducer for GltfFailure {
         }
         if let Some(byte_offset) = self.byte_offset() {
             sink.unsigned("byte_offset", byte_offset);
+        }
+        if let Some(byte_length) = self.byte_length() {
+            sink.unsigned("byte_length", byte_length);
         }
         sink.string("reason", self.reason.as_str());
     }
@@ -339,11 +375,12 @@ mod tests {
     fn invalid_utf8_failure_retains_only_bounded_stable_evidence() {
         let bytes = [u8::MAX];
         let source = std::str::from_utf8(&bytes).expect_err("fixture must be invalid UTF-8");
-        let failure = GltfFailure::invalid_utf8(source, 4_096);
+        let failure = GltfFailure::invalid_utf8(source, 4_096, 1);
 
         assert_eq!(failure.code(), GltfFailureCode::InvalidUtf8);
         assert_eq!(failure.subject, Some("json-document"));
         assert_eq!(failure.byte_offset(), Some(4_096));
+        assert_eq!(failure.byte_length(), Some(1));
         assert!(failure.reason.as_str().contains("invalid UTF-8"));
         assert!(failure.reason.as_str().len() <= MAX_REASON_BYTES);
     }

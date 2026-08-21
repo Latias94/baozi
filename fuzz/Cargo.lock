@@ -24,6 +24,7 @@ dependencies = [
  "baozi-import",
  "base64",
  "gltf",
+ "sha2",
 ]
 
 [[package]]
