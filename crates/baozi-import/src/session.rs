@@ -23,9 +23,7 @@ use crate::outcome::{
 use crate::registry::{ParseInvocationError, RegistryEntry};
 use crate::request::PreparedImportRequest;
 use crate::resource_graph::ResourceGraph;
-use crate::scope::{
-    DiagnosticLineIndex, ParseFailureKind, ParseScope, ParseScopeParts, read_opened_asset,
-};
+use crate::scope::{ParseFailureKind, ParseScope, ParseScopeParts, read_opened_asset};
 use crate::source_scope::{LiveSourceScopeRecord, SourceScopeRecord};
 use crate::store::{
     ImportStoreBootstrapRequirements, ImportStoreFailureCauseAuthority, ImportStoreReservation,
@@ -223,7 +221,6 @@ struct ImportSession<'a> {
     dependency_origin_issuer: DependencyOriginIssuer,
     store: ImportStoreSessionOwner,
     diagnostics: Option<RefCell<DiagnosticSink>>,
-    diagnostic_line_indexes: RefCell<AccountedVec<DiagnosticLineIndex>>,
     resource_graph: Option<RefCell<ResourceGraph>>,
     optional_dependency_evidence: RefCell<AccountedVec<crate::OptionalDependencyEvidence>>,
     loss_evidence: RefCell<AccountedVec<ImportLossEvidence>>,
@@ -260,7 +257,6 @@ impl<'a> ImportSession<'a> {
                 request.limits().max_diagnostic_message_bytes,
                 request.limits().max_attempted_diagnostic_bytes,
             ))),
-            diagnostic_line_indexes: RefCell::new(AccountedVec::new()),
             resource_graph: Some(RefCell::new(ResourceGraph::new(request.limits().clone()))),
             optional_dependency_evidence: RefCell::new(AccountedVec::new()),
             loss_evidence: RefCell::new(AccountedVec::new()),
@@ -792,7 +788,6 @@ impl<'a> ImportSession<'a> {
                 store_owner: &self.store,
                 host: self.host(),
                 diagnostics: self.diagnostics(),
-                diagnostic_line_indexes: &self.diagnostic_line_indexes,
                 resource_graph: self.resource_graph(),
                 optional_dependency_evidence: &self.optional_dependency_evidence,
                 loss_evidence: &self.loss_evidence,
@@ -1052,7 +1047,6 @@ impl<'a> ImportSession<'a> {
 
     fn release_transient_live(&mut self) {
         drop(self.primary_snapshot.take());
-        drop(self.diagnostic_line_indexes.get_mut().take());
         drop(self.resource_graph.take());
     }
 

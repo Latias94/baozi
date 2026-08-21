@@ -77,7 +77,7 @@ fn with_obj_text_options<'scope, 'session, 'source, T>(
 pub(crate) fn authorize_line_recoveries(
     scope: &ParseScope<'_>,
     recoveries: &mut TextInputRecoveryTracker<'_, '_>,
-    line: &TextInputLine<'_>,
+    line: &TextInputLine<'_, '_>,
     allowed_value: Option<Range<usize>>,
     comment_start: Option<usize>,
 ) -> ParseResult<()> {

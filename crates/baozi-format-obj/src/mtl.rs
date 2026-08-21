@@ -615,7 +615,7 @@ impl<'line> std::ops::Deref for MtlTokenBuffer<'_, 'line> {
 
 fn tokenize_mtl<'scope, 'line>(
     scope: &'scope ParseScope<'_>,
-    decoded_line: &'line TextInputLine<'_>,
+    decoded_line: &'line TextInputLine<'_, '_>,
 ) -> ParseResult<MtlTokenBuffer<'scope, 'line>> {
     let line = decoded_line.text();
     let mut tokens = MtlTokenBuffer {

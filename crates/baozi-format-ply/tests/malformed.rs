@@ -16,6 +16,31 @@ fn diagnostic_has_code(diagnostic: &ImportDiagnostic, code: &str) -> bool {
     diagnostic.code().as_str() == code
 }
 
+fn assert_diagnostic_starts_at_line(
+    diagnostics: &[ImportDiagnostic],
+    code: &str,
+    bytes: &[u8],
+    source_line: &[u8],
+    line_number: u64,
+) {
+    let offset = bytes
+        .windows(source_line.len())
+        .position(|window| window == source_line)
+        .expect("diagnostic source line must belong to the fixture") as u64;
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic_has_code(diagnostic, code))
+        .expect("expected diagnostic must be retained");
+    let range = diagnostic
+        .byte_range()
+        .expect("text diagnostic must retain its source byte range");
+    assert_eq!((range.start(), range.end()), (offset, offset));
+    let location = diagnostic
+        .line_column()
+        .expect("text diagnostic must retain its source line and column");
+    assert_eq!((location.line(), location.column()), (line_number, 1));
+}
+
 #[test]
 fn missing_end_header_is_parse_error() -> TestResult<()> {
     let bytes = b"ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\n";
@@ -890,6 +915,13 @@ end_header
         );
     }
     assert_eq!(diagnostics.len(), 4);
+    assert_diagnostic_starts_at_line(
+        diagnostics,
+        "ply.vertex_list_property_ignored",
+        bytes,
+        b"property list uchar int neighbors",
+        11,
+    );
     Ok(())
 }
 
@@ -939,5 +971,19 @@ end_header
         );
     }
     assert_eq!(diagnostics.len(), 2);
+    assert_diagnostic_starts_at_line(
+        diagnostics,
+        "ply.face_scalar_property_ignored",
+        bytes,
+        b"property int material_id",
+        9,
+    );
+    assert_diagnostic_starts_at_line(
+        diagnostics,
+        "ply.face_list_property_ignored",
+        bytes,
+        b"property list uchar float texcoord",
+        10,
+    );
     Ok(())
 }

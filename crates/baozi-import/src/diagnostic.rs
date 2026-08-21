@@ -7,6 +7,7 @@ use baozi_io::{AssetPath, AuthorityDomain};
 use baozi_operation::{CapacityPlan, CapacityPlanError};
 use std::error::Error;
 use std::fmt::{self, Write as _};
+use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const MAX_DIAGNOSTIC_DETAILS: usize = 32;
@@ -125,6 +126,45 @@ impl DiagnosticLineColumn {
 
     pub const fn column(self) -> u64 {
         self.column
+    }
+}
+
+/// A source location derived from one conformed text-input line.
+///
+/// The constructor is private so callers cannot pair an arbitrary byte range with an unrelated
+/// line and column. The lifetime brands the location to the parse scope that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextDiagnosticLocation<'scope> {
+    byte_range: DiagnosticByteRange,
+    line_column: DiagnosticLineColumn,
+    primary_source: bool,
+    scope: PhantomData<&'scope ()>,
+}
+
+impl<'scope> TextDiagnosticLocation<'scope> {
+    pub(crate) const fn new(
+        byte_range: DiagnosticByteRange,
+        line_column: DiagnosticLineColumn,
+        primary_source: bool,
+    ) -> Self {
+        Self {
+            byte_range,
+            line_column,
+            primary_source,
+            scope: PhantomData,
+        }
+    }
+
+    pub const fn byte_range(self) -> DiagnosticByteRange {
+        self.byte_range
+    }
+
+    pub const fn line_column(self) -> DiagnosticLineColumn {
+        self.line_column
+    }
+
+    pub(crate) const fn is_primary_source(self) -> bool {
+        self.primary_source
     }
 }
 

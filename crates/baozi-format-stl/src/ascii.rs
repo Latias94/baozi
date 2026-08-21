@@ -5,7 +5,7 @@ use baozi_import::{
     ConformedTextInput, DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity,
     ImportProgressPhase, ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec,
     ParseFailure, ParseResult, ParseScope, TextConformanceViolation, TextConformanceViolationKind,
-    TextDecodingMode, TextInputLine, TextInputOptions,
+    TextDecodingMode, TextDiagnosticLocation, TextInputLine, TextInputOptions,
 };
 
 const CHECKPOINT_CHUNK_BYTES: usize = 4 * 1024;
@@ -116,7 +116,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
         }
     }
 
-    fn parse(mut self, input: &ConformedTextInput<'_>) -> ParseResult<ParsedStl<'scope>> {
+    fn parse(mut self, input: &ConformedTextInput<'scope>) -> ParseResult<ParsedStl<'scope>> {
         let mut token_buffer = TokenBuffer::new(self.scope);
         for line in input.lines() {
             self.scope
@@ -131,7 +131,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
 
     fn parse_line(
         &mut self,
-        line: &TextInputLine<'_>,
+        line: &TextInputLine<'_, 'scope>,
         line_number: u32,
         token_buffer: &mut TokenBuffer<'scope>,
     ) -> ParseResult<()> {
@@ -145,9 +145,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
 
         let state = std::mem::replace(&mut self.state, State::Start);
         match state {
-            State::Start => {
-                self.parse_start_line(text, &tokens, line_number, line.raw_content_range().start())
-            }
+            State::Start => self.parse_start_line(line, text, &tokens, line_number),
             State::InSolid => self.parse_solid_line(&tokens, line_number),
             State::NeedOuterLoop { normal } => {
                 if tokens_match(&tokens, &["outer", "loop"]) {
@@ -223,16 +221,16 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
 
     fn parse_start_line(
         &mut self,
+        decoded_line: &TextInputLine<'_, 'scope>,
         line: &str,
         tokens: &TokenLine<'_, '_>,
         line_number: u32,
-        line_byte_offset: u64,
     ) -> ParseResult<()> {
         let first = required_token(self.scope, tokens, 0)?;
         if !keyword_is(first, "solid") {
             return Err(self.failure("document", "expected-solid", line_number, first.column));
         }
-        self.start_solid(line, tokens, line_byte_offset)
+        self.start_solid(decoded_line, line, tokens)
     }
 
     fn parse_solid_line(
@@ -270,9 +268,9 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
 
     fn start_solid(
         &mut self,
+        decoded_line: &TextInputLine<'_, 'scope>,
         line: &str,
         tokens: &TokenLine<'_, '_>,
-        line_byte_offset: u64,
     ) -> ParseResult<()> {
         let scope = self.scope;
         let name_value = trailing_text_after_first_token(line, tokens);
@@ -303,7 +301,9 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
                     .checked_sub(1)
                     .map(u64::from)
                     .ok_or_else(|| scope.allocation_failure("stl-solid-byte-offset"))?;
-                let token_offset = line_byte_offset
+                let token_offset = decoded_line
+                    .raw_content_range()
+                    .start()
                     .checked_add(column_offset)
                     .ok_or_else(|| scope.allocation_failure("stl-solid-byte-offset"))?;
                 let token_end = token_offset
@@ -314,7 +314,14 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
                     )?)
                     .ok_or_else(|| scope.allocation_failure("stl-solid-byte-range"))?;
                 let start = diagnostic_range(scope, token_offset, token_end)?;
-                self.current = Some(SolidBuilder::new(scope, name, start));
+                let start_location = decoded_line.diagnostic_location(start).ok_or_else(|| {
+                    scope.format_failure(StlFailure::content(
+                        StlFailureCode::InternalInvariant,
+                        "diagnostic-line-column",
+                        "invalid-solid-start",
+                    ))
+                })?;
+                self.current = Some(SolidBuilder::new(scope, name, start_location));
                 self.state = State::InSolid;
                 work.complete([1, 0])
             },
@@ -327,13 +334,12 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
         };
 
         if current.face_count == 0 {
-            self.scope.emit_diagnostic_with(
+            self.scope.emit_text_diagnostic_with(
                 DiagnosticSeverity::Warning,
                 DiagnosticCode::new("stl.empty_solid")
                     .expect("static STL diagnostic code must be valid"),
                 ImportProgressPhase::Decode,
-                self.scope.diagnostic_source(),
-                Some(current.start),
+                current.start_location,
                 None,
                 |details| details.unsigned("facet_count", 0),
                 format_args!("ASCII STL solid contains no facets"),
@@ -442,7 +448,7 @@ struct SolidBuilder<'scope> {
     positions: MeteredVec<'scope, [f32; 3]>,
     normals: MeteredVec<'scope, [f32; 3]>,
     face_count: usize,
-    start: DiagnosticByteRange,
+    start_location: TextDiagnosticLocation<'scope>,
 }
 
 const fn vec3_components(value: Vec3) -> [f32; 3] {
@@ -453,7 +459,7 @@ impl<'scope> SolidBuilder<'scope> {
     fn new(
         scope: &'scope ParseScope<'_>,
         name: Option<MeteredString<'scope>>,
-        start: DiagnosticByteRange,
+        start_location: TextDiagnosticLocation<'scope>,
     ) -> Self {
         Self {
             name,
@@ -461,7 +467,7 @@ impl<'scope> SolidBuilder<'scope> {
                 .metered_vec(ImportStorageClass::SceneConstruction, "stl-ascii-positions"),
             normals: scope.metered_vec(ImportStorageClass::SceneConstruction, "stl-ascii-normals"),
             face_count: 0,
-            start,
+            start_location,
         }
     }
 }

@@ -10,7 +10,8 @@ use crate::descriptor::TextDecodingMode;
 use crate::diagnostic::{
     DiagnosticByteRange, DiagnosticCause, DiagnosticCode, DiagnosticDetailSink,
     DiagnosticDropReason, DiagnosticLineColumn, DiagnosticPrepareCause, DiagnosticSeverity,
-    DiagnosticSink, DiagnosticSource, PreparedDiagnostic, valid_diagnostic_code,
+    DiagnosticSink, DiagnosticSource, PreparedDiagnostic, TextDiagnosticLocation,
+    valid_diagnostic_code,
 };
 use crate::error::{
     BoundedFormatFailureDetailSink, FormatFailureDetailCause, FormatFailureEnvelope,
@@ -396,40 +397,6 @@ impl<const N: usize> Drop for ImportWorkScope<'_, '_, N> {
     }
 }
 
-pub(crate) struct DiagnosticLineIndex {
-    authority: baozi_io::AuthorityDomain,
-    source: AssetPath,
-    _source_reservation: Option<ImportStoreReservation>,
-    source_len: u64,
-    line_starts: AccountedVec<u64>,
-}
-
-impl DiagnosticLineIndex {
-    fn matches(&self, source: &DiagnosticSource<'_>, source_len: u64) -> bool {
-        &self.authority == source.authority()
-            && &self.source == source.path()
-            && self.source_len == source_len
-    }
-
-    fn derive(&self, range: DiagnosticByteRange) -> Result<DiagnosticLineColumn, DiagnosticCause> {
-        if range.end() > self.source_len {
-            return Err(DiagnosticCause::ByteRangeOutOfBounds {
-                end: range.end(),
-                source_len: self.source_len,
-            });
-        }
-        let line_index = self
-            .line_starts
-            .partition_point(|line_start| *line_start <= range.start())
-            .saturating_sub(1);
-        let line_start = self.line_starts.get(line_index).copied().unwrap_or(0);
-        DiagnosticLineColumn::new(
-            (line_index as u64).saturating_add(1),
-            range.start().saturating_sub(line_start).saturating_add(1),
-        )
-    }
-}
-
 /// A capability-limited parser view valid only for one selected importer call.
 pub struct ParseScope<'session> {
     entry: RegistryEntry,
@@ -446,7 +413,6 @@ pub struct ParseScope<'session> {
     store_owner: &'session ImportStoreSessionOwner,
     host: ImportStoreHost<'session>,
     diagnostics: &'session RefCell<DiagnosticSink>,
-    diagnostic_line_indexes: &'session RefCell<AccountedVec<DiagnosticLineIndex>>,
     resource_graph: &'session RefCell<ResourceGraph>,
     optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
     loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
@@ -475,7 +441,6 @@ pub(crate) struct ParseScopeParts<'session> {
     pub store_owner: &'session ImportStoreSessionOwner,
     pub host: ImportStoreHost<'session>,
     pub diagnostics: &'session RefCell<DiagnosticSink>,
-    pub diagnostic_line_indexes: &'session RefCell<AccountedVec<DiagnosticLineIndex>>,
     pub resource_graph: &'session RefCell<ResourceGraph>,
     pub optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
     pub loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
@@ -568,7 +533,6 @@ impl<'session> ParseScope<'session> {
             store_owner: parts.store_owner,
             host: parts.host,
             diagnostics: parts.diagnostics,
-            diagnostic_line_indexes: parts.diagnostic_line_indexes,
             resource_graph: parts.resource_graph,
             optional_dependency_evidence: parts.optional_dependency_evidence,
             loss_evidence: parts.loss_evidence,
@@ -626,7 +590,9 @@ impl<'session> ParseScope<'session> {
         &'scope self,
         source: DiagnosticSource<'source>,
         options: TextInputOptions,
-    ) -> ParseResult<crate::text_input::TextInputRecordCursor<'scope, 'session, 'source>> {
+    ) -> ParseResult<
+        TextConformanceResult<crate::text_input::TextInputRecordCursor<'scope, 'session, 'source>>,
+    > {
         crate::text_input::TextInputRecordCursor::new(
             self,
             self.entry.descriptor().text_profile(),
@@ -641,6 +607,12 @@ impl<'session> ParseScope<'session> {
             self.primary_source,
             self.primary_bytes,
         )
+    }
+
+    pub(crate) fn diagnostic_source_is_primary(&self, source: &DiagnosticSource<'_>) -> bool {
+        source.authority() == self.primary_authority
+            && source.path() == self.primary_source
+            && std::ptr::eq(source.bytes(), self.primary_bytes)
     }
 
     pub fn limits(&self) -> &ResourceLimits {
@@ -1136,6 +1108,17 @@ impl<'session> ParseScope<'session> {
         raw_range: DiagnosticByteRange,
         message: fmt::Arguments<'_>,
     ) -> ParseResult<()> {
+        self.record_format_recovery_with_location(code, source, raw_range, None, message)
+    }
+
+    pub(crate) fn record_format_recovery_with_location(
+        &self,
+        code: DiagnosticCode,
+        source: DiagnosticSource<'_>,
+        raw_range: DiagnosticByteRange,
+        line_column: Option<DiagnosticLineColumn>,
+        message: fmt::Arguments<'_>,
+    ) -> ParseResult<()> {
         self.preflight_active()?;
         let source_len = u64::try_from(source.bytes().len())
             .map_err(|_| self.resource_limit_exceeded("format-recovery-source", u64::MAX))?;
@@ -1188,12 +1171,13 @@ impl<'session> ParseScope<'session> {
             raw_range,
             disposition,
         )?;
-        self.emit_diagnostic_with(
+        self.emit_diagnostic_with_location(
             DiagnosticSeverity::Warning,
             code,
             ImportProgressPhase::Normalize,
             source,
             Some(raw_range),
+            line_column,
             None,
             |_| {},
             message,
@@ -1478,8 +1462,63 @@ impl<'session> ParseScope<'session> {
         details: impl FnOnce(&mut dyn DiagnosticDetailSink),
         message: fmt::Arguments<'_>,
     ) -> ParseResult<()> {
+        self.emit_diagnostic_with_location(
+            severity,
+            code,
+            phase,
+            source,
+            byte_range,
+            None,
+            object_path,
+            details,
+            message,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_text_diagnostic_with(
+        &self,
+        severity: DiagnosticSeverity,
+        code: DiagnosticCode,
+        phase: ImportProgressPhase,
+        location: TextDiagnosticLocation<'_>,
+        object_path: Option<&str>,
+        details: impl FnOnce(&mut dyn DiagnosticDetailSink),
+        message: fmt::Arguments<'_>,
+    ) -> ParseResult<()> {
+        if !location.is_primary_source() {
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "text-diagnostic-location-not-primary",
+            }));
+        }
+        self.emit_diagnostic_with_location(
+            severity,
+            code,
+            phase,
+            self.diagnostic_source(),
+            Some(location.byte_range()),
+            Some(location.line_column()),
+            object_path,
+            details,
+            message,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_diagnostic_with_location(
+        &self,
+        severity: DiagnosticSeverity,
+        code: DiagnosticCode,
+        phase: ImportProgressPhase,
+        source: DiagnosticSource<'_>,
+        byte_range: Option<DiagnosticByteRange>,
+        line_column: Option<DiagnosticLineColumn>,
+        object_path: Option<&str>,
+        details: impl FnOnce(&mut dyn DiagnosticDetailSink),
+        message: fmt::Arguments<'_>,
+    ) -> ParseResult<()> {
         self.preflight_active()?;
-        let line_column = self.derive_line_column(&source, byte_range)?;
+        self.validate_diagnostic_location(&source, byte_range, line_column)?;
         self.emit_diagnostic_event(
             DiagnosticEventMetadata {
                 severity,
@@ -1493,6 +1532,33 @@ impl<'session> ParseScope<'session> {
             details,
             message,
         )
+    }
+
+    fn validate_diagnostic_location(
+        &self,
+        source: &DiagnosticSource<'_>,
+        byte_range: Option<DiagnosticByteRange>,
+        line_column: Option<DiagnosticLineColumn>,
+    ) -> ParseResult<()> {
+        let Some(byte_range) = byte_range else {
+            if line_column.is_some() {
+                return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                    code: "diagnostic-line-column-without-byte-range",
+                }));
+            }
+            return Ok(());
+        };
+        let source_len = u64::try_from(source.bytes().len())
+            .map_err(|_| self.resource_limit_exceeded("diagnostic-source-bytes", u64::MAX))?;
+        if byte_range.end() <= source_len {
+            return Ok(());
+        }
+        Err(self.abort(ScopeAbortCause::Diagnostic(
+            DiagnosticCause::ByteRangeOutOfBounds {
+                end: byte_range.end(),
+                source_len,
+            },
+        )))
     }
 
     fn emit_diagnostic_event(
@@ -1736,181 +1802,6 @@ impl<'session> ParseScope<'session> {
                 capacity_bytes,
             )
             .map_err(|cause| cause.into_scope_abort_cause())
-    }
-
-    fn derive_line_column(
-        &self,
-        source: &DiagnosticSource<'_>,
-        byte_range: Option<DiagnosticByteRange>,
-    ) -> ParseResult<Option<DiagnosticLineColumn>> {
-        let Some(byte_range) = byte_range else {
-            return Ok(None);
-        };
-        let bytes = source.bytes();
-        let source_len = u64::try_from(bytes.len())
-            .map_err(|_| self.resource_limit_exceeded("diagnostic-source-bytes", u64::MAX))?;
-        if byte_range.end() > source_len {
-            return Err(self.abort(ScopeAbortCause::Diagnostic(
-                DiagnosticCause::ByteRangeOutOfBounds {
-                    end: byte_range.end(),
-                    source_len,
-                },
-            )));
-        }
-        if let Some(location) = self
-            .diagnostic_line_indexes
-            .try_borrow()
-            .map_err(|_| self.reentrant_capability_failure())?
-            .iter()
-            .find(|index| index.matches(source, source_len))
-            .map(|index| index.derive(byte_range))
-        {
-            return location
-                .map(Some)
-                .map_err(|cause| self.abort(ScopeAbortCause::Diagnostic(cause)));
-        }
-
-        let mut line_count = 1_usize;
-        for chunk in bytes.chunks(4096) {
-            line_count = self.with_work(
-                ImportWorkClass::DecodeWork,
-                u64::try_from(chunk.len()).map_err(|_| {
-                    self.resource_limit_exceeded("diagnostic-line-index-work", u64::MAX)
-                })?,
-                |work| {
-                    let next = chunk
-                        .iter()
-                        .try_fold(line_count, |count, byte| {
-                            if *byte == b'\n' {
-                                count.checked_add(1)
-                            } else {
-                                Some(count)
-                            }
-                        })
-                        .ok_or_else(|| {
-                            self.resource_limit_exceeded("diagnostic-line-index-entries", u64::MAX)
-                        })?;
-                    work.complete_all()?;
-                    Ok(next)
-                },
-            )?;
-        }
-        let source_plan = CapacityPlan::for_type::<u8>(0, 0, source.path().as_str().len())
-            .map_err(|cause| self.capacity_plan_error("diagnostic-line-index-source", cause))?;
-        let source_admitted_bytes = source_plan
-            .envelope_delta_bytes()
-            .map_err(|cause| self.capacity_plan_error("diagnostic-line-index-source", cause))?;
-        let mut source_reservation = if source_admitted_bytes == 0 {
-            None
-        } else {
-            Some(self.reserve_live(ImportStorageClass::LineIndex, source_admitted_bytes)?)
-        };
-        let mut line_starts = AccountedVec::new();
-        line_starts
-            .try_reserve_capacity(line_count, "diagnostic-line-index", |capacity_bytes| {
-                self.reserve_storage_cause(ImportStorageClass::LineIndex, capacity_bytes)
-            })
-            .map_err(|cause| self.abort(cause))?;
-        line_starts.try_push_reserved(0).map_err(|_| {
-            self.abort(ScopeAbortCause::DescriptorContract {
-                code: "diagnostic-line-index-slots-not-admitted",
-            })
-        })?;
-        let mut offset = 0_usize;
-        for chunk in bytes.chunks(4096) {
-            offset = self.with_work(
-                ImportWorkClass::DecodeWork,
-                u64::try_from(chunk.len()).map_err(|_| {
-                    self.resource_limit_exceeded("diagnostic-line-index-work", u64::MAX)
-                })?,
-                |work| {
-                    for (chunk_offset, byte) in chunk.iter().enumerate() {
-                        if *byte == b'\n' {
-                            let start = offset
-                                .checked_add(chunk_offset)
-                                .and_then(|value| value.checked_add(1))
-                                .and_then(|value| u64::try_from(value).ok())
-                                .ok_or_else(|| {
-                                    self.resource_limit_exceeded(
-                                        "diagnostic-line-index-offset",
-                                        u64::MAX,
-                                    )
-                                })?;
-                            line_starts.try_push_reserved(start).map_err(|_| {
-                                self.abort(ScopeAbortCause::DescriptorContract {
-                                    code: "diagnostic-line-index-slots-not-admitted",
-                                })
-                            })?;
-                        }
-                    }
-                    let next = offset.checked_add(chunk.len()).ok_or_else(|| {
-                        self.resource_limit_exceeded("diagnostic-line-index-offset", u64::MAX)
-                    })?;
-                    work.complete_all()?;
-                    Ok(next)
-                },
-            )?;
-        }
-
-        let source_path = source
-            .path()
-            .try_clone()
-            .map_err(|_| self.allocation_failure("diagnostic-line-index-source"))?;
-        let source_capacity_bytes = u64::try_from(source_path.capacity_bytes())
-            .map_err(|_| self.resource_limit_exceeded("diagnostic-line-index-source", u64::MAX))?;
-        if source_capacity_bytes > source_admitted_bytes {
-            return Err(self.abort(ScopeAbortCause::DescriptorContract {
-                code: "diagnostic-line-index-reservation-underestimated",
-            }));
-        }
-        let source_reservation = match source_reservation.as_mut() {
-            Some(reservation) if source_capacity_bytes != 0 => {
-                self.resize_live(reservation, source_capacity_bytes)?;
-                source_reservation.map(ImportLiveReservation::into_reservation)
-            }
-            Some(_) => {
-                drop(source_reservation.take());
-                None
-            }
-            None if source_capacity_bytes == 0 => None,
-            None => {
-                return Err(self.abort(ScopeAbortCause::DescriptorContract {
-                    code: "diagnostic-line-index-source-without-reservation",
-                }));
-            }
-        };
-        let index = DiagnosticLineIndex {
-            authority: source.authority().clone(),
-            source: source_path,
-            _source_reservation: source_reservation,
-            source_len,
-            line_starts,
-        };
-        let mut indexes = self
-            .diagnostic_line_indexes
-            .try_borrow_mut()
-            .map_err(|_| self.reentrant_capability_failure())?;
-        indexes
-            .try_reserve(1, "diagnostic-line-index-cache", |capacity_bytes| {
-                self.reserve_storage_cause(ImportStorageClass::LineIndex, capacity_bytes)
-            })
-            .map_err(|cause| self.abort(cause))?;
-        if let Err(index) = indexes.try_push_reserved(index) {
-            drop(index);
-            return Err(self.abort(ScopeAbortCause::DescriptorContract {
-                code: "diagnostic-line-index-cache-slots-not-admitted",
-            }));
-        }
-        indexes
-            .last()
-            .ok_or_else(|| {
-                self.abort(ScopeAbortCause::DescriptorContract {
-                    code: "diagnostic-line-index-missing-after-insert",
-                })
-            })?
-            .derive(byte_range)
-            .map(Some)
-            .map_err(|cause| self.abort(ScopeAbortCause::Diagnostic(cause)))
     }
 
     /// Returns the opaque origin capability for references authored by the primary resource.

@@ -1,13 +1,9 @@
 const SCOPE_SOURCE: &str = include_str!("../src/scope.rs");
 
 #[test]
-fn diagnostic_line_index_cache_uses_the_shared_accounted_owner() {
-    assert!(
-        SCOPE_SOURCE.contains(
-            "diagnostic_line_indexes: &'session RefCell<AccountedVec<DiagnosticLineIndex>>"
-        )
-    );
-    assert!(SCOPE_SOURCE.contains("line_starts: AccountedVec<u64>"));
-    assert!(!SCOPE_SOURCE.contains("line_starts: Vec<u64>"));
-    assert!(!SCOPE_SOURCE.contains("CapacityPlan::for_type::<DiagnosticLineIndex>"));
+fn diagnostics_do_not_rebuild_line_indexes_from_arbitrary_source_bytes() {
+    assert!(!SCOPE_SOURCE.contains("DiagnosticLineIndex"));
+    assert!(!SCOPE_SOURCE.contains("diagnostic-line-index"));
+    assert!(!SCOPE_SOURCE.contains("pub fn emit_diagnostic_with_location("));
+    assert!(SCOPE_SOURCE.contains("pub fn emit_text_diagnostic_with("));
 }

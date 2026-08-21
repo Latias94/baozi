@@ -7,10 +7,10 @@ use baozi_import::{
     FormatCapability, FormatDescriptor, FormatEncoding, FormatFailureEvidenceProducer,
     FormatImporter, ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure,
     ImportLossDisposition, ImportLossKind, ImportOperationControl, ImportReport, ImportRequest,
-    ImportRequestLayer, ImportResult, LossPolicy, OptionCompileLimits, ParseResult, ParseScope,
-    PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, TextBomPolicy,
-    TextConformanceViolationKind, TextControlPolicy, TextDecodingMode, TextHardCaps,
+    ImportRequestLayer, ImportResult, LedgerCause, LossPolicy, OptionCompileLimits, ParseResult,
+    ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
+    TextBomPolicy, TextConformanceViolationKind, TextControlPolicy, TextDecodingMode, TextHardCaps,
     TextInputOptions, TextInputRecoveryTracker, TextLexicalMode, TextNewline, TextProfile,
     TextSourceEncoding, import_bytes as run_import_bytes,
 };
@@ -23,7 +23,6 @@ const FORMAT_ID: &str = "dev.baozi.test.text-input-conformance";
 const FORMAT_FAILURE_CODE: &str = "test.text_conformance_violation";
 const INVALID_UTF8_REPLACEMENT_CODE: &str = "test.invalid_utf8_replaced";
 const ACCEPTED_BOM_CODE: &str = "test.accepted_bom";
-
 #[derive(Debug, Clone, Copy)]
 struct ExpectedReplacement {
     raw_start: u64,
@@ -115,6 +114,14 @@ enum ParserBehavior {
     },
     ExerciseRecordCursorTransactions {
         options: TextInputOptions,
+    },
+    ExpectRecordCursorRecoveries {
+        options: TextInputOptions,
+        record_count: usize,
+    },
+    ExpectRecordCursorRejected {
+        options: TextInputOptions,
+        expected_kind: TextConformanceViolationKind,
     },
     PropagateRecordCursorFailure {
         options: TextInputOptions,
@@ -427,9 +434,10 @@ impl FormatImporter for TextInputImporter {
                 expected_raw_offset,
                 expect_exhausted,
             } => {
-                let mut cursor =
-                    scope.text_input_record_cursor(scope.diagnostic_source(), options)?;
-                for expected in expected {
+                let mut cursor = scope
+                    .text_input_record_cursor(scope.diagnostic_source(), options)?
+                    .expect("record cursor profile must be declared");
+                for (record_index, expected) in expected.iter().enumerate() {
                     cursor
                         .with_next_record(|accepted, recoveries| {
                             let mut lines = accepted.lines();
@@ -437,7 +445,12 @@ impl FormatImporter for TextInputImporter {
                                 .next()
                                 .expect("each nonempty raw record must expose one line");
                             assert!(lines.next().is_none());
-                            assert_eq!(line.number(), 1);
+                            assert_eq!(
+                                line.number(),
+                                u64::try_from(record_index)
+                                    .expect("fixture record index must fit u64")
+                                    + 1
+                            );
                             assert_eq!(line.text(), expected.text);
                             assert_eq!(
                                 line.raw_content_range(),
@@ -472,8 +485,9 @@ impl FormatImporter for TextInputImporter {
                 support::submit_minimal_scene(scope)
             }
             ParserBehavior::ExerciseRecordCursorTransactions { options } => {
-                let mut cursor =
-                    scope.text_input_record_cursor(scope.diagnostic_source(), options)?;
+                let mut cursor = scope
+                    .text_input_record_cursor(scope.diagnostic_source(), options)?
+                    .expect("record cursor profile must be declared");
                 let caught = catch_unwind(AssertUnwindSafe(|| {
                     cursor.with_next_record(|_accepted, _recoveries| -> ParseResult<()> {
                         panic!("record callback panic")
@@ -513,9 +527,40 @@ impl FormatImporter for TextInputImporter {
                 }
                 support::submit_minimal_scene(scope)
             }
+            ParserBehavior::ExpectRecordCursorRecoveries {
+                options,
+                record_count,
+            } => {
+                let mut cursor = scope
+                    .text_input_record_cursor(scope.diagnostic_source(), options)?
+                    .expect("record cursor profile must be declared");
+                for _ in 0..record_count {
+                    cursor
+                        .with_next_record(|accepted, recoveries| {
+                            authorize_text_obligations(recoveries, accepted)
+                        })?
+                        .expect("recovery record must conform")
+                        .expect("recovery fixture must contain every declared record");
+                }
+                support::submit_minimal_scene(scope)
+            }
+            ParserBehavior::ExpectRecordCursorRejected {
+                options,
+                expected_kind,
+            } => {
+                let violation =
+                    match scope.text_input_record_cursor(scope.diagnostic_source(), options)? {
+                        Ok(_cursor) => panic!("record cursor declaration must be rejected"),
+                        Err(violation) => violation,
+                    };
+                assert_eq!(violation.kind(), expected_kind);
+                assert_eq!(violation.raw_range(), None);
+                support::submit_minimal_scene(scope)
+            }
             ParserBehavior::PropagateRecordCursorFailure { options } => {
-                let mut cursor =
-                    scope.text_input_record_cursor(scope.diagnostic_source(), options)?;
+                let mut cursor = scope
+                    .text_input_record_cursor(scope.diagnostic_source(), options)?
+                    .expect("record cursor profile must be declared");
                 let _unexpected = cursor.with_next_record(|_accepted, _recoveries| Ok(()))?;
                 panic!("the record cursor fixture must fail before invoking its callback")
             }
@@ -750,6 +795,24 @@ fn assert_replacement_recovery(
         assert_eq!(diagnostic.code().as_str(), INVALID_UTF8_REPLACEMENT_CODE);
         assert_eq!(diagnostic.source().as_str(), SOURCE);
         assert_eq!(diagnostic.byte_range(), Some(range));
+    }
+}
+
+fn assert_replacement_recovery_locations(
+    report: &ImportReport,
+    expected: impl IntoIterator<Item = ((u64, u64), (u64, u64))>,
+) {
+    let expected = expected.into_iter().collect::<Vec<_>>();
+    assert_eq!(report.diagnostics().len(), expected.len());
+    for (diagnostic, ((start, end), (line, column))) in report.diagnostics().iter().zip(expected) {
+        assert_eq!(
+            diagnostic.byte_range(),
+            Some(DiagnosticByteRange::new(start, end).expect("expected range must be valid"))
+        );
+        let location = diagnostic
+            .line_column()
+            .expect("text recovery must publish a source location");
+        assert_eq!((location.line(), location.column()), (line, column));
     }
 }
 
@@ -1146,6 +1209,72 @@ fn line_view_preserves_empty_records_and_cross_line_replacement_mapping() {
 }
 
 #[test]
+fn recovery_locations_follow_the_declared_cr_newline_profile() {
+    let profile = text_profile(
+        TextBomPolicy::Forbidden,
+        [TextNewline::Cr],
+        [
+            TextDecodingMode::RejectInvalid,
+            TextDecodingMode::ReplaceInvalidUtf8,
+        ],
+        TextControlPolicy::RejectAll,
+    );
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::ExpectAccepted {
+            options: TextInputOptions::new(TextDecodingMode::ReplaceInvalidUtf8, "test-text"),
+            expected: ExpectedAccepted {
+                text: "a\r\u{fffd}",
+                bom: None,
+                lines: &[
+                    ExpectedLine {
+                        text: "a",
+                        raw_start: 0,
+                        raw_end: 1,
+                        raw_record_end: 2,
+                        decoded_start: 0,
+                        decoded_end: 1,
+                        decoded_record_end: 2,
+                        newline: Some(TextNewline::Cr),
+                        replacement_count: 0,
+                    },
+                    ExpectedLine {
+                        text: "\u{fffd}",
+                        raw_start: 2,
+                        raw_end: 3,
+                        raw_record_end: 3,
+                        decoded_start: 2,
+                        decoded_end: 5,
+                        decoded_record_end: 5,
+                        newline: None,
+                        replacement_count: 1,
+                    },
+                ],
+                replacements: &[ExpectedReplacement {
+                    raw_start: 2,
+                    raw_end: 3,
+                    decoded_start: 2,
+                    decoded_end: 5,
+                }],
+            },
+        },
+    );
+    let request = request_for_with_policies(
+        importer,
+        ResourceLimits::default(),
+        ConformancePolicy::AllowDeclaredRecovery,
+        recovery_loss_policy(),
+    );
+
+    let report = import_bytes(&request, b"a\r\xff")
+        .expect("declared CR text recovery must preserve raw locations");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+    assert_replacement_recovery_locations(&report, [((2, 3), (2, 1))]);
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+}
+
+#[test]
 fn replace_invalid_utf8_records_raw_and_decoded_spans() {
     let profile = text_profile(
         TextBomPolicy::Forbidden,
@@ -1523,6 +1652,216 @@ fn record_cursor_preserves_exact_ranges_and_can_stop_before_invalid_suffix() {
 }
 
 #[test]
+fn record_cursor_boundary_scan_is_decode_work_and_ignores_binary_suffix_size() {
+    const EXPECTED: &[ExpectedRecord] = &[ExpectedRecord {
+        text: "a",
+        raw_start: 0,
+        raw_end: 1,
+        raw_record_end: 2,
+        newline: Some(TextNewline::Lf),
+    }];
+    let mut long_suffix = vec![0xff; 512];
+    long_suffix.splice(0..0, b"a\n".iter().copied());
+    let fixtures = [&b"a\n\xff"[..], long_suffix.as_slice()];
+
+    for bytes in fixtures {
+        let profile = text_profile(
+            TextBomPolicy::Forbidden,
+            [TextNewline::Lf],
+            [TextDecodingMode::RejectInvalid],
+            TextControlPolicy::RejectAll,
+        );
+        let (importer, parse_calls) = TextInputImporter::new(
+            descriptor(profile),
+            ParserBehavior::ExpectRecordCursor {
+                options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text"),
+                expected: EXPECTED,
+                expected_raw_offset: 2,
+                expect_exhausted: false,
+            },
+        );
+        let request = request_for(importer, ResourceLimits::default());
+
+        let report = import_bytes(&request, bytes)
+            .expect("the cursor must not inspect the binary suffix after one text record");
+
+        assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+        let decode = report
+            .ledger()
+            .dimension(ImportDimension::DecodeWork)
+            .expect("record conformance must publish decode work");
+        assert_eq!(decode.consumed(), 6);
+        assert!(decode.attempted() >= decode.consumed());
+    }
+}
+
+#[test]
+fn record_cursor_accepts_bom_with_diagnostic_without_counting_it_as_line_content() {
+    let profile = text_profile(
+        TextBomPolicy::AcceptedWithDiagnostic,
+        [TextNewline::Lf],
+        [TextDecodingMode::RejectInvalid],
+        TextControlPolicy::RejectAll,
+    );
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::ExpectRecordCursor {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text"),
+            expected: &[ExpectedRecord {
+                text: "a",
+                raw_start: 3,
+                raw_end: 4,
+                raw_record_end: 5,
+                newline: Some(TextNewline::Lf),
+            }],
+            expected_raw_offset: 5,
+            expect_exhausted: false,
+        },
+    );
+    let mut limits = ResourceLimits::default();
+    limits.max_line_bytes = 1;
+    let request = request_for(importer, limits);
+
+    let report = import_bytes(&request, b"\xef\xbb\xbfa\n\xff")
+        .expect("the BOM must not count against the first record's content limit");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+    assert_eq!(report.diagnostics().len(), 1);
+    let diagnostic = &report.diagnostics()[0];
+    assert_eq!(diagnostic.code().as_str(), ACCEPTED_BOM_CODE);
+    assert_eq!(
+        diagnostic.byte_range(),
+        Some(DiagnosticByteRange::new(0, 3).expect("BOM range must be valid"))
+    );
+    let location = diagnostic
+        .line_column()
+        .expect("accepted BOM diagnostic must retain its source location");
+    assert_eq!((location.line(), location.column()), (1, 1));
+}
+
+#[test]
+fn record_cursor_preserves_crlf_across_the_scan_quantum_boundary() {
+    // The source-start BOM probe admits three bytes before the 4096-byte scan quantum.
+    const CONTENT_BYTES: usize = 4 * 1024 + 2;
+    let expected_text: &'static str = Box::leak("a".repeat(CONTENT_BYTES).into_boxed_str());
+    let expected: &'static [ExpectedRecord] = Box::leak(
+        vec![ExpectedRecord {
+            text: expected_text,
+            raw_start: 0,
+            raw_end: CONTENT_BYTES as u64,
+            raw_record_end: CONTENT_BYTES as u64 + 2,
+            newline: Some(TextNewline::CrLf),
+        }]
+        .into_boxed_slice(),
+    );
+    let mut bytes = expected_text.as_bytes().to_vec();
+    bytes.extend_from_slice(b"\r\n\xff");
+    let profile = TextProfile::builder(
+        TextHardCaps::new(8192, 8192, 8192, 8192, 8192)
+            .expect("positive text hard caps must be valid"),
+    )
+    .source_encodings([TextSourceEncoding::Utf8])
+    .bom_policy(TextBomPolicy::Forbidden)
+    .newlines([TextNewline::CrLf])
+    .lexical_mode(TextLexicalMode::Utf8Document)
+    .decoding_modes([TextDecodingMode::RejectInvalid])
+    .control_policy(TextControlPolicy::RejectAll)
+    .build()
+    .expect("test text profile must be valid");
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::ExpectRecordCursor {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text"),
+            expected,
+            expected_raw_offset: CONTENT_BYTES as u64 + 2,
+            expect_exhausted: false,
+        },
+    );
+    let request = request_for(importer, ResourceLimits::default());
+
+    import_bytes(&request, &bytes)
+        .expect("a split CRLF must remain one record without inspecting the suffix");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn record_cursor_recovery_locations_advance_across_records() {
+    let profile = text_profile(
+        TextBomPolicy::Forbidden,
+        [TextNewline::Lf],
+        [
+            TextDecodingMode::RejectInvalid,
+            TextDecodingMode::ReplaceInvalidUtf8,
+        ],
+        TextControlPolicy::RejectAll,
+    );
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::ExpectRecordCursorRecoveries {
+            options: TextInputOptions::new(TextDecodingMode::ReplaceInvalidUtf8, "test-text"),
+            record_count: 2,
+        },
+    );
+    let request = request_for_with_policies(
+        importer,
+        ResourceLimits::default(),
+        ConformancePolicy::AllowDeclaredRecovery,
+        recovery_loss_policy(),
+    );
+
+    let report = import_bytes(&request, b"a\nb\xff\n")
+        .expect("record recovery must retain the source-level line number");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+    assert_replacement_recovery(&report, [(3, 4)]);
+    assert_replacement_recovery_locations(&report, [((3, 4), (2, 2))]);
+}
+
+#[test]
+fn record_cursor_decode_budget_includes_boundary_discovery() {
+    let profile = text_profile(
+        TextBomPolicy::Forbidden,
+        [TextNewline::Lf],
+        [TextDecodingMode::RejectInvalid],
+        TextControlPolicy::RejectAll,
+    );
+    let (importer, parse_calls) = TextInputImporter::new(
+        descriptor(profile),
+        ParserBehavior::PropagateRecordCursorFailure {
+            options: TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text"),
+        },
+    );
+    let mut limits = ResourceLimits::default();
+    limits.max_decode_work = 5;
+    let request = request_for(importer, limits);
+
+    let failure = import_bytes(&request, b"a\n")
+        .expect_err("one byte below the three-pass record cost must fail");
+
+    assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                    dimension: ImportDimension::DecodeWork,
+                    limit: 5,
+                    ..
+                })
+            )
+    ));
+    let decode = failure
+        .ledger()
+        .dimension(ImportDimension::DecodeWork)
+        .expect("failed boundary discovery must publish decode work");
+    assert_eq!(decode.attempted(), 6);
+    assert!(decode.consumed() <= decode.attempted());
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
 fn bounded_record_cursor_exhausts_at_its_absolute_end() {
     let profile = text_profile(
         TextBomPolicy::Forbidden,
@@ -1650,7 +1989,7 @@ fn record_cursor_stops_an_overlong_ascii_record_at_the_shared_line_limit() {
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
     assert_scope_resource_limit(&failure, 4);
-    assert_decode_work(&failure, 5, 5);
+    assert_decode_work(&failure, 8, 5);
     assert_no_text_storage(&failure);
 }
 
@@ -1678,7 +2017,7 @@ fn record_cursor_line_probe_does_not_reclassify_split_utf8() {
 
     assert_eq!(parse_calls.load(Ordering::Acquire), 1);
     assert_scope_resource_limit(&failure, 1);
-    assert_decode_work(&failure, 2, 2);
+    assert_decode_work(&failure, 3, 2);
     assert_no_text_storage(&failure);
 }
 
@@ -1858,6 +2197,52 @@ fn text_profile_declaration_violations_are_structured_without_storage() {
         assert_eq!(parse_calls.load(Ordering::Acquire), 1);
         assert_format_violation(&failure);
         assert_no_decode_work(&failure);
+    }
+}
+
+#[test]
+fn record_cursor_validates_text_profile_before_bom_or_record_scanning() {
+    for (descriptor, options, expected_kind) in [
+        (
+            binary_descriptor(),
+            TextInputOptions::new(TextDecodingMode::RejectInvalid, "test-text"),
+            TextConformanceViolationKind::MissingTextProfile,
+        ),
+        (
+            descriptor(text_profile(
+                TextBomPolicy::Forbidden,
+                [TextNewline::Lf],
+                [TextDecodingMode::RejectInvalid],
+                TextControlPolicy::RejectAll,
+            )),
+            TextInputOptions::new(TextDecodingMode::ReplaceInvalidUtf8, "test-text"),
+            TextConformanceViolationKind::DecodingModeNotDeclared,
+        ),
+    ] {
+        let (importer, parse_calls) = TextInputImporter::new(
+            descriptor,
+            ParserBehavior::ExpectRecordCursorRejected {
+                options,
+                expected_kind,
+            },
+        );
+        let request = request_for(importer, ResourceLimits::default());
+
+        let report = import_bytes(&request, b"\xef\xbb\xbfline\n")
+            .expect("declaration rejection must precede the forbidden BOM fast path");
+
+        assert_eq!(parse_calls.load(Ordering::Acquire), 1);
+        for dimension in [
+            ImportDimension::DecodeWork,
+            ImportDimension::DecodedTextBytes,
+            ImportDimension::LineIndexBytes,
+        ] {
+            if let Some(evidence) = report.ledger().dimension(dimension) {
+                assert_eq!(evidence.attempted(), 0);
+                assert_eq!(evidence.peak_live_bytes(), 0);
+            }
+        }
+        assert_eq!(report.ledger().current_live_bytes(), 0);
     }
 }
 

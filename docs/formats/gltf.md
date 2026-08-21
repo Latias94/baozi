@@ -56,6 +56,15 @@ criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.m
 
 ## Text Preflight, Resource Accounting, and Cancellation
 
+This development preflight is intentionally outside U4.6's line-record migration. glTF is not in
+the first-party format inventory, and JSON is a document grammar rather than a line-record grammar.
+Materializing the complete JSON surface as `ConformedTextInput` would add a decoded copy and line
+index without enforcing duplicate-key, nesting, token, object, array, string, number, GLB chunk, or
+padding limits. U6 therefore owns replacing the bootstrap scan with one borrowed, bounded JSON/GLB
+admission path that preserves container-relative raw ranges. The temporary UTF-8 preflight, minimal
+GLB JSON-surface locator, and heuristic text detector are development evidence only and must be
+deleted or reduced to adapters over that admitted path before facade registration.
+
 - Plain `.gltf` counts the complete JSON document against `max_decoded_utf8_bytes`. GLB counts only
   its JSON chunk; the 12-byte container header, chunk header, and BIN chunks are excluded from the
   decoded-text surface.

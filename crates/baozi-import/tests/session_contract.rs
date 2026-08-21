@@ -16,9 +16,10 @@ use baozi_import::{
     ManifestUnavailableReplay, MeteredDecodedText, MeteredString, MeteredVec, OptionCompileLimits,
     ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
     RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
-    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
-    TextProfile, TextSourceEncoding, TrustedExtensionBoundary, import_asset as run_import_asset,
-    import_asset_with_resolver as run_import_asset_with_resolver, import_bytes as run_import_bytes,
+    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextInputOptions,
+    TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding, TrustedExtensionBoundary,
+    import_asset as run_import_asset, import_asset_with_resolver as run_import_asset_with_resolver,
+    import_bytes as run_import_bytes,
 };
 use baozi_io::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetPath,
@@ -3336,24 +3337,40 @@ impl FormatImporter for StructuredDiagnosticImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        for record in 0..self.diagnostic_count {
-            scope.emit_diagnostic_with(
-                baozi_import::DiagnosticSeverity::Warning,
-                baozi_import::DiagnosticCode::new("test.structured_warning").unwrap(),
-                ImportProgressPhase::Decode,
+        scope
+            .with_conformed_text_input(
                 scope.diagnostic_source(),
-                Some(baozi_import::DiagnosticByteRange::new(2, 4).unwrap()),
-                Some("/records/0"),
-                |details| {
-                    details.unsigned(
-                        "record",
-                        u64::try_from(record).expect("bounded diagnostic count"),
-                    );
-                    details.string("token", "bad\nvalue");
+                TextInputOptions::new(TextDecodingMode::RejectInvalid, "structured-diagnostic")
+                    .with_line_index_resource("structured-diagnostic-line-index"),
+                |input, _recoveries| {
+                    let line = input
+                        .lines()
+                        .nth(1)
+                        .expect("fixture must expose its second line");
+                    let location = line
+                        .diagnostic_location(baozi_import::DiagnosticByteRange::new(2, 4).unwrap())
+                        .expect("fixture range must belong to the second line");
+                    for record in 0..self.diagnostic_count {
+                        scope.emit_text_diagnostic_with(
+                            baozi_import::DiagnosticSeverity::Warning,
+                            baozi_import::DiagnosticCode::new("test.structured_warning").unwrap(),
+                            ImportProgressPhase::Decode,
+                            location,
+                            Some("/records/0"),
+                            |details| {
+                                details.unsigned(
+                                    "record",
+                                    u64::try_from(record).expect("bounded diagnostic count"),
+                                );
+                                details.string("token", "bad\nvalue");
+                            },
+                            format_args!("bad\nrecord"),
+                        )?;
+                    }
+                    Ok(())
                 },
-                format_args!("bad\nrecord"),
-            )?;
-        }
+            )?
+            .expect("structured diagnostic fixture must conform");
         support::submit_minimal_scene(scope)
     }
 }
@@ -3371,14 +3388,6 @@ fn import_structured_diagnostics(
         request_for_with_limits(StructuredDiagnosticImporter::new(diagnostic_count), limits);
     let io = SequencedIo::new(source.clone(), [Arc::from(&b"a\nprimary"[..])]);
     import_asset(&request, &io, source, ImportOperationControl::default())
-}
-
-fn line_index_peak(report: &ImportReport) -> u64 {
-    report
-        .ledger()
-        .dimension(ImportDimension::LineIndexBytes)
-        .expect("line-index evidence")
-        .peak_live_bytes()
 }
 
 #[test]
@@ -3407,7 +3416,7 @@ fn structured_diagnostic_retains_bounded_location_and_details() {
 }
 
 #[test]
-fn repeated_diagnostics_for_one_source_reuse_the_accounted_line_index() {
+fn repeated_text_locations_reuse_one_shared_line_index() {
     let single = import_structured_diagnostics(1, ResourceLimits::default())
         .expect("single diagnostic import");
     let repeated = import_structured_diagnostics(2, ResourceLimits::default())
@@ -3415,35 +3424,33 @@ fn repeated_diagnostics_for_one_source_reuse_the_accounted_line_index() {
 
     assert_eq!(single.diagnostics().len(), 1);
     assert_eq!(repeated.diagnostics().len(), 2);
+    let line_index_peak = |report: &ImportReport| {
+        report
+            .ledger()
+            .dimension(ImportDimension::LineIndexBytes)
+            .expect("line-index evidence is configured")
+            .peak_live_bytes()
+    };
+    assert!(line_index_peak(&single) > 0);
     assert_eq!(line_index_peak(&repeated), line_index_peak(&single));
 }
 
 #[test]
-fn line_index_storage_honors_the_exact_dimension_budget() {
-    let baseline = import_structured_diagnostics(1, ResourceLimits::default())
-        .expect("baseline line-index import");
-    let required = line_index_peak(&baseline);
-    assert!(required > 0);
+fn text_diagnostic_locations_require_the_shared_line_index_budget() {
+    let mut limits = ResourceLimits::default();
+    limits.max_line_index_bytes = 0;
 
-    let mut exact_limits = ResourceLimits::default();
-    exact_limits.max_line_index_bytes = required;
-    import_structured_diagnostics(1, exact_limits)
-        .expect("the exact observed line-index budget must succeed");
-
-    let mut insufficient_limits = ResourceLimits::default();
-    insufficient_limits.max_line_index_bytes = required - 1;
-    let failure = import_structured_diagnostics(1, insufficient_limits)
-        .expect_err("one byte below the line-index requirement must fail");
+    let failure = import_structured_diagnostics(1, limits)
+        .expect_err("text locations must not fall back to an arbitrary source scan");
+    let ImportCause::Scope(abort) = failure.cause() else {
+        panic!("shared line-index exhaustion must remain import-owned")
+    };
     assert!(matches!(
-        failure.cause(),
-        ImportCause::Scope(abort)
-            if matches!(
-                abort.cause(),
-                ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
-                    dimension: ImportDimension::LineIndexBytes,
-                    ..
-                })
-            )
+        abort.cause(),
+        ScopeAbortCause::ResourceLimit {
+            resource: "structured-diagnostic-line-index",
+            limit: 0,
+        }
     ));
 }
 

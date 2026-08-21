@@ -77,7 +77,7 @@ pub use detection::{DetectionAbort, DetectionResult, DetectionScope};
 pub use diagnostic::{
     DiagnosticByteRange, DiagnosticCause, DiagnosticCode, DiagnosticDetail, DiagnosticDetailSink,
     DiagnosticDetailValue, DiagnosticLineColumn, DiagnosticSeverity, DiagnosticSource,
-    DiagnosticSummary, ImportDiagnostic,
+    DiagnosticSummary, ImportDiagnostic, TextDiagnosticLocation,
 };
 pub use error::{
     CauseOwner, DetectionFailure, FormatFailureDetail, FormatFailureDetailCause,

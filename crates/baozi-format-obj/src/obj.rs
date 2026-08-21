@@ -117,7 +117,7 @@ impl<'scope> ObjParser<'scope, '_> {
     fn parse_line(
         &mut self,
         recoveries: &mut TextInputRecoveryTracker<'_, '_>,
-        decoded_line: &TextInputLine<'_>,
+        decoded_line: &TextInputLine<'_, '_>,
         line_number: u32,
     ) -> ParseResult<()> {
         let raw_line = decoded_line.text();
@@ -350,7 +350,7 @@ fn parse_state_name<'scope>(
 
 fn tokenize<'scope, 'line>(
     scope: &'scope ParseScope<'_>,
-    decoded_line: &'line TextInputLine<'_>,
+    decoded_line: &'line TextInputLine<'_, '_>,
     line_number: u32,
 ) -> ParseResult<TokenBuffer<'scope, 'line>> {
     let line = decoded_line.text();

@@ -322,7 +322,7 @@ fn binary_body_bytes_are_not_scanned_as_ascii_text() -> TestResult<()> {
 }
 
 #[test]
-fn binary_payload_boundaries_preserve_first_bytes_and_constant_text_evidence() -> TestResult<()> {
+fn binary_payload_boundaries_preserve_first_bytes_and_consumed_text_evidence() -> TestResult<()> {
     const LF_HEADER: &[u8] = b"ply\nformat binary_little_endian 1.0\nelement vertex 1\nproperty uchar x\nproperty uchar y\nproperty uchar z\nend_header\n";
     const CRLF_HEADER: &[u8] = b"ply\r\nformat binary_little_endian 1.0\r\nelement vertex 1\r\nproperty uchar x\r\nproperty uchar y\r\nproperty uchar z\r\nend_header\r\n";
 
@@ -360,15 +360,15 @@ fn binary_payload_boundaries_preserve_first_bytes_and_constant_text_evidence() -
                 .ledger()
                 .dimension(ImportDimension::LineIndexBytes)
                 .expect("binary header must publish line-index storage");
-            let text_evidence = (
-                decode.attempted(),
+            assert!(decode.attempted() >= decode.consumed());
+            let consumed_text_evidence = (
                 decode.consumed(),
                 decoded.peak_live_bytes(),
                 line_index.peak_live_bytes(),
             );
             match expected_text_evidence {
-                Some(expected) => assert_eq!(text_evidence, expected),
-                None => expected_text_evidence = Some(text_evidence),
+                Some(expected) => assert_eq!(consumed_text_evidence, expected),
+                None => expected_text_evidence = Some(consumed_text_evidence),
             }
         }
     }

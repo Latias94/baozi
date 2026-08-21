@@ -17,7 +17,7 @@ use baozi_import::{
     DiagnosticByteRange, DiagnosticCode, DiagnosticSeverity, ImportProgressPhase,
     ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredString, MeteredVec, ParseFailure,
     ParseResult, ParseScope, SceneDraft, TextConformanceViolation, TextConformanceViolationKind,
-    TextDecodingMode, TextInputOptions, TextInputRecordCursor,
+    TextDecodingMode, TextDiagnosticLocation, TextInputOptions, TextInputRecordCursor,
 };
 use std::cell::RefCell;
 use std::fmt;
@@ -44,13 +44,19 @@ fn body_completion(index: usize, amount: u64) -> [u64; BODY_WORK_ENTRIES] {
     completed
 }
 
-pub(crate) fn read_ply(scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+pub(crate) fn read_ply<'scope, 'session>(
+    scope: &'scope mut ParseScope<'session>,
+) -> ParseResult<SceneDraft> {
     let bytes = scope.primary_bytes();
     let options = TextInputOptions::new(TextDecodingMode::RejectInvalid, "ply-text-input")
         .with_decoded_resource("ply-decoded-text-record")
         .with_line_resource("max_line_bytes")
         .with_line_index_resource("ply-line-index-bytes");
-    let mut text = scope.text_input_record_cursor(scope.diagnostic_source(), options)?;
+    let mut text = scope
+        .text_input_record_cursor(scope.diagnostic_source(), options)?
+        .map_err(|violation| {
+            text_conformance_failure(scope, AsciiTextSurface::Header, violation)
+        })?;
     let header = parse_header(scope, bytes, &mut text)?;
     let decoded_utf8_bytes = match header.format {
         PlyFormat::Ascii => bytes.len(),
@@ -89,13 +95,13 @@ enum Property<'scope> {
         name: MeteredString<'scope>,
         ty: ScalarType,
         custom_attribute: Option<usize>,
-        source_offset: usize,
+        source_location: TextDiagnosticLocation<'scope>,
     },
     List {
         name: MeteredString<'scope>,
         count_ty: ScalarType,
         item_ty: ScalarType,
-        source_offset: usize,
+        source_location: TextDiagnosticLocation<'scope>,
     },
 }
 
@@ -104,7 +110,7 @@ struct Element<'scope> {
     count: usize,
     properties: MeteredVec<'scope, Property<'scope>>,
     next_custom_attribute: usize,
-    source_offset: usize,
+    source_location: TextDiagnosticLocation<'scope>,
 }
 
 struct Header<'scope> {
@@ -234,12 +240,12 @@ struct VertexPropertyProfile {
     stream_count: usize,
 }
 
-fn parse_header<'scope>(
-    ctx: &'scope ParseScope<'_>,
+fn parse_header<'scope, 'session, 'source>(
+    ctx: &'scope ParseScope<'session>,
     bytes: &[u8],
-    text: &mut TextInputRecordCursor<'_, '_, '_>,
+    text: &mut TextInputRecordCursor<'scope, 'session, 'source>,
 ) -> ParseResult<Header<'scope>> {
-    with_next_ascii_record(ctx, text, AsciiTextSurface::Header, |line, _| {
+    with_next_ascii_record(ctx, text, AsciiTextSurface::Header, |line, _, _| {
         if line != "ply" {
             return Err(ply_parse_error(
                 ctx,
@@ -282,8 +288,11 @@ fn parse_header<'scope>(
         header_line_index = header_line_index
             .checked_add(1)
             .ok_or_else(|| ctx.resource_limit_exceeded("ply-header-lines", u64::MAX))?;
-        let ended =
-            with_next_ascii_record(ctx, text, AsciiTextSurface::Header, |line, line_offset| {
+        let ended = with_next_ascii_record(
+            ctx,
+            text,
+            AsciiTextSurface::Header,
+            |line, line_offset, line_location| {
                 if line.is_empty() {
                     return Ok(false);
                 }
@@ -389,7 +398,7 @@ fn parse_header<'scope>(
                                 "ply-header-properties",
                             ),
                             next_custom_attribute: 0,
-                            source_offset: line_offset,
+                            source_location: line_location,
                         });
                     }
                     ["property", "list", count_ty, item_ty, name] => {
@@ -405,7 +414,7 @@ fn parse_header<'scope>(
                             name: bounded_string(ctx, name, "property name")?,
                             count_ty: parse_scalar_type(ctx, count_ty, line_offset)?,
                             item_ty: parse_scalar_type(ctx, item_ty, line_offset)?,
-                            source_offset: line_offset,
+                            source_location: line_location,
                         };
                         element.properties.try_push(property)?;
                     }
@@ -439,7 +448,7 @@ fn parse_header<'scope>(
                             name,
                             ty: parse_scalar_type(ctx, ty, line_offset)?,
                             custom_attribute,
-                            source_offset: line_offset,
+                            source_location: line_location,
                         };
                         element.properties.try_push(property)?;
                     }
@@ -454,15 +463,16 @@ fn parse_header<'scope>(
                     }
                 }
                 Ok(false)
-            })?
-            .ok_or_else(|| {
-                ply_parse_error(
-                    ctx,
-                    PlyFailureCode::InvalidHeader,
-                    None,
-                    "PLY header has no end_header",
-                )
-            })?;
+            },
+        )?
+        .ok_or_else(|| {
+            ply_parse_error(
+                ctx,
+                PlyFailureCode::InvalidHeader,
+                None,
+                "PLY header has no end_header",
+            )
+        })?;
         if ended {
             break;
         }
@@ -647,11 +657,11 @@ fn scalar_width(ty: ScalarType) -> usize {
     }
 }
 
-fn parse_body<'scope>(
-    ctx: &'scope ParseScope<'_>,
+fn parse_body<'scope, 'session, 'source>(
+    ctx: &'scope ParseScope<'session>,
     bytes: &[u8],
     header: &Header<'scope>,
-    text: &mut TextInputRecordCursor<'_, '_, '_>,
+    text: &mut TextInputRecordCursor<'scope, 'session, 'source>,
 ) -> ParseResult<ParsedPly<'scope>> {
     let mut vertex_element = None;
     let mut face_count = 0usize;
@@ -730,11 +740,11 @@ fn parse_body<'scope>(
     Ok(parsed)
 }
 
-fn parse_ascii_body<'scope>(
-    ctx: &'scope ParseScope<'_>,
+fn parse_ascii_body<'scope, 'session, 'source>(
+    ctx: &'scope ParseScope<'session>,
     header: &Header<'_>,
     parsed: &mut ParsedPly<'scope>,
-    text: &mut TextInputRecordCursor<'_, '_, '_>,
+    text: &mut TextInputRecordCursor<'scope, 'session, 'source>,
 ) -> ParseResult<()> {
     for (element_index, element) in header.elements.as_slice().iter().enumerate() {
         poll_collection(ctx, element_index)?;
@@ -743,14 +753,19 @@ fn parse_ascii_body<'scope>(
             poll_collection(ctx, record_index)?;
             let line_offset = raw_offset_usize(ctx, text.raw_offset(), "ply-text-byte-offset")?;
             ctx.with_parent_work(ImportWorkClass::Records, 1, || {
-                with_next_ascii_record(ctx, text, AsciiTextSurface::Body, |line, line_offset| {
-                    let plan = plan_ascii_row(ctx, line, element, parsed);
-                    ctx.with_work_group(plan.charges(), |work| -> ParseResult<()> {
-                        let mut cursor = AsciiRow::new(line, line_offset);
-                        parse_row(ctx, element, &mut cursor, parsed, plan, work)?;
-                        cursor.finish(ctx, element.name.as_str(), work)
-                    })
-                })?
+                with_next_ascii_record(
+                    ctx,
+                    text,
+                    AsciiTextSurface::Body,
+                    |line, line_offset, _line_location| {
+                        let plan = plan_ascii_row(ctx, line, element, parsed);
+                        ctx.with_work_group(plan.charges(), |work| -> ParseResult<()> {
+                            let mut cursor = AsciiRow::new(line, line_offset);
+                            parse_row(ctx, element, &mut cursor, parsed, plan, work)?;
+                            cursor.finish(ctx, element.name.as_str(), work)
+                        })
+                    },
+                )?
                 .ok_or_else(|| {
                     format_failure(
                         ctx,
@@ -1040,7 +1055,7 @@ fn warn_for_element_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResu
         _ => warn(
             ctx,
             "ply.element_ignored",
-            Some(element.source_offset),
+            Some(element.source_location),
             format_args!("PLY element '{}' was ignored", element.name.as_str()),
         ),
     }
@@ -1072,12 +1087,12 @@ fn warn_for_vertex_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResul
             },
             Property::List {
                 name,
-                source_offset,
+                source_location,
                 ..
             } => warn(
                 ctx,
                 "ply.vertex_list_property_ignored",
-                Some(*source_offset),
+                Some(*source_location),
                 format_args!("PLY vertex list property '{}' was ignored", name.as_str()),
             )?,
         }
@@ -1088,7 +1103,7 @@ fn warn_for_vertex_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResul
         warn(
             ctx,
             "ply.partial_normals_ignored",
-            Some(element.source_offset),
+            Some(element.source_location),
             format_args!("PLY vertex has partial normal properties; normals were ignored"),
         )?;
     }
@@ -1096,7 +1111,7 @@ fn warn_for_vertex_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResul
         warn(
             ctx,
             "ply.partial_texcoords_ignored",
-            Some(element.source_offset),
+            Some(element.source_location),
             format_args!(
                 "PLY vertex has partial texture coordinate properties; texcoords were ignored"
             ),
@@ -1107,7 +1122,7 @@ fn warn_for_vertex_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResul
         warn(
             ctx,
             "ply.partial_colors_ignored",
-            Some(element.source_offset),
+            Some(element.source_location),
             format_args!("PLY vertex has partial color properties; colors were ignored"),
         )?;
     }
@@ -1200,22 +1215,22 @@ fn warn_for_face_schema(ctx: &ParseScope<'_>, element: &Element) -> ParseResult<
                 if name.as_str() == "vertex_indices" || name.as_str() == "vertex_index" => {}
             Property::List {
                 name,
-                source_offset,
+                source_location,
                 ..
             } => warn(
                 ctx,
                 "ply.face_list_property_ignored",
-                Some(*source_offset),
+                Some(*source_location),
                 format_args!("PLY face list property '{}' was ignored", name.as_str()),
             )?,
             Property::Scalar {
                 name,
-                source_offset,
+                source_location,
                 ..
             } => warn(
                 ctx,
                 "ply.face_scalar_property_ignored",
-                Some(*source_offset),
+                Some(*source_location),
                 format_args!("PLY face scalar property '{}' was ignored", name.as_str()),
             )?,
         }
@@ -2743,11 +2758,11 @@ impl AsciiTextSurface {
     }
 }
 
-fn with_next_ascii_record<T>(
-    ctx: &ParseScope<'_>,
-    text: &mut TextInputRecordCursor<'_, '_, '_>,
+fn with_next_ascii_record<'scope, 'session, 'source, T>(
+    ctx: &'scope ParseScope<'session>,
+    text: &mut TextInputRecordCursor<'scope, 'session, 'source>,
     surface: AsciiTextSurface,
-    action: impl for<'line> FnOnce(&'line str, usize) -> ParseResult<T>,
+    action: impl for<'line> FnOnce(&'line str, usize, TextDiagnosticLocation<'scope>) -> ParseResult<T>,
 ) -> ParseResult<Option<T>> {
     match text.with_next_record(|input, _recoveries| {
         let mut lines = input.lines();
@@ -2768,7 +2783,7 @@ fn with_next_ascii_record<T>(
             line.raw_content_range().start(),
             "ply-text-byte-offset",
         )?;
-        action(line.text(), line_offset)
+        action(line.text(), line_offset, line.start_diagnostic_location())
     })? {
         Ok(value) => Ok(value),
         Err(violation) => Err(text_conformance_failure(ctx, surface, violation)),
@@ -2847,7 +2862,7 @@ fn internal_text_conformance_failure(ctx: &ParseScope<'_>, context: &'static str
 fn warn(
     ctx: &ParseScope<'_>,
     code: &'static str,
-    byte_offset: Option<usize>,
+    location: Option<TextDiagnosticLocation<'_>>,
     message: fmt::Arguments<'_>,
 ) -> ParseResult<()> {
     let code = DiagnosticCode::new(code).map_err(|_| {
@@ -2856,28 +2871,27 @@ fn warn(
             "PLY diagnostic code is invalid",
         ))
     })?;
-    let byte_range = byte_offset
-        .map(|offset| {
-            let offset = u64::try_from(offset)
-                .map_err(|_| ctx.resource_limit_exceeded("ply-diagnostic-byte-offset", u64::MAX))?;
-            DiagnosticByteRange::new(offset, offset).map_err(|_| {
-                ctx.format_failure(PlyFailure::new(
-                    PlyFailureCode::InternalInvariant,
-                    "PLY diagnostic byte range is invalid",
-                ))
-            })
-        })
-        .transpose()?;
-    ctx.emit_diagnostic_with(
-        DiagnosticSeverity::Warning,
-        code,
-        ImportProgressPhase::Decode,
-        ctx.diagnostic_source(),
-        byte_range,
-        None,
-        |details| details.string("format", "ply"),
-        message,
-    )
+    match location {
+        Some(location) => ctx.emit_text_diagnostic_with(
+            DiagnosticSeverity::Warning,
+            code,
+            ImportProgressPhase::Decode,
+            location,
+            None,
+            |details| details.string("format", "ply"),
+            message,
+        ),
+        None => ctx.emit_diagnostic_with(
+            DiagnosticSeverity::Warning,
+            code,
+            ImportProgressPhase::Decode,
+            ctx.diagnostic_source(),
+            None,
+            None,
+            |details| details.string("format", "ply"),
+            message,
+        ),
+    }
 }
 
 fn ply_parse_error(
