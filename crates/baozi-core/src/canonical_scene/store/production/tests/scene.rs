@@ -186,6 +186,7 @@ fn scene_envelope_rejects_top_level_input_limit_overflow() {
 #[test]
 fn scene_envelope_reserves_nested_worst_case_without_deep_validation() {
     let channels = [AnimationChannelAuthoring::new(
+        0,
         AnimationTargetAuthoring::NodeTranslation(NodeLocalId::new(99)),
         AnimationInterpolationAuthoring::CubicSpline,
         AnimationExtrapolationAuthoring::SourceDefault,

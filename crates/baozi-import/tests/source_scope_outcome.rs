@@ -2,11 +2,12 @@ mod support;
 
 use baozi_core::FormatId;
 use baozi_import::{
-    CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
-    FormatDescriptor, FormatEncoding, FormatFailureDetailSink, FormatFailureEvidenceProducer,
-    FormatImporter, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind,
-    ImportLossSubject, ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer,
-    ImportResult, LossPolicy, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
+    CapabilityStatus, CauseOwner, DetectionOutcome, DetectionResult, DetectionScope,
+    DiagnosticCode, FormatCapability, FormatDescriptor, FormatEncoding, FormatFailureDetailSink,
+    FormatFailureEvidenceProducer, FormatImporter, ImportCause, ImportConfigOverlay,
+    ImportDimension, ImportFailure, ImportLossDisposition, ImportLossKind, ImportLossSubject,
+    ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
+    LossPolicy, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
     ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
     ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, SourceScopeDetailState,
     SourceScopeDisposition, SourceScopeEntityKind, import_bytes,
@@ -16,6 +17,7 @@ use baozi_operation::{CancellationOrigin, CancellationToken, ControlCause};
 use std::fmt;
 
 const SOURCE: &str = "scene.scope";
+const SOURCE_SEMANTIC_LOSS_CODE: &str = "test.source_channel_omitted";
 
 #[derive(Debug, Clone, Copy)]
 enum Exit {
@@ -29,6 +31,45 @@ enum Exit {
 struct ScopeImporter {
     exit: Exit,
     identities: &'static [&'static str],
+}
+
+struct SourceSemanticLossImporter;
+
+impl FormatImporter for SourceSemanticLossImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.source-semantic-loss").unwrap(),
+            "Source Semantic Loss",
+        )
+        .extensions(["scope"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        scope.record_source_semantic_loss(
+            DiagnosticCode::new(SOURCE_SEMANTIC_LOSS_CODE).unwrap(),
+            SourceScopeEntityKind::AnimationChannel,
+            "/animations/3/channels/5",
+            |details| {
+                details.unsigned("animation_index", 3);
+                details.unsigned("channel_index", 5);
+            },
+            format_args!("omitted one source animation channel"),
+        )?;
+        support::submit_minimal_scene(scope)
+    }
 }
 
 impl FormatImporter for ScopeImporter {
@@ -240,6 +281,41 @@ fn provenance_loss_policy() -> LossPolicy {
     LossPolicy::preserve_or_fail().allow(ImportLossKind::ProvenanceEvidenceLoss)
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "source-semantic-loss assertions inspect complete bounded failure evidence"
+)]
+fn run_source_semantic_loss(loss_policy: LossPolicy) -> Result<ImportReport, ImportFailure> {
+    let request = compile_request(
+        SourceSemanticLossImporter,
+        ResourceLimits::default(),
+        loss_policy,
+    );
+    operation_result(import_bytes(
+        &request,
+        AssetPath::new(SOURCE).unwrap(),
+        b"scope",
+        ImportOperationControl::default(),
+    ))
+}
+
+fn assert_source_semantic_loss(
+    evidence: &[baozi_import::ImportLossEvidence],
+    disposition: ImportLossDisposition,
+) {
+    assert_eq!(evidence.len(), 1);
+    let evidence = &evidence[0];
+    assert_eq!(evidence.kind(), ImportLossKind::SourceSemanticLoss);
+    assert_eq!(
+        evidence.subject(),
+        ImportLossSubject::SourceEntity(SourceScopeEntityKind::AnimationChannel)
+    );
+    assert_eq!(evidence.code().as_str(), SOURCE_SEMANTIC_LOSS_CODE);
+    assert_eq!(evidence.source().as_str(), SOURCE);
+    assert_eq!(evidence.raw_range(), None);
+    assert_eq!(evidence.disposition(), disposition);
+}
+
 fn assert_source_scope_bundle_unpublished(failure: &ImportFailure) {
     assert!(failure.source_scope_record().is_none());
     assert!(failure.loss_evidence().is_empty());
@@ -270,6 +346,44 @@ fn absent_record_remains_none() {
     .unwrap();
 
     assert!(report.source_scope_record().is_none());
+}
+
+#[test]
+fn source_semantic_loss_requires_explicit_authority_and_retains_typed_evidence() {
+    let failure = run_source_semantic_loss(LossPolicy::preserve_or_fail())
+        .expect_err("source semantic loss must be rejected by default");
+
+    assert_source_semantic_loss(
+        failure.loss_evidence(),
+        ImportLossDisposition::RejectedByLossPolicy,
+    );
+    assert_eq!(failure.diagnostics().len(), 1);
+    assert_eq!(
+        failure.diagnostics()[0].object_path(),
+        Some("/animations/3/channels/5")
+    );
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if abort.owner() == CauseOwner::Import
+                && matches!(
+                    abort.cause(),
+                    ScopeAbortCause::SourceSemanticLossRejectedByLossPolicy { code }
+                        if code.as_str() == SOURCE_SEMANTIC_LOSS_CODE
+                )
+    ));
+
+    let report = run_source_semantic_loss(
+        LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss),
+    )
+    .expect("explicit source semantic loss authority must allow publication");
+    assert_source_semantic_loss(report.loss_evidence(), ImportLossDisposition::Applied);
+    assert_eq!(report.diagnostics().len(), 1);
+    assert_eq!(
+        report.diagnostics()[0].object_path(),
+        Some("/animations/3/channels/5")
+    );
+    assert_eq!(report.ledger().current_live_bytes(), 0);
 }
 
 #[test]

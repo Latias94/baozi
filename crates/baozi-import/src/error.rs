@@ -98,6 +98,9 @@ pub enum ScopeAbortCause {
     FormatRecoveryRejectedByLossPolicy {
         code: DiagnosticCode,
     },
+    SourceSemanticLossRejectedByLossPolicy {
+        code: DiagnosticCode,
+    },
     FormatFailureDetail(FormatFailureDetailCause),
     ResourceLimit {
         resource: &'static str,
@@ -136,6 +139,7 @@ impl ScopeAbortCause {
             | Self::Diagnostic(_)
             | Self::FormatRecoveryRejectedByConformance { .. }
             | Self::FormatRecoveryRejectedByLossPolicy { .. }
+            | Self::SourceSemanticLossRejectedByLossPolicy { .. }
             | Self::FormatFailureDetail(_)
             | Self::ResourceLimit { .. }
             | Self::Allocation { .. }
@@ -163,6 +167,11 @@ impl fmt::Display for ScopeAbortCause {
             Self::FormatRecoveryRejectedByLossPolicy { code } => write!(
                 formatter,
                 "format recovery {} was rejected by loss policy",
+                code.as_str()
+            ),
+            Self::SourceSemanticLossRejectedByLossPolicy { code } => write!(
+                formatter,
+                "source semantic loss {} was rejected by loss policy",
                 code.as_str()
             ),
             Self::FormatFailureDetail(error) => error.fmt(formatter),
@@ -210,6 +219,7 @@ impl Error for ScopeAbortCause {
             Self::OptionTypeMismatch
             | Self::FormatRecoveryRejectedByConformance { .. }
             | Self::FormatRecoveryRejectedByLossPolicy { .. }
+            | Self::SourceSemanticLossRejectedByLossPolicy { .. }
             | Self::ResourceLimit { .. }
             | Self::Allocation { .. }
             | Self::DescriptorContract { .. }

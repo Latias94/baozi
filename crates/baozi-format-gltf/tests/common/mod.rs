@@ -6,8 +6,8 @@ use baozi_import::{
     DenyDependencies, DetectionOptions, DetectionOutcome, FormatFailureDetailValue,
     FormatFailureEnvelope, FormatSelection, ImportCause, ImportConfigOverlay, ImportDiagnostic,
     ImportFailure, ImportOperationControl, ImportReport, ImportRequest, ImportRequestLayer,
-    ImportResult, OptionCompileLimits, PreparedImportRequest, RegistryBuildLimits, RegistryBuilder,
-    ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, import_asset,
+    ImportResult, LossPolicy, OptionCompileLimits, PreparedImportRequest, RegistryBuildLimits,
+    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, ScopeAbortCause, import_asset,
     import_asset_with_resolver,
 };
 use baozi_io::{AssetPath, MemoryAssetIo};
@@ -21,6 +21,7 @@ pub type TestResult<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 #[derive(Debug, Clone)]
 pub struct GltfTestOptions {
     pub limits: ResourceLimits,
+    pub loss_policy: LossPolicy,
     allow_dependencies: bool,
 }
 
@@ -28,6 +29,7 @@ impl GltfTestOptions {
     pub fn memory() -> Self {
         Self {
             limits: ResourceLimits::default(),
+            loss_policy: LossPolicy::preserve_or_fail(),
             allow_dependencies: false,
         }
     }
@@ -62,7 +64,7 @@ pub fn import_assets_result_with_control(
     for (path, bytes) in assets {
         let _replaced = io.try_insert(AssetPath::new(path)?, Arc::<[u8]>::from(bytes))?;
     }
-    let request = prepared_request(options.limits)?;
+    let request = prepared_request(options.limits, options.loss_policy)?;
     let result = if options.allow_dependencies {
         import_asset(&request, &io, source_path, control)
     } else {
@@ -78,7 +80,10 @@ pub fn import_assets_result_with_control(
     Ok((result, diagnostics))
 }
 
-fn prepared_request(limits: ResourceLimits) -> TestResult<PreparedImportRequest> {
+fn prepared_request(
+    limits: ResourceLimits,
+    loss_policy: LossPolicy,
+) -> TestResult<PreparedImportRequest> {
     let mut registry = RegistryBuilder::new();
     registry.register(GltfImporter)?;
     let snapshot = registry.freeze(RegistryBuildLimits::default())?;
@@ -89,6 +94,7 @@ fn prepared_request(limits: ResourceLimits) -> TestResult<PreparedImportRequest>
             ImportRequestLayer::new(
                 ImportConfigOverlay::default()
                     .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
+                    .with_loss_policy(loss_policy)
                     .with_format_selection(FormatSelection::Forced(format)),
             ),
         ),
@@ -268,6 +274,10 @@ pub fn assert_resource_limit(error: &ImportFailure, expected: &str) {
                 "max_open_assets" => "AssetOpen",
                 "max_primary_asset_bytes" => "PrimaryBytes",
                 "max_primitives" => "Primitives",
+                "source-scope-items" => "SourceScopeItemCount",
+                "source-scope-digest-bytes" => "SourceScopeDigestBytes",
+                "source-scope-detail-count" => "SourceScopeDetailCount",
+                "source-scope-detail-bytes" => "SourceScopeDetailBytes",
                 "max_live_bytes" => "ScratchBytes",
                 "max_total_asset_bytes" => "TotalAssetBytes",
                 "max_total_topology_cells" => "TopologyCells",

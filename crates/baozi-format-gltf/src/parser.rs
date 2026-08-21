@@ -24,7 +24,8 @@ use baozi_import::authoring::{
 use baozi_import::{
     DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass,
     ImportWorkScope, MeteredOrderedMap, MeteredString, MeteredVec, ParseFailure, ParseResult,
-    ParseScope, SceneDraft,
+    ParseScope, SceneDraft, SourceScopeDisposition, SourceScopeEntityKind,
+    SourceScopeRecordBuilder,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::{DecodeError, DecodeSliceError, Engine as _};
@@ -167,6 +168,7 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
         .map_err(|error| GltfFailure::invalid_document(format_args!("invalid glTF: {error}")))?;
     let node_graph = preflight_node_graph(ctx, &gltf)?;
     let animation_contracts = animation::preflight(ctx, &gltf, node_graph.selected.as_slice())?;
+    record_source_scope(ctx, &gltf, &node_graph, &animation_contracts)?;
     let repeated_mesh_string_bytes = preflight_canonical_base_strings(ctx, &gltf, &node_graph)?;
     let resolved_texture_uris = preflight_texture_strings(ctx, &gltf, repeated_mesh_string_bytes)?;
     let material_count = safe_gltf(ctx, "glTF material count", || gltf.materials().count())?;
@@ -2691,6 +2693,136 @@ struct NodeGraph<'document, 'scope> {
     children: MeteredVec<'scope, MeteredVec<'scope, usize>>,
     roots: MeteredVec<'scope, usize>,
     selected: MeteredVec<'scope, bool>,
+    selected_scene_index: Option<usize>,
+}
+
+fn record_source_scope(
+    ctx: &ParseScope<'_>,
+    gltf: &gltf::Gltf,
+    graph: &NodeGraph<'_, '_>,
+    animation_contracts: &animation::AnimationContracts<'_, '_>,
+) -> Result<()> {
+    let document = gltf.as_json();
+    let mut builder = ctx.source_scope_builder()?;
+    let mut identity = ctx.metered_string(
+        ImportStorageClass::FormatNormalization,
+        "gltf-source-scope-identity",
+    );
+    identity.try_reserve(32)?;
+
+    for scene_index in 0..document.scenes.len() {
+        observe_source_index(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Scene,
+            graph.selected_scene_index == Some(scene_index),
+            's',
+            scene_index,
+        )?;
+    }
+    for (node_index, selected) in graph.selected.as_slice().iter().copied().enumerate() {
+        observe_source_index(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Node,
+            selected,
+            'n',
+            node_index,
+        )?;
+    }
+    for (animation_index, selected) in animation_contracts
+        .selected_animations
+        .as_slice()
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        observe_source_index(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Animation,
+            selected,
+            'a',
+            animation_index,
+        )?;
+    }
+    let mut source_channel_index = 0usize;
+    for (animation_index, animation) in document.animations.iter().enumerate() {
+        for channel_index in 0..animation.channels.len() {
+            let selected = animation_contracts
+                .source_channels
+                .as_slice()
+                .get(source_channel_index)
+                .copied()
+                .ok_or_else(|| {
+                    ContentError::from(GltfFailure::internal(
+                        "animation source-scope channel selection is incomplete",
+                    ))
+                })?;
+            observe_source_channel(
+                &mut builder,
+                &mut identity,
+                selected.is_retained(),
+                animation_index,
+                channel_index,
+            )?;
+            source_channel_index = source_channel_index
+                .checked_add(1)
+                .ok_or_else(|| ctx.allocation_failure("gltf-source-scope-channel-index"))?;
+        }
+    }
+    if source_channel_index != animation_contracts.source_channels.len() {
+        return Err(ContentError::from(GltfFailure::internal(
+            "animation source-scope channel selection length changed",
+        )));
+    }
+
+    let record = builder.finish()?;
+    ctx.record_source_scope(record)?;
+    Ok(())
+}
+
+fn observe_source_index(
+    builder: &mut SourceScopeRecordBuilder<'_, '_>,
+    identity: &mut MeteredString<'_>,
+    kind: SourceScopeEntityKind,
+    selected: bool,
+    prefix: char,
+    index: usize,
+) -> Result<()> {
+    identity.truncate(0);
+    identity.try_write_fmt(format_args!("{prefix}{index}"))?;
+    builder.observe(
+        kind,
+        if selected {
+            SourceScopeDisposition::Selected
+        } else {
+            SourceScopeDisposition::Omitted
+        },
+        identity.as_str(),
+    )?;
+    Ok(())
+}
+
+fn observe_source_channel(
+    builder: &mut SourceScopeRecordBuilder<'_, '_>,
+    identity: &mut MeteredString<'_>,
+    selected: bool,
+    animation_index: usize,
+    channel_index: usize,
+) -> Result<()> {
+    identity.truncate(0);
+    identity.try_write_fmt(format_args!("a{animation_index}c{channel_index}"))?;
+    builder.observe(
+        SourceScopeEntityKind::AnimationChannel,
+        if selected {
+            SourceScopeDisposition::Selected
+        } else {
+            SourceScopeDisposition::Omitted
+        },
+        identity.as_str(),
+    )?;
+    Ok(())
 }
 
 fn preflight_node_graph<'document, 'scope>(
@@ -2814,7 +2946,8 @@ fn preflight_node_graph<'document, 'scope>(
     }
 
     validate_graph_depth_and_cycles(ctx, children.as_slice(), parents.as_slice())?;
-    let roots = select_and_validate_scene_roots(ctx, gltf, parents.as_slice())?;
+    let (roots, selected_scene_index) =
+        select_and_validate_scene_roots(ctx, gltf, parents.as_slice())?;
     charge_canonical_graph_shape(ctx, roots.len())?;
     let selected = validate_canonical_graph_limits(ctx, children.as_slice(), roots.as_slice())?;
 
@@ -2823,6 +2956,7 @@ fn preflight_node_graph<'document, 'scope>(
         children,
         roots,
         selected,
+        selected_scene_index,
     })
 }
 
@@ -2957,7 +3091,7 @@ fn select_and_validate_scene_roots<'scope>(
     ctx: &'scope ParseScope<'_>,
     gltf: &gltf::Gltf,
     parents: &[Option<usize>],
-) -> Result<MeteredVec<'scope, usize>> {
+) -> Result<(MeteredVec<'scope, usize>, Option<usize>)> {
     let scene_count = safe_gltf(ctx, "glTF scene count", || gltf.scenes().len())?;
     let mut scene_roots = ctx.metered_vec(
         ImportStorageClass::FormatNormalization,
@@ -3028,7 +3162,17 @@ fn select_and_validate_scene_roots<'scope>(
     let default_scene_index = safe_gltf(ctx, "glTF default scene", || {
         gltf.default_scene().map(|scene| scene.index())
     })?;
-    let selected_scene_index = default_scene_index.or((scene_count > 0).then_some(0));
+    let selected_scene_index = match (default_scene_index, scene_count) {
+        (Some(scene_index), _) => Some(scene_index),
+        (None, 0) => None,
+        (None, 1) => Some(0),
+        (None, _) => {
+            return Err(gltf_parse_error(
+                ctx,
+                "multiple scenes require an explicit default scene",
+            ));
+        }
+    };
     match selected_scene_index {
         Some(scene_index) => {
             let selected = scene_roots.as_slice().get(scene_index).ok_or_else(|| {
@@ -3047,7 +3191,7 @@ fn select_and_validate_scene_roots<'scope>(
                 poll_parser_loop(ctx, root_ordinal)?;
                 roots.try_push_reserved(root)?;
             }
-            Ok(roots)
+            Ok((roots, Some(scene_index)))
         }
         None => ctx.with_work(ImportWorkClass::GraphWork, 1, |work| -> Result<_> {
             let mut roots = ctx.metered_vec(
@@ -3077,7 +3221,7 @@ fn select_and_validate_scene_roots<'scope>(
                     work.complete([1])?;
                 }
             }
-            Ok(roots)
+            Ok((roots, None))
         }),
     }
 }

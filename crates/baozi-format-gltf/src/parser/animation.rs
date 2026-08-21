@@ -1,14 +1,17 @@
 use super::{
     AccessorContract, AccessorOwner, BufferData, ContentError, PARSER_POLL_INTERVAL, Result,
-    authoring_u32, finish_gltf_operation, gltf_parse_error, push_warning, safe_gltf, to_u64,
-    try_vec_capacity, try_vec_filled, validate_accessor,
+    authoring_u32, finish_gltf_operation, gltf_parse_error, safe_gltf, to_u64, try_vec_capacity,
+    try_vec_filled, validate_accessor,
 };
 use baozi_import::authoring::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
     AnimationExtrapolationAuthoring, AnimationInterpolationAuthoring, AnimationTargetAuthoring,
     AnimationTimeDomainAuthoring, AuthoringRange, NodeLocalId, Presence, Quat,
 };
-use baozi_import::{ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredVec, ParseScope};
+use baozi_import::{
+    DiagnosticCode, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredVec, ParseScope,
+    SourceScopeEntityKind,
+};
 use gltf::animation::util::ReadOutputs;
 use gltf::json;
 use gltf::json::validation::Checked;
@@ -48,13 +51,16 @@ impl NodeAnimationProperty {
 
 #[derive(Debug, Clone, Copy)]
 struct AnimationClipContract {
-    channel_offset: usize,
-    channel_count: usize,
+    source_index: usize,
+    materialization_offset: usize,
+    materialization_count: usize,
+    retained_channel_count: usize,
 }
 
 #[derive(Debug, Clone)]
 struct AnimationChannelContract<'document> {
     source: gltf::animation::Channel<'document>,
+    source_index: usize,
     animation_index: usize,
     channel_index: usize,
     source_node_index: usize,
@@ -64,20 +70,52 @@ struct AnimationChannelContract<'document> {
     output_count: usize,
 }
 
+#[derive(Debug, Clone)]
+struct AnimationDurationContract<'document> {
+    source: gltf::animation::Channel<'document>,
+    animation_index: usize,
+    channel_index: usize,
+    key_count: usize,
+}
+
+#[derive(Debug, Clone)]
+enum AnimationMaterializationContract<'document> {
+    Retained(AnimationChannelContract<'document>),
+    DurationOnly(AnimationDurationContract<'document>),
+}
+
 pub(super) struct AnimationContracts<'scope, 'document> {
     clips: MeteredVec<'scope, AnimationClipContract>,
-    channels: MeteredVec<'scope, AnimationChannelContract<'document>>,
+    materialization_channels: MeteredVec<'scope, AnimationMaterializationContract<'document>>,
+    pub(super) selected_animations: MeteredVec<'scope, bool>,
+    pub(super) source_channels: MeteredVec<'scope, SourceChannelDisposition>,
+    retained_channel_count: usize,
     total_cells: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceChannelDisposition {
+    Retained,
+    ScopeOmitted,
+    SemanticLoss,
+}
+
+impl SourceChannelDisposition {
+    pub(super) const fn is_retained(self) -> bool {
+        matches!(self, Self::Retained)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct AnimationClipStorage {
+    source_index: usize,
     duration: f64,
     channel_offset: usize,
     channel_count: usize,
 }
 
 struct AnimationChannelStorage<'scope> {
+    source_index: usize,
     target: AnimationTargetAuthoring,
     interpolation: AnimationInterpolationAuthoring,
     times: MeteredVec<'scope, f64>,
@@ -96,24 +134,16 @@ pub(super) fn preflight<'scope, 'document>(
     gltf: &'document gltf::Gltf,
     selected_nodes: &[bool],
 ) -> Result<AnimationContracts<'scope, 'document>> {
-    let (contracts, has_morph_weights) = safe_gltf(ctx, "glTF animation preflight", || {
+    safe_gltf(ctx, "glTF animation preflight", || {
         preflight_inner(ctx, gltf, selected_nodes)
-    })??;
-    if has_morph_weights {
-        push_warning(
-            ctx,
-            "gltf.animation_morph_weights_ignored",
-            "morph-weight animation channels are not imported yet",
-        )?;
-    }
-    Ok(contracts)
+    })?
 }
 
 fn preflight_inner<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
     gltf: &'document gltf::Gltf,
     selected_nodes: &[bool],
-) -> Result<(AnimationContracts<'scope, 'document>, bool)> {
+) -> Result<AnimationContracts<'scope, 'document>> {
     let source_animations = &gltf.as_json().animations;
     let source_channel_count = source_animations
         .iter()
@@ -144,14 +174,26 @@ fn preflight_inner<'scope, 'document>(
                 source_animations.len(),
                 "gltf-animation-contract-clips",
             )?;
-            let mut channels = try_vec_capacity(
+            let mut materialization_channels = try_vec_capacity(
                 ctx,
                 ImportStorageClass::FormatNormalization,
                 source_channel_count,
-                "gltf-animation-contract-channels",
+                "gltf-animation-materialization-channels",
+            )?;
+            let mut selected_animations = try_vec_capacity(
+                ctx,
+                ImportStorageClass::FormatNormalization,
+                source_animations.len(),
+                "gltf-animation-selection",
+            )?;
+            let mut source_channels = try_vec_capacity(
+                ctx,
+                ImportStorageClass::FormatNormalization,
+                source_channel_count,
+                "gltf-animation-channel-selection",
             )?;
             let mut total_cells = 0usize;
-            let mut has_morph_weights = false;
+            let mut retained_channel_count = 0usize;
             let mut visited_channels = 0usize;
 
             for (animation_index, animation) in gltf.animations().enumerate() {
@@ -161,8 +203,12 @@ fn preflight_inner<'scope, 'document>(
                         format!("glTF animation {animation_index} is out of range"),
                     )
                 })?;
-                let channel_offset = channels.len();
+                let materialization_offset = materialization_channels.len();
+                let source_channel_offset = source_channels.len();
                 let mut runtime_channel_count = 0usize;
+                let mut animation_selected = false;
+                let mut animation_retained_channel_count = 0usize;
+                let mut animation_cells = 0usize;
 
                 for (channel_index, runtime_channel) in animation.channels().enumerate() {
                     if visited_channels.is_multiple_of(PARSER_POLL_INTERVAL) {
@@ -197,12 +243,79 @@ fn preflight_inner<'scope, 'document>(
                         channel_index,
                         source_channel.target.path.as_ref(),
                     )?;
+                    let sampler = source_animation
+                        .samplers
+                        .get(source_channel.sampler.value())
+                        .ok_or_else(|| {
+                            gltf_parse_error(
+                                ctx,
+                                format!(
+                                    "glTF animation {animation_index} channel {channel_index} sampler reference is out of range"
+                                ),
+                            )
+                        })?;
+                    let owner = AccessorOwner::Animation {
+                        animation_index,
+                        channel_index,
+                    };
+                    let input = validate_accessor(
+                        ctx,
+                        gltf,
+                        sampler.input.value(),
+                        owner,
+                        "input",
+                        AccessorContract::vertex(
+                            &[json::accessor::ComponentType::F32],
+                            &[json::accessor::Type::Scalar],
+                        ),
+                    )?;
+                    if input.count == 0 {
+                        return Err(gltf_parse_error(
+                            ctx,
+                            format!(
+                                "glTF animation {animation_index} channel {channel_index} input accessor is empty"
+                            ),
+                        ));
+                    }
                     if !selected {
+                        source_channels
+                            .try_push_reserved(SourceChannelDisposition::ScopeOmitted)?;
+                        animation_cells = animation_cells
+                            .checked_add(input.count)
+                            .ok_or_else(|| {
+                                ctx.allocation_failure("gltf-animation-duration-cells")
+                            })?;
+                        materialization_channels.try_push_reserved(
+                            AnimationMaterializationContract::DurationOnly(
+                                AnimationDurationContract {
+                                    source: runtime_channel,
+                                    animation_index,
+                                    channel_index,
+                                    key_count: input.count,
+                                },
+                            ),
+                        )?;
                         work.complete([1])?;
                         continue;
                     }
                     let Some(property) = property else {
-                        has_morph_weights = true;
+                        source_channels
+                            .try_push_reserved(SourceChannelDisposition::SemanticLoss)?;
+                        animation_cells = animation_cells
+                            .checked_add(input.count)
+                            .ok_or_else(|| {
+                                ctx.allocation_failure("gltf-animation-duration-cells")
+                            })?;
+                        materialization_channels.try_push_reserved(
+                            AnimationMaterializationContract::DurationOnly(
+                                AnimationDurationContract {
+                                    source: runtime_channel,
+                                    animation_index,
+                                    channel_index,
+                                    key_count: input.count,
+                                },
+                            ),
+                        )?;
                         work.complete([1])?;
                         continue;
                     };
@@ -247,46 +360,12 @@ fn preflight_inner<'scope, 'document>(
                     }
                     *seen = animation_index;
 
-                    let sampler = source_animation
-                        .samplers
-                        .get(source_channel.sampler.value())
-                        .ok_or_else(|| {
-                            gltf_parse_error(
-                                ctx,
-                                format!(
-                                    "glTF animation {animation_index} channel {channel_index} sampler reference is out of range"
-                                ),
-                            )
-                        })?;
                     let interpolation = checked_interpolation(
                         ctx,
                         animation_index,
                         channel_index,
                         sampler.interpolation.as_ref(),
                     )?;
-                    let owner = AccessorOwner::Animation {
-                        animation_index,
-                        channel_index,
-                    };
-                    let input = validate_accessor(
-                        ctx,
-                        gltf,
-                        sampler.input.value(),
-                        owner,
-                        "input",
-                        AccessorContract::vertex(
-                            &[json::accessor::ComponentType::F32],
-                            &[json::accessor::Type::Scalar],
-                        ),
-                    )?;
-                    if input.count == 0 {
-                        return Err(gltf_parse_error(
-                            ctx,
-                            format!(
-                                "glTF animation {animation_index} channel {channel_index} input accessor is empty"
-                            ),
-                        ));
-                    }
                     if interpolation == AnimationInterpolationAuthoring::CubicSpline
                         && input.count < 2
                     {
@@ -333,19 +412,29 @@ fn preflight_inner<'scope, 'document>(
                         .count
                         .checked_add(output_cells)
                         .ok_or_else(|| ctx.allocation_failure("gltf-animation-channel-cells"))?;
-                    total_cells = total_cells
+                    animation_cells = animation_cells
                         .checked_add(cell_count)
                         .ok_or_else(|| ctx.allocation_failure("gltf-animation-total-cells"))?;
-                    channels.try_push_reserved(AnimationChannelContract {
-                        source: runtime_channel,
-                        animation_index,
-                        channel_index,
-                        source_node_index,
-                        property,
-                        interpolation,
-                        key_count: input.count,
-                        output_count: output.count,
-                    })?;
+                    materialization_channels.try_push_reserved(
+                        AnimationMaterializationContract::Retained(AnimationChannelContract {
+                            source: runtime_channel,
+                            source_index: visited_channels - 1,
+                            animation_index,
+                            channel_index,
+                            source_node_index,
+                            property,
+                            interpolation,
+                            key_count: input.count,
+                            output_count: output.count,
+                        }),
+                    )?;
+                    source_channels.try_push_reserved(SourceChannelDisposition::Retained)?;
+                    animation_selected = true;
+                    animation_retained_channel_count = animation_retained_channel_count
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            ctx.allocation_failure("gltf-animation-retained-channel-count")
+                        })?;
                     work.complete([1])?;
                 }
 
@@ -358,13 +447,47 @@ fn preflight_inner<'scope, 'document>(
                         ),
                     ));
                 }
-                let channel_count = channels.len() - channel_offset;
-                if channel_count != 0 {
-                    clips.try_push_reserved(AnimationClipContract {
-                        channel_offset,
-                        channel_count,
+                let materialization_count = materialization_channels
+                    .len()
+                    .checked_sub(materialization_offset)
+                    .ok_or_else(|| {
+                        ctx.allocation_failure("gltf-animation-materialization-range")
                     })?;
+                if animation_selected {
+                    total_cells = total_cells
+                        .checked_add(animation_cells)
+                        .ok_or_else(|| ctx.allocation_failure("gltf-animation-total-cells"))?;
+                    retained_channel_count = retained_channel_count
+                        .checked_add(animation_retained_channel_count)
+                        .ok_or_else(|| {
+                            ctx.allocation_failure("gltf-animation-retained-channel-count")
+                        })?;
+                    clips.try_push_reserved(AnimationClipContract {
+                        source_index: animation_index,
+                        materialization_offset,
+                        materialization_count,
+                        retained_channel_count: animation_retained_channel_count,
+                    })?;
+                } else {
+                    materialization_channels.truncate(materialization_offset);
                 }
+                let source_channel_end = source_channel_offset
+                    .checked_add(runtime_channel_count)
+                    .ok_or_else(|| ctx.allocation_failure("gltf-animation-channel-range"))?;
+                record_channel_losses(
+                    ctx,
+                    animation_index,
+                    source_channels
+                        .as_slice()
+                        .get(source_channel_offset..source_channel_end)
+                        .ok_or_else(|| {
+                            ContentError::from(super::GltfFailure::internal(
+                                "animation channel disposition range is invalid",
+                            ))
+                        })?,
+                    animation_selected,
+                )?;
+                selected_animations.try_push_reserved(animation_selected)?;
             }
             if visited_channels != source_channel_count {
                 return Err(gltf_parse_error(
@@ -374,16 +497,63 @@ fn preflight_inner<'scope, 'document>(
                     ),
                 ));
             }
-            Ok((
-                AnimationContracts {
-                    clips,
-                    channels,
-                    total_cells,
-                },
-                has_morph_weights,
-            ))
+            Ok(AnimationContracts {
+                clips,
+                materialization_channels,
+                selected_animations,
+                source_channels,
+                retained_channel_count,
+                total_cells,
+            })
         },
     )
+}
+
+fn record_channel_losses(
+    ctx: &ParseScope<'_>,
+    animation_index: usize,
+    dispositions: &[SourceChannelDisposition],
+    animation_selected: bool,
+) -> Result<()> {
+    let mut object_path = ctx.metered_string(
+        ImportStorageClass::FormatNormalization,
+        "gltf-animation-loss-object-path",
+    );
+    object_path.try_reserve(48)?;
+    for (channel_index, disposition) in dispositions.iter().copied().enumerate() {
+        let (code, reason) = match disposition {
+            SourceChannelDisposition::Retained => continue,
+            SourceChannelDisposition::ScopeOmitted if !animation_selected => continue,
+            SourceChannelDisposition::ScopeOmitted => (
+                "gltf.animation_channel_outside_scene_omitted",
+                "targets a node outside the selected scene",
+            ),
+            SourceChannelDisposition::SemanticLoss => (
+                "gltf.animation_morph_weights_ignored",
+                "uses morph-weight animation, which is not imported yet",
+            ),
+        };
+        object_path.truncate(0);
+        object_path.try_write_fmt(format_args!(
+            "/animations/{animation_index}/channels/{channel_index}"
+        ))?;
+        let code = DiagnosticCode::new(code).map_err(|_| {
+            ContentError::from(super::GltfFailure::internal(
+                "static glTF animation-loss code is invalid",
+            ))
+        })?;
+        ctx.record_source_semantic_loss(
+            code,
+            SourceScopeEntityKind::AnimationChannel,
+            object_path.as_str(),
+            |details| {
+                details.unsigned("animation_index", to_u64(animation_index));
+                details.unsigned("channel_index", to_u64(channel_index));
+            },
+            format_args!("glTF animation {animation_index} channel {channel_index} {reason}"),
+        )?;
+    }
+    Ok(())
 }
 
 fn checked_property(
@@ -481,28 +651,37 @@ pub(super) fn build_storage<'scope>(
             let mut channels = try_vec_capacity(
                 ctx,
                 ImportStorageClass::SceneConstruction,
-                contracts.channels.len(),
+                contracts.retained_channel_count,
                 "gltf-animation-storage-channels",
             )?;
 
             for clip in contracts.clips.as_slice() {
                 work.poll()?;
-                let source_channels = checked_contract_range(ctx, contracts, *clip)?;
+                let materialization_channels = checked_contract_range(ctx, contracts, *clip)?;
                 let channel_offset = channels.len();
                 let mut duration = 0.0_f64;
-                for contract in source_channels {
-                    let (channel, channel_duration) =
-                        read_channel(ctx, buffers, node_ids, contract, work)?;
-                    duration = duration.max(channel_duration);
-                    channels.try_push_reserved(channel)?;
+                for contract in materialization_channels {
+                    match contract {
+                        AnimationMaterializationContract::Retained(contract) => {
+                            let (channel, channel_duration) =
+                                read_channel(ctx, buffers, node_ids, contract, work)?;
+                            duration = duration.max(channel_duration);
+                            channels.try_push_reserved(channel)?;
+                        }
+                        AnimationMaterializationContract::DurationOnly(contract) => {
+                            duration =
+                                duration.max(read_duration_channel(ctx, buffers, contract, work)?);
+                        }
+                    }
                 }
                 clips.try_push_reserved(AnimationClipStorage {
+                    source_index: clip.source_index,
                     duration,
                     channel_offset,
-                    channel_count: source_channels.len(),
+                    channel_count: clip.retained_channel_count,
                 })?;
             }
-            if channels.len() != contracts.channels.len() {
+            if channels.len() != contracts.retained_channel_count {
                 return Err(ContentError::from(super::GltfFailure::internal(
                     "animation storage did not materialize every admitted channel",
                 )));
@@ -516,20 +695,77 @@ fn checked_contract_range<'a>(
     ctx: &ParseScope<'_>,
     contracts: &'a AnimationContracts<'_, '_>,
     clip: AnimationClipContract,
-) -> Result<&'a [AnimationChannelContract<'a>]> {
+) -> Result<&'a [AnimationMaterializationContract<'a>]> {
     let end = clip
-        .channel_offset
-        .checked_add(clip.channel_count)
+        .materialization_offset
+        .checked_add(clip.materialization_count)
         .ok_or_else(|| ctx.allocation_failure("gltf-animation-contract-range"))?;
     contracts
-        .channels
+        .materialization_channels
         .as_slice()
-        .get(clip.channel_offset..end)
+        .get(clip.materialization_offset..end)
         .ok_or_else(|| {
             ContentError::from(super::GltfFailure::internal(
                 "animation clip channel range is invalid",
             ))
         })
+}
+
+fn read_duration_channel(
+    ctx: &ParseScope<'_>,
+    buffers: &[BufferData<'_>],
+    contract: &AnimationDurationContract<'_>,
+    work: &mut ImportWorkScope<'_, '_, 2>,
+) -> Result<f64> {
+    let reader = safe_gltf(ctx, "glTF animation duration reader construction", || {
+        contract
+            .source
+            .reader(|buffer| buffers.get(buffer.index()).map(BufferData::as_slice))
+    })?;
+    let mut input = safe_gltf(ctx, "glTF animation duration input reader", || {
+        reader.read_inputs()
+    })?
+    .ok_or_else(|| {
+        channel_error_at(
+            ctx,
+            contract.animation_index,
+            contract.channel_index,
+            "input accessor could not be read",
+        )
+    })?;
+    let mut previous = None;
+    for key in 0..contract.key_count {
+        if key.is_multiple_of(PARSER_POLL_INTERVAL) {
+            work.poll()?;
+        }
+        let time = next_gltf_value("glTF animation duration input iteration", &mut input)?
+            .ok_or_else(|| {
+                channel_error_at(
+                    ctx,
+                    contract.animation_index,
+                    contract.channel_index,
+                    "input accessor ended early",
+                )
+            })?;
+        let time = validate_animation_time(
+            ctx,
+            contract.animation_index,
+            contract.channel_index,
+            time,
+            previous,
+        )?;
+        previous = Some(time);
+        work.complete([1, 1])?;
+    }
+    if next_gltf_value("glTF animation duration input iteration", &mut input)?.is_some() {
+        return Err(channel_error_at(
+            ctx,
+            contract.animation_index,
+            contract.channel_index,
+            "input accessor produced too many values",
+        ));
+    }
+    Ok(previous.unwrap_or(0.0))
 }
 
 fn read_channel<'scope>(
@@ -640,6 +876,7 @@ fn read_channel<'scope>(
     }
     Ok((
         AnimationChannelStorage {
+            source_index: contract.source_index,
             target: contract.property.target(node),
             interpolation: contract.interpolation,
             times,
@@ -670,28 +907,13 @@ fn read_times<'scope>(
         }
         let time = next_gltf_value("glTF animation input iteration", &mut input)?
             .ok_or_else(|| channel_error(ctx, contract, "input accessor ended early"))?;
-        if !time.is_finite() {
-            return Err(channel_error(
-                ctx,
-                contract,
-                "contains a non-finite animation time",
-            ));
-        }
-        let time = f64::from(time);
-        if time < 0.0 {
-            return Err(channel_error(
-                ctx,
-                contract,
-                "contains a negative animation time",
-            ));
-        }
-        if previous.is_some_and(|previous| previous >= time) {
-            return Err(channel_error(
-                ctx,
-                contract,
-                "animation times are not strictly increasing",
-            ));
-        }
+        let time = validate_animation_time(
+            ctx,
+            contract.animation_index,
+            contract.channel_index,
+            time,
+            previous,
+        )?;
         previous = Some(time);
         times.try_push_reserved(time)?;
         work.complete([1, 1])?;
@@ -790,12 +1012,58 @@ fn channel_error(
     contract: &AnimationChannelContract<'_>,
     reason: &'static str,
 ) -> ContentError {
+    channel_error_at(
+        ctx,
+        contract.animation_index,
+        contract.channel_index,
+        reason,
+    )
+}
+
+fn validate_animation_time(
+    ctx: &ParseScope<'_>,
+    animation_index: usize,
+    channel_index: usize,
+    time: f32,
+    previous: Option<f64>,
+) -> Result<f64> {
+    if !time.is_finite() {
+        return Err(channel_error_at(
+            ctx,
+            animation_index,
+            channel_index,
+            "contains a non-finite animation time",
+        ));
+    }
+    let time = f64::from(time);
+    if time < 0.0 {
+        return Err(channel_error_at(
+            ctx,
+            animation_index,
+            channel_index,
+            "contains a negative animation time",
+        ));
+    }
+    if previous.is_some_and(|previous| previous >= time) {
+        return Err(channel_error_at(
+            ctx,
+            animation_index,
+            channel_index,
+            "animation times are not strictly increasing",
+        ));
+    }
+    Ok(time)
+}
+
+fn channel_error_at(
+    ctx: &ParseScope<'_>,
+    animation_index: usize,
+    channel_index: usize,
+    reason: &'static str,
+) -> ContentError {
     gltf_parse_error(
         ctx,
-        format!(
-            "glTF animation {} channel {} {reason}",
-            contract.animation_index, contract.channel_index
-        ),
+        format!("glTF animation {animation_index} channel {channel_index} {reason}"),
     )
 }
 
@@ -851,6 +1119,11 @@ impl AnimationStorage<'_> {
                         (Presence::Absent, Presence::Absent)
                     };
                 channels.try_push_reserved(AnimationChannelAuthoring::new(
+                    authoring_u32(
+                        ctx,
+                        channel.source_index,
+                        "gltf-animation-source-channel-index",
+                    )?,
                     channel.target,
                     channel.interpolation,
                     AnimationExtrapolationAuthoring::SourceDefault,
@@ -862,6 +1135,7 @@ impl AnimationStorage<'_> {
                 ))?;
             }
             clips.try_push_reserved(AnimationClipAuthoring::new(
+                authoring_u32(ctx, clip.source_index, "gltf-animation-source-clip-index")?,
                 clip.duration,
                 AnimationTimeDomainAuthoring::Seconds,
                 AuthoringRange::new(

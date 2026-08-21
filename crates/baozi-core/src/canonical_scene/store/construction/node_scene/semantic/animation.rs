@@ -257,12 +257,11 @@ impl<'scene> NodeSceneAnimationCursor<'scene> {
             .tables
             .clips
             .ok_or_else(|| invariant("validated animation-clip table view is absent"))?;
-        require_row_ordinal(
+        let source_index = read_u32_as_usize(
             table,
             row,
             animation_clip_field::CLIP,
-            "validated animation-clip identity is unreadable",
-            "validated animation-clip identity disagrees with its row",
+            "validated animation-clip source identity is unreadable",
         )?;
 
         let duration = read_scalar::<f64>(
@@ -321,7 +320,7 @@ impl<'scene> NodeSceneAnimationCursor<'scene> {
             .ok_or_else(|| invariant("animation-clip channel cursor overflows"))?;
         self.next_clip = advance_row(row, "animation-clip cursor index overflows")?;
         Ok(Some(NodeSceneAnimationClip {
-            source_index: row,
+            source_index,
             duration,
             time_domain,
             channel_offset,
@@ -345,12 +344,11 @@ impl<'scene> NodeSceneAnimationCursor<'scene> {
             .tables
             .channels
             .ok_or_else(|| invariant("validated animation-channel table view is absent"))?;
-        require_row_ordinal(
+        let source_index = read_u32_as_usize(
             table,
             row,
             animation_channel_field::CHANNEL,
-            "validated animation-channel identity is unreadable",
-            "validated animation-channel identity disagrees with its row",
+            "validated animation-channel source identity is unreadable",
         )?;
 
         let target = self.read_target(table, row)?;
@@ -470,7 +468,7 @@ impl<'scene> NodeSceneAnimationCursor<'scene> {
         }
         self.next_channel = advance_row(row, "animation-channel cursor index overflows")?;
         Ok(Some(NodeSceneAnimationChannel {
-            source_index: row,
+            source_index,
             target,
             interpolation,
             pre_extrapolation,
@@ -1000,20 +998,6 @@ fn require_absent_cell(
 ) -> NodeSceneSemanticResult<()> {
     if table.scalar::<u8>(row, field) != Some(0) {
         return Err(invariant(reason));
-    }
-    Ok(())
-}
-
-fn require_row_ordinal(
-    table: CanonicalRecordView<'_>,
-    row: usize,
-    field: usize,
-    unreadable_reason: &'static str,
-    mismatch_reason: &'static str,
-) -> NodeSceneSemanticResult<()> {
-    let value = read_u32_as_usize(table, row, field, unreadable_reason)?;
-    if value != row {
-        return Err(invariant(mismatch_reason));
     }
     Ok(())
 }

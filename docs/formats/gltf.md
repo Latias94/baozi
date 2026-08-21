@@ -43,11 +43,21 @@ criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.m
 - Positions, normals, tangents, texture coordinates, colors, indices, `JOINTS_0`, and `WEIGHTS_0`
   streams when present.
 - Node hierarchy, node transforms, mesh binding, node-level skin binding, and camera binding.
+- Deterministic document-default scene selection: a sole scene is selected when no default is
+  declared, while multiple declared scenes without a default are rejected instead of silently
+  selecting scene zero.
 - Skins with joint node references, optional skeleton root, and optional inverse bind matrices.
 - Perspective and orthographic camera projection data.
 - PBR metallic-roughness material factors.
 - Base color, metallic-roughness, normal, occlusion, and emissive texture URI references.
 - Y-up, right-handed, meters scene space metadata.
+- Node translation, rotation, and scale animation with source clip/channel identity, duration, time
+  domain, interpolation, retained channel order, and non-contiguous source indexes preserved through
+  canonical storage. Whole clips outside the selected scene are scope omissions; mixed-target clips
+  require explicit `SourceSemanticLoss` authority before outside channels may be filtered.
+- A bounded development `SourceScopeRecord` covering declared scenes, nodes, animations, and
+  animation channels on success and on later terminal failure. Complete mesh, material, image,
+  accessor, sampler, and external-resource closure remains pending.
 - Development resource-limit coverage for primary assets, decoded JSON text surfaces, external
   buffers, base64 buffer data URIs, GLB BIN payloads, diagnostics, and cooperative cancellation.
 - Development gates for GLB import, snapshots, malformed external buffers/data URIs, skin validation,
@@ -102,9 +112,12 @@ and import-contract tests.
 
 - Embedded image buffer views and texture data URIs are diagnosed and skipped.
 - Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
-- Node translation, rotation, and scale animation channels are imported with their source
-  interpolation and bounded payload semantics. Morph-weight animation remains explicitly diagnosed
-  and ignored until the morph animation slice is admitted.
+- Morph-weight animation is unsupported retained-domain semantics. It is rejected by default and may
+  be omitted only under explicit `SourceSemanticLoss` authority with typed loss evidence and a stable
+  channel diagnostic until the morph animation slice is admitted.
+- Source-scope evidence currently covers scenes, nodes, animations, and animation channels only. The
+  full ADR 0039 resource closure across meshes, materials, images, accessors, buffer views, buffers,
+  samplers, skins, and external dependencies remains an admission blocker.
 - The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
 - `gltf_import` is a non-admitted development target until known backend aborts are removed or
   process-isolated and the complete baseline admission matrix passes.

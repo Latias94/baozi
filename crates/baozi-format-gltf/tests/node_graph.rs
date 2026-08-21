@@ -297,7 +297,7 @@ fn imports_valid_forest_once_without_a_declared_scene() -> TestResult<()> {
 }
 
 #[test]
-fn uses_the_first_scene_when_no_default_scene_is_declared() -> TestResult<()> {
+fn selects_the_only_scene_when_no_default_scene_is_declared() -> TestResult<()> {
     let document = graph_document(
         r#""scenes": [{ "nodes": [1] }],"#,
         r#"{ "name": "Unselected" }, { "name": "Selected" }"#,

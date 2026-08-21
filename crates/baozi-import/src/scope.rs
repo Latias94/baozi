@@ -35,7 +35,8 @@ use crate::resource_graph::{
     registered_negative_proof_canonical_len, unavailable_disposition,
 };
 use crate::source_scope::{
-    FinalizedSourceScopeRecord, LiveSourceScopeRecord, SourceScopeRecordBuilder,
+    FinalizedSourceScopeRecord, LiveSourceScopeRecord, SourceScopeEntityKind,
+    SourceScopeRecordBuilder,
 };
 use crate::store::{
     ImportObservedWorkFailure, ImportStoreHost, ImportStoreHostError, ImportStoreReservation,
@@ -1204,6 +1205,59 @@ impl<'session> ParseScope<'session> {
             }
             ImportLossDisposition::RejectedByLossPolicy => {
                 Err(self.abort(ScopeAbortCause::FormatRecoveryRejectedByLossPolicy { code }))
+            }
+        }
+    }
+
+    /// Records one format-identified source semantic omission under the caller's frozen loss policy.
+    ///
+    /// The source entity identity belongs in `object_path`; the typed subject keeps loss evidence
+    /// queryable even when the diagnostic message is truncated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_source_semantic_loss(
+        &self,
+        code: DiagnosticCode,
+        subject: SourceScopeEntityKind,
+        object_path: &str,
+        details: impl FnOnce(&mut dyn DiagnosticDetailSink),
+        message: fmt::Arguments<'_>,
+    ) -> ParseResult<()> {
+        self.preflight_active()?;
+        let disposition = if self.loss_policy.allows(ImportLossKind::SourceSemanticLoss) {
+            ImportLossDisposition::Applied
+        } else {
+            ImportLossDisposition::RejectedByLossPolicy
+        };
+        let source = self.diagnostic_source();
+        let evidence = self.prepare_loss_evidence(
+            ImportLossKind::SourceSemanticLoss,
+            ImportLossSubject::SourceEntity(subject),
+            code,
+            &source,
+            None,
+            disposition,
+        )?;
+        self.commit_loss_evidence(evidence)?;
+        self.emit_diagnostic_with(
+            DiagnosticSeverity::Warning,
+            code,
+            ImportProgressPhase::Normalize,
+            source,
+            None,
+            Some(object_path),
+            details,
+            message,
+        )?;
+
+        match disposition {
+            ImportLossDisposition::Applied => Ok(()),
+            ImportLossDisposition::RejectedByLossPolicy => {
+                Err(self.abort(ScopeAbortCause::SourceSemanticLossRejectedByLossPolicy { code }))
+            }
+            ImportLossDisposition::RejectedByConformance => {
+                Err(self.abort(ScopeAbortCause::DescriptorContract {
+                    code: "source-semantic-loss-invalid-disposition",
+                }))
             }
         }
     }

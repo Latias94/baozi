@@ -2,9 +2,10 @@ mod common;
 
 use baozi_format_gltf::GltfFailureCode;
 use baozi_import::{
-    ImportCause, ImportDimension, ImportFailure, ImportOperationControl, ImportProgressPhase,
-    ImportProgressUnit, ImportReport, ImportResult, SceneSnapshot, SceneSnapshotLimits,
-    ScopeAbortCause,
+    ImportCause, ImportDiagnostic, ImportDimension, ImportFailure, ImportLossDisposition,
+    ImportLossKind, ImportLossSubject, ImportOperationControl, ImportProgressPhase,
+    ImportProgressUnit, ImportReport, ImportResult, LossPolicy, SceneSnapshot, SceneSnapshotLimits,
+    ScopeAbortCause, SourceScopeDisposition, SourceScopeEntityKind,
 };
 use baozi_operation::{
     CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
@@ -20,6 +21,7 @@ use std::sync::{
 };
 
 const ANIMATION_CELLS: u64 = 38;
+const FILTERED_ANIMATION_CELLS: u64 = 40;
 
 #[derive(Clone)]
 struct AnimationPollCancellation {
@@ -40,8 +42,9 @@ impl CancellationSignal for AnimationPollCancellation {
 
 fn controlled_animation_result(
     document: &[u8],
+    options: GltfTestOptions,
     cancel_on: Option<usize>,
-) -> TestResult<(ImportResult<ImportReport>, usize)> {
+) -> TestResult<(ImportResult<ImportReport>, Vec<ImportDiagnostic>, usize)> {
     let armed = Arc::new(AtomicBool::new(false));
     let polls = Arc::new(AtomicUsize::new(0));
     let signal = AnimationPollCancellation {
@@ -62,11 +65,10 @@ fn controlled_animation_result(
     let (result, diagnostics) = import_assets_result_with_control(
         "animation.glb",
         [("animation.glb", document.to_vec())],
-        GltfTestOptions::memory(),
+        options,
         control,
     )?;
-    assert!(diagnostics.is_empty());
-    Ok((result, polls.load(Ordering::SeqCst)))
+    Ok((result, diagnostics, polls.load(Ordering::SeqCst)))
 }
 
 fn assert_signal_cancelled(failure: &ImportFailure) {
@@ -316,13 +318,17 @@ fn animation_cell_budget_is_admitted_before_accessor_reading() -> TestResult<()>
 #[test]
 fn animation_cancellation_preserves_cell_prefix_and_releases_storage() -> TestResult<()> {
     let document = animation_glb(base_animation_json(), &base_animation_bin());
-    let (calibration, total_polls) = controlled_animation_result(&document, None)?;
+    let (calibration, diagnostics, total_polls) =
+        controlled_animation_result(&document, GltfTestOptions::memory(), None)?;
+    assert!(diagnostics.is_empty());
     let _report = calibration?;
     assert!(total_polls > 0);
 
     let mut cancelled = None;
     for cancel_on in 1..=total_polls {
-        let (result, polls) = controlled_animation_result(&document, Some(cancel_on))?;
+        let (result, diagnostics, polls) =
+            controlled_animation_result(&document, GltfTestOptions::memory(), Some(cancel_on))?;
+        assert!(diagnostics.is_empty());
         let failure = match result {
             Ok(_) => continue,
             Err(error) => error.into_operation_failure()?,
@@ -350,6 +356,70 @@ fn animation_cancellation_preserves_cell_prefix_and_releases_storage() -> TestRe
         .expect("animation cells are configured");
     assert_eq!(animation_cells.attempted(), ANIMATION_CELLS);
     assert!(animation_cells.consumed() < ANIMATION_CELLS);
+    assert!(
+        failure.source_scope_record().is_some(),
+        "source-scope evidence must survive a later cancellation"
+    );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
+    Ok(())
+}
+
+#[test]
+fn filtered_animation_cancellation_preserves_duration_only_prefix_and_evidence() -> TestResult<()> {
+    const LOSS_CODE: &str = "gltf.animation_channel_outside_scene_omitted";
+
+    let document = filtered_animation_glb();
+    let mut options = GltfTestOptions::memory();
+    options.loss_policy = LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss);
+    let (calibration, diagnostics, total_polls) =
+        controlled_animation_result(&document, options.clone(), None)?;
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code().as_str(), LOSS_CODE);
+    let _report = calibration?;
+    assert!(total_polls > 0);
+
+    let mut cancelled = None;
+    for cancel_on in 1..=total_polls {
+        let (result, diagnostics, polls) =
+            controlled_animation_result(&document, options.clone(), Some(cancel_on))?;
+        let failure = match result {
+            Ok(_) => continue,
+            Err(error) => error.into_operation_failure()?,
+        };
+        assert_eq!(polls, cancel_on);
+        assert_signal_cancelled(&failure);
+        let animation_cells = failure
+            .ledger()
+            .dimension(ImportDimension::AnimationCells)
+            .expect("animation cells are configured");
+        if animation_cells.attempted() == FILTERED_ANIMATION_CELLS
+            && animation_cells.consumed() == 2
+        {
+            cancelled = Some((failure, diagnostics));
+            break;
+        }
+    }
+
+    let (failure, diagnostics) = cancelled
+        .expect("a calibrated poll must cancel after the duration-only time axis is consumed");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code().as_str(), LOSS_CODE);
+    assert_source_channel_loss(
+        failure.loss_evidence(),
+        LOSS_CODE,
+        ImportLossDisposition::Applied,
+    );
+    assert!(
+        failure.source_scope_record().is_some(),
+        "source-scope evidence must survive filtered animation cancellation"
+    );
+    let animation_cells = failure
+        .ledger()
+        .dimension(ImportDimension::AnimationCells)
+        .expect("animation cells are configured");
+    assert_eq!(animation_cells.attempted(), FILTERED_ANIMATION_CELLS);
+    assert_eq!(animation_cells.consumed(), 2);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
     assert_eq!(failure.ledger().active_reservations(), 0);
     Ok(())
@@ -362,10 +432,12 @@ fn morph_weight_animation_remains_an_explicit_controlled_diagnostic() -> TestRes
         .flat_map(f32::to_le_bytes)
         .collect::<Vec<_>>();
     let document = animation_glb(morph_animation_json(), &bin);
+    let mut options = GltfTestOptions::memory();
+    options.loss_policy = LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss);
     let (report, diagnostics) = import_assets(
         "morph-animation.glb",
         [("morph-animation.glb", document)],
-        GltfTestOptions::memory(),
+        options,
     )?;
 
     assert_eq!(diagnostics.len(), 1);
@@ -373,10 +445,372 @@ fn morph_weight_animation_remains_an_explicit_controlled_diagnostic() -> TestRes
         diagnostics[0].code().as_str(),
         "gltf.animation_morph_weights_ignored"
     );
+    assert_eq!(
+        diagnostics[0].object_path(),
+        Some("/animations/0/channels/0")
+    );
+    assert_source_channel_loss(
+        report.loss_evidence(),
+        "gltf.animation_morph_weights_ignored",
+        ImportLossDisposition::Applied,
+    );
     let snapshot = scene_snapshot(&report);
     assert!(snapshot.preview().contains("animation(present)"));
     assert!(snapshot.preview().contains("clips(present,total=0)"));
     assert!(snapshot.preview().contains("channels(present,total=0)"));
+    Ok(())
+}
+
+#[test]
+fn animation_loss_diagnostics_are_scoped_to_their_source_clip() -> TestResult<()> {
+    let document = multi_animation_morph_loss_glb();
+    let mut options = GltfTestOptions::memory();
+    options.loss_policy = LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss);
+    let (report, diagnostics) = import_assets(
+        "multi-animation-loss.glb",
+        [("multi-animation-loss.glb", document)],
+        options,
+    )?;
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].code().as_str(),
+        "gltf.animation_morph_weights_ignored"
+    );
+    assert_eq!(
+        diagnostics[0].object_path(),
+        Some("/animations/1/channels/0")
+    );
+    assert_source_channel_loss(
+        report.loss_evidence(),
+        "gltf.animation_morph_weights_ignored",
+        ImportLossDisposition::Applied,
+    );
+    Ok(())
+}
+
+#[test]
+fn multiple_scenes_without_default_are_rejected_instead_of_selecting_scene_zero() -> TestResult<()>
+{
+    let document = glb_with_json(
+        br#"{
+  "asset": { "version": "2.0" },
+  "scenes": [{ "nodes": [0] }, { "nodes": [1] }],
+  "nodes": [{ "name": "First" }, { "name": "Second" }]
+}"#,
+    );
+    let (result, diagnostics) = import_assets_result(
+        "ambiguous-scenes.glb",
+        [("ambiguous-scenes.glb", document)],
+        GltfTestOptions::memory(),
+    )?;
+    let failure = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_gltf_failure(
+        &failure,
+        GltfFailureCode::InvalidDocument,
+        Some("multiple scenes require an explicit default"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn mixed_target_animation_requires_source_semantic_loss_authority() -> TestResult<()> {
+    let document = filtered_animation_glb();
+    let (result, diagnostics) = import_assets_result(
+        "filtered-animation-rejected.glb",
+        [("filtered-animation-rejected.glb", document)],
+        GltfTestOptions::memory(),
+    )?;
+    let failure = expected_error(result)?;
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].code().as_str(),
+        "gltf.animation_channel_outside_scene_omitted"
+    );
+    assert_eq!(
+        diagnostics[0].object_path(),
+        Some("/animations/0/channels/0")
+    );
+    assert_source_channel_loss(
+        failure.loss_evidence(),
+        "gltf.animation_channel_outside_scene_omitted",
+        ImportLossDisposition::RejectedByLossPolicy,
+    );
+    assert!(failure.source_scope_record().is_none());
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::SourceSemanticLossRejectedByLossPolicy { code }
+                    if code.as_str() == "gltf.animation_channel_outside_scene_omitted"
+            )
+    ));
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(ImportDimension::AnimationCells)
+            .expect("animation cells are configured")
+            .attempted(),
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn whole_animation_outside_selected_scene_is_scope_omission_without_loss() -> TestResult<()> {
+    let document = outside_animation_glb();
+    let (report, diagnostics) = import_assets(
+        "outside-animation.glb",
+        [("outside-animation.glb", document)],
+        GltfTestOptions::memory(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    assert!(report.loss_evidence().is_empty());
+    let record = report
+        .source_scope_record()
+        .expect("glTF projection must publish source-scope evidence");
+    assert_eq!(
+        record.counts(SourceScopeEntityKind::Animation).selected(),
+        0
+    );
+    assert_eq!(record.counts(SourceScopeEntityKind::Animation).omitted(), 1);
+    assert_eq!(
+        record
+            .counts(SourceScopeEntityKind::AnimationChannel)
+            .selected(),
+        0
+    );
+    assert_eq!(
+        record
+            .counts(SourceScopeEntityKind::AnimationChannel)
+            .omitted(),
+        3
+    );
+
+    let snapshot = scene_snapshot(&report);
+    assert!(!snapshot.preview().contains("clip["));
+    assert!(!snapshot.preview().contains("channel["));
+    Ok(())
+}
+
+#[test]
+fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()> {
+    let document = filtered_animation_glb();
+    let mut options = GltfTestOptions::memory();
+    options.loss_policy = LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss);
+    let (report, diagnostics) = import_assets(
+        "filtered-animation.glb",
+        [("filtered-animation.glb", document)],
+        options,
+    )?;
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].code().as_str(),
+        "gltf.animation_channel_outside_scene_omitted"
+    );
+    assert_eq!(
+        diagnostics[0].object_path(),
+        Some("/animations/0/channels/0")
+    );
+    assert_source_channel_loss(
+        report.loss_evidence(),
+        "gltf.animation_channel_outside_scene_omitted",
+        ImportLossDisposition::Applied,
+    );
+    let animation_cells = report
+        .ledger()
+        .dimension(ImportDimension::AnimationCells)
+        .expect("animation cells are configured");
+    assert_eq!(animation_cells.attempted(), FILTERED_ANIMATION_CELLS);
+    assert_eq!(animation_cells.consumed(), FILTERED_ANIMATION_CELLS);
+    let record = report
+        .source_scope_record()
+        .expect("glTF projection must publish source-scope evidence");
+    assert_eq!(record.counts(SourceScopeEntityKind::Scene).selected(), 1);
+    assert_eq!(record.counts(SourceScopeEntityKind::Scene).omitted(), 1);
+    assert_eq!(record.counts(SourceScopeEntityKind::Node).selected(), 1);
+    assert_eq!(record.counts(SourceScopeEntityKind::Node).omitted(), 1);
+    assert_eq!(
+        record.counts(SourceScopeEntityKind::Animation).selected(),
+        1
+    );
+    assert_eq!(record.counts(SourceScopeEntityKind::Animation).omitted(), 0);
+    assert_eq!(
+        record
+            .counts(SourceScopeEntityKind::AnimationChannel)
+            .selected(),
+        3
+    );
+    assert_eq!(
+        record
+            .counts(SourceScopeEntityKind::AnimationChannel)
+            .omitted(),
+        1
+    );
+    let details = record
+        .details()
+        .map(|detail| {
+            (
+                detail.kind(),
+                detail.disposition(),
+                detail.identity().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(details.len(), 9);
+    assert_eq!(
+        details[0],
+        (
+            SourceScopeEntityKind::Scene,
+            SourceScopeDisposition::Selected,
+            "s0".to_owned()
+        )
+    );
+    assert_eq!(
+        details[1],
+        (
+            SourceScopeEntityKind::Scene,
+            SourceScopeDisposition::Omitted,
+            "s1".to_owned()
+        )
+    );
+    assert_eq!(
+        details[2],
+        (
+            SourceScopeEntityKind::Node,
+            SourceScopeDisposition::Selected,
+            "n0".to_owned()
+        )
+    );
+    assert_eq!(
+        details[3],
+        (
+            SourceScopeEntityKind::Node,
+            SourceScopeDisposition::Omitted,
+            "n1".to_owned()
+        )
+    );
+    assert_eq!(
+        details[4],
+        (
+            SourceScopeEntityKind::Animation,
+            SourceScopeDisposition::Selected,
+            "a0".to_owned()
+        )
+    );
+    assert_eq!(
+        details[5],
+        (
+            SourceScopeEntityKind::AnimationChannel,
+            SourceScopeDisposition::Omitted,
+            "a0c0".to_owned()
+        )
+    );
+    assert_eq!(
+        details[6],
+        (
+            SourceScopeEntityKind::AnimationChannel,
+            SourceScopeDisposition::Selected,
+            "a0c1".to_owned()
+        )
+    );
+    assert_eq!(
+        details[7],
+        (
+            SourceScopeEntityKind::AnimationChannel,
+            SourceScopeDisposition::Selected,
+            "a0c2".to_owned()
+        )
+    );
+    assert_eq!(
+        details[8],
+        (
+            SourceScopeEntityKind::AnimationChannel,
+            SourceScopeDisposition::Selected,
+            "a0c3".to_owned()
+        )
+    );
+
+    let snapshot = scene_snapshot(&report);
+    assert!(snapshot_line(&snapshot, "clip[0]").contains(concat!(
+        "duration_bits=4611686018427387904 time_domain=0 ",
+        "channel_offset=0 channel_count=3"
+    )));
+    assert!(snapshot_line(&snapshot, "channel[1]").contains("target=1"));
+    assert!(snapshot_line(&snapshot, "channel[2]").contains("target=1"));
+    assert!(snapshot_line(&snapshot, "channel[3]").contains("target=1"));
+    Ok(())
+}
+
+#[test]
+fn filtered_animation_cell_budget_fails_before_duration_or_payload_reading() -> TestResult<()> {
+    let document = filtered_animation_glb();
+    let mut options = GltfTestOptions::memory();
+    options.loss_policy = LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss);
+    options.limits.max_animation_cells = usize::try_from(FILTERED_ANIMATION_CELLS - 1)?;
+    let (result, diagnostics) = import_assets_result(
+        "filtered-animation-cell-limit.glb",
+        [("filtered-animation-cell-limit.glb", document)],
+        options,
+    )?;
+    let failure = expected_error(result)?;
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_source_channel_loss(
+        failure.loss_evidence(),
+        "gltf.animation_channel_outside_scene_omitted",
+        ImportLossDisposition::Applied,
+    );
+    assert!(failure.source_scope_record().is_some());
+    assert_resource_limit(&failure, "max_animation_cells");
+    let animation_cells = failure
+        .ledger()
+        .dimension(ImportDimension::AnimationCells)
+        .expect("animation cells are configured");
+    assert_eq!(animation_cells.attempted(), FILTERED_ANIMATION_CELLS);
+    assert_eq!(animation_cells.consumed(), 0);
+    Ok(())
+}
+
+#[test]
+fn source_scope_budget_fails_before_scene_publication() -> TestResult<()> {
+    let document = filtered_animation_glb();
+    let mut options = GltfTestOptions::memory();
+    options.loss_policy = LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss);
+    options.limits.max_source_scope_items = 8;
+    let (result, diagnostics) = import_assets_result(
+        "source-scope-limit.glb",
+        [("source-scope-limit.glb", document)],
+        options,
+    )?;
+    let failure = expected_error(result)?;
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].code().as_str(),
+        "gltf.animation_channel_outside_scene_omitted"
+    );
+    assert_source_channel_loss(
+        failure.loss_evidence(),
+        "gltf.animation_channel_outside_scene_omitted",
+        ImportLossDisposition::Applied,
+    );
+    assert_resource_limit(&failure, "source-scope-items");
+    assert!(failure.source_scope_record().is_none());
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(ImportDimension::AnimationCells)
+            .expect("animation cells are configured")
+            .attempted(),
+        0
+    );
     Ok(())
 }
 
@@ -390,6 +824,22 @@ fn scene_snapshot(report: &ImportReport) -> SceneSnapshot {
     assert!(!snapshot.preview_bytes_truncated());
     assert!(!snapshot.preview_items_truncated());
     snapshot
+}
+
+fn assert_source_channel_loss(
+    evidence: &[baozi_import::ImportLossEvidence],
+    code: &str,
+    disposition: ImportLossDisposition,
+) {
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].kind(), ImportLossKind::SourceSemanticLoss);
+    assert_eq!(
+        evidence[0].subject(),
+        ImportLossSubject::SourceEntity(SourceScopeEntityKind::AnimationChannel)
+    );
+    assert_eq!(evidence[0].code().as_str(), code);
+    assert_eq!(evidence[0].raw_range(), None);
+    assert_eq!(evidence[0].disposition(), disposition);
 }
 
 fn snapshot_line<'snapshot>(snapshot: &'snapshot SceneSnapshot, prefix: &str) -> &'snapshot str {
@@ -412,6 +862,64 @@ fn replace_once(source: impl AsRef<[u8]>, from: &str, to: &str) -> String {
 
 fn animation_glb(json: &[u8], bin: &[u8]) -> Vec<u8> {
     append_glb_chunk(glb_with_json(json), b"BIN\0", bin)
+}
+
+fn filtered_animation_glb() -> Vec<u8> {
+    let json = replace_once(
+        base_animation_json(),
+        "\"scenes\": [{ \"nodes\": [0] }],\n  \"nodes\": [{ \"name\": \"AnimatedNode\" }]",
+        "\"scenes\": [{ \"nodes\": [0] }, { \"nodes\": [1] }],\n  \"nodes\": [{ \"name\": \"AnimatedNode\" }, { \"name\": \"OmittedNode\" }]",
+    );
+    let json = replace_once(
+        &json,
+        "\"buffers\": [{ \"byteLength\": 136 }]",
+        "\"buffers\": [{ \"byteLength\": 144 }]",
+    );
+    let json = replace_once(
+        &json,
+        "    { \"buffer\": 0, \"byteOffset\": 64, \"byteLength\": 72 }\n  ]",
+        "    { \"buffer\": 0, \"byteOffset\": 64, \"byteLength\": 72 },\n    { \"buffer\": 0, \"byteOffset\": 136, \"byteLength\": 8 }\n  ]",
+    );
+    let json = replace_once(
+        &json,
+        "    { \"bufferView\": 3, \"componentType\": 5126, \"count\": 6, \"type\": \"VEC3\" }\n  ]",
+        "    { \"bufferView\": 3, \"componentType\": 5126, \"count\": 6, \"type\": \"VEC3\" },\n    { \"bufferView\": 4, \"componentType\": 5126, \"count\": 2, \"type\": \"SCALAR\", \"min\": [0], \"max\": [2] }\n  ]",
+    );
+    let json = replace_once(
+        &json,
+        "      { \"input\": 0, \"output\": 3, \"interpolation\": \"CUBICSPLINE\" }\n    ]",
+        "      { \"input\": 0, \"output\": 3, \"interpolation\": \"CUBICSPLINE\" },\n      { \"input\": 4, \"output\": 1, \"interpolation\": \"LINEAR\" }\n    ]",
+    );
+    let json = replace_once(
+        &json,
+        "    \"channels\": [\n      { \"sampler\": 0, \"target\": { \"node\": 0, \"path\": \"translation\" } },",
+        "    \"channels\": [\n      { \"sampler\": 3, \"target\": { \"node\": 1, \"path\": \"translation\" } },\n      { \"sampler\": 0, \"target\": { \"node\": 0, \"path\": \"translation\" } },",
+    );
+    let mut bin = base_animation_bin();
+    extend_f32(&mut bin, &[0.0, 2.0]);
+    assert_eq!(bin.len(), 144);
+    animation_glb(json.as_bytes(), &bin)
+}
+
+fn outside_animation_glb() -> Vec<u8> {
+    let json = replace_once(
+        base_animation_json(),
+        "\"scenes\": [{ \"nodes\": [0] }],\n  \"nodes\": [{ \"name\": \"AnimatedNode\" }]",
+        "\"scenes\": [{ \"nodes\": [0] }, { \"nodes\": [1] }],\n  \"nodes\": [{ \"name\": \"SelectedNode\" }, { \"name\": \"AnimatedOutsideNode\" }]",
+    );
+    let selected_target = "\"target\": { \"node\": 0";
+    assert_eq!(json.matches(selected_target).count(), 3);
+    let json = json.replace(selected_target, "\"target\": { \"node\": 1");
+    animation_glb(json.as_bytes(), &base_animation_bin())
+}
+
+fn multi_animation_morph_loss_glb() -> Vec<u8> {
+    let json = replace_once(
+        base_animation_json(),
+        "  }]\n}",
+        "  }, {\n    \"name\": \"Morph\",\n    \"samplers\": [{ \"input\": 0, \"output\": 0, \"interpolation\": \"LINEAR\" }],\n    \"channels\": [\n      { \"sampler\": 0, \"target\": { \"node\": 0, \"path\": \"weights\" } }\n    ]\n  }]\n}",
+    );
+    animation_glb(json.as_bytes(), &base_animation_bin())
 }
 
 fn base_animation_bin() -> Vec<u8> {

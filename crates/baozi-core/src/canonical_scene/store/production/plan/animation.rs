@@ -87,6 +87,22 @@ pub(in crate::canonical_scene::store) enum AnimationAuthoringSemanticError {
     },
     #[error("animation clip {clip} channel range exceeds channel count {channel_count}")]
     ClipChannelRangeOutOfBounds { clip: usize, channel_count: usize },
+    #[error(
+        "animation clip {clip} source index {actual} is not greater than previous source index {previous}"
+    )]
+    ClipSourceIndexOrder {
+        clip: usize,
+        previous: u32,
+        actual: u32,
+    },
+    #[error(
+        "animation channel {channel} source index {actual} is not greater than previous source index {previous}"
+    )]
+    ChannelSourceIndexOrder {
+        channel: usize,
+        previous: u32,
+        actual: u32,
+    },
     #[error("flat animation channel table has {unowned} rows without exactly one clip owner")]
     UnownedChannels { unowned: usize },
     #[error("animation clip {clip} duration must be finite and non-negative")]
@@ -346,6 +362,10 @@ impl<'batch, 'input> ValidatedAnimationClip<'batch, 'input> {
         self.input.duration()
     }
 
+    pub(in crate::canonical_scene::store) const fn source_index(&self) -> u32 {
+        self.input.source_index()
+    }
+
     pub(in crate::canonical_scene::store) const fn time_domain(
         &self,
     ) -> AnimationTimeDomainAuthoring {
@@ -378,6 +398,10 @@ impl<'input> ValidatedAnimationChannel<'_, 'input> {
 
     pub(in crate::canonical_scene::store) const fn target(&self) -> AnimationTargetAuthoring {
         self.input.target()
+    }
+
+    pub(in crate::canonical_scene::store) const fn source_index(&self) -> u32 {
+        self.input.source_index()
     }
 
     pub(in crate::canonical_scene::store) const fn interpolation(
@@ -1049,10 +1073,21 @@ where
     };
 
     let mut expected_channel_offset = 0_u32;
+    let mut previous_clip_source_index = None;
+    let mut previous_channel_source_index = None;
     for (clip_index, clip) in input.clips().iter().copied().enumerate() {
         let (channel_range, range) =
             context.run_semantic_unit(SceneValidationWork::Entity, || {
                 validate_clip_header(clip_index, clip)?;
+                if let Some(previous) = previous_clip_source_index
+                    && clip.source_index() <= previous
+                {
+                    return Err(AnimationAuthoringSemanticError::ClipSourceIndexOrder {
+                        clip: clip_index,
+                        previous,
+                        actual: clip.source_index(),
+                    });
+                }
                 let channel_range = clip.channels();
                 if channel_range.offset() != expected_channel_offset {
                     return Err(AnimationAuthoringSemanticError::ClipChannelRangeOrder {
@@ -1084,6 +1119,15 @@ where
                             dimension: "animation channel lookup",
                         },
                     )?;
+                    if let Some(previous) = previous_channel_source_index
+                        && channel.source_index() <= previous
+                    {
+                        return Err(AnimationAuthoringSemanticError::ChannelSourceIndexOrder {
+                            channel: channel_index - first_channel,
+                            previous,
+                            actual: channel.source_index(),
+                        });
+                    }
                     let target = validate_target(
                         clip_index,
                         channel_index - first_channel,
@@ -1117,6 +1161,7 @@ where
                 &mut context,
             )?;
             storage.channel_plans.push(plan);
+            previous_channel_source_index = Some(channel.source_index());
         }
         expected_channel_offset = channel_range
             .offset()
@@ -1131,6 +1176,7 @@ where
             input_index: clip_index,
             channels: channel_range,
         });
+        previous_clip_source_index = Some(clip.source_index());
     }
     context.run_semantic_unit(SceneValidationWork::Traversal, || {
         if expected_channel_offset == channel_count {

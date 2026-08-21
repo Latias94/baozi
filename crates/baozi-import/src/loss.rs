@@ -1,5 +1,6 @@
 use crate::config::ImportLossKind;
 use crate::diagnostic::{DiagnosticByteRange, DiagnosticCode};
+use crate::source_scope::SourceScopeEntityKind;
 use crate::store::ImportStoreReservation;
 use baozi_io::AssetPath;
 use std::fmt;
@@ -17,6 +18,7 @@ pub enum ImportLossDisposition {
 pub enum ImportLossSubject {
     FormatRecovery,
     SourceScopeDetails,
+    SourceEntity(SourceScopeEntityKind),
 }
 
 /// A bounded, session-authenticated fact about semantic loss or recovery.

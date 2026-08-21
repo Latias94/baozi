@@ -331,6 +331,7 @@ fn animation_relation_limit_failures_preserve_the_exact_completed_prefix() {
     let times = [0.0_f64, 1.0];
     let values = [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0];
     let channels = [AnimationChannelAuthoring::new(
+        0,
         AnimationTargetAuthoring::NodeTranslation(NodeLocalId::new(0)),
         AnimationInterpolationAuthoring::Linear,
         AnimationExtrapolationAuthoring::SourceDefault,
@@ -341,6 +342,7 @@ fn animation_relation_limit_failures_preserve_the_exact_completed_prefix() {
         Presence::Absent,
     )];
     let clips = [AnimationClipAuthoring::new(
+        0,
         1.0,
         AnimationTimeDomainAuthoring::Seconds,
         AuthoringRange::new(0, 1),

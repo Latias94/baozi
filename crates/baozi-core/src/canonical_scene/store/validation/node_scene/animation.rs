@@ -721,6 +721,7 @@ where
     let mut value_cursor = 0_u32;
     let mut in_tangent_cursor = 0_u32;
     let mut out_tangent_cursor = 0_u32;
+    let mut previous_source_channel_index = None;
     let complete = session.visit_canonical_records(
         channels,
         channel_rows,
@@ -831,6 +832,14 @@ where
             let Some(row_id) = u32::try_from(row_index).ok() else {
                 return Ok(false);
             };
+            let Some(source_channel_index) = channel else {
+                return Ok(false);
+            };
+            if previous_source_channel_index
+                .is_some_and(|previous| source_channel_index <= previous)
+            {
+                return Ok(false);
+            }
             let Some(target_kind) = target_kind else {
                 return Ok(false);
             };
@@ -919,8 +928,7 @@ where
                 return Ok(false);
             }
 
-            let valid = channel == Some(row_id)
-                && target_reference_matches
+            let valid = target_reference_matches
                 && value_width == expected_value_width
                 && valid_interpolation(interpolation)
                 && valid_extrapolation(pre_extrapolation)
@@ -952,6 +960,7 @@ where
             value_cursor = value_end;
             in_tangent_cursor = in_tangent_end;
             out_tangent_cursor = out_tangent_end;
+            previous_source_channel_index = Some(source_channel_index);
             Ok(true)
         },
     )?;
@@ -1100,6 +1109,7 @@ where
         return Ok(false);
     };
     let mut channel_cursor = 0_u32;
+    let mut previous_source_clip_index = None;
     let complete = session.visit_canonical_records(
         clips,
         clip_rows,
@@ -1133,9 +1143,12 @@ where
                 row.scalar(animation_clip_field::CHANNELS, |value: u8| value == 0)? == Some(true)
             };
 
-            let Some(row_id) = u32::try_from(row_index).ok() else {
+            let Some(source_clip_index) = clip else {
                 return Ok(false);
             };
+            if previous_source_clip_index.is_some_and(|previous| source_clip_index <= previous) {
+                return Ok(false);
+            }
             let Some(duration) = duration else {
                 return Ok(false);
             };
@@ -1173,8 +1186,7 @@ where
             } else {
                 channels_presence == Some(PRESENCE_PRESENT) && channels_reference_matches
             };
-            let valid = clip == Some(row_id)
-                && duration.is_finite()
+            let valid = duration.is_finite()
                 && duration >= 0.0
                 && valid_time_domain(time_domain)
                 && rate_is_valid
@@ -1189,6 +1201,7 @@ where
             };
             *descriptor = AnimationClipValidationDescriptor { channel_end };
             channel_cursor = channel_end;
+            previous_source_clip_index = Some(source_clip_index);
             Ok(true)
         },
     )?;
@@ -1712,22 +1725,21 @@ fn validate_clip_table<'storage, R>(
     };
     let table = session.canonical_records(reference)?;
     let mut channel_cursor = 0_u32;
+    let mut previous_source_clip_index = None;
     for row in 0..table.rows() {
         observe_work(1)?;
         let clip = match expected {
             Some(expected) => Some(expected.clip(row)?),
             None => None,
         };
-        let clip_id = u32::try_from(row).ok()?;
-        if let Some(clip) = clip.as_ref()
-            && u32::try_from(clip.input_index()).ok()? != clip_id
-        {
+        let row_id = u32::try_from(row).ok()?;
+        let source_clip_index = table.scalar::<u32>(row, animation_clip_field::CLIP)?;
+        if previous_source_clip_index.is_some_and(|previous| source_clip_index <= previous) {
             return None;
         }
-        require_scalar(
-            table.scalar::<u32>(row, animation_clip_field::CLIP),
-            clip_id,
-        )?;
+        if let Some(clip) = clip.as_ref() {
+            require_scalar(Some(source_clip_index), clip.source_index())?;
+        }
         let duration = table.scalar::<f64>(row, animation_clip_field::DURATION)?;
         if let Some(clip) = clip.as_ref() {
             require_float64_bits(Some(duration), clip.duration())?;
@@ -1781,11 +1793,12 @@ fn validate_clip_table<'storage, R>(
                 channel_range_count,
                 target_marks.as_deref_mut()?,
                 node_target_mark_count,
-                clip_id.checked_add(1)?,
+                row_id.checked_add(1)?,
                 observe_work,
             )?;
         }
         channel_cursor = channel_end;
+        previous_source_clip_index = Some(source_clip_index);
     }
     if expected.is_some_and(|expected| channel_cursor != expected.channel_count()) {
         return None;
@@ -1842,23 +1855,20 @@ fn validate_channel_table<'storage, R>(
     let mut value_cursor = 0_u64;
     let mut in_tangent_cursor = 0_u64;
     let mut out_tangent_cursor = 0_u64;
+    let mut previous_source_channel_index = None;
     for row in 0..table.rows() {
         observe_work(1)?;
         let channel = match expectation.fresh {
             Some(expected) => Some(expected.channel(row)?),
             None => None,
         };
-        let channel_id = u32::try_from(row).ok()?;
-        if channel
-            .as_ref()
-            .is_some_and(|channel| u32::try_from(channel.input_index()) != Ok(channel_id))
-        {
+        let source_channel_index = table.scalar::<u32>(row, animation_channel_field::CHANNEL)?;
+        if previous_source_channel_index.is_some_and(|previous| source_channel_index <= previous) {
             return None;
         }
-        require_scalar(
-            table.scalar::<u32>(row, animation_channel_field::CHANNEL),
-            channel_id,
-        )?;
+        if let Some(channel) = channel.as_ref() {
+            require_scalar(Some(source_channel_index), channel.source_index())?;
+        }
 
         let target_kind = table.scalar::<u8>(row, animation_channel_field::TARGET_KIND)?;
         if let Some(channel) = channel.as_ref() {
@@ -2045,6 +2055,7 @@ fn validate_channel_table<'storage, R>(
             value_count,
             observe_work,
         )?;
+        previous_source_channel_index = Some(source_channel_index);
     }
 
     if expectation.fresh.is_some_and(|expected| {

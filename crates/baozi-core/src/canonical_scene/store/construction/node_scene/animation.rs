@@ -450,11 +450,6 @@ where
         let channel_count = usize::try_from(plans.channel_count).map_err(|_| failure)?;
         for channel_index in 0..channel_count {
             let channel = batch.channel(channel_index).ok_or(failure)?;
-            let channel_id = u32::try_from(channel_index).map_err(|_| failure)?;
-            let source_channel = u32::try_from(channel.input_index()).map_err(|_| failure)?;
-            if source_channel != channel_id {
-                return Err(failure.into());
-            }
             let expected_value_count = channel
                 .time_count()
                 .checked_mul(channel.value_width())
@@ -467,7 +462,7 @@ where
             }
             let target_kind = encode_animation_target_kind(channel.target());
             control.write_row(|row| {
-                row.write_scalar(channel_id)?;
+                row.write_scalar(channel.source_index())?;
                 row.write_scalar(target_kind)?;
                 row.write_scalar(channel.canonical_target_index())?;
                 write_animation_target_ref(row, target_kind, targets, failure)?;
@@ -523,16 +518,14 @@ where
         let mut channel_offset = 0_u32;
         for clip_index in 0..clip_count {
             let clip = batch.clip(clip_index).ok_or(failure)?;
-            let clip_id = u32::try_from(clip_index).map_err(|_| failure)?;
-            let source_clip = u32::try_from(clip.input_index()).map_err(|_| failure)?;
             let range = clip.channel_range();
-            if source_clip != clip_id || range.offset() != channel_offset {
+            if range.offset() != channel_offset {
                 return Err(failure.into());
             }
             channel_offset = channel_offset.checked_add(range.count()).ok_or(failure)?;
             let (time_domain, rate) = encode_animation_time_domain(clip.time_domain());
             control.write_row(|row| {
-                row.write_scalar(clip_id)?;
+                row.write_scalar(clip.source_index())?;
                 row.write_scalar(clip.duration())?;
                 row.write_scalar(time_domain)?;
                 write_optional_rate(row, rate)?;

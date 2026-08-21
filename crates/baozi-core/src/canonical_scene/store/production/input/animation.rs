@@ -36,6 +36,7 @@ pub enum AnimationTargetAuthoring {
 /// One typed channel payload. Target semantics determine `value_width`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnimationChannelAuthoring<'a> {
+    source_index: u32,
     target: AnimationTargetAuthoring,
     interpolation: AnimationInterpolationAuthoring,
     pre_extrapolation: AnimationExtrapolationAuthoring,
@@ -49,6 +50,7 @@ pub struct AnimationChannelAuthoring<'a> {
 impl<'a> AnimationChannelAuthoring<'a> {
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
+        source_index: u32,
         target: AnimationTargetAuthoring,
         interpolation: AnimationInterpolationAuthoring,
         pre_extrapolation: AnimationExtrapolationAuthoring,
@@ -59,6 +61,7 @@ impl<'a> AnimationChannelAuthoring<'a> {
         out_tangents: Presence<&'a [f32]>,
     ) -> Self {
         Self {
+            source_index,
             target,
             interpolation,
             pre_extrapolation,
@@ -68,6 +71,10 @@ impl<'a> AnimationChannelAuthoring<'a> {
             in_tangents,
             out_tangents,
         }
+    }
+
+    pub(in crate::canonical_scene::store) const fn source_index(self) -> u32 {
+        self.source_index
     }
 
     pub(in crate::canonical_scene::store) const fn target(self) -> AnimationTargetAuthoring {
@@ -112,6 +119,7 @@ impl<'a> AnimationChannelAuthoring<'a> {
 /// One source animation clip retaining a contiguous range of source channels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnimationClipAuthoring {
+    source_index: u32,
     duration: f64,
     time_domain: AnimationTimeDomainAuthoring,
     channels: AuthoringRange,
@@ -119,15 +127,21 @@ pub struct AnimationClipAuthoring {
 
 impl AnimationClipAuthoring {
     pub const fn new(
+        source_index: u32,
         duration: f64,
         time_domain: AnimationTimeDomainAuthoring,
         channels: AuthoringRange,
     ) -> Self {
         Self {
+            source_index,
             duration,
             time_domain,
             channels,
         }
+    }
+
+    pub(in crate::canonical_scene::store) const fn source_index(self) -> u32 {
+        self.source_index
     }
 
     pub(in crate::canonical_scene::store) const fn duration(self) -> f64 {

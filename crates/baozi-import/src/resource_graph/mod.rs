@@ -1648,6 +1648,7 @@ pub(crate) fn unavailable_disposition(cause: &ScopeAbortCause) -> ResourceUnavai
         ScopeAbortCause::Diagnostic(_)
         | ScopeAbortCause::FormatRecoveryRejectedByConformance { .. }
         | ScopeAbortCause::FormatRecoveryRejectedByLossPolicy { .. }
+        | ScopeAbortCause::SourceSemanticLossRejectedByLossPolicy { .. }
         | ScopeAbortCause::FormatFailureDetail(_)
         | ScopeAbortCause::Allocation { .. }
         | ScopeAbortCause::CapacityEnvelope { .. }

@@ -1594,6 +1594,7 @@ fn with_gltf_capability_input<R>(
     };
     let animation_channels = [
         AnimationChannelAuthoring::new(
+            5,
             AnimationTargetAuthoring::NodeTranslation(NodeLocalId::new(0)),
             AnimationInterpolationAuthoring::Linear,
             AnimationExtrapolationAuthoring::SourceDefault,
@@ -1604,6 +1605,7 @@ fn with_gltf_capability_input<R>(
             Presence::Absent,
         ),
         AnimationChannelAuthoring::new(
+            8,
             AnimationTargetAuthoring::NodeRotation(NodeLocalId::new(2)),
             AnimationInterpolationAuthoring::Step,
             AnimationExtrapolationAuthoring::SourceDefault,
@@ -1614,6 +1616,7 @@ fn with_gltf_capability_input<R>(
             Presence::Absent,
         ),
         AnimationChannelAuthoring::new(
+            13,
             AnimationTargetAuthoring::MeshInstanceMorphWeights(0),
             AnimationInterpolationAuthoring::CubicSpline,
             AnimationExtrapolationAuthoring::SourceDefault,
@@ -1625,6 +1628,7 @@ fn with_gltf_capability_input<R>(
         ),
     ];
     let animation_clips = [AnimationClipAuthoring::new(
+        3,
         1.0,
         AnimationTimeDomainAuthoring::Seconds,
         AuthoringRange::new(0, 3),
@@ -2510,7 +2514,7 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
             .next_clip()
             .expect("glTF animation clip read")
             .expect("declared glTF animation clip");
-        assert_eq!(clip.source_index(), 0);
+        assert_eq!(clip.source_index(), 3);
         assert_eq!(clip.duration(), 1.0);
         assert_eq!(clip.time_domain(), NodeSceneAnimationTimeDomain::Seconds);
         assert_eq!((clip.channel_offset(), clip.channel_count()), (0, 3));
@@ -2536,17 +2540,15 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
             &ROTATION_VALUES,
             &MORPH_ANIMATION_VALUES,
         ];
-        for source_index in 0..3 {
+        let expected_source_indexes = [5, 8, 13];
+        for ordinal in 0..3 {
             let channel = animation
                 .next_channel()
                 .expect("glTF animation channel read")
                 .expect("declared glTF animation channel");
-            assert_eq!(channel.source_index(), source_index);
-            assert_eq!(channel.target(), expected_targets[source_index]);
-            assert_eq!(
-                channel.interpolation(),
-                expected_interpolations[source_index],
-            );
+            assert_eq!(channel.source_index(), expected_source_indexes[ordinal]);
+            assert_eq!(channel.target(), expected_targets[ordinal]);
+            assert_eq!(channel.interpolation(), expected_interpolations[ordinal],);
             assert_eq!(
                 channel.pre_extrapolation(),
                 NodeSceneAnimationExtrapolation::SourceDefault,
@@ -2556,9 +2558,9 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
                 NodeSceneAnimationExtrapolation::SourceDefault,
             );
             assert_eq!(channel.times(), &KEY_TIMES);
-            assert_eq!(channel.values(), expected_values[source_index]);
+            assert_eq!(channel.values(), expected_values[ordinal]);
             animation_key_count += channel.key_count();
-            if source_index == 2 {
+            if ordinal == 2 {
                 assert_eq!(channel.in_tangents(), Some(&MORPH_TANGENTS[..]));
                 assert_eq!(channel.out_tangents(), Some(&MORPH_TANGENTS[..]));
             } else {
