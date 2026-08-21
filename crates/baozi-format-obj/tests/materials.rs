@@ -432,7 +432,7 @@ fn sidecar_total_byte_limit_is_terminal_after_recording_optional_loss_evidence()
 }
 
 #[test]
-fn sidecar_open_asset_limit_is_terminal_after_recording_optional_loss_evidence() -> TestResult<()> {
+fn sidecar_open_asset_limit_is_terminal_before_optional_loss_evidence() -> TestResult<()> {
     let obj = b"mtllib material.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
     let mtl = b"newmtl red\nKd 1 0 0\n";
     let mut limits = sidecar_limits();
@@ -447,15 +447,24 @@ fn sidecar_open_asset_limit_is_terminal_after_recording_optional_loss_evidence()
         limits,
         true,
     )?);
-    let terminal = match failure.cause() {
-        ImportCause::OperationTerminal(terminal) => *terminal,
-        cause => panic!("expected terminal ledger failure, got {cause:?}"),
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::Ledger(baozi_import::LedgerCause::LimitExceeded {
+                    class: baozi_operation::CounterClass::Attempted,
+                    dimension: ImportDimension::AssetOpen,
+                    value: 2,
+                    limit: 1,
+                })
+            )
+    ));
+    let terminal = match failure.ledger().terminal_cause() {
+        ImportTerminalCause::Failure(terminal) => terminal,
+        ImportTerminalCause::Success => panic!("expected terminal ledger failure"),
     };
     assert_eq!(terminal.class(), ImportTerminalFailureClass::Ledger);
-    assert_eq!(
-        failure.ledger().terminal_cause(),
-        ImportTerminalCause::Failure(terminal)
-    );
     let opens = failure
         .ledger()
         .dimension(ImportDimension::AssetOpen)
@@ -463,11 +472,7 @@ fn sidecar_open_asset_limit_is_terminal_after_recording_optional_loss_evidence()
     assert_eq!(opens.attempted(), 2);
     assert_eq!(opens.consumed(), 1);
     assert_eq!(failure.ledger().committed_canonical_members(), 0);
-    assert_eq!(failure.optional_dependency_evidence().len(), 1);
-    assert_eq!(failure.diagnostics().len(), 2);
-    assert_eq!(
-        failure.diagnostics()[1].code().as_str(),
-        "obj.mtl_unavailable"
-    );
+    assert!(failure.optional_dependency_evidence().is_empty());
+    assert!(failure.diagnostics().is_empty());
     Ok(())
 }
