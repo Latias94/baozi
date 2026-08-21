@@ -1,26 +1,25 @@
 use crate::admission::JsonSurface;
 use crate::{FORMAT_ID, GltfFailure, admission, external_buffer_role, external_image_role};
 use baozi_import::authoring::{
-    AlphaMode, AnimationAuthoringBatch, AppearanceAuthoringBatch, AttributeDomain,
-    AttributeSemantic, AuthoredTransform, AuthoringRange, CameraAuthoring, CameraLocalId,
-    CameraProjection, Color, ColorInterpretation, DeformationAuthoringBatch, EntityName,
-    ExtensionMediaType, ExtensionValueRef, FormatId, GeometryAttributeAuthoring,
-    GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
-    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, ImageAuthoring, ImageLocalId,
-    InfluenceAuthoring, InfluenceRowsAuthoring, LineageAuthoringBatch, LogicalMeshLocalId,
-    LogicalMorphAuthoring, Mat4, MaterialAuthoring, MaterialBindingAuthoring, MaterialFactors,
-    MaterialLocalId, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
-    MetadataAuthoringEntry, MipmapFilter, NamespacedName, NodeAuthoringBatch, NodeAuthoringNode,
-    NodeLocalId, NodeParent, ObservedResourceAuthoring, OwnerProvenanceAuthoring,
-    PbrMetallicRoughnessFactors, Presence, PrimitiveDeformationAuthoring, ProfileAuthoringBatch,
-    ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, ResourceIdentity,
-    ResourceIdentityLocalId, ResourceSnapshotAuthoring, SamplerAuthoring, SamplerLocalId,
-    SamplerState, SceneAuthoringBatch, SceneSpace, SessionOpaqueReason, ShadingModel,
-    SkinAuthoring, SkinLocalId, SkinMatrixSpaces, SourceIdentityAuthoring, SourceIdentityLocalId,
-    SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch, TexelFilter, TextureAddressMode,
-    TextureAuthoring, TextureBlendOperation, TextureChannelMapping, TextureChannelSwizzle,
-    TextureCoordinateSource, TextureLocalId, TextureRole, TextureSourceKey, TextureStrength,
-    TextureTransform, Vec3,
+    AlphaMode, AppearanceAuthoringBatch, AttributeDomain, AttributeSemantic, AuthoredTransform,
+    AuthoringRange, CameraAuthoring, CameraLocalId, CameraProjection, Color, ColorInterpretation,
+    DeformationAuthoringBatch, EntityName, ExtensionMediaType, ExtensionValueRef, FormatId,
+    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
+    GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
+    ImageAuthoring, ImageLocalId, InfluenceAuthoring, InfluenceRowsAuthoring,
+    LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring, Mat4, MaterialAuthoring,
+    MaterialBindingAuthoring, MaterialFactors, MaterialLocalId, MeshInstanceDeformationAuthoring,
+    MetadataAuthoringBatch, MetadataAuthoringEntry, MipmapFilter, NamespacedName,
+    NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent, ObservedResourceAuthoring,
+    OwnerProvenanceAuthoring, PbrMetallicRoughnessFactors, Presence, PrimitiveDeformationAuthoring,
+    ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring, Quat,
+    ResourceIdentity, ResourceIdentityLocalId, ResourceSnapshotAuthoring, SamplerAuthoring,
+    SamplerLocalId, SamplerState, SceneAuthoringBatch, SceneSpace, SessionOpaqueReason,
+    ShadingModel, SkinAuthoring, SkinLocalId, SkinMatrixSpaces, SourceIdentityAuthoring,
+    SourceIdentityLocalId, SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch,
+    TexelFilter, TextureAddressMode, TextureAuthoring, TextureBlendOperation,
+    TextureChannelMapping, TextureChannelSwizzle, TextureCoordinateSource, TextureLocalId,
+    TextureRole, TextureSourceKey, TextureStrength, TextureTransform, Vec3,
 };
 use baozi_import::{
     DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass,
@@ -37,6 +36,8 @@ use gltf::mesh::Mode;
 use gltf::texture::{MagFilter, MinFilter, WrappingMode};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+
+mod animation;
 
 type Result<T> = std::result::Result<T, ContentError>;
 
@@ -165,6 +166,7 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
     let gltf = parsed
         .map_err(|error| GltfFailure::invalid_document(format_args!("invalid glTF: {error}")))?;
     let node_graph = preflight_node_graph(ctx, &gltf)?;
+    let animation_contracts = animation::preflight(ctx, &gltf, node_graph.selected.as_slice())?;
     let repeated_mesh_string_bytes = preflight_canonical_base_strings(ctx, &gltf, &node_graph)?;
     let resolved_texture_uris = preflight_texture_strings(ctx, &gltf, repeated_mesh_string_bytes)?;
     let material_count = safe_gltf(ctx, "glTF material count", || gltf.materials().count())?;
@@ -177,6 +179,7 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
         &node_graph,
         &geometry_contracts,
         &resolved_texture_uris,
+        &animation_contracts,
     )
 }
 
@@ -817,14 +820,20 @@ fn scene_from_document(
     node_graph: &NodeGraph<'_, '_>,
     geometry_contracts: &GeometryContracts<'_>,
     resolved_texture_uris: &ResolvedTextureUris<'_>,
+    animation_contracts: &animation::AnimationContracts<'_, '_>,
 ) -> Result<SceneDraft> {
     let external_images = load_external_image_resources(ctx, gltf, resolved_texture_uris)?;
     let appearance_storage =
         build_appearance_storage(ctx, gltf, resolved_texture_uris, &external_images)?;
     let geometry_storage = build_geometry_storage(ctx, gltf, buffers, geometry_contracts)?;
     let cameras = build_cameras(ctx, gltf)?;
-    add_unsupported_domain_diagnostics(ctx, gltf)?;
     let node_storage = build_scene_nodes(ctx, node_graph, geometry_storage.logical_meshes.len())?;
+    let animation_storage = animation::build_storage(
+        ctx,
+        buffers,
+        node_storage.node_ids.as_slice(),
+        animation_contracts,
+    )?;
     let skin_storage = build_skins(
         ctx,
         gltf,
@@ -846,6 +855,7 @@ fn scene_from_document(
         &skin_storage,
         &mesh_instance_deformations,
         &external_images,
+        &animation_storage,
     )
 }
 
@@ -1370,6 +1380,10 @@ enum AccessorOwner {
     Skin {
         skin_index: usize,
     },
+    Animation {
+        animation_index: usize,
+        channel_index: usize,
+    },
 }
 
 impl fmt::Display for AccessorOwner {
@@ -1383,6 +1397,13 @@ impl fmt::Display for AccessorOwner {
                 "glTF mesh {mesh_index} primitive {primitive_index}"
             ),
             Self::Skin { skin_index } => write!(formatter, "glTF skin {skin_index}"),
+            Self::Animation {
+                animation_index,
+                channel_index,
+            } => write!(
+                formatter,
+                "glTF animation {animation_index} channel {channel_index}"
+            ),
         }
     }
 }
@@ -2579,8 +2600,21 @@ fn build_scene_nodes<'scope, 'document>(
             storage.roots.try_push_reserved(node_id)?;
         }
 
-        let transform = safe_gltf(ctx, "glTF node transform", || node.transform().matrix())?;
-        let transform = AuthoredTransform::try_matrix(Mat4 { cols: transform }).map_err(|_| {
+        let transform = match safe_gltf(ctx, "glTF node transform", || node.transform())? {
+            gltf::scene::Transform::Matrix { matrix } => {
+                AuthoredTransform::try_matrix(Mat4 { cols: matrix })
+            }
+            gltf::scene::Transform::Decomposed {
+                translation,
+                rotation,
+                scale,
+            } => AuthoredTransform::try_trs(
+                Vec3::new(translation[0], translation[1], translation[2]),
+                Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]),
+                Vec3::new(scale[0], scale[1], scale[2]),
+            ),
+        }
+        .map_err(|_| {
             gltf_parse_error(ctx, format!("glTF node {node_index} transform is invalid"))
         })?;
         let camera = safe_gltf(ctx, "glTF node camera", || node.camera())?
@@ -2656,6 +2690,7 @@ struct NodeGraph<'document, 'scope> {
     nodes: MeteredVec<'scope, gltf::Node<'document>>,
     children: MeteredVec<'scope, MeteredVec<'scope, usize>>,
     roots: MeteredVec<'scope, usize>,
+    selected: MeteredVec<'scope, bool>,
 }
 
 fn preflight_node_graph<'document, 'scope>(
@@ -2781,22 +2816,30 @@ fn preflight_node_graph<'document, 'scope>(
     validate_graph_depth_and_cycles(ctx, children.as_slice(), parents.as_slice())?;
     let roots = select_and_validate_scene_roots(ctx, gltf, parents.as_slice())?;
     charge_canonical_graph_shape(ctx, roots.len())?;
-    validate_canonical_graph_limits(ctx, children.as_slice(), roots.as_slice())?;
+    let selected = validate_canonical_graph_limits(ctx, children.as_slice(), roots.as_slice())?;
 
     Ok(NodeGraph {
         nodes,
         children,
         roots,
+        selected,
     })
 }
 
-fn validate_canonical_graph_limits(
-    ctx: &ParseScope<'_>,
+fn validate_canonical_graph_limits<'scope>(
+    ctx: &'scope ParseScope<'_>,
     children: &[MeteredVec<'_, usize>],
     roots: &[usize],
-) -> Result<()> {
+) -> Result<MeteredVec<'scope, bool>> {
     let mut max_depth = 0usize;
     observe_graph_depth(ctx, &mut max_depth, 1)?;
+    let mut selected = try_vec_filled(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        children.len(),
+        false,
+        "gltf-selected-node-membership",
+    )?;
 
     let mut pending = try_vec_capacity(
         ctx,
@@ -2821,6 +2864,13 @@ fn validate_canonical_graph_limits(
                 format!("glTF node graph references missing node {node_index}"),
             )
         })?;
+        let selected_node = selected.as_mut_slice().get_mut(node_index).ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF selected node {node_index} is out of range"),
+            )
+        })?;
+        *selected_node = true;
         let child_depth = depth
             .checked_add(1)
             .ok_or_else(|| ctx.allocation_failure("gltf-graph-depth-counter"))?;
@@ -2831,7 +2881,7 @@ fn validate_canonical_graph_limits(
         }
     }
 
-    Ok(())
+    Ok(selected)
 }
 
 fn charge_canonical_graph_shape(ctx: &ParseScope<'_>, root_count: usize) -> Result<()> {
@@ -3385,6 +3435,7 @@ fn submit_complete_batch(
     skins: &SkinStorage<'_>,
     mesh_instance_deformations: &MeteredVec<'_, MeshInstanceDeformationAuthoring<'static>>,
     external_images: &ExternalImageResources<'_>,
+    animation_storage: &animation::AnimationStorage<'_>,
 ) -> Result<SceneDraft> {
     let mut images = ctx.metered_vec(
         ImportStorageClass::SceneConstruction,
@@ -3616,8 +3667,6 @@ fn submit_complete_batch(
         Presence::Present(nodes.roots.as_slice()),
         nodes.nodes.as_slice(),
     );
-    let animations = AnimationAuthoringBatch::empty();
-
     let primary_identity = ResourceIdentity::new(ctx.source().as_str())
         .map_err(|_| gltf_parse_error(ctx, "glTF primary resource identity is not canonical"))?;
     let resource_count = external_images
@@ -3760,6 +3809,18 @@ fn submit_complete_batch(
         skin_authoring.len(),
         ProfileOwner::Skin,
     )?;
+    push_indexed_owner_sources(
+        ctx,
+        &mut owner_sources,
+        animation_storage.clip_count(),
+        ProfileOwner::AnimationClip,
+    )?;
+    push_indexed_owner_sources(
+        ctx,
+        &mut owner_sources,
+        animation_storage.channel_count(),
+        ProfileOwner::AnimationChannel,
+    )?;
 
     let mut owner_provenance = ctx.metered_vec(
         ImportStorageClass::SceneConstruction,
@@ -3809,15 +3870,17 @@ fn submit_complete_batch(
         MetadataAuthoringBatch::new(metadata.as_slice()),
     )
     .with_resource_snapshots(snapshots.as_slice());
-    Ok(ctx.submit_scene(SceneAuthoringBatch::new(
-        spatial,
-        node_batch,
-        appearance,
-        geometry,
-        deformation,
-        animations,
-        profile,
-    ))?)
+    animation_storage.with_authoring_batch(ctx, |animations| {
+        Ok(ctx.submit_scene(SceneAuthoringBatch::new(
+            spatial,
+            node_batch,
+            appearance,
+            geometry,
+            deformation,
+            animations,
+            profile,
+        ))?)
+    })
 }
 
 fn push_owner_source(
@@ -3843,19 +3906,6 @@ fn push_indexed_owner_sources(
             owner: owner(authoring_u32(ctx, index, "gltf-profile-owner-index")?),
             provenance: [ProvenanceLocalId::new(0)],
         })?;
-    }
-    Ok(())
-}
-
-fn add_unsupported_domain_diagnostics(ctx: &ParseScope<'_>, gltf: &gltf::Gltf) -> Result<()> {
-    if safe_gltf(ctx, "glTF animation presence", || {
-        gltf.animations().next().is_some()
-    })? {
-        push_warning(
-            ctx,
-            "gltf.animations_ignored",
-            "animation channels are not imported by the glTF MVP",
-        )?;
     }
     Ok(())
 }

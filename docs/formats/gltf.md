@@ -102,7 +102,9 @@ and import-contract tests.
 
 - Embedded image buffer views and texture data URIs are diagnosed and skipped.
 - Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
-- Morph targets and animation channels are diagnosed but not imported into final IR yet.
+- Node translation, rotation, and scale animation channels are imported with their source
+  interpolation and bounded payload semantics. Morph-weight animation remains explicitly diagnosed
+  and ignored until the morph animation slice is admitted.
 - The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
 - `gltf_import` is a non-admitted development target until known backend aborts are removed or
   process-isolated and the complete baseline admission matrix passes.

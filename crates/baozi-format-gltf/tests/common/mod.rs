@@ -257,6 +257,7 @@ pub fn assert_resource_limit(error: &ImportFailure, expected: &str) {
                 "max_canonical_string_bytes" => "CanonicalStringBytes",
                 "max_data_uri_bytes" => "DataUriBytes",
                 "max_decode_work" => "DecodeWork",
+                "max_animation_cells" => "AnimationCells",
                 "max_dependency_asset_bytes" => "DependencyBytes",
                 "max_faces" => "Faces",
                 "max_graph_depth" => "GraphDepth",

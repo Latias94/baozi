@@ -43,7 +43,7 @@ pub fn format_descriptor_for_development() -> FormatDescriptor {
         (FormatCapability::Materials, CapabilityStatus::Partial),
         (FormatCapability::Textures, CapabilityStatus::ParsedLossy),
         (FormatCapability::CamerasLights, CapabilityStatus::Partial),
-        (FormatCapability::Animation, CapabilityStatus::Unsupported),
+        (FormatCapability::Animation, CapabilityStatus::Partial),
         (FormatCapability::Skinning, CapabilityStatus::Partial),
         (
             FormatCapability::MorphTargets,
@@ -135,6 +135,10 @@ mod tests {
         }));
         assert_eq!(
             descriptor.capability_status(FormatCapability::ResourceLimits),
+            Some(CapabilityStatus::Partial)
+        );
+        assert_eq!(
+            descriptor.capability_status(FormatCapability::Animation),
             Some(CapabilityStatus::Partial)
         );
     }
