@@ -55,9 +55,12 @@ criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.m
   domain, interpolation, retained channel order, and non-contiguous source indexes preserved through
   canonical storage. Whole clips outside the selected scene are scope omissions; mixed-target clips
   require explicit `SourceSemanticLoss` authority before outside channels may be filtered.
-- A bounded development `SourceScopeRecord` covering declared scenes, nodes, animations, and
-  animation channels on success and on later terminal failure. Complete mesh, material, image,
-  accessor, sampler, and external-resource closure remains pending.
+- A bounded development `SourceScopeRecord` covering declared scenes, selected/omitted nodes,
+  meshes/primitives, materials, textures/images/samplers, skins, accessors/buffer views/buffers,
+  animations, and animation channels. The selected core resource closure is compiled before
+  dependency IO; omitted external buffers/images are not authorized, and selected data-URI or
+  buffer-view images are materialized as encoded payloads. This remains development evidence, not
+  public admission evidence.
 - Development resource-limit coverage for primary assets, decoded JSON text surfaces, external
   buffers, base64 buffer data URIs, GLB BIN payloads, diagnostics, and cooperative cancellation.
 - Development gates for GLB import, snapshots, malformed external buffers/data URIs, skin validation,
@@ -110,14 +113,17 @@ and import-contract tests.
 
 ## Admission Blockers And Missing Semantics
 
-- Embedded image buffer views and texture data URIs are diagnosed and skipped.
+- Embedded image buffer views and image data URIs are materialized as encoded image payloads without
+  pixel decoding. Unsupported morph/default-weight semantics, required extensions, and the remaining
+  backend/admission gaps are still fail-closed or explicitly deferred.
 - Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
 - Morph-weight animation is unsupported retained-domain semantics. It is rejected by default and may
   be omitted only under explicit `SourceSemanticLoss` authority with typed loss evidence and a stable
   channel diagnostic until the morph animation slice is admitted.
-- Source-scope evidence currently covers scenes, nodes, animations, and animation channels only. The
-  full ADR 0039 resource closure across meshes, materials, images, accessors, buffer views, buffers,
-  samplers, skins, and external dependencies remains an admission blocker.
+- The current `SourceScopeRecord` still lacks ADR 0039's typed selection outcome, camera and
+  animation-sampler kinds, extension rows, and complete dependency provenance. The bootstrap
+  backend also materializes a GLB BIN chunk before the closure can filter it. These are admission
+  blockers even though the selected core resource closure is now tested and bounded.
 - The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
 - `gltf_import` is a non-admitted development target until known backend aborts are removed or
   process-isolated and the complete baseline admission matrix passes.

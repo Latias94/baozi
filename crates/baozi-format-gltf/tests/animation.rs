@@ -663,7 +663,7 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(details.len(), 9);
+    assert_eq!(details.len(), 20);
     assert_eq!(
         details[0],
         (
@@ -736,6 +736,37 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
             "a0c3".to_owned()
         )
     );
+    assert_eq!(
+        details[9],
+        (
+            SourceScopeEntityKind::Buffer,
+            SourceScopeDisposition::Selected,
+            "b0".to_owned()
+        )
+    );
+    for (offset, identity) in ["bv0", "bv1", "bv2", "bv3", "bv4"].into_iter().enumerate() {
+        assert_eq!(
+            details[10 + offset],
+            (
+                SourceScopeEntityKind::BufferView,
+                SourceScopeDisposition::Selected,
+                identity.to_owned()
+            )
+        );
+    }
+    for (offset, identity) in ["acc0", "acc1", "acc2", "acc3", "acc4"]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            details[15 + offset],
+            (
+                SourceScopeEntityKind::Accessor,
+                SourceScopeDisposition::Selected,
+                identity.to_owned()
+            )
+        );
+    }
 
     let snapshot = scene_snapshot(&report);
     assert!(snapshot_line(&snapshot, "clip[0]").contains(concat!(

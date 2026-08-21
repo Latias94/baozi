@@ -1,7 +1,7 @@
 mod common;
 
 use baozi_format_gltf::GltfFailureCode;
-use baozi_import::{ImportCause, ImportTerminalFailureClass};
+use baozi_import::{ImportCause, ImportDimension, ImportTerminalFailureClass};
 use common::{
     TestResult, assert_gltf_failure, expected_error, import_assets, import_assets_result,
     sidecar_options, skinned_triangle_bin, skinned_triangle_bin_with_joint_index,
@@ -85,10 +85,7 @@ fn selected_skin_rejects_a_joint_outside_the_imported_scene() -> TestResult<()> 
     .into_bytes();
     let (result, diagnostics) = import_assets_result(
         "models/skin.gltf",
-        [
-            ("models/skin.gltf", gltf),
-            ("models/skin.bin", skinned_triangle_bin()),
-        ],
+        [("models/skin.gltf", gltf)],
         sidecar_options(),
     )?;
     let error = expected_error(result)?;
@@ -99,6 +96,15 @@ fn selected_skin_rejects_a_joint_outside_the_imported_scene() -> TestResult<()> 
         GltfFailureCode::InvalidDocument,
         Some("joint node 4 outside the imported scene"),
     )?;
+    assert!(error.source_scope_record().is_none());
+    assert_eq!(
+        error
+            .ledger()
+            .dimension(ImportDimension::DependencyReference)
+            .expect("dependency references are configured")
+            .attempted(),
+        0
+    );
     Ok(())
 }
 
@@ -112,10 +118,7 @@ fn selected_skin_rejects_a_skeleton_outside_the_imported_scene() -> TestResult<(
     .into_bytes();
     let (result, diagnostics) = import_assets_result(
         "models/skin.gltf",
-        [
-            ("models/skin.gltf", gltf),
-            ("models/skin.bin", skinned_triangle_bin()),
-        ],
+        [("models/skin.gltf", gltf)],
         sidecar_options(),
     )?;
     let error = expected_error(result)?;
@@ -126,6 +129,83 @@ fn selected_skin_rejects_a_skeleton_outside_the_imported_scene() -> TestResult<(
         GltfFailureCode::InvalidDocument,
         Some("skeleton root node 4 outside the imported scene"),
     )?;
+    assert!(error.source_scope_record().is_none());
+    assert_eq!(
+        error
+            .ledger()
+            .dimension(ImportDimension::DependencyReference)
+            .expect("dependency references are configured")
+            .attempted(),
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn selected_skin_without_mesh_is_rejected_before_dependency_io() -> TestResult<()> {
+    let gltf = String::from_utf8(skinned_triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#"{ "name": "MeshNode", "mesh": 0, "skin": 0 }"#,
+            r#"{ "name": "MeshNode", "skin": 0 }"#,
+        )
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/skin.gltf",
+        [("models/skin.gltf", gltf)],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_gltf_failure(
+        &error,
+        GltfFailureCode::InvalidDocument,
+        Some("declares a skin without a mesh"),
+    )?;
+    assert!(error.source_scope_record().is_none());
+    assert_eq!(
+        error
+            .ledger()
+            .dimension(ImportDimension::DependencyReference)
+            .expect("dependency references are configured")
+            .attempted(),
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn multiple_influence_sets_are_rejected_before_dependency_io() -> TestResult<()> {
+    let gltf = String::from_utf8(skinned_triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#""JOINTS_0": 2, "WEIGHTS_0": 3"#,
+            r#""JOINTS_0": 2, "WEIGHTS_0": 3, "JOINTS_1": 2"#,
+        )
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/skin.gltf",
+        [("models/skin.gltf", gltf)],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_gltf_failure(
+        &error,
+        GltfFailureCode::UnsupportedFeature,
+        Some("multiple JOINTS/WEIGHTS sets"),
+    )?;
+    assert!(error.source_scope_record().is_none());
+    assert_eq!(
+        error
+            .ledger()
+            .dimension(ImportDimension::DependencyReference)
+            .expect("dependency references are configured")
+            .attempted(),
+        0
+    );
     Ok(())
 }
 

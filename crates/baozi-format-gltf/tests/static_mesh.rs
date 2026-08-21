@@ -2,6 +2,7 @@ mod common;
 
 use baozi_format_gltf::GltfFailureCode;
 use baozi_import::{ImportCause, ImportDimension, ScopeAbortCause};
+use base64::Engine as _;
 use common::{
     GltfTestOptions, TestResult, assert_gltf_failure, assert_resource_limit, data_uri_gltf,
     expected_error, import_assets, import_assets_result, interleaved_triangle_bin,
@@ -88,6 +89,92 @@ fn imports_glb_static_mesh_from_bin_chunk() -> TestResult<()> {
 
     assert!(diagnostics.is_empty());
     assert!(report.scene().canonical_block_count() > 0);
+    Ok(())
+}
+
+#[test]
+fn selected_morph_targets_are_rejected_before_dependency_io() -> TestResult<()> {
+    let document = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            "      \"mode\": 4\n    }]",
+            "      \"mode\": 4,\n      \"targets\": [{ \"POSITION\": 0 }]\n    }]",
+        )
+        .into_bytes();
+    let (result, diagnostics) = import_assets_result(
+        "models/scene.gltf",
+        [("models/scene.gltf", document)],
+        sidecar_options(),
+    )?;
+    let error = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_gltf_failure(
+        &error,
+        GltfFailureCode::UnsupportedFeature,
+        Some("morph targets are not implemented yet"),
+    )?;
+    assert!(error.source_scope_record().is_none());
+    assert_eq!(
+        error
+            .ledger()
+            .dimension(ImportDimension::DependencyReference)
+            .expect("dependency references are configured")
+            .attempted(),
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn selected_morph_default_weights_are_rejected_before_dependency_io() -> TestResult<()> {
+    let fixtures = [
+        (
+            "mesh",
+            String::from_utf8(triangle_gltf())
+                .expect("fixture is valid utf-8")
+                .replace(
+                    "    \"name\": \"Triangle\",\n    \"primitives\"",
+                    "    \"name\": \"Triangle\",\n    \"weights\": [0.5],\n    \"primitives\"",
+                )
+                .into_bytes(),
+        ),
+        (
+            "node",
+            String::from_utf8(triangle_gltf())
+                .expect("fixture is valid utf-8")
+                .replace(
+                    r#"{ "name": "TriangleNode", "mesh": 0 }"#,
+                    r#"{ "name": "TriangleNode", "mesh": 0, "weights": [0.5] }"#,
+                )
+                .into_bytes(),
+        ),
+    ];
+
+    for (subject, document) in fixtures {
+        let (result, diagnostics) = import_assets_result(
+            "models/scene.gltf",
+            [("models/scene.gltf", document)],
+            sidecar_options(),
+        )?;
+        let error = expected_error(result)?;
+
+        assert!(diagnostics.is_empty(), "unexpected {subject} diagnostics");
+        assert_gltf_failure(
+            &error,
+            GltfFailureCode::UnsupportedFeature,
+            Some("morph weights are not implemented yet"),
+        )?;
+        assert!(error.source_scope_record().is_none());
+        assert_eq!(
+            error
+                .ledger()
+                .dimension(ImportDimension::DependencyReference)
+                .expect("dependency references are configured")
+                .attempted(),
+            0
+        );
+    }
     Ok(())
 }
 
@@ -246,7 +333,7 @@ fn generated_primitive_name_suffix_is_limited_before_sidecar_io() -> TestResult<
 }
 
 #[test]
-fn ignored_overlong_texture_uri_does_not_consume_canonical_string_budget() -> TestResult<()> {
+fn selected_overlong_texture_uri_fails_before_source_scope_and_dependency_io() -> TestResult<()> {
     let long_uri = "x".repeat(128);
     let document = String::from_utf8(triangle_gltf())
         .expect("fixture is valid utf-8")
@@ -258,17 +345,22 @@ fn ignored_overlong_texture_uri_does_not_consume_canonical_string_budget() -> Te
 
     let (result, diagnostics) = import_assets_result(
         "models/ignored-texture.gltf",
-        [
-            ("models/ignored-texture.gltf", document),
-            ("models/triangle.bin", triangle_bin()),
-        ],
+        [("models/ignored-texture.gltf", document)],
         options,
     )?;
-    let report = result?;
+    let error = expected_error(result)?;
 
-    assert!(report.scene().canonical_block_count() > 0);
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].code().as_str(), "gltf.texture_uri_limit");
+    assert!(diagnostics.is_empty());
+    assert_resource_limit(&error, "max_string_bytes");
+    assert!(error.source_scope_record().is_none());
+    assert_eq!(
+        error
+            .ledger()
+            .dimension(ImportDimension::DependencyReference)
+            .expect("dependency references are configured")
+            .attempted(),
+        0
+    );
     Ok(())
 }
 
@@ -668,6 +760,33 @@ fn imports_base64_buffer_data_uri() -> TestResult<()> {
 
     assert!(diagnostics.is_empty());
     assert!(report.scene().canonical_block_count() > 0);
+    Ok(())
+}
+
+#[test]
+fn data_uri_buffer_retains_only_the_declared_prefix() -> TestResult<()> {
+    let mut payload = triangle_bin();
+    let declared_length = payload.len();
+    payload.extend_from_slice(&[0x5a; 32]);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
+    let document = triangle_gltf_with_buffer_uri(
+        &format!("data:application/octet-stream;base64,{encoded}"),
+        declared_length,
+    );
+    let mut options = GltfTestOptions::memory();
+    options.limits.max_data_uri_bytes = declared_length as u64;
+
+    let (report, diagnostics) = import_assets("scene.gltf", [("scene.gltf", document)], options)?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        report
+            .ledger()
+            .dimension(ImportDimension::DataUriBytes)
+            .expect("data URI bytes are configured")
+            .consumed(),
+        declared_length as u64
+    );
     Ok(())
 }
 

@@ -521,6 +521,9 @@ fn record_channel_losses(
     );
     object_path.try_reserve(48)?;
     for (channel_index, disposition) in dispositions.iter().copied().enumerate() {
+        if channel_index.is_multiple_of(super::PARSER_POLL_INTERVAL) {
+            ctx.poll()?;
+        }
         let (code, reason) = match disposition {
             SourceChannelDisposition::Retained => continue,
             SourceChannelDisposition::ScopeOmitted if !animation_selected => continue,
@@ -629,7 +632,7 @@ fn output_contract(property: NodeAnimationProperty) -> AccessorContract {
 
 pub(super) fn build_storage<'scope>(
     ctx: &'scope ParseScope<'_>,
-    buffers: &[BufferData<'_>],
+    buffers: &[Option<BufferData<'_>>],
     node_ids: &[Option<NodeLocalId>],
     contracts: &AnimationContracts<'_, '_>,
 ) -> Result<AnimationStorage<'scope>> {
@@ -713,14 +716,17 @@ fn checked_contract_range<'a>(
 
 fn read_duration_channel(
     ctx: &ParseScope<'_>,
-    buffers: &[BufferData<'_>],
+    buffers: &[Option<BufferData<'_>>],
     contract: &AnimationDurationContract<'_>,
     work: &mut ImportWorkScope<'_, '_, 2>,
 ) -> Result<f64> {
     let reader = safe_gltf(ctx, "glTF animation duration reader construction", || {
-        contract
-            .source
-            .reader(|buffer| buffers.get(buffer.index()).map(BufferData::as_slice))
+        contract.source.reader(|buffer| {
+            buffers
+                .get(buffer.index())
+                .and_then(Option::as_ref)
+                .map(BufferData::as_slice)
+        })
     })?;
     let mut input = safe_gltf(ctx, "glTF animation duration input reader", || {
         reader.read_inputs()
@@ -770,7 +776,7 @@ fn read_duration_channel(
 
 fn read_channel<'scope>(
     ctx: &'scope ParseScope<'_>,
-    buffers: &[BufferData<'_>],
+    buffers: &[Option<BufferData<'_>>],
     node_ids: &[Option<NodeLocalId>],
     contract: &AnimationChannelContract<'_>,
     work: &mut ImportWorkScope<'_, '_, 2>,
@@ -785,9 +791,12 @@ fn read_channel<'scope>(
             ))
         })?;
     let reader = safe_gltf(ctx, "glTF animation reader construction", || {
-        contract
-            .source
-            .reader(|buffer| buffers.get(buffer.index()).map(BufferData::as_slice))
+        contract.source.reader(|buffer| {
+            buffers
+                .get(buffer.index())
+                .and_then(Option::as_ref)
+                .map(BufferData::as_slice)
+        })
     })?;
     let input = safe_gltf(ctx, "glTF animation input reader", || reader.read_inputs())?
         .ok_or_else(|| channel_error(ctx, contract, "input accessor could not be read"))?;

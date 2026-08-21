@@ -133,6 +133,19 @@ fn enforce_usize_limit(
     Ok(())
 }
 
+fn selected_count(ctx: &ParseScope<'_>, values: &[bool]) -> Result<usize> {
+    let mut count = 0usize;
+    for chunk in values.chunks(PARSER_POLL_INTERVAL) {
+        ctx.charge_work(to_u64(chunk.len()))?;
+        for selected in chunk {
+            count = count.checked_add(usize::from(*selected)).ok_or_else(|| {
+                ContentError::from(GltfFailure::internal("selection count overflow"))
+            })?;
+        }
+    }
+    Ok(count)
+}
+
 fn checked_add_with_limit(
     ctx: &ParseScope<'_>,
     resource: &'static str,
@@ -145,6 +158,14 @@ fn checked_add_with_limit(
         .ok_or_else(|| ctx.allocation_failure("gltf-resource-counter-overflow"))?;
     enforce_usize_limit(ctx, resource, attempted, limit)?;
     Ok(attempted)
+}
+
+struct PreparedDocument<'scope, 'document> {
+    node_graph: NodeGraph<'document, 'scope>,
+    resource_closure: ResourceClosure<'scope>,
+    geometry_contracts: GeometryContracts<'scope>,
+    resolved_texture_uris: ResolvedTextureUris<'scope>,
+    animation_contracts: animation::AnimationContracts<'scope, 'document>,
 }
 
 fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
@@ -168,21 +189,30 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
         .map_err(|error| GltfFailure::invalid_document(format_args!("invalid glTF: {error}")))?;
     let node_graph = preflight_node_graph(ctx, &gltf)?;
     let animation_contracts = animation::preflight(ctx, &gltf, node_graph.selected.as_slice())?;
-    record_source_scope(ctx, &gltf, &node_graph, &animation_contracts)?;
-    let repeated_mesh_string_bytes = preflight_canonical_base_strings(ctx, &gltf, &node_graph)?;
-    let resolved_texture_uris = preflight_texture_strings(ctx, &gltf, repeated_mesh_string_bytes)?;
+    let resource_closure = build_resource_closure(ctx, &gltf, &node_graph, &animation_contracts)?;
+    let repeated_mesh_string_bytes =
+        preflight_canonical_base_strings(ctx, &gltf, &node_graph, &resource_closure)?;
+    let resolved_texture_uris =
+        preflight_texture_strings(ctx, &gltf, repeated_mesh_string_bytes, &resource_closure)?;
     let material_count = safe_gltf(ctx, "glTF material count", || gltf.materials().count())?;
-    let geometry_contracts = preflight_geometry_contracts(ctx, &gltf, material_count)?;
-    let buffers = load_buffers(ctx, &gltf)?;
-    scene_from_document(
+    let geometry_contracts =
+        preflight_geometry_contracts(ctx, &gltf, material_count, &resource_closure)?;
+    let prepared = PreparedDocument {
+        node_graph,
+        resource_closure,
+        geometry_contracts,
+        resolved_texture_uris,
+        animation_contracts,
+    };
+    record_source_scope(
         ctx,
         &gltf,
-        buffers.as_slice(),
-        &node_graph,
-        &geometry_contracts,
-        &resolved_texture_uris,
-        &animation_contracts,
-    )
+        &prepared.node_graph,
+        &prepared.animation_contracts,
+        &prepared.resource_closure,
+    )?;
+    let buffers = load_buffers(ctx, &gltf, &prepared.resource_closure)?;
+    scene_from_document(ctx, &gltf, buffers.as_slice(), &prepared)
 }
 
 fn gltf_backend_allocation_allowance(
@@ -210,6 +240,7 @@ fn preflight_canonical_base_strings(
     ctx: &ParseScope<'_>,
     gltf: &gltf::Gltf,
     graph: &NodeGraph<'_, '_>,
+    closure: &ResourceClosure<'_>,
 ) -> Result<usize> {
     safe_gltf(ctx, "glTF canonical string preflight", || {
         let mut bytes = 0usize;
@@ -217,6 +248,15 @@ fn preflight_canonical_base_strings(
 
         for (mesh_index, mesh) in gltf.meshes().enumerate() {
             poll_parser_loop(ctx, mesh_index)?;
+            if !closure
+                .meshes
+                .as_slice()
+                .get(mesh_index)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
             if let Some(name) = mesh.name() {
                 enforce_usize_limit(
                     ctx,
@@ -225,6 +265,17 @@ fn preflight_canonical_base_strings(
                     ctx.limits().max_string_bytes,
                 )?;
                 add_repeated_string_bytes(ctx, &mut bytes, name.len(), limit)?;
+                let primitive_count =
+                    safe_gltf(ctx, "glTF primitive count", || mesh.primitives().len())?;
+                for primitive_index in 0..primitive_count {
+                    let generated_len = primitive_name_len(ctx, name, primitive_index)?;
+                    enforce_usize_limit(
+                        ctx,
+                        "max_string_bytes",
+                        generated_len,
+                        ctx.limits().max_string_bytes,
+                    )?;
+                }
             }
         }
 
@@ -322,6 +373,15 @@ fn preflight_canonical_base_strings(
 
         for (camera_index, camera) in gltf.cameras().enumerate() {
             poll_parser_loop(ctx, camera_index)?;
+            if !closure
+                .cameras
+                .as_slice()
+                .get(camera_index)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
             if let Some(name) = camera.name()
                 && name.len() <= ctx.limits().max_string_bytes
             {
@@ -347,6 +407,7 @@ fn preflight_texture_strings<'scope>(
     ctx: &'scope ParseScope<'_>,
     gltf: &gltf::Gltf,
     repeated_mesh_string_bytes: usize,
+    closure: &ResourceClosure<'_>,
 ) -> Result<ResolvedTextureUris<'scope>> {
     safe_gltf(ctx, "glTF texture string preflight", || {
         let mut bytes = repeated_mesh_string_bytes;
@@ -359,6 +420,15 @@ fn preflight_texture_strings<'scope>(
 
         for (material_index, material) in gltf.materials().enumerate() {
             poll_parser_loop(ctx, material_index)?;
+            if !closure
+                .materials
+                .as_slice()
+                .get(material_index)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
             if let Some(name) = material.name() {
                 enforce_usize_limit(
                     ctx,
@@ -451,12 +521,13 @@ fn preflight_texture_reference<'scope>(
             ctx.limits().max_string_bytes,
         )?;
     }
-
-    let ImageSource::Uri { uri, .. } = image.source() else {
-        return Ok(());
-    };
-    if is_data_uri(uri) || uri.len() > ctx.limits().max_string_bytes {
-        return Ok(());
+    if let ImageSource::Uri { uri, .. } = image.source() {
+        enforce_usize_limit(
+            ctx,
+            "max_string_bytes",
+            uri.len(),
+            ctx.limits().max_string_bytes,
+        )?;
     }
 
     let image_index = image.index();
@@ -466,34 +537,46 @@ fn preflight_texture_reference<'scope>(
             format!("glTF texture references missing image {image_index}"),
         ));
     }
-    if !resolved_uris.contains_key(&image_index) {
-        let resolution_bytes = texture_path_resolution_allowance(ctx, uri)?;
-        let _resolution_allowance = ctx
-            .metered_opaque_allowance(ImportStorageClass::FormatNormalization, resolution_bytes)?;
-        let resolved = ctx.with_work(
-            ImportWorkClass::WorkUnits,
-            to_u64(ctx.source().as_str().len().saturating_add(uri.len())),
-            |work| -> Result<_> {
-                let resolved = ctx.source().resolve_from_file(uri).map_err(|error| {
-                    GltfFailure::invalid_reference("texture-uri", Some(image_index), error)
-                })?;
-                work.complete_all()?;
-                Ok(resolved)
-            },
-        )?;
-        let mut resolved_uri = ctx.metered_string(
-            ImportStorageClass::FormatNormalization,
-            "gltf-resolved-texture-uri",
-        );
-        resolved_uri.try_push_str(resolved.as_str())?;
-        resolved_uris.try_insert(image_index, resolved_uri)?;
-    }
-    let resolved_uri = resolved_uris.get(&image_index).ok_or_else(|| {
-        gltf_parse_error(
-            ctx,
-            format!("glTF texture resolution plan is missing image {image_index}"),
-        )
-    })?;
+    let resolved_uri_len = match image.source() {
+        ImageSource::Uri { uri, .. } if !is_data_uri(uri) => {
+            if !resolved_uris.contains_key(&image_index) {
+                let resolution_bytes = texture_path_resolution_allowance(ctx, uri)?;
+                let _resolution_allowance = ctx.metered_opaque_allowance(
+                    ImportStorageClass::FormatNormalization,
+                    resolution_bytes,
+                )?;
+                let resolved = ctx.with_work(
+                    ImportWorkClass::WorkUnits,
+                    to_u64(ctx.source().as_str().len().saturating_add(uri.len())),
+                    |work| -> Result<_> {
+                        let resolved = ctx.source().resolve_from_file(uri).map_err(|error| {
+                            GltfFailure::invalid_reference("texture-uri", Some(image_index), error)
+                        })?;
+                        work.complete_all()?;
+                        Ok(resolved)
+                    },
+                )?;
+                let mut resolved_uri = ctx.metered_string(
+                    ImportStorageClass::FormatNormalization,
+                    "gltf-resolved-texture-uri",
+                );
+                resolved_uri.try_push_str(resolved.as_str())?;
+                resolved_uris.try_insert(image_index, resolved_uri)?;
+            }
+            Some(
+                resolved_uris
+                    .get(&image_index)
+                    .ok_or_else(|| {
+                        gltf_parse_error(
+                            ctx,
+                            format!("glTF texture resolution plan is missing image {image_index}"),
+                        )
+                    })?
+                    .len(),
+            )
+        }
+        ImageSource::Uri { .. } | ImageSource::View { .. } => None,
+    };
 
     let texture_name = texture.name();
     if let Some(name) = texture_name {
@@ -507,7 +590,9 @@ fn preflight_texture_reference<'scope>(
     if let Some(name) = texture_name.or(image_name) {
         add_repeated_string_bytes(ctx, bytes, name.len(), limit)?;
     }
-    add_repeated_string_bytes(ctx, bytes, resolved_uri.len(), limit)?;
+    if let Some(resolved_uri_len) = resolved_uri_len {
+        add_repeated_string_bytes(ctx, bytes, resolved_uri_len, limit)?;
+    }
     add_repeated_string_bytes(ctx, bytes, source_key.len(), limit)?;
     Ok(())
 }
@@ -547,6 +632,33 @@ fn add_repeated_string_bytes(
     Ok(())
 }
 
+fn primitive_name_len(
+    ctx: &ParseScope<'_>,
+    mesh_name: &str,
+    primitive_index: usize,
+) -> Result<usize> {
+    let suffix_len = if primitive_index == 0 {
+        0
+    } else {
+        1usize
+            .checked_add(decimal_digits(primitive_index))
+            .ok_or_else(|| ctx.allocation_failure("gltf-primitive-name-length"))?
+    };
+    mesh_name
+        .len()
+        .checked_add(suffix_len)
+        .ok_or_else(|| ctx.allocation_failure("gltf-primitive-name-length").into())
+}
+
+fn decimal_digits(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
 fn complete_canonical_string_work(ctx: &ParseScope<'_>, bytes: usize) -> Result<()> {
     if bytes == 0 {
         return Ok(());
@@ -572,11 +684,11 @@ impl BufferData<'_> {
 }
 
 struct BufferSet<'scope> {
-    values: MeteredVec<'scope, BufferData<'scope>>,
+    values: MeteredVec<'scope, Option<BufferData<'scope>>>,
 }
 
 impl BufferSet<'_> {
-    fn as_slice(&self) -> &[BufferData<'_>] {
+    fn as_slice(&self) -> &[Option<BufferData<'_>>] {
         self.values.as_slice()
     }
 }
@@ -584,13 +696,24 @@ impl BufferSet<'_> {
 fn load_buffers<'scope>(
     ctx: &'scope ParseScope<'_>,
     gltf: &gltf::Gltf,
+    closure: &ResourceClosure<'_>,
 ) -> Result<BufferSet<'scope>> {
     let buffer_count = safe_gltf(ctx, "glTF buffer count", || gltf.buffers().count())?;
     let mut buffers = ctx.metered_vec(ImportStorageClass::BackendDecode, "gltf-buffer-list");
     buffers.try_reserve(buffer_count)?;
     for (ordinal, buffer) in gltf.buffers().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
-        let mut loaded = match buffer.source() {
+        if !closure
+            .buffers
+            .as_slice()
+            .get(ordinal)
+            .copied()
+            .unwrap_or(false)
+        {
+            buffers.try_push_reserved(None)?;
+            continue;
+        }
+        let loaded = match buffer.source() {
             BufferSource::Bin => {
                 let blob = gltf.blob.as_deref().ok_or_else(|| {
                     ContentError::parse(
@@ -599,15 +722,23 @@ fn load_buffers<'scope>(
                         format!("glTF buffer {} requires a GLB BIN chunk", buffer.index()),
                     )
                 })?;
-                copy_buffer(ctx, blob, "gltf-glb-buffer")?
+                copy_buffer_prefix(
+                    ctx,
+                    blob,
+                    buffer.length(),
+                    "gltf-glb-buffer",
+                    buffer.index(),
+                )?
             }
             BufferSource::Uri(uri) if is_data_uri(uri) => {
-                load_data_uri_buffer(ctx, uri, buffer.index())?
+                load_data_uri_buffer(ctx, uri, buffer.index(), buffer.length())?
             }
-            BufferSource::Uri(uri) => load_external_buffer(ctx, uri, buffer.index())?,
+            BufferSource::Uri(uri) => {
+                load_external_buffer(ctx, uri, buffer.index(), buffer.length())?
+            }
         };
 
-        if loaded.bytes.len() < buffer.length() {
+        if loaded.bytes.len() != buffer.length() {
             return Err(ContentError::parse(
                 ctx.source().to_string(),
                 None,
@@ -619,8 +750,7 @@ fn load_buffers<'scope>(
                 ),
             ));
         }
-        loaded.bytes.truncate(buffer.length());
-        buffers.try_push_reserved(loaded)?;
+        buffers.try_push_reserved(Some(loaded))?;
     }
     Ok(BufferSet { values: buffers })
 }
@@ -629,23 +759,52 @@ fn load_data_uri_buffer<'scope>(
     ctx: &'scope ParseScope<'_>,
     uri: &str,
     buffer_index: usize,
+    declared_length: usize,
 ) -> Result<BufferData<'scope>> {
+    let decoded = decode_data_uri_payload(
+        ctx,
+        uri,
+        "buffer",
+        buffer_index,
+        "data-uri-buffer",
+        "gltf-data-uri-buffer",
+        Some(declared_length),
+    )?;
+    Ok(BufferData {
+        bytes: decoded.bytes,
+    })
+}
+
+struct DecodedDataUri<'scope, 'uri> {
+    bytes: MeteredVec<'scope, u8>,
+    media_type: Option<&'uri str>,
+}
+
+fn decode_data_uri_payload<'scope, 'uri>(
+    ctx: &'scope ParseScope<'_>,
+    uri: &'uri str,
+    subject: &'static str,
+    subject_index: usize,
+    reference: &'static str,
+    allocation: &'static str,
+    retained_length: Option<usize>,
+) -> Result<DecodedDataUri<'scope, 'uri>> {
     enforce_usize_limit(
         ctx,
         "max_string_bytes",
         uri.len(),
         ctx.limits().max_string_bytes,
     )?;
-    let Some(payload) = uri.strip_prefix("data:") else {
+    let Some(payload) = uri.get(5..).filter(|_| is_data_uri(uri)) else {
         return Err(gltf_parse_error(
             ctx,
-            format!("glTF buffer {buffer_index} has an invalid data URI"),
+            format!("glTF {subject} {subject_index} has an invalid data URI"),
         ));
     };
     let Some((metadata, encoded)) = payload.split_once(',') else {
         return Err(gltf_parse_error(
             ctx,
-            format!("glTF buffer {buffer_index} data URI has no comma separator"),
+            format!("glTF {subject} {subject_index} data URI has no comma separator"),
         ));
     };
     if !metadata
@@ -654,45 +813,48 @@ fn load_data_uri_buffer<'scope>(
     {
         return Err(ContentError::FeatureUnsupported {
             format: "gltf",
-            feature: format!("buffer {buffer_index} uses a non-base64 data URI"),
+            feature: format!("{subject} {subject_index} uses a non-base64 data URI"),
         });
     }
 
-    let decoded_len = base64_decoded_len(ctx, encoded, buffer_index)?;
-    let decoded_capacity = base64::decoded_len_estimate(encoded.len());
+    let decoded_len = base64_decoded_len(ctx, encoded, subject, subject_index)?;
+    let decoded_len = usize::try_from(decoded_len)
+        .map_err(|_| ctx.allocation_failure("gltf-data-uri-decoded-length"))?;
+    let retained_length = retained_length.unwrap_or(decoded_len);
+    let stored_length = retained_length.min(decoded_len);
     let decoded = ctx.with_work_group(
         [
-            (ImportWorkClass::DataUriBytes, decoded_len),
+            (ImportWorkClass::DataUriBytes, to_u64(stored_length)),
             (
                 ImportWorkClass::DecodeWork,
                 u64::try_from(encoded.len()).unwrap_or(u64::MAX),
             ),
         ],
         |work| -> Result<_> {
-            let mut decoded =
-                ctx.metered_vec(ImportStorageClass::BackendDecode, "gltf-data-uri-buffer");
-            decoded.try_reserve(decoded_capacity)?;
-            let mut written = 0usize;
+            let mut decoded = ctx.metered_vec(ImportStorageClass::BackendDecode, allocation);
+            decoded.try_reserve(stored_length)?;
+            let mut decoded_length = 0usize;
+            let mut chunk_output = [0_u8; PARSER_POLL_INTERVAL];
             for (chunk_index, chunk) in encoded.as_bytes().chunks(PARSER_POLL_INTERVAL).enumerate()
             {
                 work.poll()?;
                 let chunk_start = chunk_index * PARSER_POLL_INTERVAL;
                 let chunk_capacity = base64::decoded_len_estimate(chunk.len());
-                let chunk_end = written
-                    .checked_add(chunk_capacity)
-                    .ok_or_else(|| ctx.allocation_failure("gltf-data-uri-buffer"))?;
-                decoded.try_resize(chunk_end, 0_u8)?;
+                let output = chunk_output.get_mut(..chunk_capacity).ok_or_else(|| {
+                    ContentError::from(GltfFailure::internal(
+                        "base64 chunk capacity exceeds the bounded decode buffer",
+                    ))
+                })?;
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
-                    BASE64_STANDARD
-                        .decode_slice(chunk, &mut decoded.as_mut_slice()[written..chunk_end])
+                    BASE64_STANDARD.decode_slice(chunk, output)
                 }));
                 let chunk_written = finish_gltf_operation("glTF base64 buffer decode", outcome)?
                     .map_err(|error| match error {
                         DecodeSliceError::DecodeError(error) => {
                             let error = offset_base64_decode_error(error, chunk_start);
                             GltfFailure::invalid_reference(
-                                "data-uri-buffer",
-                                Some(buffer_index),
+                                reference,
+                                Some(subject_index),
                                 format_args!("invalid base64: {error}"),
                             )
                         }
@@ -700,19 +862,47 @@ fn load_data_uri_buffer<'scope>(
                             GltfFailure::internal("base64 decoder exceeded its preflight capacity")
                         }
                     })?;
-                written = written
+                let retained_chunk = stored_length
+                    .saturating_sub(decoded_length)
+                    .min(chunk_written);
+                decoded.try_extend_from_slice(&output[..retained_chunk])?;
+                decoded_length = decoded_length
                     .checked_add(chunk_written)
                     .ok_or_else(|| ctx.allocation_failure("gltf-data-uri-buffer"))?;
-                decoded.truncate(written);
-                work.complete([to_u64(chunk_written), to_u64(chunk.len())])?;
+                work.complete([to_u64(retained_chunk), to_u64(chunk.len())])?;
+            }
+            if decoded_length != decoded_len || decoded.len() != stored_length {
+                return Err(ContentError::from(GltfFailure::internal(
+                    "base64 decode length changed after preflight",
+                )));
+            }
+            if decoded_len < retained_length {
+                return Err(gltf_parse_error(
+                    ctx,
+                    format!(
+                        "glTF {subject} {subject_index} declares {retained_length} bytes but only {decoded_len} bytes are available"
+                    ),
+                ));
             }
             Ok(decoded)
         },
     )?;
-    Ok(BufferData { bytes: decoded })
+    let media_type = metadata
+        .split(';')
+        .next()
+        .filter(|media_type| !media_type.is_empty());
+    Ok(DecodedDataUri {
+        bytes: decoded,
+        media_type,
+    })
 }
 
-fn base64_decoded_len(ctx: &ParseScope<'_>, encoded: &str, buffer_index: usize) -> Result<u64> {
+fn base64_decoded_len(
+    ctx: &ParseScope<'_>,
+    encoded: &str,
+    subject: &'static str,
+    subject_index: usize,
+) -> Result<u64> {
     if encoded.is_empty() {
         return Ok(0);
     }
@@ -726,7 +916,7 @@ fn base64_decoded_len(ctx: &ParseScope<'_>, encoded: &str, buffer_index: usize) 
             if byte.is_ascii_whitespace() {
                 return Err(gltf_parse_error(
                     ctx,
-                    format!("glTF buffer {buffer_index} data URI base64 contains whitespace"),
+                    format!("glTF {subject} {subject_index} data URI base64 contains whitespace"),
                 ));
             }
             if byte == b'=' {
@@ -741,13 +931,13 @@ fn base64_decoded_len(ctx: &ParseScope<'_>, encoded: &str, buffer_index: usize) 
     if !encoded.len().is_multiple_of(4) {
         return Err(gltf_parse_error(
             ctx,
-            format!("glTF buffer {buffer_index} data URI base64 length is not padded"),
+            format!("glTF {subject} {subject_index} data URI base64 length is not padded"),
         ));
     }
     if invalid_padding {
         return Err(gltf_parse_error(
             ctx,
-            format!("glTF buffer {buffer_index} data URI base64 padding is invalid"),
+            format!("glTF {subject} {subject_index} data URI base64 padding is invalid"),
         ));
     }
     let groups = (encoded.len() / 4) as u64;
@@ -775,7 +965,8 @@ fn offset_base64_decode_error(error: DecodeError, chunk_start: usize) -> DecodeE
 fn load_external_buffer<'scope>(
     ctx: &'scope ParseScope<'_>,
     uri: &str,
-    _buffer_index: usize,
+    buffer_index: usize,
+    declared_length: usize,
 ) -> Result<BufferData<'scope>> {
     enforce_usize_limit(
         ctx,
@@ -786,10 +977,44 @@ fn load_external_buffer<'scope>(
     let origin = ctx.root_origin();
     let outcome = ctx.dependency(&origin, &external_buffer_role(), uri)?;
     let snapshot = ctx.into_available_dependency(outcome)?;
-    copy_buffer(ctx, snapshot.bytes(), "gltf-external-buffer-copy")
+    copy_buffer_prefix(
+        ctx,
+        snapshot.bytes(),
+        declared_length,
+        "gltf-external-buffer-copy",
+        buffer_index,
+    )
 }
 
 fn copy_buffer<'scope>(
+    ctx: &'scope ParseScope<'_>,
+    source: &[u8],
+    allocation: &'static str,
+) -> Result<BufferData<'scope>> {
+    copy_buffer_bytes(ctx, source, allocation)
+}
+
+fn copy_buffer_prefix<'scope>(
+    ctx: &'scope ParseScope<'_>,
+    source: &[u8],
+    declared_length: usize,
+    allocation: &'static str,
+    buffer_index: usize,
+) -> Result<BufferData<'scope>> {
+    if source.len() < declared_length {
+        return Err(ContentError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "glTF buffer {buffer_index} declares {declared_length} bytes but only {} bytes are available",
+                source.len()
+            ),
+        ));
+    }
+    copy_buffer_bytes(ctx, &source[..declared_length], allocation)
+}
+
+fn copy_buffer_bytes<'scope>(
     ctx: &'scope ParseScope<'_>,
     source: &[u8],
     allocation: &'static str,
@@ -818,23 +1043,42 @@ fn gltf_parse_error(ctx: &ParseScope<'_>, message: impl Into<String>) -> Content
 fn scene_from_document(
     ctx: &ParseScope<'_>,
     gltf: &gltf::Gltf,
-    buffers: &[BufferData<'_>],
-    node_graph: &NodeGraph<'_, '_>,
-    geometry_contracts: &GeometryContracts<'_>,
-    resolved_texture_uris: &ResolvedTextureUris<'_>,
-    animation_contracts: &animation::AnimationContracts<'_, '_>,
+    buffers: &[Option<BufferData<'_>>],
+    prepared: &PreparedDocument<'_, '_>,
 ) -> Result<SceneDraft> {
-    let external_images = load_external_image_resources(ctx, gltf, resolved_texture_uris)?;
-    let appearance_storage =
-        build_appearance_storage(ctx, gltf, resolved_texture_uris, &external_images)?;
-    let geometry_storage = build_geometry_storage(ctx, gltf, buffers, geometry_contracts)?;
-    let cameras = build_cameras(ctx, gltf)?;
-    let node_storage = build_scene_nodes(ctx, node_graph, geometry_storage.logical_meshes.len())?;
+    let external_images = load_external_image_resources(
+        ctx,
+        gltf,
+        &prepared.resolved_texture_uris,
+        &prepared.resource_closure,
+    )?;
+    let appearance_storage = build_appearance_storage(
+        ctx,
+        gltf,
+        buffers,
+        &prepared.resolved_texture_uris,
+        &external_images,
+        &prepared.resource_closure,
+    )?;
+    let geometry_storage = build_geometry_storage(
+        ctx,
+        gltf,
+        buffers,
+        &prepared.geometry_contracts,
+        &appearance_storage.material_ids,
+    )?;
+    let cameras = build_cameras(ctx, gltf, &prepared.resource_closure)?;
+    let node_storage = build_scene_nodes(
+        ctx,
+        &prepared.node_graph,
+        &geometry_storage.logical_mesh_ids,
+        &cameras,
+    )?;
     let animation_storage = animation::build_storage(
         ctx,
         buffers,
         node_storage.node_ids.as_slice(),
-        animation_contracts,
+        &prepared.animation_contracts,
     )?;
     let skin_storage = build_skins(
         ctx,
@@ -889,6 +1133,7 @@ fn load_external_image_resources<'scope>(
     ctx: &'scope ParseScope<'_>,
     gltf: &gltf::Gltf,
     resolved_texture_uris: &ResolvedTextureUris<'_>,
+    closure: &ResourceClosure<'_>,
 ) -> Result<ExternalImageResources<'scope>> {
     let mut values = ctx.metered_vec(
         ImportStorageClass::FormatNormalization,
@@ -897,6 +1142,15 @@ fn load_external_image_resources<'scope>(
     values.try_reserve(resolved_texture_uris.values.len())?;
     for (ordinal, image) in gltf.images().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
+        if !closure
+            .images
+            .as_slice()
+            .get(ordinal)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let ImageSource::Uri { uri, .. } = image.source() else {
             continue;
         };
@@ -923,15 +1177,20 @@ fn load_external_image_resources<'scope>(
     Ok(ExternalImageResources { values })
 }
 
-struct ImageStorage<'scope> {
-    resource: ResourceIdentityLocalId,
-    resource_index: u32,
+enum ImagePayloadStorage {
+    Encoded(usize),
+    SessionResource(ResourceIdentityLocalId),
+}
+
+struct ImageStorage {
+    payload: ImagePayloadStorage,
+    provenance: u32,
     media_type: Option<ExtensionMediaType>,
-    texture_name: Option<MeteredString<'scope>>,
 }
 
 struct BindingStorage {
     texture: TextureLocalId,
+    provenance: u32,
     role: TextureRole,
     coordinate_source: TextureCoordinateSource,
     channel_mapping: TextureChannelMapping,
@@ -950,18 +1209,29 @@ struct MaterialStorage<'document> {
 }
 
 struct AppearanceStorage<'scope, 'document> {
-    images: MeteredVec<'scope, ImageStorage<'scope>>,
+    images: MeteredVec<'scope, ImageStorage>,
+    encoded_image_payloads: MeteredVec<'scope, MeteredVec<'scope, u8>>,
     samplers: MeteredVec<'scope, SamplerAuthoring>,
+    sampler_provenance: MeteredVec<'scope, u32>,
     textures: MeteredVec<'scope, TextureAuthoring>,
+    texture_provenance: MeteredVec<'scope, u32>,
+    texture_names: MeteredVec<'scope, Option<MeteredString<'scope>>>,
     bindings: MeteredVec<'scope, BindingStorage>,
     materials: MeteredVec<'scope, MaterialStorage<'document>>,
+    image_ids: MeteredVec<'scope, Option<ImageLocalId>>,
+    sampler_ids: MeteredVec<'scope, Option<SamplerLocalId>>,
+    texture_ids: MeteredVec<'scope, Option<TextureLocalId>>,
+    default_sampler: Option<SamplerLocalId>,
+    material_ids: MeteredVec<'scope, Option<MaterialLocalId>>,
 }
 
 fn build_appearance_storage<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
     gltf: &'document gltf::Gltf,
+    buffers: &[Option<BufferData<'_>>],
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     external_images: &ExternalImageResources<'scope>,
+    closure: &ResourceClosure<'_>,
 ) -> Result<AppearanceStorage<'scope, 'document>> {
     let material_count = safe_gltf(ctx, "glTF material count", || gltf.materials().count())?;
     let mut storage = AppearanceStorage {
@@ -969,13 +1239,29 @@ fn build_appearance_storage<'scope, 'document>(
             ImportStorageClass::SceneConstruction,
             "gltf-authoring-images",
         ),
+        encoded_image_payloads: ctx.metered_vec(
+            ImportStorageClass::SceneConstruction,
+            "gltf-authoring-encoded-image-payloads",
+        ),
         samplers: ctx.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-authoring-samplers",
         ),
+        sampler_provenance: ctx.metered_vec(
+            ImportStorageClass::FormatNormalization,
+            "gltf-sampler-provenance",
+        ),
         textures: ctx.metered_vec(
             ImportStorageClass::SceneConstruction,
             "gltf-authoring-textures",
+        ),
+        texture_provenance: ctx.metered_vec(
+            ImportStorageClass::FormatNormalization,
+            "gltf-texture-provenance",
+        ),
+        texture_names: ctx.metered_vec(
+            ImportStorageClass::SceneConstruction,
+            "gltf-authoring-texture-names",
         ),
         bindings: ctx.metered_vec(
             ImportStorageClass::SceneConstruction,
@@ -985,10 +1271,63 @@ fn build_appearance_storage<'scope, 'document>(
             ImportStorageClass::SceneConstruction,
             "gltf-authoring-materials",
         ),
+        image_ids: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            gltf.images().count(),
+            None,
+            "gltf-image-id-map",
+        )?,
+        sampler_ids: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            gltf.samplers().count(),
+            None,
+            "gltf-sampler-id-map",
+        )?,
+        texture_ids: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            gltf.textures().count(),
+            None,
+            "gltf-texture-id-map",
+        )?,
+        default_sampler: None,
+        material_ids: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            material_count,
+            None,
+            "gltf-material-id-map",
+        )?,
     };
-    storage.materials.try_reserve(material_count)?;
+    build_shared_appearance_resources(
+        ctx,
+        gltf,
+        buffers,
+        resolved_texture_uris,
+        external_images,
+        closure,
+        &mut storage,
+    )?;
+    let selected_material_count = selected_count(ctx, closure.materials.as_slice())?;
+    storage.materials.try_reserve(selected_material_count)?;
     for (material_index, material) in gltf.materials().enumerate() {
         poll_parser_loop(ctx, material_index)?;
+        if !closure
+            .materials
+            .as_slice()
+            .get(material_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let local_id = MaterialLocalId::new(authoring_u32(
+            ctx,
+            storage.materials.len(),
+            "gltf-authoring-material-id",
+        )?);
         add_material_authoring(
             ctx,
             &mut storage,
@@ -996,8 +1335,295 @@ fn build_appearance_storage<'scope, 'document>(
             resolved_texture_uris,
             external_images,
         )?;
+        let Some(slot) = storage.material_ids.as_mut_slice().get_mut(material_index) else {
+            return Err(gltf_parse_error(ctx, "glTF material id map is incomplete"));
+        };
+        *slot = Some(local_id);
     }
     Ok(storage)
+}
+
+fn build_shared_appearance_resources<'scope, 'document>(
+    ctx: &'scope ParseScope<'_>,
+    gltf: &'document gltf::Gltf,
+    buffers: &[Option<BufferData<'_>>],
+    resolved_texture_uris: &ResolvedTextureUris<'_>,
+    external_images: &ExternalImageResources<'scope>,
+    closure: &ResourceClosure<'_>,
+    storage: &mut AppearanceStorage<'scope, 'document>,
+) -> Result<()> {
+    let selected_image_count = selected_count(ctx, closure.images.as_slice())?;
+    storage.images.try_reserve(selected_image_count)?;
+    storage
+        .encoded_image_payloads
+        .try_reserve(selected_image_count)?;
+    for (image_index, image) in gltf.images().enumerate() {
+        poll_parser_loop(ctx, image_index)?;
+        if !closure
+            .images
+            .as_slice()
+            .get(image_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let (payload, provenance, media_type) = match image.source() {
+            ImageSource::Uri { uri, mime_type } if is_data_uri(uri) => {
+                let decoded = decode_data_uri_payload(
+                    ctx,
+                    uri,
+                    "image",
+                    image_index,
+                    "data-uri-image",
+                    "gltf-data-uri-image",
+                    None,
+                )?;
+                let media_type =
+                    image_media_type(ctx, image_index, mime_type.or(decoded.media_type))?;
+                (
+                    store_encoded_image_payload(storage, decoded.bytes)?,
+                    0,
+                    media_type,
+                )
+            }
+            ImageSource::Uri { mime_type, .. } => {
+                let resolved = resolved_texture_uris.get(&image_index).ok_or_else(|| {
+                    gltf_parse_error(
+                        ctx,
+                        format!("glTF texture resolution plan is missing image {image_index}"),
+                    )
+                })?;
+                let (resource_index, _) = external_images.get(image_index).ok_or_else(|| {
+                    gltf_parse_error(
+                        ctx,
+                        format!("glTF texture resource is missing image {image_index}"),
+                    )
+                })?;
+                let media_type =
+                    mime_type
+                        .map(ExtensionMediaType::new)
+                        .transpose()
+                        .map_err(|_| {
+                            gltf_parse_error(
+                                ctx,
+                                format!("glTF image {image_index} has an invalid media type"),
+                            )
+                        })?;
+                complete_canonical_string_work(ctx, resolved.len())?;
+                (
+                    ImagePayloadStorage::SessionResource(ResourceIdentityLocalId::new(
+                        resource_index,
+                    )),
+                    resource_index,
+                    media_type,
+                )
+            }
+            ImageSource::View { view, mime_type } => {
+                let bytes = copy_buffer_view_image(ctx, buffers, view, image_index)?;
+                (
+                    store_encoded_image_payload(storage, bytes)?,
+                    0,
+                    image_media_type(ctx, image_index, Some(mime_type))?,
+                )
+            }
+        };
+        let local_id = ImageLocalId::new(authoring_u32(
+            ctx,
+            storage.images.len(),
+            "gltf-authoring-image-id",
+        )?);
+        storage.images.try_push(ImageStorage {
+            payload,
+            provenance,
+            media_type,
+        })?;
+        let Some(slot) = storage.image_ids.as_mut_slice().get_mut(image_index) else {
+            return Err(gltf_parse_error(ctx, "glTF image id map is incomplete"));
+        };
+        *slot = Some(local_id);
+    }
+
+    storage
+        .samplers
+        .try_reserve(selected_count(ctx, closure.samplers.as_slice())?)?;
+    storage
+        .sampler_provenance
+        .try_reserve(selected_count(ctx, closure.samplers.as_slice())?.saturating_add(1))?;
+    for (sampler_index, sampler) in gltf.samplers().enumerate() {
+        poll_parser_loop(ctx, sampler_index)?;
+        if !closure
+            .samplers
+            .as_slice()
+            .get(sampler_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let local_id = SamplerLocalId::new(authoring_u32(
+            ctx,
+            storage.samplers.len(),
+            "gltf-authoring-sampler-id",
+        )?);
+        storage
+            .samplers
+            .try_push(SamplerAuthoring::new(map_sampler(sampler)))?;
+        storage.sampler_provenance.try_push(0)?;
+        let Some(slot) = storage.sampler_ids.as_mut_slice().get_mut(sampler_index) else {
+            return Err(gltf_parse_error(ctx, "glTF sampler id map is incomplete"));
+        };
+        *slot = Some(local_id);
+    }
+
+    storage
+        .textures
+        .try_reserve(selected_count(ctx, closure.textures.as_slice())?)?;
+    storage
+        .texture_provenance
+        .try_reserve(selected_count(ctx, closure.textures.as_slice())?)?;
+    storage
+        .texture_names
+        .try_reserve(selected_count(ctx, closure.textures.as_slice())?)?;
+    for (texture_index, texture) in gltf.textures().enumerate() {
+        poll_parser_loop(ctx, texture_index)?;
+        if !closure
+            .textures
+            .as_slice()
+            .get(texture_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(image_id) = storage
+            .image_ids
+            .as_slice()
+            .get(texture.source().index())
+            .copied()
+            .flatten()
+        else {
+            return Err(gltf_parse_error(
+                ctx,
+                format!("glTF texture {texture_index} references an image outside the closure"),
+            ));
+        };
+        let sampler_id = match texture.sampler().index() {
+            Some(sampler_index) => storage
+                .sampler_ids
+                .as_slice()
+                .get(sampler_index)
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    gltf_parse_error(
+                        ctx,
+                        format!(
+                            "glTF texture {texture_index} references a sampler outside the closure"
+                        ),
+                    )
+                })?,
+            None => {
+                if let Some(default_sampler) = storage.default_sampler {
+                    default_sampler
+                } else {
+                    let default_sampler = SamplerLocalId::new(authoring_u32(
+                        ctx,
+                        storage.samplers.len(),
+                        "gltf-authoring-default-sampler-id",
+                    )?);
+                    storage
+                        .samplers
+                        .try_push(SamplerAuthoring::new(map_sampler(texture.sampler())))?;
+                    storage.sampler_provenance.try_push(0)?;
+                    storage.default_sampler = Some(default_sampler);
+                    default_sampler
+                }
+            }
+        };
+        let local_id = TextureLocalId::new(authoring_u32(
+            ctx,
+            storage.textures.len(),
+            "gltf-authoring-texture-id",
+        )?);
+        storage
+            .textures
+            .try_push(TextureAuthoring::new(image_id, sampler_id))?;
+        storage.texture_provenance.try_push(0)?;
+        let texture_name = texture
+            .name()
+            .or_else(|| texture.source().name())
+            .map(|name| {
+                let mut owned = ctx.metered_string(
+                    ImportStorageClass::SceneConstruction,
+                    "gltf-authoring-texture-name",
+                );
+                owned.try_push_str(name).map(|()| owned)
+            });
+        storage.texture_names.try_push(texture_name.transpose()?)?;
+        let Some(slot) = storage.texture_ids.as_mut_slice().get_mut(texture_index) else {
+            return Err(gltf_parse_error(ctx, "glTF texture id map is incomplete"));
+        };
+        *slot = Some(local_id);
+    }
+    Ok(())
+}
+
+fn store_encoded_image_payload<'scope>(
+    storage: &mut AppearanceStorage<'scope, '_>,
+    bytes: MeteredVec<'scope, u8>,
+) -> Result<ImagePayloadStorage> {
+    let index = storage.encoded_image_payloads.len();
+    storage.encoded_image_payloads.try_push_reserved(bytes)?;
+    Ok(ImagePayloadStorage::Encoded(index))
+}
+
+fn image_media_type(
+    ctx: &ParseScope<'_>,
+    image_index: usize,
+    media_type: Option<&str>,
+) -> Result<Option<ExtensionMediaType>> {
+    media_type
+        .map(ExtensionMediaType::new)
+        .transpose()
+        .map_err(|_| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF image {image_index} has an invalid media type"),
+            )
+        })
+}
+
+fn copy_buffer_view_image<'scope>(
+    ctx: &'scope ParseScope<'_>,
+    buffers: &[Option<BufferData<'_>>],
+    view: gltf::buffer::View<'_>,
+    image_index: usize,
+) -> Result<MeteredVec<'scope, u8>> {
+    let buffer_index = view.buffer().index();
+    let buffer = buffers
+        .get(buffer_index)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF image {image_index} references unavailable buffer {buffer_index}"),
+            )
+        })?;
+    let end = view
+        .offset()
+        .checked_add(view.length())
+        .ok_or_else(|| ctx.allocation_failure("gltf-image-buffer-view-range"))?;
+    let bytes = buffer.as_slice().get(view.offset()..end).ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!(
+                "glTF image {image_index} bufferView {} exceeds buffer {buffer_index}",
+                view.index()
+            ),
+        )
+    })?;
+    Ok(copy_buffer(ctx, bytes, "gltf-buffer-view-image")?.bytes)
 }
 
 fn add_material_authoring<'scope, 'document>(
@@ -1137,110 +1763,42 @@ fn add_texture_binding<'scope, 'document>(
 ) -> Result<()> {
     let image = texture.source();
     let image_name = image.name();
-    let source = match image.source() {
-        ImageSource::Uri { uri, .. } if is_data_uri(uri) => {
-            push_warning(
-                ctx,
-                "gltf.texture_data_uri_ignored",
-                format_args!("texture data URI for {source_key} was ignored"),
-            )?;
-            return Ok(());
-        }
-        ImageSource::Uri { uri, mime_type } => {
-            if uri.len() > ctx.limits().max_string_bytes {
-                push_warning(
-                    ctx,
-                    "gltf.texture_uri_limit",
-                    format_args!(
-                        "texture URI for {source_key} exceeded max_string_bytes and was ignored"
-                    ),
-                )?;
-                return Ok(());
-            }
-            let image_index = image.index();
+    let image_index = image.index();
+    let resolved_uri_len = match image.source() {
+        ImageSource::Uri { uri, .. } if !is_data_uri(uri) => {
             let resolved = resolved_texture_uris.get(&image_index).ok_or_else(|| {
                 gltf_parse_error(
                     ctx,
                     format!("glTF texture resolution plan is missing image {image_index}"),
                 )
             })?;
-            let (resource_index, _) = external_images.get(image_index).ok_or_else(|| {
-                gltf_parse_error(
+            if external_images.get(image_index).is_none() {
+                return Err(gltf_parse_error(
                     ctx,
                     format!("glTF texture resource is missing image {image_index}"),
-                )
-            })?;
-            let media_type = mime_type
-                .map(ExtensionMediaType::new)
-                .transpose()
-                .map_err(|_| {
-                    gltf_parse_error(
-                        ctx,
-                        format!("glTF image {image_index} has an invalid media type"),
-                    )
-                })?;
-            let canonical_string_bytes = resolved
-                .len()
-                .checked_add(source_key.len())
-                .and_then(|bytes| {
-                    bytes.checked_add(texture.name().or(image_name).map_or(0, str::len))
-                })
-                .ok_or_else(|| ctx.allocation_failure("gltf-texture-canonical-strings"))?;
-            complete_canonical_string_work(ctx, canonical_string_bytes)?;
-            (
-                ResourceIdentityLocalId::new(resource_index),
-                resource_index,
-                media_type,
-            )
+                ));
+            }
+            resolved.len()
         }
-        ImageSource::View { mime_type, .. } => {
-            push_warning(
+        ImageSource::Uri { .. } | ImageSource::View { .. } => 0,
+    };
+    let canonical_string_bytes = resolved_uri_len
+        .checked_add(source_key.len())
+        .and_then(|bytes| bytes.checked_add(texture.name().or(image_name).map_or(0, str::len)))
+        .ok_or_else(|| ctx.allocation_failure("gltf-texture-canonical-strings"))?;
+    complete_canonical_string_work(ctx, canonical_string_bytes)?;
+    let texture_id = storage
+        .texture_ids
+        .as_slice()
+        .get(texture.index())
+        .copied()
+        .flatten()
+        .ok_or_else(|| {
+            gltf_parse_error(
                 ctx,
-                "gltf.embedded_texture_ignored",
-                format_args!("embedded {mime_type} texture for {source_key} was ignored"),
-            )?;
-            return Ok(());
-        }
-    };
-
-    let image_id = ImageLocalId::new(authoring_u32(
-        ctx,
-        storage.images.len(),
-        "gltf-authoring-image-id",
-    )?);
-    let texture_name = match texture.name().or(image_name) {
-        Some(name) => {
-            let mut owned = ctx.metered_string(
-                ImportStorageClass::SceneConstruction,
-                "gltf-authoring-texture-name",
-            );
-            owned.try_push_str(name)?;
-            Some(owned)
-        }
-        None => None,
-    };
-    storage.images.try_push(ImageStorage {
-        resource: source.0,
-        resource_index: source.1,
-        media_type: source.2,
-        texture_name,
-    })?;
-    let sampler_id = SamplerLocalId::new(authoring_u32(
-        ctx,
-        storage.samplers.len(),
-        "gltf-authoring-sampler-id",
-    )?);
-    storage
-        .samplers
-        .try_push(SamplerAuthoring::new(map_sampler(texture.sampler())))?;
-    let texture_id = TextureLocalId::new(authoring_u32(
-        ctx,
-        storage.textures.len(),
-        "gltf-authoring-texture-id",
-    )?);
-    storage
-        .textures
-        .try_push(TextureAuthoring::new(image_id, sampler_id))?;
+                format!("glTF texture {} is outside the closure", texture.index()),
+            )
+        })?;
     let coordinate_source = TextureCoordinateSource::uv_set(tex_coord)
         .map_err(|_| gltf_parse_error(ctx, "glTF texture coordinate set is out of range"))?;
     let strength = TextureStrength::try_new(scale)
@@ -1249,6 +1807,7 @@ fn add_texture_binding<'scope, 'document>(
         .map_err(|_| gltf_parse_error(ctx, "static glTF texture source key is invalid"))?;
     storage.bindings.try_push(BindingStorage {
         texture: texture_id,
+        provenance: 0,
         role,
         coordinate_source,
         channel_mapping: TextureChannelMapping::swizzle(channel_swizzle),
@@ -1275,16 +1834,23 @@ struct MeshContracts<'scope> {
 }
 
 struct GeometryContracts<'scope> {
-    meshes: MeteredVec<'scope, MeshContracts<'scope>>,
+    meshes: MeteredVec<'scope, Option<MeshContracts<'scope>>>,
 }
 
 fn preflight_geometry_contracts<'scope>(
     ctx: &'scope ParseScope<'_>,
     gltf: &gltf::Gltf,
     material_count: usize,
+    closure: &ResourceClosure<'_>,
 ) -> Result<GeometryContracts<'scope>> {
     let mesh_count = safe_gltf(ctx, "glTF mesh count", || gltf.meshes().count())?;
-    enforce_usize_limit(ctx, "max_meshes", mesh_count, ctx.limits().max_meshes)?;
+    let selected_mesh_count = selected_count(ctx, closure.meshes.as_slice())?;
+    enforce_usize_limit(
+        ctx,
+        "max_meshes",
+        selected_mesh_count,
+        ctx.limits().max_meshes,
+    )?;
     let mut meshes = ctx.metered_vec(
         ImportStorageClass::FormatNormalization,
         "gltf-geometry-contract-meshes",
@@ -1299,6 +1865,16 @@ fn preflight_geometry_contracts<'scope>(
     let mut total_attribute_cells = 0usize;
     for (mesh_ordinal, mesh) in gltf.meshes().enumerate() {
         poll_parser_loop(ctx, mesh_ordinal)?;
+        if !closure
+            .meshes
+            .as_slice()
+            .get(mesh_ordinal)
+            .copied()
+            .unwrap_or(false)
+        {
+            meshes.try_push_reserved(None)?;
+            continue;
+        }
         let primitive_count = safe_gltf(ctx, "glTF primitive count", || mesh.primitives().len())?;
         total_primitives = checked_add_with_limit(
             ctx,
@@ -1368,7 +1944,7 @@ fn preflight_geometry_contracts<'scope>(
             )?;
             primitives.try_push_reserved(contract)?;
         }
-        meshes.try_push_reserved(MeshContracts { primitives })?;
+        meshes.try_push_reserved(Some(MeshContracts { primitives }))?;
     }
     Ok(GeometryContracts { meshes })
 }
@@ -2106,13 +2682,15 @@ struct LogicalMeshStorage<'scope, 'document> {
 
 struct GeometryStorage<'scope, 'document> {
     logical_meshes: MeteredVec<'scope, LogicalMeshStorage<'scope, 'document>>,
+    logical_mesh_ids: MeteredVec<'scope, Option<LogicalMeshLocalId>>,
 }
 
 fn build_geometry_storage<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
     gltf: &'document gltf::Gltf,
-    buffers: &[BufferData<'_>],
+    buffers: &[Option<BufferData<'_>>],
     contracts: &GeometryContracts<'_>,
+    material_ids: &MeteredVec<'_, Option<MaterialLocalId>>,
 ) -> Result<GeometryStorage<'scope, 'document>> {
     let mesh_count = safe_gltf(ctx, "glTF mesh count", || gltf.meshes().count())?;
     if contracts.meshes.len() != mesh_count {
@@ -2125,7 +2703,20 @@ fn build_geometry_storage<'scope, 'document>(
         ImportStorageClass::SceneConstruction,
         "gltf-authoring-logical-meshes",
     );
-    logical_meshes.try_reserve(mesh_count)?;
+    let selected_mesh_count = contracts
+        .meshes
+        .as_slice()
+        .iter()
+        .filter(|mesh| mesh.is_some())
+        .count();
+    logical_meshes.try_reserve(selected_mesh_count)?;
+    let mut logical_mesh_ids = try_vec_filled(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        mesh_count,
+        None,
+        "gltf-logical-mesh-id-map",
+    )?;
     for (mesh_ordinal, mesh) in gltf.meshes().enumerate() {
         poll_parser_loop(ctx, mesh_ordinal)?;
         let mesh_contracts = contracts
@@ -2135,6 +2726,21 @@ fn build_geometry_storage<'scope, 'document>(
             .ok_or_else(|| {
                 gltf_parse_error(ctx, "glTF geometry contract mesh table is incomplete")
             })?;
+        let Some(mesh_contracts) = mesh_contracts.as_ref() else {
+            continue;
+        };
+        let logical_mesh_id = LogicalMeshLocalId::new(authoring_u32(
+            ctx,
+            logical_meshes.len(),
+            "gltf-authoring-logical-mesh-id",
+        )?);
+        let Some(slot) = logical_mesh_ids.as_mut_slice().get_mut(mesh_ordinal) else {
+            return Err(gltf_parse_error(
+                ctx,
+                "glTF logical mesh id map is incomplete",
+            ));
+        };
+        *slot = Some(logical_mesh_id);
         let name_bytes = mesh.name().map_or(0, str::len);
         ctx.with_work_group(
             [
@@ -2168,7 +2774,12 @@ fn build_geometry_storage<'scope, 'document>(
                     gltf_parse_error(ctx, "glTF geometry contract primitive table is incomplete")
                 })?;
             primitives.try_push_reserved(build_primitive_authoring(
-                ctx, buffers, &mesh, primitive, contract,
+                ctx,
+                buffers,
+                &mesh,
+                primitive,
+                contract,
+                material_ids,
             )?)?;
         }
         logical_meshes.try_push_reserved(LogicalMeshStorage {
@@ -2176,15 +2787,19 @@ fn build_geometry_storage<'scope, 'document>(
             primitives,
         })?;
     }
-    Ok(GeometryStorage { logical_meshes })
+    Ok(GeometryStorage {
+        logical_meshes,
+        logical_mesh_ids,
+    })
 }
 
 fn build_primitive_authoring<'scope>(
     ctx: &'scope ParseScope<'_>,
-    buffers: &[BufferData<'_>],
+    buffers: &[Option<BufferData<'_>>],
     mesh: &gltf::Mesh<'_>,
     primitive: gltf::Primitive<'_>,
     contract: PrimitiveContract,
+    material_ids: &MeteredVec<'_, Option<MaterialLocalId>>,
 ) -> Result<PrimitiveStorage<'scope>> {
     let topology = map_topology(contract.mode).ok_or_else(|| ContentError::FeatureUnsupported {
         format: "gltf",
@@ -2212,7 +2827,12 @@ fn build_primitive_authoring<'scope>(
         ],
         |work| -> Result<PrimitiveStorage<'scope>> {
             let reader = safe_gltf(ctx, "glTF primitive reader construction", || {
-                primitive.reader(|buffer| buffers.get(buffer.index()).map(BufferData::as_slice))
+                primitive.reader(|buffer| {
+                    buffers
+                        .get(buffer.index())
+                        .and_then(Option::as_ref)
+                        .map(BufferData::as_slice)
+                })
             })?;
             let positions = safe_gltf(ctx, "glTF POSITION reader", || {
                 reader.read_positions().map(|positions| {
@@ -2390,15 +3010,9 @@ fn build_primitive_authoring<'scope>(
             if safe_gltf(ctx, "glTF morph target iterator", || {
                 primitive.morph_targets().next().is_some()
             })? {
-                push_warning(
-                    ctx,
-                    "gltf.morph_targets_ignored",
-                    format_args!(
-                        "glTF mesh {} primitive {} morph targets were ignored",
-                        mesh.index(),
-                        primitive.index()
-                    ),
-                )?;
+                return Err(ContentError::from(GltfFailure::internal(
+                    "morph target passed resource-closure admission",
+                )));
             }
 
             let (influence_offsets, influences) = build_influence_rows(
@@ -2415,8 +3029,19 @@ fn build_primitive_authoring<'scope>(
                 material: contract
                     .material_index
                     .map(|index| {
-                        authoring_u32(ctx, index, "gltf-authoring-material-id")
-                            .map(MaterialLocalId::new)
+                        material_ids
+                            .as_slice()
+                            .get(index)
+                            .copied()
+                            .flatten()
+                            .ok_or_else(|| {
+                                gltf_parse_error(
+                                    ctx,
+                                    format!(
+                                        "glTF primitive references material {index} outside the closure"
+                                    ),
+                                )
+                            })
                     })
                     .transpose()?,
                 attributes,
@@ -2523,8 +3148,10 @@ struct NodeStorage<'scope, 'document> {
 fn build_scene_nodes<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
     graph: &NodeGraph<'document, '_>,
-    logical_mesh_count: usize,
+    logical_mesh_ids: &MeteredVec<'_, Option<LogicalMeshLocalId>>,
+    cameras: &CameraStorage<'_, '_>,
 ) -> Result<NodeStorage<'scope, 'document>> {
+    let selected_node_count = selected_count(ctx, graph.selected.as_slice())?;
     let mut storage = NodeStorage {
         roots: try_vec_capacity(
             ctx,
@@ -2535,7 +3162,7 @@ fn build_scene_nodes<'scope, 'document>(
         nodes: try_vec_capacity(
             ctx,
             ImportStorageClass::SceneConstruction,
-            graph.nodes.len(),
+            selected_node_count,
             "gltf-authoring-nodes",
         )?,
         node_ids: try_vec_filled(
@@ -2548,20 +3175,20 @@ fn build_scene_nodes<'scope, 'document>(
         skin_references: try_vec_capacity(
             ctx,
             ImportStorageClass::FormatNormalization,
-            graph.nodes.len(),
+            selected_node_count,
             "gltf-node-skin-map",
         )?,
         mesh_instances: try_vec_capacity(
             ctx,
             ImportStorageClass::SceneConstruction,
-            graph.nodes.len(),
+            selected_node_count,
             "gltf-authoring-mesh-instances",
         )?,
     };
     let mut pending = try_vec_capacity(
         ctx,
         ImportStorageClass::FormatNormalization,
-        graph.nodes.len(),
+        selected_node_count,
         "gltf-node-build-stack",
     )?;
     for (root_ordinal, node_index) in graph.roots.as_slice().iter().rev().copied().enumerate() {
@@ -2619,12 +3246,25 @@ fn build_scene_nodes<'scope, 'document>(
         .map_err(|_| {
             gltf_parse_error(ctx, format!("glTF node {node_index} transform is invalid"))
         })?;
-        let camera = safe_gltf(ctx, "glTF node camera", || node.camera())?
-            .map(|camera| {
-                authoring_u32(ctx, camera.index(), "gltf-authoring-camera-id")
-                    .map(CameraLocalId::new)
-            })
-            .transpose()?;
+        let camera = match safe_gltf(ctx, "glTF node camera", || node.camera())? {
+            Some(camera) => cameras
+                .camera_ids
+                .as_slice()
+                .get(camera.index())
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    gltf_parse_error(
+                        ctx,
+                        format!(
+                            "glTF selected node {node_index} references camera {} outside the closure",
+                            camera.index()
+                        ),
+                    )
+                })
+                .map(Some)?,
+            None => None,
+        };
         let mut authored = NodeAuthoringNode::new(
             parent,
             transform,
@@ -2638,34 +3278,32 @@ fn build_scene_nodes<'scope, 'document>(
         storage.nodes.try_push_reserved(authored)?;
 
         let skin_index = safe_gltf(ctx, "glTF node skin", || node.skin())?.map(|skin| skin.index());
-        if let Some(skin_index) = skin_index {
-            storage
-                .skin_references
-                .try_push_reserved((node_id, skin_index))?;
-        }
         if let Some(mesh) = safe_gltf(ctx, "glTF node mesh", || node.mesh())? {
-            if mesh.index() >= logical_mesh_count {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format!(
-                        "glTF node {node_index} references mesh {} out of range",
-                        mesh.index()
-                    ),
-                ));
-            }
+            let logical_mesh = logical_mesh_ids
+                .as_slice()
+                .get(mesh.index())
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    gltf_parse_error(
+                        ctx,
+                        format!(
+                            "glTF selected node {node_index} references mesh {} outside the closure",
+                            mesh.index()
+                        ),
+                    )
+                })?;
             storage
                 .mesh_instances
                 .try_push_reserved(MeshInstanceStorage {
-                    authored: GeometryMeshInstanceAuthoring::new(
-                        node_id,
-                        LogicalMeshLocalId::new(authoring_u32(
-                            ctx,
-                            mesh.index(),
-                            "gltf-authoring-logical-mesh-id",
-                        )?),
-                    ),
+                    authored: GeometryMeshInstanceAuthoring::new(node_id, logical_mesh),
                     skin_index,
                 })?;
+            if let Some(skin_index) = skin_index {
+                storage
+                    .skin_references
+                    .try_push_reserved((node_id, skin_index))?;
+            }
         }
 
         for (child_ordinal, child_index) in graph.children.as_slice()[node_index]
@@ -2696,11 +3334,604 @@ struct NodeGraph<'document, 'scope> {
     selected_scene_index: Option<usize>,
 }
 
+/// Source-index membership compiled before any selected dependency is opened.
+///
+/// The parser deliberately keeps these maps source-indexed.  Canonical local IDs
+/// are assigned later by the materializers, so omitted source rows never acquire
+/// a visible local identity or consume scene-construction capacity.
+struct ResourceClosure<'scope> {
+    meshes: MeteredVec<'scope, bool>,
+    materials: MeteredVec<'scope, bool>,
+    textures: MeteredVec<'scope, bool>,
+    images: MeteredVec<'scope, bool>,
+    samplers: MeteredVec<'scope, bool>,
+    skins: MeteredVec<'scope, bool>,
+    cameras: MeteredVec<'scope, bool>,
+    buffers: MeteredVec<'scope, bool>,
+    buffer_views: MeteredVec<'scope, bool>,
+    accessors: MeteredVec<'scope, bool>,
+}
+
+fn build_resource_closure<'scope, 'document>(
+    ctx: &'scope ParseScope<'_>,
+    gltf: &'document gltf::Gltf,
+    graph: &NodeGraph<'document, '_>,
+    animation_contracts: &animation::AnimationContracts<'_, '_>,
+) -> Result<ResourceClosure<'scope>> {
+    let root = gltf.as_json();
+    let mut closure = ResourceClosure {
+        meshes: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.meshes.len(),
+            false,
+            "gltf-closure-mesh-selection",
+        )?,
+        materials: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.materials.len(),
+            false,
+            "gltf-closure-material-selection",
+        )?,
+        textures: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.textures.len(),
+            false,
+            "gltf-closure-texture-selection",
+        )?,
+        images: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.images.len(),
+            false,
+            "gltf-closure-image-selection",
+        )?,
+        samplers: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.samplers.len(),
+            false,
+            "gltf-closure-sampler-selection",
+        )?,
+        skins: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.skins.len(),
+            false,
+            "gltf-closure-skin-selection",
+        )?,
+        cameras: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.cameras.len(),
+            false,
+            "gltf-closure-camera-selection",
+        )?,
+        buffers: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.buffers.len(),
+            false,
+            "gltf-closure-buffer-selection",
+        )?,
+        buffer_views: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.buffer_views.len(),
+            false,
+            "gltf-closure-buffer-view-selection",
+        )?,
+        accessors: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            root.accessors.len(),
+            false,
+            "gltf-closure-accessor-selection",
+        )?,
+    };
+
+    for (node_index, selected) in graph.selected.as_slice().iter().copied().enumerate() {
+        charge_closure_work(ctx)?;
+        poll_parser_loop(ctx, node_index)?;
+        if !selected {
+            continue;
+        }
+        let node = root.nodes.get(node_index).ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF closure references missing node {node_index}"),
+            )
+        })?;
+        if node.weights.is_some() {
+            return Err(ContentError::FeatureUnsupported {
+                format: "gltf",
+                feature: format!(
+                    "selected node {node_index} morph weights are not implemented yet"
+                ),
+            });
+        }
+        match (node.mesh, node.skin) {
+            (Some(mesh), Some(skin)) => {
+                mark_mesh(ctx, root, &mut closure, mesh.value())?;
+                mark_skin(
+                    ctx,
+                    root,
+                    &mut closure,
+                    graph.selected.as_slice(),
+                    skin.value(),
+                )?;
+            }
+            (Some(mesh), None) => mark_mesh(ctx, root, &mut closure, mesh.value())?,
+            (None, Some(_)) => {
+                return Err(gltf_parse_error(
+                    ctx,
+                    format!("glTF selected node {node_index} declares a skin without a mesh"),
+                ));
+            }
+            (None, None) => {}
+        }
+        if let Some(camera) = node.camera {
+            mark_bool(ctx, &mut closure.cameras, camera.value(), "camera")?;
+        }
+    }
+
+    let mut source_channel_index = 0usize;
+    for (animation_index, animation) in root.animations.iter().enumerate() {
+        charge_closure_work(ctx)?;
+        poll_parser_loop(ctx, animation_index)?;
+        let animation_selected = animation_contracts
+            .selected_animations
+            .as_slice()
+            .get(animation_index)
+            .copied()
+            .ok_or_else(|| {
+                ContentError::from(GltfFailure::internal(
+                    "animation closure selection is incomplete",
+                ))
+            })?;
+        for (channel_index, channel) in animation.channels.iter().enumerate() {
+            charge_closure_work(ctx)?;
+            poll_parser_loop(ctx, channel_index)?;
+            let disposition = animation_contracts
+                .source_channels
+                .as_slice()
+                .get(source_channel_index)
+                .copied()
+                .ok_or_else(|| {
+                    ContentError::from(GltfFailure::internal(
+                        "animation closure channel selection is incomplete",
+                    ))
+                })?;
+            source_channel_index = source_channel_index
+                .checked_add(1)
+                .ok_or_else(|| ctx.allocation_failure("gltf-closure-channel-index"))?;
+            if !animation_selected {
+                continue;
+            }
+            let sampler = animation.samplers.get(channel.sampler.value()).ok_or_else(|| {
+                gltf_parse_error(
+                    ctx,
+                    format!(
+                        "glTF animation {animation_index} channel {channel_index} sampler reference is out of range"
+                    ),
+                )
+            })?;
+            mark_accessor(ctx, root, &mut closure, sampler.input.value())?;
+            if matches!(disposition, animation::SourceChannelDisposition::Retained) {
+                mark_accessor(ctx, root, &mut closure, sampler.output.value())?;
+            }
+        }
+    }
+    if source_channel_index != animation_contracts.source_channels.len() {
+        return Err(ContentError::from(GltfFailure::internal(
+            "animation closure channel selection length changed",
+        )));
+    }
+
+    Ok(closure)
+}
+
+fn validate_selected_primitive_semantics(
+    ctx: &ParseScope<'_>,
+    mesh_index: usize,
+    primitive_index: usize,
+    primitive: &json::mesh::Primitive,
+) -> Result<()> {
+    let mut texcoord_sets = [false; 8];
+    let mut color_sets = [false; 8];
+    for semantic in primitive.attributes.keys() {
+        charge_closure_work(ctx)?;
+        match semantic {
+            Checked::Valid(json::mesh::Semantic::TexCoords(set)) => {
+                let Some(selected) = texcoord_sets.get_mut(*set as usize) else {
+                    return Err(ContentError::FeatureUnsupported {
+                        format: "gltf",
+                        feature: format!(
+                            "mesh {mesh_index} primitive {primitive_index} TEXCOORD_{set} is not implemented yet"
+                        ),
+                    });
+                };
+                *selected = true;
+            }
+            Checked::Valid(json::mesh::Semantic::Colors(set)) => {
+                let Some(selected) = color_sets.get_mut(*set as usize) else {
+                    return Err(ContentError::FeatureUnsupported {
+                        format: "gltf",
+                        feature: format!(
+                            "mesh {mesh_index} primitive {primitive_index} COLOR_{set} is not implemented yet"
+                        ),
+                    });
+                };
+                *selected = true;
+            }
+            Checked::Valid(json::mesh::Semantic::Joints(set))
+            | Checked::Valid(json::mesh::Semantic::Weights(set))
+                if *set != 0 =>
+            {
+                return Err(ContentError::FeatureUnsupported {
+                    format: "gltf",
+                    feature: format!(
+                        "mesh {mesh_index} primitive {primitive_index} has multiple JOINTS/WEIGHTS sets"
+                    ),
+                });
+            }
+            Checked::Invalid => {
+                return Err(gltf_parse_error(
+                    ctx,
+                    format!(
+                        "glTF mesh {mesh_index} primitive {primitive_index} has an invalid attribute semantic"
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
+    ensure_contiguous_attribute_sets(ctx, mesh_index, primitive_index, "TEXCOORD", &texcoord_sets)?;
+    ensure_contiguous_attribute_sets(ctx, mesh_index, primitive_index, "COLOR", &color_sets)?;
+    if primitive
+        .targets
+        .as_ref()
+        .is_some_and(|targets| !targets.is_empty())
+    {
+        charge_closure_work(ctx)?;
+        return Err(ContentError::FeatureUnsupported {
+            format: "gltf",
+            feature: format!(
+                "mesh {mesh_index} primitive {primitive_index} morph targets are not implemented yet"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_contiguous_attribute_sets(
+    ctx: &ParseScope<'_>,
+    mesh_index: usize,
+    primitive_index: usize,
+    semantic: &'static str,
+    sets: &[bool],
+) -> Result<()> {
+    let Some(last) = sets.iter().rposition(|selected| *selected) else {
+        return Ok(());
+    };
+    if sets[..=last].iter().all(|selected| *selected) {
+        return Ok(());
+    }
+    Err(gltf_parse_error(
+        ctx,
+        format!(
+            "glTF mesh {mesh_index} primitive {primitive_index} has non-contiguous {semantic} sets"
+        ),
+    ))
+}
+
+fn charge_closure_work(ctx: &ParseScope<'_>) -> Result<()> {
+    ctx.charge_work(1)?;
+    Ok(())
+}
+
+fn mark_bool(
+    ctx: &ParseScope<'_>,
+    values: &mut MeteredVec<'_, bool>,
+    index: usize,
+    kind: &'static str,
+) -> Result<()> {
+    charge_closure_work(ctx)?;
+    let Some(selected) = values.as_mut_slice().get_mut(index) else {
+        return Err(gltf_parse_error(
+            ctx,
+            format!("glTF closure references missing {kind} {index}"),
+        ));
+    };
+    *selected = true;
+    Ok(())
+}
+
+fn mark_skin(
+    ctx: &ParseScope<'_>,
+    root: &json::Root,
+    closure: &mut ResourceClosure<'_>,
+    selected_nodes: &[bool],
+    skin_index: usize,
+) -> Result<()> {
+    let was_selected = closure
+        .skins
+        .as_slice()
+        .get(skin_index)
+        .copied()
+        .ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF closure references missing skin {skin_index}"),
+            )
+        })?;
+    if was_selected {
+        charge_closure_work(ctx)?;
+        return Ok(());
+    }
+    mark_bool(ctx, &mut closure.skins, skin_index, "skin")?;
+    let skin = root.skins.get(skin_index).ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!("glTF closure references missing skin {skin_index}"),
+        )
+    })?;
+    for (joint_ordinal, joint) in skin.joints.iter().enumerate() {
+        charge_closure_work(ctx)?;
+        poll_parser_loop(ctx, joint_ordinal)?;
+        let joint_index = joint.value();
+        if !selected_nodes.get(joint_index).copied().unwrap_or(false) {
+            return Err(gltf_parse_error(
+                ctx,
+                format!(
+                    "glTF skin {skin_index} references joint node {joint_index} outside the imported scene"
+                ),
+            ));
+        }
+    }
+    if let Some(skeleton) = skin.skeleton {
+        charge_closure_work(ctx)?;
+        let skeleton_index = skeleton.value();
+        if !selected_nodes.get(skeleton_index).copied().unwrap_or(false) {
+            return Err(gltf_parse_error(
+                ctx,
+                format!(
+                    "glTF skin {skin_index} references skeleton root node {skeleton_index} outside the imported scene"
+                ),
+            ));
+        }
+    }
+    if let Some(accessor) = skin.inverse_bind_matrices {
+        mark_accessor(ctx, root, closure, accessor.value())?;
+    }
+    Ok(())
+}
+
+fn mark_mesh(
+    ctx: &ParseScope<'_>,
+    root: &json::Root,
+    closure: &mut ResourceClosure<'_>,
+    mesh_index: usize,
+) -> Result<()> {
+    let was_selected = closure
+        .meshes
+        .as_slice()
+        .get(mesh_index)
+        .copied()
+        .ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF closure references missing mesh {mesh_index}"),
+            )
+        })?;
+    if was_selected {
+        charge_closure_work(ctx)?;
+        return Ok(());
+    }
+    mark_bool(ctx, &mut closure.meshes, mesh_index, "mesh")?;
+    let mesh = root.meshes.get(mesh_index).ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!("glTF closure references missing mesh {mesh_index}"),
+        )
+    })?;
+    if mesh.weights.is_some() {
+        charge_closure_work(ctx)?;
+        return Err(ContentError::FeatureUnsupported {
+            format: "gltf",
+            feature: format!("mesh {mesh_index} morph weights are not implemented yet"),
+        });
+    }
+    for (primitive_index, primitive) in mesh.primitives.iter().enumerate() {
+        charge_closure_work(ctx)?;
+        poll_parser_loop(ctx, primitive_index)?;
+        validate_selected_primitive_semantics(ctx, mesh_index, primitive_index, primitive)?;
+        for accessor in primitive.attributes.values() {
+            mark_accessor(ctx, root, closure, accessor.value())?;
+        }
+        if let Some(indices) = primitive.indices {
+            mark_accessor(ctx, root, closure, indices.value())?;
+        }
+        if let Some(material) = primitive.material {
+            mark_material(ctx, root, closure, material.value())?;
+        }
+    }
+    Ok(())
+}
+
+fn mark_material(
+    ctx: &ParseScope<'_>,
+    root: &json::Root,
+    closure: &mut ResourceClosure<'_>,
+    material_index: usize,
+) -> Result<()> {
+    let was_selected = closure
+        .materials
+        .as_slice()
+        .get(material_index)
+        .copied()
+        .ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF closure references missing material {material_index}"),
+            )
+        })?;
+    if was_selected {
+        charge_closure_work(ctx)?;
+        return Ok(());
+    }
+    mark_bool(ctx, &mut closure.materials, material_index, "material")?;
+    let material = root.materials.get(material_index).ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!("glTF closure references missing material {material_index}"),
+        )
+    })?;
+    if let Some(info) = material.pbr_metallic_roughness.base_color_texture.as_ref() {
+        mark_texture(ctx, root, closure, info.index.value())?;
+    }
+    if let Some(info) = material
+        .pbr_metallic_roughness
+        .metallic_roughness_texture
+        .as_ref()
+    {
+        mark_texture(ctx, root, closure, info.index.value())?;
+    }
+    if let Some(info) = material.normal_texture.as_ref() {
+        mark_texture(ctx, root, closure, info.index.value())?;
+    }
+    if let Some(info) = material.occlusion_texture.as_ref() {
+        mark_texture(ctx, root, closure, info.index.value())?;
+    }
+    if let Some(info) = material.emissive_texture.as_ref() {
+        mark_texture(ctx, root, closure, info.index.value())?;
+    }
+    Ok(())
+}
+
+fn mark_texture(
+    ctx: &ParseScope<'_>,
+    root: &json::Root,
+    closure: &mut ResourceClosure<'_>,
+    texture_index: usize,
+) -> Result<()> {
+    let was_selected = closure
+        .textures
+        .as_slice()
+        .get(texture_index)
+        .copied()
+        .ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF closure references missing texture {texture_index}"),
+            )
+        })?;
+    if was_selected {
+        charge_closure_work(ctx)?;
+        return Ok(());
+    }
+    mark_bool(ctx, &mut closure.textures, texture_index, "texture")?;
+    let texture = root.textures.get(texture_index).ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!("glTF closure references missing texture {texture_index}"),
+        )
+    })?;
+    let image_index = texture.source.value();
+    mark_bool(ctx, &mut closure.images, image_index, "image")?;
+    let image = root.images.get(image_index).ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!("glTF closure references missing image {image_index}"),
+        )
+    })?;
+    if let Some(view) = image.buffer_view {
+        mark_buffer_view(ctx, root, closure, view.value())?;
+    }
+    if let Some(sampler) = texture.sampler {
+        mark_bool(ctx, &mut closure.samplers, sampler.value(), "sampler")?;
+    }
+    Ok(())
+}
+
+fn mark_accessor(
+    ctx: &ParseScope<'_>,
+    root: &json::Root,
+    closure: &mut ResourceClosure<'_>,
+    accessor_index: usize,
+) -> Result<()> {
+    let was_selected = closure
+        .accessors
+        .as_slice()
+        .get(accessor_index)
+        .copied()
+        .ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF closure references missing accessor {accessor_index}"),
+            )
+        })?;
+    if was_selected {
+        charge_closure_work(ctx)?;
+        return Ok(());
+    }
+    mark_bool(ctx, &mut closure.accessors, accessor_index, "accessor")?;
+    let accessor = root.accessors.get(accessor_index).ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!("glTF closure references missing accessor {accessor_index}"),
+        )
+    })?;
+    if let Some(view) = accessor.buffer_view {
+        mark_buffer_view(ctx, root, closure, view.value())?;
+    }
+    if let Some(sparse) = accessor.sparse.as_ref() {
+        mark_buffer_view(ctx, root, closure, sparse.indices.buffer_view.value())?;
+        mark_buffer_view(ctx, root, closure, sparse.values.buffer_view.value())?;
+    }
+    Ok(())
+}
+
+fn mark_buffer_view(
+    ctx: &ParseScope<'_>,
+    root: &json::Root,
+    closure: &mut ResourceClosure<'_>,
+    view_index: usize,
+) -> Result<()> {
+    let was_selected = closure
+        .buffer_views
+        .as_slice()
+        .get(view_index)
+        .copied()
+        .ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF closure references missing bufferView {view_index}"),
+            )
+        })?;
+    if was_selected {
+        charge_closure_work(ctx)?;
+        return Ok(());
+    }
+    mark_bool(ctx, &mut closure.buffer_views, view_index, "bufferView")?;
+    let view = root.buffer_views.get(view_index).ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!("glTF closure references missing bufferView {view_index}"),
+        )
+    })?;
+    mark_bool(ctx, &mut closure.buffers, view.buffer.value(), "buffer")?;
+    Ok(())
+}
+
 fn record_source_scope(
     ctx: &ParseScope<'_>,
     gltf: &gltf::Gltf,
     graph: &NodeGraph<'_, '_>,
     animation_contracts: &animation::AnimationContracts<'_, '_>,
+    closure: &ResourceClosure<'_>,
 ) -> Result<()> {
     let document = gltf.as_json();
     let mut builder = ctx.source_scope_builder()?;
@@ -2728,6 +3959,77 @@ fn record_source_scope(
             selected,
             'n',
             node_index,
+        )?;
+    }
+    for (mesh_index, selected) in closure.meshes.as_slice().iter().copied().enumerate() {
+        observe_source_index(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Mesh,
+            selected,
+            'm',
+            mesh_index,
+        )?;
+        let mesh = document.meshes.get(mesh_index).ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF source-scope mesh {mesh_index} is missing"),
+            )
+        })?;
+        for (primitive_index, _primitive) in mesh.primitives.iter().enumerate() {
+            observe_source_identity(
+                &mut builder,
+                &mut identity,
+                SourceScopeEntityKind::Primitive,
+                selected,
+                format_args!("m{mesh_index}p{primitive_index}"),
+            )?;
+        }
+    }
+    for (material_index, selected) in closure.materials.as_slice().iter().copied().enumerate() {
+        observe_source_identity(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Material,
+            selected,
+            format_args!("mat{material_index}"),
+        )?;
+    }
+    for (texture_index, selected) in closure.textures.as_slice().iter().copied().enumerate() {
+        observe_source_identity(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Texture,
+            selected,
+            format_args!("t{texture_index}"),
+        )?;
+    }
+    for (image_index, selected) in closure.images.as_slice().iter().copied().enumerate() {
+        observe_source_identity(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Image,
+            selected,
+            format_args!("i{image_index}"),
+        )?;
+    }
+    for (sampler_index, selected) in closure.samplers.as_slice().iter().copied().enumerate() {
+        observe_source_identity(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Sampler,
+            selected,
+            format_args!("ts{sampler_index}"),
+        )?;
+    }
+    for (skin_index, selected) in closure.skins.as_slice().iter().copied().enumerate() {
+        observe_source_index(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Skin,
+            selected,
+            'k',
+            skin_index,
         )?;
     }
     for (animation_index, selected) in animation_contracts
@@ -2776,6 +4078,33 @@ fn record_source_scope(
             "animation source-scope channel selection length changed",
         )));
     }
+    for (buffer_index, selected) in closure.buffers.as_slice().iter().copied().enumerate() {
+        observe_source_identity(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Buffer,
+            selected,
+            format_args!("b{buffer_index}"),
+        )?;
+    }
+    for (view_index, selected) in closure.buffer_views.as_slice().iter().copied().enumerate() {
+        observe_source_identity(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::BufferView,
+            selected,
+            format_args!("bv{view_index}"),
+        )?;
+    }
+    for (accessor_index, selected) in closure.accessors.as_slice().iter().copied().enumerate() {
+        observe_source_identity(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Accessor,
+            selected,
+            format_args!("acc{accessor_index}"),
+        )?;
+    }
 
     let record = builder.finish()?;
     ctx.record_source_scope(record)?;
@@ -2792,6 +4121,27 @@ fn observe_source_index(
 ) -> Result<()> {
     identity.truncate(0);
     identity.try_write_fmt(format_args!("{prefix}{index}"))?;
+    builder.observe(
+        kind,
+        if selected {
+            SourceScopeDisposition::Selected
+        } else {
+            SourceScopeDisposition::Omitted
+        },
+        identity.as_str(),
+    )?;
+    Ok(())
+}
+
+fn observe_source_identity(
+    builder: &mut SourceScopeRecordBuilder<'_, '_>,
+    identity: &mut MeteredString<'_>,
+    kind: SourceScopeEntityKind,
+    selected: bool,
+    value: fmt::Arguments<'_>,
+) -> Result<()> {
+    identity.truncate(0);
+    identity.try_write_fmt(value)?;
     builder.observe(
         kind,
         if selected {
@@ -3241,7 +4591,7 @@ struct SkinStorage<'scope> {
 fn build_skins<'scope>(
     ctx: &'scope ParseScope<'_>,
     gltf: &gltf::Gltf,
-    buffers: &[BufferData<'_>],
+    buffers: &[Option<BufferData<'_>>],
     node_ids: &[Option<NodeLocalId>],
     node_skins: &[(NodeLocalId, usize)],
 ) -> Result<SkinStorage<'scope>> {
@@ -3263,12 +4613,13 @@ fn build_skins<'scope>(
         };
         *referenced = true;
     }
+    let referenced_skin_count = selected_count(ctx, referenced_skins.as_slice())?;
 
     let mut storage = SkinStorage {
         skins: try_vec_capacity(
             ctx,
             ImportStorageClass::SceneConstruction,
-            skin_count,
+            referenced_skin_count,
             "gltf-authoring-skins",
         )?,
         skin_ids: try_vec_filled(
@@ -3346,7 +4697,12 @@ fn build_skins<'scope>(
             validate_skin_inverse_bind_accessor(ctx, gltf, skin.index(), mapped_joints.len())?;
         let inverse_bind_matrices = if has_inverse_bind_matrices {
             let reader = safe_gltf(ctx, "glTF skin reader construction", || {
-                skin.reader(|buffer| buffers.get(buffer.index()).map(BufferData::as_slice))
+                skin.reader(|buffer| {
+                    buffers
+                        .get(buffer.index())
+                        .and_then(Option::as_ref)
+                        .map(BufferData::as_slice)
+                })
             })?;
             safe_gltf(ctx, "glTF inverse bind matrix reader", || {
                 reader
@@ -3498,29 +4854,48 @@ fn validate_skin_inverse_bind_accessor(
 struct CameraStorage<'scope, 'document> {
     authored: MeteredVec<'scope, CameraAuthoring>,
     names: MeteredVec<'scope, Option<&'document str>>,
+    camera_ids: MeteredVec<'scope, Option<CameraLocalId>>,
 }
 
 fn build_cameras<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
     gltf: &'document gltf::Gltf,
+    closure: &ResourceClosure<'_>,
 ) -> Result<CameraStorage<'scope, 'document>> {
     let camera_count = safe_gltf(ctx, "glTF camera count", || gltf.cameras().count())?;
+    let selected_camera_count = selected_count(ctx, closure.cameras.as_slice())?;
     let mut storage = CameraStorage {
         authored: try_vec_capacity(
             ctx,
             ImportStorageClass::SceneConstruction,
-            camera_count,
+            selected_camera_count,
             "gltf-authoring-cameras",
         )?,
         names: try_vec_capacity(
             ctx,
             ImportStorageClass::SceneConstruction,
-            camera_count,
+            selected_camera_count,
             "gltf-authoring-camera-names",
+        )?,
+        camera_ids: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            camera_count,
+            None,
+            "gltf-camera-id-map",
         )?,
     };
     for (ordinal, camera) in gltf.cameras().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
+        if !closure
+            .cameras
+            .as_slice()
+            .get(ordinal)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let projection = safe_gltf(ctx, "glTF camera projection", || {
             match camera.projection() {
                 gltf::camera::Projection::Orthographic(orthographic) => {
@@ -3556,10 +4931,19 @@ fn build_cameras<'scope, 'document>(
             name => name,
         };
         complete_canonical_string_work(ctx, name.map_or(0, str::len))?;
+        let local_id = CameraLocalId::new(authoring_u32(
+            ctx,
+            storage.authored.len(),
+            "gltf-authoring-camera-id",
+        )?);
         storage
             .authored
             .try_push_reserved(CameraAuthoring::new(projection))?;
         storage.names.try_push_reserved(name)?;
+        let Some(slot) = storage.camera_ids.as_mut_slice().get_mut(ordinal) else {
+            return Err(gltf_parse_error(ctx, "glTF camera id map is incomplete"));
+        };
+        *slot = Some(local_id);
     }
     Ok(storage)
 }
@@ -3591,7 +4975,22 @@ fn submit_complete_batch(
             .media_type
             .as_ref()
             .map_or(Presence::Absent, Presence::Present);
-        images.try_push_reserved(ImageAuthoring::session_resource(image.resource, media_type))?;
+        let authored = match &image.payload {
+            ImagePayloadStorage::Encoded(index) => {
+                let bytes = appearance_storage
+                    .encoded_image_payloads
+                    .as_slice()
+                    .get(*index)
+                    .ok_or_else(|| {
+                        gltf_parse_error(ctx, "glTF encoded image payload map is incomplete")
+                    })?;
+                ImageAuthoring::encoded(bytes.as_slice(), media_type)
+            }
+            ImagePayloadStorage::SessionResource(resource) => {
+                ImageAuthoring::session_resource(*resource, media_type)
+            }
+        };
+        images.try_push_reserved(authored)?;
     }
 
     let mut bindings = ctx.metered_vec(
@@ -3906,15 +5305,34 @@ fn submit_complete_batch(
         )?;
     }
     for (index, image) in appearance_storage.images.as_slice().iter().enumerate() {
-        let provenance = image.resource_index;
+        let provenance = image.provenance;
         let index = authoring_u32(ctx, index, "gltf-profile-image-owner")?;
         push_owner_source(&mut owner_sources, ProfileOwner::Image(index), provenance)?;
+    }
+    for (index, &provenance) in appearance_storage
+        .sampler_provenance
+        .as_slice()
+        .iter()
+        .enumerate()
+    {
+        let index = authoring_u32(ctx, index, "gltf-profile-sampler-owner")?;
         push_owner_source(&mut owner_sources, ProfileOwner::Sampler(index), provenance)?;
+    }
+    for (index, &provenance) in appearance_storage
+        .texture_provenance
+        .as_slice()
+        .iter()
+        .enumerate()
+    {
+        let index = authoring_u32(ctx, index, "gltf-profile-texture-owner")?;
         push_owner_source(&mut owner_sources, ProfileOwner::Texture(index), provenance)?;
+    }
+    for (index, binding) in appearance_storage.bindings.as_slice().iter().enumerate() {
+        let index = authoring_u32(ctx, index, "gltf-profile-texture-binding-owner")?;
         push_owner_source(
             &mut owner_sources,
             ProfileOwner::TextureBinding(index),
-            provenance,
+            binding.provenance,
         )?;
     }
     push_indexed_owner_sources(
@@ -3993,9 +5411,14 @@ fn submit_complete_batch(
             ))?;
         }
     }
-    for (index, image) in appearance_storage.images.as_slice().iter().enumerate() {
+    for (index, name) in appearance_storage
+        .texture_names
+        .as_slice()
+        .iter()
+        .enumerate()
+    {
         let index = authoring_u32(ctx, index, "gltf-metadata-image")?;
-        if let Some(name) = image.texture_name.as_ref() {
+        if let Some(name) = name.as_ref() {
             metadata.try_push(MetadataAuthoringEntry::new(
                 ProfileOwner::Texture(index),
                 &source_name_key,
