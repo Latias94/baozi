@@ -137,3 +137,106 @@ fn unsupported_obj_statement_warns_and_geometry_imports() -> TestResult<()> {
     assert_eq!(diagnostics[0].code().as_str(), "obj.unsupported_statement");
     Ok(())
 }
+
+#[test]
+fn invalid_smoothing_statements_retain_stable_location_details() -> TestResult<()> {
+    struct Case {
+        name: &'static str,
+        statement: &'static str,
+        column: u64,
+        reason: &'static str,
+    }
+
+    for case in [
+        Case {
+            name: "missing",
+            statement: "s",
+            column: 1,
+            reason: "missing-value",
+        },
+        Case {
+            name: "negative",
+            statement: "s -1",
+            column: 3,
+            reason: "negative",
+        },
+        Case {
+            name: "bare-negative-sign",
+            statement: "s -",
+            column: 3,
+            reason: "invalid-integer",
+        },
+        Case {
+            name: "negative-text",
+            statement: "s -group",
+            column: 3,
+            reason: "invalid-integer",
+        },
+        Case {
+            name: "double-negative",
+            statement: "s --1",
+            column: 3,
+            reason: "invalid-integer",
+        },
+        Case {
+            name: "non-integer",
+            statement: "s 1.5",
+            column: 3,
+            reason: "invalid-integer",
+        },
+        Case {
+            name: "u32-overflow",
+            statement: "s 4294967296",
+            column: 3,
+            reason: "out-of-range",
+        },
+        Case {
+            name: "extra-argument",
+            statement: "s 7 extra",
+            column: 5,
+            reason: "extra-value",
+        },
+    ] {
+        let document = format!("v 0 0 0\nv 1 0 0\nv 0 1 0\n{}\nf 1 2 3\n", case.statement);
+        let result = import_bytes_result(
+            &format!("invalid-smoothing-{}.obj", case.name),
+            document.as_bytes(),
+            ResourceLimits::default(),
+        )?;
+        let error = expected_failure(result);
+        let envelope = format_envelope(&error);
+
+        assert_eq!(
+            envelope.code(),
+            ObjFailureCode::InvalidStatement.as_str(),
+            "case {}",
+            case.name
+        );
+        assert_eq!(
+            unsigned_detail(envelope, "line"),
+            Some(4),
+            "case {}",
+            case.name
+        );
+        assert_eq!(
+            unsigned_detail(envelope, "column"),
+            Some(case.column),
+            "case {}",
+            case.name
+        );
+        assert_eq!(
+            string_detail(envelope, "subject"),
+            Some("smoothing-group"),
+            "case {}",
+            case.name
+        );
+        assert_eq!(
+            string_detail(envelope, "reason"),
+            Some(case.reason),
+            "case {}",
+            case.name
+        );
+        assert!(error.diagnostics().is_empty(), "case {}", case.name);
+    }
+    Ok(())
+}

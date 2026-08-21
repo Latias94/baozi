@@ -24,7 +24,7 @@
 | Animation | Unsupported | OBJ has no animation model in this importer slice. | not applicable |
 | Skinning | Unsupported | OBJ has no skinning model in this importer slice. | not applicable |
 | Morph targets | Unsupported | OBJ has no morph target model in this importer slice. | not applicable |
-| Metadata | Partial | Stores OBJ/MTL context such as group names, smoothing flags, and MTL-only material values as namespaced metadata. | geometry and material tests |
+| Metadata | Partial | Stores descriptive OBJ/MTL context such as object/group names and MTL-only material values as namespaced metadata. Smoothing groups are typed Face-domain attributes rather than metadata. | geometry and material tests |
 | Compression or containers | Unsupported | Raw `.obj` and sidecar `.mtl` assets only; archives are outside this crate. | not applicable |
 | Coordinate and unit metadata | ParsedLossy | OBJ is imported as-authored. Baozi does not infer units, axis conventions, or winding changes in raw import. | docs/model conventions |
 | Malformed input diagnostics | Supported | Structural geometry and strict text failures are fatal. Declared format warnings and explicitly authorized optional-dependency unavailability produce bounded diagnostics. | `malformed.rs`, `limits.rs`, `text_recovery.rs` |
@@ -40,11 +40,12 @@ Status values: `Supported`, `Partial`, `ParsedLossy`, `IgnoredWithDiagnostic`, `
 - Unit handling: OBJ is treated as unitless; Baozi does not infer meters, centimeters, or inches.
 - Winding handling: face order is preserved as-authored.
 - Topology handling: all-triangle mesh segments use `PrimitiveTopology::Triangles`; quads and N-gons use `PrimitiveTopology::Polygons` with `face_vertex_counts`.
+- Smoothing handling: `s off` and `s 0` map to Face-domain smoothing group `0`; positive decimal group identifiers are preserved as dense Face-domain `u32` values. A segment with no face governed by an `s` statement has no smoothing attribute. Once an explicit smoothing state reaches a face, earlier unspecified faces in that segment are represented as `0` so the attribute remains dense, and the state continues across object, group, and material segment boundaries until another `s` statement changes it. Smoothing changes do not split a mesh segment by themselves.
 - Post-process boundary: raw OBJ parsing preserves polygon topology. Canonical triangulation belongs
   in `baozi-postprocess`, but no transformation request is currently admitted while the retained
   edit, remap, and evidence rail is being completed.
 - Attribute remapping: OBJ's separate position/UV/normal indices are remapped into Baozi's vertex-indexed SoA mesh streams by unique `(position, texcoord, normal)` tuples.
-- Mesh splitting: material, object/group, and topology boundaries may split one OBJ file into multiple Baozi meshes to preserve the one-material-per-mesh contract.
+- Mesh splitting: material and object/group boundaries may split one OBJ file into multiple Baozi meshes. Polygon topology is preserved within each segment, and smoothing remains per-face data.
 
 ### Text Decoding and Recovery
 
@@ -57,10 +58,10 @@ Invalid UTF-8 is rejected by default. A caller that needs declared legacy-text r
 
 Even with all four gates enabled, replacement is limited to these textual value ranges:
 
-- OBJ values following `o`, `g`, `usemtl`, `s`, and `mtllib`.
+- OBJ values following `o`, `g`, `usemtl`, and `mtllib`.
 - MTL values following `newmtl`, and the `map_Kd` path after its option operands have valid arity and required numeric syntax.
 
-OBJ/MTL keywords, numeric fields, face references, `map_Kd` option operands, and all other required syntax remain strict. Invalid UTF-8 in those regions is terminal rather than replaced. When replacement is applied, the import report records a bounded `obj.invalid_utf8_replaced` diagnostic and `FormatRecovery` loss evidence with the original raw-byte range. Recovery count/raw bytes and loss-evidence count/bytes are charged through the import ledger; exhausting any applicable limit is terminal. In replacement mode, invalid bytes wholly inside a discarded `#` comment tail are ignored without a diagnostic, loss evidence, or recovery-ledger charge. In the default `RejectInvalid` mode, invalid UTF-8 is rejected before comment-tail recovery filtering.
+OBJ/MTL keywords, numeric fields, smoothing values, face references, `map_Kd` option operands, and all other required syntax remain strict. Invalid UTF-8 in those regions is terminal rather than replaced. When replacement is applied, the import report records a bounded `obj.invalid_utf8_replaced` diagnostic and `FormatRecovery` loss evidence with the original raw-byte range. Recovery count/raw bytes and loss-evidence count/bytes are charged through the import ledger; exhausting any applicable limit is terminal. In replacement mode, invalid bytes wholly inside a discarded `#` comment tail are ignored without a diagnostic, loss evidence, or recovery-ledger charge. In the default `RejectInvalid` mode, invalid UTF-8 is rejected before comment-tail recovery filtering.
 
 ## MTL Mapping
 

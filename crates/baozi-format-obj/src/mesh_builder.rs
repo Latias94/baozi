@@ -36,7 +36,6 @@ struct SegmentKey {
     object: Option<StateNameId>,
     group: Option<StateNameId>,
     material: Option<StateNameId>,
-    smoothing: Option<StateNameId>,
 }
 
 fn bounded_entity_name(name: &str) -> Option<&str> {
@@ -49,7 +48,6 @@ impl SegmentKey {
             object: face.object,
             group: face.group,
             material: face.material,
-            smoothing: face.smoothing,
         }
     }
 
@@ -85,6 +83,8 @@ struct SegmentBuilder<'scope> {
     key: SegmentKey,
     vertex_keys: MeteredVec<'scope, VertexKey>,
     face_vertex_counts: MeteredVec<'scope, u32>,
+    smoothing_groups: Option<MeteredVec<'scope, u32>>,
+    attribute_stream_count: usize,
     has_polygon: bool,
 }
 
@@ -128,9 +128,35 @@ fn warn_partial_attributes(
     Ok(())
 }
 
+fn checked_attribute_stream_count(
+    scope: &ParseScope<'_>,
+    current: usize,
+    additional: usize,
+) -> ParseResult<usize> {
+    let count = current
+        .checked_add(additional)
+        .ok_or_else(|| scope.allocation_failure("obj-attribute-stream-count"))?;
+    scope.enforce_resource_limit(
+        "max_vertex_attribute_streams_per_mesh",
+        usize_amount(scope, count, "obj-attribute-stream-count")?,
+        usize_amount(
+            scope,
+            scope.limits().max_vertex_attribute_streams_per_mesh,
+            "obj-attribute-stream-limit",
+        )?,
+    )?;
+    Ok(count)
+}
+
 impl<'scope> SegmentBuilder<'scope> {
-    fn new(scope: &'scope ParseScope<'_>, key: SegmentKey) -> Self {
-        Self {
+    fn new(scope: &'scope ParseScope<'_>, key: SegmentKey) -> ParseResult<Self> {
+        let attribute_stream_count = checked_attribute_stream_count(scope, 0, 1)?;
+        scope.with_work(
+            ImportWorkClass::AttributeStreams,
+            1,
+            |work| -> ParseResult<()> { work.complete_all() },
+        )?;
+        Ok(Self {
             key,
             vertex_keys: scope.metered_vec(
                 ImportStorageClass::FormatNormalization,
@@ -140,8 +166,10 @@ impl<'scope> SegmentBuilder<'scope> {
                 ImportStorageClass::FormatNormalization,
                 "obj-face-vertex-counts",
             ),
+            smoothing_groups: None,
+            attribute_stream_count,
             has_polygon: false,
-        }
+        })
     }
 
     fn push_face(&mut self, scope: &'scope ParseScope<'_>, face: &Face<'_>) -> ParseResult<()> {
@@ -171,30 +199,98 @@ impl<'scope> SegmentBuilder<'scope> {
         )?;
         let face_count_cells =
             usize_amount(scope, face_count_cells, "obj-canonical-face-count-cells")?;
+        let prior_face_count = self.face_vertex_counts.len();
+        let smoothing_value = face.smoothing.canonical_value();
+        let activates_smoothing = self.smoothing_groups.is_none() && smoothing_value.is_some();
+        let additional_attribute_streams = usize::from(activates_smoothing);
+        let attribute_stream_count = checked_attribute_stream_count(
+            scope,
+            self.attribute_stream_count,
+            additional_attribute_streams,
+        )?;
+        let additional_attribute_streams = usize_amount(
+            scope,
+            additional_attribute_streams,
+            "obj-canonical-attribute-stream-count",
+        )?;
+        let smoothing_cells = if self.smoothing_groups.is_some() {
+            1
+        } else if smoothing_value.is_some() {
+            prior_face_count
+                .checked_add(1)
+                .ok_or_else(|| scope.allocation_failure("obj-smoothing-group-cell-count"))?
+        } else {
+            0
+        };
+        let smoothing_cells = usize_amount(
+            scope,
+            smoothing_cells,
+            "obj-canonical-smoothing-group-cells",
+        )?;
 
-        scope.with_work(
-            ImportWorkClass::TopologyCells,
-            canonical_topology_cells,
+        scope.with_work_group(
+            [
+                (
+                    ImportWorkClass::AttributeStreams,
+                    additional_attribute_streams,
+                ),
+                (ImportWorkClass::AttributeCells, smoothing_cells),
+                (ImportWorkClass::TopologyCells, canonical_topology_cells),
+            ],
             |work| -> ParseResult<()> {
                 if face_vertex_count > 3 {
                     self.has_polygon = true;
                 }
                 let face_vertex_count = u32::try_from(face_vertex_count)
                     .map_err(|_| scope.allocation_failure("obj-face-vertex-count"))?;
-                work.run([face_count_cells], || {
+                work.run([0, 0, face_count_cells], || {
                     self.face_vertex_counts.try_push(face_vertex_count)
                 })?;
+
+                if let Some(smoothing_groups) = self.smoothing_groups.as_mut() {
+                    let value = smoothing_value.unwrap_or(0);
+                    work.run([0, 1, 0], || smoothing_groups.try_push(value))?;
+                } else if let Some(value) = smoothing_value {
+                    let smoothing_count = prior_face_count.checked_add(1).ok_or_else(|| {
+                        scope.allocation_failure("obj-smoothing-group-cell-count")
+                    })?;
+                    let mut smoothing_groups = scope.metered_vec(
+                        ImportStorageClass::FormatNormalization,
+                        "obj-face-smoothing-groups",
+                    );
+                    smoothing_groups.try_reserve(smoothing_count)?;
+                    let mut remaining = prior_face_count;
+                    while remaining != 0 {
+                        work.poll()?;
+                        let chunk_len = remaining.min(64);
+                        let chunk_amount =
+                            usize_amount(scope, chunk_len, "obj-smoothing-group-backfill-cells")?;
+                        work.run([0, chunk_amount, 0], || {
+                            for _ in 0..chunk_len {
+                                smoothing_groups.try_push_reserved(0)?;
+                            }
+                            Ok(())
+                        })?;
+                        remaining -= chunk_len;
+                    }
+                    work.run([1, 1, 0], || smoothing_groups.try_push_reserved(value))?;
+                    self.smoothing_groups = Some(smoothing_groups);
+                }
                 self.vertex_keys.try_reserve(face.vertices.len())?;
 
                 for chunk in face.vertices.as_slice().chunks(64) {
                     work.poll()?;
                     for vertex in chunk {
-                        work.run([1], || self.vertex_keys.try_push_reserved((*vertex).into()))?;
+                        work.run([0, 0, 1], || {
+                            self.vertex_keys.try_push_reserved((*vertex).into())
+                        })?;
                     }
                 }
                 Ok(())
             },
-        )
+        )?;
+        self.attribute_stream_count = attribute_stream_count;
+        Ok(())
     }
 
     fn materialize_vertices(
@@ -286,156 +382,174 @@ impl<'scope> SegmentBuilder<'scope> {
         let channel_count = usize::from(keep_texcoords) + usize::from(keep_normals);
         let channel_count_amount =
             usize_amount(scope, channel_count, "obj-canonical-attribute-stream-count")?;
-        let mut positions = scope.metered_vec(
-            ImportStorageClass::FormatNormalization,
-            "obj-segment-position-scalars",
-        );
-        let mut texcoords = scope.metered_vec(
-            ImportStorageClass::FormatNormalization,
-            "obj-segment-texcoord-scalars",
-        );
-        let mut normals = scope.metered_vec(
-            ImportStorageClass::FormatNormalization,
-            "obj-segment-normal-scalars",
-        );
-        let mut indices = scope.metered_vec(
-            ImportStorageClass::FormatNormalization,
-            "obj-segment-indices",
-        );
-        positions.try_reserve(
-            unique_count
-                .checked_mul(3)
-                .ok_or_else(|| scope.allocation_failure("obj-position-scalar-count"))?,
-        )?;
-        if keep_texcoords {
-            texcoords.try_reserve(
-                unique_count
-                    .checked_mul(2)
-                    .ok_or_else(|| scope.allocation_failure("obj-texcoord-scalar-count"))?,
-            )?;
-        }
-        if keep_normals {
-            normals.try_reserve(
-                unique_count
-                    .checked_mul(3)
-                    .ok_or_else(|| scope.allocation_failure("obj-normal-scalar-count"))?,
-            )?;
-        }
-        indices.try_reserve(self.vertex_keys.len())?;
-        mtl::for_work_chunks(
-            scope,
-            self.vertex_keys.len(),
-            "obj-vertex-index-init-work",
-            |range| {
-                indices.try_resize(range.end, 0)?;
-                Ok(())
-            },
-        )?;
+        let attribute_stream_count =
+            checked_attribute_stream_count(scope, self.attribute_stream_count, channel_count)?;
+        scope.with_parent_work(
+            ImportWorkClass::AttributeStreams,
+            channel_count_amount,
+            || -> ParseResult<BuiltVertexStreams<'scope>> {
+                let mut positions = scope.metered_vec(
+                    ImportStorageClass::FormatNormalization,
+                    "obj-segment-position-scalars",
+                );
+                let mut texcoords = scope.metered_vec(
+                    ImportStorageClass::FormatNormalization,
+                    "obj-segment-texcoord-scalars",
+                );
+                let mut normals = scope.metered_vec(
+                    ImportStorageClass::FormatNormalization,
+                    "obj-segment-normal-scalars",
+                );
+                let mut indices = scope.metered_vec(
+                    ImportStorageClass::FormatNormalization,
+                    "obj-segment-indices",
+                );
+                positions.try_reserve(
+                    unique_count
+                        .checked_mul(3)
+                        .ok_or_else(|| scope.allocation_failure("obj-position-scalar-count"))?,
+                )?;
+                if keep_texcoords {
+                    texcoords.try_reserve(
+                        unique_count
+                            .checked_mul(2)
+                            .ok_or_else(|| scope.allocation_failure("obj-texcoord-scalar-count"))?,
+                    )?;
+                }
+                if keep_normals {
+                    normals.try_reserve(
+                        unique_count
+                            .checked_mul(3)
+                            .ok_or_else(|| scope.allocation_failure("obj-normal-scalar-count"))?,
+                    )?;
+                }
+                indices.try_reserve(self.vertex_keys.len())?;
+                mtl::for_work_chunks(
+                    scope,
+                    self.vertex_keys.len(),
+                    "obj-vertex-index-init-work",
+                    |range| {
+                        indices.try_resize(range.end, 0)?;
+                        Ok(())
+                    },
+                )?;
 
-        for (chunk_index, first_flags) in first_occurrences.as_slice().chunks(64).enumerate() {
-            let start = chunk_index
-                .checked_mul(64)
-                .ok_or_else(|| scope.allocation_failure("obj-vertex-materialization-offset"))?;
-            let end = start
-                .checked_add(first_flags.len())
-                .ok_or_else(|| scope.allocation_failure("obj-vertex-materialization-offset"))?;
-            let chunk_vertices = first_flags.iter().filter(|is_first| **is_first).count();
-            let chunk_attribute_cells = chunk_vertices
-                .checked_mul(channel_count)
-                .ok_or_else(|| scope.allocation_failure("obj-canonical-attribute-cells"))?;
-            scope.with_work_group(
-                [
-                    (
-                        ImportWorkClass::WorkUnits,
-                        usize_amount(scope, first_flags.len(), "obj-vertex-materialization-work")?,
-                    ),
-                    (
-                        ImportWorkClass::Vertices,
-                        usize_amount(scope, chunk_vertices, "obj-canonical-vertices")?,
-                    ),
-                    (
-                        ImportWorkClass::AttributeCells,
-                        usize_amount(
-                            scope,
-                            chunk_attribute_cells,
-                            "obj-canonical-attribute-cells",
-                        )?,
-                    ),
-                ],
-                |work| -> ParseResult<()> {
-                    for occurrence in start..end {
-                        let key = &self.vertex_keys.as_slice()[occurrence];
-                        if !first_occurrences.as_slice()[occurrence] {
-                            work.complete([1, 0, 0])?;
-                            continue;
-                        }
-                        let canonical_index = u32::try_from(positions.len() / 3)
-                            .map_err(|_| scope.allocation_failure("obj-vertex-index-space"))?;
-                        let position = parsed.positions.as_slice()[key.position];
-                        let texcoord = if keep_texcoords {
-                            let Some(index) = key.texcoord else {
-                                return Err(scope.format_failure(ObjFailure::internal(
-                                    "complete-texcoord-channel-has-missing-index",
-                                )));
-                            };
-                            Some(parsed.texcoords.as_slice()[index])
-                        } else {
-                            None
-                        };
-                        let normal = if keep_normals {
-                            let Some(index) = key.normal else {
-                                return Err(scope.format_failure(ObjFailure::internal(
-                                    "complete-normal-channel-has-missing-index",
-                                )));
-                            };
-                            Some(parsed.normals.as_slice()[index])
-                        } else {
-                            None
-                        };
-                        work.run([1, 1, channel_count_amount], || {
-                            indices.as_mut_slice()[occurrence] = canonical_index;
-                            positions.try_extend_from_slice_reserved(&[
-                                position.x, position.y, position.z,
-                            ])?;
-                            if let Some(texcoord) = texcoord {
-                                texcoords
-                                    .try_extend_from_slice_reserved(&[texcoord.x, texcoord.y])?;
-                            }
-                            if let Some(normal) = normal {
-                                normals.try_extend_from_slice_reserved(&[
-                                    normal.x, normal.y, normal.z,
-                                ])?;
+                for (chunk_index, first_flags) in
+                    first_occurrences.as_slice().chunks(64).enumerate()
+                {
+                    let start = chunk_index.checked_mul(64).ok_or_else(|| {
+                        scope.allocation_failure("obj-vertex-materialization-offset")
+                    })?;
+                    let end = start.checked_add(first_flags.len()).ok_or_else(|| {
+                        scope.allocation_failure("obj-vertex-materialization-offset")
+                    })?;
+                    let chunk_vertices = first_flags.iter().filter(|is_first| **is_first).count();
+                    let chunk_attribute_cells = chunk_vertices
+                        .checked_mul(channel_count)
+                        .ok_or_else(|| scope.allocation_failure("obj-canonical-attribute-cells"))?;
+                    scope.with_work_group(
+                        [
+                            (
+                                ImportWorkClass::WorkUnits,
+                                usize_amount(
+                                    scope,
+                                    first_flags.len(),
+                                    "obj-vertex-materialization-work",
+                                )?,
+                            ),
+                            (
+                                ImportWorkClass::Vertices,
+                                usize_amount(scope, chunk_vertices, "obj-canonical-vertices")?,
+                            ),
+                            (
+                                ImportWorkClass::AttributeCells,
+                                usize_amount(
+                                    scope,
+                                    chunk_attribute_cells,
+                                    "obj-canonical-attribute-cells",
+                                )?,
+                            ),
+                        ],
+                        |work| -> ParseResult<()> {
+                            for occurrence in start..end {
+                                let key = &self.vertex_keys.as_slice()[occurrence];
+                                if !first_occurrences.as_slice()[occurrence] {
+                                    work.complete([1, 0, 0])?;
+                                    continue;
+                                }
+                                let canonical_index =
+                                    u32::try_from(positions.len() / 3).map_err(|_| {
+                                        scope.allocation_failure("obj-vertex-index-space")
+                                    })?;
+                                let position = parsed.positions.as_slice()[key.position];
+                                let texcoord = if keep_texcoords {
+                                    let Some(index) = key.texcoord else {
+                                        return Err(scope.format_failure(ObjFailure::internal(
+                                            "complete-texcoord-channel-has-missing-index",
+                                        )));
+                                    };
+                                    Some(parsed.texcoords.as_slice()[index])
+                                } else {
+                                    None
+                                };
+                                let normal = if keep_normals {
+                                    let Some(index) = key.normal else {
+                                        return Err(scope.format_failure(ObjFailure::internal(
+                                            "complete-normal-channel-has-missing-index",
+                                        )));
+                                    };
+                                    Some(parsed.normals.as_slice()[index])
+                                } else {
+                                    None
+                                };
+                                work.run([1, 1, channel_count_amount], || {
+                                    indices.as_mut_slice()[occurrence] = canonical_index;
+                                    positions.try_extend_from_slice_reserved(&[
+                                        position.x, position.y, position.z,
+                                    ])?;
+                                    if let Some(texcoord) = texcoord {
+                                        texcoords.try_extend_from_slice_reserved(&[
+                                            texcoord.x, texcoord.y,
+                                        ])?;
+                                    }
+                                    if let Some(normal) = normal {
+                                        normals.try_extend_from_slice_reserved(&[
+                                            normal.x, normal.y, normal.z,
+                                        ])?;
+                                    }
+                                    Ok(())
+                                })?;
                             }
                             Ok(())
-                        })?;
+                        },
+                    )?;
+                }
+                let mut current_key = None;
+                let mut canonical_index = 0u32;
+                mtl::for_work_chunks(scope, sorted_keys.len(), "obj-vertex-remap-work", |range| {
+                    for cursor in range {
+                        let indexed = sorted_keys.as_slice()[cursor];
+                        if current_key != Some(indexed.key) {
+                            current_key = Some(indexed.key);
+                            canonical_index = indices.as_slice()[indexed.occurrence];
+                        } else {
+                            indices.as_mut_slice()[indexed.occurrence] = canonical_index;
+                        }
                     }
                     Ok(())
-                },
-            )?;
-        }
-        let mut current_key = None;
-        let mut canonical_index = 0u32;
-        mtl::for_work_chunks(scope, sorted_keys.len(), "obj-vertex-remap-work", |range| {
-            for cursor in range {
-                let indexed = sorted_keys.as_slice()[cursor];
-                if current_key != Some(indexed.key) {
-                    current_key = Some(indexed.key);
-                    canonical_index = indices.as_slice()[indexed.occurrence];
-                } else {
-                    indices.as_mut_slice()[indexed.occurrence] = canonical_index;
-                }
-            }
-            Ok(())
-        })?;
+                })?;
 
-        drop(first_occurrences);
-        drop(sorted_keys);
-        Ok(BuiltVertexStreams {
-            positions,
-            texcoords,
-            normals,
-            indices,
-        })
+                drop(first_occurrences);
+                drop(sorted_keys);
+                Ok(BuiltVertexStreams {
+                    positions,
+                    texcoords,
+                    normals,
+                    indices,
+                    attribute_stream_count,
+                })
+            },
+        )
     }
 
     fn finish(
@@ -449,6 +563,8 @@ impl<'scope> SegmentBuilder<'scope> {
             key,
             vertex_keys,
             face_vertex_counts,
+            smoothing_groups,
+            attribute_stream_count: _,
             has_polygon,
         } = self;
         drop(vertex_keys);
@@ -457,6 +573,7 @@ impl<'scope> SegmentBuilder<'scope> {
             texcoords,
             normals,
             indices,
+            attribute_stream_count,
         } = streams;
         let face_vertex_counts = if has_polygon {
             face_vertex_counts
@@ -474,6 +591,8 @@ impl<'scope> SegmentBuilder<'scope> {
             normals,
             indices,
             face_vertex_counts,
+            smoothing_groups,
+            attribute_stream_count,
             has_polygon,
             material,
         })
@@ -485,6 +604,7 @@ struct BuiltVertexStreams<'scope> {
     texcoords: MeteredVec<'scope, f32>,
     normals: MeteredVec<'scope, f32>,
     indices: MeteredVec<'scope, u32>,
+    attribute_stream_count: usize,
 }
 
 struct BuiltSegment<'scope> {
@@ -494,6 +614,8 @@ struct BuiltSegment<'scope> {
     normals: MeteredVec<'scope, f32>,
     indices: MeteredVec<'scope, u32>,
     face_vertex_counts: MeteredVec<'scope, u32>,
+    smoothing_groups: Option<MeteredVec<'scope, u32>>,
+    attribute_stream_count: usize,
     has_polygon: bool,
     material: Option<MaterialLocalId>,
 }
@@ -529,7 +651,7 @@ pub(crate) fn scene_from_parsed<'scope>(
             )?;
         }
         if current.is_none() {
-            current = Some(SegmentBuilder::new(scope, key));
+            current = Some(SegmentBuilder::new(scope, key)?);
         }
         let Some(segment) = current.as_mut() else {
             return Err(scope.format_failure(ObjFailure::internal(
@@ -922,10 +1044,7 @@ fn submit_complete_batch<'scope>(
         .iter()
         .try_fold(0usize, |total, segment| {
             total
-                .checked_add(
-                    1 + usize::from(!segment.normals.is_empty())
-                        + usize::from(!segment.texcoords.is_empty()),
-                )
+                .checked_add(segment.attribute_stream_count)
                 .ok_or_else(|| scope.allocation_failure("obj-attribute-count"))
         })?;
     attributes.try_reserve(attribute_count)?;
@@ -978,13 +1097,23 @@ fn submit_complete_batch<'scope>(
                 Presence::Absent,
             ))?;
         }
+        if let Some(smoothing_groups) = segment.smoothing_groups.as_ref() {
+            attributes.try_push_reserved(GeometryAttributeAuthoring::u32(
+                AttributeSemantic::SmoothingGroup,
+                AttributeDomain::Face,
+                1,
+                smoothing_groups.as_slice(),
+            ))?;
+        }
+        let authored_attribute_count = attributes.len() - attribute_start;
+        if authored_attribute_count != segment.attribute_stream_count {
+            return Err(scope.format_failure(ObjFailure::internal(
+                "segment-attribute-stream-count-mismatch",
+            )));
+        }
         let attribute_range = AuthoringRange::new(
             attribute_offset,
-            canonical_u32(
-                scope,
-                attributes.len() - attribute_start,
-                "obj-attribute-range-count",
-            )?,
+            canonical_u32(scope, authored_attribute_count, "obj-attribute-range-count")?,
         );
         let topology = if segment.has_polygon {
             GeometryTopologyAuthoring::Polygons(segment.face_vertex_counts.as_slice())
@@ -1398,7 +1527,6 @@ fn append_segment_metadata<'scope, 'input>(
         ("obj:group", key.group),
         ("obj:material", key.material),
         ("obj:object", key.object),
-        ("obj:smoothing", key.smoothing),
     ] {
         if let Some(id) = id {
             push_metadata(
@@ -1466,7 +1594,6 @@ mod tests {
             object: Some(object),
             group: None,
             material: None,
-            smoothing: None,
         }
     }
 

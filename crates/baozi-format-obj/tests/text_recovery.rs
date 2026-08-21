@@ -544,10 +544,11 @@ fn inline_mtl_comments_discard_invalid_bytes_after_semantic_recovery() -> TestRe
 }
 
 #[test]
-fn recovery_remains_strict_in_obj_keyword_numeric_and_face_syntax() -> TestResult<()> {
+fn recovery_remains_strict_in_obj_keyword_numeric_smoothing_and_face_syntax() -> TestResult<()> {
     let fixtures: &[(&str, &[u8], u64)] = &[
         ("keyword.obj", b"v\xff 0 0 0\n", 1),
         ("numeric.obj", b"v \xff 0 0\n", 2),
+        ("smoothing.obj", b"s \xff\n", 2),
         ("face.obj", b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 \xff\n", 30),
     ];
 
@@ -565,7 +566,19 @@ fn recovery_remains_strict_in_obj_keyword_numeric_and_face_syntax() -> TestResul
             true,
         )?);
         assert_invalid_utf8(&failure, *offset);
+        assert!(failure.diagnostics().is_empty());
         assert!(failure.loss_evidence().is_empty());
+        for dimension in [
+            ImportDimension::RecoveryCount,
+            ImportDimension::RecoveryRawBytes,
+        ] {
+            let recovery = failure
+                .ledger()
+                .dimension(dimension)
+                .expect("recovery evidence remains queryable");
+            assert_eq!(recovery.attempted(), 0);
+            assert_eq!(recovery.consumed(), 0);
+        }
     }
     Ok(())
 }

@@ -4,6 +4,7 @@ use baozi_import::{
     ConformedTextInput, ImportStorageClass, ImportWorkClass, MeteredString, MeteredVec,
     ParseResult, ParseScope, TextInputLine, TextInputRecoveryTracker,
 };
+use std::num::NonZeroU32;
 
 use parser::usize_amount;
 
@@ -34,7 +35,24 @@ pub(crate) struct Face<'scope> {
     pub object: Option<StateNameId>,
     pub group: Option<StateNameId>,
     pub material: Option<StateNameId>,
-    pub smoothing: Option<StateNameId>,
+    pub smoothing: ObjSmoothing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjSmoothing {
+    Unspecified,
+    Off,
+    Group(NonZeroU32),
+}
+
+impl ObjSmoothing {
+    pub(crate) const fn canonical_value(self) -> Option<u32> {
+        match self {
+            Self::Unspecified => None,
+            Self::Off => Some(0),
+            Self::Group(group) => Some(group.get()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -75,7 +93,7 @@ pub(crate) fn parse<'scope>(
         object: None,
         group: None,
         material: None,
-        smoothing: None,
+        smoothing: ObjSmoothing::Unspecified,
     };
 
     for line in text.lines() {
@@ -97,7 +115,7 @@ struct ObjParser<'scope, 'session> {
     object: Option<StateNameId>,
     group: Option<StateNameId>,
     material: Option<StateNameId>,
-    smoothing: Option<StateNameId>,
+    smoothing: ObjSmoothing,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -124,7 +142,7 @@ impl<'scope> ObjParser<'scope, '_> {
         let tokens = tokenize(self.scope, decoded_line, line_number)?;
         let token_values = tokens.values.as_slice();
         let allowed_value = token_values.first().and_then(|first| match first.text {
-            "o" | "g" | "usemtl" | "s" | "mtllib" => trailing_token_range(token_values),
+            "o" | "g" | "usemtl" | "mtllib" => trailing_token_range(token_values),
             _ => None,
         });
         parser::authorize_line_recoveries(
@@ -171,12 +189,7 @@ impl<'scope> ObjParser<'scope, '_> {
                 Ok(())
             }
             "s" => {
-                self.smoothing = parse_state_name(
-                    self.scope,
-                    &mut self.parsed.state_names,
-                    self.smoothing,
-                    trailing_text_after_first_token(raw_line, token_values),
-                )?;
+                self.smoothing = parse_smoothing_group(self.scope, token_values, line_number)?;
                 Ok(())
             }
             "mtllib" => self.parse_material_library_references(&token_values[1..]),
@@ -346,6 +359,63 @@ fn parse_state_name<'scope>(
             Ok(Some(id))
         },
     )
+}
+
+fn parse_smoothing_group(
+    scope: &ParseScope<'_>,
+    tokens: &[Token<'_>],
+    line_number: u32,
+) -> ParseResult<ObjSmoothing> {
+    let keyword_column = tokens.first().map_or(1, |token| token.column);
+    let Some(value) = tokens.get(1).copied() else {
+        return Err(scope.format_failure(ObjFailure::statement(
+            "smoothing-group",
+            "missing-value",
+            line_number,
+            keyword_column,
+        )));
+    };
+    if let Some(extra) = tokens.get(2) {
+        return Err(scope.format_failure(ObjFailure::statement(
+            "smoothing-group",
+            "extra-value",
+            line_number,
+            extra.column,
+        )));
+    }
+    if value.text == "off" {
+        return Ok(ObjSmoothing::Off);
+    }
+
+    enforce_numeric_literal(scope, value.text)?;
+    let negative_digits = value.text.strip_prefix('-').is_some_and(|digits| {
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    let reason = if negative_digits {
+        Some("negative")
+    } else if value.text.bytes().all(|byte| byte.is_ascii_digit()) {
+        None
+    } else {
+        Some("invalid-integer")
+    };
+    if let Some(reason) = reason {
+        return Err(scope.format_failure(ObjFailure::statement(
+            "smoothing-group",
+            reason,
+            line_number,
+            value.column,
+        )));
+    }
+
+    let group = value.text.parse::<u32>().map_err(|_| {
+        scope.format_failure(ObjFailure::statement(
+            "smoothing-group",
+            "out-of-range",
+            line_number,
+            value.column,
+        ))
+    })?;
+    Ok(NonZeroU32::new(group).map_or(ObjSmoothing::Off, ObjSmoothing::Group))
 }
 
 fn tokenize<'scope, 'line>(

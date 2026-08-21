@@ -178,6 +178,15 @@ fn polygon_document(vertex_count: usize) -> String {
     document
 }
 
+fn smoothing_backfill_document(prior_face_count: usize) -> String {
+    let mut document = String::from("v 0 0 0\nv 1 0 0\nv 0 1 0\n");
+    for _ in 0..prior_face_count {
+        document.push_str("f 1 2 3\n");
+    }
+    document.push_str("s 7\nf 1 3 2\n");
+    document
+}
+
 fn assert_scope_limit(failure: &baozi_import::ImportFailure, resource: &'static str, limit: u64) {
     assert!(matches!(
         failure.cause(),
@@ -209,6 +218,50 @@ fn assert_ledger_limit(failure: &baozi_import::ImportFailure, dimension: ImportD
         .dimension(dimension)
         .expect("tested import dimension is configured");
     assert!(snapshot.attempted() > snapshot.consumed());
+}
+
+fn assert_attribute_stream_boundaries(
+    source: &str,
+    bytes: &[u8],
+    expected_streams: usize,
+) -> TestResult<()> {
+    let one_short = expected_streams
+        .checked_sub(1)
+        .expect("every canonical mesh retains a position stream");
+    let expected_work = u64::try_from(expected_streams)
+        .expect("test attribute stream count must fit the ledger amount type");
+    let one_short_work = u64::try_from(one_short)
+        .expect("test attribute stream limit must fit the ledger amount type");
+
+    let mut exact = ResourceLimits::default();
+    exact.max_vertex_attribute_streams_per_mesh = expected_streams;
+    exact.max_total_vertex_attribute_streams = expected_streams;
+    let report = expected_success(import_bytes_result(source, bytes, exact)?);
+    assert!(report.diagnostics().is_empty());
+    assert_eq!(scene_snapshot(&report)?.attribute_count(), expected_streams);
+    let streams = report
+        .ledger()
+        .dimension(ImportDimension::AttributeStreams)
+        .expect("attribute stream evidence remains queryable");
+    assert_eq!(streams.attempted(), expected_work);
+    assert_eq!(streams.consumed(), expected_work);
+
+    let mut per_mesh_excess = ResourceLimits::default();
+    per_mesh_excess.max_vertex_attribute_streams_per_mesh = one_short;
+    per_mesh_excess.max_total_vertex_attribute_streams = expected_streams;
+    let failure = expected_failure(import_bytes_result(source, bytes, per_mesh_excess)?);
+    assert_scope_limit(
+        &failure,
+        "max_vertex_attribute_streams_per_mesh",
+        one_short_work,
+    );
+
+    let mut total_excess = ResourceLimits::default();
+    total_excess.max_vertex_attribute_streams_per_mesh = expected_streams;
+    total_excess.max_total_vertex_attribute_streams = one_short;
+    let failure = expected_failure(import_bytes_result(source, bytes, total_excess)?);
+    assert_ledger_limit(&failure, ImportDimension::AttributeStreams);
+    Ok(())
 }
 
 fn assert_live_limit(failure: &baozi_import::ImportFailure, limit: u64) {
@@ -637,6 +690,48 @@ fn vertex_key_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<
 }
 
 #[test]
+fn smoothing_backfill_cancellation_is_bounded_by_cell_chunks() -> TestResult<()> {
+    const PRIOR_FACE_COUNT: usize = 512;
+    const BACKFILL_CHUNK: u64 = 64;
+    let document = smoothing_backfill_document(PRIOR_FACE_COUNT);
+
+    let (calibration_control, calibration_polls) = controlled_import(None);
+    let _report = expected_success(import_assets_result_with_control(
+        "smoothing-backfill.obj",
+        [("smoothing-backfill.obj", document.as_bytes())],
+        ResourceLimits::default(),
+        false,
+        calibration_control,
+    )?);
+    let total_polls = calibration_polls.load(Ordering::SeqCst);
+    assert!(total_polls > 0);
+
+    let (_, failure) = first_cancelled_dimension_prefix_at_least(
+        total_polls,
+        ImportDimension::AttributeCells,
+        BACKFILL_CHUNK,
+        |cancel_on| {
+            let (control, polls) = controlled_import(Some(cancel_on));
+            let failure = expected_failure(import_assets_result_with_control(
+                "smoothing-backfill.obj",
+                [("smoothing-backfill.obj", document.as_bytes())],
+                ResourceLimits::default(),
+                false,
+                control,
+            )?);
+            assert_cancelled(&failure);
+            assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
+            Ok(failure)
+        },
+    )?;
+    assert_eq!(
+        work_consumed(&failure, ImportDimension::AttributeCells),
+        BACKFILL_CHUNK
+    );
+    Ok(())
+}
+
+#[test]
 fn primary_asset_byte_limit_is_enforced() -> TestResult<()> {
     let mut limits = ResourceLimits::default();
     limits.max_primary_asset_bytes = 4;
@@ -669,6 +764,21 @@ fn token_byte_limit_is_enforced() -> TestResult<()> {
     let failure = expected_failure(import_bytes_result("token-limit.obj", bytes, limits)?);
 
     assert_scope_limit(&failure, "token-bytes", 1);
+    Ok(())
+}
+
+#[test]
+fn smoothing_numeric_literal_byte_limit_is_enforced() -> TestResult<()> {
+    let oversized_group = "1".repeat(129);
+    let document = format!("v 0 0 0\nv 1 0 0\nv 0 1 0\ns {oversized_group}\nf 1 2 3\n");
+
+    let failure = expected_failure(import_bytes_result(
+        "smoothing-number-limit.obj",
+        document.as_bytes(),
+        ResourceLimits::default(),
+    )?);
+
+    assert_scope_limit(&failure, "obj-number-bytes", 128);
     Ok(())
 }
 
@@ -836,6 +946,147 @@ fn canonical_attribute_cells_are_charged_at_the_exact_boundary() -> TestResult<(
 }
 
 #[test]
+fn smoothing_attribute_cells_are_charged_at_the_exact_boundary() -> TestResult<()> {
+    let bytes = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\ns 7\nf 1 3 2\n";
+
+    let mut exact = ResourceLimits::default();
+    exact.max_total_vertex_attribute_cells = 2;
+    let report = expected_success(import_bytes_result("smoothing-exact.obj", bytes, exact)?);
+    assert!(report.diagnostics().is_empty());
+    let snapshot = scene_snapshot(&report)?;
+    assert_eq!(snapshot.attribute_count(), 2);
+    assert!(
+        snapshot_line_containing(&snapshot, "semantic=smoothing_group")
+            .contains("values(present,total=2)=[0,7]")
+    );
+
+    let mut excess = ResourceLimits::default();
+    excess.max_total_vertex_attribute_cells = 1;
+    let failure = expected_failure(import_bytes_result("smoothing-excess.obj", bytes, excess)?);
+    assert_ledger_limit(&failure, ImportDimension::AttributeCells);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    assert!(failure.diagnostics().is_empty());
+    assert!(failure.loss_evidence().is_empty());
+    let canonical_output = failure
+        .ledger()
+        .dimension(ImportDimension::CanonicalOutputBytes)
+        .expect("canonical output evidence remains queryable");
+    assert_eq!(canonical_output.current_live_bytes(), 0);
+    assert_eq!(canonical_output.committed(), 0);
+    assert_eq!(canonical_output.published_outcome_evidence(), 0);
+    Ok(())
+}
+
+#[test]
+fn canonical_attribute_streams_are_charged_for_retained_channels() -> TestResult<()> {
+    let cases: [(&str, &[u8], usize); 3] = [
+        (
+            "position-only.obj",
+            b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+            1,
+        ),
+        (
+            "complete-corner-channels.obj",
+            b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2/1 3/3/1\n",
+            3,
+        ),
+        (
+            "complete-corner-channels-with-smoothing.obj",
+            b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\ns 7\nf 1/1/1 2/2/1 3/3/1\n",
+            4,
+        ),
+    ];
+
+    for (source, bytes, expected) in cases {
+        assert_attribute_stream_boundaries(source, bytes, expected)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn smoothing_stream_limit_precedes_attribute_cell_admission() -> TestResult<()> {
+    let smoothing_only = b"v 0 0 0\nv 1 0 0\nv 0 1 0\ns 7\nf 1 2 3\n";
+    let mut smoothing_stream_excess = ResourceLimits::default();
+    smoothing_stream_excess.max_total_vertex_attribute_streams = 1;
+    let failure = expected_failure(import_bytes_result(
+        "smoothing-stream-precedes-cells.obj",
+        smoothing_only,
+        smoothing_stream_excess,
+    )?);
+    assert_ledger_limit(&failure, ImportDimension::AttributeStreams);
+    let cells = failure
+        .ledger()
+        .dimension(ImportDimension::AttributeCells)
+        .expect("attribute cell evidence remains queryable");
+    assert_eq!(cells.attempted(), 0);
+    assert_eq!(cells.consumed(), 0);
+    Ok(())
+}
+
+#[test]
+fn smoothing_budgets_are_aggregate_across_segments() -> TestResult<()> {
+    let bytes = b"g first\nv 0 0 0\nv 1 0 0\nv 0 1 0\ns 7\nf 1 2 3\ng second\nf 1 3 2\n";
+
+    let mut exact = ResourceLimits::default();
+    exact.max_total_vertex_attribute_cells = 2;
+    exact.max_vertex_attribute_streams_per_mesh = 2;
+    exact.max_total_vertex_attribute_streams = 4;
+    let report = expected_success(import_bytes_result(
+        "smoothing-segments-exact.obj",
+        bytes,
+        exact,
+    )?);
+    let snapshot = scene_snapshot(&report)?;
+    assert_eq!(snapshot.logical_mesh_count(), 2);
+    assert_eq!(snapshot.attribute_count(), 4);
+    let smoothing_attributes = snapshot
+        .preview()
+        .lines()
+        .filter(|line| line.contains("semantic=smoothing_group"))
+        .collect::<Vec<_>>();
+    assert_eq!(smoothing_attributes.len(), 2);
+    assert!(
+        smoothing_attributes
+            .iter()
+            .all(|line| line.contains("values(present,total=1)=[7]"))
+    );
+    let cells = report
+        .ledger()
+        .dimension(ImportDimension::AttributeCells)
+        .expect("attribute cell evidence remains queryable");
+    assert_eq!(cells.attempted(), 2);
+    assert_eq!(cells.consumed(), 2);
+    let streams = report
+        .ledger()
+        .dimension(ImportDimension::AttributeStreams)
+        .expect("attribute stream evidence remains queryable");
+    assert_eq!(streams.attempted(), 4);
+    assert_eq!(streams.consumed(), 4);
+
+    let mut cell_excess = ResourceLimits::default();
+    cell_excess.max_total_vertex_attribute_cells = 1;
+    let failure = expected_failure(import_bytes_result(
+        "smoothing-segments-cell-excess.obj",
+        bytes,
+        cell_excess,
+    )?);
+    assert_ledger_limit(&failure, ImportDimension::AttributeCells);
+
+    let mut stream_excess = ResourceLimits::default();
+    stream_excess.max_vertex_attribute_streams_per_mesh = 2;
+    stream_excess.max_total_vertex_attribute_streams = 3;
+    let failure = expected_failure(import_bytes_result(
+        "smoothing-segments-stream-excess.obj",
+        bytes,
+        stream_excess,
+    )?);
+    assert_ledger_limit(&failure, ImportDimension::AttributeStreams);
+    Ok(())
+}
+
+#[test]
 fn mesh_limit_is_enforced_after_group_split() -> TestResult<()> {
     let mut limits = ResourceLimits::default();
     limits.max_meshes = 1;
@@ -856,11 +1107,12 @@ fn canonical_string_budget_is_charged_before_segment_materialization() -> TestRe
     let object = "x".repeat(NAME_BYTES);
     let mut document = format!("o {object}\nv 0 0 0\nv 1 0 0\nv 0 1 0\n");
     for segment in 0..SEGMENT_COUNT {
-        let smoothing = if segment.is_multiple_of(2) { "a" } else { "b" };
-        document.push_str(&format!("s {smoothing}\nf 1 2 3\n"));
+        let group = if segment.is_multiple_of(2) { "a" } else { "b" };
+        document.push_str(&format!("g {group}\nf 1 2 3\n"));
     }
     let parsed_name_bytes = NAME_BYTES + SEGMENT_COUNT;
-    let segment_bytes = 3 * NAME_BYTES + "obj:object".len() + "obj:smoothing".len() + "a".len();
+    let group_bytes = "a".len();
+    let segment_bytes = 3 * group_bytes + "obj:group".len() + "obj:object".len() + NAME_BYTES;
     let exact_bytes = parsed_name_bytes
         + SEGMENT_COUNT * segment_bytes
         + SOURCE.len()
