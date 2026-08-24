@@ -130,8 +130,9 @@ pub use scope::{
 pub use session::{ReadHint, import_asset, import_asset_with_resolver, import_bytes};
 pub use source_scope::{
     FinalizedSourceScopeRecord, SourceScopeCounts, SourceScopeDetail, SourceScopeDetailState,
-    SourceScopeDetails, SourceScopeDigest, SourceScopeDisposition, SourceScopeEntityKind,
-    SourceScopeRecord, SourceScopeRecordBuilder,
+    SourceScopeDetails, SourceScopeDigest, SourceScopeDisposition, SourceScopeDocumentIdentity,
+    SourceScopeEntityKind, SourceScopeRecord, SourceScopeRecordBuilder,
+    SourceScopeSelectionOutcome, SourceScopeSourceIdentity,
 };
 pub use text_input::{
     ConformedTextInput, TextConformanceResult, TextConformanceViolation,

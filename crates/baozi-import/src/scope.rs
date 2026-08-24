@@ -36,7 +36,7 @@ use crate::resource_graph::{
 };
 use crate::source_scope::{
     FinalizedSourceScopeRecord, LiveSourceScopeRecord, SourceScopeEntityKind,
-    SourceScopeRecordBuilder,
+    SourceScopeRecordBuilder, SourceScopeSelectionOutcome,
 };
 use crate::store::{
     ImportObservedWorkFailure, ImportStoreHost, ImportStoreHostError, ImportStoreReservation,
@@ -666,9 +666,17 @@ impl<'session> ParseScope<'session> {
     }
 
     /// Starts one incremental source-selection and closure evidence record.
-    pub fn source_scope_builder(&self) -> ParseResult<SourceScopeRecordBuilder<'_, 'session>> {
+    pub fn source_scope_builder(
+        &self,
+        selection_outcome: SourceScopeSelectionOutcome,
+    ) -> ParseResult<SourceScopeRecordBuilder<'_, 'session>> {
         self.preflight_active()?;
-        Ok(SourceScopeRecordBuilder::new(self))
+        if selection_outcome.document().asset_path() != self.source() {
+            return Err(self.abort(ScopeAbortCause::DescriptorContract {
+                code: "source-scope-selection-document-mismatch",
+            }));
+        }
+        SourceScopeRecordBuilder::new(self, selection_outcome)
     }
 
     /// Creates vector storage whose backing allocation cannot outlive this parse capability.

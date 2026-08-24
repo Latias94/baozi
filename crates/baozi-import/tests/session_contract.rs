@@ -16,10 +16,10 @@ use baozi_import::{
     ManifestUnavailableReplay, MeteredDecodedText, MeteredString, MeteredVec, OptionCompileLimits,
     ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
     RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
-    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextInputOptions,
-    TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding, TrustedExtensionBoundary,
-    import_asset as run_import_asset, import_asset_with_resolver as run_import_asset_with_resolver,
-    import_bytes as run_import_bytes,
+    SourceScopeSelectionOutcome, TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps,
+    TextInputOptions, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    TrustedExtensionBoundary, import_asset as run_import_asset,
+    import_asset_with_resolver as run_import_asset_with_resolver, import_bytes as run_import_bytes,
 };
 use baozi_io::{
     AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetPath,
@@ -694,7 +694,11 @@ impl FormatFailureEvidenceProducer for ReentrantFormatFailureProducer<'_, '_> {
 
     fn visit_details(&self, sink: &mut dyn FormatFailureDetailSink) {
         match self.phase {
-            ReentrantFormatFailurePhase::Details => drop(self.scope.source_scope_builder()),
+            ReentrantFormatFailurePhase::Details => drop(self.scope.source_scope_builder(
+                SourceScopeSelectionOutcome::parentless_node_projection(
+                    self.scope.source().try_clone().expect("source clone"),
+                ),
+            )),
             ReentrantFormatFailurePhase::DecodedStorage => {
                 drop(
                     self.decoded

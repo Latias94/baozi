@@ -25,7 +25,7 @@ use baozi_import::{
     DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass,
     ImportWorkScope, MeteredOrderedMap, MeteredString, MeteredVec, ParseFailure, ParseResult,
     ParseScope, SceneDraft, SourceScopeDisposition, SourceScopeEntityKind,
-    SourceScopeRecordBuilder,
+    SourceScopeRecordBuilder, SourceScopeSelectionOutcome,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::{DecodeError, DecodeSliceError, Engine as _};
@@ -3331,7 +3331,22 @@ struct NodeGraph<'document, 'scope> {
     children: MeteredVec<'scope, MeteredVec<'scope, usize>>,
     roots: MeteredVec<'scope, usize>,
     selected: MeteredVec<'scope, bool>,
-    selected_scene_index: Option<usize>,
+    selection_outcome: NodeSelectionOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeSelectionOutcome {
+    DeclaredScene(usize),
+    ParentlessNodeProjection,
+}
+
+impl NodeSelectionOutcome {
+    const fn selected_scene_index(self) -> Option<usize> {
+        match self {
+            Self::DeclaredScene(scene_index) => Some(scene_index),
+            Self::ParentlessNodeProjection => None,
+        }
+    }
 }
 
 /// Source-index membership compiled before any selected dependency is opened.
@@ -3979,7 +3994,24 @@ fn record_source_scope(
     closure: &ResourceClosure<'_>,
 ) -> Result<()> {
     let document = gltf.as_json();
-    let mut builder = ctx.source_scope_builder()?;
+    let source_document = ctx
+        .source()
+        .try_clone()
+        .map_err(|_| ctx.allocation_failure("gltf-source-scope-document"))?;
+    let selection_outcome = match graph.selection_outcome {
+        NodeSelectionOutcome::DeclaredScene(scene_index) => {
+            SourceScopeSelectionOutcome::declared_scene(
+                source_document,
+                u64::try_from(scene_index).map_err(|_| {
+                    gltf_parse_error(ctx, "glTF selected scene index exceeds source-scope range")
+                })?,
+            )
+        }
+        NodeSelectionOutcome::ParentlessNodeProjection => {
+            SourceScopeSelectionOutcome::parentless_node_projection(source_document)
+        }
+    };
+    let mut builder = ctx.source_scope_builder(selection_outcome)?;
     let mut identity = ctx.metered_string(
         ImportStorageClass::FormatNormalization,
         "gltf-source-scope-identity",
@@ -3991,7 +4023,7 @@ fn record_source_scope(
             &mut builder,
             &mut identity,
             SourceScopeEntityKind::Scene,
-            graph.selected_scene_index == Some(scene_index),
+            graph.selection_outcome.selected_scene_index() == Some(scene_index),
             's',
             scene_index,
         )?;
@@ -4376,7 +4408,7 @@ fn preflight_node_graph<'document, 'scope>(
     }
 
     validate_graph_depth_and_cycles(ctx, children.as_slice(), parents.as_slice())?;
-    let (roots, selected_scene_index) =
+    let (roots, selection_outcome) =
         select_and_validate_scene_roots(ctx, gltf, parents.as_slice())?;
     charge_canonical_graph_shape(ctx, roots.len())?;
     let selected = validate_canonical_graph_limits(ctx, children.as_slice(), roots.as_slice())?;
@@ -4386,7 +4418,7 @@ fn preflight_node_graph<'document, 'scope>(
         children,
         roots,
         selected,
-        selected_scene_index,
+        selection_outcome,
     })
 }
 
@@ -4521,7 +4553,7 @@ fn select_and_validate_scene_roots<'scope>(
     ctx: &'scope ParseScope<'_>,
     gltf: &gltf::Gltf,
     parents: &[Option<usize>],
-) -> Result<(MeteredVec<'scope, usize>, Option<usize>)> {
+) -> Result<(MeteredVec<'scope, usize>, NodeSelectionOutcome)> {
     let scene_count = safe_gltf(ctx, "glTF scene count", || gltf.scenes().len())?;
     let mut scene_roots = ctx.metered_vec(
         ImportStorageClass::FormatNormalization,
@@ -4592,10 +4624,10 @@ fn select_and_validate_scene_roots<'scope>(
     let default_scene_index = safe_gltf(ctx, "glTF default scene", || {
         gltf.default_scene().map(|scene| scene.index())
     })?;
-    let selected_scene_index = match (default_scene_index, scene_count) {
-        (Some(scene_index), _) => Some(scene_index),
-        (None, 0) => None,
-        (None, 1) => Some(0),
+    let selection_outcome = match (default_scene_index, scene_count) {
+        (Some(scene_index), _) => NodeSelectionOutcome::DeclaredScene(scene_index),
+        (None, 0) => NodeSelectionOutcome::ParentlessNodeProjection,
+        (None, 1) => NodeSelectionOutcome::DeclaredScene(0),
         (None, _) => {
             return Err(gltf_parse_error(
                 ctx,
@@ -4603,8 +4635,8 @@ fn select_and_validate_scene_roots<'scope>(
             ));
         }
     };
-    match selected_scene_index {
-        Some(scene_index) => {
+    match selection_outcome {
+        NodeSelectionOutcome::DeclaredScene(scene_index) => {
             let selected = scene_roots.as_slice().get(scene_index).ok_or_else(|| {
                 gltf_parse_error(
                     ctx,
@@ -4621,38 +4653,40 @@ fn select_and_validate_scene_roots<'scope>(
                 poll_parser_loop(ctx, root_ordinal)?;
                 roots.try_push_reserved(root)?;
             }
-            Ok((roots, Some(scene_index)))
+            Ok((roots, NodeSelectionOutcome::DeclaredScene(scene_index)))
         }
-        None => ctx.with_work(ImportWorkClass::GraphWork, 1, |work| -> Result<_> {
-            let mut roots = ctx.metered_vec(
-                ImportStorageClass::FormatNormalization,
-                "gltf-derived-scene-roots",
-            );
-            work.complete_all()?;
-            for (chunk_index, chunk) in parents.chunks(PARSER_POLL_INTERVAL).enumerate() {
-                work.poll()?;
-                let root_count = chunk.iter().filter(|parent| parent.is_none()).count();
-                if root_count == 0 {
-                    continue;
-                }
-                work.replenish(to_u64(root_count))?;
-                roots.try_reserve(root_count)?;
-                let base = chunk_index
-                    .checked_mul(PARSER_POLL_INTERVAL)
-                    .ok_or_else(|| ctx.allocation_failure("gltf-derived-root-index"))?;
-                for (offset, parent) in chunk.iter().enumerate() {
-                    if parent.is_some() {
+        NodeSelectionOutcome::ParentlessNodeProjection => {
+            ctx.with_work(ImportWorkClass::GraphWork, 1, |work| -> Result<_> {
+                let mut roots = ctx.metered_vec(
+                    ImportStorageClass::FormatNormalization,
+                    "gltf-derived-scene-roots",
+                );
+                work.complete_all()?;
+                for (chunk_index, chunk) in parents.chunks(PARSER_POLL_INTERVAL).enumerate() {
+                    work.poll()?;
+                    let root_count = chunk.iter().filter(|parent| parent.is_none()).count();
+                    if root_count == 0 {
                         continue;
                     }
-                    let node_index = base
-                        .checked_add(offset)
+                    work.replenish(to_u64(root_count))?;
+                    roots.try_reserve(root_count)?;
+                    let base = chunk_index
+                        .checked_mul(PARSER_POLL_INTERVAL)
                         .ok_or_else(|| ctx.allocation_failure("gltf-derived-root-index"))?;
-                    roots.try_push_reserved(node_index)?;
-                    work.complete([1])?;
+                    for (offset, parent) in chunk.iter().enumerate() {
+                        if parent.is_some() {
+                            continue;
+                        }
+                        let node_index = base
+                            .checked_add(offset)
+                            .ok_or_else(|| ctx.allocation_failure("gltf-derived-root-index"))?;
+                        roots.try_push_reserved(node_index)?;
+                        work.complete([1])?;
+                    }
                 }
-            }
-            Ok((roots, None))
-        }),
+                Ok((roots, NodeSelectionOutcome::ParentlessNodeProjection))
+            })
+        }
     }
 }
 

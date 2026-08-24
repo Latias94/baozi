@@ -210,6 +210,22 @@ excluded or lossy semantic observable. Chosen.
 
 ## Amendment History
 
+### 2026-08-24: Make selection outcomes typed report evidence
+
+- Affected: `SourceScopeRecord` transport, source-scope digest framing, and glTF node preflight.
+- New: the record exposes `SourceScopeSelectionOutcome` with a typed
+  `DeclaredScene(SourceScopeSourceIdentity)` or
+  `ParentlessNodeProjection(SourceScopeDocumentIdentity)` result. The document identity is the
+  sanitized primary `AssetPath`; the declared-scene identity additionally carries the format-owned
+  source scene index.
+- New: selection metadata is included in the versioned source-scope digest, while the existing
+  item/digest byte budgets continue to measure only observed source-entity identities. A builder
+  rejects an outcome whose document identity does not match the originating parse scope.
+- Impact: glTF no longer represents selection as an untyped `Option<usize>`, and zero-scene
+  parentless-node projections are distinguishable from declared scene selection in success and
+  failure reports.
+- Review: 2026-08-24 source-selection evidence implementation review.
+
 ### 2026-07-17: Own source-scope semantics without owning lifecycle transport
 
 - Affected: front matter dependencies/related links, `Decision`, `Consequences`, and

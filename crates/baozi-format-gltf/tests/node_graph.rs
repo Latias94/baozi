@@ -3,8 +3,9 @@ mod common;
 use baozi_format_gltf::GltfFailureCode;
 use baozi_import::{
     ImportCause, ImportDimension, ImportFailure, ImportOperationControl, ImportProgressPhase,
-    ImportProgressUnit, ImportReport, ImportResult, ScopeAbortCause,
+    ImportProgressUnit, ImportReport, ImportResult, ScopeAbortCause, SourceScopeSelectionOutcome,
 };
+use baozi_io::AssetPath;
 use baozi_operation::{
     CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
 };
@@ -293,6 +294,15 @@ fn imports_valid_forest_once_without_a_declared_scene() -> TestResult<()> {
 
     assert!(diagnostics.is_empty());
     assert!(report.scene().canonical_block_count() > 0);
+    assert_eq!(
+        report
+            .source_scope_record()
+            .expect("source-scope evidence")
+            .selection_outcome(),
+        &SourceScopeSelectionOutcome::parentless_node_projection(
+            AssetPath::new("graph.gltf").unwrap()
+        )
+    );
     Ok(())
 }
 
@@ -310,6 +320,13 @@ fn selects_the_only_scene_when_no_default_scene_is_declared() -> TestResult<()> 
 
     assert!(diagnostics.is_empty());
     assert!(report.scene().canonical_block_count() > 0);
+    assert_eq!(
+        report
+            .source_scope_record()
+            .expect("source-scope evidence")
+            .selection_outcome(),
+        &SourceScopeSelectionOutcome::declared_scene(AssetPath::new("graph.gltf").unwrap(), 0,)
+    );
     Ok(())
 }
 

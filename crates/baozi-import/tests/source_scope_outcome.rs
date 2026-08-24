@@ -10,7 +10,7 @@ use baozi_import::{
     LossPolicy, OptionCompileLimits, ParseResult, ParseScope, PreparedImportRequest,
     ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder, ResourceLimits,
     ResourceLimitsOverlay, SceneDraft, ScopeAbortCause, SourceScopeDetailState,
-    SourceScopeDisposition, SourceScopeEntityKind, import_bytes,
+    SourceScopeDisposition, SourceScopeEntityKind, SourceScopeSelectionOutcome, import_bytes,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationOrigin, CancellationToken, ControlCause};
@@ -18,6 +18,10 @@ use std::fmt;
 
 const SOURCE: &str = "scene.scope";
 const SOURCE_SEMANTIC_LOSS_CODE: &str = "test.source_channel_omitted";
+
+fn selection_outcome() -> SourceScopeSelectionOutcome {
+    SourceScopeSelectionOutcome::parentless_node_projection(AssetPath::new(SOURCE).unwrap())
+}
 
 #[derive(Debug, Clone, Copy)]
 enum Exit {
@@ -144,7 +148,7 @@ impl FormatImporter for CancelBeforeEmptyIdentityImporter {
     }
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
-        let mut builder = scope.source_scope_builder()?;
+        let mut builder = scope.source_scope_builder(selection_outcome())?;
         self.cancellation.cancel();
         builder.observe(
             SourceScopeEntityKind::Scene,
@@ -156,7 +160,7 @@ impl FormatImporter for CancelBeforeEmptyIdentityImporter {
 }
 
 fn record(scope: &ParseScope<'_>, identities: &[&str]) -> ParseResult<()> {
-    let mut builder = scope.source_scope_builder()?;
+    let mut builder = scope.source_scope_builder(selection_outcome())?;
     for (index, identity) in identities.iter().enumerate() {
         let disposition = if index == 0 {
             SourceScopeDisposition::Selected
@@ -170,7 +174,7 @@ fn record(scope: &ParseScope<'_>, identities: &[&str]) -> ParseResult<()> {
 }
 
 fn record_typed(scope: &ParseScope<'_>) -> ParseResult<()> {
-    let mut builder = scope.source_scope_builder()?;
+    let mut builder = scope.source_scope_builder(selection_outcome())?;
     for (kind, disposition, identity) in [
         (
             SourceScopeEntityKind::Scene,
@@ -484,9 +488,9 @@ fn typed_counts_remain_partitioned_by_source_entity_kind() {
     assert_eq!(
         record.digest().as_bytes(),
         &[
-            0x6a, 0x11, 0xc5, 0x0d, 0x29, 0x7a, 0xae, 0x38, 0xf6, 0x1f, 0x74, 0x46, 0x55, 0xc4,
-            0x7e, 0x47, 0x79, 0xd7, 0xf2, 0x9a, 0xe7, 0x6f, 0x6b, 0x8b, 0x20, 0xa3, 0xc5, 0x28,
-            0x2c, 0x64, 0xb8, 0x8f,
+            0x23, 0x7b, 0x0b, 0xd3, 0x89, 0x1c, 0xa7, 0x32, 0xb1, 0xba, 0x26, 0xa9, 0xe2, 0x2b,
+            0xfd, 0x84, 0x38, 0xb3, 0x7a, 0x2f, 0xf5, 0x24, 0x6a, 0xa6, 0x0d, 0xe8, 0xc4, 0x86,
+            0xe4, 0x62, 0xd6, 0x75,
         ]
     );
 }
@@ -806,9 +810,9 @@ fn full_digest_is_sensitive_to_tail_changes() {
     assert_eq!(
         canonical.source_scope_record().unwrap().digest().as_bytes(),
         &[
-            0x71, 0xf5, 0x67, 0xb4, 0xa2, 0xf8, 0xb3, 0x3a, 0xec, 0xcf, 0xa4, 0xa2, 0x37, 0xf6,
-            0xa2, 0x5c, 0xc6, 0xad, 0x87, 0x3e, 0x08, 0x56, 0x07, 0xd3, 0x70, 0x52, 0xa4, 0x85,
-            0xa3, 0x99, 0x95, 0x33,
+            0x89, 0xbf, 0xba, 0x0d, 0xf1, 0x3b, 0x75, 0xf7, 0x39, 0xfe, 0xeb, 0xa5, 0x9e, 0xd5,
+            0xb0, 0x8a, 0xa6, 0x38, 0xa7, 0x32, 0x4b, 0x61, 0x6e, 0xb9, 0x04, 0x14, 0x0d, 0x66,
+            0x38, 0xf7, 0xc9, 0x75,
         ]
     );
 }

@@ -4,10 +4,12 @@ use crate::metered_storage::AccountedVec;
 use crate::scope::{
     ImportStorageClass, METERED_COPY_POLL_INTERVAL, ParseFailure, ParseResult, ParseScope,
 };
+use baozi_io::AssetPath;
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-const SOURCE_SCOPE_DIGEST_DOMAIN: &[u8] = b"baozi.source-scope.v1\0";
+const SOURCE_SCOPE_DIGEST_DOMAIN: &[u8] = b"baozi.source-scope.v2\0";
+const SOURCE_SCOPE_SELECTION_FRAME_TAG: u8 = 0xff;
 
 /// A source-document entity category counted by source-scope evidence.
 #[repr(u8)]
@@ -48,6 +50,80 @@ impl SourceScopeEntityKind {
 pub enum SourceScopeDisposition {
     Selected = 1,
     Omitted = 2,
+}
+
+/// A sanitized source-document identity used by selection evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceScopeDocumentIdentity(AssetPath);
+
+impl SourceScopeDocumentIdentity {
+    pub fn new(document: AssetPath) -> Self {
+        Self(document)
+    }
+
+    pub const fn asset_path(&self) -> &AssetPath {
+        &self.0
+    }
+}
+
+/// A format-owned identity for one selected source object.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceScopeSourceIdentity {
+    document: SourceScopeDocumentIdentity,
+    scene_index: u64,
+}
+
+impl SourceScopeSourceIdentity {
+    pub fn new(document: SourceScopeDocumentIdentity, scene_index: u64) -> Self {
+        Self {
+            document,
+            scene_index,
+        }
+    }
+
+    pub const fn document(&self) -> &SourceScopeDocumentIdentity {
+        &self.document
+    }
+
+    pub const fn scene_index(&self) -> u64 {
+        self.scene_index
+    }
+}
+
+/// Typed result of the format-owned source selection step.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SourceScopeSelectionOutcome {
+    /// A declared source scene was selected.
+    DeclaredScene(SourceScopeSourceIdentity),
+    /// No source scene was declared; parentless nodes define the imported projection.
+    ParentlessNodeProjection(SourceScopeDocumentIdentity),
+}
+
+impl SourceScopeSelectionOutcome {
+    pub fn declared_scene(document: AssetPath, scene_index: u64) -> Self {
+        Self::DeclaredScene(SourceScopeSourceIdentity::new(
+            SourceScopeDocumentIdentity::new(document),
+            scene_index,
+        ))
+    }
+
+    pub fn parentless_node_projection(document: AssetPath) -> Self {
+        Self::ParentlessNodeProjection(SourceScopeDocumentIdentity::new(document))
+    }
+
+    pub const fn document(&self) -> &SourceScopeDocumentIdentity {
+        match self {
+            Self::DeclaredScene(identity) => identity.document(),
+            Self::ParentlessNodeProjection(document) => document,
+        }
+    }
+
+    pub const fn scene_index(&self) -> Option<u64> {
+        match self {
+            Self::DeclaredScene(identity) => Some(identity.scene_index()),
+            Self::ParentlessNodeProjection(_) => None,
+        }
+    }
 }
 
 /// Retention state for optional per-entity source-scope detail.
@@ -168,6 +244,7 @@ impl ExactSizeIterator for SourceScopeDetails<'_> {}
 
 /// Baozi-owned inert evidence describing one selected source closure.
 pub struct SourceScopeRecord {
+    selection_outcome: SourceScopeSelectionOutcome,
     counts: [SourceScopeCounts; SourceScopeEntityKind::COUNT],
     digest: SourceScopeDigest,
     detail_state: SourceScopeDetailState,
@@ -178,6 +255,9 @@ pub struct SourceScopeRecord {
 }
 
 impl SourceScopeRecord {
+    pub fn selection_outcome(&self) -> &SourceScopeSelectionOutcome {
+        &self.selection_outcome
+    }
     pub const fn counts(&self, kind: SourceScopeEntityKind) -> SourceScopeCounts {
         self.counts[kind.index()]
     }
@@ -210,6 +290,7 @@ impl fmt::Debug for SourceScopeRecord {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SourceScopeRecord")
+            .field("selection_outcome", &self.selection_outcome)
             .field("counts", &self.counts)
             .field("digest", &self.digest)
             .field("detail_state", &self.detail_state)
@@ -225,6 +306,7 @@ impl fmt::Debug for SourceScopeRecord {
 #[must_use = "finish and submit source-scope evidence or drop the builder"]
 pub struct SourceScopeRecordBuilder<'scope, 'session> {
     scope: &'scope ParseScope<'session>,
+    selection_outcome: SourceScopeSelectionOutcome,
     counts: [SourceScopeCounts; SourceScopeEntityKind::COUNT],
     digest: Sha256,
     detail_state: SourceScopeDetailState,
@@ -235,11 +317,27 @@ pub struct SourceScopeRecordBuilder<'scope, 'session> {
 }
 
 impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
-    pub(crate) fn new(scope: &'scope ParseScope<'session>) -> Self {
+    pub(crate) fn new(
+        scope: &'scope ParseScope<'session>,
+        selection_outcome: SourceScopeSelectionOutcome,
+    ) -> ParseResult<Self> {
         let mut digest = Sha256::new();
         digest.update(SOURCE_SCOPE_DIGEST_DOMAIN);
-        Self {
+        digest.update(SOURCE_SCOPE_SELECTION_FRAME_TAG.to_le_bytes());
+        match &selection_outcome {
+            SourceScopeSelectionOutcome::DeclaredScene(identity) => {
+                digest.update([1]);
+                digest.update(identity.scene_index().to_le_bytes());
+                Self::digest_document(&mut digest, identity.document().asset_path());
+            }
+            SourceScopeSelectionOutcome::ParentlessNodeProjection(document) => {
+                digest.update([2]);
+                Self::digest_document(&mut digest, document.asset_path());
+            }
+        }
+        Ok(Self {
             scope,
+            selection_outcome,
             counts: [SourceScopeCounts::default(); SourceScopeEntityKind::COUNT],
             digest,
             detail_state: SourceScopeDetailState::Detailed,
@@ -247,7 +345,13 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
             detail_bytes: AccountedVec::new(),
             observed_count: 0,
             observed_bytes: 0,
-        }
+        })
+    }
+
+    fn digest_document(digest: &mut Sha256, document: &AssetPath) {
+        let document_bytes = document.as_str().len() as u64;
+        digest.update(document_bytes.to_le_bytes());
+        digest.update(document.as_str().as_bytes());
     }
 
     pub fn observe(
@@ -282,7 +386,7 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
             (ImportDimension::SourceScopeDigestBytes, identity_bytes),
         ])?;
 
-        // This framing is the v1 digest wire: typed tag, disposition, LE length, then full bytes.
+        // Entity framing remains stable: typed tag, disposition, LE length, then full bytes.
         self.digest.update([kind as u8, disposition as u8]);
         self.digest.update(identity_bytes.to_le_bytes());
         for (chunk_index, chunk) in identity
@@ -385,6 +489,7 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
         Ok(FinalizedSourceScopeRecord {
             scope: self.scope,
             record: LiveSourceScopeRecord {
+                selection_outcome: self.selection_outcome,
                 counts: self.counts,
                 digest,
                 detail_state: self.detail_state,
@@ -423,6 +528,7 @@ impl FinalizedSourceScopeRecord<'_, '_> {
 }
 
 pub(crate) struct LiveSourceScopeRecord {
+    selection_outcome: SourceScopeSelectionOutcome,
     counts: [SourceScopeCounts; SourceScopeEntityKind::COUNT],
     digest: SourceScopeDigest,
     detail_state: SourceScopeDetailState,
@@ -449,6 +555,7 @@ impl LiveSourceScopeRecord {
         let detail_indexes = self.detail_indexes.into_terminal().into_values();
         let detail_bytes = self.detail_bytes.into_terminal().into_values();
         SourceScopeRecord {
+            selection_outcome: self.selection_outcome,
             counts: self.counts,
             digest: self.digest,
             detail_state: self.detail_state,
@@ -514,7 +621,13 @@ mod tests {
         }
 
         fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<CanonicalSceneDraft> {
-            let mut builder = scope.source_scope_builder()?;
+            let document = scope
+                .source()
+                .try_clone()
+                .map_err(|_| scope.allocation_failure("source-scope-document"))?;
+            let mut builder = scope.source_scope_builder(
+                SourceScopeSelectionOutcome::parentless_node_projection(document),
+            )?;
             builder.observe(
                 SourceScopeEntityKind::Scene,
                 SourceScopeDisposition::Selected,
