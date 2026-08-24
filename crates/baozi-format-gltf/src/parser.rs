@@ -3347,6 +3347,8 @@ struct ResourceClosure<'scope> {
     samplers: MeteredVec<'scope, bool>,
     skins: MeteredVec<'scope, bool>,
     cameras: MeteredVec<'scope, bool>,
+    animation_sampler_ranges: MeteredVec<'scope, std::ops::Range<usize>>,
+    animation_samplers: MeteredVec<'scope, bool>,
     buffers: MeteredVec<'scope, bool>,
     buffer_views: MeteredVec<'scope, bool>,
     accessors: MeteredVec<'scope, bool>,
@@ -3359,6 +3361,22 @@ fn build_resource_closure<'scope, 'document>(
     animation_contracts: &animation::AnimationContracts<'_, '_>,
 ) -> Result<ResourceClosure<'scope>> {
     let root = gltf.as_json();
+    let mut animation_sampler_ranges = try_vec_capacity(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        root.animations.len(),
+        "gltf-closure-animation-sampler-ranges",
+    )?;
+    let mut animation_sampler_count = 0usize;
+    for (animation_index, animation) in root.animations.iter().enumerate() {
+        charge_closure_work(ctx)?;
+        poll_parser_loop(ctx, animation_index)?;
+        let end = animation_sampler_count
+            .checked_add(animation.samplers.len())
+            .ok_or_else(|| ctx.allocation_failure("gltf-closure-animation-sampler-count"))?;
+        animation_sampler_ranges.try_push_reserved(animation_sampler_count..end)?;
+        animation_sampler_count = end;
+    }
     let mut closure = ResourceClosure {
         meshes: try_vec_filled(
             ctx,
@@ -3408,6 +3426,14 @@ fn build_resource_closure<'scope, 'document>(
             root.cameras.len(),
             false,
             "gltf-closure-camera-selection",
+        )?,
+        animation_sampler_ranges,
+        animation_samplers: try_vec_filled(
+            ctx,
+            ImportStorageClass::FormatNormalization,
+            animation_sampler_count,
+            false,
+            "gltf-closure-animation-sampler-selection",
         )?,
         buffers: try_vec_filled(
             ctx,
@@ -3518,6 +3544,25 @@ fn build_resource_closure<'scope, 'document>(
                     ),
                 )
             })?;
+            let sampler_range = closure
+                .animation_sampler_ranges
+                .as_slice()
+                .get(animation_index)
+                .ok_or_else(|| {
+                    ContentError::from(GltfFailure::internal(
+                        "animation closure sampler selection is incomplete",
+                    ))
+                })?;
+            let sampler_index = sampler_range
+                .start
+                .checked_add(channel.sampler.value())
+                .ok_or_else(|| ctx.allocation_failure("gltf-closure-animation-sampler-index"))?;
+            mark_bool(
+                ctx,
+                &mut closure.animation_samplers,
+                sampler_index,
+                "animation sampler",
+            )?;
             mark_accessor(ctx, root, &mut closure, sampler.input.value())?;
             if matches!(disposition, animation::SourceChannelDisposition::Retained) {
                 mark_accessor(ctx, root, &mut closure, sampler.output.value())?;
@@ -3961,6 +4006,16 @@ fn record_source_scope(
             node_index,
         )?;
     }
+    for (camera_index, selected) in closure.cameras.as_slice().iter().copied().enumerate() {
+        observe_source_index(
+            &mut builder,
+            &mut identity,
+            SourceScopeEntityKind::Camera,
+            selected,
+            'c',
+            camera_index,
+        )?;
+    }
     for (mesh_index, selected) in closure.meshes.as_slice().iter().copied().enumerate() {
         observe_source_index(
             &mut builder,
@@ -4047,6 +4102,31 @@ fn record_source_scope(
             'a',
             animation_index,
         )?;
+    }
+    for (animation_index, sampler_range) in closure
+        .animation_sampler_ranges
+        .as_slice()
+        .iter()
+        .enumerate()
+    {
+        let samplers = closure
+            .animation_samplers
+            .as_slice()
+            .get(sampler_range.clone())
+            .ok_or_else(|| {
+                ContentError::from(GltfFailure::internal(
+                    "source-scope animation sampler range is invalid",
+                ))
+            })?;
+        for (sampler_index, selected) in samplers.iter().copied().enumerate() {
+            observe_source_identity(
+                &mut builder,
+                &mut identity,
+                SourceScopeEntityKind::AnimationSampler,
+                selected,
+                format_args!("a{animation_index}s{sampler_index}"),
+            )?;
+        }
     }
     let mut source_channel_index = 0usize;
     for (animation_index, animation) in document.animations.iter().enumerate() {

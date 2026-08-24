@@ -28,10 +28,14 @@ pub enum SourceScopeEntityKind {
     Buffer = 11,
     BufferView = 12,
     Accessor = 13,
+    /// A camera declared by the source document.
+    Camera = 14,
+    /// An animation sampler scoped to its source animation.
+    AnimationSampler = 15,
 }
 
 impl SourceScopeEntityKind {
-    const COUNT: usize = Self::Accessor as usize + 1;
+    const COUNT: usize = Self::AnimationSampler as usize + 1;
 
     const fn index(self) -> usize {
         self as usize

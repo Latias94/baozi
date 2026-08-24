@@ -120,10 +120,11 @@ and import-contract tests.
 - Morph-weight animation is unsupported retained-domain semantics. It is rejected by default and may
   be omitted only under explicit `SourceSemanticLoss` authority with typed loss evidence and a stable
   channel diagnostic until the morph animation slice is admitted.
-- The current `SourceScopeRecord` still lacks ADR 0039's typed selection outcome, camera and
-  animation-sampler kinds, extension rows, and complete dependency provenance. The bootstrap
-  backend also materializes a GLB BIN chunk before the closure can filter it. These are admission
-  blockers even though the selected core resource closure is now tested and bounded.
+- The current `SourceScopeRecord` still lacks ADR 0039's typed selection outcome, extension rows,
+  and complete dependency provenance. Camera and animation-sampler rows are now emitted from the
+  selected closure, but the bootstrap backend still materializes a GLB BIN chunk before the closure
+  can filter it. These remaining gaps are admission blockers even though the selected core resource
+  closure is now tested and bounded.
 - The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
 - `gltf_import` is a non-admitted development target until known backend aborts are removed or
   process-isolated and the complete baseline admission matrix passes.

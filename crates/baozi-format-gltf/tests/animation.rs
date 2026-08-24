@@ -591,6 +591,18 @@ fn whole_animation_outside_selected_scene_is_scope_omission_without_loss() -> Te
             .omitted(),
         3
     );
+    assert_eq!(
+        record
+            .counts(SourceScopeEntityKind::AnimationSampler)
+            .selected(),
+        0
+    );
+    assert_eq!(
+        record
+            .counts(SourceScopeEntityKind::AnimationSampler)
+            .omitted(),
+        3
+    );
 
     let snapshot = scene_snapshot(&report);
     assert!(!snapshot.preview().contains("clip["));
@@ -653,6 +665,18 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
             .omitted(),
         1
     );
+    assert_eq!(
+        record
+            .counts(SourceScopeEntityKind::AnimationSampler)
+            .selected(),
+        4
+    );
+    assert_eq!(
+        record
+            .counts(SourceScopeEntityKind::AnimationSampler)
+            .omitted(),
+        0
+    );
     let details = record
         .details()
         .map(|detail| {
@@ -663,7 +687,7 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(details.len(), 20);
+    assert_eq!(details.len(), 24);
     assert_eq!(
         details[0],
         (
@@ -704,8 +728,18 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
             "a0".to_owned()
         )
     );
+    for (offset, identity) in ["a0s0", "a0s1", "a0s2", "a0s3"].into_iter().enumerate() {
+        assert_eq!(
+            details[5 + offset],
+            (
+                SourceScopeEntityKind::AnimationSampler,
+                SourceScopeDisposition::Selected,
+                identity.to_owned()
+            )
+        );
+    }
     assert_eq!(
-        details[5],
+        details[9],
         (
             SourceScopeEntityKind::AnimationChannel,
             SourceScopeDisposition::Omitted,
@@ -713,7 +747,7 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
         )
     );
     assert_eq!(
-        details[6],
+        details[10],
         (
             SourceScopeEntityKind::AnimationChannel,
             SourceScopeDisposition::Selected,
@@ -721,7 +755,7 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
         )
     );
     assert_eq!(
-        details[7],
+        details[11],
         (
             SourceScopeEntityKind::AnimationChannel,
             SourceScopeDisposition::Selected,
@@ -729,7 +763,7 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
         )
     );
     assert_eq!(
-        details[8],
+        details[12],
         (
             SourceScopeEntityKind::AnimationChannel,
             SourceScopeDisposition::Selected,
@@ -737,7 +771,7 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
         )
     );
     assert_eq!(
-        details[9],
+        details[13],
         (
             SourceScopeEntityKind::Buffer,
             SourceScopeDisposition::Selected,
@@ -746,7 +780,7 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
     );
     for (offset, identity) in ["bv0", "bv1", "bv2", "bv3", "bv4"].into_iter().enumerate() {
         assert_eq!(
-            details[10 + offset],
+            details[14 + offset],
             (
                 SourceScopeEntityKind::BufferView,
                 SourceScopeDisposition::Selected,
@@ -759,7 +793,7 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
         .enumerate()
     {
         assert_eq!(
-            details[15 + offset],
+            details[19 + offset],
             (
                 SourceScopeEntityKind::Accessor,
                 SourceScopeDisposition::Selected,
@@ -776,6 +810,44 @@ fn source_scope_preserves_filtered_animation_and_source_order() -> TestResult<()
     assert!(snapshot_line(&snapshot, "channel[1]").contains("target=1"));
     assert!(snapshot_line(&snapshot, "channel[2]").contains("target=1"));
     assert!(snapshot_line(&snapshot, "channel[3]").contains("target=1"));
+    Ok(())
+}
+
+#[test]
+fn source_scope_deduplicates_a_shared_animation_sampler() -> TestResult<()> {
+    let document = animation_glb(shared_sampler_json(), &shared_sampler_bin());
+    let (report, diagnostics) = import_assets(
+        "shared-sampler.glb",
+        [("shared-sampler.glb", document)],
+        GltfTestOptions::memory(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    let record = report
+        .source_scope_record()
+        .expect("shared sampler import must publish source-scope evidence");
+    assert_eq!(
+        record.counts(SourceScopeEntityKind::Animation).selected(),
+        1
+    );
+    assert_eq!(
+        record
+            .counts(SourceScopeEntityKind::AnimationChannel)
+            .selected(),
+        2
+    );
+    assert_eq!(
+        record
+            .counts(SourceScopeEntityKind::AnimationSampler)
+            .selected(),
+        1
+    );
+    let samplers = record
+        .details()
+        .filter(|detail| detail.kind() == SourceScopeEntityKind::AnimationSampler)
+        .collect::<Vec<_>>();
+    assert_eq!(samplers.len(), 1);
+    assert_eq!(samplers[0].identity(), "a0s0");
     Ok(())
 }
 
@@ -1017,6 +1089,39 @@ fn base_animation_json() -> &'static [u8] {
     ]
   }]
 }"#
+}
+
+fn shared_sampler_json() -> &'static [u8] {
+    br#"{
+  "asset": { "version": "2.0", "generator": "baozi-shared-sampler-test" },
+  "scene": 0,
+  "scenes": [{ "nodes": [0, 1] }],
+  "nodes": [{ "name": "AnimatedA" }, { "name": "AnimatedB" }],
+  "buffers": [{ "byteLength": 32 }],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0, "byteLength": 8 },
+    { "buffer": 0, "byteOffset": 8, "byteLength": 24 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1] },
+    { "bufferView": 1, "componentType": 5126, "count": 2, "type": "VEC3" }
+  ],
+  "animations": [{
+    "samplers": [{ "input": 0, "output": 1, "interpolation": "LINEAR" }],
+    "channels": [
+      { "sampler": 0, "target": { "node": 0, "path": "translation" } },
+      { "sampler": 0, "target": { "node": 1, "path": "translation" } }
+    ]
+  }]
+}"#
+}
+
+fn shared_sampler_bin() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    extend_f32(&mut bytes, &[0.0, 1.0]);
+    extend_f32(&mut bytes, &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+    assert_eq!(bytes.len(), 32);
+    bytes
 }
 
 fn morph_animation_json() -> &'static [u8] {
