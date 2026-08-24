@@ -1,4 +1,4 @@
-use crate::admission::JsonSurface;
+use crate::admission::AdmittedSurfaces;
 use crate::{FORMAT_ID, GltfFailure, admission, external_buffer_role, external_image_role};
 use baozi_import::authoring::{
     AlphaMode, AppearanceAuthoringBatch, AttributeDomain, AttributeSemantic, AuthoredTransform,
@@ -170,7 +170,7 @@ struct PreparedDocument<'scope, 'document> {
 
 fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
     let surface = admission::admit(ctx)?;
-    let primary_len = to_u64(surface.document_bytes().len());
+    let primary_len = to_u64(ctx.primary_bytes().len());
     let (parsed, _document_allowance) = ctx.with_work(
         ImportWorkClass::DecodeWork,
         primary_len,
@@ -179,7 +179,8 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
             let document_allowance =
                 ctx.metered_opaque_allowance(ImportStorageClass::BackendDecode, backend_allowance)?;
             let parsed = safe_gltf(ctx, "glTF document parse", || {
-                gltf::Gltf::from_slice(surface.document_bytes())
+                let json = gltf::json::Root::from_slice(surface.json_bytes())?;
+                gltf::Document::from_json(json)
             })?;
             work.complete_all()?;
             Ok((parsed, document_allowance))
@@ -211,24 +212,22 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
         &prepared.animation_contracts,
         &prepared.resource_closure,
     )?;
-    let buffers = load_buffers(ctx, &gltf, &prepared.resource_closure)?;
+    let buffers = load_buffers(ctx, &gltf, surface.bin_bytes(), &prepared.resource_closure)?;
     scene_from_document(ctx, &gltf, buffers.as_slice(), &prepared)
 }
 
 fn gltf_backend_allocation_allowance(
     ctx: &ParseScope<'_>,
-    surface: JsonSurface<'_>,
+    surface: AdmittedSurfaces<'_>,
 ) -> Result<u64> {
-    let input_bytes = u64::try_from(surface.document_bytes().len())
-        .map_err(|_| ctx.allocation_failure("gltf-backend-input-bytes"))?;
     let json_bytes = u64::try_from(surface.json_bytes().len())
         .map_err(|_| ctx.allocation_failure("gltf-backend-json-bytes"))?;
 
-    // The gltf/serde object graph is opaque to the import ledger. Retain the
-    // input-sized payload allowance plus a declared structural expansion cap.
+    // The gltf/serde object graph is opaque to the import ledger. The GLB BIN
+    // payload stays in the admission-owned input snapshot and is not copied by
+    // the backend, so only the borrowed JSON surface needs an opaque allowance.
     json_bytes
         .checked_mul(GLTF_JSON_EXPANSION_ALLOWANCE)
-        .and_then(|expanded| expanded.checked_add(input_bytes))
         .and_then(|expanded| expanded.checked_add(GLTF_BACKEND_FIXED_ALLOWANCE))
         .ok_or_else(|| {
             ctx.allocation_failure("gltf-backend-allocation-allowance")
@@ -238,7 +237,7 @@ fn gltf_backend_allocation_allowance(
 
 fn preflight_canonical_base_strings(
     ctx: &ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     graph: &NodeGraph<'_, '_>,
     closure: &ResourceClosure<'_>,
 ) -> Result<usize> {
@@ -405,7 +404,7 @@ impl ResolvedTextureUris<'_> {
 
 fn preflight_texture_strings<'scope>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     repeated_mesh_string_bytes: usize,
     closure: &ResourceClosure<'_>,
 ) -> Result<ResolvedTextureUris<'scope>> {
@@ -695,7 +694,8 @@ impl BufferSet<'_> {
 
 fn load_buffers<'scope>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
+    glb_bin_bytes: Option<&[u8]>,
     closure: &ResourceClosure<'_>,
 ) -> Result<BufferSet<'scope>> {
     let buffer_count = safe_gltf(ctx, "glTF buffer count", || gltf.buffers().count())?;
@@ -715,7 +715,7 @@ fn load_buffers<'scope>(
         }
         let loaded = match buffer.source() {
             BufferSource::Bin => {
-                let blob = gltf.blob.as_deref().ok_or_else(|| {
+                let blob = glb_bin_bytes.ok_or_else(|| {
                     ContentError::parse(
                         ctx.source().to_string(),
                         None,
@@ -1042,7 +1042,7 @@ fn gltf_parse_error(ctx: &ParseScope<'_>, message: impl Into<String>) -> Content
 
 fn scene_from_document(
     ctx: &ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     buffers: &[Option<BufferData<'_>>],
     prepared: &PreparedDocument<'_, '_>,
 ) -> Result<SceneDraft> {
@@ -1131,7 +1131,7 @@ impl ExternalImageResources<'_> {
 
 fn load_external_image_resources<'scope>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     closure: &ResourceClosure<'_>,
 ) -> Result<ExternalImageResources<'scope>> {
@@ -1227,7 +1227,7 @@ struct AppearanceStorage<'scope, 'document> {
 
 fn build_appearance_storage<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &'document gltf::Gltf,
+    gltf: &'document gltf::Document,
     buffers: &[Option<BufferData<'_>>],
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     external_images: &ExternalImageResources<'scope>,
@@ -1345,7 +1345,7 @@ fn build_appearance_storage<'scope, 'document>(
 
 fn build_shared_appearance_resources<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &'document gltf::Gltf,
+    gltf: &'document gltf::Document,
     buffers: &[Option<BufferData<'_>>],
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     external_images: &ExternalImageResources<'scope>,
@@ -1839,7 +1839,7 @@ struct GeometryContracts<'scope> {
 
 fn preflight_geometry_contracts<'scope>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     material_count: usize,
     closure: &ResourceClosure<'_>,
 ) -> Result<GeometryContracts<'scope>> {
@@ -1988,7 +1988,7 @@ impl fmt::Display for AccessorOwner {
 
 fn validate_primitive_contract(
     ctx: &ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     mesh_index: usize,
     primitive_index: usize,
     material_count: usize,
@@ -2179,7 +2179,7 @@ fn validate_primitive_contract(
 
 fn json_primitive<'a>(
     ctx: &ParseScope<'_>,
-    gltf: &'a gltf::Gltf,
+    gltf: &'a gltf::Document,
     mesh_index: usize,
     primitive_index: usize,
 ) -> Result<&'a json::mesh::Primitive> {
@@ -2266,7 +2266,7 @@ struct AccessorInfo {
 
 fn validate_accessor(
     ctx: &ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     accessor_index: usize,
     owner: AccessorOwner,
     label: &'static str,
@@ -2362,7 +2362,7 @@ struct AccessorLayoutCheck<'a> {
 
 fn validate_accessor_layout(
     ctx: &ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     check: AccessorLayoutCheck<'_>,
 ) -> Result<()> {
     let buffer_view_index = check
@@ -2687,7 +2687,7 @@ struct GeometryStorage<'scope, 'document> {
 
 fn build_geometry_storage<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &'document gltf::Gltf,
+    gltf: &'document gltf::Document,
     buffers: &[Option<BufferData<'_>>],
     contracts: &GeometryContracts<'_>,
     material_ids: &MeteredVec<'_, Option<MaterialLocalId>>,
@@ -3371,7 +3371,7 @@ struct ResourceClosure<'scope> {
 
 fn build_resource_closure<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &'document gltf::Gltf,
+    gltf: &'document gltf::Document,
     graph: &NodeGraph<'document, '_>,
     animation_contracts: &animation::AnimationContracts<'_, '_>,
 ) -> Result<ResourceClosure<'scope>> {
@@ -3988,7 +3988,7 @@ fn mark_buffer_view(
 
 fn record_source_scope(
     ctx: &ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     graph: &NodeGraph<'_, '_>,
     animation_contracts: &animation::AnimationContracts<'_, '_>,
     closure: &ResourceClosure<'_>,
@@ -4289,7 +4289,7 @@ fn observe_source_channel(
 
 fn preflight_node_graph<'document, 'scope>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &'document gltf::Gltf,
+    gltf: &'document gltf::Document,
 ) -> Result<NodeGraph<'document, 'scope>> {
     let node_count = safe_gltf(ctx, "glTF node count", || gltf.nodes().len())?;
     let nodes = ctx.with_work_group(
@@ -4551,7 +4551,7 @@ fn validate_graph_depth_and_cycles(
 
 fn select_and_validate_scene_roots<'scope>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     parents: &[Option<usize>],
 ) -> Result<(MeteredVec<'scope, usize>, NodeSelectionOutcome)> {
     let scene_count = safe_gltf(ctx, "glTF scene count", || gltf.scenes().len())?;
@@ -4704,7 +4704,7 @@ struct SkinStorage<'scope> {
 
 fn build_skins<'scope>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     buffers: &[Option<BufferData<'_>>],
     node_ids: &[Option<NodeLocalId>],
     node_skins: &[(NodeLocalId, usize)],
@@ -4926,7 +4926,7 @@ fn build_mesh_instance_deformations<'scope>(
 
 fn validate_skin_inverse_bind_accessor(
     ctx: &ParseScope<'_>,
-    gltf: &gltf::Gltf,
+    gltf: &gltf::Document,
     skin_index: usize,
     joint_count: usize,
 ) -> Result<bool> {
@@ -4973,7 +4973,7 @@ struct CameraStorage<'scope, 'document> {
 
 fn build_cameras<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &'document gltf::Gltf,
+    gltf: &'document gltf::Document,
     closure: &ResourceClosure<'_>,
 ) -> Result<CameraStorage<'scope, 'document>> {
     let camera_count = safe_gltf(ctx, "glTF camera count", || gltf.cameras().count())?;

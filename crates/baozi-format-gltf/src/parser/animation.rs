@@ -131,7 +131,7 @@ pub(super) struct AnimationStorage<'scope> {
 
 pub(super) fn preflight<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &'document gltf::Gltf,
+    gltf: &'document gltf::Document,
     selected_nodes: &[bool],
 ) -> Result<AnimationContracts<'scope, 'document>> {
     safe_gltf(ctx, "glTF animation preflight", || {
@@ -141,7 +141,7 @@ pub(super) fn preflight<'scope, 'document>(
 
 fn preflight_inner<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
-    gltf: &'document gltf::Gltf,
+    gltf: &'document gltf::Document,
     selected_nodes: &[bool],
 ) -> Result<AnimationContracts<'scope, 'document>> {
     let source_animations = &gltf.as_json().animations;

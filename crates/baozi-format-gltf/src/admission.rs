@@ -10,17 +10,13 @@ const GLB_JSON_CHUNK: &[u8; 4] = b"JSON";
 const GLB_BIN_CHUNK: &[u8; 4] = b"BIN\0";
 
 #[derive(Clone, Copy)]
-pub(crate) struct JsonSurface<'bytes> {
-    document_bytes: &'bytes [u8],
+pub(crate) struct AdmittedSurfaces<'bytes> {
     json_bytes: &'bytes [u8],
     json_raw_base: u64,
+    bin_bytes: Option<&'bytes [u8]>,
 }
 
-impl<'bytes> JsonSurface<'bytes> {
-    pub(crate) const fn document_bytes(self) -> &'bytes [u8] {
-        self.document_bytes
-    }
-
+impl<'bytes> AdmittedSurfaces<'bytes> {
     pub(crate) const fn json_bytes(self) -> &'bytes [u8] {
         self.json_bytes
     }
@@ -28,29 +24,34 @@ impl<'bytes> JsonSurface<'bytes> {
     pub(crate) const fn json_raw_base(self) -> u64 {
         self.json_raw_base
     }
+
+    pub(crate) const fn bin_bytes(self) -> Option<&'bytes [u8]> {
+        self.bin_bytes
+    }
 }
 
-pub(crate) fn admit<'bytes>(ctx: &'bytes ParseScope<'_>) -> ParseResult<JsonSurface<'bytes>> {
+pub(crate) fn admit<'bytes>(ctx: &'bytes ParseScope<'_>) -> ParseResult<AdmittedSurfaces<'bytes>> {
     let document_bytes = ctx.primary_bytes();
-    let (json_bytes, json_raw_base, is_glb) = if document_bytes.starts_with(GLB_MAGIC) {
-        let (json_bytes, json_raw_base) = locate_glb_json(ctx, document_bytes)?;
-        (json_bytes, json_raw_base, true)
+    let (surface, is_glb) = if document_bytes.starts_with(GLB_MAGIC) {
+        (locate_glb_surfaces(ctx, document_bytes)?, true)
     } else {
-        (document_bytes, 0, false)
-    };
-    let surface = JsonSurface {
-        document_bytes,
-        json_bytes,
-        json_raw_base,
+        (
+            AdmittedSurfaces {
+                json_bytes: document_bytes,
+                json_raw_base: 0,
+                bin_bytes: None,
+            },
+            false,
+        )
     };
     json_syntax::admit(ctx, surface.json_bytes(), surface.json_raw_base(), is_glb)?;
     Ok(surface)
 }
 
-fn locate_glb_json<'bytes>(
+fn locate_glb_surfaces<'bytes>(
     ctx: &ParseScope<'_>,
     document_bytes: &'bytes [u8],
-) -> ParseResult<(&'bytes [u8], u64)> {
+) -> ParseResult<AdmittedSurfaces<'bytes>> {
     if document_bytes.len() < GLB_HEADER_BYTES || !document_bytes.len().is_multiple_of(4) {
         return Err(invalid_glb(
             ctx,
@@ -81,6 +82,7 @@ fn locate_glb_json<'bytes>(
     let mut cursor = GLB_HEADER_BYTES;
     let mut chunk_index = 0usize;
     let mut json_range = None;
+    let mut bin_range = None;
     ctx.with_work(ImportWorkClass::WorkUnits, 1, |work| -> ParseResult<()> {
         while cursor < declared_length {
             let chunk = read_glb_chunk(ctx, document_bytes, cursor, declared_length)?;
@@ -91,6 +93,8 @@ fn locate_glb_json<'bytes>(
                     return Err(invalid_glb(ctx, "the first GLB chunk is not JSON"));
                 }
                 json_range = Some((chunk.data_start, chunk.end));
+            } else if chunk_index == 1 && chunk.chunk_type == GLB_BIN_CHUNK {
+                bin_range = Some((chunk.data_start, chunk.end));
             } else if chunk.chunk_type == GLB_JSON_CHUNK {
                 return Err(invalid_glb(ctx, "GLB contains more than one JSON chunk"));
             } else if chunk.chunk_type == GLB_BIN_CHUNK && chunk_index != 1 {
@@ -116,7 +120,18 @@ fn locate_glb_json<'bytes>(
         .ok_or_else(|| invalid_glb(ctx, "GLB JSON range is outside the input"))?;
     let json_raw_base =
         u64::try_from(json_start).map_err(|_| ctx.allocation_failure("gltf-json-byte-offset"))?;
-    Ok((json_bytes, json_raw_base))
+    let bin_bytes = bin_range
+        .map(|(bin_start, bin_end)| {
+            document_bytes
+                .get(bin_start..bin_end)
+                .ok_or_else(|| invalid_glb(ctx, "GLB BIN range is outside the input"))
+        })
+        .transpose()?;
+    Ok(AdmittedSurfaces {
+        json_bytes,
+        json_raw_base,
+        bin_bytes,
+    })
 }
 
 struct GlbChunk<'bytes> {

@@ -10,7 +10,12 @@ It is not a public API contract; ADR 0027 remains the architectural policy.
 
 - `gltf-rs` types are contained inside `baozi-format-gltf`.
 - Public Baozi APIs expose owned `Scene`, `ImportReport`, diagnostics, and options only.
-- `ImportContext` owns external buffers, GLB BIN payload bytes, buffer data URI accounting, source-relative paths, and resource limits.
+- `ParseScope` owns the metered primary snapshot, external buffers, buffer data URI accounting,
+  source-relative paths, and resource limits. GLB admission exposes borrowed JSON and BIN views over
+  that snapshot.
+- The backend receives only the JSON view and returns a private `gltf::Document`. It never receives
+  the complete GLB container and cannot populate `gltf::Gltf::blob`; selected BIN-backed buffers are
+  copied later through Baozi's metered buffer loader.
 - Baozi wraps many `gltf-rs` calls in `safe_gltf`, which uses `catch_unwind` in normal Rust builds to turn backend panics into `BaoziError::Parse`.
 
 ## Known Hazards
@@ -29,7 +34,7 @@ It is not a public API contract; ADR 0027 remains the architectural policy.
 
 Baozi currently treats these `gltf-rs` reader calls as untrusted backend boundaries:
 
-- document parse: `gltf::Gltf::from_slice`
+- document parse: `gltf::json::Root::from_slice` followed by `gltf::Document::from_json`
 - primitive readers: `read_positions`, `read_normals`, `read_tangents`, `read_indices`, `read_tex_coords`, `read_colors`, `read_joints`, `read_weights`
 - skin reader: `read_inverse_bind_matrices`
 - node traversal helpers: mesh, camera, skin, children, joint, and skeleton accessors
@@ -50,6 +55,8 @@ The 2026-07-09 format beta hardening slice added Baozi-owned checks for:
 - integer TEXCOORD, COLOR, and WEIGHTS normalized-value policy before conversion
 - JOINTS/WEIGHTS pairing before reader calls
 - core scene validation rejecting joint-stream meshes that are also referenced by unskinned mesh bindings
+- GLB JSON/BIN ownership separation: only JSON enters the backend, BIN remains borrowed from the
+  primary snapshot, and equivalent JSON/large-BIN imports consume identical backend `ScratchBytes`
 
 ### Remaining Preflight Gaps
 

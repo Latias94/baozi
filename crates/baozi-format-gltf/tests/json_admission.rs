@@ -5,8 +5,8 @@ use baozi_import::{
     FormatFailureDetailValue, ImportCause, ImportDimension, LedgerCause, ScopeAbortCause,
 };
 use common::{
-    GltfTestOptions, TestResult, expected_error, glb_with_json, gltf_failure, import_assets,
-    import_assets_result,
+    GltfTestOptions, TestResult, append_glb_chunk, expected_error, glb_with_json, gltf_failure,
+    import_assets, import_assets_result,
 };
 
 const JSON_NESTING_HARD_LIMIT: u64 = 256;
@@ -372,6 +372,56 @@ fn glb_authored_json_whitespace_before_space_padding_remains_valid() -> TestResu
 
     assert!(diagnostics.is_empty());
     assert_eq!(report.ledger().current_live_bytes(), 0);
+    Ok(())
+}
+
+#[test]
+fn glb_bin_bytes_do_not_expand_the_backend_allowance() -> TestResult<()> {
+    let mut json = minimal_gltf();
+    json.push(b' ');
+    assert!(json.len().is_multiple_of(4));
+
+    let (json_report, json_diagnostics) = import_assets(
+        "plain.gltf",
+        [("plain.gltf", json.clone())],
+        GltfTestOptions::memory(),
+    )?;
+    assert!(json_diagnostics.is_empty());
+
+    let bin = vec![0x5a; 256 * 1024];
+    let document = append_glb_chunk(glb_with_json(&json), b"BIN\0", &bin);
+    let primary_growth = u64::try_from(document.len() - json.len())?;
+    let (glb_report, glb_diagnostics) = import_assets(
+        "binary.glb",
+        [("binary.glb", document)],
+        GltfTestOptions::memory(),
+    )?;
+    assert!(glb_diagnostics.is_empty());
+
+    let json_scratch = json_report
+        .ledger()
+        .dimension(ImportDimension::ScratchBytes)
+        .expect("scratch bytes are configured");
+    let glb_scratch = glb_report
+        .ledger()
+        .dimension(ImportDimension::ScratchBytes)
+        .expect("scratch bytes are configured");
+    assert_eq!(glb_scratch.attempted(), json_scratch.attempted());
+    assert_eq!(glb_scratch.consumed(), json_scratch.consumed());
+
+    let json_primary = json_report
+        .ledger()
+        .dimension(ImportDimension::PrimaryBytes)
+        .expect("primary bytes are configured");
+    let glb_primary = glb_report
+        .ledger()
+        .dimension(ImportDimension::PrimaryBytes)
+        .expect("primary bytes are configured");
+    assert_eq!(
+        glb_primary.consumed() - json_primary.consumed(),
+        primary_growth
+    );
+    assert_eq!(glb_report.ledger().current_live_bytes(), 0);
     Ok(())
 }
 

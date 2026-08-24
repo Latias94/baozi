@@ -63,6 +63,9 @@ criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.m
   public admission evidence.
 - Development resource-limit coverage for primary assets, decoded JSON text surfaces, external
   buffers, base64 buffer data URIs, GLB BIN payloads, diagnostics, and cooperative cancellation.
+- GLB admission retains borrowed JSON and BIN views over the primary snapshot. Only the JSON view is
+  deserialized into a private `gltf::Document`; selected BIN-backed buffers are copied later through
+  Baozi's metered buffer loader, and BIN size does not expand the opaque backend allowance.
 - Development gates for GLB import, snapshots, malformed external buffers/data URIs, skin validation,
   text preflight, bounded format failures, and a check-only glTF fuzz target. These are not facade
   admission evidence.
@@ -73,10 +76,10 @@ This development preflight is intentionally outside U4.6's line-record migration
 the first-party format inventory, and JSON is a document grammar rather than a line-record grammar.
 Materializing the complete JSON surface as `ConformedTextInput` would add a decoded copy and line
 index without enforcing duplicate-key, nesting, token, object, array, string, number, GLB chunk, or
-padding limits. U6 therefore owns replacing the bootstrap scan with one borrowed, bounded JSON/GLB
-admission path that preserves container-relative raw ranges. The temporary UTF-8 preflight, minimal
-GLB JSON-surface locator, and heuristic text detector are development evidence only and must be
-deleted or reduced to adapters over that admitted path before facade registration.
+padding limits. U6 therefore uses one borrowed, bounded JSON/GLB admission path that preserves
+container-relative raw ranges and exposes the validated BIN chunk separately. The parser enters the
+bootstrap backend through `gltf::json::Root` and `gltf::Document`, so the backend never receives the
+GLB container or materializes its BIN payload.
 
 - Plain `.gltf` counts the complete JSON document against `max_decoded_utf8_bytes`. GLB counts only
   its JSON chunk; the 12-byte container header, chunk header, and BIN chunks are excluded from the
@@ -84,7 +87,9 @@ deleted or reduced to adapters over that admitted path before facade registratio
 - JSON UTF-8 validation is incremental and polls for every at-most-4096-byte window. An incomplete
   code point at a window edge carries its at-most-three-byte prefix into the next validation window.
   The JSON slice remains borrowed, so decoded-text admission creates no fictitious live allocation;
-  the opaque `gltf-rs` document graph is covered separately by its conservative backend allowance.
+  the opaque `gltf-rs` document graph is covered separately by a conservative JSON-sized backend
+  allowance. GLB BIN bytes remain part of the metered primary snapshot and selected-buffer copy, not
+  that opaque allowance.
 - A leading UTF-8 BOM is forbidden on the JSON surface. Invalid UTF-8 and BOM evidence use raw
   container-relative offsets: zero-based within a plain `.gltf`, and based at the GLB JSON payload
   offset within `.glb`.
@@ -121,10 +126,10 @@ and import-contract tests.
   be omitted only under explicit `SourceSemanticLoss` authority with typed loss evidence and a stable
   channel diagnostic until the morph animation slice is admitted.
 - The current `SourceScopeRecord` includes ADR 0039's typed selection outcome, camera rows, and
-  animation-sampler rows. Extension rows, complete dependency provenance, and isolation of the
-  bootstrap backend's GLB BIN materialization remain admission blockers. The selected core resource
-  closure is compiled and tested before dependency IO, but those remaining boundaries are not yet
-  public-admission evidence.
+  animation-sampler rows. Extension rows and complete dependency provenance remain admission
+  blockers. The selected core resource closure is compiled and tested before dependency IO, and GLB
+  BIN data is isolated from the bootstrap backend, but those results remain development evidence
+  until the independent admission matrix passes.
 - The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
 - `gltf_import` is a non-admitted development target until known backend aborts are removed or
   process-isolated and the complete baseline admission matrix passes.

@@ -237,10 +237,25 @@ excluded or lossy semantic observable. Chosen.
 - Verification: resource-closure tests cover omitted external resources, exact work-budget failure,
   closure-phase cancellation before scope publication or dependency references, selected-reference
   failure precedence, source-index ordering, and selected data-URI or buffer-view image materialization.
-- Deferred: typed extension closure, complete dependency provenance, and isolation of the bootstrap
-  backend's GLB BIN materialization remain U6 admission work; this amendment does not promote glTF to
-  the public facade or claim full extension completeness.
+- Deferred: typed extension closure and complete dependency provenance remain U6 admission work;
+  this amendment does not promote glTF to the public facade or claim full extension completeness.
 - Review: 2026-08-24 glTF resource-closure evidence review.
+
+### 2026-08-24: Isolate GLB BIN data from the bootstrap document backend
+
+- Affected: glTF/GLB admission surfaces, backend allocation evidence, and selected buffer loading.
+- New: GLB admission exposes separate borrowed JSON and optional BIN views over the metered primary
+  snapshot. The bootstrap backend deserializes only the JSON view into `gltf::Document`; it no longer
+  receives the GLB container or owns a copied blob.
+- New: selected `BufferSource::Bin` resources are copied from the admission-owned BIN view through
+  Baozi's metered buffer loader after source-scope publication. The opaque backend allowance is based
+  only on JSON size plus its fixed structural allowance.
+- Verification: the same JSON imported as `.gltf` and as a GLB with a large unreferenced BIN chunk
+  consumes identical `ScratchBytes`, while `PrimaryBytes` records the exact container growth. Static
+  mesh and animation GLB fixtures continue to materialize selected BIN-backed buffers.
+- Deferred: typed extension closure, complete dependency provenance, sanitizer/abort evidence, and
+  the remaining admission matrix still block facade registration.
+- Review: 2026-08-24 GLB BIN ownership-boundary review.
 
 ### 2026-07-17: Own source-scope semantics without owning lifecycle transport
 
