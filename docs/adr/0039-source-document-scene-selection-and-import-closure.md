@@ -226,6 +226,22 @@ excluded or lossy semantic observable. Chosen.
   failure reports.
 - Review: 2026-08-24 source-selection evidence implementation review.
 
+### 2026-08-24: Close the first glTF resource-closure evidence slice
+
+- Affected: glTF selected-resource preflight, source-scope rows, and the development verification
+  matrix.
+- New: selected nodes now compile a bounded forward closure through meshes/primitives, materials,
+  textures/images/samplers, skins, accessors/sparse accessors, buffer views, buffers, cameras, and
+  retained animation sampler/data references before any dependency IO. Every declared source entity
+  in those categories receives a stable selected/omitted row in source index order.
+- Verification: resource-closure tests cover omitted external resources, exact work-budget failure,
+  closure-phase cancellation before scope publication or dependency references, selected-reference
+  failure precedence, source-index ordering, and selected data-URI or buffer-view image materialization.
+- Deferred: typed extension closure, complete dependency provenance, and isolation of the bootstrap
+  backend's GLB BIN materialization remain U6 admission work; this amendment does not promote glTF to
+  the public facade or claim full extension completeness.
+- Review: 2026-08-24 glTF resource-closure evidence review.
+
 ### 2026-07-17: Own source-scope semantics without owning lifecycle transport
 
 - Affected: front matter dependencies/related links, `Decision`, `Consequences`, and

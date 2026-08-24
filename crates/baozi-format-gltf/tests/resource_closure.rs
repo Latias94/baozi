@@ -1,14 +1,73 @@
 mod common;
 
 use baozi_import::{
-    ImportCause, ImportDimension, SceneSnapshotLimits, ScopeAbortCause, SourceScopeDisposition,
-    SourceScopeEntityKind,
+    ImportCause, ImportDiagnostic, ImportDimension, ImportOperationControl, ImportProgressPhase,
+    ImportProgressUnit, ImportReport, ImportResult, SceneSnapshotLimits, ScopeAbortCause,
+    SourceScopeDisposition, SourceScopeEntityKind,
+};
+use baozi_operation::{
+    CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
 };
 use base64::Engine as _;
 use common::{
-    TestResult, expected_error, import_assets, import_assets_result, sidecar_options, triangle_bin,
-    triangle_gltf, triangle_png,
+    TestResult, expected_error, import_assets, import_assets_result,
+    import_assets_result_with_control, sidecar_options, triangle_bin, triangle_gltf, triangle_png,
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
+#[derive(Clone)]
+struct ResourceClosurePollCancellation {
+    armed: Arc<AtomicBool>,
+    polls: Arc<AtomicUsize>,
+    cancel_on: Option<usize>,
+}
+
+impl CancellationSignal for ResourceClosurePollCancellation {
+    fn is_cancelled(&self) -> bool {
+        if !self.armed.load(Ordering::SeqCst) {
+            return false;
+        }
+        let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+        self.cancel_on.is_some_and(|cancel_on| poll >= cancel_on)
+    }
+}
+
+fn controlled_resource_closure_result(
+    document: &[u8],
+    cancel_on: Option<usize>,
+) -> TestResult<(ImportResult<ImportReport>, Vec<ImportDiagnostic>, usize)> {
+    let armed = Arc::new(AtomicBool::new(false));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let signal = ResourceClosurePollCancellation {
+        armed: Arc::clone(&armed),
+        polls: Arc::clone(&polls),
+        cancel_on,
+    };
+    let control = ImportOperationControl::default()
+        .with_cancellation(signal)
+        .with_progress_observer(
+            move |event: ProgressEvent<ImportProgressPhase, ImportProgressUnit>| {
+                if event.phase() == ImportProgressPhase::Detect {
+                    armed.store(true, Ordering::SeqCst);
+                }
+                ProgressDecision::Continue
+            },
+        );
+    let (result, diagnostics) = import_assets_result_with_control(
+        "models/resource-closure-cancel.gltf",
+        [
+            ("models/resource-closure-cancel.gltf", document.to_vec()),
+            ("models/triangle.bin", triangle_bin()),
+            ("models/textures/base.png", triangle_png()),
+        ],
+        sidecar_options(),
+        control,
+    )?;
+    Ok((result, diagnostics, polls.load(Ordering::SeqCst)))
+}
 
 fn replace_once(source: String, from: &str, to: &str) -> String {
     assert!(source.contains(from), "fixture fragment not found: {from}");
@@ -156,6 +215,30 @@ fn selected_scene_does_not_acquire_omitted_resource_closure() -> TestResult<()> 
             && detail.disposition() == SourceScopeDisposition::Omitted
             && detail.identity() == "b1"
     }));
+    for (kind, expected) in [
+        (SourceScopeEntityKind::Mesh, vec!["m0", "m1"]),
+        (SourceScopeEntityKind::Primitive, vec!["m0p0", "m1p0"]),
+        (SourceScopeEntityKind::Material, vec!["mat0", "mat1"]),
+        (SourceScopeEntityKind::Texture, vec!["t0", "t1"]),
+        (SourceScopeEntityKind::Image, vec!["i0", "i1"]),
+        (SourceScopeEntityKind::Sampler, vec!["ts0", "ts1"]),
+        (SourceScopeEntityKind::Buffer, vec!["b0", "b1"]),
+        (
+            SourceScopeEntityKind::BufferView,
+            vec!["bv0", "bv1", "bv2", "bv3", "bv4"],
+        ),
+        (
+            SourceScopeEntityKind::Accessor,
+            vec!["acc0", "acc1", "acc2", "acc3", "acc4"],
+        ),
+    ] {
+        let identities = record
+            .details()
+            .filter(|detail| detail.kind() == kind)
+            .map(|detail| detail.identity())
+            .collect::<Vec<_>>();
+        assert_eq!(identities, expected, "source order changed for {kind:?}");
+    }
     Ok(())
 }
 
@@ -204,6 +287,68 @@ fn resource_closure_work_budget_fails_before_scope_or_dependency_io() -> TestRes
             .attempted(),
         0
     );
+    Ok(())
+}
+
+#[test]
+fn resource_closure_cancellation_precedes_scope_publication_and_dependency_io() -> TestResult<()> {
+    let document = selected_resource_closure_fixture();
+    let (calibration, diagnostics, total_polls) =
+        controlled_resource_closure_result(&document, None)?;
+    assert!(diagnostics.is_empty());
+    let _report = calibration?;
+    assert!(total_polls > 0);
+
+    let mut cancelled_before_scope = None;
+    for cancel_on in 1..=total_polls {
+        let (result, diagnostics, polls) =
+            controlled_resource_closure_result(&document, Some(cancel_on))?;
+        let failure = match result {
+            Ok(_) => continue,
+            Err(error) => error.into_operation_failure()?,
+        };
+        assert!(diagnostics.is_empty());
+        assert_eq!(polls, cancel_on);
+        assert!(matches!(
+            failure.cause(),
+            ImportCause::Scope(abort)
+                if matches!(
+                    abort.cause(),
+                    ScopeAbortCause::Control(ControlCause::Cancelled {
+                        origin: CancellationOrigin::Signal,
+                    })
+                )
+        ));
+        let dependency_references = failure
+            .ledger()
+            .dimension(ImportDimension::DependencyReference)
+            .expect("dependency references are configured");
+        let work_units = failure
+            .ledger()
+            .dimension(ImportDimension::WorkUnits)
+            .expect("work units are configured");
+        if failure.source_scope_record().is_none()
+            && dependency_references.attempted() == 0
+            && work_units.attempted() > 0
+        {
+            cancelled_before_scope = Some(failure);
+            break;
+        }
+    }
+
+    let failure = cancelled_before_scope
+        .expect("a calibrated cancellation must stop after closure work but before scope");
+    assert!(failure.source_scope_record().is_none());
+    assert_eq!(
+        failure
+            .ledger()
+            .dimension(ImportDimension::DependencyReference)
+            .expect("dependency references are configured")
+            .attempted(),
+        0
+    );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
     Ok(())
 }
 
