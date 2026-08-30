@@ -16,6 +16,8 @@ It is not a public API contract; ADR 0027 remains the architectural policy.
 - The backend receives only the JSON view and returns a private `gltf::Document`. It never receives
   the complete GLB container and cannot populate `gltf::Gltf::blob`; selected BIN-backed buffers are
   copied later through Baozi's metered buffer loader.
+- Baozi deserializes `gltf::json::Root`, validates the global extension declarations under metered
+  work, and only then calls `gltf::Document::from_json`. No extension schema is currently admitted.
 - Baozi wraps many `gltf-rs` calls in `safe_gltf`, which uses `catch_unwind` in normal Rust builds to turn backend panics into `BaoziError::Parse`.
 
 ## Known Hazards
@@ -34,7 +36,8 @@ It is not a public API contract; ADR 0027 remains the architectural policy.
 
 Baozi currently treats these `gltf-rs` reader calls as untrusted backend boundaries:
 
-- document parse: `gltf::json::Root::from_slice` followed by `gltf::Document::from_json`
+- document parse: `gltf::json::Root::from_slice`, Baozi-owned global extension admission, then
+  `gltf::Document::from_json`
 - primitive readers: `read_positions`, `read_normals`, `read_tangents`, `read_indices`, `read_tex_coords`, `read_colors`, `read_joints`, `read_weights`
 - skin reader: `read_inverse_bind_matrices`
 - node traversal helpers: mesh, camera, skin, children, joint, and skeleton accessors
@@ -57,6 +60,10 @@ The 2026-07-09 format beta hardening slice added Baozi-owned checks for:
 - core scene validation rejecting joint-stream meshes that are also referenced by unskinned mesh bindings
 - GLB JSON/BIN ownership separation: only JSON enters the backend, BIN remains borrowed from the
   primary snapshot, and equivalent JSON/large-BIN imports consume identical backend `ScratchBytes`
+- global extension declarations: empty and duplicate list entries are rejected, every required name
+  must be present in `extensionsUsed`, unsupported required extensions return typed failure before
+  backend document validation, and unsupported optional extensions emit a stable warning while the
+  core fallback is retained
 
 ### Remaining Preflight Gaps
 
@@ -66,6 +73,8 @@ The 2026-07-09 format beta hardening slice added Baozi-owned checks for:
   the target back to sanitizer-run CI.
 - Decide whether morph target iterator validation should become a fatal unsupported path rather
   than a warning after the core morph IR policy is exercised by fixtures.
+- Admit entity-level extension schemas, reference closure, source-scope rows, and extras policy; the
+  global declaration gate does not preserve or validate extension payloads.
 
 ## Fork Or Replacement Triggers
 

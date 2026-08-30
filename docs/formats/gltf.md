@@ -66,6 +66,11 @@ criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.m
 - GLB admission retains borrowed JSON and BIN views over the primary snapshot. Only the JSON view is
   deserialized into a private `gltf::Document`; selected BIN-backed buffers are copied later through
   Baozi's metered buffer loader, and BIN size does not expand the opaque backend allowance.
+- Global `extensionsUsed` and `extensionsRequired` declarations are checked after JSON-root decode
+  and before backend document validation. Empty or duplicate names and a required name missing from
+  `extensionsUsed` are invalid; unsupported required extensions return typed format failure, while
+  unsupported optional extensions retain the core fallback and emit `gltf.extension_ignored`.
+  Duplicate detection uses metered name storage and bounded `WorkUnits` sorting.
 - Development gates for GLB import, snapshots, malformed external buffers/data URIs, skin validation,
   text preflight, bounded format failures, and a check-only glTF fuzz target. These are not facade
   admission evidence.
@@ -119,17 +124,18 @@ and import-contract tests.
 ## Admission Blockers And Missing Semantics
 
 - Embedded image buffer views and image data URIs are materialized as encoded image payloads without
-  pixel decoding. Unsupported morph/default-weight semantics, required extensions, and the remaining
-  backend/admission gaps are still fail-closed or explicitly deferred.
+  pixel decoding. Unsupported morph/default-weight semantics, typed extension payloads, extras, and
+  the remaining backend/admission gaps are still fail-closed or explicitly deferred.
 - Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
 - Morph-weight animation is unsupported retained-domain semantics. It is rejected by default and may
   be omitted only under explicit `SourceSemanticLoss` authority with typed loss evidence and a stable
   channel diagnostic until the morph animation slice is admitted.
 - The current `SourceScopeRecord` includes ADR 0039's typed selection outcome, camera rows, and
-  animation-sampler rows. Extension rows and complete dependency provenance remain admission
-  blockers. The selected core resource closure is compiled and tested before dependency IO, and GLB
-  BIN data is isolated from the bootstrap backend, but those results remain development evidence
-  until the independent admission matrix passes.
+  animation-sampler rows. Entity-level extension rows, typed extension-reference closure, and
+  complete dependency provenance remain admission blockers. The selected core resource closure is
+  compiled and tested before dependency IO, global extension declarations are gated, and GLB BIN
+  data is isolated from the bootstrap backend, but those results remain development evidence until
+  the independent admission matrix passes.
 - The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
 - `gltf_import` is a non-admitted development target until known backend aborts are removed or
   process-isolated and the complete baseline admission matrix passes.

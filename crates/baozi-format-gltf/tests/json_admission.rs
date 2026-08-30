@@ -122,6 +122,183 @@ fn assert_ledger_limit(
 }
 
 #[test]
+fn unknown_optional_extension_is_explicitly_diagnosed() -> TestResult<()> {
+    let document = br#"{
+  "asset": { "version": "2.0" },
+  "extensionsUsed": ["VENDOR_physics"],
+  "extensions": { "VENDOR_physics": { "gravity": 9.8 } }
+}"#
+    .to_vec();
+    let (report, diagnostics) = import_assets(
+        "optional-extension.gltf",
+        [("optional-extension.gltf", document)],
+        GltfTestOptions::memory(),
+    )?;
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code().as_str(), "gltf.extension_ignored");
+    assert!(diagnostics[0].message().contains("VENDOR_physics"));
+    assert!(report.source_scope_record().is_some());
+    Ok(())
+}
+
+#[test]
+fn unsupported_required_extension_fails_before_scene_projection() -> TestResult<()> {
+    let document = br#"{
+  "asset": { "version": "2.0" },
+  "extensionsUsed": ["VENDOR_physics"],
+  "extensionsRequired": ["VENDOR_physics"]
+}"#
+    .to_vec();
+    let (result, diagnostics) = import_assets_result(
+        "required-extension.gltf",
+        [("required-extension.gltf", document)],
+        GltfTestOptions::memory(),
+    )?;
+    let failure = expected_error(result)?;
+    let envelope = gltf_failure(&failure)?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        envelope.code(),
+        GltfFailureCode::UnsupportedFeature.as_str()
+    );
+    assert_eq!(
+        string_detail(envelope, "subject"),
+        Some("required-extension")
+    );
+    assert!(string_detail(envelope, "reason").is_some_and(|reason| {
+        reason.contains("VENDOR_physics") && reason.contains("not supported")
+    }));
+    assert!(failure.source_scope_record().is_none());
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    Ok(())
+}
+
+#[test]
+fn required_extensions_must_be_used() -> TestResult<()> {
+    let document = br#"{
+  "asset": { "version": "2.0" },
+  "extensionsRequired": ["VENDOR_physics"]
+}"#
+    .to_vec();
+    let (result, diagnostics) = import_assets_result(
+        "missing-used-extension.gltf",
+        [("missing-used-extension.gltf", document)],
+        GltfTestOptions::memory(),
+    )?;
+    let failure = expected_error(result)?;
+    let envelope = gltf_failure(&failure)?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(envelope.code(), GltfFailureCode::InvalidDocument.as_str());
+    assert!(
+        string_detail(envelope, "reason")
+            .is_some_and(|reason| reason.contains("missing from extensionsUsed"))
+    );
+    assert!(failure.source_scope_record().is_none());
+    Ok(())
+}
+
+#[test]
+fn extension_declaration_lists_reject_duplicates_and_empty_names() -> TestResult<()> {
+    let documents = [
+        (
+            "duplicate-used-extension.gltf",
+            br#"{
+  "asset": { "version": "2.0" },
+  "extensionsUsed": ["VENDOR_physics", "VENDOR_physics"]
+}"#
+            .to_vec(),
+            "extensionsUsed contains duplicate",
+        ),
+        (
+            "duplicate-required-extension.gltf",
+            br#"{
+  "asset": { "version": "2.0" },
+  "extensionsUsed": ["VENDOR_physics"],
+  "extensionsRequired": ["VENDOR_physics", "VENDOR_physics"]
+}"#
+            .to_vec(),
+            "extensionsRequired contains duplicate",
+        ),
+        (
+            "empty-extension.gltf",
+            br#"{
+  "asset": { "version": "2.0" },
+  "extensionsUsed": [""]
+}"#
+            .to_vec(),
+            "has an empty extension name",
+        ),
+    ];
+
+    for (source, document, expected_reason) in documents {
+        let (result, diagnostics) =
+            import_assets_result(source, [(source, document)], GltfTestOptions::memory())?;
+        let failure = expected_error(result)?;
+        let envelope = gltf_failure(&failure)?;
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected diagnostics for {source}"
+        );
+        assert_eq!(envelope.code(), GltfFailureCode::InvalidDocument.as_str());
+        assert!(
+            string_detail(envelope, "reason")
+                .is_some_and(|reason| reason.contains(expected_reason))
+        );
+        assert!(failure.source_scope_record().is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn extension_declaration_sort_obeys_the_work_budget() -> TestResult<()> {
+    let document = br#"{
+  "asset": { "version": "2.0" },
+  "extensionsUsed": [
+    "VENDOR_h", "VENDOR_g", "VENDOR_f", "VENDOR_e",
+    "VENDOR_d", "VENDOR_c", "VENDOR_b", "VENDOR_a", "VENDOR_h"
+  ]
+}"#
+    .to_vec();
+    let (calibration_result, calibration_diagnostics) = import_assets_result(
+        "extension-work-calibration.gltf",
+        [("extension-work-calibration.gltf", document.clone())],
+        GltfTestOptions::memory(),
+    )?;
+    let calibration_failure = expected_error(calibration_result)?;
+    assert!(calibration_diagnostics.is_empty());
+    assert_eq!(
+        gltf_failure(&calibration_failure)?.code(),
+        GltfFailureCode::InvalidDocument.as_str()
+    );
+    let attempted = dimension_attempted(calibration_failure.ledger(), ImportDimension::WorkUnits);
+    let limit = attempted
+        .checked_sub(1)
+        .expect("extension validation must attempt bounded work");
+
+    let mut options = GltfTestOptions::memory();
+    options.limits.max_work_units = limit;
+    let (result, diagnostics) = import_assets_result(
+        "extension-work-limit.gltf",
+        [("extension-work-limit.gltf", document)],
+        options,
+    )?;
+    let failure = expected_error(result)?;
+
+    assert!(diagnostics.is_empty());
+    assert_ledger_limit(&failure, ImportDimension::WorkUnits, limit);
+    assert_eq!(
+        dimension_attempted(failure.ledger(), ImportDimension::WorkUnits),
+        attempted
+    );
+    assert!(failure.source_scope_record().is_none());
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    Ok(())
+}
+
+#[test]
 fn backend_accepted_duplicate_keys_fail_before_backend_allocation() -> TestResult<()> {
     let document = br#"{"asset":{"version":"2.0"},"vendor":{"a":1,"a":2}}"#.to_vec();
     assert!(

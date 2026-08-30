@@ -46,6 +46,9 @@ const GLTF_BACKEND_FIXED_ALLOWANCE: u64 = 64 * 1024;
 const GLTF_JSON_EXPANSION_ALLOWANCE: u64 = 64;
 const PARSER_POLL_INTERVAL: usize = 4_096;
 
+// Extension payloads remain outside the canonical IR until each schema has a typed Baozi mapping.
+const BAOZI_SUPPORTED_EXTENSION_NAMES: &[&str] = &[];
+
 #[derive(Debug)]
 enum ContentError {
     Scope(ParseFailure),
@@ -171,23 +174,28 @@ struct PreparedDocument<'scope, 'document> {
 fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
     let surface = admission::admit(ctx)?;
     let primary_len = to_u64(ctx.primary_bytes().len());
-    let (parsed, _document_allowance) = ctx.with_work(
+    let (json, _document_allowance) = ctx.with_work(
         ImportWorkClass::DecodeWork,
         primary_len,
         |work| -> Result<_> {
             let backend_allowance = gltf_backend_allocation_allowance(ctx, surface)?;
             let document_allowance =
                 ctx.metered_opaque_allowance(ImportStorageClass::BackendDecode, backend_allowance)?;
-            let parsed = safe_gltf(ctx, "glTF document parse", || {
-                let json = gltf::json::Root::from_slice(surface.json_bytes())?;
-                gltf::Document::from_json(json)
+            let json = safe_gltf(ctx, "glTF JSON parse", || {
+                gltf::json::Root::from_slice(surface.json_bytes())
+            })?
+            .map_err(|error| {
+                GltfFailure::invalid_document(format_args!("invalid glTF JSON: {error}"))
             })?;
             work.complete_all()?;
-            Ok((parsed, document_allowance))
+            Ok((json, document_allowance))
         },
     )?;
-    let gltf = parsed
-        .map_err(|error| GltfFailure::invalid_document(format_args!("invalid glTF: {error}")))?;
+    preflight_extension_declarations(ctx, &json)?;
+    let gltf = safe_gltf(ctx, "glTF document parse", || {
+        gltf::Document::from_json(json)
+    })?
+    .map_err(|error| GltfFailure::invalid_document(format_args!("invalid glTF: {error}")))?;
     let node_graph = preflight_node_graph(ctx, &gltf)?;
     let animation_contracts = animation::preflight(ctx, &gltf, node_graph.selected.as_slice())?;
     let resource_closure = build_resource_closure(ctx, &gltf, &node_graph, &animation_contracts)?;
@@ -233,6 +241,143 @@ fn gltf_backend_allocation_allowance(
             ctx.allocation_failure("gltf-backend-allocation-allowance")
                 .into()
         })
+}
+
+fn preflight_extension_declarations(ctx: &ParseScope<'_>, root: &json::Root) -> Result<()> {
+    let used_names = sorted_extension_names(
+        ctx,
+        "extensionsUsed",
+        &root.extensions_used,
+        "gltf-extension-used-names",
+    )?;
+    let required_names = sorted_extension_names(
+        ctx,
+        "extensionsRequired",
+        &root.extensions_required,
+        "gltf-extension-required-names",
+    )?;
+
+    let validation_work = to_u64(
+        root.extensions_required
+            .len()
+            .saturating_add(root.extensions_used.len()),
+    );
+    if validation_work == 0 {
+        return Ok(());
+    }
+    ctx.with_work(
+        ImportWorkClass::WorkUnits,
+        validation_work,
+        |work| -> Result<()> {
+            for name in required_names.as_slice() {
+                work.poll()?;
+                let missing = used_names.as_slice().binary_search(name).is_err();
+                let unsupported = !is_supported_extension(name);
+                work.complete([1])?;
+                if missing {
+                    return Err(gltf_parse_error(
+                        ctx,
+                        format!("required extension {name:?} missing from extensionsUsed"),
+                    ));
+                }
+                if unsupported {
+                    return Err(ContentError::from(GltfFailure::unsupported(
+                        "required-extension",
+                        format_args!("glTF required extension {name:?} is not supported"),
+                    )));
+                }
+            }
+
+            for name in &root.extensions_used {
+                work.poll()?;
+                if !is_supported_extension(name) {
+                    push_warning(
+                        ctx,
+                        "gltf.extension_ignored",
+                        format_args!(
+                            "glTF optional extension {name:?} is not interpreted; its payload is omitted"
+                        ),
+                    )?;
+                }
+                work.complete([1])?;
+            }
+            Ok(())
+        },
+    )
+}
+
+fn sorted_extension_names<'scope, 'document>(
+    ctx: &'scope ParseScope<'_>,
+    field: &'static str,
+    names: &'document [String],
+    allocation: &'static str,
+) -> Result<MeteredVec<'scope, &'document str>> {
+    let mut sorted = ctx.metered_vec(ImportStorageClass::FormatNormalization, allocation);
+    sorted.try_reserve(names.len())?;
+    if names.is_empty() {
+        return Ok(sorted);
+    }
+
+    let sort_work = extension_sort_work(names.len());
+    let total_work = to_u64(names.len())
+        .saturating_mul(2)
+        .saturating_add(sort_work);
+    ctx.with_work(
+        ImportWorkClass::WorkUnits,
+        total_work,
+        |work| -> Result<()> {
+            for (index, name) in names.iter().enumerate() {
+                work.poll()?;
+                sorted.try_push_reserved(name.as_str())?;
+                work.complete([1])?;
+                if name.is_empty() {
+                    return Err(gltf_parse_error(
+                        ctx,
+                        format!("glTF {field} entry {index} has an empty extension name"),
+                    ));
+                }
+            }
+
+            if sort_work != 0 {
+                let mut comparisons = 0usize;
+                sorted.try_sort_unstable_by(|left, right| -> Result<_> {
+                    comparisons = comparisons.saturating_add(1);
+                    if comparisons.is_multiple_of(PARSER_POLL_INTERVAL) {
+                        work.poll()?;
+                    }
+                    Ok(left.cmp(right))
+                })?;
+                work.complete([sort_work])?;
+            }
+
+            for pair in sorted.as_slice().windows(2) {
+                work.poll()?;
+                work.complete([1])?;
+                if pair[0] == pair[1] {
+                    return Err(gltf_parse_error(
+                        ctx,
+                        format!("glTF {field} contains duplicate extension {:?}", pair[1]),
+                    ));
+                }
+            }
+            work.complete_all()?;
+            Ok(())
+        },
+    )?;
+    Ok(sorted)
+}
+
+fn extension_sort_work(name_count: usize) -> u64 {
+    if name_count <= 1 {
+        return 0;
+    }
+    let count = to_u64(name_count);
+    let levels = u64::from(usize::BITS - (name_count - 1).leading_zeros());
+    count.saturating_mul(levels.saturating_mul(4).saturating_add(4))
+}
+
+fn is_supported_extension(name: &str) -> bool {
+    BAOZI_SUPPORTED_EXTENSION_NAMES.contains(&name)
 }
 
 fn preflight_canonical_base_strings(

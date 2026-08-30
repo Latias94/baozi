@@ -210,6 +210,24 @@ excluded or lossy semantic observable. Chosen.
 
 ## Amendment History
 
+### 2026-08-31: Gate global glTF extension declarations
+
+- Affected: glTF JSON-root admission, backend validation ordering, and the U6 development matrix.
+- New: after `gltf::json::Root` deserialization and before `gltf::Document::from_json`, Baozi
+  rejects empty or duplicate `extensionsUsed`/`extensionsRequired` names and requires every required
+  name to appear in the used set. Borrowed names are copied only as metered references, sorted under
+  a conservative `WorkUnits` bound, and released before scene projection.
+- Policy: Baozi currently admits no typed extension schema. Every required extension therefore
+  returns `gltf.unsupported_feature` with subject `required-extension`; a non-required extension uses
+  its core fallback and emits `gltf.extension_ignored` rather than disappearing silently.
+- Verification: declaration tests cover optional diagnostics, required typed failure, subset,
+  duplicate and empty-name failures, exact sort-work budget failure, no premature source-scope
+  publication, and complete temporary-storage release.
+- Deferred: this declaration gate does not admit entity-level extension payloads, extension-reference
+  closure, extension source-scope rows, or extras. Those semantics and complete dependency
+  provenance still block glTF facade registration.
+- Review: 2026-08-31 glTF global-extension admission review.
+
 ### 2026-08-24: Make selection outcomes typed report evidence
 
 - Affected: `SourceScopeRecord` transport, source-scope digest framing, and glTF node preflight.
