@@ -1,61 +1,22 @@
 mod common;
 
 use baozi_import::{
-    ImportCause, ImportDiagnostic, ImportDimension, ImportOperationControl, ImportProgressPhase,
-    ImportProgressUnit, ImportReport, ImportResult, SceneSnapshotLimits, ScopeAbortCause,
-    SourceScopeDisposition, SourceScopeEntityKind,
+    ImportCause, ImportDiagnostic, ImportDimension, ImportReport, ImportResult,
+    SceneSnapshotLimits, ScopeAbortCause, SourceScopeDisposition, SourceScopeEntityKind,
 };
-use baozi_operation::{
-    CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
-};
+use baozi_operation::{CancellationOrigin, ControlCause};
 use base64::Engine as _;
 use common::{
-    TestResult, expected_error, import_assets, import_assets_result,
+    TestResult, controlled_import, expected_error, import_assets, import_assets_result,
     import_assets_result_with_control, sidecar_options, triangle_bin, triangle_gltf, triangle_png,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
-
-#[derive(Clone)]
-struct ResourceClosurePollCancellation {
-    armed: Arc<AtomicBool>,
-    polls: Arc<AtomicUsize>,
-    cancel_on: Option<usize>,
-}
-
-impl CancellationSignal for ResourceClosurePollCancellation {
-    fn is_cancelled(&self) -> bool {
-        if !self.armed.load(Ordering::SeqCst) {
-            return false;
-        }
-        let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
-        self.cancel_on.is_some_and(|cancel_on| poll >= cancel_on)
-    }
-}
+use std::sync::atomic::Ordering;
 
 fn controlled_resource_closure_result(
     document: &[u8],
     cancel_on: Option<usize>,
 ) -> TestResult<(ImportResult<ImportReport>, Vec<ImportDiagnostic>, usize)> {
-    let armed = Arc::new(AtomicBool::new(false));
-    let polls = Arc::new(AtomicUsize::new(0));
-    let signal = ResourceClosurePollCancellation {
-        armed: Arc::clone(&armed),
-        polls: Arc::clone(&polls),
-        cancel_on,
-    };
-    let control = ImportOperationControl::default()
-        .with_cancellation(signal)
-        .with_progress_observer(
-            move |event: ProgressEvent<ImportProgressPhase, ImportProgressUnit>| {
-                if event.phase() == ImportProgressPhase::Detect {
-                    armed.store(true, Ordering::SeqCst);
-                }
-                ProgressDecision::Continue
-            },
-        );
+    let (control, polls) = controlled_import(cancel_on);
     let (result, diagnostics) = import_assets_result_with_control(
         "models/resource-closure-cancel.gltf",
         [

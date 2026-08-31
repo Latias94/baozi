@@ -423,51 +423,17 @@ fn preflight_canonical_base_strings(
             }
         }
 
-        let mut visited = try_vec_filled(
-            ctx,
-            ImportStorageClass::FormatNormalization,
-            graph.nodes.len(),
-            false,
-            "gltf-canonical-string-node-membership",
-        )?;
-        let skin_count = gltf.skins().len();
-        let mut referenced_skins = try_vec_filled(
-            ctx,
-            ImportStorageClass::FormatNormalization,
-            skin_count,
-            false,
-            "gltf-canonical-string-skin-membership",
-        )?;
-        let mut pending = try_vec_capacity(
-            ctx,
-            ImportStorageClass::FormatNormalization,
-            graph.nodes.len(),
-            "gltf-canonical-string-node-stack",
-        )?;
-        for (root_ordinal, root) in graph.roots.as_slice().iter().rev().copied().enumerate() {
-            poll_parser_loop(ctx, root_ordinal)?;
-            pending.try_push_reserved(root)?;
-        }
-        let mut selected_count = 0usize;
-        while let Some(node_index) = pending.pop() {
-            poll_parser_loop(ctx, selected_count)?;
-            selected_count += 1;
+        for (node_index, selected) in graph.selected.as_slice().iter().copied().enumerate() {
+            poll_parser_loop(ctx, node_index)?;
+            if !selected {
+                continue;
+            }
             let Some(node) = graph.nodes.as_slice().get(node_index) else {
                 return Err(gltf_parse_error(
                     ctx,
                     format!("glTF node graph references missing node {node_index}"),
                 ));
             };
-            let Some(seen) = visited.as_mut_slice().get_mut(node_index) else {
-                return Err(gltf_parse_error(
-                    ctx,
-                    format!("glTF node graph references missing node {node_index}"),
-                ));
-            };
-            if *seen {
-                continue;
-            }
-            *seen = true;
             if let Some(name) = node.name() {
                 enforce_usize_limit(
                     ctx,
@@ -477,31 +443,11 @@ fn preflight_canonical_base_strings(
                 )?;
                 add_repeated_string_bytes(ctx, &mut bytes, name.len(), limit)?;
             }
-            if let Some(skin) = node.skin() {
-                let skin_index = skin.index();
-                let Some(referenced) = referenced_skins.as_mut_slice().get_mut(skin_index) else {
-                    return Err(gltf_parse_error(
-                        ctx,
-                        format!("glTF node {node_index} references skin {skin_index} out of range"),
-                    ));
-                };
-                *referenced = true;
-            }
-            for (child_ordinal, child) in graph.children.as_slice()[node_index]
-                .as_slice()
-                .iter()
-                .rev()
-                .copied()
-                .enumerate()
-            {
-                poll_parser_loop(ctx, child_ordinal)?;
-                pending.try_push_reserved(child)?;
-            }
         }
 
         for (skin_index, skin) in gltf.skins().enumerate() {
             poll_parser_loop(ctx, skin_index)?;
-            if referenced_skins.as_slice().get(skin_index).copied() != Some(true) {
+            if closure.skins.as_slice().get(skin_index).copied() != Some(true) {
                 continue;
             }
             if let Some(name) = skin.name() {
@@ -1230,7 +1176,7 @@ fn scene_from_document(
         gltf,
         buffers,
         node_storage.node_ids.as_slice(),
-        node_storage.skin_references.as_slice(),
+        &prepared.resource_closure,
     )?;
     let mesh_instance_deformations = build_mesh_instance_deformations(
         ctx,
@@ -1589,12 +1535,11 @@ fn build_shared_appearance_resources<'scope, 'document>(
         *slot = Some(local_id);
     }
 
-    storage
-        .samplers
-        .try_reserve(selected_count(ctx, closure.samplers.as_slice())?)?;
+    let selected_sampler_count = selected_count(ctx, closure.samplers.as_slice())?;
+    storage.samplers.try_reserve(selected_sampler_count)?;
     storage
         .sampler_provenance
-        .try_reserve(selected_count(ctx, closure.samplers.as_slice())?.saturating_add(1))?;
+        .try_reserve(selected_sampler_count.saturating_add(1))?;
     for (sampler_index, sampler) in gltf.samplers().enumerate() {
         poll_parser_loop(ctx, sampler_index)?;
         if !closure
@@ -1621,15 +1566,12 @@ fn build_shared_appearance_resources<'scope, 'document>(
         *slot = Some(local_id);
     }
 
-    storage
-        .textures
-        .try_reserve(selected_count(ctx, closure.textures.as_slice())?)?;
+    let selected_texture_count = selected_count(ctx, closure.textures.as_slice())?;
+    storage.textures.try_reserve(selected_texture_count)?;
     storage
         .texture_provenance
-        .try_reserve(selected_count(ctx, closure.textures.as_slice())?)?;
-    storage
-        .texture_names
-        .try_reserve(selected_count(ctx, closure.textures.as_slice())?)?;
+        .try_reserve(selected_texture_count)?;
+    storage.texture_names.try_reserve(selected_texture_count)?;
     for (texture_index, texture) in gltf.textures().enumerate() {
         poll_parser_loop(ctx, texture_index)?;
         if !closure
@@ -3286,7 +3228,6 @@ struct NodeStorage<'scope, 'document> {
     roots: MeteredVec<'scope, NodeLocalId>,
     nodes: MeteredVec<'scope, NodeAuthoringNode<'document>>,
     node_ids: MeteredVec<'scope, Option<NodeLocalId>>,
-    skin_references: MeteredVec<'scope, (NodeLocalId, usize)>,
     mesh_instances: MeteredVec<'scope, MeshInstanceStorage>,
 }
 
@@ -3316,12 +3257,6 @@ fn build_scene_nodes<'scope, 'document>(
             graph.nodes.len(),
             None,
             "gltf-node-id-map",
-        )?,
-        skin_references: try_vec_capacity(
-            ctx,
-            ImportStorageClass::FormatNormalization,
-            selected_node_count,
-            "gltf-node-skin-map",
         )?,
         mesh_instances: try_vec_capacity(
             ctx,
@@ -3444,11 +3379,6 @@ fn build_scene_nodes<'scope, 'document>(
                     authored: GeometryMeshInstanceAuthoring::new(node_id, logical_mesh),
                     skin_index,
                 })?;
-            if let Some(skin_index) = skin_index {
-                storage
-                    .skin_references
-                    .try_push_reserved((node_id, skin_index))?;
-            }
         }
 
         for (child_ordinal, child_index) in graph.children.as_slice()[node_index]
@@ -4852,33 +4782,16 @@ fn build_skins<'scope>(
     gltf: &gltf::Document,
     buffers: &[Option<BufferData<'_>>],
     node_ids: &[Option<NodeLocalId>],
-    node_skins: &[(NodeLocalId, usize)],
+    closure: &ResourceClosure<'_>,
 ) -> Result<SkinStorage<'scope>> {
     let skin_count = safe_gltf(ctx, "glTF skin count", || gltf.skins().len())?;
-    let mut referenced_skins = try_vec_filled(
-        ctx,
-        ImportStorageClass::FormatNormalization,
-        skin_count,
-        false,
-        "gltf-referenced-skins",
-    )?;
-    for (binding_ordinal, (_node_id, skin_index)) in node_skins.iter().enumerate() {
-        poll_parser_loop(ctx, binding_ordinal)?;
-        let Some(referenced) = referenced_skins.as_mut_slice().get_mut(*skin_index) else {
-            return Err(gltf_parse_error(
-                ctx,
-                format!("glTF node references skin {skin_index} out of range"),
-            ));
-        };
-        *referenced = true;
-    }
-    let referenced_skin_count = selected_count(ctx, referenced_skins.as_slice())?;
+    let selected_skin_count = selected_count(ctx, closure.skins.as_slice())?;
 
     let mut storage = SkinStorage {
         skins: try_vec_capacity(
             ctx,
             ImportStorageClass::SceneConstruction,
-            referenced_skin_count,
+            selected_skin_count,
             "gltf-authoring-skins",
         )?,
         skin_ids: try_vec_filled(
@@ -4892,13 +4805,13 @@ fn build_skins<'scope>(
     for (ordinal, skin) in gltf.skins().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
         let skin_index = skin.index();
-        let Some(is_referenced) = referenced_skins.as_slice().get(skin_index).copied() else {
+        let Some(is_selected) = closure.skins.as_slice().get(skin_index).copied() else {
             return Err(gltf_parse_error(
                 ctx,
                 format!("glTF skin index {skin_index} is out of range"),
             ));
         };
-        if !is_referenced {
+        if !is_selected {
             continue;
         }
 

@@ -2,65 +2,22 @@ mod common;
 
 use baozi_format_gltf::GltfFailureCode;
 use baozi_import::{
-    ImportCause, ImportDimension, ImportFailure, ImportOperationControl, ImportProgressPhase,
-    ImportProgressUnit, LedgerCause, ScopeAbortCause,
+    ImportCause, ImportDimension, ImportFailure, ImportOperationControl, LedgerCause,
+    ScopeAbortCause,
 };
-use baozi_operation::{
-    CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
-};
+use baozi_operation::{CancellationOrigin, ControlCause};
 use common::{
-    GltfTestOptions, TestResult, append_glb_chunk, assert_gltf_failure, expected_error,
-    glb_with_json, import_assets_result_with_control, sidecar_options,
+    GltfTestOptions, TestResult, append_glb_chunk, assert_gltf_failure, controlled_import,
+    expected_error, glb_with_json, import_assets_result_with_control, sidecar_options,
     triangle_gltf_with_buffer_uri,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SCAN_CHUNK_BYTES: usize = 4 * 1024;
 const ENCODED_CHUNKS: usize = 9;
 const ENCODED_BYTES: usize = SCAN_CHUNK_BYTES * ENCODED_CHUNKS;
 const DECODED_BYTES: usize = ENCODED_BYTES / 4 * 3;
 const CANCELLATION_FIXTURE_CHUNKS: usize = 64;
-
-#[derive(Clone)]
-struct ArmedPollCancellation {
-    armed: Arc<AtomicBool>,
-    polls: Arc<AtomicUsize>,
-    cancel_on: Option<usize>,
-}
-
-impl CancellationSignal for ArmedPollCancellation {
-    fn is_cancelled(&self) -> bool {
-        if !self.armed.load(Ordering::SeqCst) {
-            return false;
-        }
-        let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
-        self.cancel_on.is_some_and(|cancel_on| poll >= cancel_on)
-    }
-}
-
-fn controlled_import(cancel_on: Option<usize>) -> (ImportOperationControl, Arc<AtomicUsize>) {
-    let armed = Arc::new(AtomicBool::new(false));
-    let polls = Arc::new(AtomicUsize::new(0));
-    let signal = ArmedPollCancellation {
-        armed: Arc::clone(&armed),
-        polls: Arc::clone(&polls),
-        cancel_on,
-    };
-    let control = ImportOperationControl::default()
-        .with_cancellation(signal)
-        .with_progress_observer(
-            move |event: ProgressEvent<ImportProgressPhase, ImportProgressUnit>| {
-                if event.phase() == ImportProgressPhase::Detect {
-                    armed.store(true, Ordering::SeqCst);
-                }
-                ProgressDecision::Continue
-            },
-        );
-    (control, polls)
-}
 
 fn cancel_on_next_poll(calibration_polls: &AtomicUsize) -> usize {
     let completed_polls = calibration_polls.load(Ordering::SeqCst);

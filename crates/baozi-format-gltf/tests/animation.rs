@@ -3,65 +3,26 @@ mod common;
 use baozi_format_gltf::GltfFailureCode;
 use baozi_import::{
     ImportCause, ImportDiagnostic, ImportDimension, ImportFailure, ImportLossDisposition,
-    ImportLossKind, ImportLossSubject, ImportOperationControl, ImportProgressPhase,
-    ImportProgressUnit, ImportReport, ImportResult, LossPolicy, SceneSnapshot, SceneSnapshotLimits,
-    ScopeAbortCause, SourceScopeDisposition, SourceScopeEntityKind,
+    ImportLossKind, ImportLossSubject, ImportReport, ImportResult, LossPolicy, SceneSnapshot,
+    SceneSnapshotLimits, ScopeAbortCause, SourceScopeDisposition, SourceScopeEntityKind,
 };
-use baozi_operation::{
-    CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
-};
+use baozi_operation::{CancellationOrigin, ControlCause};
 use common::{
     GltfTestOptions, TestResult, append_glb_chunk, assert_gltf_failure, assert_resource_limit,
-    expected_error, glb_with_json, import_assets, import_assets_result,
+    controlled_import, expected_error, glb_with_json, import_assets, import_assets_result,
     import_assets_result_with_control,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use std::sync::atomic::Ordering;
 
 const ANIMATION_CELLS: u64 = 38;
 const FILTERED_ANIMATION_CELLS: u64 = 40;
-
-#[derive(Clone)]
-struct AnimationPollCancellation {
-    armed: Arc<AtomicBool>,
-    polls: Arc<AtomicUsize>,
-    cancel_on: Option<usize>,
-}
-
-impl CancellationSignal for AnimationPollCancellation {
-    fn is_cancelled(&self) -> bool {
-        if !self.armed.load(Ordering::SeqCst) {
-            return false;
-        }
-        let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
-        self.cancel_on.is_some_and(|cancel_on| poll >= cancel_on)
-    }
-}
 
 fn controlled_animation_result(
     document: &[u8],
     options: GltfTestOptions,
     cancel_on: Option<usize>,
 ) -> TestResult<(ImportResult<ImportReport>, Vec<ImportDiagnostic>, usize)> {
-    let armed = Arc::new(AtomicBool::new(false));
-    let polls = Arc::new(AtomicUsize::new(0));
-    let signal = AnimationPollCancellation {
-        armed: Arc::clone(&armed),
-        polls: Arc::clone(&polls),
-        cancel_on,
-    };
-    let control = ImportOperationControl::default()
-        .with_cancellation(signal)
-        .with_progress_observer(
-            move |event: ProgressEvent<ImportProgressPhase, ImportProgressUnit>| {
-                if event.phase() == ImportProgressPhase::Detect {
-                    armed.store(true, Ordering::SeqCst);
-                }
-                ProgressDecision::Continue
-            },
-        );
+    let (control, polls) = controlled_import(cancel_on);
     let (result, diagnostics) = import_assets_result_with_control(
         "animation.glb",
         [("animation.glb", document.to_vec())],

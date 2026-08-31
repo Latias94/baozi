@@ -2,41 +2,19 @@ mod common;
 
 use baozi_format_gltf::GltfFailureCode;
 use baozi_import::{
-    ImportCause, ImportDimension, ImportFailure, ImportOperationControl, ImportProgressPhase,
-    ImportProgressUnit, ImportReport, ImportResult, ScopeAbortCause, SourceScopeSelectionOutcome,
+    ImportCause, ImportDimension, ImportFailure, ImportReport, ImportResult, ScopeAbortCause,
+    SourceScopeSelectionOutcome,
 };
 use baozi_io::AssetPath;
-use baozi_operation::{
-    CancellationOrigin, CancellationSignal, ControlCause, ProgressDecision, ProgressEvent,
-};
+use baozi_operation::{CancellationOrigin, ControlCause};
 use common::{
-    GltfTestOptions, TestResult, assert_gltf_failure, assert_resource_limit, expected_error,
-    import_assets, import_assets_result, import_assets_result_with_control,
+    GltfTestOptions, TestResult, assert_gltf_failure, assert_resource_limit, controlled_import,
+    expected_error, import_assets, import_assets_result, import_assets_result_with_control,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use std::sync::atomic::Ordering;
 
 const GRAPH_POLL_INTERVAL: usize = 4_096;
 const CANONICAL_IMPORT_STACK_BUDGET: usize = 2 * 1024 * 1024;
-
-#[derive(Clone)]
-struct GraphPollCancellation {
-    armed: Arc<AtomicBool>,
-    polls: Arc<AtomicUsize>,
-    cancel_on: Option<usize>,
-}
-
-impl CancellationSignal for GraphPollCancellation {
-    fn is_cancelled(&self) -> bool {
-        if !self.armed.load(Ordering::SeqCst) {
-            return false;
-        }
-        let poll = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
-        self.cancel_on.is_some_and(|cancel_on| poll >= cancel_on)
-    }
-}
 
 fn graph_document(scene_fields: &str, nodes: &str) -> Vec<u8> {
     format!(
@@ -71,23 +49,7 @@ fn controlled_graph_result(
     options: GltfTestOptions,
     cancel_on: Option<usize>,
 ) -> TestResult<(ImportResult<ImportReport>, usize)> {
-    let armed = Arc::new(AtomicBool::new(false));
-    let polls = Arc::new(AtomicUsize::new(0));
-    let signal = GraphPollCancellation {
-        armed: Arc::clone(&armed),
-        polls: Arc::clone(&polls),
-        cancel_on,
-    };
-    let control = ImportOperationControl::default()
-        .with_cancellation(signal)
-        .with_progress_observer(
-            move |event: ProgressEvent<ImportProgressPhase, ImportProgressUnit>| {
-                if event.phase() == ImportProgressPhase::Detect {
-                    armed.store(true, Ordering::SeqCst);
-                }
-                ProgressDecision::Continue
-            },
-        );
+    let (control, polls) = controlled_import(cancel_on);
     let (result, diagnostics) = import_assets_result_with_control(
         "graph.gltf",
         [("graph.gltf", document.to_vec())],
