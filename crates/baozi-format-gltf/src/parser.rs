@@ -17,9 +17,9 @@ use baozi_import::authoring::{
     SamplerLocalId, SamplerState, SceneAuthoringBatch, SceneSpace, SessionOpaqueReason,
     ShadingModel, SkinAuthoring, SkinLocalId, SkinMatrixSpaces, SourceIdentityAuthoring,
     SourceIdentityLocalId, SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch,
-    TexelFilter, TextureAddressMode, TextureAuthoring, TextureBlendOperation,
+    TexelFilter, TextureAddressMode, TextureAuthoring, TextureBlendOperation, TextureChannel,
     TextureChannelMapping, TextureChannelSwizzle, TextureCoordinateSource, TextureLocalId,
-    TextureRole, TextureSourceKey, TextureStrength, TextureTransform, Vec3,
+    TextureRole, TextureSourceKey, TextureStrength, TextureTransform, Vec2, Vec3,
 };
 use baozi_import::{
     DependencySnapshot, DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass,
@@ -35,6 +35,7 @@ use gltf::json;
 use gltf::json::validation::Checked;
 use gltf::mesh::Mode;
 use gltf::texture::{MagFilter, MinFilter, WrappingMode};
+use serde::Deserialize as _;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -46,8 +47,10 @@ const GLTF_BACKEND_FIXED_ALLOWANCE: u64 = 64 * 1024;
 const GLTF_JSON_EXPANSION_ALLOWANCE: u64 = 64;
 const PARSER_POLL_INTERVAL: usize = 4_096;
 
-// Extension payloads remain outside the canonical IR until each schema has a typed Baozi mapping.
-const BAOZI_SUPPORTED_EXTENSION_NAMES: &[&str] = &[];
+const KHR_TEXTURE_TRANSFORM: &str = "KHR_texture_transform";
+
+// Only schemas with a bounded typed Baozi mapping belong in this list.
+const BAOZI_SUPPORTED_EXTENSION_NAMES: &[&str] = &[KHR_TEXTURE_TRANSFORM];
 
 #[derive(Debug)]
 enum ContentError {
@@ -166,6 +169,7 @@ fn checked_add_with_limit(
 struct PreparedDocument<'scope, 'document> {
     node_graph: NodeGraph<'document, 'scope>,
     resource_closure: ResourceClosure<'scope>,
+    texture_binding_contracts: TextureBindingContracts<'scope>,
     geometry_contracts: GeometryContracts<'scope>,
     resolved_texture_uris: ResolvedTextureUris<'scope>,
     animation_contracts: animation::AnimationContracts<'scope, 'document>,
@@ -199,6 +203,8 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
     let node_graph = preflight_node_graph(ctx, &gltf)?;
     let animation_contracts = animation::preflight(ctx, &gltf, node_graph.selected.as_slice())?;
     let resource_closure = build_resource_closure(ctx, &gltf, &node_graph, &animation_contracts)?;
+    let texture_binding_contracts =
+        preflight_texture_binding_contracts(ctx, &gltf, &resource_closure)?;
     let repeated_mesh_string_bytes =
         preflight_canonical_base_strings(ctx, &gltf, &node_graph, &resource_closure)?;
     let resolved_texture_uris =
@@ -209,6 +215,7 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
     let prepared = PreparedDocument {
         node_graph,
         resource_closure,
+        texture_binding_contracts,
         geometry_contracts,
         resolved_texture_uris,
         animation_contracts,
@@ -378,6 +385,273 @@ fn extension_sort_work(name_count: usize) -> u64 {
 
 fn is_supported_extension(name: &str) -> bool {
     BAOZI_SUPPORTED_EXTENSION_NAMES.contains(&name)
+}
+
+#[derive(Debug)]
+struct TextureBindingContract {
+    coordinate_source: TextureCoordinateSource,
+    transform: TextureTransform,
+}
+
+#[derive(Debug)]
+struct MaterialTextureContracts {
+    base_color: Option<TextureBindingContract>,
+    metallic_roughness: Option<TextureBindingContract>,
+    normal: Option<TextureBindingContract>,
+    occlusion: Option<TextureBindingContract>,
+    emissive: Option<TextureBindingContract>,
+}
+
+struct TextureBindingContracts<'scope> {
+    materials: MeteredOrderedMap<'scope, usize, MaterialTextureContracts>,
+}
+
+impl TextureBindingContracts<'_> {
+    fn material(
+        &self,
+        ctx: &ParseScope<'_>,
+        material_index: usize,
+    ) -> Result<&MaterialTextureContracts> {
+        self.materials.get(&material_index).ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!("glTF texture binding contract is missing material {material_index}"),
+            )
+        })
+    }
+}
+
+fn preflight_texture_binding_contracts<'scope>(
+    ctx: &'scope ParseScope<'_>,
+    gltf: &gltf::Document,
+    closure: &ResourceClosure<'_>,
+) -> Result<TextureBindingContracts<'scope>> {
+    let root = gltf.as_json();
+    let extension_declared = root
+        .extensions_used
+        .iter()
+        .any(|name| name == KHR_TEXTURE_TRANSFORM);
+    let mut materials = ctx.metered_ordered_map(
+        ImportStorageClass::FormatNormalization,
+        "gltf-texture-binding-contracts",
+    );
+
+    for (material_index, material) in root.materials.iter().enumerate() {
+        poll_parser_loop(ctx, material_index)?;
+        ctx.charge_work(1)?;
+        let selected = closure
+            .materials
+            .as_slice()
+            .get(material_index)
+            .copied()
+            .ok_or_else(|| {
+                ContentError::from(GltfFailure::internal(
+                    "glTF material closure length changed during texture preflight",
+                ))
+            })?;
+        if !selected {
+            continue;
+        }
+        let pbr = &material.pbr_metallic_roughness;
+        let contracts = MaterialTextureContracts {
+            base_color: pbr
+                .base_color_texture
+                .as_ref()
+                .map(|info| {
+                    compile_texture_info_contract(
+                        ctx,
+                        material_index,
+                        "baseColorTexture",
+                        info,
+                        extension_declared,
+                    )
+                })
+                .transpose()?,
+            metallic_roughness: pbr
+                .metallic_roughness_texture
+                .as_ref()
+                .map(|info| {
+                    compile_texture_info_contract(
+                        ctx,
+                        material_index,
+                        "metallicRoughnessTexture",
+                        info,
+                        extension_declared,
+                    )
+                })
+                .transpose()?,
+            normal: material
+                .normal_texture
+                .as_ref()
+                .map(|info| {
+                    compile_material_texture_contract(
+                        ctx,
+                        material_index,
+                        "normalTexture",
+                        info.tex_coord,
+                        info.extensions
+                            .as_ref()
+                            .and_then(|extensions| extensions.others.get(KHR_TEXTURE_TRANSFORM)),
+                        extension_declared,
+                    )
+                })
+                .transpose()?,
+            occlusion: material
+                .occlusion_texture
+                .as_ref()
+                .map(|info| {
+                    compile_material_texture_contract(
+                        ctx,
+                        material_index,
+                        "occlusionTexture",
+                        info.tex_coord,
+                        info.extensions
+                            .as_ref()
+                            .and_then(|extensions| extensions.others.get(KHR_TEXTURE_TRANSFORM)),
+                        extension_declared,
+                    )
+                })
+                .transpose()?,
+            emissive: material
+                .emissive_texture
+                .as_ref()
+                .map(|info| {
+                    compile_texture_info_contract(
+                        ctx,
+                        material_index,
+                        "emissiveTexture",
+                        info,
+                        extension_declared,
+                    )
+                })
+                .transpose()?,
+        };
+        if materials.try_insert(material_index, contracts)?.is_some() {
+            return Err(ContentError::from(GltfFailure::internal(
+                "glTF texture binding contract material index was inserted twice",
+            )));
+        }
+    }
+
+    Ok(TextureBindingContracts { materials })
+}
+
+fn compile_texture_info_contract(
+    ctx: &ParseScope<'_>,
+    material_index: usize,
+    source_key: &'static str,
+    info: &json::texture::Info,
+    extension_declared: bool,
+) -> Result<TextureBindingContract> {
+    let transform = info
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.texture_transform.as_ref());
+    require_texture_transform_declaration(
+        ctx,
+        material_index,
+        source_key,
+        transform.is_some(),
+        extension_declared,
+    )?;
+    compile_texture_binding_contract(ctx, material_index, source_key, info.tex_coord, transform)
+}
+
+fn compile_material_texture_contract(
+    ctx: &ParseScope<'_>,
+    material_index: usize,
+    source_key: &'static str,
+    tex_coord: u32,
+    extension_value: Option<&serde_json::Value>,
+    extension_declared: bool,
+) -> Result<TextureBindingContract> {
+    require_texture_transform_declaration(
+        ctx,
+        material_index,
+        source_key,
+        extension_value.is_some(),
+        extension_declared,
+    )?;
+    let transform = extension_value
+        .map(|value| {
+            json::extensions::texture::TextureTransform::deserialize(value).map_err(|error| {
+                gltf_parse_error(
+                    ctx,
+                    format!(
+                        "glTF material {material_index} {source_key} has invalid {KHR_TEXTURE_TRANSFORM}: {error}"
+                    ),
+                )
+            })
+        })
+        .transpose()?;
+    compile_texture_binding_contract(
+        ctx,
+        material_index,
+        source_key,
+        tex_coord,
+        transform.as_ref(),
+    )
+}
+
+fn require_texture_transform_declaration(
+    ctx: &ParseScope<'_>,
+    material_index: usize,
+    source_key: &'static str,
+    has_transform: bool,
+    extension_declared: bool,
+) -> Result<()> {
+    if has_transform && !extension_declared {
+        return Err(gltf_parse_error(
+            ctx,
+            format!(
+                "glTF material {material_index} {source_key} uses {KHR_TEXTURE_TRANSFORM} without declaring it in extensionsUsed"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn compile_texture_binding_contract(
+    ctx: &ParseScope<'_>,
+    material_index: usize,
+    source_key: &'static str,
+    tex_coord: u32,
+    transform: Option<&json::extensions::texture::TextureTransform>,
+) -> Result<TextureBindingContract> {
+    ctx.charge_work(1)?;
+    let (tex_coord, transform) = match transform {
+        Some(transform) => {
+            let offset = transform.offset.0;
+            let scale = transform.scale.0;
+            let canonical = TextureTransform::try_new(
+                Vec2::new(offset[0], offset[1]),
+                transform.rotation.0,
+                Vec2::new(scale[0], scale[1]),
+            )
+            .map_err(|error| {
+                gltf_parse_error(
+                    ctx,
+                    format!(
+                        "glTF material {material_index} {source_key} has invalid {KHR_TEXTURE_TRANSFORM}: {error}"
+                    ),
+                )
+            })?;
+            (transform.tex_coord.unwrap_or(tex_coord), canonical)
+        }
+        None => (tex_coord, TextureTransform::IDENTITY),
+    };
+    let coordinate_source = TextureCoordinateSource::uv_set(tex_coord).map_err(|_| {
+        gltf_parse_error(
+            ctx,
+            format!(
+                "glTF material {material_index} {source_key} texture coordinate set {tex_coord} is out of range"
+            ),
+        )
+    })?;
+    Ok(TextureBindingContract {
+        coordinate_source,
+        transform,
+    })
 }
 
 fn preflight_canonical_base_strings(
@@ -1149,6 +1423,7 @@ fn scene_from_document(
         buffers,
         &prepared.resolved_texture_uris,
         &external_images,
+        &prepared.texture_binding_contracts,
         &prepared.resource_closure,
     )?;
     let geometry_storage = build_geometry_storage(
@@ -1286,6 +1561,7 @@ struct BindingStorage {
     coordinate_source: TextureCoordinateSource,
     channel_mapping: TextureChannelMapping,
     color_interpretation: ColorInterpretation,
+    transform: TextureTransform,
     strength: TextureStrength,
     blend: TextureBlendOperation,
     source_key: TextureSourceKey,
@@ -1322,6 +1598,7 @@ fn build_appearance_storage<'scope, 'document>(
     buffers: &[Option<BufferData<'_>>],
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     external_images: &ExternalImageResources<'scope>,
+    texture_binding_contracts: &TextureBindingContracts<'_>,
     closure: &ResourceClosure<'_>,
 ) -> Result<AppearanceStorage<'scope, 'document>> {
     let material_count = safe_gltf(ctx, "glTF material count", || gltf.materials().count())?;
@@ -1419,12 +1696,14 @@ fn build_appearance_storage<'scope, 'document>(
             storage.materials.len(),
             "gltf-authoring-material-id",
         )?);
+        let texture_contracts = texture_binding_contracts.material(ctx, material_index)?;
         add_material_authoring(
             ctx,
             &mut storage,
             material,
             resolved_texture_uris,
             external_images,
+            texture_contracts,
         )?;
         let Some(slot) = storage.material_ids.as_mut_slice().get_mut(material_index) else {
             return Err(gltf_parse_error(ctx, "glTF material id map is incomplete"));
@@ -1719,7 +1998,13 @@ fn add_material_authoring<'scope, 'document>(
     material: gltf::Material<'document>,
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     external_images: &ExternalImageResources<'scope>,
+    contracts: &MaterialTextureContracts,
 ) -> Result<()> {
+    let material_index = material.index().ok_or_else(|| {
+        ContentError::from(GltfFailure::internal(
+            "glTF default material reached explicit material authoring",
+        ))
+    })?;
     let pbr = material.pbr_metallic_roughness();
     let base = pbr.base_color_factor();
     let emissive = material.emissive_factor();
@@ -1734,7 +2019,11 @@ fn add_material_authoring<'scope, 'document>(
             resolved_texture_uris,
             external_images,
             info.texture(),
-            info.tex_coord(),
+            required_texture_binding_contract(
+                material_index,
+                "baseColorTexture",
+                contracts.base_color.as_ref(),
+            )?,
             TextureRole::BaseColor,
             TextureChannelSwizzle::RGBA,
             ColorInterpretation::SrgbColor,
@@ -1749,9 +2038,16 @@ fn add_material_authoring<'scope, 'document>(
             resolved_texture_uris,
             external_images,
             info.texture(),
-            info.tex_coord(),
+            required_texture_binding_contract(
+                material_index,
+                "metallicRoughnessTexture",
+                contracts.metallic_roughness.as_ref(),
+            )?,
             TextureRole::MetallicRoughness,
-            TextureChannelSwizzle::RGBA,
+            TextureChannelSwizzle::try_new(&[TextureChannel::Blue, TextureChannel::Green])
+                .map_err(|_| {
+                    gltf_parse_error(ctx, "glTF metallic-roughness channel mapping is invalid")
+                })?,
             ColorInterpretation::Data,
             1.0,
             "metallicRoughnessTexture",
@@ -1764,7 +2060,11 @@ fn add_material_authoring<'scope, 'document>(
             resolved_texture_uris,
             external_images,
             info.texture(),
-            info.tex_coord(),
+            required_texture_binding_contract(
+                material_index,
+                "normalTexture",
+                contracts.normal.as_ref(),
+            )?,
             TextureRole::Normal,
             TextureChannelSwizzle::RGB,
             ColorInterpretation::Data,
@@ -1779,7 +2079,11 @@ fn add_material_authoring<'scope, 'document>(
             resolved_texture_uris,
             external_images,
             info.texture(),
-            info.tex_coord(),
+            required_texture_binding_contract(
+                material_index,
+                "occlusionTexture",
+                contracts.occlusion.as_ref(),
+            )?,
             TextureRole::Occlusion,
             TextureChannelSwizzle::RED,
             ColorInterpretation::Data,
@@ -1794,7 +2098,11 @@ fn add_material_authoring<'scope, 'document>(
             resolved_texture_uris,
             external_images,
             info.texture(),
-            info.tex_coord(),
+            required_texture_binding_contract(
+                material_index,
+                "emissiveTexture",
+                contracts.emissive.as_ref(),
+            )?,
             TextureRole::Emissive,
             TextureChannelSwizzle::RGB,
             ColorInterpretation::SrgbColor,
@@ -1834,6 +2142,18 @@ fn add_material_authoring<'scope, 'document>(
     Ok(())
 }
 
+fn required_texture_binding_contract<'contract>(
+    material_index: usize,
+    source_key: &'static str,
+    contract: Option<&'contract TextureBindingContract>,
+) -> Result<&'contract TextureBindingContract> {
+    contract.ok_or_else(|| {
+        ContentError::from(GltfFailure::internal(format_args!(
+            "glTF texture binding contract is missing material {material_index} {source_key}"
+        )))
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn add_texture_binding<'scope, 'document>(
     ctx: &'scope ParseScope<'_>,
@@ -1841,7 +2161,7 @@ fn add_texture_binding<'scope, 'document>(
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     external_images: &ExternalImageResources<'scope>,
     texture: gltf::texture::Texture<'document>,
-    tex_coord: u32,
+    contract: &TextureBindingContract,
     role: TextureRole,
     channel_swizzle: TextureChannelSwizzle,
     color_interpretation: ColorInterpretation,
@@ -1886,8 +2206,6 @@ fn add_texture_binding<'scope, 'document>(
                 format!("glTF texture {} is outside the closure", texture.index()),
             )
         })?;
-    let coordinate_source = TextureCoordinateSource::uv_set(tex_coord)
-        .map_err(|_| gltf_parse_error(ctx, "glTF texture coordinate set is out of range"))?;
     let strength = TextureStrength::try_new(scale)
         .map_err(|_| gltf_parse_error(ctx, "glTF texture strength is not finite"))?;
     let source_key = TextureSourceKey::try_new(source_key)
@@ -1896,9 +2214,10 @@ fn add_texture_binding<'scope, 'document>(
         texture: texture_id,
         provenance: 0,
         role,
-        coordinate_source,
+        coordinate_source: contract.coordinate_source.clone(),
         channel_mapping: TextureChannelMapping::swizzle(channel_swizzle),
         color_interpretation,
+        transform: contract.transform,
         strength,
         blend: TextureBlendOperation::Replace,
         source_key,
@@ -5177,7 +5496,7 @@ fn submit_complete_batch(
             &binding.coordinate_source,
             &binding.channel_mapping,
             &binding.color_interpretation,
-            TextureTransform::IDENTITY,
+            binding.transform,
             binding.strength,
             &binding.blend,
             Some(&binding.source_key),

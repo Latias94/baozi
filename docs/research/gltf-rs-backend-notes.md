@@ -17,7 +17,9 @@ It is not a public API contract; ADR 0027 remains the architectural policy.
   the complete GLB container and cannot populate `gltf::Gltf::blob`; selected BIN-backed buffers are
   copied later through Baozi's metered buffer loader.
 - Baozi deserializes `gltf::json::Root`, validates the global extension declarations under metered
-  work, and only then calls `gltf::Document::from_json`. No extension schema is currently admitted.
+  work, and only then calls `gltf::Document::from_json`. The selected `KHR_texture_transform`
+  textureInfo payload is compiled into Baozi-owned binding semantics; unknown extension payloads
+  remain outside the canonical IR.
 - Baozi wraps many `gltf-rs` calls in `safe_gltf`, which uses `catch_unwind` in normal Rust builds to turn backend panics into `BaoziError::Parse`.
 
 ## Known Hazards
@@ -64,6 +66,9 @@ The 2026-07-09 format beta hardening slice added Baozi-owned checks for:
   must be present in `extensionsUsed`, unsupported required extensions return typed failure before
   backend document validation, and unsupported optional extensions emit a stable warning while the
   core fallback is retained
+- selected `KHR_texture_transform` payloads: standard and material-specific textureInfo locations
+  are normalized into the canonical binding transform and coordinate source, with declaration,
+  finite-value, and UV-set bounds checked before dependency I/O
 
 ### Remaining Preflight Gaps
 
@@ -73,8 +78,9 @@ The 2026-07-09 format beta hardening slice added Baozi-owned checks for:
   the target back to sanitizer-run CI.
 - Decide whether morph target iterator validation should become a fatal unsupported path rather
   than a warning after the core morph IR policy is exercised by fixtures.
-- Admit entity-level extension schemas, reference closure, source-scope rows, and extras policy; the
-  global declaration gate does not preserve or validate extension payloads.
+- Admit additional entity-level extension schemas, reference closure, source-scope rows, and extras
+  policy; the global declaration gate and the first transform schema slice do not yet provide
+  complete extension provenance.
 
 ## Fork Or Replacement Triggers
 

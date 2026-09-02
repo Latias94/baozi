@@ -50,6 +50,10 @@ criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.m
 - Perspective and orthographic camera projection data.
 - PBR metallic-roughness material factors.
 - Base color, metallic-roughness, normal, occlusion, and emissive texture URI references.
+- The typed `KHR_texture_transform` slice for selected base color, metallic-roughness, normal,
+  occlusion, and emissive texture bindings, including the extension `texCoord` override. Its
+  finite transform and canonical UV-set bounds are checked before dependency I/O, and the values
+  participate in the canonical material-binding snapshot.
 - Y-up, right-handed, meters scene space metadata.
 - Node translation, rotation, and scale animation with source clip/channel identity, duration, time
   domain, interpolation, retained channel order, and non-contiguous source indexes preserved through
@@ -124,18 +128,19 @@ and import-contract tests.
 ## Admission Blockers And Missing Semantics
 
 - Embedded image buffer views and image data URIs are materialized as encoded image payloads without
-  pixel decoding. Unsupported morph/default-weight semantics, typed extension payloads, extras, and
-  the remaining backend/admission gaps are still fail-closed or explicitly deferred.
+  pixel decoding. Unsupported morph/default-weight semantics, typed extension payloads beyond
+  `KHR_texture_transform`, extras, and the remaining backend/admission gaps are still fail-closed or
+  explicitly deferred.
 - Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
 - Morph-weight animation is unsupported retained-domain semantics. It is rejected by default and may
   be omitted only under explicit `SourceSemanticLoss` authority with typed loss evidence and a stable
   channel diagnostic until the morph animation slice is admitted.
 - The current `SourceScopeRecord` includes ADR 0039's typed selection outcome, camera rows, and
-  animation-sampler rows. Entity-level extension rows, typed extension-reference closure, and
-  complete dependency provenance remain admission blockers. The selected core resource closure is
-  compiled and tested before dependency IO, global extension declarations are gated, and GLB BIN
-  data is isolated from the bootstrap backend, but those results remain development evidence until
-  the independent admission matrix passes.
+  animation-sampler rows. Entity-level extension rows, typed extension-reference closure for
+  reference-bearing schemas, and complete dependency provenance remain admission blockers. The
+  selected core resource closure is compiled and tested before dependency IO, global extension
+  declarations are gated, and GLB BIN data is isolated from the bootstrap backend, but those
+  results remain development evidence until the independent admission matrix passes.
 - The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
 - `gltf_import` is a non-admitted development target until known backend aborts are removed or
   process-isolated and the complete baseline admission matrix passes.

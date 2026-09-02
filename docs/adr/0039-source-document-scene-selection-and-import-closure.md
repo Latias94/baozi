@@ -210,6 +210,25 @@ excluded or lossy semantic observable. Chosen.
 
 ## Amendment History
 
+### 2026-09-02: Admit typed `KHR_texture_transform` bindings
+
+- Affected: selected glTF material closure, typed texture-binding semantics, and extension admission.
+- New: selected base color, metallic-roughness, normal, occlusion, and emissive textureInfo payloads
+  may carry `KHR_texture_transform`. Baozi compiles the offset, rotation, scale, and effective
+  `texCoord` into one selected-material contract before dependency IO, then consumes that contract
+  while authoring canonical material bindings. Contract storage grows only with selected materials.
+- Policy: the extension must be declared in `extensionsUsed`; finite transform values and canonical
+  UV-set bounds are mandatory. The schema adds no resource-reference edge, so this slice does not
+  broaden the selected resource closure. Other entity-level schemas remain unsupported or ignored
+  according to the global required/optional declaration policy.
+- Verification: one required-extension fixture exercises all five textureInfo locations, the
+  effective coordinate source, and canonical snapshot impact; missing declaration and out-of-range
+  override fixtures fail before source-scope publication or dependency references.
+- Deferred: extension source-scope rows, schemas with reference edges, extras, and complete
+  dependency provenance remain U6 admission work. This amendment does not promote glTF to the
+  public facade.
+- Review: 2026-09-02 typed texture-transform admission review.
+
 ### 2026-08-31: Gate global glTF extension declarations
 
 - Affected: glTF JSON-root admission, backend validation ordering, and the U6 development matrix.
@@ -217,9 +236,10 @@ excluded or lossy semantic observable. Chosen.
   rejects empty or duplicate `extensionsUsed`/`extensionsRequired` names and requires every required
   name to appear in the used set. Borrowed names are copied only as metered references, sorted under
   a conservative `WorkUnits` bound, and released before scene projection.
-- Policy: Baozi currently admits no typed extension schema. Every required extension therefore
-  returns `gltf.unsupported_feature` with subject `required-extension`; a non-required extension uses
-  its core fallback and emits `gltf.extension_ignored` rather than disappearing silently.
+- Policy at this slice: Baozi admitted no typed extension schema. Every required extension therefore
+  returned `gltf.unsupported_feature` with subject `required-extension`; a non-required extension
+  used its core fallback and emitted `gltf.extension_ignored` rather than disappearing silently.
+  The 2026-09-02 amendment supersedes this statement for `KHR_texture_transform` only.
 - Verification: declaration tests cover optional diagnostics, required typed failure, subset,
   duplicate and empty-name failures, exact sort-work budget failure, no premature source-scope
   publication, and complete temporary-storage release.

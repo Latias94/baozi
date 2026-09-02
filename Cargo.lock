@@ -80,6 +80,8 @@ dependencies = [
  "baozi-test-support",
  "base64",
  "gltf",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 
