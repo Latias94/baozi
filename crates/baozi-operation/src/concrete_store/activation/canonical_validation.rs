@@ -694,8 +694,28 @@ where
         &mut self,
         member: CanonicalValidationMember<'session, ScalarSequence<T>, Tag>,
         expected_len: usize,
-        mut inspect: impl FnMut(usize, T) -> bool,
+        inspect: impl FnMut(usize, T) -> bool,
     ) -> Result<bool, StoreWorkError>
+    where
+        T: StoredScalar,
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.validate_canonical_sequence(member, expected_len, inspect)
+            .map(|values| values.is_some())
+    }
+
+    /// Borrows an immutable canonical sequence after its exact metered visit succeeds.
+    ///
+    /// No slice is returned until every pending scalar passes inspection and member completion
+    /// succeeds. An already completed member still polls control and checks its length without
+    /// repeating inspection or charging work. The slice borrows storage, so other validation
+    /// actions can continue while it is read; it cannot outlive the canonical storage owner.
+    pub fn validate_canonical_sequence<T, Tag>(
+        &mut self,
+        member: CanonicalValidationMember<'session, ScalarSequence<T>, Tag>,
+        expected_len: usize,
+        mut inspect: impl FnMut(usize, T) -> bool,
+    ) -> Result<Option<&'storage [T]>, StoreWorkError>
     where
         T: StoredScalar,
         Tag: Copy + Send + Sync + 'static,
@@ -703,7 +723,7 @@ where
         self.poll_visit()?;
         let Some(visit) = self.raw.peek_canonical_sequence(member.raw) else {
             self.reject_contract();
-            return Ok(false);
+            return Ok(None);
         };
         let (view, completion) = match visit {
             StoreCanonicalMemberVisit::Completed(view) => (view, None),
@@ -711,23 +731,25 @@ where
         };
         if view.as_slice().len() != expected_len {
             self.reject_contract();
-            return Ok(false);
+            return Ok(None);
         }
         let Some(completion) = completion else {
-            return Ok(true);
+            return Ok(Some(view.as_slice()));
         };
         for index in 0..expected_len {
             let Some(accepted) =
                 self.run_unit(|_raw| view.get(index).map(|value| inspect(index, value)))?
             else {
-                return Ok(false);
+                return Ok(None);
             };
             if !accepted {
                 self.reject_semantic()?;
-                return Ok(false);
+                return Ok(None);
             }
         }
-        self.complete_canonical(completion)
+        Ok(self
+            .complete_canonical(completion)?
+            .then_some(view.as_slice()))
     }
 
     /// Visits every byte in one canonical binary block exactly once.

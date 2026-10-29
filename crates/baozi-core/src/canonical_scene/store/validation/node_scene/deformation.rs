@@ -434,7 +434,7 @@ impl DeformationMeshInstanceValidationProjection {
     };
 }
 
-/// Exact caller-provided deformation projection capacity derived from the sealed Scene plan.
+/// Projection capacities and immutable payload lengths derived from the sealed Scene plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::canonical_scene::store) struct DeformationValidationScratchRequirements {
     pub(in crate::canonical_scene::store) skins: usize,
@@ -444,9 +444,8 @@ pub(in crate::canonical_scene::store) struct DeformationValidationScratchRequire
     pub(in crate::canonical_scene::store) morph_targets: usize,
     pub(in crate::canonical_scene::store) primitives: usize,
     pub(in crate::canonical_scene::store) mesh_instances: usize,
-    pub(in crate::canonical_scene::store) influence_row_offsets: usize,
-    pub(in crate::canonical_scene::store) influence_joints: usize,
-    pub(in crate::canonical_scene::store) influence_source_orders: usize,
+    pub(in crate::canonical_scene::store) influence_row_offset_count: usize,
+    pub(in crate::canonical_scene::store) influence_count: usize,
 }
 
 impl DeformationValidationScratchRequirements {
@@ -470,9 +469,8 @@ impl DeformationValidationScratchRequirements {
             morph_targets: usize::try_from(morph_target_count).ok()?,
             primitives: usize::try_from(primitive_count).ok()?,
             mesh_instances: usize::try_from(mesh_instance_count).ok()?,
-            influence_row_offsets: usize::try_from(influence_row_offset_count).ok()?,
-            influence_joints: usize::try_from(influence_count).ok()?,
-            influence_source_orders: usize::try_from(influence_count).ok()?,
+            influence_row_offset_count: usize::try_from(influence_row_offset_count).ok()?,
+            influence_count: usize::try_from(influence_count).ok()?,
         })
     }
 
@@ -485,9 +483,6 @@ impl DeformationValidationScratchRequirements {
             self.morph_targets,
             self.primitives,
             self.mesh_instances,
-            self.influence_row_offsets,
-            self.influence_joints,
-            self.influence_source_orders,
         ]
         .into_iter()
         .try_fold(0_u64, |total, count| {
@@ -505,9 +500,6 @@ pub(in crate::canonical_scene::store) struct DeformationValidationScratch<'scrat
     morph_targets: &'scratch mut [DeformationMorphTargetValidationProjection],
     primitives: &'scratch mut [DeformationPrimitiveValidationProjection],
     mesh_instances: &'scratch mut [DeformationMeshInstanceValidationProjection],
-    influence_row_offsets: &'scratch mut [u32],
-    influence_joints: &'scratch mut [u32],
-    influence_source_orders: &'scratch mut [u32],
     palette_maxima: &'scratch mut [Option<u32>],
     uniqueness_marks: &'scratch mut [u64],
 }
@@ -522,9 +514,6 @@ impl<'scratch> DeformationValidationScratch<'scratch> {
         morph_targets: &'scratch mut [DeformationMorphTargetValidationProjection],
         primitives: &'scratch mut [DeformationPrimitiveValidationProjection],
         mesh_instances: &'scratch mut [DeformationMeshInstanceValidationProjection],
-        influence_row_offsets: &'scratch mut [u32],
-        influence_joints: &'scratch mut [u32],
-        influence_source_orders: &'scratch mut [u32],
         palette_maxima: &'scratch mut [Option<u32>],
         uniqueness_marks: &'scratch mut [u64],
     ) -> Self {
@@ -536,9 +525,6 @@ impl<'scratch> DeformationValidationScratch<'scratch> {
             morph_targets,
             primitives,
             mesh_instances,
-            influence_row_offsets,
-            influence_joints,
-            influence_source_orders,
             palette_maxima,
             uniqueness_marks,
         }
@@ -556,9 +542,6 @@ impl<'scratch> DeformationValidationScratch<'scratch> {
             && self.morph_targets.len() >= requirements.morph_targets
             && self.primitives.len() >= requirements.primitives
             && self.mesh_instances.len() >= requirements.mesh_instances
-            && self.influence_row_offsets.len() >= requirements.influence_row_offsets
-            && self.influence_joints.len() >= requirements.influence_joints
-            && self.influence_source_orders.len() >= requirements.influence_source_orders
             && usize::try_from(logical_mesh_count)
                 .is_ok_and(|count| self.palette_maxima.len() >= count)
     }
@@ -2438,25 +2421,24 @@ fn validate_influence_row_offsets_metered<'session, 'storage, 'control, 'operati
     >,
     count: u32,
     primitives: &[DeformationPrimitiveValidationProjection],
-    output: &mut [u32],
-) -> Result<bool, StoreWorkError>
+) -> Result<Option<&'storage [u32]>, StoreWorkError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     let Ok(expected_len) = usize::try_from(count) else {
-        return Ok(false);
+        return Ok(None);
     };
     if expected_len == 0 {
-        return Ok(member.is_none());
+        return Ok(member.is_none().then_some(&[]));
     }
-    let (Some(member), Some(output)) = (member, output.get_mut(..expected_len)) else {
-        return Ok(false);
+    let Some(member) = member else {
+        return Ok(None);
     };
     let mut primitive_index = 0_usize;
     let mut previous = 0_u32;
-    session.visit_canonical_sequence(member, expected_len, |index, value| {
+    session.validate_canonical_sequence(member, expected_len, |index, value| {
         while primitives.get(primitive_index).is_some_and(|primitive| {
             !primitive.influences_present
                 || usize::try_from(
@@ -2485,7 +2467,6 @@ where
             && (local == 0 || value >= previous)
             && (local != 0 || value == 0)
             && (local + 1 != segment_len || value == primitive.influence_count);
-        output[index] = value;
         previous = value;
         valid
     })
@@ -2541,6 +2522,12 @@ where
     })
 }
 
+struct DeformationValidatedInfluencePayloads<'storage> {
+    row_offsets: &'storage [u32],
+    joints: &'storage [u32],
+    source_orders: &'storage [u32],
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn validate_deformation_payloads_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
@@ -2552,17 +2539,14 @@ fn validate_deformation_payloads_metered<'session, 'storage, 'control, 'operatio
     logical_morphs: &[DeformationLogicalMorphValidationProjection],
     morph_deltas: &[DeformationMorphDeltaValidationProjection],
     primitives: &[DeformationPrimitiveValidationProjection],
-    influence_row_offsets: &mut [u32],
-    influence_joints: &mut [u32],
-    influence_source_orders: &mut [u32],
-) -> Result<bool, StoreWorkError>
+) -> Result<Option<DeformationValidatedInfluencePayloads<'storage>>, StoreWorkError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     let Ok(node_rows) = usize::try_from(node_count) else {
-        return Ok(false);
+        return Ok(None);
     };
     let joint_nodes_valid = match (
         members.joint_nodes,
@@ -2600,7 +2584,7 @@ where
             morph_definitions,
         )?
     {
-        return Ok(false);
+        return Ok(None);
     }
 
     let morph_defaults_valid = match (
@@ -2633,35 +2617,28 @@ where
             counts.morph_sparse_index_count,
             morph_deltas,
         )?
-        || !validate_influence_row_offsets_metered(
-            session,
-            members.influence_row_offsets,
-            counts.influence_row_offset_count,
-            primitives,
-            influence_row_offsets,
-        )?
     {
-        return Ok(false);
+        return Ok(None);
     }
+    let Some(row_offsets) = validate_influence_row_offsets_metered(
+        session,
+        members.influence_row_offsets,
+        counts.influence_row_offset_count,
+        primitives,
+    )?
+    else {
+        return Ok(None);
+    };
 
     let Ok(influence_len) = usize::try_from(counts.influence_count) else {
-        return Ok(false);
+        return Ok(None);
     };
-    let (Some(influence_joints_output), Some(source_orders_output)) = (
-        influence_joints.get_mut(..influence_len),
-        influence_source_orders.get_mut(..influence_len),
-    ) else {
-        return Ok(false);
-    };
-    let influence_joints_valid = match members.influence_joints {
-        None => influence_len == 0,
+    let joints = match members.influence_joints {
+        None => (influence_len == 0).then_some(&[][..]),
         Some(member) if influence_len != 0 => {
-            session.visit_canonical_sequence(member, influence_len, |index, value| {
-                influence_joints_output[index] = value;
-                true
-            })?
+            session.validate_canonical_sequence(member, influence_len, |_index, _value| true)?
         }
-        Some(_) => false,
+        Some(_) => None,
     };
     let influence_weights_valid = match members.influence_weights {
         None => influence_len == 0,
@@ -2672,15 +2649,12 @@ where
         }
         Some(_) => false,
     };
-    let source_orders_valid = match members.influence_source_orders {
-        None => influence_len == 0,
+    let source_orders = match members.influence_source_orders {
+        None => (influence_len == 0).then_some(&[][..]),
         Some(member) if influence_len != 0 => {
-            session.visit_canonical_sequence(member, influence_len, |index, value| {
-                source_orders_output[index] = value;
-                true
-            })?
+            session.validate_canonical_sequence(member, influence_len, |_index, _value| true)?
         }
-        Some(_) => false,
+        Some(_) => None,
     };
     let instance_weights_valid = match (
         members.instance_morph_weights,
@@ -2694,17 +2668,26 @@ where
         _ => false,
     };
 
-    Ok(influence_joints_valid
-        && influence_weights_valid
-        && source_orders_valid
-        && instance_weights_valid
-        && logical_morphs.iter().try_fold(0_u32, |cursor, projection| {
+    let (Some(joints), Some(source_orders)) = (joints, source_orders) else {
+        return Ok(None);
+    };
+    if !influence_weights_valid
+        || !instance_weights_valid
+        || logical_morphs.iter().try_fold(0_u32, |cursor, projection| {
             if projection.default_weight_offset == cursor {
                 cursor.checked_add(projection.default_weight_count)
             } else {
                 None
             }
-        }) == Some(counts.morph_default_count))
+        }) != Some(counts.morph_default_count)
+    {
+        return Ok(None);
+    }
+    Ok(Some(DeformationValidatedInfluencePayloads {
+        row_offsets,
+        joints,
+        source_orders,
+    }))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -3074,9 +3057,6 @@ where
         morph_targets,
         primitives,
         mesh_instances,
-        influence_row_offsets,
-        influence_joints,
-        influence_source_orders,
         palette_maxima,
         uniqueness_marks,
     } = scratch;
@@ -3145,7 +3125,7 @@ where
     {
         return Ok(None);
     }
-    if !validate_deformation_payloads_metered(
+    let Some(influences) = validate_deformation_payloads_metered(
         session,
         members,
         counts,
@@ -3155,12 +3135,10 @@ where
         logical_morphs,
         morph_deltas,
         primitives,
-        influence_row_offsets,
-        influence_joints,
-        influence_source_orders,
-    )? {
+    )?
+    else {
         return Ok(None);
-    }
+    };
     let Some(algorithm_maximum) = validate_deformation_algorithms_metered(
         session,
         counts,
@@ -3170,9 +3148,9 @@ where
         morph_targets,
         primitives,
         mesh_instances,
-        influence_row_offsets,
-        influence_joints,
-        influence_source_orders,
+        influences.row_offsets,
+        influences.joints,
+        influences.source_orders,
         palette_maxima,
         &mut uniqueness,
     )?

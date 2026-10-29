@@ -15,21 +15,19 @@ fn inspect_one_byte_pair<'session, 'storage, 'control, 'operation>(
     expected_canonical: u8,
     expected_evidence: u8,
 ) -> Result<bool, StoreWorkError> {
-    let mut canonical_value = None;
-    let canonical_valid = session.visit_canonical_sequence(canonical, 1, |_index, value| {
-        canonical_value = Some(value);
-        true
-    })?;
+    let canonical_values =
+        session.validate_canonical_sequence(canonical, 1, |_index, _value| true)?;
     let mut evidence_value = None;
     let evidence_valid =
         session.visit_outcome_evidence_sequence(evidence, 1, |_index, value| {
             evidence_value = Some(value);
             true
         })?;
-    Ok(canonical_valid
-        && evidence_valid
-        && canonical_value == Some(expected_canonical)
-        && evidence_value == Some(expected_evidence))
+    Ok(
+        canonical_values.is_some_and(|values| values == [expected_canonical])
+            && evidence_valid
+            && evidence_value == Some(expected_evidence),
+    )
 }
 
 fn split_dimension_operation(account: &PhysicalStorageAccount) -> (TestOperation, TestKeys) {
@@ -351,7 +349,17 @@ fn matching_activation_can_only_publish_through_central_validation_body() {
                 planning.validate_with(
                     |_| Ok(()),
                     |session, canonical, evidence, &mut ()| {
+                        let values = session
+                            .validate_canonical_sequence(canonical, 1, |_index, value| value == 7)?
+                            .expect("the complete canonical sequence passes inspection");
                         if inspect_one_byte_pair(session, canonical, evidence, 7, 9)? {
+                            let repeated = session
+                                .validate_canonical_sequence(canonical, 1, |_index, _value| {
+                                    panic!("a completed immutable sequence is not inspected twice")
+                                })?
+                                .expect("a completed sequence retains its storage borrow");
+                            assert_eq!(values, [7]);
+                            assert!(std::ptr::eq(values, repeated));
                             Ok(CanonicalValidationDecision::accept("validated"))
                         } else {
                             Ok(
@@ -430,11 +438,11 @@ fn canonical_shape_contract_cannot_be_overwritten_by_requested_rejection_body() 
                     |_| Ok(()),
                     |session, canonical, evidence, &mut ()| {
                         assert!(inspect_one_byte_pair(session, canonical, evidence, 7, 9)?);
-                        assert!(!session.visit_canonical_sequence(
-                            canonical,
-                            2,
-                            |_index, _value| true
-                        )?);
+                        assert!(
+                            session
+                                .validate_canonical_sequence(canonical, 2, |_index, _value| true)?
+                                .is_none()
+                        );
                         Ok(
                             CanonicalValidationDecision::<(), ValidationRejection>::reject(
                                 ValidationRejection::Semantic,
@@ -701,7 +709,7 @@ fn completed_member_repeat_still_polls_control_without_recharging() {
                         assert!(inspect_one_byte_pair(session, canonical, evidence, 7, 9)?);
                         cancellation.cancel();
                         let cause = session
-                            .visit_canonical_sequence(canonical, 1, |_index, _value| {
+                            .validate_canonical_sequence(canonical, 1, |_index, _value| {
                                 repeated_inspector_called.set(true);
                                 true
                             })
@@ -796,14 +804,18 @@ fn canonical_validation_cancellation_is_bounded_and_preserves_the_completed_pref
                     |_| Ok(()),
                     |session, canonical, _evidence, &mut ()| {
                         let cause = session
-                            .visit_canonical_sequence(canonical, CANONICAL_UNITS, |index, value| {
-                                assert_eq!(value, 7);
-                                inspected.set(inspected.get() + 1);
-                                if index == 0 {
-                                    cancellation.cancel();
-                                }
-                                true
-                            })
+                            .validate_canonical_sequence(
+                                canonical,
+                                CANONICAL_UNITS,
+                                |index, value| {
+                                    assert_eq!(value, 7);
+                                    inspected.set(inspected.get() + 1);
+                                    if index == 0 {
+                                        cancellation.cancel();
+                                    }
+                                    true
+                                },
+                            )
                             .expect_err("cancellation must be observed at the bounded checkpoint");
                         Err::<CanonicalValidationDecision<(), ValidationRejection>, _>(cause)
                     },
@@ -1161,7 +1173,7 @@ fn ledger_interruption_before_validator_panic_preserves_one_terminal_cause() {
                         StoreWorkError,
                     > {
                         let cause = session
-                            .visit_canonical_sequence(canonical, 1, |_index, _value| true)
+                            .validate_canonical_sequence(canonical, 1, |_index, _value| true)
                             .unwrap_err();
                         assert!(cause.ledger_cause().is_some());
                         panic!("panic after the first ledger interruption")

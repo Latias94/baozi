@@ -124,9 +124,6 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
     deformation_morph_targets: ScratchCapacityPlan,
     deformation_primitives: ScratchCapacityPlan,
     deformation_mesh_instances: ScratchCapacityPlan,
-    deformation_influence_row_offsets: ScratchCapacityPlan,
-    deformation_influence_joints: ScratchCapacityPlan,
-    deformation_influence_source_orders: ScratchCapacityPlan,
     deformation_palette_maxima: ScratchCapacityPlan,
     deformation_uniqueness_marks: ScratchCapacityPlan,
     animation_clip_descriptors: ScratchCapacityPlan,
@@ -264,12 +261,6 @@ impl NodeSceneValidationScratchPlan {
         let deformation_mesh_instances = scratch_capacity_plan::<
             DeformationMeshInstanceValidationProjection,
         >(deformation_requirements.mesh_instances)?;
-        let deformation_influence_row_offsets =
-            scratch_capacity_plan::<u32>(deformation_requirements.influence_row_offsets)?;
-        let deformation_influence_joints =
-            scratch_capacity_plan::<u32>(deformation_requirements.influence_joints)?;
-        let deformation_influence_source_orders =
-            scratch_capacity_plan::<u32>(deformation_requirements.influence_source_orders)?;
         let deformation_palette_maxima = scratch_capacity_plan::<Option<u32>>(palette_count)?;
         let deformation_uniqueness_marks =
             scratch_capacity_plan::<u64>(deformation_uniqueness_capacity)?;
@@ -359,9 +350,6 @@ impl NodeSceneValidationScratchPlan {
             deformation_morph_targets,
             deformation_primitives,
             deformation_mesh_instances,
-            deformation_influence_row_offsets,
-            deformation_influence_joints,
-            deformation_influence_source_orders,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_clip_descriptors,
@@ -469,9 +457,6 @@ impl NodeSceneValidationScratchPlan {
             deformation_morph_targets,
             deformation_primitives,
             deformation_mesh_instances,
-            deformation_influence_row_offsets,
-            deformation_influence_joints,
-            deformation_influence_source_orders,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_clip_descriptors,
@@ -516,15 +501,10 @@ impl NodeSceneValidationScratchPlan {
         profile_counts: ProfileMeteredCounts,
     ) -> Result<Self, StorePlanError> {
         let influence_row_offset_count =
-            u32::try_from(self.deformation_requirements.influence_row_offsets)
+            u32::try_from(self.deformation_requirements.influence_row_offset_count)
                 .map_err(|_| StorePlanError::SizeOverflow)?;
-        let influence_count = u32::try_from(self.deformation_requirements.influence_joints)
+        let influence_count = u32::try_from(self.deformation_requirements.influence_count)
             .map_err(|_| StorePlanError::SizeOverflow)?;
-        if self.deformation_requirements.influence_source_orders
-            != self.deformation_requirements.influence_joints
-        {
-            return Err(StorePlanError::InvalidBlockTable);
-        }
         Self::try_new(
             counts,
             self.deformation_uniqueness_marks.desired_capacity(),
@@ -600,9 +580,6 @@ pub(in crate::canonical_scene::store) struct ScopedNodeSceneValidationScratchOwn
     deformation_morph_targets: Vec<DeformationMorphTargetValidationProjection>,
     deformation_primitives: Vec<DeformationPrimitiveValidationProjection>,
     deformation_mesh_instances: Vec<DeformationMeshInstanceValidationProjection>,
-    deformation_influence_row_offsets: Vec<u32>,
-    deformation_influence_joints: Vec<u32>,
-    deformation_influence_source_orders: Vec<u32>,
     deformation_palette_maxima: Vec<Option<u32>>,
     deformation_uniqueness_marks: Vec<u64>,
     animation_clip_descriptors: Vec<AnimationClipValidationDescriptor>,
@@ -694,9 +671,6 @@ where
         let deformation_morph_targets = allocate!(deformation_morph_targets);
         let deformation_primitives = allocate!(deformation_primitives);
         let deformation_mesh_instances = allocate!(deformation_mesh_instances);
-        let deformation_influence_row_offsets = allocate!(deformation_influence_row_offsets);
-        let deformation_influence_joints = allocate!(deformation_influence_joints);
-        let deformation_influence_source_orders = allocate!(deformation_influence_source_orders);
         let deformation_palette_maxima = allocate!(deformation_palette_maxima);
         let deformation_uniqueness_marks = allocate!(deformation_uniqueness_marks);
         let animation_clip_descriptors = allocate!(animation_clip_descriptors);
@@ -745,9 +719,6 @@ where
             deformation_morph_targets,
             deformation_primitives,
             deformation_mesh_instances,
-            deformation_influence_row_offsets,
-            deformation_influence_joints,
-            deformation_influence_source_orders,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_clip_descriptors,
@@ -856,9 +827,6 @@ where
             deformation_mesh_instances,
             DeformationMeshInstanceValidationProjection::EMPTY
         );
-        initialize!(deformation_influence_row_offsets, 0);
-        initialize!(deformation_influence_joints, 0);
-        initialize!(deformation_influence_source_orders, 0);
         initialize!(deformation_palette_maxima, None);
         initialize!(deformation_uniqueness_marks, 0);
         initialize!(
@@ -922,9 +890,6 @@ where
                 &mut self.deformation_morph_targets,
                 &mut self.deformation_primitives,
                 &mut self.deformation_mesh_instances,
-                &mut self.deformation_influence_row_offsets,
-                &mut self.deformation_influence_joints,
-                &mut self.deformation_influence_source_orders,
                 &mut self.deformation_palette_maxima,
                 &mut self.deformation_uniqueness_marks,
             ),
@@ -1005,9 +970,6 @@ where
             &mut self.deformation_morph_targets,
             &mut self.deformation_primitives,
             &mut self.deformation_mesh_instances,
-            &mut self.deformation_influence_row_offsets,
-            &mut self.deformation_influence_joints,
-            &mut self.deformation_influence_source_orders,
             &mut self.deformation_palette_maxima,
             &mut self.deformation_uniqueness_marks,
         )
