@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-08-01
+updated: 2026-10-29
 authors:
   - Codex
 decision_type: architecture
@@ -44,6 +44,19 @@ lifetimes, errors, validation messages, and feature flags never cross the format
 
 Accepted freezes this ownership and replacement boundary. It does not approve any active backend for
 Beta/Stable or claim the full normalized pipeline is implemented.
+
+### Maintained Backend Corrections
+
+When an upstream validator defect is demonstrated, a narrow licensed source correction may be
+maintained at that defect's owner. Baozi must not accumulate an overlapping general validator around
+an unchanged panic-capable backend. The maintained dependency identity must survive independent
+workspace resolution and Cargo packaging; a root-only registry override cannot establish that
+property. Keep an explicit source revision, original licenses, a small change inventory, and direct
+backend regressions that do not rely on Baozi's panic containment.
+
+Installing a correction does not satisfy sanitizer admission, complete the normalized boundary, or
+authorize first-party registration. Those execution gates and source-identity guarantees remain
+separate. Current package identities and correction evidence are in the linked backend notes.
 
 ### Required Pipeline
 
@@ -273,6 +286,17 @@ Negative:
 | Maturity truthfulness | Linux sanitizer and subprocess RSS/timeout gates execute before promotion; compile-only evidence cannot satisfy them. |
 
 ## Amendment History
+
+### 2026-10-29: Maintain demonstrated validator corrections at the backend
+
+- Affected: `Decision`, with the `Maintained Backend Corrections` subsection.
+- New: a narrow maintained source package is permitted when its corrected dependency closure is
+  preserved in independent workspaces and packaged manifests. Direct backend tests establish the
+  corrected behavior; the original licenses and change inventory remain beside the source.
+- Rationale: POSITION index validation and camera projection-discriminator defects belong in the
+  validator. Another pre-validation framework would duplicate that responsibility.
+- Impact: no facade registration or sanitizer qualification follows from installation. The existing
+  format-private ownership, IO, normalization, source identity, and admission requirements remain.
 
 ### 2026-08-01: Align the normalized firewall with opaque canonical construction
 

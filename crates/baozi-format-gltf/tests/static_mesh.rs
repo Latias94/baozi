@@ -501,7 +501,7 @@ fn unsupported_primitive_mode_is_fatal() -> TestResult<()> {
 }
 
 #[test]
-fn malformed_accessor_root_is_caught_at_backend_boundary() -> TestResult<()> {
+fn malformed_accessor_root_is_rejected_by_backend_validation() -> TestResult<()> {
     let gltf = String::from_utf8(triangle_gltf())
         .expect("fixture is valid utf-8")
         .replace(r#""accessors""#, r#""acceOsors""#)
@@ -517,7 +517,7 @@ fn malformed_accessor_root_is_caught_at_backend_boundary() -> TestResult<()> {
     let error = expected_error(result)?;
 
     assert!(diagnostics.is_empty());
-    assert_gltf_failure(&error, GltfFailureCode::ParserPanicked, None)?;
+    assert_gltf_failure(&error, GltfFailureCode::InvalidDocument, None)?;
     Ok(())
 }
 

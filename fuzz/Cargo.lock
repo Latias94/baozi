@@ -21,9 +21,9 @@ dependencies = [
 name = "baozi-format-gltf"
 version = "0.1.0"
 dependencies = [
+ "baozi-gltf",
  "baozi-import",
  "base64",
- "gltf",
  "serde",
  "serde_json",
  "sha2",
@@ -62,6 +62,26 @@ dependencies = [
  "baozi-import",
  "baozi-io",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "baozi-gltf"
+version = "0.1.0"
+dependencies = [
+ "baozi-gltf-json",
+ "byteorder",
+ "lazy_static",
+ "serde_json",
+]
+
+[[package]]
+name = "baozi-gltf-json"
+version = "0.1.0"
+dependencies = [
+ "gltf-derive",
+ "serde",
+ "serde_derive",
+ "serde_json",
 ]
 
 [[package]]
@@ -186,18 +206,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gltf"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3ce1918195723ce6ac74e80542c5a96a40c2b26162c1957a5cd70799b8cacf7"
-dependencies = [
- "byteorder",
- "gltf-json",
- "lazy_static",
- "serde_json",
-]
-
-[[package]]
 name = "gltf-derive"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -207,18 +215,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "gltf-json"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6176f9d60a7eab0a877e8e96548605dedbde9190a7ae1e80bbcc1c9af03ab14"
-dependencies = [
- "gltf-derive",
- "serde",
- "serde_derive",
- "serde_json",
 ]
 
 [[package]]

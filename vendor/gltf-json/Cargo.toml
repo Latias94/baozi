@@ -1,0 +1,37 @@
+[package]
+name = "baozi-gltf-json"
+version = "0.1.0"
+authors = ["David Harvey-Macaulay <alteous@outlook.com>"]
+description = "JSON parsing for the gltf crate"
+repository = "https://github.com/gltf-rs/gltf"
+license = "MIT OR Apache-2.0"
+edition = "2021"
+rust-version = "1.61"
+readme = "BAOZI_PATCHES.md"
+include = ["src/**", "tests/**", "Cargo.toml", "BAOZI_PATCHES.md", "LICENSE-*"]
+
+[lib]
+name = "gltf_json"
+
+[dependencies]
+gltf-derive = "=1.4.1"
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = { features = ["raw_value"], version = "1.0" }
+
+[features]
+default = []
+allow_empty_texture = []
+names = []
+extensions = []
+extras = []
+KHR_lights_punctual = []
+KHR_materials_ior = []
+KHR_materials_pbrSpecularGlossiness = []
+KHR_materials_specular = []
+KHR_materials_transmission = []
+KHR_materials_unlit = []
+KHR_materials_variants = []
+KHR_materials_volume = []
+KHR_texture_transform = []
+KHR_materials_emissive_strength = []
