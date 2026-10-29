@@ -10,7 +10,7 @@ use baozi_operation::{CancellationOrigin, ControlCause};
 use common::{
     GltfTestOptions, TestResult, append_glb_chunk, assert_gltf_failure, assert_resource_limit,
     controlled_import, expected_error, glb_with_json, import_assets, import_assets_result,
-    import_assets_result_with_control,
+    import_assets_result_with_control, sidecar_options,
 };
 use std::sync::atomic::Ordering;
 
@@ -100,6 +100,33 @@ fn imports_node_trs_animation_with_source_order_and_exact_payloads() -> TestResu
         "out_tangents(present,total=6)=[0x3f000000,0x3f000000,0x3f000000,",
         "0x00000000,0x00000000,0x00000000]"
     )));
+    Ok(())
+}
+
+#[test]
+fn external_animation_provenance_is_canonicalized_by_source_id() -> TestResult<()> {
+    let (document, output, input) = split_buffer_animation_fixture();
+    let (report, diagnostics) = import_assets(
+        "animation/split.gltf",
+        [
+            ("animation/split.gltf", document),
+            ("animation/output.bin", output),
+            ("animation/input.bin", input),
+        ],
+        sidecar_options(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        report
+            .successful_input_manifest()
+            .counts()
+            .node_class_count(),
+        3
+    );
+    let snapshot = scene_snapshot(&report);
+    assert_eq!(snapshot.profile_resource_count(), 3);
+    assert!(snapshot.profile_attachment_count() > snapshot.profile_owner_count());
     Ok(())
 }
 
@@ -926,6 +953,40 @@ fn replace_once(source: impl AsRef<[u8]>, from: &str, to: &str) -> String {
 
 fn animation_glb(json: &[u8], bin: &[u8]) -> Vec<u8> {
     append_glb_chunk(glb_with_json(json), b"BIN\0", bin)
+}
+
+fn split_buffer_animation_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let mut output = Vec::new();
+    extend_f32(&mut output, &[0.0, 0.0, 0.0, 1.0, 2.0, 3.0]);
+    let mut input = Vec::new();
+    extend_f32(&mut input, &[0.0, 1.0]);
+    let document = br#"{
+  "asset": { "version": "2.0", "generator": "baozi-animation-provenance-test" },
+  "scene": 0,
+  "scenes": [{ "nodes": [0] }],
+  "nodes": [{ "name": "AnimatedNode" }],
+  "buffers": [
+    { "uri": "output.bin", "byteLength": 24 },
+    { "uri": "input.bin", "byteLength": 8 }
+  ],
+  "bufferViews": [
+    { "buffer": 1, "byteOffset": 0, "byteLength": 8 },
+    { "buffer": 0, "byteOffset": 0, "byteLength": 24 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1] },
+    { "bufferView": 1, "componentType": 5126, "count": 2, "type": "VEC3" }
+  ],
+  "animations": [{
+    "name": "Translation",
+    "samplers": [{ "input": 0, "output": 1, "interpolation": "LINEAR" }],
+    "channels": [
+      { "sampler": 0, "target": { "node": 0, "path": "translation" } }
+    ]
+  }]
+}"#
+    .to_vec();
+    (document, output, input)
 }
 
 fn filtered_animation_glb() -> Vec<u8> {

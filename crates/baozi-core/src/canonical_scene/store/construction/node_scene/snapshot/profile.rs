@@ -1255,6 +1255,7 @@ const fn encode_source_object_kind(kind: SourceObjectKind) -> u8 {
         SourceObjectKind::Row => 17,
         SourceObjectKind::Statement => 18,
         SourceObjectKind::Segment => 19,
+        SourceObjectKind::Buffer => 20,
     }
 }
 

@@ -212,6 +212,7 @@ struct CustomAttributeAccumulator<'scope> {
 
 enum CustomAttributeData<'scope> {
     F32(MeteredVec<'scope, f32>),
+    F64(MeteredVec<'scope, f64>),
     U32(MeteredVec<'scope, u32>),
     I32(MeteredVec<'scope, i32>),
 }
@@ -2079,6 +2080,26 @@ enum ScalarValue {
 }
 
 impl ScalarValue {
+    fn to_f64(self, ctx: &ParseScope<'_>, name: &str) -> ParseResult<f64> {
+        let value = match self {
+            Self::I32(value) => f64::from(value),
+            Self::U32(value) => f64::from(value),
+            Self::F64(value) => value,
+        };
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            let _ = name;
+            Err(format_failure(
+                ctx,
+                PlyFailureCode::InvalidScalar,
+                "PLY property contains a non-finite value",
+                None,
+                Some("scalar"),
+            ))
+        }
+    }
+
     fn to_f32(self, ctx: &ParseScope<'_>, name: &str) -> ParseResult<f32> {
         let value = match self {
             Self::I32(value) => value as f32,
@@ -2203,13 +2224,21 @@ fn custom_accumulators<'scope>(
             continue;
         }
         let data = match ty {
-            ScalarType::F32 | ScalarType::F64 => {
+            ScalarType::F32 => {
                 let mut values = ctx.metered_vec(
                     ImportStorageClass::FormatNormalization,
                     "ply-custom-f32-values",
                 );
                 values.try_reserve(element.count)?;
                 CustomAttributeData::F32(values)
+            }
+            ScalarType::F64 => {
+                let mut values = ctx.metered_vec(
+                    ImportStorageClass::FormatNormalization,
+                    "ply-custom-f64-values",
+                );
+                values.try_reserve(element.count)?;
+                CustomAttributeData::F64(values)
             }
             ScalarType::U8 | ScalarType::U16 | ScalarType::U32 => {
                 let mut values = ctx.metered_vec(
@@ -2308,6 +2337,12 @@ impl CustomAttributeStorage<'_> {
                 values.as_slice(),
                 Presence::Absent,
             ),
+            CustomAttributeData::F64(values) => GeometryAttributeAuthoring::f64(
+                semantic,
+                AttributeDomain::Vertex,
+                1,
+                values.as_slice(),
+            ),
             CustomAttributeData::U32(values) => GeometryAttributeAuthoring::u32(
                 semantic,
                 AttributeDomain::Vertex,
@@ -2385,6 +2420,9 @@ fn push_custom_scalar<'scope>(
     match (&mut *data, value) {
         (CustomAttributeData::F32(values), value) => {
             values.try_push_reserved(value.to_f32(ctx, name)?)?
+        }
+        (CustomAttributeData::F64(values), value) => {
+            values.try_push_reserved(value.to_f64(ctx, name)?)?
         }
         (CustomAttributeData::U32(values), ScalarValue::U32(value)) => {
             values.try_push_reserved(value)?

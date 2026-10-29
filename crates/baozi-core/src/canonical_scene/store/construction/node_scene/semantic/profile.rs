@@ -2333,6 +2333,7 @@ fn decode_source_object_kind(value: u32) -> NodeSceneSemanticResult<SourceObject
         PROFILE_SOURCE_OBJECT_ROW => Ok(SourceObjectKind::Row),
         PROFILE_SOURCE_OBJECT_STATEMENT => Ok(SourceObjectKind::Statement),
         PROFILE_SOURCE_OBJECT_SEGMENT => Ok(SourceObjectKind::Segment),
+        PROFILE_SOURCE_OBJECT_BUFFER => Ok(SourceObjectKind::Buffer),
         _ => Err(invariant("validated profile source-object kind is unknown")),
     }
 }

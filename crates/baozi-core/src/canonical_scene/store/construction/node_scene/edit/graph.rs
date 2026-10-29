@@ -672,6 +672,12 @@ where
     };
 
     let animation = AnimationPayloadRefs {
+        clip_names: inherit_optional_leaf(
+            lane,
+            pending.input,
+            proof.animation_clip_names(),
+            &mut inherited,
+        )?,
         times: inherit_optional_leaf(lane, pending.input, proof.animation_times(), &mut inherited)?,
         values: inherit_optional_leaf(
             lane,

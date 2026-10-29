@@ -3733,6 +3733,7 @@ const fn encode_source_object_kind(kind: SourceObjectKind) -> u8 {
         SourceObjectKind::Row => PROFILE_SOURCE_OBJECT_ROW,
         SourceObjectKind::Statement => PROFILE_SOURCE_OBJECT_STATEMENT,
         SourceObjectKind::Segment => PROFILE_SOURCE_OBJECT_SEGMENT,
+        SourceObjectKind::Buffer => PROFILE_SOURCE_OBJECT_BUFFER,
     }
 }
 
@@ -3758,6 +3759,7 @@ fn decode_source_object_kind(value: u32) -> Option<SourceObjectKind> {
         PROFILE_SOURCE_OBJECT_ROW => SourceObjectKind::Row,
         PROFILE_SOURCE_OBJECT_STATEMENT => SourceObjectKind::Statement,
         PROFILE_SOURCE_OBJECT_SEGMENT => SourceObjectKind::Segment,
+        PROFILE_SOURCE_OBJECT_BUFFER => SourceObjectKind::Buffer,
         _ => return None,
     })
 }

@@ -75,6 +75,21 @@ The canonical rules are:
   `Exact`, while native same-handle metadata is only a `Hint` because the object can change during a
   read. Exact length is enforced at EOF and overrun, a hint is never an upper bound, and neither can
   raise the session or backend hard limit
+- snapshot reads reuse unused preauthorized byte capacity across legal short reads. Attempted byte
+  credit is never refunded or charged again merely because a backend returns less than requested;
+  consumed bytes record only the credibly observed completed prefix. Serial acquisition carries
+  unspent admission across resource boundaries using each existing ledger dimension's
+  `attempted - consumed` balance. Resource-class and total-byte admission are topped up independently;
+  an aggregate limit therefore bounds actual completed payload without stranding an earlier short
+  resource's unspent allowance. Attempted credit rejected by a ledger limit is never reusable
+- each read call, including EOF validation, is separately admitted as one `WorkUnits` action with a
+  cooperative control checkpoint. At an exhausted resource/backend or aggregate byte limit, a
+  nonempty one-byte EOF probe may return zero successfully; a positive result is a typed limit
+  failure and is never appended to the snapshot. This probe is validation/read work, not payload
+  storage: every successfully retained payload byte remains within preauthorized byte credit
+- a positive probe retains truthful observed excess in existing byte counters where their contracts
+  allow it; failed counter admission preserves the earlier consumed prefix without inventing
+  consumption. Exact-length truncation/overrun and backend contract failures remain typed errors
 - an opened reader returning more bytes than the provided buffer, overflowing its cumulative count,
   or violating an exact-length contract fails as a typed trusted-backend contract error before the
   import layer slices or allocates from that value

@@ -7,8 +7,9 @@ Current status: experimental parser foundation. STL, OBJ/MTL, and PLY have owned
 fixture and fuzz coverage. The glTF/GLB crate is an internal, non-admitted backend candidate: it has
 no facade feature, built-in registration, or first-party support entry until its baseline sanitizer
 and resource-admission gates pass.
-Typed Scene readers and geometry postprocessing are still in development. The current API offers
-bounded snapshots for test and debug observation.
+Scene nodes, geometry, materials, images, skins, morphs, and animation have borrowed typed readers.
+Concrete geometry postprocessing remains in development. Bounded snapshots are available separately
+for test and debug evidence.
 
 ## Goals
 
@@ -46,18 +47,24 @@ promotion evidence.
 Import bytes from memory:
 
 ```rust
-use baozi::{Importer, Result, SceneSnapshotLimits};
+use baozi::{AttributeData, Importer, Result};
 
 fn main() -> Result<()> {
     let report = Importer::new()?.read_bytes(
         "triangle.obj",
         b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
     )?;
-    let limits = SceneSnapshotLimits::try_new(16_384, 64, 1_000_000)
-        .expect("valid snapshot limits");
-    let snapshot = report.scene().capture_snapshot(limits)
-        .expect("the triangle fits the snapshot limits");
-    println!("meshes={}", snapshot.logical_mesh_count());
+    for mesh in report.scene().meshes() {
+        for primitive in mesh.primitives() {
+            if let Some(positions) = primitive.positions() {
+                if let AttributeData::DenseF32 { lanes: 3, values } = positions.data() {
+                    for position in values.chunks_exact(3) {
+                        println!("position={position:?}");
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 ```
@@ -70,6 +77,17 @@ cargo run --locked -p baozi --example import_memory_sidecars
 cargo run --locked -p baozi --example diagnostics
 cargo run --locked -p baozi --example wasm_memory
 ```
+
+Baozi requires the Rust standard library; `default-features = false` selects no built-in formats.
+The curated `default-formats` set contains STL and OBJ/MTL, while `all-formats` also enables PLY.
+Individual `format-stl`, `format-obj`, and `format-ply` features enable one parser each. Optional
+`tracing` adds import spans, and `mint` adds the current `Vec3` conversions. The examples and
+benchmarks require `format-obj`.
+
+`Importer::new()` registers every enabled built-in format. Use
+`Importer::builder_with_builtin_formats()` or `ImporterBuilder::with_builtin_formats()` to extend
+that registry before freezing it; `Importer::builder()` starts an empty registry. Format authoring
+remains in the `baozi_import` extension API.
 
 Run the import benchmark harness without collecting measurements:
 
@@ -87,6 +105,7 @@ Start here:
 - [`docs/adr/README.md`](docs/adr/README.md)
 - [`docs/adr/0001-baozi-assimp-compatible-architecture.md`](docs/adr/0001-baozi-assimp-compatible-architecture.md)
 - [`docs/model/scene-ir.md`](docs/model/scene-ir.md)
+- [Reading a validated Scene](docs/model/reading-scenes.md)
 - [`docs/model/coordinate-and-render-conventions.md`](docs/model/coordinate-and-render-conventions.md)
 - [`docs/security/parser-threat-model.md`](docs/security/parser-threat-model.md)
 - [`docs/roadmap.md`](docs/roadmap.md)

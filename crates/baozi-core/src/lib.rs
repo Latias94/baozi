@@ -74,15 +74,68 @@ pub mod scene {
     }
 }
 
+pub use appearance::{
+    AlphaCutoff, AlphaMode, ColorInterpretation, ColorInterpretationKind, LegacyMaterialFactors,
+    MaterialFactorError, MaterialFactorField, MaterialFactors, PbrMetallicRoughnessFactors,
+    PbrSpecularGlossinessFactors, ShadingModel, ShadingModelKind, SupplementalPbrFactors,
+    TextureBlendOperation, TextureChannel, TextureChannelMapping, TextureChannelSwizzle,
+    TextureCoordinateSource, TextureRole, TextureRoleKind, TextureStrength, TextureTransform,
+};
+pub use attribute::{
+    AttributeDomain, AttributeSemantic, AttributeSemanticKind, CustomAttributeSemantic,
+};
+pub use canonical_scene::store::api::read::{
+    AnimationChannelRef, AnimationClipRef, AnimationExtrapolation, AnimationInterpolation,
+    AnimationTarget, AnimationTimeDomain,
+};
+pub use canonical_scene::store::api::read::{
+    AttributeData, AttributeRef, AttributeSemanticRef, CameraRef, ImageRef, LightRef,
+    LogicalMeshRef, MaterialBindingRef, MaterialRef, MeshInstanceRef, NodeChildren, NodeRef,
+    PrimitiveRef, SamplerRef, SceneSpaceRef, TangentBasisRef, TangentEncodingRef, TextureRef,
+};
+pub use canonical_scene::store::api::read::{
+    InfluenceRef, InfluenceRowRef, InfluenceRows, MorphDeltaData, MorphDeltaRef,
+    MorphTargetDefinitionRef, MorphTargetRef, SkinRef,
+};
 pub use canonical_scene::store::api::scene::{
     SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
 };
+pub use canonical_scene::store::api::validation::{
+    AppearanceBehaviorKind, AppearanceBuildResource, AppearanceLimitDimension, EntityNameError,
+    MaterialFactorGroup, SceneAnimationRateKind, SceneAnimationSamplePart, SceneAnimationTarget,
+    SceneAppearanceRule, SceneAuthoredProfileOwner, SceneInputCollection, SceneLightEmissionRule,
+    SceneProfileOwner, SceneValidationDomain, SceneValidationError, SceneValidationLimit,
+    TextureStrengthRequirement,
+};
+pub use deform::{
+    MorphDeltaSemantic, SkinMatrixCorrection, SkinMatrixCorrectionError, SkinMatrixSpace,
+    SkinMatrixSpaces,
+};
 pub use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSeverity, SourceLocation};
+pub use entity::{
+    AuthoredTransform, AuthoredTransformError, AuthoredTransformKind, CameraProjection,
+    CameraProjectionError, CameraProjectionKind, LightError, LightKind, LightKindCategory,
+    TrsTransform,
+};
+pub use extension::{ExtensionSchemaId, ExtensionSchemaIdError};
 pub use format_id::{FormatId, FormatIdError, MAX_FORMAT_ID_LEN};
+pub use geometry::TopologyKind;
+pub use identity::AnimationClipId;
 pub use identity::SceneGenerationId;
+pub use identity::{
+    CameraId, ImageId, LightId, LogicalMeshId, MaterialId, MeshInstanceId, NodeId, PrimitiveId,
+    SamplerId, SceneEntityKind, SceneLookupError, TextureId,
+};
+pub use identity::{MorphTargetId, SkinId};
+pub use image::{MipmapFilter, SamplerState, TexelFilter, TextureAddressMode};
 pub use math::{Aabb, Color, Mat4, Quat, Vec2, Vec3, Vec4};
+pub use namespaced::{NamespacedName, NamespacedNameError};
 pub use ordered_map::{
     OrderedMap, OrderedMapCapacityPlan, OrderedMapError, OrderedMapIter, PreparedOrderedMapCapacity,
+};
+pub use scene_space::{
+    Axis, FrontFaceWinding, Handedness, SceneSpace, SceneSpaceField, SceneSpaceValidationError,
+    TangentBasisConvention, TangentHandednessEncoding, TransformConvention, UvOrigin,
 };
 pub use validation_control::{
     SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork,

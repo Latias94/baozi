@@ -1,10 +1,54 @@
 mod common;
 
-use baozi_import::ResourceLimits;
-use common::{
-    TestResult, import_assets, import_bytes, scene_snapshot, snapshot_line,
-    snapshot_line_containing,
+use baozi_import::{
+    ImportCause, ImportDiagnostic, ImportLossDisposition, ImportLossEvidence, ImportLossKind,
+    ImportLossSubject, LossPolicy, ResourceLimits, SceneSnapshot, ScopeAbortCause,
+    SourceScopeEntityKind,
 };
+use common::{
+    TestResult, expected_failure, expected_success, import_assets, import_bytes,
+    import_bytes_result_with_loss_policy, scene_snapshot, snapshot_line, snapshot_line_containing,
+};
+
+const PARTIAL_TEXCOORD_OBJ: &[u8] =
+    b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2//1 3/3/1\n";
+const PARTIAL_NORMAL_OBJ: &[u8] =
+    b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2 3/3/1\n";
+const PARTIAL_BOTH_OBJ: &[u8] = b"g mixed\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2/1 3/3/1\nf 1 2 3\n";
+
+fn assert_triangle_positions(snapshot: &SceneSnapshot) {
+    assert!(
+        snapshot_line_containing(snapshot, "semantic=position").contains(concat!(
+            "values(present,total=9)=[",
+            "0x00000000,0x00000000,0x00000000,",
+            "0x3f800000,0x00000000,0x00000000,",
+            "0x00000000,0x3f800000,0x00000000]"
+        ))
+    );
+}
+
+fn assert_partial_channel_loss(
+    evidence: &ImportLossEvidence,
+    diagnostic: &ImportDiagnostic,
+    source: &str,
+    segment_index: usize,
+    channel: &str,
+    disposition: ImportLossDisposition,
+) {
+    let code = format!("obj.partial_{channel}_channel");
+    let object_path = format!("/segments/{segment_index}/attributes/{channel}");
+    assert_eq!(evidence.kind(), ImportLossKind::SourceSemanticLoss);
+    assert_eq!(
+        evidence.subject(),
+        ImportLossSubject::SourceEntity(SourceScopeEntityKind::Mesh)
+    );
+    assert_eq!(evidence.code().as_str(), code);
+    assert_eq!(evidence.source().as_str(), source);
+    assert_eq!(evidence.raw_range(), None);
+    assert_eq!(evidence.disposition(), disposition);
+    assert_eq!(diagnostic.code(), evidence.code());
+    assert_eq!(diagnostic.object_path(), Some(object_path.as_str()));
+}
 
 #[test]
 fn imports_one_triangle_obj() -> TestResult<()> {
@@ -14,6 +58,7 @@ fn imports_one_triangle_obj() -> TestResult<()> {
     let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
+    assert!(report.loss_evidence().is_empty());
     assert_eq!(snapshot.node_count(), 1);
     assert_eq!(snapshot.root_count(), 1);
     assert_eq!(snapshot.logical_mesh_count(), 1);
@@ -59,6 +104,7 @@ fn preserves_corner_uv_and_normal_domains_without_duplicating_positions() -> Tes
     let snapshot = scene_snapshot(&report)?;
 
     assert!(report.diagnostics().is_empty());
+    assert!(report.loss_evidence().is_empty());
     assert_eq!(snapshot.attribute_count(), 3);
     assert_eq!(snapshot.primitive_index_count(), 6);
     assert_eq!(snapshot.f32_scalar_count(), 39);
@@ -141,25 +187,124 @@ fn isolates_corner_source_projection_between_segments() -> TestResult<()> {
 }
 
 #[test]
-fn retains_complete_texcoords_when_normals_are_partial() -> TestResult<()> {
-    let bytes = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2 3/3/1\n";
+fn partial_channels_require_source_semantic_loss_authority() -> TestResult<()> {
+    let cases = [
+        ("partial-uv.obj", PARTIAL_TEXCOORD_OBJ, "texcoord"),
+        ("partial-normal.obj", PARTIAL_NORMAL_OBJ, "normal"),
+        ("partial-both.obj", PARTIAL_BOTH_OBJ, "texcoord"),
+    ];
+    for (source, bytes, first_partial_channel) in cases {
+        for loss_policy in [
+            LossPolicy::preserve_or_fail(),
+            LossPolicy::preserve_or_fail().allow(ImportLossKind::FormatRecovery),
+        ] {
+            let failure = expected_failure(import_bytes_result_with_loss_policy(
+                source,
+                bytes,
+                ResourceLimits::default(),
+                loss_policy,
+            )?);
 
-    let report = import_bytes("partial-normal.obj", bytes)?;
+            assert_eq!(failure.loss_evidence().len(), 1);
+            assert_eq!(failure.diagnostics().len(), 1);
+            assert!(matches!(
+                failure.cause(),
+                ImportCause::Scope(abort)
+                    if matches!(
+                        abort.cause(),
+                        ScopeAbortCause::SourceSemanticLossRejectedByLossPolicy { code }
+                            if *code == failure.loss_evidence()[0].code()
+                    )
+            ));
+            assert_partial_channel_loss(
+                &failure.loss_evidence()[0],
+                &failure.diagnostics()[0],
+                source,
+                0,
+                first_partial_channel,
+                ImportLossDisposition::RejectedByLossPolicy,
+            );
+            assert_eq!(failure.ledger().committed_canonical_members(), 0);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn explicit_loss_authority_retains_complete_normals_when_texcoords_are_partial() -> TestResult<()> {
+    let report = expected_success(import_bytes_result_with_loss_policy(
+        "partial-uv.obj",
+        PARTIAL_TEXCOORD_OBJ,
+        ResourceLimits::default(),
+        LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss),
+    )?);
     let snapshot = scene_snapshot(&report)?;
 
     assert_eq!(snapshot.attribute_count(), 2);
-    assert!(snapshot.preview().contains("semantic=texcoord"));
+    assert!(!snapshot.preview().contains("semantic=texcoord"));
+    assert_triangle_positions(&snapshot);
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains(concat!(
+        "topology=triangle_list vertices=3 corners=3 faces=1 ",
+        "polygon_boundaries(absent,total=0)=[] indices(present,total=3)=[0,1,2]"
+    )));
+    assert!(
+        snapshot_line_containing(&snapshot, "semantic=normal").contains(concat!(
+            "domain=corner scalar=f32 lanes=3 normalization=none ",
+            "payload=dense elements=3 explicit=3 canonical_scalars=9 ",
+            "values(present,total=9)=[",
+            "0x00000000,0x00000000,0x3f800000,",
+            "0x00000000,0x00000000,0x3f800000,",
+            "0x00000000,0x00000000,0x3f800000]"
+        ))
+    );
+    assert_eq!(report.loss_evidence().len(), 1);
+    assert_eq!(report.diagnostics().len(), 1);
+    assert_partial_channel_loss(
+        &report.loss_evidence()[0],
+        &report.diagnostics()[0],
+        "partial-uv.obj",
+        0,
+        "texcoord",
+        ImportLossDisposition::Applied,
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_loss_authority_retains_complete_texcoords_when_normals_are_partial() -> TestResult<()> {
+    let report = expected_success(import_bytes_result_with_loss_policy(
+        "partial-normal.obj",
+        PARTIAL_NORMAL_OBJ,
+        ResourceLimits::default(),
+        LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss),
+    )?);
+    let snapshot = scene_snapshot(&report)?;
+
+    assert_eq!(snapshot.attribute_count(), 2);
     assert!(!snapshot.preview().contains("semantic=normal"));
+    assert_triangle_positions(&snapshot);
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains(concat!(
+        "topology=triangle_list vertices=3 corners=3 faces=1 ",
+        "polygon_boundaries(absent,total=0)=[] indices(present,total=3)=[0,1,2]"
+    )));
     assert!(
         snapshot_line_containing(&snapshot, "semantic=texcoord").contains(concat!(
             "domain=corner scalar=f32 lanes=2 normalization=none ",
-            "payload=dense elements=3 explicit=3 canonical_scalars=6"
+            "payload=dense elements=3 explicit=3 canonical_scalars=6 ",
+            "values(present,total=6)=[",
+            "0x00000000,0x00000000,0x3f800000,0x00000000,",
+            "0x00000000,0x3f800000]"
         ))
     );
+    assert_eq!(report.loss_evidence().len(), 1);
     assert_eq!(report.diagnostics().len(), 1);
-    assert_eq!(
-        report.diagnostics()[0].code().as_str(),
-        "obj.partial_normal_channel"
+    assert_partial_channel_loss(
+        &report.loss_evidence()[0],
+        &report.diagnostics()[0],
+        "partial-normal.obj",
+        0,
+        "normal",
+        ImportLossDisposition::Applied,
     );
     Ok(())
 }
@@ -207,28 +352,72 @@ fn supports_negative_face_indices() -> TestResult<()> {
 }
 
 #[test]
-fn partial_uv_and_normal_channels_are_diagnosed_and_omitted() -> TestResult<()> {
-    let bytes = b"g mixed\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2/1 3/3/1\nf 1 2 3\n";
-
-    let report = import_bytes("partial.obj", bytes)?;
+fn explicit_loss_authority_drops_partial_uv_and_normal_channels() -> TestResult<()> {
+    let report = expected_success(import_bytes_result_with_loss_policy(
+        "partial-both.obj",
+        PARTIAL_BOTH_OBJ,
+        ResourceLimits::default(),
+        LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss),
+    )?);
     let snapshot = scene_snapshot(&report)?;
-    let diagnostics = report.diagnostics();
 
     assert_eq!(snapshot.logical_mesh_count(), 1);
     assert_eq!(snapshot.attribute_count(), 1);
-    assert!(snapshot_line(&snapshot, "primitive[0]").contains("vertices=3 corners=6 faces=2"));
+    assert_triangle_positions(&snapshot);
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains(concat!(
+        "topology=triangle_list vertices=3 corners=6 faces=2 ",
+        "polygon_boundaries(absent,total=0)=[] indices(present,total=6)=[0,1,2,0,1,2]"
+    )));
     assert!(!snapshot.preview().contains("semantic=texcoord"));
     assert!(!snapshot.preview().contains("semantic=normal"));
-    assert_eq!(diagnostics.len(), 2);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code().as_str() == "obj.partial_texcoord_channel")
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code().as_str() == "obj.partial_normal_channel")
+    assert_eq!(report.loss_evidence().len(), 2);
+    assert_eq!(report.diagnostics().len(), 2);
+    for (index, channel) in ["texcoord", "normal"].into_iter().enumerate() {
+        assert_partial_channel_loss(
+            &report.loss_evidence()[index],
+            &report.diagnostics()[index],
+            "partial-both.obj",
+            0,
+            channel,
+            ImportLossDisposition::Applied,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn partial_channel_loss_is_scoped_to_its_segment() -> TestResult<()> {
+    let bytes = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\ng complete\nf 1/1/1 2/2/1 3/3/1\ng partial\nf 1/1/1 2//1 3/3/1\n";
+    let report = expected_success(import_bytes_result_with_loss_policy(
+        "partial-segment.obj",
+        bytes,
+        ResourceLimits::default(),
+        LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss),
+    )?);
+    let snapshot = scene_snapshot(&report)?;
+
+    assert_eq!(snapshot.logical_mesh_count(), 2);
+    assert_eq!(snapshot.attribute_count(), 5);
+    assert!(snapshot_line(&snapshot, "attribute[2]").contains("semantic=texcoord"));
+    assert!(snapshot_line(&snapshot, "attribute[3]").contains("semantic=position"));
+    assert!(snapshot_line(&snapshot, "attribute[4]").contains("semantic=normal"));
+    for index in 0..2 {
+        assert!(
+            snapshot_line(&snapshot, &format!("primitive[{index}]")).contains(concat!(
+                "topology=triangle_list vertices=3 corners=3 faces=1 ",
+                "polygon_boundaries(absent,total=0)=[] indices(present,total=3)=[0,1,2]"
+            ))
+        );
+    }
+    assert_eq!(report.loss_evidence().len(), 1);
+    assert_eq!(report.diagnostics().len(), 1);
+    assert_partial_channel_loss(
+        &report.loss_evidence()[0],
+        &report.diagnostics()[0],
+        "partial-segment.obj",
+        1,
+        "texcoord",
+        ImportLossDisposition::Applied,
     );
     Ok(())
 }

@@ -65,6 +65,7 @@ pub(in super::super) const PROFILE_SOURCE_OBJECT_ELEMENT: u8 = 16;
 pub(in super::super) const PROFILE_SOURCE_OBJECT_ROW: u8 = 17;
 pub(in super::super) const PROFILE_SOURCE_OBJECT_STATEMENT: u8 = 18;
 pub(in super::super) const PROFILE_SOURCE_OBJECT_SEGMENT: u8 = 19;
+pub(in super::super) const PROFILE_SOURCE_OBJECT_BUFFER: u8 = 20;
 
 pub(in super::super) const PROFILE_DIGEST_SHA256: u8 = 0;
 pub(in super::super) const PROFILE_DIGEST_BLAKE3: u8 = 1;

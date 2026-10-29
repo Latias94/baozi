@@ -118,14 +118,15 @@ impl<'a> AnimationChannelAuthoring<'a> {
 
 /// One source animation clip retaining a contiguous range of source channels.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AnimationClipAuthoring {
+pub struct AnimationClipAuthoring<'a> {
     source_index: u32,
+    name: Presence<&'a str>,
     duration: f64,
     time_domain: AnimationTimeDomainAuthoring,
     channels: AuthoringRange,
 }
 
-impl AnimationClipAuthoring {
+impl<'a> AnimationClipAuthoring<'a> {
     pub const fn new(
         source_index: u32,
         duration: f64,
@@ -134,10 +135,21 @@ impl AnimationClipAuthoring {
     ) -> Self {
         Self {
             source_index,
+            name: Presence::Absent,
             duration,
             time_domain,
             channels,
         }
+    }
+
+    /// Retains an authored name, including an explicitly authored empty string.
+    pub const fn with_name(mut self, name: &'a str) -> Self {
+        self.name = Presence::Present(name);
+        self
+    }
+
+    pub(in crate::canonical_scene::store) const fn name(self) -> Presence<&'a str> {
+        self.name
     }
 
     pub(in crate::canonical_scene::store) const fn source_index(self) -> u32 {
@@ -162,7 +174,7 @@ impl AnimationClipAuthoring {
 /// Borrowed animation-domain input supplied by a format adapter.
 #[derive(Debug, Clone, Copy)]
 pub struct AnimationAuthoringBatch<'a> {
-    clips: &'a [AnimationClipAuthoring],
+    clips: &'a [AnimationClipAuthoring<'a>],
     channels: &'a [AnimationChannelAuthoring<'a>],
 }
 
@@ -172,13 +184,13 @@ impl<'a> AnimationAuthoringBatch<'a> {
     }
 
     pub const fn new(
-        clips: &'a [AnimationClipAuthoring],
+        clips: &'a [AnimationClipAuthoring<'a>],
         channels: &'a [AnimationChannelAuthoring<'a>],
     ) -> Self {
         Self { clips, channels }
     }
 
-    pub(in crate::canonical_scene::store) const fn clips(self) -> &'a [AnimationClipAuthoring] {
+    pub(in crate::canonical_scene::store) const fn clips(self) -> &'a [AnimationClipAuthoring<'a>] {
         self.clips
     }
 

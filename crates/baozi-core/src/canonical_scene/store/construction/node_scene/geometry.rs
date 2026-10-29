@@ -17,9 +17,10 @@ use crate::canonical_scene::store::schema::geometry::{
     GEOMETRY_ATTRIBUTE_FIELD_COUNT, GEOMETRY_LOGICAL_MESH_FIELD_COUNT,
     GEOMETRY_MESH_INSTANCE_FIELD_COUNT, GEOMETRY_NORMALIZATION_NONE, GEOMETRY_PAYLOAD_DENSE,
     GEOMETRY_PAYLOAD_SPARSE, GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32,
-    GEOMETRY_SCALAR_I32, GEOMETRY_SCALAR_U32, GeometryAttributeSemanticNameSchema,
-    GeometryAttributeTableSchema, GeometryF32ValuesSchema, GeometryI32ValuesSchema,
-    GeometryLogicalMeshNameSchema, GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
+    GEOMETRY_SCALAR_F64, GEOMETRY_SCALAR_I32, GEOMETRY_SCALAR_U32,
+    GeometryAttributeSemanticNameSchema, GeometryAttributeTableSchema, GeometryF32ValuesSchema,
+    GeometryF64ValuesSchema, GeometryI32ValuesSchema, GeometryLogicalMeshNameSchema,
+    GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema,
     GeometryPolygonBoundariesSchema, GeometryPrimitiveIndicesSchema, GeometryPrimitiveTableSchema,
     GeometrySparseF32DefaultsSchema, GeometrySparseI32DefaultsSchema, GeometrySparseIndicesSchema,
     GeometrySparseU32DefaultsSchema, GeometryU32ValuesSchema, encode_geometry_domain,
@@ -53,6 +54,7 @@ pub(super) struct GeometryMaterializationPlans {
     attribute_count: u32,
     mesh_instance_count: u32,
     f32_scalar_count: u64,
+    f64_scalar_count: u64,
     u32_scalar_count: u64,
     i32_scalar_count: u64,
     payload_block_count: u32,
@@ -68,6 +70,7 @@ impl GeometryMaterializationPlans {
         let attribute_count = batch.attribute_count();
         let mesh_instance_count = batch.mesh_instance_count();
         let f32_scalar_count = batch.f32_scalar_count();
+        let f64_scalar_count = batch.f64_scalar_count();
         let u32_scalar_count = batch.u32_scalar_count();
         let i32_scalar_count = batch.i32_scalar_count();
         let logical_meshes =
@@ -117,6 +120,7 @@ impl GeometryMaterializationPlans {
             attribute_count,
             mesh_instance_count,
             f32_scalar_count,
+            f64_scalar_count,
             u32_scalar_count,
             i32_scalar_count,
             payload_block_count,
@@ -159,6 +163,7 @@ impl GeometryMaterializationPlans {
     pub(super) fn validation_work_units(&self) -> Result<u64, StorePlanError> {
         checked_validation_work_sum([
             self.f32_scalar_count,
+            self.f64_scalar_count,
             self.u32_scalar_count,
             self.i32_scalar_count,
             optional_utf8_validation_work(self.logical_mesh_names)?,
@@ -189,6 +194,7 @@ impl PrimitiveLeafRefs {
 enum AttributeValuesRef {
     Absent,
     F32(CanonicalBlockRef<GeometryF32ValuesSchema>),
+    F64(CanonicalBlockRef<GeometryF64ValuesSchema>),
     U32(CanonicalBlockRef<GeometryU32ValuesSchema>),
     I32(CanonicalBlockRef<GeometryI32ValuesSchema>),
 }
@@ -713,6 +719,12 @@ where
                 }
                 Presence::Absent | Presence::Present(_) => {}
             },
+            GeometryAttributePayloadAuthoring::DenseF64 { values, .. } => {
+                if !values.is_empty() {
+                    target.values = AttributeValuesRef::F64(retain_f64_sequence(lane, values)?);
+                    record_payload_block(&mut payload_block_count, failure)?;
+                }
+            }
             GeometryAttributePayloadAuthoring::DenseU32 { values, .. } => {
                 if !values.is_empty() {
                     target.values = AttributeValuesRef::U32(retain_u32_sequence(
@@ -885,6 +897,22 @@ where
     .map(CanonicalBlockRef::from_store)
 }
 
+fn retain_f64_sequence<'lane, O, PP, U, L>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
+    values: &[f64],
+) -> Result<CanonicalBlockRef<GeometryF64ValuesSchema>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let plan = SequencePlan::<f64>::new(values.len()).map_err(StoreRuntimeError::Plan)?;
+    lane.try_retain_sequence(plan, GeometryF64ValuesSchema, |control| {
+        control.extend_from_slice(values)
+    })
+    .map(CanonicalBlockRef::from_store)
+}
+
 fn retain_i32_sequence<'lane, O, PP, U, L, Tag>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     values: &[i32],
@@ -962,6 +990,7 @@ where
             let domain = encode_geometry_domain(attribute.domain()).ok_or(failure)?;
             let scalar_kind = match attribute.scalar_kind() {
                 GeometryAttributeScalarKind::F32 => GEOMETRY_SCALAR_F32,
+                GeometryAttributeScalarKind::F64 => GEOMETRY_SCALAR_F64,
                 GeometryAttributeScalarKind::U32 => GEOMETRY_SCALAR_U32,
                 GeometryAttributeScalarKind::I32 => GEOMETRY_SCALAR_I32,
             };
@@ -984,6 +1013,9 @@ where
                 match payload_refs.values {
                     AttributeValuesRef::Absent => row.write_scalar(0_u8)?,
                     AttributeValuesRef::F32(reference) => {
+                        row.write_sequence_ref(reference.into_store())?;
+                    }
+                    AttributeValuesRef::F64(reference) => {
                         row.write_sequence_ref(reference.into_store())?;
                     }
                     AttributeValuesRef::U32(reference) => {

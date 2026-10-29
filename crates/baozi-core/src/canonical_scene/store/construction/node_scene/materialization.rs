@@ -86,6 +86,7 @@ use super::scratch::{
     ScopedNodeSceneValidationScratchOwner,
 };
 mod spatial;
+mod validation;
 #[cfg(test)]
 use super::NodeSceneBuildFaults;
 use super::{
@@ -386,6 +387,48 @@ impl NodeSceneLaneRejection {
 
     pub const fn is_authoring_rejection(&self) -> bool {
         !matches!(self.0, NodeSceneConstructionRejection::Materialization(_))
+    }
+
+    /// Returns producer-local semantic detail without allocating on the rejection path.
+    pub fn scene_validation_error(&self) -> Option<crate::SceneValidationError> {
+        validation::scene_validation_error(&self.0)
+    }
+
+    /// Separates authoring-lane interruption from a producer semantic rejection.
+    pub fn control_cause(&self) -> Option<&baozi_operation::ControlCause> {
+        use crate::canonical_scene::store::production::{
+            AnimationAuthoringFailure, AppearanceAuthoringFailure, DeformationAuthoringFailure,
+            GeometryAuthoringFailure, NodeAuthoringFailure, ProfileAuthoringFailure,
+            SpatialAuthoringFailure,
+        };
+
+        let runtime = match &self.0 {
+            NodeSceneConstructionRejection::SpatialAuthoring(SpatialAuthoringFailure::Control(
+                cause,
+            ))
+            | NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Control(cause))
+            | NodeSceneConstructionRejection::AppearanceAuthoring(
+                AppearanceAuthoringFailure::Control(cause),
+            )
+            | NodeSceneConstructionRejection::GeometryAuthoring(
+                GeometryAuthoringFailure::Control(cause),
+            )
+            | NodeSceneConstructionRejection::DeformationAuthoring(
+                DeformationAuthoringFailure::Control(cause),
+            )
+            | NodeSceneConstructionRejection::AnimationAuthoring(
+                AnimationAuthoringFailure::Control(cause),
+            )
+            | NodeSceneConstructionRejection::ProfileAuthoring(ProfileAuthoringFailure::Control(
+                cause,
+            ))
+            | NodeSceneConstructionRejection::Materialization(cause) => cause,
+            _ => return None,
+        };
+        match runtime {
+            StoreRuntimeError::Control(cause) => Some(cause),
+            _ => None,
+        }
     }
 
     pub(super) fn into_inner(self) -> NodeSceneConstructionRejection<StoreRuntimeError> {

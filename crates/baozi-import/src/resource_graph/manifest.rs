@@ -1,6 +1,7 @@
 use crate::dependency::{DependencyRequirement, DependencyRoleId};
 use crate::metered_storage::AccountedVec;
 use baozi_io::AssetPath;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::fmt;
 
@@ -24,6 +25,7 @@ impl ManifestDigest {
         self.0
     }
 
+    #[cfg(test)]
     pub(super) fn of(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
     }
@@ -32,7 +34,7 @@ impl ManifestDigest {
         Self([0; 32])
     }
 
-    pub(super) const fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub(crate) const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 }

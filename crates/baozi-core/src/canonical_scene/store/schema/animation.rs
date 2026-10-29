@@ -1,6 +1,11 @@
 //! Private canonical Scene animation schema.
+//!
+//! Revision 2 retains clip names in one shared UTF-8 leaf. Directory fields 19..22
+//! describe its byte count, presence, and reference; clip fields 9..13 describe
+//! name presence, byte offset, byte count, and the same leaf reference. Empty names
+//! keep presence set with zero byte count and a zero reference sentinel.
 
-use baozi_operation::{RecordBlock, ScalarSequence};
+use baozi_operation::{RecordBlock, ScalarSequence, Utf8Block};
 
 use super::CanonicalSchema;
 use crate::canonical_scene::store::production::{
@@ -8,9 +13,9 @@ use crate::canonical_scene::store::production::{
     AnimationTimeDomainAuthoring, Presence,
 };
 
-pub(in super::super) const ANIMATION_SCHEMA_REVISION: u32 = 1;
-pub(in super::super) const ANIMATION_DIRECTORY_FIELD_COUNT: usize = 19;
-pub(in super::super) const ANIMATION_CLIP_FIELD_COUNT: usize = 9;
+pub(in super::super) const ANIMATION_SCHEMA_REVISION: u32 = 2;
+pub(in super::super) const ANIMATION_DIRECTORY_FIELD_COUNT: usize = 22;
+pub(in super::super) const ANIMATION_CLIP_FIELD_COUNT: usize = 13;
 pub(in super::super) const ANIMATION_CHANNEL_FIELD_COUNT: usize = 23;
 
 pub(in super::super) const ANIMATION_TIME_DOMAIN_SECONDS: u8 = 0;
@@ -100,6 +105,9 @@ pub(in super::super) mod animation_directory_field {
     pub(crate) const OUT_TANGENT_SCALAR_COUNT: usize = 16;
     pub(crate) const OUT_TANGENTS_PRESENCE: usize = 17;
     pub(crate) const OUT_TANGENTS: usize = 18;
+    pub(crate) const CLIP_NAME_BYTE_COUNT: usize = 19;
+    pub(crate) const CLIP_NAMES_PRESENCE: usize = 20;
+    pub(crate) const CLIP_NAMES: usize = 21;
 }
 
 pub(in super::super) mod animation_clip_field {
@@ -112,6 +120,10 @@ pub(in super::super) mod animation_clip_field {
     pub(crate) const CHANNEL_COUNT: usize = 6;
     pub(crate) const CHANNELS_PRESENCE: usize = 7;
     pub(crate) const CHANNELS: usize = 8;
+    pub(crate) const NAME_PRESENCE: usize = 9;
+    pub(crate) const NAME_OFFSET: usize = 10;
+    pub(crate) const NAME_COUNT: usize = 11;
+    pub(crate) const NAMES: usize = 12;
 }
 
 pub(in super::super) mod animation_channel_field {
@@ -147,6 +159,9 @@ pub(in super::super) struct AnimationDirectorySchema;
 pub(in super::super) struct AnimationClipTableSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(in super::super) struct AnimationClipNameSchema;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in super::super) struct AnimationChannelTableSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -167,6 +182,10 @@ impl CanonicalSchema for AnimationDirectorySchema {
 
 impl CanonicalSchema for AnimationClipTableSchema {
     type StoreKind = RecordBlock;
+}
+
+impl CanonicalSchema for AnimationClipNameSchema {
+    type StoreKind = Utf8Block;
 }
 
 impl CanonicalSchema for AnimationChannelTableSchema {

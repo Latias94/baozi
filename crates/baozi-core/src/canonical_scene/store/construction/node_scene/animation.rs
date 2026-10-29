@@ -4,7 +4,7 @@ use baozi_operation::__retained_store_integration::activation::{
 use baozi_operation::{
     OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, RecordPlan, ScalarSequence,
     SequencePlan, StoreBuildError, StoreControlledError, StorePlanError, StoreRuntimeError,
-    StoredScalar,
+    StoredScalar, Utf8Plan,
 };
 
 use crate::canonical_scene::store::production::{Presence, ValidatedAnimationBatch};
@@ -12,10 +12,10 @@ use crate::canonical_scene::store::schema::animation::{
     ANIMATION_CHANNEL_FIELD_COUNT, ANIMATION_CLIP_FIELD_COUNT, ANIMATION_DIRECTORY_FIELD_COUNT,
     ANIMATION_SCHEMA_REVISION, ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS,
     ANIMATION_TARGET_NODE_ROTATION, ANIMATION_TARGET_NODE_SCALE, ANIMATION_TARGET_NODE_TRANSLATION,
-    AnimationChannelTableSchema, AnimationClipTableSchema, AnimationDirectorySchema,
-    AnimationInTangentsSchema, AnimationOutTangentsSchema, AnimationTimesSchema,
-    AnimationValuesSchema, encode_animation_extrapolation, encode_animation_interpolation,
-    encode_animation_target_kind, encode_animation_time_domain,
+    AnimationChannelTableSchema, AnimationClipNameSchema, AnimationClipTableSchema,
+    AnimationDirectorySchema, AnimationInTangentsSchema, AnimationOutTangentsSchema,
+    AnimationTimesSchema, AnimationValuesSchema, encode_animation_extrapolation,
+    encode_animation_interpolation, encode_animation_target_kind, encode_animation_time_domain,
 };
 use crate::canonical_scene::store::schema::deformation::DeformationMeshInstanceTableSchema;
 use crate::canonical_scene::store::schema::{
@@ -25,7 +25,7 @@ use crate::canonical_scene::store::validation::AnimationMeteredCounts;
 
 use super::{
     checked_validation_work_sum, optional_record_validation_work,
-    optional_sequence_validation_work, record_validation_work,
+    optional_sequence_validation_work, optional_utf8_validation_work, record_validation_work,
 };
 
 pub(super) struct AnimationMaterializationPlans {
@@ -35,8 +35,10 @@ pub(super) struct AnimationMaterializationPlans {
     values: Option<SequencePlan<f32>>,
     in_tangents: Option<SequencePlan<f32>>,
     out_tangents: Option<SequencePlan<f32>>,
+    clip_names: Option<Utf8Plan>,
     directory: RecordPlan,
     clip_count: u32,
+    clip_name_byte_count: u32,
     channel_count: u32,
     time_scalar_count: u64,
     value_scalar_count: u64,
@@ -50,6 +52,7 @@ pub(super) struct AnimationMaterializationPlans {
 impl AnimationMaterializationPlans {
     pub(super) fn new<R>(batch: &ValidatedAnimationBatch<'_, R>) -> Result<Self, StorePlanError> {
         let clip_count = batch.clip_count();
+        let clip_name_byte_count = batch.clip_name_byte_count();
         let channel_count = batch.channel_count();
         let time_scalar_count = batch.time_scalar_count();
         let value_scalar_count = batch.value_scalar_count();
@@ -62,12 +65,20 @@ impl AnimationMaterializationPlans {
         let values = sequence_plan_if_nonempty(value_scalar_count)?;
         let in_tangents = sequence_plan_if_nonempty(in_tangent_scalar_count)?;
         let out_tangents = sequence_plan_if_nonempty(out_tangent_scalar_count)?;
+        let clip_names = if clip_name_byte_count == 0 {
+            None
+        } else {
+            Some(Utf8Plan::new(
+                usize::try_from(clip_name_byte_count).map_err(|_| StorePlanError::SizeOverflow)?,
+            )?)
+        };
 
         let payload_block_count = [
             times.is_some(),
             values.is_some(),
             in_tangents.is_some(),
             out_tangents.is_some(),
+            clip_names.is_some(),
         ]
         .into_iter()
         .try_fold(0_u32, |count, present| {
@@ -109,8 +120,10 @@ impl AnimationMaterializationPlans {
             values,
             in_tangents,
             out_tangents,
+            clip_names,
             directory: RecordPlan::new(1, ANIMATION_DIRECTORY_FIELD_COUNT)?,
             clip_count,
+            clip_name_byte_count,
             channel_count,
             time_scalar_count,
             value_scalar_count,
@@ -167,6 +180,7 @@ impl AnimationMaterializationPlans {
             self.in_tangent_scalar_count,
             self.out_tangent_scalar_count,
             self.payload_block_count,
+            self.clip_name_byte_count,
         )
     }
 
@@ -178,12 +192,14 @@ impl AnimationMaterializationPlans {
             optional_sequence_validation_work(self.values)?,
             optional_sequence_validation_work(self.in_tangents)?,
             optional_sequence_validation_work(self.out_tangents)?,
+            optional_utf8_validation_work(self.clip_names)?,
             record_validation_work(self.directory)?,
         ])
     }
 
     fn matches_batch<R>(&self, batch: &ValidatedAnimationBatch<'_, R>) -> bool {
         self.clip_count == batch.clip_count()
+            && self.clip_name_byte_count == batch.clip_name_byte_count()
             && self.channel_count == batch.channel_count()
             && self.time_scalar_count == batch.time_scalar_count()
             && self.value_scalar_count == batch.value_scalar_count()
@@ -229,6 +245,8 @@ impl RetainedAnimationRefs {
 
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct AnimationPayloadRefs {
+    pub(in crate::canonical_scene::store) clip_names:
+        Option<CanonicalBlockRef<AnimationClipNameSchema>>,
     pub(in crate::canonical_scene::store) times: Option<CanonicalBlockRef<AnimationTimesSchema>>,
     pub(in crate::canonical_scene::store) values: Option<CanonicalBlockRef<AnimationValuesSchema>>,
     pub(in crate::canonical_scene::store) in_tangents:
@@ -300,7 +318,32 @@ where
         )?),
         None => None,
     };
+    let clip_names = match plans.clip_names {
+        Some(plan) => Some(CanonicalBlockRef::from_store(lane.try_retain_utf8(
+            plan,
+            AnimationClipNameSchema,
+            |control| {
+                let mut offset = 0_u32;
+                for index in 0..usize::try_from(plans.clip_count).map_err(|_| failure)? {
+                    let clip = batch.clip(index).ok_or(failure)?;
+                    if clip.name_offset() != offset {
+                        return Err(failure.into());
+                    }
+                    if let Presence::Present(name) = clip.name() {
+                        control.write_str(name)?;
+                    }
+                    offset = offset.checked_add(clip.name_count()).ok_or(failure)?;
+                }
+                if offset != plans.clip_name_byte_count {
+                    return Err(failure.into());
+                }
+                Ok(())
+            },
+        )?)),
+        None => None,
+    };
     let payloads = AnimationPayloadRefs {
+        clip_names,
         times,
         values,
         in_tangents,
@@ -315,7 +358,13 @@ where
     };
     let clips = match plans.clips {
         Some(plan) => Some(retain_animation_clips(
-            lane, plan, plans, batch, channels, failure,
+            lane,
+            plan,
+            plans,
+            batch,
+            channels,
+            payloads.clip_names,
+            failure,
         )?),
         None => None,
     };
@@ -500,12 +549,14 @@ where
     .map(CanonicalBlockRef::from_store)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn retain_animation_clips<'lane, O, PP, U, L, R>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: RecordPlan,
     plans: &AnimationMaterializationPlans,
     batch: &ValidatedAnimationBatch<'_, R>,
     channels: Option<CanonicalBlockRef<AnimationChannelTableSchema>>,
+    names: Option<CanonicalBlockRef<AnimationClipNameSchema>>,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<AnimationClipTableSchema>, StoreRuntimeError>
 where
@@ -531,7 +582,19 @@ where
                 write_optional_rate(row, rate)?;
                 row.write_scalar(range.offset())?;
                 row.write_scalar(range.count())?;
-                write_optional_record_presence(row, range.count() != 0, channels, failure)
+                write_optional_record_presence(row, range.count() != 0, channels, failure)?;
+                row.write_scalar(if matches!(clip.name(), Presence::Present(_)) {
+                    PRESENCE_PRESENT
+                } else {
+                    PRESENCE_ABSENT
+                })?;
+                row.write_scalar(clip.name_offset())?;
+                row.write_scalar(clip.name_count())?;
+                if clip.name_count() == 0 {
+                    row.write_scalar(0_u8)
+                } else {
+                    row.write_utf8_ref(names.ok_or(failure)?.into_store())
+                }
             })?;
         }
         if channel_offset != plans.channel_count {
@@ -583,7 +646,17 @@ where
                 plans.out_tangent_scalar_count,
                 payloads.out_tangents,
                 failure,
-            )
+            )?;
+            row.write_scalar(plans.clip_name_byte_count)?;
+            row.write_scalar(if payloads.clip_names.is_some() {
+                PRESENCE_PRESENT
+            } else {
+                PRESENCE_ABSENT
+            })?;
+            match payloads.clip_names {
+                Some(names) => row.write_utf8_ref(names.into_store()),
+                None => row.write_scalar(0_u8),
+            }
         })
     })
     .map(CanonicalBlockRef::from_store)

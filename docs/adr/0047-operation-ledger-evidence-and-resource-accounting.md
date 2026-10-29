@@ -104,6 +104,28 @@ An exact semantic envelope is admitted once before canonical materialization or 
 actions consume that envelope through scoped units. Under-run, overrun, wrong dimension, or mismatched
 description is a contract failure and cannot be repaired by caller-provided counts.
 
+Asset snapshot byte admission grants reusable payload capacity within the operation. Legal short
+reads consume only observed bytes and carry unused admitted capacity into later reads without
+refunding or repeating attempted charges. Serial acquisition also carries unused capacity into later
+resources by deriving each dimension's balance from `attempted - consumed`; no second budget is
+created. Resource-class and aggregate dimensions are topped up independently, so their attempted
+envelopes need not add up after credit crosses a resource-class boundary. Rejected attempted charges
+are evidence of failure, never reusable credit. Each read call separately admits one `WorkUnits` action;
+normal return, including EOF or a returned read error, completes that action, while panic leaves
+only the earlier completed call prefix. Cooperative cancellation is checked before the next call.
+
+Once payload credit reaches a resource/backend or aggregate byte limit, one nonempty one-byte probe
+may validate EOF. A zero result succeeds; a positive result causes a typed limit failure and is never
+stored as payload. The probe is validation/read work rather than payload storage, and cannot enlarge
+the successful snapshot's admitted byte envelope. Truthfully observed excess may advance existing
+byte counters before rejection; a rejected attempted charge never fabricates consumed bytes or
+erases previously completed consumption. Exact-length contract errors remain backend failures.
+
+Input-byte ceilings constrain payload counters, independently of allocator capacity. Snapshot
+capacity, allocator slack, and the temporary overlap of an admitted replacement buffer use the
+existing `max_live_bytes` ceiling. Tightening a file's byte limit must not lower the live-memory
+ceiling to that file length or reject an otherwise legal short-read stream during buffer growth.
+
 ### Live Storage
 
 Live capacity is reserved before allocation or growth, bound to one operation/session owner, and

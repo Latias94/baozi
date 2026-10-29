@@ -265,7 +265,7 @@ fn ascii_stl_uses_shared_line_index_storage() {
 
 #[test]
 fn crlf_line_limit_counts_content_bytes_without_the_newline() {
-    let lf_document = ascii_triangle("crlf-line-limit");
+    let lf_document = ascii_triangle("part one line limit");
     let max_content_bytes = lf_document
         .lines()
         .map(str::len)
@@ -288,6 +288,68 @@ fn crlf_line_limit_counts_content_bytes_without_the_newline() {
         "line-bytes",
         u64::try_from(max_content_bytes - 1).expect("test line length must fit in u64"),
     );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn multiword_solid_names_keep_full_string_and_per_word_token_limits() {
+    let name = "part one segment middle";
+    let document = ascii_triangle(name);
+    let mut limits = ResourceLimits::default();
+    limits.max_string_bytes = name.len();
+    limits.max_token_bytes = "endsolid".len();
+    limits.max_tokens = document.split_ascii_whitespace().count() as u64;
+
+    let report =
+        import_bytes_forced_with_limits("name-limits.stl", document.as_bytes(), limits.clone())
+            .expect("the whole name may exceed the per-word limit within its string budget");
+    assert_eq!(
+        report
+            .ledger()
+            .dimension(ImportDimension::Tokens)
+            .expect("token dimension is configured")
+            .consumed(),
+        limits.max_tokens
+    );
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+
+    let mut below_string = limits.clone();
+    below_string.max_string_bytes -= 1;
+    let failure =
+        import_bytes_forced_with_limits("name-string-limit.stl", document.as_bytes(), below_string)
+            .expect_err("the full multiword name must fit the string budget before copying");
+    assert_resource_limit(&failure, "string-bytes", name.len() as u64 - 1);
+    assert_eq!(consumed(&failure, ImportDimension::CanonicalStringBytes), 0);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+
+    let mut below_tokens = limits.clone();
+    below_tokens.max_tokens -= 1;
+    let failure = import_bytes_forced_with_limits(
+        "name-token-count-limit.stl",
+        document.as_bytes(),
+        below_tokens,
+    )
+    .expect_err("every word of the closing solid name must still consume a token");
+    assert_ledger_limit(&failure, ImportDimension::Tokens, limits.max_tokens - 1);
+    assert_eq!(
+        consumed(&failure, ImportDimension::Tokens),
+        limits.max_tokens - 1
+    );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+
+    let oversized_end = document.replace(
+        &format!("endsolid {name}"),
+        &format!("endsolid {name} oversized"),
+    );
+    let mut end_limits = limits;
+    end_limits.max_tokens += 1;
+    let failure = import_bytes_forced_with_limits(
+        "end-name-token-limit.stl",
+        oversized_end.as_bytes(),
+        end_limits,
+    )
+    .expect_err("closing names must enforce each token's byte limit before name comparison");
+    assert_resource_limit(&failure, "token-bytes", "endsolid".len() as u64);
     assert_eq!(failure.ledger().current_live_bytes(), 0);
 }
 
@@ -394,10 +456,10 @@ fn ascii_profile_cancellation_is_bounded_by_scan_chunks() {
 }
 
 #[test]
-fn ascii_solid_name_copy_cancellation_is_bounded_by_scan_chunks() {
+fn ascii_solid_name_copy_and_comparison_cancellation_are_bounded_by_scan_chunks() {
     const NAME_CHUNKS: usize = 8;
 
-    let name = "x".repeat(SCAN_CHUNK_BYTES * NAME_CHUNKS);
+    let name = format!("{} part one", "x".repeat(SCAN_CHUNK_BYTES * NAME_CHUNKS));
     let document = ascii_triangle(&name);
     let (calibration_control, calibration_polls) = controlled_import(None);
     let calibration_failure = import_bytes_forced_with_limits_and_control(
@@ -439,6 +501,24 @@ fn ascii_solid_name_copy_cancellation_is_bounded_by_scan_chunks() {
         name.len() as u64
     );
     assert_eq!(consumed(&failure, ImportDimension::CanonicalStringBytes), 0);
+
+    let total_tokens = document.split_ascii_whitespace().count() as u64;
+    let (closing_tokens_poll, _) = first_cancelled_prefix_at_least(
+        "end-name-tokens-cancel.stl",
+        document.as_bytes(),
+        total_polls,
+        ImportDimension::Tokens,
+        total_tokens,
+    );
+    let failure = cancelled_failure(
+        "end-name-comparison-cancel.stl",
+        document.as_bytes(),
+        closing_tokens_poll + NAME_CHUNKS - 1,
+    );
+    assert_eq!(consumed(&failure, ImportDimension::Tokens), total_tokens);
+    assert_eq!(consumed(&failure, ImportDimension::Faces), 1);
+    assert_eq!(attempted(&failure, ImportDimension::Meshes), 0);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
 }
 
 #[test]
@@ -493,23 +573,70 @@ fn binary_color_expansion_cancellation_is_bounded_by_scan_chunks() {
     let total_polls = calibration_polls.load(Ordering::SeqCst);
     assert!(total_polls > 0);
 
-    let (_, failure) = first_cancelled_prefix_at_least(
-        "color-cancel.stl",
+    // Completing every facet record precedes color expansion. Measure the acquisition/hash
+    // prefix here instead of treating the operation's WorkUnits counter as color-only work.
+    let (decoded_poll, decoded) = first_cancelled_prefix_at_least(
+        "color-before-expansion.stl",
         &bytes,
         total_polls,
-        ImportDimension::WorkUnits,
-        1,
+        ImportDimension::Records,
+        FACET_COUNT as u64,
     );
+    let decoded_cells = 6 * FACET_COUNT as u64;
     assert_eq!(
-        attempted(&failure, ImportDimension::WorkUnits),
+        consumed(&decoded, ImportDimension::Records),
         FACET_COUNT as u64
     );
     assert_eq!(
-        consumed(&failure, ImportDimension::WorkUnits),
+        consumed(&decoded, ImportDimension::AttributeCells),
+        decoded_cells
+    );
+    let work_before_expansion = consumed(&decoded, ImportDimension::WorkUnits);
+    assert_eq!(
+        attempted(&decoded, ImportDimension::WorkUnits),
+        work_before_expansion
+    );
+
+    let (expansion_poll, failure) = first_cancelled_prefix_at_least(
+        "color-cancel.stl",
+        &bytes,
+        total_polls,
+        ImportDimension::AttributeCells,
+        decoded_cells + 3,
+    );
+    assert!(expansion_poll > decoded_poll);
+    assert_eq!(
+        attempted(&failure, ImportDimension::WorkUnits) - work_before_expansion,
+        FACET_COUNT as u64
+    );
+    assert_eq!(
+        consumed(&failure, ImportDimension::WorkUnits) - work_before_expansion,
         SCAN_CHUNK_BYTES as u64
+    );
+    assert_eq!(
+        consumed(&failure, ImportDimension::AttributeCells) - decoded_cells,
+        3 * SCAN_CHUNK_BYTES as u64
     );
     assert_eq!(
         consumed(&failure, ImportDimension::Records),
         FACET_COUNT as u64
     );
+    assert_eq!(attempted(&failure, ImportDimension::Meshes), 0);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+
+    let next = cancelled_failure("color-next-chunk-cancel.stl", &bytes, expansion_poll + 1);
+    assert_eq!(
+        attempted(&next, ImportDimension::WorkUnits) - work_before_expansion,
+        FACET_COUNT as u64
+    );
+    assert_eq!(
+        consumed(&next, ImportDimension::WorkUnits) - work_before_expansion,
+        2 * SCAN_CHUNK_BYTES as u64
+    );
+    assert_eq!(
+        consumed(&next, ImportDimension::AttributeCells) - decoded_cells,
+        6 * SCAN_CHUNK_BYTES as u64
+    );
+    assert_eq!(attempted(&next, ImportDimension::Meshes), 0);
+    assert_eq!(next.ledger().current_live_bytes(), 0);
 }

@@ -182,6 +182,10 @@ impl PendingNodeSceneEdit {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the scoped stage borrows the pending edit and moves each independent publication capability once"
+)]
 fn prepare_scoped_edit<O, PP, U>(
     owner: RetainedStoreSessionOutcomeOwner<O, PP, U, CanonicalInheritanceSource>,
     pending: BoundPendingNodeSceneEdit<'_>,

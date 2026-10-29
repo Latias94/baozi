@@ -1,7 +1,10 @@
 use crate::diagnostic::DiagnosticSource;
 use crate::error::{CauseOwner, ScopeAbortCause};
+use crate::ledger::{ImportDimension, ImportLedgerPhase};
 use crate::metered_storage::AccountedVec;
-use crate::store::ImportStoreReservation;
+use crate::resource_graph::ManifestDigest;
+use crate::resource_hash::chunked_sha256;
+use crate::store::{ImportStoreHost, ImportStoreReservation};
 use baozi_io::__semantic_identity::{
     RegisteredAssetResolution, RegisteredResolverProfile, RegisteredUnavailableCause,
     StableResourceIdentitySchema, VerifiedNegativeInputProof, VerifiedNegativeInputProofBinding,
@@ -14,7 +17,7 @@ use std::fmt;
 use std::hash::{BuildHasher, Hash};
 use std::marker::PhantomData;
 use std::mem::size_of;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub const MAX_DEPENDENCY_ROLE_ID_BYTES: usize = 64;
 
@@ -141,7 +144,8 @@ impl DependencyIdentity {
         &self.path
     }
 
-    pub(crate) fn authority(&self) -> &AuthorityDomain {
+    /// Returns the backend namespace that qualifies this logical path.
+    pub fn authority(&self) -> &AuthorityDomain {
         &self.authority
     }
 
@@ -153,6 +157,183 @@ impl DependencyIdentity {
                 .try_clone()
                 .map_err(|_| DependencyPolicyError::AllocationFailed)?,
         })
+    }
+}
+
+/// Owned context for one failed required dependency request.
+///
+/// The origin and target identities retain their backend namespaces. The normalized path is the
+/// logical reference before resolver redirection; `target_identity` is the authorized open target.
+/// Invalid references longer than [`AssetPath::MAX_BYTES`] retain a UTF-8 prefix and their full
+/// byte length. Reading this value never allocates or performs IO.
+#[derive(Debug)]
+pub struct DependencyFailureContext {
+    details: Vec<DependencyFailureDetails>,
+}
+
+#[derive(Debug)]
+struct DependencyFailureDetails {
+    origin: DependencyIdentity,
+    role: DependencyRoleId,
+    requested_reference: String,
+    requested_reference_bytes: usize,
+    normalized_path: Option<AssetPath>,
+    target_identity: Option<DependencyIdentity>,
+    cause: ScopeAbortCause,
+}
+
+impl DependencyFailureContext {
+    const fn details(&self) -> &DependencyFailureDetails {
+        &self.details.as_slice()[0]
+    }
+
+    /// The resource that declared the failing reference, rather than the primary import source.
+    pub fn origin(&self) -> &DependencyIdentity {
+        &self.details().origin
+    }
+
+    pub fn role(&self) -> &DependencyRoleId {
+        &self.details().role
+    }
+
+    /// The caller's reference spelling, bounded to a complete UTF-8 prefix.
+    pub fn requested_reference(&self) -> &str {
+        &self.details().requested_reference
+    }
+
+    pub const fn requested_reference_bytes(&self) -> usize {
+        self.details().requested_reference_bytes
+    }
+
+    pub fn requested_reference_is_truncated(&self) -> bool {
+        self.requested_reference().len() != self.requested_reference_bytes()
+    }
+
+    /// The normalized logical reference, absent when normalization failed.
+    pub fn normalized_path(&self) -> Option<&AssetPath> {
+        self.details().normalized_path.as_ref()
+    }
+
+    /// The resolver-authorized resource, absent when authorization failed.
+    pub fn target_identity(&self) -> Option<&DependencyIdentity> {
+        self.details().target_identity.as_ref()
+    }
+
+    pub(crate) const fn cause(&self) -> &ScopeAbortCause {
+        &self.details().cause
+    }
+
+    pub(crate) fn attach_cause(&mut self, cause: ScopeAbortCause) {
+        self.details[0].cause = cause;
+    }
+
+    pub(crate) fn try_capture(
+        host: ImportStoreHost<'_>,
+        origin_authority: &AuthorityDomain,
+        origin_path: &AssetPath,
+        role: &DependencyRoleId,
+        requested_reference: &str,
+        normalized_path: Option<&AssetPath>,
+        target_identity: Option<&DependencyIdentity>,
+    ) -> Result<(Self, ImportStoreReservation), ScopeAbortCause> {
+        const RESOURCE: &str = "required-dependency-failure-context";
+        let capacity_error = |cause| ScopeAbortCause::CapacityEnvelope {
+            resource: RESOURCE,
+            cause,
+        };
+        let allocation_error = || ScopeAbortCause::Allocation { resource: RESOURCE };
+        let mut end = requested_reference.len().min(AssetPath::MAX_BYTES);
+        while !requested_reference.is_char_boundary(end) {
+            end -= 1;
+        }
+        let requested_prefix = &requested_reference[..end];
+        let text = [
+            origin_path.as_str(),
+            requested_prefix,
+            normalized_path.map_or("", AssetPath::as_str),
+            target_identity.map_or("", |identity| identity.path().as_str()),
+        ];
+        let detail_plan =
+            CapacityPlan::for_type::<DependencyFailureDetails>(0, 0, 1).map_err(capacity_error)?;
+        let text_plans = text.map(|text| CapacityPlan::for_type::<u8>(0, 0, text.len()));
+        let mut envelope = detail_plan.envelope_delta_bytes().map_err(capacity_error)?;
+        for plan in &text_plans {
+            let bytes = plan
+                .as_ref()
+                .map_err(|cause| capacity_error(*cause))?
+                .envelope_delta_bytes()
+                .map_err(capacity_error)?;
+            envelope = envelope
+                .checked_add(bytes)
+                .ok_or_else(|| capacity_error(CapacityPlanError::CapacityOverflow))?;
+        }
+        // The existing terminal-failure slot retains this reservation until the session moves
+        // its failure evidence into the terminal outcome. Nothing is allocated before admission.
+        let mut reservation = host
+            .reserve(
+                ImportLedgerPhase::DependencyAcquisition,
+                ImportDimension::ScratchBytes,
+                envelope,
+            )
+            .map_err(|cause| cause.into_scope_abort_cause())?;
+        let mut details = Vec::new();
+        details
+            .try_reserve_exact(detail_plan.allocator_additional())
+            .map_err(|_| allocation_error())?;
+        detail_plan
+            .finish(0, details.capacity())
+            .map_err(capacity_error)?;
+        let origin = DependencyIdentity::new(
+            origin_authority.clone(),
+            origin_path.try_clone().map_err(|_| allocation_error())?,
+        );
+        let mut requested = String::new();
+        requested
+            .try_reserve_exact(requested_prefix.len())
+            .map_err(|_| allocation_error())?;
+        requested.push_str(requested_prefix);
+        let normalized = normalized_path
+            .map(AssetPath::try_clone)
+            .transpose()
+            .map_err(|_| allocation_error())?;
+        let target = target_identity
+            .map(DependencyIdentity::try_clone)
+            .transpose()
+            .map_err(|_| allocation_error())?;
+        let capacities = [
+            origin.path().capacity_bytes(),
+            requested.capacity(),
+            normalized.as_ref().map_or(0, AssetPath::capacity_bytes),
+            target
+                .as_ref()
+                .map_or(0, |identity| identity.path().capacity_bytes()),
+        ];
+        let mut actual = u64::try_from(details.capacity())
+            .ok()
+            .and_then(|capacity| capacity.checked_mul(size_of::<DependencyFailureDetails>() as u64))
+            .ok_or_else(|| capacity_error(CapacityPlanError::CapacityOverflow))?;
+        for (plan, capacity) in text_plans.into_iter().zip(capacities) {
+            plan.map_err(capacity_error)?
+                .finish(0, capacity)
+                .map_err(capacity_error)?;
+            actual = actual
+                .checked_add(capacity as u64)
+                .ok_or_else(|| capacity_error(CapacityPlanError::CapacityOverflow))?;
+        }
+        host.resize(&mut reservation, actual)
+            .map_err(|cause| cause.into_scope_abort_cause())?;
+        details.push(DependencyFailureDetails {
+            origin,
+            role: role.clone(),
+            requested_reference: requested,
+            requested_reference_bytes: requested_reference.len(),
+            normalized_path: normalized,
+            target_identity: target,
+            cause: ScopeAbortCause::DescriptorContract {
+                code: "dependency-failure-context-not-attached",
+            },
+        });
+        Ok((Self { details }, reservation))
     }
 }
 
@@ -444,6 +625,7 @@ impl<'scope> DependencySnapshot<'scope> {
 
 pub(crate) struct SharedDependencySnapshot {
     bytes: AccountedVec<u8>,
+    content_digest: OnceLock<ManifestDigest>,
     _sharing_reservation: ImportStoreReservation,
 }
 
@@ -460,12 +642,27 @@ impl SharedDependencySnapshot {
     ) -> Self {
         Self {
             bytes,
+            content_digest: OnceLock::new(),
             _sharing_reservation: sharing_reservation,
         }
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub(crate) fn content_digest(
+        &self,
+        host: ImportStoreHost<'_>,
+    ) -> Result<ManifestDigest, ScopeAbortCause> {
+        if let Some(digest) = self.content_digest.get() {
+            return Ok(*digest);
+        }
+        // ResourceGraph serializes access to this session's immutable snapshots. Publish only a
+        // complete digest; cancellation or rejected work admission must not seal a partial hash.
+        let digest = chunked_sha256(host, self.bytes(), ImportDimension::WorkUnits)
+            .map(ManifestDigest::from_bytes)?;
+        Ok(*self.content_digest.get_or_init(|| digest))
     }
 }
 
@@ -845,10 +1042,20 @@ impl DependencyCache {
     }
 
     pub(crate) fn available_identity(&self, index: usize) -> Option<&DependencyIdentity> {
+        self.available_snapshot(index).map(|(identity, _)| identity)
+    }
+
+    pub(crate) fn available_snapshot(
+        &self,
+        index: usize,
+    ) -> Option<(&DependencyIdentity, &CachedDependencySnapshot)> {
         let DependencyCacheRecordSlot::Occupied(record) = self.entries.get(index)? else {
             return None;
         };
-        matches!(&record.entry, DependencyCacheEntry::Available(_)).then_some(&record.identity)
+        match &record.entry {
+            DependencyCacheEntry::Available(snapshot) => Some((&record.identity, snapshot)),
+            DependencyCacheEntry::Resolving | DependencyCacheEntry::Failed(_) => None,
+        }
     }
 
     pub(crate) fn store_failed(
@@ -1475,6 +1682,37 @@ mod tests {
             AssetOpenStage::Open,
             AssetOpenErrorKind::NotFound,
         ))
+    }
+
+    #[test]
+    fn failure_context_bounds_utf8_and_keeps_all_owned_storage_admitted() {
+        let store = StoreHarness::new();
+        let authority = AuthorityDomain::new();
+        let source = AssetPath::new("models/materials/library.side").unwrap();
+        let role = DependencyRoleId::new("payload.required").unwrap();
+        let reference = "界".repeat(AssetPath::MAX_BYTES);
+        let (context, reservation) = DependencyFailureContext::try_capture(
+            store.host(),
+            &authority,
+            &source,
+            &role,
+            &reference,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(context.origin().path(), &source);
+        assert_eq!(context.origin().authority(), &authority);
+        assert_eq!(context.role(), &role);
+        assert_eq!(context.requested_reference_bytes(), reference.len());
+        assert!(context.requested_reference_is_truncated());
+        assert_eq!(context.requested_reference().len(), 4095);
+        assert!(reference.starts_with(context.requested_reference()));
+        assert_eq!(store.live_scratch_bytes(), reservation.bytes());
+        assert!(reservation.bytes() >= context.requested_reference().len() as u64);
+        drop(context);
+        drop(reservation);
+        assert_eq!(store.live_scratch_bytes(), 0);
     }
 
     #[test]

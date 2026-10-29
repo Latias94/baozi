@@ -85,18 +85,183 @@ fn imports_one_triangle_ascii_stl_through_session() -> TestResult {
 
 #[test]
 fn imports_multiple_ascii_solids_as_multiple_meshes() -> TestResult {
-    let bytes = format!("{}{}", ascii_triangle("left"), ascii_triangle("right"));
+    let bytes = format!(
+        "{}{}",
+        ascii_triangle("left part"),
+        ascii_triangle("right part")
+    );
     let report = import_bytes("multi.stl", bytes.as_bytes())?;
     let snapshot = scene_snapshot(&report)?;
 
     assert_eq!(snapshot.logical_mesh_count(), 2);
     assert_eq!(snapshot.node_count(), 2);
     assert_eq!(snapshot.root_count(), 2);
-    assert!(snapshot_line(&snapshot, "node[0]").contains(" name=left "));
-    assert!(snapshot_line(&snapshot, "logical_mesh[0]").contains(" name=left "));
-    assert!(snapshot_line(&snapshot, "node[1]").contains(" name=right "));
-    assert!(snapshot_line(&snapshot, "logical_mesh[1]").contains(" name=right "));
+    assert!(snapshot_line(&snapshot, "node[0]").contains(" name=left part "));
+    assert!(snapshot_line(&snapshot, "logical_mesh[0]").contains(" name=left part "));
+    assert!(snapshot_line(&snapshot, "node[1]").contains(" name=right part "));
+    assert!(snapshot_line(&snapshot, "logical_mesh[1]").contains(" name=right part "));
     Ok(())
+}
+
+#[test]
+fn ascii_solid_names_preserve_the_full_trimmed_line_remainder() -> TestResult {
+    for (opening, closing, expected) in [
+        ("solid part one", "endsolid part one", "part one"),
+        (
+            " \tsolid\t  part  one \t",
+            "\tendsolid \tpart  one\t  ",
+            "part  one",
+        ),
+        ("SoLiD\tPart One", "EnDsOlId Part One\t", "Part One"),
+        ("solid part # one", "endsolid part # one", "part # one"),
+        ("solid part // one", "endsolid part // one", "part // one"),
+        ("solid", "endsolid", "absent"),
+        ("solid \t ", "\tendsolid\t ", "absent"),
+    ] {
+        let document = ascii_triangle("part one")
+            .replacen("solid part one", opening, 1)
+            .replace("endsolid part one", closing);
+        let report = import_bytes("solid-name.stl", document.as_bytes())?;
+        let snapshot = scene_snapshot(&report)?;
+
+        assert_eq!(snapshot.node_count(), 1);
+        assert_eq!(snapshot.logical_mesh_count(), 1);
+        for prefix in ["node[0]", "logical_mesh[0]"] {
+            assert!(
+                snapshot_line(&snapshot, prefix).contains(&format!(" name={expected} ")),
+                "{prefix} must retain the trimmed name for {opening:?} and {closing:?}"
+            );
+        }
+        assert!(report.diagnostics().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn ascii_endsolid_requires_an_exact_matching_name() {
+    for (opening, closing) in [
+        ("part one", "part two"),
+        ("part one", "other one"),
+        ("part one", "part"),
+        ("part one", "part one extra"),
+        ("part", "other"),
+        ("part one", ""),
+        ("", "part one"),
+        ("part  one", "part one"),
+        ("part\tone", "part one"),
+        ("part one", "Part One"),
+        ("part one", "part one # comment"),
+    ] {
+        let document = ascii_triangle(opening).replace(
+            &format!("endsolid {opening}\n"),
+            &format!(" \tendsolid {closing}\n"),
+        );
+        let failure = import_bytes_with_limits(
+            "mismatched-solid.stl",
+            document.as_bytes(),
+            ResourceLimits::default(),
+        )
+        .expect_err("different trimmed names must fail at endsolid");
+        let envelope = expected_stl_failure(&failure);
+
+        assert_eq!(envelope.code(), StlFailureCode::InvalidStructure.as_str());
+        assert_eq!(stl_string_detail(envelope, "subject"), Some("endsolid"));
+        assert_eq!(stl_string_detail(envelope, "reason"), Some("name-mismatch"));
+        assert_eq!(stl_unsigned_detail(envelope, "line"), Some(9));
+        assert_eq!(stl_unsigned_detail(envelope, "column"), Some(3));
+        assert!(failure.diagnostics().is_empty());
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+    }
+
+    let failure = import_bytes_with_limits(
+        "mismatched-empty-solid.stl",
+        b"solid part one\nendsolid part two\n",
+        ResourceLimits::default(),
+    )
+    .expect_err("an empty solid must also match names before emitting its warning");
+    assert_eq!(
+        stl_string_detail(expected_stl_failure(&failure), "reason"),
+        Some("name-mismatch")
+    );
+    assert!(failure.diagnostics().is_empty());
+}
+
+#[test]
+fn empty_solids_match_embedded_tabs_before_emitting_their_warning() -> TestResult {
+    let document = format!(
+        "solid \tpart\tone \t\nendsolid part\tone\n{}",
+        ascii_triangle("part two")
+    );
+    let report = import_bytes("empty-tabbed-solid.stl", document.as_bytes())?;
+    let snapshot = scene_snapshot(&report)?;
+
+    assert_eq!(snapshot.logical_mesh_count(), 1);
+    assert!(snapshot_line(&snapshot, "node[0]").contains(" name=part two "));
+    assert!(snapshot_line(&snapshot, "logical_mesh[0]").contains(" name=part two "));
+    assert_eq!(report.diagnostics().len(), 1);
+    assert_eq!(report.diagnostics()[0].code().as_str(), "stl.empty_solid");
+    Ok(())
+}
+
+#[test]
+fn matching_embedded_name_tabs_still_reach_canonical_name_validation() {
+    let document = ascii_triangle("part\tone");
+    let failure = import_bytes_with_limits(
+        "embedded-name-tab.stl",
+        document.as_bytes(),
+        ResourceLimits::default(),
+    )
+    .expect_err("canonical entity names continue to reject embedded control characters");
+
+    assert!(matches!(
+        failure.scene_validation_error(),
+        Some(baozi_import::SceneValidationError::InvalidName {
+            node: 0,
+            cause: baozi_import::EntityNameError::ControlCharacter { offset: 4 },
+        })
+    ));
+    let ImportTerminalCause::Failure(terminal) = failure.ledger().terminal_cause() else {
+        panic!("expected canonical name rejection");
+    };
+    assert_eq!(terminal.class(), ImportTerminalFailureClass::Requested);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn ascii_solid_name_at_eof_needs_no_final_newline() -> TestResult {
+    let document = ascii_triangle("part one");
+    for suffix in ["", "\n \t\n"] {
+        let document = format!("{}{suffix}", document.trim_end());
+        let report = import_bytes("solid-name-at-eof.stl", document.as_bytes())?;
+        let snapshot = scene_snapshot(&report)?;
+
+        assert!(snapshot_line(&snapshot, "node[0]").contains(" name=part one "));
+        assert!(snapshot_line(&snapshot, "logical_mesh[0]").contains(" name=part one "));
+    }
+    Ok(())
+}
+
+#[test]
+fn ascii_solid_rejects_trailing_garbage_and_comment_lines() {
+    for suffix in ["garbage\n", "# comment\n", "// comment\n"] {
+        let document = format!("{}{suffix}", ascii_triangle("part one"));
+        let failure = import_bytes_with_limits(
+            "trailing-garbage.stl",
+            document.as_bytes(),
+            ResourceLimits::default(),
+        )
+        .expect_err("only whitespace or another solid may follow endsolid");
+        let envelope = expected_stl_failure(&failure);
+
+        assert_eq!(envelope.code(), StlFailureCode::InvalidStructure.as_str());
+        assert_eq!(stl_string_detail(envelope, "subject"), Some("document"));
+        assert_eq!(
+            stl_string_detail(envelope, "reason"),
+            Some("expected-solid")
+        );
+        assert_eq!(stl_unsigned_detail(envelope, "line"), Some(10));
+        assert_eq!(stl_unsigned_detail(envelope, "column"), Some(1));
+    }
 }
 
 #[test]
@@ -190,12 +355,20 @@ fn facet_with_too_few_vertices_is_typed_format_failure() {
 
 #[test]
 fn missing_endsolid_is_typed_format_failure() {
-    let bytes = b"solid missing\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\n";
-    let failure =
-        import_bytes_with_limits("missing-endsolid.stl", bytes, ResourceLimits::default())
-            .expect_err("unterminated solid must fail");
+    let document = ascii_triangle("missing end").replace("endsolid missing end\n", "");
+    let failure = import_bytes_with_limits(
+        "missing-endsolid.stl",
+        document.as_bytes(),
+        ResourceLimits::default(),
+    )
+    .expect_err("unterminated multiword solid must fail");
 
     let envelope = expected_stl_failure(&failure);
+    assert_eq!(envelope.code(), StlFailureCode::InvalidStructure.as_str());
+    assert_eq!(
+        stl_string_detail(envelope, "subject"),
+        Some("ascii-document")
+    );
     assert_eq!(
         stl_string_detail(envelope, "reason"),
         Some("ended-before-endsolid")

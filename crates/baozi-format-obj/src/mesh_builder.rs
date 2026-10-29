@@ -25,8 +25,8 @@ use baozi_import::authoring::{
     TextureLocalId, TextureRole, TextureSourceKey, TextureStrength, TextureTransform, Vec3,
 };
 use baozi_import::{
-    DependencySnapshot, ImportStorageClass, ImportWorkClass, MeteredVec, ParseResult, ParseScope,
-    SceneDraft,
+    DependencySnapshot, DiagnosticCode, ImportStorageClass, ImportWorkClass, MeteredVec,
+    ParseResult, ParseScope, SceneDraft, SourceScopeEntityKind,
 };
 
 const FALLBACK_RESOURCE_IDENTITY: &str = "session/obj-primary";
@@ -125,6 +125,7 @@ impl<'scope, T> BuiltCornerProjection<'scope, T> {
     fn new(
         scope: &'scope ParseScope<'_>,
         corner_count: usize,
+        source_value_count: usize,
         values_resource: &'static str,
         indices_resource: &'static str,
         indices_work_resource: &'static str,
@@ -133,7 +134,7 @@ impl<'scope, T> BuiltCornerProjection<'scope, T> {
             scope.metered_vec(ImportStorageClass::FormatNormalization, values_resource);
         let mut source_indices =
             scope.metered_vec(ImportStorageClass::FormatNormalization, indices_resource);
-        source_values.try_reserve(corner_count)?;
+        source_values.try_reserve(source_value_count)?;
         source_indices.try_reserve(corner_count)?;
         mtl::for_work_chunks(scope, corner_count, indices_work_resource, |range| {
             source_indices.try_resize(range.end, 0)
@@ -166,28 +167,48 @@ fn state_name<'parsed>(
     })
 }
 
-fn warn_partial_attributes(
+fn record_partial_attribute_losses(
     scope: &ParseScope<'_>,
+    segment_index: usize,
     partial_texcoords: bool,
     partial_normals: bool,
 ) -> ParseResult<()> {
-    if partial_texcoords {
-        mtl::push_warning(
-            scope,
-            None,
-            "obj.partial_texcoord_channel",
-            format_args!(
-                "OBJ segment mixes vertices with and without texture coordinates; the partial texture coordinate channel was omitted"
-            ),
-        )?;
+    if !partial_texcoords && !partial_normals {
+        return Ok(());
     }
-    if partial_normals {
-        mtl::push_warning(
-            scope,
-            None,
-            "obj.partial_normal_channel",
+
+    // Sparse canonical attributes supply defaults; they do not encode absent corner values.
+    let segment_amount = usize_amount(scope, segment_index, "obj-partial-attribute-segment")?;
+    let mut object_path = scope.metered_string(
+        ImportStorageClass::FormatNormalization,
+        "obj-partial-attribute-object-path",
+    );
+    for (partial, channel, code) in [
+        (
+            partial_texcoords,
+            "texcoord",
+            "obj.partial_texcoord_channel",
+        ),
+        (partial_normals, "normal", "obj.partial_normal_channel"),
+    ] {
+        if !partial {
+            continue;
+        }
+        object_path.truncate(0);
+        object_path.try_write_fmt(format_args!(
+            "/segments/{segment_index}/attributes/{channel}"
+        ))?;
+        let code = DiagnosticCode::new(code).expect("static OBJ diagnostic code must be valid");
+        scope.record_source_semantic_loss(
+            code,
+            SourceScopeEntityKind::Mesh,
+            object_path.as_str(),
+            |details| {
+                details.unsigned("segment_index", segment_amount);
+                details.string("channel", channel);
+            },
             format_args!(
-                "OBJ segment mixes vertices with and without normals; the partial normal channel was omitted"
+                "OBJ segment {segment_index} mixes corners with and without {channel} values; dropping this partial channel requires explicit source semantic loss authorization"
             ),
         )?;
     }
@@ -375,11 +396,6 @@ impl<'scope> SegmentBuilder<'scope> {
             );
         }
 
-        warn_partial_attributes(
-            scope,
-            self.texcoord_channel.is_partial(),
-            self.normal_channel.is_partial(),
-        )?;
         let channels = CornerChannelSelection {
             texcoords: self.texcoord_channel.is_complete(),
             normals: self.normal_channel.is_complete(),
@@ -427,20 +443,11 @@ impl<'scope> SegmentBuilder<'scope> {
         total_attribute_stream_count: usize,
     ) -> ParseResult<BuiltGeometryStreams<'scope>> {
         let corner_count = self.corner_references.len();
-        let mut texcoords = if channels.texcoords {
-            Some(BuiltCornerProjection::new(
-                scope,
-                corner_count,
-                "obj-segment-texcoord-source-values",
-                "obj-segment-texcoord-source-indices",
-                "obj-texcoord-source-index-init-work",
-            )?)
-        } else {
-            None
-        };
+        let mut texcoord_lanes = 2_u8;
         let mut normals = if channels.normals {
             Some(BuiltCornerProjection::new(
                 scope,
+                corner_count,
                 corner_count,
                 "obj-segment-normal-source-values",
                 "obj-segment-normal-source-indices",
@@ -480,6 +487,16 @@ impl<'scope> SegmentBuilder<'scope> {
                                 "complete-texcoord-channel-has-missing-index",
                             ))
                         })?;
+                        let source_value = parsed
+                            .texcoords
+                            .as_slice()
+                            .get(source_index)
+                            .ok_or_else(|| {
+                                scope.format_failure(ObjFailure::internal(
+                                    "obj-texcoord-source-index-out-of-range",
+                                ))
+                            })?;
+                        texcoord_lanes = texcoord_lanes.max(source_value.lanes);
                         sorted_channels.try_push_reserved(IndexedCornerChannel {
                             channel: CornerChannel::Texcoord,
                             source_index,
@@ -502,6 +519,21 @@ impl<'scope> SegmentBuilder<'scope> {
                 Ok(())
             },
         )?;
+        let mut texcoords = if channels.texcoords {
+            let scalar_count = corner_count
+                .checked_mul(usize::from(texcoord_lanes))
+                .ok_or_else(|| scope.allocation_failure("obj-texcoord-source-scalar-count"))?;
+            Some(BuiltCornerProjection::new(
+                scope,
+                corner_count,
+                scalar_count,
+                "obj-segment-texcoord-source-values",
+                "obj-segment-texcoord-source-indices",
+                "obj-texcoord-source-index-init-work",
+            )?)
+        } else {
+            None
+        };
         mtl::interruptible_sort_by(scope, &mut sorted_positions, |_work, left, right| {
             Ok((left.source_index, left.occurrence).cmp(&(right.source_index, right.occurrence)))
         })?;
@@ -602,10 +634,12 @@ impl<'scope> SegmentBuilder<'scope> {
                                     })?;
                                 local_index = canonical_u32(
                                     scope,
-                                    projection.source_values.len(),
+                                    projection.source_values.len() / usize::from(texcoord_lanes),
                                     "obj-texcoord-source-index-space",
                                 )?;
-                                projection.source_values.try_push_reserved(source_value)?;
+                                projection.source_values.try_extend_from_slice_reserved(
+                                    &source_value.values[..usize::from(texcoord_lanes)],
+                                )?;
                             }
                             let destination = projection
                                 .source_indices
@@ -739,6 +773,7 @@ impl<'scope> SegmentBuilder<'scope> {
         Ok(BuiltGeometryStreams {
             positions,
             texcoords,
+            texcoord_lanes,
             normals,
             indices,
             attribute_stream_count: total_attribute_stream_count,
@@ -766,6 +801,7 @@ impl<'scope> SegmentBuilder<'scope> {
         let BuiltGeometryStreams {
             positions,
             texcoords,
+            texcoord_lanes,
             normals,
             indices,
             attribute_stream_count,
@@ -783,6 +819,7 @@ impl<'scope> SegmentBuilder<'scope> {
             key,
             positions,
             texcoords,
+            texcoord_lanes,
             normals,
             indices,
             face_vertex_counts,
@@ -796,7 +833,8 @@ impl<'scope> SegmentBuilder<'scope> {
 
 struct BuiltGeometryStreams<'scope> {
     positions: MeteredVec<'scope, f32>,
-    texcoords: Option<BuiltCornerProjection<'scope, [f32; 2]>>,
+    texcoords: Option<BuiltCornerProjection<'scope, f32>>,
+    texcoord_lanes: u8,
     normals: Option<BuiltCornerProjection<'scope, [f32; 3]>>,
     indices: MeteredVec<'scope, u32>,
     attribute_stream_count: usize,
@@ -805,7 +843,8 @@ struct BuiltGeometryStreams<'scope> {
 struct BuiltSegment<'scope> {
     key: SegmentKey,
     positions: MeteredVec<'scope, f32>,
-    texcoords: Option<BuiltCornerProjection<'scope, [f32; 2]>>,
+    texcoords: Option<BuiltCornerProjection<'scope, f32>>,
+    texcoord_lanes: u8,
     normals: Option<BuiltCornerProjection<'scope, [f32; 3]>>,
     indices: MeteredVec<'scope, u32>,
     face_vertex_counts: MeteredVec<'scope, u32>,
@@ -876,6 +915,12 @@ fn flush_segment<'scope>(
     parsed: &ParsedObj<'_>,
     segment: SegmentBuilder<'scope>,
 ) -> ParseResult<()> {
+    record_partial_attribute_losses(
+        scope,
+        segments.len(),
+        segment.texcoord_channel.is_partial(),
+        segment.normal_channel.is_partial(),
+    )?;
     let material = if let Some(id) = segment.key.material {
         let name = state_name(scope, parsed, id)?;
         Some(material_bindings.find(scope, name)?.ok_or_else(|| {
@@ -1287,8 +1332,8 @@ fn submit_complete_batch<'scope>(
             attributes.try_push_reserved(GeometryAttributeAuthoring::f32(
                 AttributeSemantic::Texcoord(0),
                 AttributeDomain::Corner,
-                2,
-                projection.source_values.as_slice().as_flattened(),
+                segment.texcoord_lanes,
+                projection.source_values.as_slice(),
                 Presence::Present(projection.source_indices.as_slice()),
             ))?;
         }

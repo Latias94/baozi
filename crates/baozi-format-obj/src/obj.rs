@@ -8,16 +8,24 @@ use std::num::NonZeroU32;
 
 use parser::usize_amount;
 
+mod record;
+
 const MAX_NUMERIC_LITERAL_BYTES: usize = 128;
 const MAX_FACE_REFERENCE_BYTES: usize = MAX_NUMERIC_LITERAL_BYTES * 3 + 2;
 
 pub(crate) struct ParsedObj<'scope> {
     pub positions: MeteredVec<'scope, Vec3>,
-    pub texcoords: MeteredVec<'scope, [f32; 2]>,
+    pub texcoords: MeteredVec<'scope, ParsedTexcoord>,
     pub normals: MeteredVec<'scope, [f32; 3]>,
     pub faces: MeteredVec<'scope, Face<'scope>>,
     pub mtllibs: MeteredVec<'scope, MeteredString<'scope>>,
     state_names: MeteredVec<'scope, MeteredString<'scope>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ParsedTexcoord {
+    pub values: [f32; 3],
+    pub lanes: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -206,53 +214,6 @@ impl<'scope> ObjParser<'scope, '_> {
                 format_args!("OBJ statement '{keyword}' is not recognized"),
             ),
         }
-    }
-
-    fn parse_position(&mut self, tokens: &[Token<'_>], line_number: u32) -> ParseResult<()> {
-        require_components(self.scope, tokens, 4, "position", line_number)?;
-        self.scope
-            .with_work(ImportWorkClass::Vertices, 1, |work| -> ParseResult<()> {
-                work.run_all(|| {
-                    self.parsed.positions.try_push(Vec3::new(
-                        parse_f32(self.scope, "position", tokens[1], line_number)?,
-                        parse_f32(self.scope, "position", tokens[2], line_number)?,
-                        parse_f32(self.scope, "position", tokens[3], line_number)?,
-                    ))
-                })
-            })
-    }
-
-    fn parse_texcoord(&mut self, tokens: &[Token<'_>], line_number: u32) -> ParseResult<()> {
-        require_components(self.scope, tokens, 3, "texcoord", line_number)?;
-        self.scope.with_work(
-            ImportWorkClass::AttributeCells,
-            1,
-            |work| -> ParseResult<()> {
-                work.run_all(|| {
-                    self.parsed.texcoords.try_push([
-                        parse_f32(self.scope, "texcoord", tokens[1], line_number)?,
-                        parse_f32(self.scope, "texcoord", tokens[2], line_number)?,
-                    ])
-                })
-            },
-        )
-    }
-
-    fn parse_normal(&mut self, tokens: &[Token<'_>], line_number: u32) -> ParseResult<()> {
-        require_components(self.scope, tokens, 4, "normal", line_number)?;
-        self.scope.with_work(
-            ImportWorkClass::AttributeCells,
-            1,
-            |work| -> ParseResult<()> {
-                work.run_all(|| {
-                    self.parsed.normals.try_push([
-                        parse_f32(self.scope, "normal", tokens[1], line_number)?,
-                        parse_f32(self.scope, "normal", tokens[2], line_number)?,
-                        parse_f32(self.scope, "normal", tokens[3], line_number)?,
-                    ])
-                })
-            },
-        )
     }
 
     fn parse_face(&mut self, tokens: &[Token<'_>], line_number: u32) -> ParseResult<()> {
@@ -583,25 +544,6 @@ fn resolve_index(
         )));
     }
     Ok(resolved as usize)
-}
-
-fn require_components(
-    scope: &ParseScope<'_>,
-    tokens: &[Token<'_>],
-    minimum: usize,
-    subject: &'static str,
-    line_number: u32,
-) -> ParseResult<()> {
-    if tokens.len() < minimum {
-        let column = tokens.first().map_or(1, |token| token.column);
-        return Err(scope.format_failure(ObjFailure::statement(
-            subject,
-            "missing-components",
-            line_number,
-            column,
-        )));
-    }
-    Ok(())
 }
 
 fn parse_f32(

@@ -48,6 +48,11 @@ impl ResourceIdentity {
         &self.0
     }
 
+    /// Returns the backing allocation capacity for caller-owned storage accounting.
+    pub const fn capacity_bytes(&self) -> usize {
+        self.0.capacity()
+    }
+
     /// Fallibly copies this heap-backed identity.
     pub fn try_clone(&self) -> Result<Self, ResourceIdentityError> {
         Self::new(self.as_str())
@@ -305,6 +310,7 @@ pub enum SourceObjectKind {
     Row,
     Statement,
     Segment,
+    Buffer,
 }
 
 /// A bounded format-defined locator payload.

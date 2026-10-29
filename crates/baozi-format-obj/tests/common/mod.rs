@@ -26,6 +26,23 @@ pub fn import_bytes_result(
     import_assets_result(source, [(source, bytes)], limits, false)
 }
 
+pub fn import_bytes_result_with_loss_policy(
+    source: &str,
+    bytes: &[u8],
+    limits: ResourceLimits,
+    loss_policy: LossPolicy,
+) -> TestResult<Result<ImportReport, ImportFailure>> {
+    import_assets_result_with_policies(
+        source,
+        [(source, bytes)],
+        limits,
+        None,
+        ConformancePolicy::Strict,
+        loss_policy,
+        ImportOperationControl::default(),
+    )
+}
+
 pub fn import_bytes_result_with_text_policy(
     source: &str,
     bytes: &[u8],
@@ -119,6 +136,33 @@ pub fn import_assets_result_with_text_policy_and_control<'asset>(
     allow_format_recovery: bool,
     control: ImportOperationControl,
 ) -> TestResult<Result<ImportReport, ImportFailure>> {
+    let mut loss_policy = LossPolicy::preserve_or_fail();
+    if allow_unavailable_dependencies {
+        loss_policy = loss_policy.allow(ImportLossKind::OptionalDependencyUnavailable);
+    }
+    if allow_format_recovery {
+        loss_policy = loss_policy.allow(ImportLossKind::FormatRecovery);
+    }
+    import_assets_result_with_policies(
+        source,
+        assets,
+        limits,
+        options,
+        conformance_policy,
+        loss_policy,
+        control,
+    )
+}
+
+fn import_assets_result_with_policies<'asset>(
+    source: &str,
+    assets: impl IntoIterator<Item = (&'asset str, &'asset [u8])>,
+    limits: ResourceLimits,
+    options: Option<ObjImportOptions>,
+    conformance_policy: ConformancePolicy,
+    loss_policy: LossPolicy,
+    control: ImportOperationControl,
+) -> TestResult<Result<ImportReport, ImportFailure>> {
     let source_path = AssetPath::new(source)?;
     let io = MemoryAssetIo::new();
     for (path, bytes) in assets {
@@ -128,13 +172,6 @@ pub fn import_assets_result_with_text_policy_and_control<'asset>(
     let mut registry = RegistryBuilder::new();
     registry.register(ObjImporter)?;
     let snapshot = registry.freeze(RegistryBuildLimits::default())?;
-    let mut loss_policy = LossPolicy::preserve_or_fail();
-    if allow_unavailable_dependencies {
-        loss_policy = loss_policy.allow(ImportLossKind::OptionalDependencyUnavailable);
-    }
-    if allow_format_recovery {
-        loss_policy = loss_policy.allow(ImportLossKind::FormatRecovery);
-    }
     let config = ImportConfigOverlay::default()
         .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
         .with_format_selection(FormatSelection::Forced(FormatId::new(FORMAT_ID)?))

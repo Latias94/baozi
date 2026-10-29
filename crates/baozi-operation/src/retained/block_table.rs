@@ -213,6 +213,10 @@ impl<Block, Tag> fmt::Debug for CanonicalRetainedSlot<Block, Tag> {
 }
 
 impl<Block, Tag: 'static> CanonicalRetainedSlot<Block, Tag> {
+    pub(crate) const fn index_in_set(self) -> usize {
+        self.index
+    }
+
     pub(crate) fn from_identity(identity: RetainedSlotIdentity) -> Self {
         assert!(
             identity.matches_tag::<Tag>(),

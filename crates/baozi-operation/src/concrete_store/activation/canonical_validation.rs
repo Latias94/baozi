@@ -203,6 +203,16 @@ pub struct OutcomeEvidenceValidationRecordRow<
 }
 
 impl<'session, Kind, Tag> CanonicalValidationMember<'session, Kind, Tag> {
+    /// Returns a cache key confined to this validation session and schema.
+    ///
+    /// The index grants no lookup authority and must not be compared across sessions.
+    pub fn index_in_session(self) -> usize
+    where
+        Tag: 'static,
+    {
+        self.raw.raw.index_in_set()
+    }
+
     pub(super) const fn from_store(raw: CanonicalStoreRef<Kind, Tag>) -> Self {
         Self {
             raw,

@@ -23,6 +23,7 @@ enum BinaryVertexProfile {
     PositionsOnly,
     BuiltinStreams,
     CustomStreams,
+    CustomF64Streams,
 }
 
 #[derive(Clone)]
@@ -90,7 +91,7 @@ fn binary_vertex_document(vertex_count: usize, profile: BinaryVertexProfile) -> 
             ["nx", "s", "u", "texture_u", "red", "r", "green", "g"]
         }
         BinaryVertexProfile::BuiltinStreams => ["nx", "ny", "nz", "s", "t", "red", "green", "blue"],
-        BinaryVertexProfile::CustomStreams => [
+        BinaryVertexProfile::CustomStreams | BinaryVertexProfile::CustomF64Streams => [
             "custom_0", "custom_1", "custom_2", "custom_3", "custom_4", "custom_5", "custom_6",
             "custom_7",
         ],
@@ -99,13 +100,22 @@ fn binary_vertex_document(vertex_count: usize, profile: BinaryVertexProfile) -> 
         "ply\nformat binary_little_endian 1.0\nelement vertex {vertex_count}\nproperty float x\nproperty float y\nproperty float z\n"
     )
     .into_bytes();
+    let custom_f64 = matches!(profile, BinaryVertexProfile::CustomF64Streams);
+    let scalar = if custom_f64 { "double" } else { "float" };
     for property in extra_properties {
-        bytes.extend_from_slice(format!("property float {property}\n").as_bytes());
+        bytes.extend_from_slice(format!("property {scalar} {property}\n").as_bytes());
     }
     bytes.extend_from_slice(b"end_header\n");
     for _ in 0..vertex_count {
-        for _ in 0..11 {
+        for _ in 0..3 {
             bytes.extend_from_slice(&0.0_f32.to_le_bytes());
+        }
+        for _ in 0..8 {
+            if custom_f64 {
+                bytes.extend_from_slice(&0.0_f64.to_le_bytes());
+            } else {
+                bytes.extend_from_slice(&0.0_f32.to_le_bytes());
+            }
         }
     }
     bytes
@@ -180,6 +190,10 @@ fn pre_reserved_vertex_and_face_streams_do_not_add_per_item_polls() -> TestResul
     );
     assert_eq!(
         vertex_poll_delta(BinaryVertexProfile::CustomStreams, "custom-streams")?,
+        positions_delta
+    );
+    assert_eq!(
+        vertex_poll_delta(BinaryVertexProfile::CustomF64Streams, "custom-f64-streams")?,
         positions_delta
     );
 

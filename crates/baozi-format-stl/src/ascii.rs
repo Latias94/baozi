@@ -146,7 +146,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
         let state = std::mem::replace(&mut self.state, State::Start);
         match state {
             State::Start => self.parse_start_line(line, text, &tokens, line_number),
-            State::InSolid => self.parse_solid_line(&tokens, line_number),
+            State::InSolid => self.parse_solid_line(text, &tokens, line_number),
             State::NeedOuterLoop { normal } => {
                 if tokens_match(&tokens, &["outer", "loop"]) {
                     self.state = State::InLoop {
@@ -235,6 +235,7 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
 
     fn parse_solid_line(
         &mut self,
+        line: &str,
         tokens: &TokenLine<'_, '_>,
         line_number: u32,
     ) -> ParseResult<()> {
@@ -244,16 +245,8 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
             self.state = State::NeedOuterLoop { normal };
             Ok(())
         } else if keyword_is(first, "endsolid") {
-            if tokens.len() > 2 {
-                let third = required_token(self.scope, tokens, 2)?;
-                return Err(self.failure(
-                    "endsolid",
-                    "too-many-name-tokens",
-                    line_number,
-                    third.column,
-                ));
-            }
-            self.finish_solid(line_number, first.column)
+            let name = trailing_text_after_first_token(line, tokens);
+            self.finish_solid(name, line_number, first.column)
         } else if keyword_is(first, "solid") {
             Err(self.failure("solid", "nested-solid", line_number, first.column))
         } else {
@@ -328,10 +321,19 @@ impl<'scope, 'session> AsciiParser<'scope, 'session> {
         )
     }
 
-    fn finish_solid(&mut self, line_number: u32, column: u32) -> ParseResult<()> {
+    fn finish_solid(
+        &mut self,
+        name: Option<&str>,
+        line_number: u32,
+        column: u32,
+    ) -> ParseResult<()> {
         let Some(current) = self.current.take() else {
             return Err(self.failure("endsolid", "without-active-solid", line_number, column));
         };
+        let start_name = current.name.as_ref().map_or("", MeteredString::as_str);
+        if !solid_names_match(self.scope, start_name, name.unwrap_or(""))? {
+            return Err(self.failure("endsolid", "name-mismatch", line_number, column));
+        }
 
         if current.face_count == 0 {
             self.scope.emit_text_diagnostic_with(
@@ -714,13 +716,27 @@ fn trailing_text_after_first_token<'line>(
     line: &'line str,
     tokens: &TokenLine<'line, '_>,
 ) -> Option<&'line str> {
-    let first = tokens.first()?;
-    let start = usize::try_from(first.column)
-        .ok()?
-        .checked_sub(1)?
-        .checked_add(first.text.len())?;
-    let text = line.get(start..)?.trim();
-    (!text.is_empty()).then_some(text)
+    // Conformed text is ASCII, so token bounds also trim surrounding whitespace.
+    let start = tokens.spans.get(1)?.start;
+    let end = tokens.spans.last()?.end;
+    line.get(start..end)
+}
+
+fn solid_names_match(scope: &ParseScope<'_>, start: &str, end: &str) -> ParseResult<bool> {
+    if start.len() != end.len() {
+        return Ok(false);
+    }
+    for (start, end) in start
+        .as_bytes()
+        .chunks(CHECKPOINT_CHUNK_BYTES)
+        .zip(end.as_bytes().chunks(CHECKPOINT_CHUNK_BYTES))
+    {
+        scope.poll()?;
+        if start != end {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn tokens_match(tokens: &TokenLine<'_, '_>, expected: &[&str]) -> bool {

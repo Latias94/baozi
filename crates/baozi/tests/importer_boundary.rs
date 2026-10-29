@@ -291,14 +291,18 @@ fn facade_forwards_canonical_authoring_rejection_without_reclassification() {
     let Error::Import(failure) = error else {
         panic!("expected import failure");
     };
-    let ImportCause::OperationTerminal(terminal) = failure.cause() else {
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::SceneValidation(baozi::SceneValidationError::ParentOutOfRange {
+            node: 1,
+            parent: 2,
+            node_count: 2,
+        })
+    ));
+    let ImportTerminalCause::Failure(terminal) = failure.ledger().terminal_cause() else {
         panic!("expected canonical authoring terminal rejection");
     };
     assert_eq!(terminal.class(), ImportTerminalFailureClass::Requested);
-    assert_eq!(
-        failure.ledger().terminal_cause(),
-        ImportTerminalCause::Failure(*terminal)
-    );
     assert_eq!(
         failure.selected_format().map(FormatId::as_str),
         Some(INVALID_ID)
@@ -340,8 +344,11 @@ fn invalid_source_path_fails_before_session_creation() {
 }
 
 #[test]
-fn enabled_default_registry_is_frozen_with_qualified_ids() {
-    let importer = Importer::new().expect("enabled first-party registry must freeze");
+fn enabled_builtin_registry_is_frozen_with_qualified_ids() {
+    let importer = Importer::builder_with_builtin_formats()
+        .expect("enabled first-party formats must register")
+        .build()
+        .expect("enabled first-party registry must freeze");
     let actual = importer
         .formats()
         .map(|format| format.id().as_str())

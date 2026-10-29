@@ -37,9 +37,11 @@ use crate::image::{MipmapFilter, SamplerState, TexelFilter, TextureAddressMode};
 
 use super::{NodeSceneSemanticResult, invariant, read_scalar, read_u32_as_usize};
 
+mod read;
+
 type SceneCanonicalStore = PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>;
 
-pub(super) struct NodeSceneAppearanceTables<'scene> {
+pub(in crate::canonical_scene::store) struct NodeSceneAppearanceTables<'scene> {
     images: Option<CanonicalRecordView<'scene>>,
     samplers: Option<CanonicalRecordView<'scene>>,
     textures: Option<CanonicalRecordView<'scene>>,
@@ -54,7 +56,7 @@ pub(super) struct NodeSceneAppearanceTables<'scene> {
 }
 
 impl<'scene> NodeSceneAppearanceTables<'scene> {
-    pub(super) fn try_new(
+    pub(in crate::canonical_scene::store) fn try_new(
         canonical: &'scene SceneCanonicalStore,
         proof: NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {

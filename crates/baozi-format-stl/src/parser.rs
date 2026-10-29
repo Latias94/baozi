@@ -26,6 +26,7 @@ const SOURCE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(0)];
 
 pub(crate) struct ParsedStl<'scope> {
     pub meshes: MeteredVec<'scope, ParsedMesh<'scope>>,
+    // The active object fallback, carried by either the material or vertex colors.
     pub material_color: Option<Color>,
 }
 
@@ -71,11 +72,13 @@ fn scene_from_parsed<'scope>(
     }
 
     let mut remaining_topology_cells = 0usize;
+    let mut has_vertex_colors = false;
     for (index, mesh) in parsed.meshes.as_slice().iter().enumerate() {
         if index % 4096 == 0 {
             scope.poll()?;
         }
         validate_mesh_shape(scope, mesh)?;
+        has_vertex_colors |= mesh.colors.is_some();
         remaining_topology_cells = remaining_topology_cells
             .checked_add(mesh.positions.len())
             .ok_or_else(|| scope.allocation_failure("stl-topology-cell-counter"))?;
@@ -83,8 +86,17 @@ fn scene_from_parsed<'scope>(
     let mut remaining_canonical_string_bytes = canonical_string_bytes(scope, &parsed)?;
 
     let shading_model = ShadingModel::Unspecified;
-    let alpha_mode = AlphaMode::Opaque;
-    let base_color = parsed.material_color.unwrap_or(Color::WHITE);
+    let alpha_mode = if parsed.material_color.is_some_and(|color| color.a < 1.0) {
+        AlphaMode::Blend
+    } else {
+        AlphaMode::Opaque
+    };
+    // Facet colors already contain the object fallback, including its alpha.
+    let base_color = if has_vertex_colors {
+        Color::WHITE
+    } else {
+        parsed.material_color.unwrap_or(Color::WHITE)
+    };
     let pbr_factors = PbrMetallicRoughnessFactors::try_new(base_color, 0.0, 1.0)
         .map_err(|_| canonical_contract_failure(scope, "stl-default-material-factors"))?;
     let material_factors = MaterialFactors::try_new(Vec3::ZERO, Some(pbr_factors), None, None)

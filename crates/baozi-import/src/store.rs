@@ -493,6 +493,7 @@ pub(crate) struct ImportStoreMinimalFallback {
 pub(crate) enum ImportStoreFailureCauseAuthority {
     OriginalImport,
     OperationTerminal,
+    SceneValidation(baozi_core::SceneValidationError),
 }
 
 /// Exact retained owners and import-semantic evidence produced by one terminal handoff.
@@ -1239,6 +1240,7 @@ pub(crate) enum ImportStoreActivationError {
     StoreUnavailable(ImportStoreHostError),
     Control(ControlCause),
     AuthoringRejected,
+    SceneValidation(baozi_core::SceneValidationError),
     MaterializationFailed,
     Containment(StoreActivationContainment),
     Preparation(StorePrepareError),
@@ -1252,6 +1254,7 @@ impl fmt::Display for ImportStoreActivationError {
             Self::AuthoringRejected => {
                 formatter.write_str("canonical Scene authoring was rejected")
             }
+            Self::SceneValidation(cause) => cause.fmt(formatter),
             Self::MaterializationFailed => {
                 formatter.write_str("canonical Scene materialization prepared a terminal failure")
             }
@@ -1266,6 +1269,7 @@ impl std::error::Error for ImportStoreActivationError {
         match self {
             Self::StoreUnavailable(cause) => Some(cause),
             Self::Control(cause) => Some(cause),
+            Self::SceneValidation(cause) => Some(cause),
             Self::AuthoringRejected | Self::MaterializationFailed => None,
             Self::Containment(cause) => Some(cause),
             Self::Preparation(cause) => Some(cause),
@@ -2638,7 +2642,13 @@ mod tests {
         let result = submit_invalid_parent(&owner);
         assert!(matches!(
             result,
-            Err(ImportStoreActivationError::AuthoringRejected)
+            Err(ImportStoreActivationError::SceneValidation(
+                baozi_core::SceneValidationError::ParentOutOfRange {
+                    node: 1,
+                    parent: 2,
+                    node_count: 2,
+                }
+            ))
         ));
         let terminal = owner
             .prepare_scene(None)
@@ -2873,7 +2883,13 @@ mod tests {
         let result = submit_invalid_parent(&owner);
         assert!(matches!(
             result,
-            Err(ImportStoreActivationError::AuthoringRejected)
+            Err(ImportStoreActivationError::SceneValidation(
+                baozi_core::SceneValidationError::ParentOutOfRange {
+                    node: 1,
+                    parent: 2,
+                    node_count: 2,
+                }
+            ))
         ));
         let pending = account.snapshot();
         assert!(pending.live_retained_bytes() >= 8);

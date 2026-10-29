@@ -3,7 +3,7 @@
     reason = "facade examples preserve complete bounded terminal evidence by value"
 )]
 
-use baozi::{AssetPath, ImportDimension, Importer, MemoryAssetIo, Result, SceneSnapshotLimits};
+use baozi::{AssetPath, ImportDimension, Importer, MemoryAssetIo, Result};
 use std::sync::Arc;
 
 // A complete 1x1 RGB PNG containing one red pixel.
@@ -50,12 +50,7 @@ map_Kd textures/red.png
     io.try_insert(texture_path, Arc::from(RED_PNG))?;
 
     let report = Importer::new()?.read_asset(&io, model_path)?;
-    let limits = SceneSnapshotLimits::try_new(16 * 1024, 64, 1_000_000)
-        .expect("example snapshot limits must be valid");
-    let scene = report
-        .scene()
-        .capture_snapshot(limits)
-        .expect("validated Scene snapshot must succeed");
+    let scene = report.scene();
     let opened_assets = report
         .ledger()
         .dimension(ImportDimension::AssetOpen)
@@ -63,13 +58,17 @@ map_Kd textures/red.png
 
     assert_eq!(report.format().id().as_str(), "org.baozi.obj");
     assert!(report.diagnostics().is_empty());
-    assert_eq!(scene.logical_mesh_count(), 1);
+    assert_eq!(scene.mesh_count(), 1);
     assert_eq!(scene.primitive_count(), 1);
     assert_eq!(scene.material_count(), 1);
     assert_eq!(scene.image_count(), 1);
     assert_eq!(scene.sampler_count(), 1);
     assert_eq!(scene.texture_count(), 1);
     assert_eq!(scene.material_binding_count(), 1);
+    let material = scene.materials().next().expect("one material");
+    assert_eq!(material.name(), Some("red"));
+    let binding = material.bindings().next().expect("one texture binding");
+    assert_eq!(binding.texture().image().encoded_bytes(), RED_PNG);
     assert_eq!(opened_assets, 3);
 
     println!(

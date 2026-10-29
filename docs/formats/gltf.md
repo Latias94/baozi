@@ -12,8 +12,9 @@
 - Candidate extensions: `.gltf`, `.glb`
 - Candidate media types: `model/gltf+json`, `model/gltf-binary`
 - Encoding: JSON plus binary buffers, base64 buffer data URIs, or GLB container
-- Sidecar policy: external buffers through the selected `ParseScope` dependency resolver; base64
-  buffer data URIs and GLB BIN payloads supported by the current development harness
+- Sidecar policy: selected external buffers and images through the origin-qualified `ParseScope`
+  dependency resolver; base64 buffer data URIs and GLB BIN payloads remain embedded in the
+  enclosing primary resource
 
 ## Current Status
 
@@ -65,6 +66,16 @@ criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.m
   dependency IO; omitted external buffers/images are not authorized, and selected data-URI or
   buffer-view images are materialized as encoded payloads. This remains development evidence, not
   public admission evidence.
+- Selected external buffers and images are recorded in the canonical source profile after the
+  primary document, with formal Buffer/Image locators and owner provenance for geometry,
+  attributes, skins, animation clips/channels, and buffer-view images. External buffer snapshots
+  are borrowed at their declared prefix instead of copied. The Scene digest therefore reflects
+  only consumed canonical meaning, while the successful input manifest still hashes and measures
+  the complete acquired dependency, including any unconsumed tail bytes.
+- The canonical profile conservatively classifies these dependency identities as session-opaque.
+  Registered resolver stability remains authoritative in the successful input manifest until the
+  import/core boundary provides a sealed stable-evidence bridge; format code must not forge that
+  evidence from URI strings.
 - Development resource-limit coverage for primary assets, decoded JSON text surfaces, external
   buffers, base64 buffer data URIs, GLB BIN payloads, diagnostics, and cooperative cancellation.
 - GLB admission retains borrowed JSON and BIN views over the primary snapshot. Only the JSON view is
@@ -137,10 +148,62 @@ and import-contract tests.
   channel diagnostic until the morph animation slice is admitted.
 - The current `SourceScopeRecord` includes ADR 0039's typed selection outcome, camera rows, and
   animation-sampler rows. Entity-level extension rows, typed extension-reference closure for
-  reference-bearing schemas, and complete dependency provenance remain admission blockers. The
-  selected core resource closure is compiled and tested before dependency IO, global extension
-  declarations are gated, and GLB BIN data is isolated from the bootstrap backend, but those
-  results remain development evidence until the independent admission matrix passes.
+  reference-bearing schemas, extras policy, and a sealed bridge for stable canonical dependency
+  evidence remain admission blockers. Selected dependency provenance and the complete successful
+  input manifest are now compiled and tested, global extension declarations are gated, and GLB BIN
+  data is isolated from the bootstrap backend, but those results remain development evidence until
+  the independent admission matrix passes.
 - The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
 - `gltf_import` is a non-admitted development target until known backend aborts are removed or
   process-isolated and the complete baseline admission matrix passes.
+
+## Exact Development Profile: Version Metadata and Resource URIs
+
+The following profile applies to the internal development importer and does not change its admission
+status. Its version and URI rules follow the
+[glTF asset and URI specification](https://github.com/KhronosGroup/glTF/blob/main/specification/2.0/Specification.adoc)
+and the [asset schema](https://github.com/KhronosGroup/glTF/blob/main/specification/2.0/schema/asset.schema.json),
+with the explicit restrictions listed below.
+
+- The JSON document and `asset` must be objects. `asset.version` is a required string;
+  `asset.minVersion` may be absent but must be a string when present, including in a GLB JSON chunk.
+  Neither arrays accepted by a backend struct visitor nor explicit null version properties are
+  admitted. Version components are ASCII decimal integers in `0..=999999999`, without leading
+  zeros, separated by exactly one dot. Comparisons are numeric, and `minVersion > version` is an
+  invalid document.
+- The supported asset profile requires major version 2. Future 2.x minor versions remain compatible
+  when no minimum is declared, or when the declared minimum is `2.0`. A different major version,
+  including one paired with `minVersion: "2.0"`, or any other well-formed minimum is an unsupported
+  profile, reported as `gltf.unsupported_feature`. Invalid syntax, types, or minimum ordering use
+  `gltf.invalid_document`. Reasons identify `asset.version` or `asset.minVersion` as applicable.
+  Schema/version scanning is charged to `WorkUnits` before backend decoding and dependency IO;
+  its temporary storage is covered by the existing JSON-sized backend allowance.
+- Selected external buffers and images share one relative IRI path decoder. Literal non-ASCII
+  characters and their UTF-8 percent encodings identify the same resource. Escapes are decoded
+  exactly once; `+` stays a literal plus sign, and `%252F` identifies literal `%2F` filename text.
+  An escaped `#` is filename text rather than a fragment. Malformed escapes, invalid decoded UTF-8,
+  control characters, and unescaped ASCII whitespace are `gltf.invalid_reference` failures.
+- URI schemes other than the supported embedded `data:` profile, authorities, absolute paths,
+  query/fragment parameters, and backslashes are unsupported. Percent-encoded separators, colons,
+  and complete `.` or `..` path segments are also explicitly unsupported; decoding cannot silently
+  introduce path structure. These failures use `gltf.unsupported_feature`, with a `buffer-uri` or
+  `texture-uri` subject and the source buffer/image index. Filename restrictions enforced by
+  `AssetPath` and the host resource policy continue to apply.
+- Literal `.` and `..` path segments remain subject to the existing logical path normalization,
+  root-escape checks, and dependency authorization. The resolver and input graph receive the
+  once-decoded logical reference. Every dependency is still acquired through the primary origin
+  capability and its declared role; decoding grants no resource authority. Primary input hashing
+  continues to cover the original JSON bytes. Only selected resources enter this URI policy.
+- Embedded data URLs retain the bounded base64-only profile. The case-insensitive `;base64` marker
+  must be the final metadata item immediately before the comma; a media type merely named `base64`
+  is not that marker. Non-base64 and percent-encoded data URL spellings are explicitly unsupported
+  and retain the source buffer/image index. Data URL grammar is defined by
+  [RFC 2397](https://www.rfc-editor.org/rfc/rfc2397#section-3).
+
+The narrow regression cases are in `crates/baozi-format-gltf/tests/version_uri.rs`. Existing animation
+and source-profile semantics are outside this bounded version/URI change.
+
+Canonical provenance resource labels reversibly escape literal `%`, `#`, and `?` in normalized
+filenames. This label is distinct from the dependency path and manifest identity: a file named
+`base#.png` is opened under that exact filename, while its canonical logical label contains
+`base%23.png`. Label allocation remains admitted for the lifetime of its authoring owner.

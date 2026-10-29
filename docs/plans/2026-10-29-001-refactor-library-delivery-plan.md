@@ -93,6 +93,20 @@ Public read views and automatic default provenance can be implemented under the 
 ownership rules. Do not create a new architecture decision for ordinary accessors or builder helpers.
 Likewise, neither generic records nor an allocation-heavy typestate chain is a security invariant.
 
+The [API ergonomics review](../reviews/2026-10-29-api-ergonomics-review.md) informs C's concrete
+consumer and producer boundaries. The [feature/module review](../reviews/2026-10-29-feature-design-review.md)
+extends G/H: remove empty `std` and unused tracing switches, keep independently selectable format
+dependencies, and distinguish compiled-in built-ins from Cargo's curated default set. Private
+modules should own one responsibility; facade errors, importer workflows, typed readers, acquisition,
+and storage accounting need not share one file. Splitting a file must not widen constructor authority
+or create domain-specific crates without a dependency or ownership reason.
+
+Implement the portable feature cleanup and facade module split first. Treat native IO candidate
+extraction and the hidden cross-crate integration bridge as separate cutovers with behavioral and
+target checks; review recommendations do not constitute their implementation. Use the checked-in
+`tools/consumers/scene` package for both C and H, without generating or inspecting its Rust source
+from xtask. Its expectations come from an explicit test case, outside workspace feature unification.
+
 ## Execution units
 
 At adoption the implementation units below remain open; review reproductions establish the baseline

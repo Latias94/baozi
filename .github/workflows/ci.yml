@@ -100,6 +100,9 @@ jobs:
       - name: Check no-default facade
         run: cargo check --locked -p baozi --no-default-features
 
+      - name: Run independent public consumer feature matrix
+        run: python3 scripts/check_features.py --toolchain 1.95.0
+
       - name: Check exact Linux native filesystem candidate facade
         run: cargo check --locked -p baozi --target x86_64-unknown-linux-gnu --no-default-features --features all-formats,native-fs-candidate
 
@@ -108,6 +111,11 @@ jobs:
 
       - name: Check WASI bytes and custom-IO path
         run: cargo check --locked -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
+
+      - name: Check independent browser and WASI consumers
+        run: |
+          python3 scripts/check_features.py --toolchain 1.95.0 --check --target wasm32-unknown-unknown --case empty --case all
+          python3 scripts/check_features.py --toolchain 1.95.0 --check --target wasm32-wasip1 --case empty --case all
 
       - name: Prove non-candidate native filesystem targets fail closed
         shell: pwsh

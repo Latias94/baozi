@@ -14,7 +14,7 @@ use baozi_import::{
     ImportProgressUnit, ImportRequest, ImportRequestLayer, ImportRunError, ImportTerminalCause,
     ImportTerminalFailureClass, OptionCompileLimits, ParseResult, ParseScope,
     PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits, RegistryBuilder,
-    SceneDraft, import_bytes,
+    SceneDraft, SceneValidationError, import_bytes,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationToken, ProgressDecision, ProgressEvent};
@@ -769,14 +769,19 @@ fn ordered_detection_evidence_survives_every_post_selection_terminal_failure() {
                 assert_eq!(envelope.code(), "test.detection.parser_failure");
             }
             TerminalCase::AuthoringRejection => {
-                let ImportCause::OperationTerminal(terminal) = failure.cause() else {
-                    panic!("expected canonical authoring terminal rejection");
+                assert!(matches!(
+                    failure.cause(),
+                    ImportCause::SceneValidation(SceneValidationError::ParentOutOfRange {
+                        node: 1,
+                        parent: 2,
+                        node_count: 2,
+                    })
+                ));
+                let ImportTerminalCause::Failure(terminal) = failure.ledger().terminal_cause()
+                else {
+                    panic!("canonical authoring rejection must retain terminal failure evidence");
                 };
                 assert_eq!(terminal.class(), ImportTerminalFailureClass::Requested);
-                assert_eq!(
-                    failure.ledger().terminal_cause(),
-                    ImportTerminalCause::Failure(*terminal)
-                );
             }
             TerminalCase::Cancellation | TerminalCase::Publication => {
                 assert!(matches!(failure.cause(), ImportCause::Scope(_)));

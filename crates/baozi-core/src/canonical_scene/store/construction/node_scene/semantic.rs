@@ -10,12 +10,13 @@ use crate::entity::{AuthoredTransform, validate_entity_name_str};
 
 use super::ValidatedNodeScene;
 
-mod animation;
-mod appearance;
-mod deformation;
-mod geometry;
+pub(in crate::canonical_scene::store) mod animation;
+pub(in crate::canonical_scene::store) mod appearance;
+pub(in crate::canonical_scene::store) mod deformation;
+pub(in crate::canonical_scene::store) mod geometry;
 mod profile;
-mod spatial;
+mod read;
+pub(in crate::canonical_scene::store) mod spatial;
 
 pub(in crate::canonical_scene::store) use animation::{
     NodeSceneAnimationCursor, NodeSceneAnimationExtrapolation, NodeSceneAnimationInterpolation,

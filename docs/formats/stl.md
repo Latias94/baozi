@@ -17,7 +17,7 @@
 | Capability | Status | Notes | Tests |
 | --- | --- | --- | --- |
 | Geometry | Supported | Imports triangle facets as `PrimitiveTopology::Triangles` with duplicated per-facet normals. | `crates/baozi-format-stl/tests/ascii.rs`, `crates/baozi-format-stl/tests/binary.rs` |
-| Hierarchy and transforms | Partial | Emits one child node per non-empty ASCII solid and one child node for binary STL. STL has no transforms. | `ascii.rs`, `binary.rs` |
+| Hierarchy and transforms | Partial | Emits one root node per non-empty ASCII solid and one root node for binary STL. STL has no transforms. | `ascii.rs`, `binary.rs` |
 | Materials | Partial | Emits one default material. Binary Materialise `COLOR=` header maps to material base color. | `binary.rs` |
 | Textures and sidecars | Unsupported | STL import does not resolve sidecars or textures. | facade and parser tests |
 | Cameras and lights | Unsupported | STL has no camera or light data. | not applicable |
@@ -69,7 +69,7 @@ Color handling is experimental:
 ASCII STL is the text encoding of the same triangle-facet model. Baozi parses this shape:
 
 ```stl
-solid name
+solid part one
   facet normal 0 0 1
     outer loop
       vertex 0 0 0
@@ -77,12 +77,27 @@ solid name
       vertex 0 1 0
     endloop
   endfacet
-endsolid name
+endsolid part one
 ```
 
 Baozi supports multiple top-level `solid ... endsolid` blocks. Each non-empty solid becomes one mesh
-and one child node. Empty solids emit a warning diagnostic; if every solid is empty, import fails
-because there is no renderable STL geometry.
+and one root node, both carrying the solid name. Empty solids emit a warning diagnostic; if every
+solid is empty, import fails because there is no renderable STL geometry.
+
+Names are the complete remainder of the `solid` or `endsolid` line after trimming surrounding ASCII
+whitespace. Internal spacing is preserved. The opening and closing names must match exactly,
+including case and internal whitespace; an unnamed `solid` requires an unnamed `endsolid`. This
+matching rule also applies to empty solids before their warning is emitted. Keywords remain
+case-insensitive. Canonical scene name validation still rejects embedded control characters
+(including tabs within a name) and names longer than 1024 bytes; tabs around a name are accepted.
+
+Blank lines and surrounding spaces or horizontal tabs are accepted. Comments are not recognized:
+`#` and `//` in a name are literal name content, and standalone comment lines fail the grammar.
+The text profile remains ASCII-only with LF or CRLF newlines; BOMs, bare CR, NUL, and other
+forbidden control bytes are rejected before parsing, as are malformed UTF-8 and non-ASCII text.
+Facet records retain their strict structure. An open solid or incomplete facet at EOF fails;
+the final `endsolid` line does not need a newline. After a complete solid, only whitespace or
+another complete solid block is accepted, so trailing garbage fails.
 
 ## Resource Accounting and Cancellation
 
@@ -91,17 +106,23 @@ because there is no renderable STL geometry.
   `DecodedText` reservation while the ASCII parser uses it. Allocator slack is reserved separately.
 - ASCII STL line starts are retained through the import-owned text-input line index. Line limits count
   content bytes only, so neither LF nor the CRLF terminator reduces the admitted content budget.
+- Solid-name words on both opening and closing lines remain individually tokenized and charged
+  against token count and per-token byte limits. The complete trimmed opening name is admitted
+  against the string-byte limit before copying; closing-name comparison borrows the decoded text.
 - Binary STL has no decoded text surface or line index and consumes zero corresponding attempted,
   consumed, or live evidence, including when the binary header begins with `solid`.
 - ASCII text-input planning and decoded-text construction each poll operation control for every
   at-most-4-KiB chunk. Owned solid-name and other string copies use UTF-8-boundary-safe chunks with
-  the same bound.
+  the same bound. Matching solid names are compared in at-most-4-KiB chunks with control checks.
 - Binary facet parsing checks control at each 50-byte record. The optional facet-color expansion pass
   checks control at least once per 4096 facets.
 
 Exact decoded-text and line-index admission, one-byte-under rejection, binary-zero accounting, CRLF
-content limits, distant profile failure cancellation, long solid-name copying, per-facet cancellation,
-and color-expansion bounds are covered by `crates/baozi-format-stl/tests/limits.rs`.
+content limits, multiword name string/token limits, distant profile failure cancellation, long
+solid-name copying and comparison, per-facet cancellation, and color-expansion bounds are covered
+by `crates/baozi-format-stl/tests/limits.rs`. Name preservation in node/mesh snapshots, mismatches,
+unnamed solids, comments, trailing garbage, and EOF behavior are covered by
+`crates/baozi-format-stl/tests/ascii.rs`.
 
 ## Known Limitations
 
@@ -144,3 +165,46 @@ and color-expansion bounds are covered by `crates/baozi-format-stl/tests/limits.
 | Fixture | Purpose | License | Snapshot |
 | --- | --- | --- | --- |
 | hand-authored in tests | binary/ASCII triangles, colors, malformed input, limits | Baozi project license | `SceneSnapshot` assertions |
+
+## Canonical Binary Color Composition
+
+The experimental binary mappings above use the following explicit canonical composition policy.
+`COLOR=` supplies an object fallback RGBA. A facet with attribute bit `0x8000` set overrides that
+fallback with its decoded 5-bit RGB and alpha `1`. A facet without that bit uses the object RGBA,
+or opaque white when the header has no complete `COLOR=` value. Header bytes are divided by `255`
+and facet components by `31`, preserving the existing linear numeric interpretation without a
+color-space conversion.
+
+| Input colors | Material base-color factor | Vertex color channel | Alpha mode |
+| --- | --- | --- | --- |
+| No explicit facet colors, no object color | Opaque white | Absent | `Opaque` |
+| Object color with no explicit facet colors | Object RGBA | Absent | `Blend` if object alpha is below `1`; otherwise `Opaque` |
+| Explicit colors on some facets | Opaque white | Facet RGBA for explicit colors; object RGBA or opaque white for other facets | `Blend` if a used object fallback has alpha below `1`; otherwise `Opaque` |
+| Explicit colors on every facet | Opaque white | Facet RGBA with alpha `1` | `Opaque`, including when the unused object fallback is transparent |
+
+The final RGBA is the component-wise product of the typed material base-color factor and the vertex
+color, with an absent vertex channel contributing opaque white. An object fallback appears in
+exactly one of those factors. For mixed colors, transparent fallback faces retain their source alpha
+while explicitly colored faces remain opaque; both share a `Blend` material. This avoids applying
+the object tint twice or squaring its alpha, including when an object component is zero.
+
+This policy follows the material-versus-vertex-color separation in the local Assimp reference at
+`repo-ref/assimp/code/AssetLib/STL/STLLoader.cpp`: its binary loader selects the object color as the
+material color only when there is no vertex color channel, fills missing facet colors from the
+object fallback, and assigns explicit facet colors alpha `1`. Baozi retains its existing channel
+order: low/middle/high 5-bit components map to RGB with `COLOR=`, and BGR without it. The existing
+set-bit color-valid convention applies in both cases. Other Materialise/Magics validity-bit
+conventions are outside this supported dialect; no heuristic switches conventions.
+
+All RGBA combinations in this supported policy are representable using the existing material and
+attribute schema, including mixed opacity, so strict `preserve_or_fail` imports need no semantic-loss
+authorization. A future source combination that cannot be represented requires a specific
+source-semantic-loss diagnostic and caller authorization, or rejection; silently duplicating a tint,
+clamping colors, or approximating an unsupported composition does not preserve source semantics.
+
+`crates/baozi-format-stl/tests/color_composition.rs` reads actual typed material factors and dense RGBA
+attributes and evaluates their final product for every imported vertex. Fixtures cover uncolored
+geometry, object-only colors, mixed colors and fallback, fully colored meshes, nonwhite facet
+components in both channel orders, zero components, transparent and opaque object alpha, and
+transparent fallbacks overridden on every facet. They use the default strict loss policy and require
+no loss evidence.

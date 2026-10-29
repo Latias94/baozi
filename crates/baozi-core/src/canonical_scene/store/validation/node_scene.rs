@@ -27,9 +27,9 @@ use super::super::production::{
     ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
 };
 use super::super::schema::animation::{
-    AnimationChannelTableSchema, AnimationClipTableSchema, AnimationDirectorySchema,
-    AnimationInTangentsSchema, AnimationOutTangentsSchema, AnimationTimesSchema,
-    AnimationValuesSchema,
+    AnimationChannelTableSchema, AnimationClipNameSchema, AnimationClipTableSchema,
+    AnimationDirectorySchema, AnimationInTangentsSchema, AnimationOutTangentsSchema,
+    AnimationTimesSchema, AnimationValuesSchema,
 };
 use super::super::schema::appearance::{
     AppearanceBindingSemanticScalarSchema, AppearanceBindingTableSchema, AppearanceDirectorySchema,
@@ -831,6 +831,12 @@ impl NodeSceneValidationProof {
         &self,
     ) -> Option<CanonicalBlockRef<AnimationClipTableSchema>> {
         self.animation.clips
+    }
+
+    pub(in crate::canonical_scene::store) const fn animation_clip_names(
+        &self,
+    ) -> Option<CanonicalBlockRef<AnimationClipNameSchema>> {
+        self.animation.clip_names
     }
 
     pub(in crate::canonical_scene::store) const fn animation_channels(
@@ -2965,6 +2971,7 @@ where
             instance_morph_weights: expected_refs.deformation.payloads.instance_morph_weights,
         },
         animation: AnimationValidatedRefs {
+            clip_names: expected_refs.animation.payloads.clip_names,
             clips: expected_refs.animation.clips,
             channels: expected_refs.animation.channels,
             times: expected_refs.animation.payloads.times,

@@ -34,6 +34,7 @@ pub(in super::super) const GEOMETRY_DOMAIN_FACE: u8 = 2;
 pub(in super::super) const GEOMETRY_SCALAR_F32: u8 = 0;
 pub(in super::super) const GEOMETRY_SCALAR_U32: u8 = 1;
 pub(in super::super) const GEOMETRY_SCALAR_I32: u8 = 2;
+pub(in super::super) const GEOMETRY_SCALAR_F64: u8 = 3;
 pub(in super::super) const GEOMETRY_NORMALIZATION_NONE: u8 = 0;
 pub(in super::super) const GEOMETRY_PAYLOAD_DENSE: u8 = 0;
 pub(in super::super) const GEOMETRY_PAYLOAD_SPARSE: u8 = 1;
@@ -158,6 +159,9 @@ pub(in super::super) struct GeometryPrimitiveIndicesSchema;
 pub(in super::super) struct GeometryF32ValuesSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(in super::super) struct GeometryF64ValuesSchema;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in super::super) struct GeometryU32ValuesSchema;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -208,6 +212,10 @@ impl CanonicalSchema for GeometryPrimitiveIndicesSchema {
 
 impl CanonicalSchema for GeometryF32ValuesSchema {
     type StoreKind = ScalarSequence<f32>;
+}
+
+impl CanonicalSchema for GeometryF64ValuesSchema {
+    type StoreKind = ScalarSequence<f64>;
 }
 
 impl CanonicalSchema for GeometryU32ValuesSchema {

@@ -34,6 +34,7 @@ mod outcome;
 mod registry;
 mod request;
 mod resource_graph;
+mod resource_hash;
 mod scope;
 mod session;
 mod source_scope;
@@ -52,7 +53,12 @@ mod text_input;
 /// ```
 pub use baozi_core::scene::integration::SceneDraft;
 pub use baozi_core::{
-    SceneGenerationId, SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
+    AppearanceBehaviorKind, AppearanceBuildResource, AppearanceLimitDimension, EntityNameError,
+    MaterialFactorGroup, SceneAnimationRateKind, SceneAnimationSamplePart, SceneAnimationTarget,
+    SceneAppearanceRule, SceneAuthoredProfileOwner, SceneGenerationId, SceneInputCollection,
+    SceneLightEmissionRule, SceneProfileOwner, SceneSnapshot, SceneSnapshotError,
+    SceneSnapshotLimits, SceneValidationDomain, SceneValidationError, SceneValidationLimit,
+    TextureStrengthRequirement, ValidatedScene,
 };
 
 pub use config::{
@@ -62,10 +68,10 @@ pub use config::{
     MAX_FORMAT_OPTION_ENVELOPES_PER_LAYER,
 };
 pub use dependency::{
-    AuthorizedDependency, DenyDependencies, DependencyCacheDisposition, DependencyIdentity,
-    DependencyOrigin, DependencyOutcome, DependencyPolicyError, DependencyReference,
-    DependencyRequirement, DependencyResolver, DependencyRoleId, DependencyRoleIdError,
-    DependencySnapshot, OptionalDependencyEvidence,
+    AuthorizedDependency, DenyDependencies, DependencyCacheDisposition, DependencyFailureContext,
+    DependencyIdentity, DependencyOrigin, DependencyOutcome, DependencyPolicyError,
+    DependencyReference, DependencyRequirement, DependencyResolver, DependencyRoleId,
+    DependencyRoleIdError, DependencySnapshot, OptionalDependencyEvidence,
 };
 pub use descriptor::{
     CapabilityStatus, DeclarationEvidenceAuthority, DescriptorError, FormatCapability,

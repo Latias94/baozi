@@ -434,6 +434,7 @@ impl fmt::Debug for ImportEvidence {
 
 pub struct ImportFailure {
     cause: ImportCause,
+    terminal_control_cause: Option<baozi_operation::ControlCause>,
     source: AssetPath,
     selected_format: Option<FormatId>,
     detection: Vec<DetectionEvidence>,
@@ -449,6 +450,7 @@ pub struct ImportFailure {
 
 pub(crate) struct ImportFailureParts {
     pub cause: ImportCause,
+    pub terminal_control_cause: Option<baozi_operation::ControlCause>,
     pub source: AssetPath,
     pub selected_format: Option<FormatId>,
     pub detection: Vec<DetectionEvidence>,
@@ -466,6 +468,7 @@ impl ImportFailure {
     pub(crate) fn from_parts(parts: ImportFailureParts) -> Self {
         Self {
             cause: parts.cause,
+            terminal_control_cause: parts.terminal_control_cause,
             source: parts.source,
             selected_format: parts.selected_format,
             detection: parts.detection,
@@ -482,6 +485,16 @@ impl ImportFailure {
 
     pub const fn cause(&self) -> &ImportCause {
         &self.cause
+    }
+
+    /// Returns the original producer-local Scene submission rule.
+    pub const fn scene_validation_error(&self) -> Option<&baozi_core::SceneValidationError> {
+        self.cause.scene_validation_error()
+    }
+
+    /// Returns a later terminal interruption retained alongside a primary semantic rejection.
+    pub const fn terminal_control_cause(&self) -> Option<&baozi_operation::ControlCause> {
+        self.terminal_control_cause.as_ref()
     }
 
     pub const fn source_identity(&self) -> &AssetPath {
@@ -530,6 +543,7 @@ impl fmt::Debug for ImportFailure {
         formatter
             .debug_struct("ImportFailure")
             .field("cause", &self.cause)
+            .field("terminal_control_cause", &self.terminal_control_cause)
             .field("source", &self.source)
             .field("selected_format", &self.selected_format)
             .field("detection", &self.detection)
@@ -554,7 +568,11 @@ pub(crate) enum ImportFailureStoreOwner {
 
 impl fmt::Display for ImportFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.cause.fmt(formatter)
+        self.cause.fmt(formatter)?;
+        if let Some(cause) = &self.terminal_control_cause {
+            write!(formatter, "; terminal finalization also reported: {cause}")?;
+        }
+        Ok(())
     }
 }
 

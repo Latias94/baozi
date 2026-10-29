@@ -10,9 +10,9 @@ use crate::canonical_scene::store::schema::animation::{
     ANIMATION_INTERPOLATION_LINEAR, ANIMATION_INTERPOLATION_STEP,
     ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS, ANIMATION_TARGET_NODE_ROTATION,
     ANIMATION_TARGET_NODE_SCALE, ANIMATION_TARGET_NODE_TRANSLATION, ANIMATION_TIME_DOMAIN_FRAMES,
-    ANIMATION_TIME_DOMAIN_SECONDS, ANIMATION_TIME_DOMAIN_TICKS, AnimationInTangentsSchema,
-    AnimationOutTangentsSchema, AnimationTimesSchema, AnimationValuesSchema,
-    animation_channel_field, animation_clip_field,
+    ANIMATION_TIME_DOMAIN_SECONDS, ANIMATION_TIME_DOMAIN_TICKS, AnimationClipNameSchema,
+    AnimationInTangentsSchema, AnimationOutTangentsSchema, AnimationTimesSchema,
+    AnimationValuesSchema, animation_channel_field, animation_clip_field,
 };
 use crate::canonical_scene::store::schema::deformation::DEFORMATION_MESH_INSTANCE_FIELD_COUNT;
 use crate::canonical_scene::store::schema::{
@@ -24,8 +24,12 @@ use super::{NodeSceneSemanticResult, invariant, read_scalar, read_u32_as_usize};
 
 type SceneCanonicalStore = PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>;
 
+mod read;
+
 /// Proof-bound projections of the animation tables and shared scalar payloads.
-pub(super) struct NodeSceneAnimationTables<'scene> {
+#[derive(Clone, Copy)]
+pub(in crate::canonical_scene::store) struct NodeSceneAnimationTables<'scene> {
+    clip_names: Option<&'scene str>,
     clips: Option<CanonicalRecordView<'scene>>,
     channels: Option<CanonicalRecordView<'scene>>,
     deformation_mesh_instances: Option<CanonicalRecordView<'scene>>,
@@ -36,10 +40,21 @@ pub(super) struct NodeSceneAnimationTables<'scene> {
 }
 
 impl<'scene> NodeSceneAnimationTables<'scene> {
-    pub(super) fn try_new(
+    pub(in crate::canonical_scene::store) fn try_new(
         canonical: &'scene SceneCanonicalStore,
         proof: NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
+        let clip_names = proof
+            .animation_clip_names()
+            .map(|reference| {
+                canonical
+                    .utf8(reference.into_store())
+                    .filter(|names| !names.is_empty())
+                    .ok_or_else(|| {
+                        invariant("validated animation-clip names are unavailable or mistyped")
+                    })
+            })
+            .transpose()?;
         let clips = resolve_table(
             canonical,
             proof.animation_clips(),
@@ -108,6 +123,7 @@ impl<'scene> NodeSceneAnimationTables<'scene> {
         }
 
         Ok(Self {
+            clip_names,
             clips,
             channels,
             deformation_mesh_instances,
@@ -129,6 +145,7 @@ impl<'scene> NodeSceneAnimationTables<'scene> {
             next_clip: 0,
             next_channel: 0,
             next_clip_channel_offset: 0,
+            next_clip_name_offset: 0,
             next_time_offset: 0,
             next_value_offset: 0,
             next_in_tangent_offset: 0,
@@ -226,6 +243,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneAnimationCursor<'scene> {
     next_clip: usize,
     next_channel: usize,
     next_clip_channel_offset: usize,
+    next_clip_name_offset: usize,
     next_time_offset: usize,
     next_value_offset: usize,
     next_in_tangent_offset: usize,
@@ -243,7 +261,7 @@ impl<'scene> NodeSceneAnimationCursor<'scene> {
 
     pub(in crate::canonical_scene::store) fn next_clip(
         &mut self,
-    ) -> NodeSceneSemanticResult<Option<NodeSceneAnimationClip>> {
+    ) -> NodeSceneSemanticResult<Option<NodeSceneAnimationClip<'scene>>> {
         self.enter_phase(AnimationCursorPhase::Clips)?;
         let Some(row) = next_row(
             self.next_clip,
@@ -263,6 +281,68 @@ impl<'scene> NodeSceneAnimationCursor<'scene> {
             animation_clip_field::CLIP,
             "validated animation-clip source identity is unreadable",
         )?;
+        let name_offset = read_u32_as_usize(
+            table,
+            row,
+            animation_clip_field::NAME_OFFSET,
+            "animation-clip name offset is unreadable",
+        )?;
+        let name_count = read_u32_as_usize(
+            table,
+            row,
+            animation_clip_field::NAME_COUNT,
+            "animation-clip name count is unreadable",
+        )?;
+        if name_offset != self.next_clip_name_offset {
+            return Err(invariant(
+                "validated animation-clip name ranges are not contiguous",
+            ));
+        }
+        let name = match (
+            read_scalar::<u8>(
+                table,
+                row,
+                animation_clip_field::NAME_PRESENCE,
+                "animation-clip name presence is unreadable",
+            )?,
+            name_count,
+        ) {
+            (PRESENCE_ABSENT, 0) => None,
+            (PRESENCE_PRESENT, 0) => Some(""),
+            (PRESENCE_PRESENT, _) => {
+                let reference = table
+                    .utf8_ref::<AnimationClipNameSchema>(row, animation_clip_field::NAMES)
+                    .ok_or_else(|| invariant("animation-clip name reference is unreadable"))?;
+                if Some(CanonicalBlockRef::from_store(reference))
+                    != self.proof.animation_clip_names()
+                {
+                    return Err(invariant(
+                        "animation-clip name reference disagrees with validation proof",
+                    ));
+                }
+                let end = name_offset
+                    .checked_add(name_count)
+                    .ok_or_else(|| invariant("animation-clip name range overflows"))?;
+                Some(
+                    self.tables
+                        .clip_names
+                        .and_then(|names| names.get(name_offset..end))
+                        .ok_or_else(|| invariant("animation-clip name range is unreadable"))?,
+                )
+            }
+            _ => return Err(invariant("animation-clip name presence is inconsistent")),
+        };
+        if name_count == 0 {
+            require_absent_cell(
+                table,
+                row,
+                animation_clip_field::NAMES,
+                "empty animation-clip name reference has a nonzero sentinel",
+            )?;
+        }
+        self.next_clip_name_offset = name_offset
+            .checked_add(name_count)
+            .ok_or_else(|| invariant("animation-clip name range overflows"))?;
 
         let duration = read_scalar::<f64>(
             table,
@@ -320,6 +400,7 @@ impl<'scene> NodeSceneAnimationCursor<'scene> {
             .ok_or_else(|| invariant("animation-clip channel cursor overflows"))?;
         self.next_clip = advance_row(row, "animation-clip cursor index overflows")?;
         Ok(Some(NodeSceneAnimationClip {
+            name,
             source_index,
             duration,
             time_domain,
@@ -486,6 +567,7 @@ impl<'scene> NodeSceneAnimationCursor<'scene> {
         if self.next_clip != self.proof.animation_clip_count()
             || self.next_channel != self.proof.animation_channel_count()
             || self.next_clip_channel_offset != self.proof.animation_channel_count()
+            || self.next_clip_name_offset != self.tables.clip_names.map_or(0, str::len)
             || self.next_time_offset != payload_len(self.tables.times)
             || self.next_value_offset != payload_len(self.tables.values)
             || self.next_in_tangent_offset != payload_len(self.tables.in_tangents)
@@ -605,7 +687,8 @@ fn require_node_target(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(in crate::canonical_scene::store) struct NodeSceneAnimationClip {
+pub(in crate::canonical_scene::store) struct NodeSceneAnimationClip<'scene> {
+    name: Option<&'scene str>,
     source_index: usize,
     duration: f64,
     time_domain: NodeSceneAnimationTimeDomain,
@@ -613,7 +696,11 @@ pub(in crate::canonical_scene::store) struct NodeSceneAnimationClip {
     channel_count: usize,
 }
 
-impl NodeSceneAnimationClip {
+impl<'scene> NodeSceneAnimationClip<'scene> {
+    pub(in crate::canonical_scene::store) const fn name(self) -> Option<&'scene str> {
+        self.name
+    }
+
     pub(in crate::canonical_scene::store) const fn source_index(self) -> usize {
         self.source_index
     }

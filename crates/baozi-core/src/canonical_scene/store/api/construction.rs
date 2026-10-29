@@ -56,6 +56,18 @@ impl<'input> SceneConstruction<'input> {
 #[derive(Debug)]
 pub struct SceneConstructionStartError(CoreSceneConstructionStartError);
 
+impl SceneConstructionStartError {
+    /// Preserves a bounded input-admission rule without exposing transaction infrastructure.
+    pub fn scene_validation_error(&self) -> Option<super::validation::SceneValidationError> {
+        match &self.0 {
+            CoreSceneConstructionStartError::InputEnvelope(cause) => {
+                super::validation::input_validation_error(cause)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for SceneConstructionStartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)

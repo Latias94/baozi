@@ -55,8 +55,9 @@ pub use crate::image::{MipmapFilter, SamplerState, TexelFilter, TextureAddressMo
 pub use crate::math::{Color, Mat4, Quat, Vec2, Vec3};
 pub use crate::namespaced::NamespacedName;
 pub use crate::provenance::{
-    ContentDigest, DigestAlgorithm, EvidenceDigest, OperationEvidenceSummary, OperationKind,
-    OptionsDigest, ResourceIdentity, SourceDisplayName, SourceObjectKind, SourceObjectLocator,
+    ContentDigest, DIGEST_LEN, DigestAlgorithm, EvidenceDigest, MAX_RESOURCE_IDENTITY_LEN,
+    OperationEvidenceSummary, OperationKind, OptionsDigest, ResourceIdentity,
+    ResourceIdentityError, SourceDisplayName, SourceObjectKind, SourceObjectLocator,
 };
 pub use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,

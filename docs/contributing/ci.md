@@ -61,7 +61,8 @@ cargo run --locked -p baozi-xtask -- crate-graph-check
 cargo run --locked -p baozi-xtask -- native-fs-check
 cargo nextest run --locked -p baozi-xtask
 cargo nextest run --locked -p baozi-xtask --all-features
-cargo run --locked -p baozi-xtask -- repository-conformance-check
+cargo run --locked -p baozi-xtask -- runtime-admission-check
+python scripts/check_features.py --toolchain 1.95.0
 ```
 
 There is currently no release-registered `native-fs` or low-level `fs` feature. The explicitly
@@ -100,13 +101,11 @@ support/tool dependencies, reverse paths, and production cycles, while allowing 
 The workspace nextest runs exclude `baozi-xtask`. Its repository-scanning fixture suites duplicate
 whole-tree work and can dominate otherwise parallel workspace tests. CI runs the complete xtask
 package once with default features and once with all features, then invokes the required repository
-checks directly; ADR review remains an authoring concern rather than a default Rust gate. The
-`repository-conformance-check` command reads only `docs/conformance/contracts.toml`,
-`docs/conformance/gates.toml`, and the repository-relative files explicitly named there. It does not
-scan ADR prose, source prose, Git history, or the repository tree, and it does not execute the
-cataloged commands. Focused retained-store and canonical-Scene commands are cataloged as behavioral
-evidence while the corresponding contracts remain partial; CI executes their code through the
-workspace test job rather than through a source-layout comparator.
+checks directly; ADR review remains an authoring concern rather than a default Rust gate.
+`runtime-admission-check` makes one locked Cargo metadata query and checks normal/build dependency
+reachability. Host scheduling, cancellation, release ordering, and publication are covered by the
+[behavior gate index](../testing/behavior-gates.md). The former conformance receipt and test-source
+hash checks have been retired; a handwritten receipt never substituted for an executed test.
 
 A green dependency or candidate runner gate is not filesystem-conformance evidence. The three exact
 runtime candidates still require the complete platform-local race, link/reparse,

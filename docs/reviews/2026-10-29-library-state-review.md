@@ -87,7 +87,7 @@ on Rust 1.95 default features and Rust 1.99 all features. Its PE stack reserve i
 Relinking the same 1.99 library and source with `/STACK:8388608` succeeds. Hostile input recursion is
 not required.
 
-The path passes through [facade read_bytes](../../crates/baozi/src/lib.rs#L254),
+The path passes through [facade read_bytes](../../crates/baozi/src/importer.rs),
 [import_bytes](../../crates/baozi-import/src/session.rs#L140), and retained scene/outcome construction.
 PE unwind/symbol inspection of a reviewed debug executable identified large individual frames:
 `prepare_scene` about 405 KiB, `submit_scene` about 290 KiB, `finalize_success` about 248 KiB, and
@@ -247,9 +247,13 @@ The README and every documented example are not executed, allowing basic workflo
 Scheduled [fuzz campaigns](../../.github/workflows/fuzz.yml#L53) do not retain successful corpus growth.
 Five targets have 19 checked-in parser seeds; registry detection has no checked-in corpus.
 
-The 1,926-line [scale runner](../../scripts/run-scale-profile.ps1) measures one repeated-face OBJ case,
+At review intake, the former 1,926-line PowerShell scale runner measured one repeated-face OBJ case,
 missing distinct buffers, unique vertices, nodes, and resource growth. Runtime-admission's nested
 Cargo metadata call omits `--locked`.
+
+The active delivery work has since replaced that runner with the thin
+[Python driver](../../scripts/run_scale_profile.py). Broader Rust workloads and the remaining
+governance cleanup still require their own verification.
 
 **Direction:** independent public consumers, normal-stack execution, retained fuzz corpus, and a few
 orthogonal scale cases. Use a thin cross-platform Python measurement runner and Rust assertions.

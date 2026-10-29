@@ -2,9 +2,9 @@ use baozi_operation::__retained_store_integration::activation::{
     CanonicalValidationMember, CanonicalValidationSession,
 };
 use baozi_operation::{
-    CanonicalRecordRef, CanonicalRecordView, CanonicalSequenceRef, OperationOwner, ProgressPhase,
-    ProgressUnit, RecordBlock, ScalarSequence, StoreValidationSession, StoreWorkError,
-    StoredScalar,
+    CanonicalRecordRef, CanonicalRecordView, CanonicalSequenceRef, CanonicalUtf8Ref,
+    OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, ScalarSequence,
+    StoreValidationSession, StoreWorkError, StoredScalar, Utf8Block,
 };
 
 use crate::canonical_scene::store::production::{Presence, ValidatedAnimationBatch};
@@ -17,11 +17,11 @@ use crate::canonical_scene::store::schema::animation::{
     ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS, ANIMATION_TARGET_NODE_ROTATION,
     ANIMATION_TARGET_NODE_SCALE, ANIMATION_TARGET_NODE_TRANSLATION, ANIMATION_TIME_DOMAIN_FRAMES,
     ANIMATION_TIME_DOMAIN_SECONDS, ANIMATION_TIME_DOMAIN_TICKS, AnimationChannelTableSchema,
-    AnimationClipTableSchema, AnimationDirectorySchema, AnimationInTangentsSchema,
-    AnimationOutTangentsSchema, AnimationTimesSchema, AnimationValuesSchema,
-    animation_channel_field, animation_clip_field, animation_directory_field,
-    encode_animation_extrapolation, encode_animation_interpolation, encode_animation_target_kind,
-    encode_animation_time_domain,
+    AnimationClipNameSchema, AnimationClipTableSchema, AnimationDirectorySchema,
+    AnimationInTangentsSchema, AnimationOutTangentsSchema, AnimationTimesSchema,
+    AnimationValuesSchema, animation_channel_field, animation_clip_field,
+    animation_directory_field, encode_animation_extrapolation, encode_animation_interpolation,
+    encode_animation_target_kind, encode_animation_time_domain,
 };
 use crate::canonical_scene::store::schema::deformation::{
     DEFORMATION_LOGICAL_MORPH_FIELD_COUNT, DEFORMATION_MESH_INSTANCE_FIELD_COUNT,
@@ -36,6 +36,7 @@ use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, NODE_SCENE_NODE_FIELD_COUNT, NODE_SCENE_TRANSFORM_TRS,
     NodeSceneNodeTableSchema, PRESENCE_ABSENT, PRESENCE_PRESENT, node_scene_node_field,
 };
+use crate::entity::{MAX_ENTITY_NAME_BYTES, validate_entity_name_str};
 use crate::math::Quat;
 
 use super::super::require_scalar;
@@ -44,6 +45,7 @@ use super::geometry::GeometryMeshInstanceValidationProjection;
 
 #[derive(Clone, Copy)]
 pub(super) struct AnimationValidatedRefs {
+    pub(super) clip_names: Option<CanonicalBlockRef<AnimationClipNameSchema>>,
     pub(super) clips: Option<CanonicalBlockRef<AnimationClipTableSchema>>,
     pub(super) channels: Option<CanonicalBlockRef<AnimationChannelTableSchema>>,
     pub(super) times: Option<CanonicalBlockRef<AnimationTimesSchema>>,
@@ -88,6 +90,8 @@ impl AnimationCanonicalDependencies {
 /// Validation-scoped animation members retained for same-session cross-domain checks.
 #[derive(Clone, Copy)]
 pub(super) struct AnimationValidatedMembers<'session> {
+    pub(super) clip_names:
+        Option<CanonicalValidationMember<'session, Utf8Block, AnimationClipNameSchema>>,
     pub(super) clips:
         Option<CanonicalValidationMember<'session, RecordBlock, AnimationClipTableSchema>>,
     pub(super) channels:
@@ -119,6 +123,7 @@ pub(super) struct AnimationMeteredShape<'session> {
 /// Aggregate animation shape sealed before physical materialization begins.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::canonical_scene::store) struct AnimationMeteredCounts {
+    pub(in crate::canonical_scene::store) clip_name_byte_count: u32,
     pub(in crate::canonical_scene::store) clip_count: u32,
     pub(in crate::canonical_scene::store) channel_count: u32,
     pub(in crate::canonical_scene::store) time_scalar_count: u64,
@@ -138,8 +143,10 @@ impl AnimationMeteredCounts {
         in_tangent_scalar_count: u64,
         out_tangent_scalar_count: u64,
         payload_block_count: u32,
+        clip_name_byte_count: u32,
     ) -> Self {
         Self {
+            clip_name_byte_count,
             clip_count,
             channel_count,
             time_scalar_count,
@@ -155,10 +162,14 @@ impl AnimationMeteredCounts {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(in crate::canonical_scene::store) struct AnimationClipValidationDescriptor {
     channel_end: u32,
+    name_count: u32,
 }
 
 impl AnimationClipValidationDescriptor {
-    pub(in crate::canonical_scene::store) const EMPTY: Self = Self { channel_end: 0 };
+    pub(in crate::canonical_scene::store) const EMPTY: Self = Self {
+        channel_end: 0,
+        name_count: 0,
+    };
 }
 
 /// One canonical channel summary needed to validate the shared payload sequences exactly once.
@@ -396,6 +407,12 @@ where
         return Ok(None);
     };
     if !validate_animation_clips_metered(session, members, counts, clip_descriptors)?
+        || !validate_animation_clip_names_metered(
+            session,
+            members.clip_names,
+            counts.clip_name_byte_count,
+            clip_descriptors,
+        )?
         || !validate_animation_channels_metered(
             session,
             members,
@@ -441,6 +458,7 @@ where
         members.values.is_some(),
         members.in_tangents.is_some(),
         members.out_tangents.is_some(),
+        members.clip_names.is_some(),
     ]
     .into_iter()
     .try_fold(0_u32, |count, present| {
@@ -499,6 +517,7 @@ where
     let mut values = None;
     let mut in_tangents = None;
     let mut out_tangents = None;
+    let mut clip_names = None;
     let complete = session.visit_canonical_records(
         animation,
         1,
@@ -613,7 +632,35 @@ where
                 out_tangents.is_some()
             };
 
+            let clip_name_byte_count = row.scalar(
+                animation_directory_field::CLIP_NAME_BYTE_COUNT,
+                |value: u32| value,
+            )?;
+            let clip_names_presence = row.scalar(
+                animation_directory_field::CLIP_NAMES_PRESENCE,
+                |value: u8| value,
+            )?;
+            let clip_names_slot_valid = if counts.clip_name_byte_count == 0 {
+                row.scalar(animation_directory_field::CLIP_NAMES, |value: u8| {
+                    value == 0
+                })? == Some(true)
+            } else {
+                clip_names = row.utf8_ref::<AnimationClipNameSchema, _>(
+                    animation_directory_field::CLIP_NAMES,
+                    |value| value,
+                )?;
+                clip_names.is_some()
+            };
+
             Ok(schema_revision == Some(ANIMATION_SCHEMA_REVISION)
+                && clip_name_byte_count == Some(counts.clip_name_byte_count)
+                && clip_names_presence
+                    == Some(if counts.clip_name_byte_count == 0 {
+                        PRESENCE_ABSENT
+                    } else {
+                        PRESENCE_PRESENT
+                    })
+                && clip_names_slot_valid
                 && clip_count == Some(counts.clip_count)
                 && clips_presence
                     == Some(if counts.clip_count == 0 {
@@ -668,6 +715,7 @@ where
         return Ok(None);
     }
     Ok(Some(AnimationValidatedMembers {
+        clip_names,
         clips,
         channels,
         times,
@@ -1109,6 +1157,7 @@ where
         return Ok(false);
     };
     let mut channel_cursor = 0_u32;
+    let mut name_cursor = 0_u32;
     let mut previous_source_clip_index = None;
     let complete = session.visit_canonical_records(
         clips,
@@ -1142,6 +1191,31 @@ where
             } else {
                 row.scalar(animation_clip_field::CHANNELS, |value: u8| value == 0)? == Some(true)
             };
+            let name_presence =
+                row.scalar(animation_clip_field::NAME_PRESENCE, |value: u8| value)?;
+            let name_offset = row.scalar(animation_clip_field::NAME_OFFSET, |value: u32| value)?;
+            let name_count = row.scalar(animation_clip_field::NAME_COUNT, |value: u32| value)?;
+            let name_reference_matches = if name_count.is_some_and(|count| count != 0) {
+                row.utf8_ref::<AnimationClipNameSchema, _>(animation_clip_field::NAMES, |value| {
+                    Some(value) == members.clip_names
+                })? == Some(true)
+            } else {
+                row.scalar(animation_clip_field::NAMES, |value: u8| value == 0)? == Some(true)
+            };
+            let Some(name_count) = name_count else {
+                return Ok(false);
+            };
+            let Some(name_end) = name_cursor.checked_add(name_count) else {
+                return Ok(false);
+            };
+            let name_valid = name_offset == Some(name_cursor)
+                && name_end <= counts.clip_name_byte_count
+                && usize::try_from(name_count).is_ok_and(|count| count <= MAX_ENTITY_NAME_BYTES)
+                && matches!(
+                    (name_presence, name_count),
+                    (Some(PRESENCE_ABSENT), 0) | (Some(PRESENCE_PRESENT), _)
+                )
+                && name_reference_matches;
 
             let Some(source_clip_index) = clip else {
                 return Ok(false);
@@ -1187,6 +1261,7 @@ where
                 channels_presence == Some(PRESENCE_PRESENT) && channels_reference_matches
             };
             let valid = duration.is_finite()
+                && name_valid
                 && duration >= 0.0
                 && valid_time_domain(time_domain)
                 && rate_is_valid
@@ -1199,13 +1274,73 @@ where
             let Some(descriptor) = descriptors.get_mut(row_index) else {
                 return Ok(false);
             };
-            *descriptor = AnimationClipValidationDescriptor { channel_end };
+            *descriptor = AnimationClipValidationDescriptor {
+                channel_end,
+                name_count,
+            };
+            name_cursor = name_end;
             channel_cursor = channel_end;
             previous_source_clip_index = Some(source_clip_index);
             Ok(true)
         },
     )?;
-    Ok(complete && channel_cursor == counts.channel_count)
+    Ok(complete
+        && channel_cursor == counts.channel_count
+        && name_cursor == counts.clip_name_byte_count)
+}
+
+fn validate_animation_clip_names_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
+    session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
+    names: Option<CanonicalValidationMember<'session, Utf8Block, AnimationClipNameSchema>>,
+    expected_len: u32,
+    descriptors: &[AnimationClipValidationDescriptor],
+) -> Result<bool, StoreWorkError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    let Some(names) = names else {
+        return Ok(expected_len == 0 && descriptors.iter().all(|clip| clip.name_count == 0));
+    };
+    let Ok(expected_len) = usize::try_from(expected_len) else {
+        return Ok(false);
+    };
+    let mut clip_index = 0;
+    let mut segment = [0_u8; MAX_ENTITY_NAME_BYTES];
+    let mut used = 0;
+    let complete = session.visit_canonical_utf8_bytes(names, expected_len, |_index, byte| {
+        while descriptors
+            .get(clip_index)
+            .is_some_and(|clip| clip.name_count == 0)
+        {
+            clip_index += 1;
+        }
+        let Some(clip) = descriptors.get(clip_index) else {
+            return false;
+        };
+        let Ok(count) = usize::try_from(clip.name_count) else {
+            return false;
+        };
+        if used >= count || count > segment.len() {
+            return false;
+        }
+        segment[used] = byte;
+        used += 1;
+        if used != count {
+            return true;
+        }
+        let valid = std::str::from_utf8(&segment[..used])
+            .is_ok_and(|name| validate_entity_name_str(name).is_ok());
+        used = 0;
+        clip_index += 1;
+        valid
+    })?;
+    Ok(complete
+        && used == 0
+        && descriptors[clip_index..]
+            .iter()
+            .all(|clip| clip.name_count == 0))
 }
 
 fn validate_animation_times_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
@@ -1521,11 +1656,38 @@ fn validate_animation_graph_inner<'storage, R>(
                 .map(ValidatedAnimationBatch::out_tangent_scalar_count),
         )?;
 
+    let clip_name_byte_count =
+        directory.scalar::<u32>(0, animation_directory_field::CLIP_NAME_BYTE_COUNT)?;
+    if let Some(expected) = expectation.fresh {
+        require_scalar(Some(clip_name_byte_count), expected.clip_name_byte_count())?;
+    }
+    let names_presence =
+        directory.scalar::<u8>(0, animation_directory_field::CLIP_NAMES_PRESENCE)?;
+    let clip_names = if clip_name_byte_count == 0 {
+        require_scalar(Some(names_presence), PRESENCE_ABSENT)?;
+        require_scalar(
+            directory.scalar::<u8>(0, animation_directory_field::CLIP_NAMES),
+            0,
+        )?;
+        None
+    } else {
+        require_scalar(Some(names_presence), PRESENCE_PRESENT)?;
+        let reference = directory
+            .utf8_ref::<AnimationClipNameSchema>(0, animation_directory_field::CLIP_NAMES)?;
+        let names = session.canonical_utf8(reference)?;
+        if names.len() != usize::try_from(clip_name_byte_count).ok()? {
+            return None;
+        }
+        observe_work(u64::from(clip_name_byte_count))?;
+        Some((reference, names))
+    };
+
     let payload_block_count = [
         times.is_some(),
         values.is_some(),
         in_tangents.is_some(),
         out_tangents.is_some(),
+        clip_names.is_some(),
     ]
     .into_iter()
     .try_fold(0_u32, |count, present| {
@@ -1578,6 +1740,7 @@ fn validate_animation_graph_inner<'storage, R>(
         channel_table,
         clip_count,
         channel_count,
+        clip_names,
         expectation.fresh,
         target_marks,
         node_target_mark_count,
@@ -1586,6 +1749,7 @@ fn validate_animation_graph_inner<'storage, R>(
 
     Some(AnimationValidatedShape {
         refs: AnimationValidatedRefs {
+            clip_names: clip_names.map(|(reference, _)| CanonicalBlockRef::from_store(reference)),
             clips: clips.map(CanonicalBlockRef::from_store),
             channels: channels.map(CanonicalBlockRef::from_store),
             times: times.map(CanonicalBlockRef::from_store),
@@ -1712,6 +1876,7 @@ fn validate_clip_table<'storage, R>(
     channel_table: Option<CanonicalRecordView<'storage>>,
     clip_count: u32,
     channel_count: u32,
+    names: Option<(CanonicalUtf8Ref<AnimationClipNameSchema>, &'storage str)>,
     expected: Option<&ValidatedAnimationBatch<'_, R>>,
     mut target_marks: Option<&mut [u32]>,
     node_target_mark_count: usize,
@@ -1721,10 +1886,11 @@ fn validate_clip_table<'storage, R>(
         if expected.is_some_and(|expected| expected.clip_count() != 0) {
             return None;
         }
-        return (clip_count == 0).then_some(());
+        return (clip_count == 0 && names.is_none()).then_some(());
     };
     let table = session.canonical_records(reference)?;
     let mut channel_cursor = 0_u32;
+    let mut name_cursor = 0_usize;
     let mut previous_source_clip_index = None;
     for row in 0..table.rows() {
         observe_work(1)?;
@@ -1733,6 +1899,43 @@ fn validate_clip_table<'storage, R>(
             None => None,
         };
         let row_id = u32::try_from(row).ok()?;
+        let presence = table.scalar::<u8>(row, animation_clip_field::NAME_PRESENCE)?;
+        let offset =
+            usize::try_from(table.scalar::<u32>(row, animation_clip_field::NAME_OFFSET)?).ok()?;
+        let count =
+            usize::try_from(table.scalar::<u32>(row, animation_clip_field::NAME_COUNT)?).ok()?;
+        if offset != name_cursor {
+            return None;
+        }
+        let name = match (presence, count) {
+            (PRESENCE_ABSENT, 0) => None,
+            (PRESENCE_PRESENT, 0) => Some(""),
+            (PRESENCE_PRESENT, _) => {
+                let (reference, payload) = names?;
+                require_scalar(
+                    table.utf8_ref::<AnimationClipNameSchema>(row, animation_clip_field::NAMES),
+                    reference,
+                )?;
+                Some(payload.get(offset..offset.checked_add(count)?)?)
+            }
+            _ => return None,
+        };
+        if count == 0 {
+            require_scalar(table.scalar::<u8>(row, animation_clip_field::NAMES), 0)?;
+        }
+        if let Some(name) = name {
+            validate_entity_name_str(name).ok()?;
+        }
+        if let Some(clip) = clip.as_ref() {
+            let expected = match clip.name() {
+                Presence::Absent => None,
+                Presence::Present(value) => Some(value),
+            };
+            if name != expected {
+                return None;
+            }
+        }
+        name_cursor = name_cursor.checked_add(count)?;
         let source_clip_index = table.scalar::<u32>(row, animation_clip_field::CLIP)?;
         if previous_source_clip_index.is_some_and(|previous| source_clip_index <= previous) {
             return None;
@@ -1803,7 +2006,10 @@ fn validate_clip_table<'storage, R>(
     if expected.is_some_and(|expected| channel_cursor != expected.channel_count()) {
         return None;
     }
-    (u32::try_from(table.rows()) == Ok(clip_count) && channel_cursor == channel_count).then_some(())
+    (u32::try_from(table.rows()) == Ok(clip_count)
+        && channel_cursor == channel_count
+        && name_cursor == names.map_or(0, |(_, payload)| payload.len()))
+    .then_some(())
 }
 
 #[allow(clippy::too_many_arguments)]

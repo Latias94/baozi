@@ -10,7 +10,7 @@ use std::ops::Range;
 use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
-use crate::entity::AuthoredTransformKind;
+use crate::entity::{AuthoredTransformKind, validate_entity_name_str};
 use crate::math::Quat;
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
@@ -33,9 +33,9 @@ const LOGICAL_F64_BYTES: u64 = 8;
 const LOGICAL_REFERENCE_BYTES: u64 = 4;
 
 const ANIMATION_DIRECTORY_SCALAR_BYTES: u64 =
-    (3 * LOGICAL_U32_BYTES) + (4 * LOGICAL_U64_BYTES) + (12 * LOGICAL_U8_BYTES);
+    (4 * LOGICAL_U32_BYTES) + (4 * LOGICAL_U64_BYTES) + (14 * LOGICAL_U8_BYTES);
 const ANIMATION_CLIP_BASE_BYTES: u64 =
-    (3 * LOGICAL_U32_BYTES) + LOGICAL_F64_BYTES + (5 * LOGICAL_U8_BYTES);
+    (5 * LOGICAL_U32_BYTES) + LOGICAL_F64_BYTES + (7 * LOGICAL_U8_BYTES);
 const ANIMATION_CHANNEL_BASE_BYTES: u64 = (12 * LOGICAL_U32_BYTES)
     + (6 * LOGICAL_U8_BYTES)
     + (3 * LOGICAL_REFERENCE_BYTES)
@@ -107,6 +107,12 @@ pub(in crate::canonical_scene::store) enum AnimationAuthoringSemanticError {
     UnownedChannels { unowned: usize },
     #[error("animation clip {clip} duration must be finite and non-negative")]
     InvalidDuration { clip: usize },
+    #[error("animation clip {clip} has an invalid name: {source}")]
+    InvalidClipName {
+        clip: usize,
+        #[source]
+        source: crate::entity::EntityNameError,
+    },
     #[error("animation clip {clip} {kind:?} rate must be finite and positive")]
     InvalidRate {
         clip: usize,
@@ -316,6 +322,8 @@ impl<'view, 'input, NR, DR> AnimationTargetCatalog<'view, 'input, NR, DR> {
 struct ValidatedAnimationClipPlan {
     input_index: usize,
     channels: AuthoringRange,
+    name_offset: u32,
+    name_count: u32,
 }
 
 #[derive(Debug)]
@@ -347,7 +355,7 @@ impl SeenAnimationTarget {
 }
 
 pub(in crate::canonical_scene::store) struct ValidatedAnimationClip<'batch, 'input> {
-    input: AnimationClipAuthoring,
+    input: AnimationClipAuthoring<'input>,
     plan: &'batch ValidatedAnimationClipPlan,
     channels: &'batch [ValidatedAnimationChannelPlan],
     input_channels: &'input [AnimationChannelAuthoring<'input>],
@@ -360,6 +368,18 @@ impl<'batch, 'input> ValidatedAnimationClip<'batch, 'input> {
 
     pub(in crate::canonical_scene::store) const fn duration(&self) -> f64 {
         self.input.duration()
+    }
+
+    pub(in crate::canonical_scene::store) const fn name(&self) -> Presence<&'input str> {
+        self.input.name()
+    }
+
+    pub(in crate::canonical_scene::store) const fn name_offset(&self) -> u32 {
+        self.plan.name_offset
+    }
+
+    pub(in crate::canonical_scene::store) const fn name_count(&self) -> u32 {
+        self.plan.name_count
     }
 
     pub(in crate::canonical_scene::store) const fn source_index(&self) -> u32 {
@@ -487,6 +507,7 @@ pub(in crate::canonical_scene::store) struct ValidatedAnimationBatch<'input, R> 
 
 struct AnimationValidationStorage<R> {
     clip_count: u32,
+    clip_name_byte_count: u32,
     channel_count: u32,
     time_scalar_count: u64,
     value_scalar_count: u64,
@@ -522,6 +543,10 @@ impl<'input, R> ValidatedAnimationBatch<'input, R> {
 
     pub(in crate::canonical_scene::store) const fn clip_count(&self) -> u32 {
         self.compiled.clip_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn clip_name_byte_count(&self) -> u32 {
+        self.compiled.clip_name_byte_count
     }
 
     pub(in crate::canonical_scene::store) const fn channel_count(&self) -> u32 {
@@ -695,6 +720,7 @@ struct AnimationValidationContext<'control, C: CanonicalAuthoringControl> {
     in_tangent_scalars: u64,
     out_tangent_scalars: u64,
     canonical_bytes: u64,
+    clip_name_bytes: u32,
 }
 
 impl<'control, C: CanonicalAuthoringControl> AnimationValidationContext<'control, C> {
@@ -712,6 +738,7 @@ impl<'control, C: CanonicalAuthoringControl> AnimationValidationContext<'control
             in_tangent_scalars: 0,
             out_tangent_scalars: 0,
             canonical_bytes: 0,
+            clip_name_bytes: 0,
         }
     }
 
@@ -1104,6 +1131,34 @@ where
                 })?;
                 Ok((channel_range, range))
             })?;
+        let name_offset = context.clip_name_bytes;
+        let name_count = match clip.name() {
+            Presence::Absent => 0,
+            Presence::Present(name) => {
+                let count = collection_count(name.len(), "animation clip name bytes")?;
+                let next = name_offset.checked_add(count).ok_or(
+                    AnimationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "animation clip name byte offset",
+                    },
+                )?;
+                if count != 0 {
+                    context.add_structural_bytes(
+                        u64::from(count)
+                            + (LOGICAL_REFERENCE_BYTES - LOGICAL_U8_BYTES)
+                            + if name_offset == 0 {
+                                LOGICAL_REFERENCE_BYTES - LOGICAL_U8_BYTES
+                            } else {
+                                0
+                            },
+                    )?;
+                    for _ in name.bytes() {
+                        context.run_unit(SceneValidationWork::PayloadCell, || {})?;
+                    }
+                }
+                context.clip_name_bytes = next;
+                count
+            }
+        };
         if animation_rate_present(clip.time_domain()) {
             context.add_structural_bytes(LOGICAL_F64_BYTES - LOGICAL_U8_BYTES)?;
         }
@@ -1175,6 +1230,8 @@ where
         storage.clip_plans.push(ValidatedAnimationClipPlan {
             input_index: clip_index,
             channels: channel_range,
+            name_offset,
+            name_count,
         });
         previous_clip_source_index = Some(clip.source_index());
     }
@@ -1208,7 +1265,7 @@ where
         AnimationAuthoringSemanticError::AccountingOverflow {
             dimension: "animation payload block count",
         }
-    })?;
+    })? + u32::from(context.clip_name_bytes != 0);
     let AnimationValidationScratch {
         clip_plans,
         channel_plans,
@@ -1222,6 +1279,7 @@ where
     )?;
     let compiled = AnimationValidationStorage {
         clip_count,
+        clip_name_byte_count: context.clip_name_bytes,
         channel_count,
         time_scalar_count: context.time_scalars,
         value_scalar_count: context.value_scalars,
@@ -1249,8 +1307,16 @@ where
 
 fn validate_clip_header(
     clip_index: usize,
-    clip: AnimationClipAuthoring,
+    clip: AnimationClipAuthoring<'_>,
 ) -> Result<(), AnimationAuthoringSemanticError> {
+    if let Presence::Present(name) = clip.name() {
+        validate_entity_name_str(name).map_err(|source| {
+            AnimationAuthoringSemanticError::InvalidClipName {
+                clip: clip_index,
+                source,
+            }
+        })?;
+    }
     if !clip.duration().is_finite() || clip.duration() < 0.0 {
         return Err(AnimationAuthoringSemanticError::InvalidDuration { clip: clip_index });
     }

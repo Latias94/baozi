@@ -52,15 +52,17 @@ pub(crate) fn parse<'scope>(
             "truncated",
         )));
     };
-    let material_color = materialise_default_color(header);
-    let materialise = material_color.is_some();
+    let object_color = materialise_default_color(header);
+    let materialise = object_color.is_some();
     let attribute_cell_count = vertex_count
         .checked_mul(2)
         .ok_or_else(|| scope.allocation_failure("stl-binary-attribute-cells"))?;
     let decode_bytes = usize_amount(scope, bytes.len(), "stl-decode-work")?;
     let preamble_bytes = usize_amount(scope, BINARY_PREAMBLE_BYTES, "stl-binary-preamble")?;
     let facet_bytes = usize_amount(scope, FACET_BYTES, "stl-binary-facet-bytes")?;
-    let (positions, normals, facet_colors, has_facet_colors) = scope.with_work_group(
+    let mut has_facet_colors = false;
+    let mut has_fallback_facets = false;
+    let (positions, normals, facet_colors) = scope.with_work_group(
         [
             (ImportWorkClass::DecodeWork, decode_bytes),
             (
@@ -100,8 +102,6 @@ pub(crate) fn parse<'scope>(
                 face_count,
                 "stl-binary-facet-colors",
             )?;
-            let mut has_facet_colors = false;
-
             for face_index in 0..face_count {
                 work.poll()?;
                 work.run([facet_bytes, 1, 3, 6, 1], || -> ParseResult<()> {
@@ -157,11 +157,12 @@ pub(crate) fn parse<'scope>(
                     attribute.copy_from_slice(attribute_bytes);
                     let color = facet_color(u16::from_le_bytes(attribute), materialise);
                     has_facet_colors |= color.is_some();
+                    has_fallback_facets |= color.is_none();
                     facet_colors.try_push_reserved(color)?;
                     Ok(())
                 })?;
             }
-            Ok((positions, normals, facet_colors, has_facet_colors))
+            Ok((positions, normals, facet_colors))
         },
     )?;
 
@@ -178,7 +179,7 @@ pub(crate) fn parse<'scope>(
                 ),
             ],
             |work| -> ParseResult<_> {
-                let fallback = material_color.unwrap_or(Color::WHITE);
+                let fallback = object_color.unwrap_or(Color::WHITE);
                 let mut colors = try_vec_capacity(
                     scope,
                     ImportStorageClass::SceneConstruction,
@@ -234,7 +235,8 @@ pub(crate) fn parse<'scope>(
         },
     )?;
     Ok(ParsedStl {
-        material_color,
+        // An overridden object fallback must not tint facets or enable transparency.
+        material_color: object_color.filter(|_| has_fallback_facets),
         meshes,
     })
 }

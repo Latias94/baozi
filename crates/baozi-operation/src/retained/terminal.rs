@@ -1299,6 +1299,10 @@ where
     state: Option<QualifiedEvidenceOnlySuccessState<O, P, D, F>>,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the bounded discard proof stays inline so terminal acknowledgement cannot allocate"
+)]
 enum VerifiedEvidenceOnlySuccessDiscardState<O, P, D, F>
 where
     O: OperationOwner,

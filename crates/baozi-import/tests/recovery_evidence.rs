@@ -10,9 +10,9 @@ use baozi_import::{
     ImportProgressUnit, ImportReport, ImportRequest, ImportRequestLayer, ImportResult,
     ImportTerminalCause, ImportTerminalFailureClass, LossPolicy, OptionCompileLimits, ParseResult,
     ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
-    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
-    TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline,
-    TextProfile, TextSourceEncoding, import_bytes,
+    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, SceneValidationError,
+    ScopeAbortCause, TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps,
+    TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding, import_bytes,
 };
 use baozi_io::AssetPath;
 use baozi_operation::{CancellationToken, ProgressDecision};
@@ -362,10 +362,20 @@ fn later_format_authoring_rejection_and_cancellation_retain_recovery_evidence() 
         match (exit, failure.cause()) {
             (RecoveryExit::FormatFailure, ImportCause::Format(_))
             | (RecoveryExit::Cancellation, ImportCause::Scope(_)) => {}
-            (RecoveryExit::AuthoringRejection, ImportCause::OperationTerminal(terminal))
-                if terminal.class() == ImportTerminalFailureClass::Requested
-                    && failure.ledger().terminal_cause()
-                        == ImportTerminalCause::Failure(*terminal) => {}
+            (
+                RecoveryExit::AuthoringRejection,
+                ImportCause::SceneValidation(SceneValidationError::ParentOutOfRange {
+                    node: 1,
+                    parent: 2,
+                    node_count: 2,
+                }),
+            ) => {
+                let ImportTerminalCause::Failure(terminal) = failure.ledger().terminal_cause()
+                else {
+                    panic!("canonical authoring rejection must retain terminal failure evidence");
+                };
+                assert_eq!(terminal.class(), ImportTerminalFailureClass::Requested);
+            }
             _ => panic!("{exit:?}: wrong terminal cause: {:?}", failure.cause()),
         }
         assert_eq!(failure.ledger().current_live_bytes(), 0);

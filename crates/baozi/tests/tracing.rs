@@ -1,11 +1,48 @@
 #![cfg(feature = "tracing")]
 
-use baozi::{ImportReport, Importer, SceneSnapshotLimits, ValidatedScene};
+mod support;
+
+use baozi::{
+    FormatDescriptor, FormatEncoding, FormatId, ImportReport, Importer, ReadConfidence,
+    SceneSnapshotLimits, ValidatedScene,
+};
+use baozi_import::{
+    DetectionOutcome, DetectionResult, DetectionScope, FormatImporter, ParseResult, ParseScope,
+    Probe, ReadHint, SceneDraft,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::{NoSubscriber, with_default};
 use tracing::{Event, Metadata, Subscriber};
+
+struct TracingImporter;
+
+impl FormatImporter for TracingImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("org.example.tracing-test").expect("qualified tracing format id"),
+            "Tracing test format",
+        )
+        .extensions(["trace-test"])
+        .encoding(FormatEncoding::Binary)
+        .build()
+        .expect("valid tracing descriptor")
+    }
+
+    fn detect(
+        &self,
+        _probe: &Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        support::submit_minimal_scene(scope)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CapturedSpan {
@@ -64,12 +101,35 @@ impl Subscriber for CapturingSubscriber {
 
 #[test]
 fn facade_tracing_is_fieldless_and_does_not_change_results() {
+    let mut builder = Importer::builder();
+    builder
+        .register(TracingImporter)
+        .expect("tracing fixture should register");
+    let importer = builder.build().expect("tracing registry should freeze");
+
+    assert_tracing_preserves_import(&importer, "model.trace-test", b"tracing fixture");
+}
+
+#[cfg(feature = "format-obj")]
+#[test]
+fn facade_tracing_preserves_obj_results() {
     let importer = Importer::new().expect("default importer should build");
 
-    let without_subscriber = with_default(NoSubscriber::default(), || run_workflow(&importer));
+    assert_tracing_preserves_import(
+        &importer,
+        "triangle.obj",
+        b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+    );
+}
+
+fn assert_tracing_preserves_import(importer: &Importer, source: &str, bytes: &[u8]) {
+    let without_subscriber = with_default(NoSubscriber::default(), || {
+        run_workflow(importer, source, bytes)
+    });
 
     let subscriber = CapturingSubscriber::default();
-    let with_subscriber = with_default(subscriber.clone(), || run_workflow(&importer));
+    let with_subscriber =
+        with_default(subscriber.clone(), || run_workflow(importer, source, bytes));
 
     assert_eq!(
         subscriber.captured_spans(),
@@ -91,10 +151,10 @@ fn facade_tracing_is_fieldless_and_does_not_change_results() {
     assert_import_eq(&without_subscriber, &with_subscriber);
 }
 
-fn run_workflow(importer: &Importer) -> ImportReport {
+fn run_workflow(importer: &Importer, source: &str, bytes: &[u8]) -> ImportReport {
     importer
-        .read_bytes("triangle.obj", b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
-        .expect("OBJ import should succeed")
+        .read_bytes(source, bytes)
+        .expect("tracing fixture import should succeed")
 }
 
 fn assert_import_eq(left: &ImportReport, right: &ImportReport) {

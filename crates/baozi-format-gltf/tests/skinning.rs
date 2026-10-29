@@ -1,7 +1,9 @@
 mod common;
 
 use baozi_format_gltf::GltfFailureCode;
-use baozi_import::{ImportCause, ImportDimension, ImportTerminalFailureClass};
+use baozi_import::{
+    ImportDimension, ImportTerminalCause, ImportTerminalFailureClass, SceneValidationError,
+};
 use common::{
     TestResult, assert_gltf_failure, expected_error, import_assets, import_assets_result,
     sidecar_options, skinned_triangle_bin, skinned_triangle_bin_with_joint_index,
@@ -241,11 +243,20 @@ fn joint_index_outside_skin_palette_is_invalid_scene() -> TestResult<()> {
     let error = expected_error(result)?;
 
     assert!(diagnostics.is_empty());
-    let ImportCause::OperationTerminal(terminal) = error.cause() else {
-        panic!(
-            "expected requested operation terminal, got {:?}",
-            error.cause()
-        );
+    assert_eq!(
+        error.scene_validation_error(),
+        Some(&SceneValidationError::PaletteJointOutOfRange {
+            instance: 0,
+            logical_mesh: 0,
+            skin: 0,
+            joint_count: 2,
+            primitive: 0,
+            influence: 0,
+            palette_joint: 2,
+        })
+    );
+    let ImportTerminalCause::Failure(terminal) = error.ledger().terminal_cause() else {
+        panic!("semantic rejection must retain failure evidence");
     };
     assert_eq!(terminal.class(), ImportTerminalFailureClass::Requested);
     assert_eq!(terminal.code(), 0x5343_1104);

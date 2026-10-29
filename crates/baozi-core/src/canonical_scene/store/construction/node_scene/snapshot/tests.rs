@@ -3,6 +3,9 @@ use baozi_operation::{
     PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
 };
 
+mod public_deformation;
+mod public_read;
+
 use crate::FormatId;
 use crate::SceneValidationLimits;
 use crate::appearance::{AlphaMode, MaterialFactors, MaterialSemanticsRef, ShadingModel};
@@ -670,6 +673,49 @@ fn point_geometry_scene(
         &nodes,
         AppearanceAuthoringBatch::new(&[], &[], &[], &[], &materials),
         GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &instances),
+    )
+}
+
+fn f64_custom_geometry_scene(
+    account: &PhysicalStorageAccount,
+    domain: AttributeDomain,
+    values: &[f64],
+) -> NodeSceneSuccessParts {
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
+    )];
+    let positions = vec![0.0_f32; values.len() * 3];
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f64(
+            AttributeSemantic::Custom(CustomAttributeSemantic::new("ply:precise").unwrap()),
+            domain,
+            1,
+            values,
+        ),
+    ];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 2),
+    )];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    build_scene_with_geometry(
+        account,
+        &roots,
+        &nodes,
+        GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
     )
 }
 
@@ -2757,6 +2803,143 @@ fn point_geometry_known_vector_pins_complete_scene_framing() {
             .text
             .contains("mesh_instance[0] owner_node=0")
     );
+}
+
+#[test]
+fn f64_custom_geometry_retains_exact_bits_in_every_primitive_domain() {
+    use crate::canonical_scene::store::construction::node_scene::semantic::{
+        NodeSceneGeometryAttributePayload, NodeSceneGeometryScalarKind,
+    };
+
+    let factory = factory();
+    let account = account(&factory);
+    for domain in [
+        AttributeDomain::Vertex,
+        AttributeDomain::Corner,
+        AttributeDomain::Face,
+    ] {
+        let mut authored = [16_777_217.0_f64, f64::MAX, -0.0, f64::from_bits(1)];
+        let parts = f64_custom_geometry_scene(&account, domain, &authored);
+        authored.fill(42.0);
+
+        let view = parts.scene.semantic_view().expect("F64 semantic view");
+        let mut scene_cursor = view.into_cursor().expect("F64 scene cursor");
+        let mut roots = scene_cursor.take_roots().expect("F64 scene roots");
+        while roots.next().expect("root").is_some() {}
+        roots.finish().expect("complete root traversal");
+        while let Some(node) = scene_cursor.next_node().expect("node") {
+            let mut children = node.into_children();
+            while children.next().expect("child").is_some() {}
+            children.finish().expect("complete child traversal");
+        }
+        let geometry = scene_cursor.geometry().expect("F64 geometry cursor");
+        while geometry
+            .next_logical_mesh()
+            .expect("logical mesh")
+            .is_some()
+        {}
+        while geometry.next_primitive().expect("primitive").is_some() {}
+        let position = geometry.next_attribute().expect("position").unwrap();
+        assert_eq!(position.scalar_kind(), NodeSceneGeometryScalarKind::F32);
+        let attribute = geometry
+            .next_attribute()
+            .expect("custom attribute")
+            .unwrap();
+        assert_eq!(attribute.scalar_kind(), NodeSceneGeometryScalarKind::F64);
+        assert_eq!(attribute.domain(), domain);
+        let NodeSceneGeometryAttributePayload::DenseF64 { mut values } = attribute.into_payload()
+        else {
+            panic!("custom geometry must retain a typed F64 leaf");
+        };
+        assert_eq!(values.declared_count(), 4);
+        for bits in [
+            0x4170_0000_1000_0000_u64,
+            0x7fef_ffff_ffff_ffff,
+            0x8000_0000_0000_0000,
+            1,
+        ] {
+            assert_eq!(values.next().expect("F64 scalar").unwrap().to_bits(), bits);
+        }
+        assert_eq!(values.next().expect("F64 exhaustion"), None);
+        values.finish().expect("complete F64 leaf");
+
+        let snapshot = capture_node_scene(&parts.scene, snapshot_limits(32_768, 64), None)
+            .expect("F64 snapshot");
+        assert_eq!(snapshot.totals.f64_scalar_count, 4);
+        assert_eq!(snapshot.totals.f32_scalar_count, 12);
+        assert_eq!(snapshot.totals.canonical_scalar_count, 16);
+        let line = snapshot
+            .preview
+            .text
+            .lines()
+            .find(|line| line.contains("semantic=ply:precise "))
+            .unwrap();
+        assert!(line.contains("scalar=f64 lanes=1"));
+        assert!(line.contains("values(present,total=4)=[0x4170000010000000,0x7fefffffffffffff,0x8000000000000000,0x0000000000000001]"));
+        assert!(snapshot.preview.text.contains("f64_scalars=4"));
+    }
+}
+
+#[test]
+fn f64_geometry_snapshot_pins_eight_byte_bits_and_distinguishes_f32_collisions() {
+    let factory = factory();
+    let account = account(&factory);
+    let parts = f64_custom_geometry_scene(&account, AttributeDomain::Vertex, &[16_777_217.0]);
+    let (snapshot, transcript) =
+        capture_node_scene_with_test_transcript(&parts.scene, snapshot_limits(32_768, 64), None)
+            .expect("complete F64 transcript");
+    assert!(transcript.complete);
+    // VALUES, PRESENT, FLOAT_BITS, eight hand-derived little-endian F64 bytes, TOTAL=1.
+    let expected = [
+        37_u8, 12, 1, 14, 0, 0, 0, 16, 0, 0, 112, 65, 11, 1, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    assert!(
+        transcript
+            .bytes
+            .windows(expected.len())
+            .any(|window| window == expected)
+    );
+
+    let rounded = f64_custom_geometry_scene(&account, AttributeDomain::Vertex, &[16_777_216.0]);
+    assert_eq!(16_777_216.0_f64 as f32, 16_777_217.0_f64 as f32);
+    let rounded_snapshot =
+        capture_node_scene(&rounded.scene, snapshot_limits(32_768, 64), None).unwrap();
+    assert_ne!(snapshot.digest, rounded_snapshot.digest);
+
+    let positive_zero = f64_custom_geometry_scene(&account, AttributeDomain::Vertex, &[0.0]);
+    let negative_zero = f64_custom_geometry_scene(&account, AttributeDomain::Vertex, &[-0.0]);
+    let positive = capture_node_scene(&positive_zero.scene, snapshot_limits(1, 0), None).unwrap();
+    let negative = capture_node_scene(&negative_zero.scene, snapshot_limits(1, 0), None).unwrap();
+    assert_ne!(positive.digest, negative.digest);
+}
+
+#[test]
+fn f64_geometry_snapshot_honors_exact_work_limit_and_empty_payloads() {
+    let factory = factory();
+    let account = account(&factory);
+    let parts = f64_custom_geometry_scene(&account, AttributeDomain::Vertex, &[1.0, 2.0, 3.0]);
+    let snapshot = capture_node_scene(&parts.scene, snapshot_limits(32_768, 64), None).unwrap();
+    let exact = NodeSceneSnapshotLimits::try_new(32_768, 64, snapshot.totals.work_units).unwrap();
+    assert_eq!(
+        capture_node_scene(&parts.scene, exact, None)
+            .unwrap()
+            .digest,
+        snapshot.digest
+    );
+    assert!(matches!(
+        capture_node_scene(
+            &parts.scene,
+            NodeSceneSnapshotLimits::try_new(32_768, 64, snapshot.totals.work_units - 1).unwrap(),
+            None,
+        ),
+        Err(NodeSceneSnapshotError::WorkBudgetExceeded { .. })
+    ));
+
+    let empty = f64_custom_geometry_scene(&account, AttributeDomain::Vertex, &[]);
+    let snapshot = capture_node_scene(&empty.scene, snapshot_limits(32_768, 64), None).unwrap();
+    assert_eq!(snapshot.totals.f64_scalar_count, 0);
+    assert!(snapshot.preview.text.contains("scalar=f64 lanes=1"));
+    assert!(snapshot.preview.text.contains("values(present,total=0)=[]"));
 }
 
 #[test]

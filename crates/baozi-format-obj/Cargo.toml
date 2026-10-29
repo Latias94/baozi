@@ -15,5 +15,6 @@ baozi-import.workspace = true
 baozi-io.workspace = true
 
 [dev-dependencies]
+baozi-core.workspace = true
 baozi-operation.workspace = true
 baozi-test-support.workspace = true

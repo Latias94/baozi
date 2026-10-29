@@ -426,8 +426,15 @@ fn assert_dimension(
         .ledger()
         .dimension(dimension)
         .expect("work callback dimension evidence");
-    assert_eq!(evidence.attempted(), attempted);
-    assert_eq!(evidence.consumed(), consumed);
+    // These imports bind bytes directly: hashing the immutable fixture is the only WorkUnits
+    // prefix before parser entry. All expected amounts below describe callback work alone.
+    let acquisition_work = if dimension == ImportDimension::WorkUnits {
+        b"fixture".len() as u64
+    } else {
+        0
+    };
+    assert_eq!(evidence.attempted(), acquisition_work + attempted);
+    assert_eq!(evidence.consumed(), acquisition_work + consumed);
 }
 
 #[test]

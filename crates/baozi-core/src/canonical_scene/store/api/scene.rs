@@ -163,6 +163,11 @@ impl SceneSnapshot {
         self.0.totals.f32_scalar_count
     }
 
+    /// Returns the total canonical f64 scalar count across geometry attributes.
+    pub const fn f64_scalar_count(&self) -> u64 {
+        self.0.totals.f64_scalar_count
+    }
+
     /// Returns the total canonical u32 scalar count across geometry attributes.
     pub const fn u32_scalar_count(&self) -> u64 {
         self.0.totals.u32_scalar_count
@@ -181,6 +186,31 @@ impl SceneSnapshot {
     /// Returns the total material-factor scalar count.
     pub const fn material_factor_scalar_count(&self) -> u64 {
         self.0.totals.material_factor_scalar_count
+    }
+
+    /// Returns the total retained profile resource count.
+    pub const fn profile_resource_count(&self) -> usize {
+        self.0.totals.profile_resource_count
+    }
+
+    /// Returns the total retained source-identity count.
+    pub const fn profile_source_count(&self) -> usize {
+        self.0.totals.profile_source_count
+    }
+
+    /// Returns the total retained provenance-node count.
+    pub const fn profile_provenance_node_count(&self) -> usize {
+        self.0.totals.profile_provenance_node_count
+    }
+
+    /// Returns the total canonical owner count carrying provenance.
+    pub const fn profile_owner_count(&self) -> usize {
+        self.0.totals.profile_owner_count
+    }
+
+    /// Returns the total provenance attachments across canonical owners.
+    pub const fn profile_attachment_count(&self) -> usize {
+        self.0.totals.profile_attachment_count
     }
 
     /// Returns the total profile metadata entry count.

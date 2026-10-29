@@ -26,11 +26,12 @@ use crate::dependency::{
 use crate::error::ScopeAbortCause;
 use crate::ledger::{ImportDimension, ImportLedgerPhase};
 use crate::limits::ResourceLimits;
-use crate::metered_storage::AccountedVec;
+use crate::metered_storage::{AccountedVec, capacity_plan_cause};
+use crate::resource_hash::chunked_sha256;
 use crate::store::{ImportStoreHost, ImportStoreReservation};
 use baozi_io::__semantic_identity::StableResourceIdentitySchema;
 use baozi_io::{AssetPath, AuthorityDomain};
-use baozi_operation::CapacityPlanError;
+use baozi_operation::{CapacityPlan, CapacityPlanError};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -106,6 +107,8 @@ struct GraphNode {
     last_outgoing: Option<usize>,
     outgoing_count: usize,
     depth: u64,
+    // Paths drop before the reservations covering their backing strings.
+    _path_reservations: [Option<ImportStoreReservation>; 2],
 }
 
 #[derive(Debug)]
@@ -116,6 +119,7 @@ struct GraphRelation {
     outcome: GraphRelationOutcome,
     previous_outgoing: Option<usize>,
     next_outgoing: Option<usize>,
+    _path_reservations: [Option<ImportStoreReservation>; 2],
 }
 
 #[derive(Clone, Copy)]
@@ -198,7 +202,7 @@ struct DigestedManifestNode {
 enum TargetAdmission {
     Existing {
         index: usize,
-        depth_updates: Vec<DepthUpdate>,
+        depth_updates: AccountedVec<DepthUpdate>,
     },
     New {
         depth: u64,
@@ -271,6 +275,7 @@ pub(crate) struct ResourceGraph {
     primary: Option<usize>,
     relation_count: u64,
     pending_relations: u64,
+    maximum_depth: u64,
     sealed_manifest: Option<SuccessfulInputManifest>,
 }
 
@@ -285,6 +290,7 @@ impl ResourceGraph {
             primary: None,
             relation_count: 0,
             pending_relations: 0,
+            maximum_depth: 0,
             sealed_manifest: None,
         }
     }
@@ -494,27 +500,26 @@ impl ResourceGraph {
                 reserve_graph_storage(host, bytes)
             })
             .map_err(ResourceGraphError::Scope)?;
-        let exact_identity = DependencyIdentity::new(
-            authority.clone(),
-            path.try_clone()
-                .map_err(|_| ResourceGraphError::Allocation {
-                    resource: "resource-graph-primary-identity",
-                })?,
-        );
+        let content_digest = chunked_sha256(host, bytes, ImportDimension::WorkUnits)
+            .map(ManifestDigest::from_bytes)
+            .map_err(ResourceGraphError::Scope)?;
+        let exact_path = clone_graph_path(host, path, "resource-graph-primary-identity")?;
         let public_identity = manifest_identity(
+            host,
             path,
             ManifestSessionOpaqueReason::UnregisteredCallerIdentity,
             "resource-graph-primary-public-identity",
         )?;
         let node = GraphNode {
-            exact_identity,
-            public_identity,
+            exact_identity: DependencyIdentity::new(authority.clone(), exact_path.0),
+            public_identity: public_identity.0,
             byte_length: u64::try_from(bytes.len()).map_err(|_| ResourceGraphError::Overflow)?,
-            content_digest: ManifestDigest::of(bytes),
+            content_digest,
             first_outgoing: None,
             last_outgoing: None,
             outgoing_count: 0,
             depth: 0,
+            _path_reservations: [Some(exact_path.1), Some(public_identity.1)],
         };
         self.nodes
             .try_push_reserved(node)
@@ -528,6 +533,14 @@ impl ResourceGraph {
 
     pub(crate) fn source_for_primary(&self) -> Result<usize, ResourceGraphError> {
         self.primary.ok_or(ResourceGraphError::MissingPrimary)
+    }
+
+    /// Reuses the digest of the immutable primary snapshot without hashing it again.
+    pub(crate) fn primary_content_digest(&self) -> Result<ManifestDigest, ResourceGraphError> {
+        self.nodes
+            .get(self.source_for_primary()?)
+            .map(|node| node.content_digest)
+            .ok_or(ResourceGraphError::DanglingNode)
     }
 
     pub(crate) fn source_for_cache(&self, cache_index: usize) -> Result<usize, ResourceGraphError> {
@@ -570,6 +583,13 @@ impl ResourceGraph {
                 reserve_graph_storage(host, bytes)
             })
             .map_err(ResourceGraphError::Scope)?;
+        let raw_reference_digest = chunked_sha256(
+            host,
+            raw_reference.as_bytes(),
+            ImportDimension::ResourceGraphWork,
+        )
+        .map(ManifestDigest::from_bytes)
+        .map_err(ResourceGraphError::Scope)?;
         self.pending_relations = self
             .pending_relations
             .checked_add(1)
@@ -578,7 +598,7 @@ impl ResourceGraph {
             source,
             role: role.clone(),
             requirement,
-            raw_reference_digest: ManifestDigest::of(raw_reference.as_bytes()),
+            raw_reference_digest,
             target: None,
         })
     }
@@ -606,7 +626,7 @@ impl ResourceGraph {
                 limit: self.limits.max_resource_graph_depth as u64,
             });
         }
-        if let Some(target) = self.find_node(identity) {
+        if let Some(target) = self.find_node(host, identity)? {
             let depth_updates = self.plan_existing_target(host, target, pending.source, depth)?;
             pending.target = Some(TargetAdmission::Existing {
                 index: target,
@@ -636,11 +656,24 @@ impl ResourceGraph {
         if identity.stable_schema.is_some() && identity.exact.path() != identity.normalized {
             return Err(ResourceGraphError::DigestCollision);
         }
-        let (target, depth_updates) = match pending
+        let target_admission = pending
             .target
             .take()
-            .ok_or(ResourceGraphError::IncompleteRelation)?
-        {
+            .ok_or(ResourceGraphError::IncompleteRelation)?;
+        let Some((cached_identity, snapshot)) = self.cache.available_snapshot(cache_index) else {
+            return Err(ResourceGraphError::DanglingNode);
+        };
+        // The caller must present the immutable bytes held by this exact cache entry. Comparing
+        // their owner-derived slice avoids rescanning the payload on every logical reference.
+        if cached_identity != identity.exact || !std::ptr::eq(snapshot.bytes.bytes(), bytes) {
+            return Err(ResourceGraphError::DigestCollision);
+        }
+        let byte_length = u64::try_from(bytes.len()).map_err(|_| ResourceGraphError::Overflow)?;
+        let content_digest = snapshot
+            .bytes
+            .content_digest(host)
+            .map_err(ResourceGraphError::Scope)?;
+        let (target, depth_updates) = match target_admission {
             TargetAdmission::Existing {
                 index,
                 depth_updates,
@@ -650,21 +683,18 @@ impl ResourceGraph {
                     .get(index)
                     .ok_or(ResourceGraphError::DanglingNode)?;
                 if &node.exact_identity != identity.exact
-                    || node.content_digest != ManifestDigest::of(bytes)
+                    || node.byte_length != byte_length
+                    || node.content_digest != content_digest
                 {
                     return Err(ResourceGraphError::DigestCollision);
                 }
                 (index, depth_updates)
             }
             TargetAdmission::New { depth } => {
-                let exact_identity =
-                    identity
-                        .exact
-                        .try_clone()
-                        .map_err(|_| ResourceGraphError::Allocation {
-                            resource: "resource-graph-node-identity",
-                        })?;
+                let exact_path =
+                    clone_graph_path(host, identity.exact.path(), "resource-graph-node-identity")?;
                 let public_identity = manifest_identity_for_resolution(
+                    host,
                     identity.exact.path(),
                     identity.stable_schema,
                     "resource-graph-node-public-identity",
@@ -672,36 +702,44 @@ impl ResourceGraph {
                 let index = self.nodes.len();
                 self.nodes
                     .try_push_reserved(GraphNode {
-                        exact_identity,
-                        public_identity,
-                        byte_length: u64::try_from(bytes.len())
-                            .map_err(|_| ResourceGraphError::Overflow)?,
-                        content_digest: ManifestDigest::of(bytes),
+                        exact_identity: DependencyIdentity::new(
+                            identity.exact.authority().clone(),
+                            exact_path.0,
+                        ),
+                        public_identity: public_identity.0,
+                        byte_length,
+                        content_digest,
                         first_outgoing: None,
                         last_outgoing: None,
                         outgoing_count: 0,
                         depth,
+                        _path_reservations: [Some(exact_path.1), Some(public_identity.1)],
                     })
                     .map_err(|_| ResourceGraphError::Allocation {
                         resource: "resource-graph-node-slot",
                     })?;
+                self.maximum_depth = self.maximum_depth.max(depth);
                 charge_consumed(host, ImportDimension::ResourceGraphNodes, 1)?;
-                (index, Vec::new())
+                (index, AccountedVec::new())
             }
         };
         self.bind_cache_node(host, cache_index, target)?;
-        let reference = ManifestReference::Normalized(manifest_identity_for_resolution(
+        let reference = manifest_identity_for_resolution(
+            host,
             identity.normalized,
             identity.stable_schema,
             "resource-graph-normalized-reference",
-        )?);
+        )?;
         self.push_relation(
             host,
             pending,
-            reference,
-            GraphRelationOutcome::Available { target },
+            (
+                ManifestReference::Normalized(reference.0),
+                Some(reference.1),
+            ),
+            (GraphRelationOutcome::Available { target }, None),
         )?;
-        self.apply_depth_updates(&depth_updates)
+        self.apply_depth_updates(host, &depth_updates)
     }
 
     pub(crate) fn complete_unavailable(
@@ -719,36 +757,51 @@ impl ResourceGraph {
             stable_identity_schema,
         } = disposition;
         let reference = match normalized {
-            Some(path) => ManifestReference::Normalized(manifest_identity_for_resolution(
-                path,
-                stable_identity_schema,
-                "resource-graph-normalized-reference",
-            )?),
-            None => ManifestReference::Rejected {
-                class,
-                code,
-                reference_digest: pending.raw_reference_digest,
-            },
+            Some(path) => {
+                let identity = manifest_identity_for_resolution(
+                    host,
+                    path,
+                    stable_identity_schema,
+                    "resource-graph-normalized-reference",
+                )?;
+                (ManifestReference::Normalized(identity.0), Some(identity.1))
+            }
+            None => (
+                ManifestReference::Rejected {
+                    class,
+                    code,
+                    reference_digest: pending.raw_reference_digest,
+                },
+                None,
+            ),
         };
         let identity_evidence = identity
             .map(|identity| {
                 manifest_identity_for_resolution(
+                    host,
                     identity.path(),
                     stable_identity_schema,
                     "resource-graph-unavailable-identity",
                 )
             })
             .transpose()?;
+        let (identity_evidence, identity_reservation) = match identity_evidence {
+            Some((identity, reservation)) => (Some(identity), Some(reservation)),
+            None => (None, None),
+        };
         self.push_relation(
             host,
             pending,
             reference,
-            GraphRelationOutcome::Unavailable {
-                class,
-                code,
-                identity_evidence,
-                replay,
-            },
+            (
+                GraphRelationOutcome::Unavailable {
+                    class,
+                    code,
+                    identity_evidence,
+                    replay,
+                },
+                identity_reservation,
+            ),
         )
     }
 
@@ -759,7 +812,7 @@ impl ResourceGraph {
         if self.pending_relations != 0 {
             return Err(ResourceGraphError::IncompleteRelation);
         }
-        self.validate_relation_storage()?;
+        self.validate_relation_storage(host)?;
         let primary = self.primary.ok_or(ResourceGraphError::MissingPrimary)?;
         let postorder = self.postorder(host, primary)?;
         if postorder.len() != self.nodes.len() {
@@ -768,6 +821,7 @@ impl ResourceGraph {
         let mut digests =
             manifest_scratch_vec(host, self.nodes.len(), "resource-manifest-node-digests")?;
         for _ in 0..self.nodes.len() {
+            charge_manifest_work(host, 1)?;
             digests.push_reserved_infallible(None);
         }
         let mut physical =
@@ -844,7 +898,7 @@ impl ResourceGraph {
             .and_then(|digest| *digest)
             .ok_or(ResourceGraphError::MissingPrimary)?;
         let (counts, replay_status) =
-            manifest_counts_and_replay_status(&classes, self.maximum_depth())?;
+            manifest_counts_and_replay_status(host, &classes, self.maximum_depth)?;
         let mut provisional = SuccessfulInputManifest::new(
             ManifestDigest::zero(),
             primary_digest,
@@ -888,8 +942,8 @@ impl ResourceGraph {
         &mut self,
         host: ImportStoreHost<'_>,
         pending: PendingResourceRelation,
-        reference: ManifestReference,
-        outcome: GraphRelationOutcome,
+        reference: (ManifestReference, Option<ImportStoreReservation>),
+        outcome: (GraphRelationOutcome, Option<ImportStoreReservation>),
     ) -> Result<(), ResourceGraphError> {
         let (first_outgoing, last_outgoing, outgoing_count) = self
             .nodes
@@ -941,10 +995,11 @@ impl ResourceGraph {
             .try_push_reserved(GraphRelation {
                 role: pending.role,
                 requirement: pending.requirement,
-                reference,
-                outcome,
+                reference: reference.0,
+                outcome: outcome.0,
                 previous_outgoing: last_outgoing,
                 next_outgoing: None,
+                _path_reservations: [reference.1, outcome.1],
             })
             .map_err(|_| ResourceGraphError::Allocation {
                 resource: "resource-graph-relation-slot",
@@ -985,6 +1040,7 @@ impl ResourceGraph {
                 )
                 .map_err(ResourceGraphError::Scope)?;
             while self.cache_to_node.len() <= cache_index {
+                charge_graph_work(host, 1)?;
                 self.cache_to_node.try_push_reserved(None).map_err(|_| {
                     ResourceGraphError::Allocation {
                         resource: "resource-graph-cache-index-slot",
@@ -1001,11 +1057,18 @@ impl ResourceGraph {
         }
     }
 
-    fn find_node(&self, identity: &DependencyIdentity) -> Option<usize> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .find_map(|(index, node)| (&node.exact_identity == identity).then_some(index))
+    fn find_node(
+        &self,
+        host: ImportStoreHost<'_>,
+        identity: &DependencyIdentity,
+    ) -> Result<Option<usize>, ResourceGraphError> {
+        for (index, node) in self.nodes.iter().enumerate() {
+            charge_graph_work(host, 1)?;
+            if &node.exact_identity == identity {
+                return Ok(Some(index));
+            }
+        }
+        Ok(None)
     }
 
     fn outgoing_relations(
@@ -1048,27 +1111,24 @@ impl ResourceGraph {
         target: usize,
         source: usize,
         target_depth: u64,
-    ) -> Result<Vec<DepthUpdate>, ResourceGraphError> {
-        let mut states = Vec::new();
-        states
-            .try_reserve_exact(self.nodes.len())
-            .map_err(|_| ResourceGraphError::Allocation {
-                resource: "resource-graph-depth-visit-state",
-            })?;
-        states.resize(self.nodes.len(), 0_u8);
-        let mut stack = Vec::new();
-        stack
-            .try_reserve_exact(self.nodes.len())
-            .map_err(|_| ResourceGraphError::Allocation {
-                resource: "resource-graph-depth-stack",
-            })?;
-        stack.push((target, false));
-        let mut postorder = Vec::new();
-        postorder.try_reserve_exact(self.nodes.len()).map_err(|_| {
-            ResourceGraphError::Allocation {
-                resource: "resource-graph-depth-postorder",
-            }
-        })?;
+    ) -> Result<AccountedVec<DepthUpdate>, ResourceGraphError> {
+        let mut states =
+            graph_scratch_vec(host, self.nodes.len(), "resource-graph-depth-visit-state")?;
+        for _ in 0..self.nodes.len() {
+            charge_graph_work(host, 1)?;
+            states.push_reserved_infallible(0_u8);
+        }
+        // Pending visits include repeated outgoing edges as well as one expansion per node.
+        let stack_capacity = self
+            .nodes
+            .len()
+            .checked_add(self.relations.len())
+            .and_then(|count| count.checked_add(1))
+            .ok_or(ResourceGraphError::Overflow)?;
+        let mut stack = graph_scratch_vec(host, stack_capacity, "resource-graph-depth-stack")?;
+        stack.push_reserved_infallible((target, false));
+        let mut postorder =
+            graph_scratch_vec(host, self.nodes.len(), "resource-graph-depth-postorder")?;
 
         while let Some((index, expanded)) = stack.pop() {
             charge_graph_work(host, 1)?;
@@ -1080,7 +1140,7 @@ impl ResourceGraph {
                 .ok_or(ResourceGraphError::DanglingNode)?;
             if expanded {
                 states[index] = 2;
-                postorder.push(index);
+                postorder.push_reserved_infallible(index);
                 continue;
             }
             match states[index] {
@@ -1089,13 +1149,13 @@ impl ResourceGraph {
                 _ => {}
             }
             states[index] = 1;
-            stack.push((index, true));
+            stack.push_reserved_infallible((index, true));
             for relation in self.outgoing_relations_rev(index)? {
                 let relation = relation?;
                 charge_graph_work(host, 1)?;
                 if let GraphRelationOutcome::Available { target } = &relation.outcome {
                     match states.get(*target).copied() {
-                        Some(0) => stack.push((*target, false)),
+                        Some(0) => stack.push_reserved_infallible((*target, false)),
                         Some(1) => return Err(ResourceGraphError::Cycle),
                         Some(2) => {}
                         _ => return Err(ResourceGraphError::DanglingNode),
@@ -1104,22 +1164,16 @@ impl ResourceGraph {
             }
         }
 
-        let mut proposed = Vec::new();
-        proposed.try_reserve_exact(self.nodes.len()).map_err(|_| {
-            ResourceGraphError::Allocation {
-                resource: "resource-graph-depth-projection",
-            }
-        })?;
-        proposed.resize(self.nodes.len(), None);
+        let mut proposed =
+            graph_scratch_vec(host, self.nodes.len(), "resource-graph-depth-projection")?;
+        for _ in 0..self.nodes.len() {
+            charge_graph_work(host, 1)?;
+            proposed.push_reserved_infallible(None);
+        }
         proposed[target] = Some(target_depth);
-        let mut updates = Vec::new();
-        updates
-            .try_reserve_exact(postorder.len())
-            .map_err(|_| ResourceGraphError::Allocation {
-                resource: "resource-graph-depth-updates",
-            })?;
+        let mut updates = graph_scratch_vec(host, postorder.len(), "resource-graph-depth-updates")?;
         let maximum_depth = u64::try_from(self.limits.max_resource_graph_depth).unwrap_or(u64::MAX);
-        for index in postorder.into_iter().rev() {
+        for &index in postorder.iter().rev() {
             charge_graph_work(host, 1)?;
             let depth = proposed[index].ok_or(ResourceGraphError::DanglingNode)?;
             if depth > maximum_depth {
@@ -1133,7 +1187,7 @@ impl ResourceGraph {
                 .get(index)
                 .ok_or(ResourceGraphError::DanglingNode)?;
             if depth > node.depth {
-                updates.push(DepthUpdate { index, depth });
+                updates.push_reserved_infallible(DepthUpdate { index, depth });
             }
             let child_depth = depth.checked_add(1).ok_or(ResourceGraphError::Overflow)?;
             for relation in self.outgoing_relations(index)? {
@@ -1152,13 +1206,19 @@ impl ResourceGraph {
         Ok(updates)
     }
 
-    fn apply_depth_updates(&mut self, updates: &[DepthUpdate]) -> Result<(), ResourceGraphError> {
+    fn apply_depth_updates(
+        &mut self,
+        host: ImportStoreHost<'_>,
+        updates: &[DepthUpdate],
+    ) -> Result<(), ResourceGraphError> {
         for update in updates {
+            charge_graph_work(host, 1)?;
             let node = self
                 .nodes
                 .get_mut(update.index)
                 .ok_or(ResourceGraphError::DanglingNode)?;
             node.depth = node.depth.max(update.depth);
+            self.maximum_depth = self.maximum_depth.max(node.depth);
         }
         Ok(())
     }
@@ -1175,6 +1235,7 @@ impl ResourceGraph {
             })
             .map_err(ResourceGraphError::Scope)?;
         for _ in 0..self.nodes.len() {
+            charge_manifest_work(host, 1)?;
             states.push_reserved_infallible(0_u8);
         }
         let stack_capacity = self
@@ -1267,13 +1328,17 @@ impl ResourceGraph {
         Ok(())
     }
 
-    fn validate_relation_storage(&self) -> Result<(), ResourceGraphError> {
+    fn validate_relation_storage(
+        &self,
+        host: ImportStoreHost<'_>,
+    ) -> Result<(), ResourceGraphError> {
         let relation_count =
             usize::try_from(self.relation_count).map_err(|_| ResourceGraphError::Overflow)?;
         if relation_count != self.relations.len() {
             return Err(ResourceGraphError::IncompleteRelation);
         }
         let declared = self.nodes.iter().try_fold(0usize, |total, node| {
+            charge_manifest_work(host, 1)?;
             total
                 .checked_add(node.outgoing_count)
                 .ok_or(ResourceGraphError::Overflow)
@@ -1285,7 +1350,7 @@ impl ResourceGraph {
     }
 
     fn maximum_depth(&self) -> u64 {
-        self.nodes.iter().map(|node| node.depth).max().unwrap_or(0)
+        self.maximum_depth
     }
 }
 
@@ -1418,11 +1483,9 @@ fn hash_manifest_bytes(
     host: ImportStoreHost<'_>,
     bytes: &[u8],
 ) -> Result<ManifestDigest, ResourceGraphError> {
-    let work = u64::try_from(bytes.len()).map_err(|_| ResourceGraphError::Overflow)?;
-    charge_attempted(host, ImportDimension::InputManifestWork, work)?;
-    let digest = ManifestDigest::of(bytes);
-    charge_consumed(host, ImportDimension::InputManifestWork, work)?;
-    Ok(digest)
+    chunked_sha256(host, bytes, ImportDimension::InputManifestWork)
+        .map(ManifestDigest::from_bytes)
+        .map_err(ResourceGraphError::Scope)
 }
 
 fn manifest_bytes_equal(
@@ -1479,6 +1542,7 @@ fn project_relation(
 }
 
 fn manifest_counts_and_replay_status(
+    host: ImportStoreHost<'_>,
     classes: &[ManifestNodeClass],
     maximum_depth: u64,
 ) -> Result<(ResourceManifestCounts, InputReplayStatus), ResourceGraphError> {
@@ -1489,8 +1553,10 @@ fn manifest_counts_and_replay_status(
     };
     let mut reasons = ManifestObservedOnlyReasons::new();
     for class in classes {
+        charge_manifest_work(host, 1)?;
         note_unstable_identity(&mut reasons, class.identity());
         for relation in class.outgoing_relations() {
+            charge_manifest_work(host, 1)?;
             if let ManifestReference::Normalized(identity) = relation.reference() {
                 note_unstable_identity(&mut reasons, identity);
             }
@@ -1564,38 +1630,74 @@ fn note_unstable_identity(
 }
 
 fn manifest_identity(
+    host: ImportStoreHost<'_>,
     path: &AssetPath,
     reason: ManifestSessionOpaqueReason,
     resource: &'static str,
-) -> Result<ManifestResourceIdentity, ResourceGraphError> {
-    Ok(ManifestResourceIdentity::new(
-        path.try_clone()
-            .map_err(|_| ResourceGraphError::Allocation { resource })?,
-        ManifestResourceIdentityStability::SessionOpaque(reason),
+) -> Result<(ManifestResourceIdentity, ImportStoreReservation), ResourceGraphError> {
+    let (path, reservation) = clone_graph_path(host, path, resource)?;
+    Ok((
+        ManifestResourceIdentity::new(
+            path,
+            ManifestResourceIdentityStability::SessionOpaque(reason),
+        ),
+        reservation,
     ))
 }
 
 fn manifest_identity_for_resolution(
+    host: ImportStoreHost<'_>,
     path: &AssetPath,
     stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
     resource: &'static str,
-) -> Result<ManifestResourceIdentity, ResourceGraphError> {
+) -> Result<(ManifestResourceIdentity, ImportStoreReservation), ResourceGraphError> {
     let Some(schema) = stable_identity_schema else {
         return manifest_identity(
+            host,
             path,
             ManifestSessionOpaqueReason::UnregisteredResolverIdentity,
             resource,
         );
     };
-    Ok(ManifestResourceIdentity::new(
-        path.try_clone()
-            .map_err(|_| ResourceGraphError::Allocation { resource })?,
-        ManifestResourceIdentityStability::Stable {
-            owner: schema.owner(),
-            schema: schema.schema_id(),
-            version: u64::from(schema.schema_version().get()),
-        },
+    let (path, reservation) = clone_graph_path(host, path, resource)?;
+    Ok((
+        ManifestResourceIdentity::new(
+            path,
+            ManifestResourceIdentityStability::Stable {
+                owner: schema.owner(),
+                schema: schema.schema_id(),
+                version: u64::from(schema.schema_version().get()),
+            },
+        ),
+        reservation,
     ))
+}
+
+fn clone_graph_path(
+    host: ImportStoreHost<'_>,
+    source: &AssetPath,
+    resource: &'static str,
+) -> Result<(AssetPath, ImportStoreReservation), ResourceGraphError> {
+    let plan = CapacityPlan::for_type::<u8>(0, 0, source.as_str().len())
+        .map_err(|cause| ResourceGraphError::Scope(capacity_plan_cause(resource, cause)))?;
+    let bytes = plan
+        .envelope_delta_bytes()
+        .map_err(|cause| ResourceGraphError::Scope(capacity_plan_cause(resource, cause)))?;
+    let mut reservation = reserve_graph_storage(host, bytes).map_err(ResourceGraphError::Scope)?;
+    let path = source
+        .try_clone()
+        .map_err(|_| ResourceGraphError::Allocation { resource })?;
+    let actual = u64::try_from(path.capacity_bytes()).map_err(|_| ResourceGraphError::Overflow)?;
+    if actual > bytes {
+        return Err(ResourceGraphError::Scope(
+            ScopeAbortCause::DescriptorContract {
+                code: "resource-graph-path-reservation-underestimated",
+            },
+        ));
+    }
+    host.resize(&mut reservation, actual)
+        .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
+    Ok((path, reservation))
 }
 
 pub(crate) fn unavailable_disposition(cause: &ScopeAbortCause) -> ResourceUnavailableDisposition {
@@ -1652,6 +1754,7 @@ pub(crate) fn unavailable_disposition(cause: &ScopeAbortCause) -> ResourceUnavai
         | ScopeAbortCause::FormatFailureDetail(_)
         | ScopeAbortCause::Allocation { .. }
         | ScopeAbortCause::CapacityEnvelope { .. }
+        | ScopeAbortCause::SceneValidation(_)
         | ScopeAbortCause::OptionTypeMismatch
         | ScopeAbortCause::DescriptorContract { .. } => (
             ManifestUnavailableClass::Contract,
@@ -1797,6 +1900,20 @@ fn manifest_scratch_vec<T>(
     Ok(values)
 }
 
+fn graph_scratch_vec<T>(
+    host: ImportStoreHost<'_>,
+    capacity: usize,
+    resource: &'static str,
+) -> Result<AccountedVec<T>, ResourceGraphError> {
+    let mut values = AccountedVec::new();
+    values
+        .try_reserve_capacity(capacity, resource, |bytes| {
+            reserve_graph_storage(host, bytes)
+        })
+        .map_err(ResourceGraphError::Scope)?;
+    Ok(values)
+}
+
 fn dependency_cache_error(cause: DependencyCacheCapacityError) -> ResourceGraphError {
     let cause = match cause {
         DependencyCacheCapacityError::Capacity { storage, cause } => {
@@ -1906,6 +2023,7 @@ fn restore_acquisition_reservations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dependency::shared_dependency_snapshot_allocation_bytes;
     use crate::ledger::ImportOperationControl;
     use crate::store::{
         ImportStoreBootstrapRequirements, ImportStoreSessionOwner, try_import_store_bootstrap,
@@ -1915,7 +2033,17 @@ mod tests {
         PhysicalStorageAccountLimits,
     };
 
+    mod accounting;
+    mod hashing;
+
     fn store_owner(limits: &ResourceLimits) -> ImportStoreSessionOwner {
+        store_owner_with_control(limits, ImportOperationControl::default())
+    }
+
+    fn store_owner_with_control(
+        limits: &ResourceLimits,
+        control: ImportOperationControl,
+    ) -> ImportStoreSessionOwner {
         let requirements = ImportStoreBootstrapRequirements::for_node_scene(limits).unwrap();
         let bootstrap = try_import_store_bootstrap(limits, requirements).unwrap();
         let factory = PhysicalStorageAccountFactory::try_new(
@@ -1925,8 +2053,7 @@ mod tests {
         let account = factory
             .try_create_account(PhysicalStorageAccountLimits::new(u64::MAX, u64::MAX).unwrap())
             .unwrap();
-        ImportStoreSessionOwner::try_start(ImportOperationControl::default(), &account, bootstrap)
-            .unwrap()
+        ImportStoreSessionOwner::try_start(control, &account, bootstrap).unwrap()
     }
 
     fn dependency_identity(authority: &AuthorityDomain, path: &str) -> DependencyIdentity {
@@ -1979,6 +2106,7 @@ mod tests {
             last_outgoing: None,
             outgoing_count: 0,
             depth: 0,
+            _path_reservations: [None, None],
         }
     }
 
@@ -1993,7 +2121,9 @@ mod tests {
             ManifestDigest::of(b"primary"),
             accounted_manifest_values(host, vec![relation]),
         );
-        manifest_counts_and_replay_status(&[class], 0).unwrap().1
+        manifest_counts_and_replay_status(host, &[class], 0)
+            .unwrap()
+            .1
     }
 
     fn accounted_manifest_values<T>(host: ImportStoreHost<'_>, values: Vec<T>) -> AccountedVec<T> {
@@ -2090,7 +2220,6 @@ mod tests {
         host: ImportStoreHost<'_>,
         source: usize,
         role: &DependencyRoleId,
-        cache_index: usize,
         identity: &DependencyIdentity,
         bytes: &[u8],
     ) -> usize {
@@ -2100,7 +2229,6 @@ mod tests {
             source,
             role,
             DependencyRequirement::Required,
-            cache_index,
             identity,
             bytes,
         )
@@ -2112,7 +2240,6 @@ mod tests {
         source: usize,
         role: &DependencyRoleId,
         requirement: DependencyRequirement,
-        cache_index: usize,
         identity: &DependencyIdentity,
         bytes: &[u8],
     ) -> usize {
@@ -2120,16 +2247,65 @@ mod tests {
             .begin_relation(host, source, role, requirement, identity.path().as_str())
             .unwrap();
         graph.prepare_target(host, &mut pending, identity).unwrap();
+        let (cache_index, snapshot) = cache_snapshot(graph, host, identity, bytes);
         graph
             .complete_available(
                 host,
                 pending,
                 cache_index,
-                bytes,
+                snapshot.bytes(),
                 AvailableResourceIdentity::new(identity, identity.path(), None),
             )
             .unwrap();
         graph.source_for_cache(cache_index).unwrap()
+    }
+
+    fn cache_snapshot(
+        graph: &mut ResourceGraph,
+        host: ImportStoreHost<'_>,
+        identity: &DependencyIdentity,
+        bytes: &[u8],
+    ) -> (usize, Arc<SharedDependencySnapshot>) {
+        if let Some(ResourceAcquisitionState::Available {
+            cache_index,
+            bytes: snapshot,
+            ..
+        }) = graph.acquisition_state(identity)
+        {
+            assert_eq!(snapshot.bytes(), bytes);
+            return (cache_index, snapshot);
+        }
+        graph.reserve_acquisition_capacity(host).unwrap();
+        assert!(
+            graph
+                .begin_acquisition(
+                    identity.try_clone().unwrap(),
+                    reserve_graph_storage(host, identity.path().as_str().len() as u64).unwrap(),
+                )
+                .unwrap()
+        );
+        let mut payload = AccountedVec::new();
+        payload
+            .try_reserve(bytes.len(), "resource-snapshot-test-bytes", |bytes| {
+                host.reserve(
+                    ImportLedgerPhase::DependencyAcquisition,
+                    ImportDimension::DependencyBytes,
+                    bytes,
+                )
+                .map_err(|cause| cause.into_scope_abort_cause())
+            })
+            .unwrap();
+        payload.try_extend_from_slice_reserved(bytes).unwrap();
+        let sharing = reserve_graph_storage(
+            host,
+            shared_dependency_snapshot_allocation_bytes().unwrap() as u64,
+        )
+        .unwrap();
+        let snapshot = Arc::new(SharedDependencySnapshot::new(payload, sharing));
+        let cache_index = graph
+            .complete_acquisition(identity, Arc::clone(&snapshot), None)
+            .unwrap();
+        (cache_index, snapshot)
     }
 
     #[derive(Clone, Copy)]
@@ -2164,7 +2340,7 @@ mod tests {
             .bind_primary(host, &authority, &primary_path, b"primary")
             .unwrap();
         let primary = graph.source_for_primary().unwrap();
-        for (cache_index, edge) in edges.iter().enumerate() {
+        for edge in edges {
             let role = DependencyRoleId::new(edge.role).unwrap();
             let identity = dependency_identity(&authority, edge.path);
             add_available_with_requirement(
@@ -2173,7 +2349,6 @@ mod tests {
                 primary,
                 &role,
                 edge.requirement,
-                cache_index,
                 &identity,
                 edge.bytes,
             );
@@ -2195,10 +2370,10 @@ mod tests {
             .unwrap();
         let primary = graph.source_for_primary().unwrap();
         let identity_a = dependency_identity(&authority, "a.asset");
-        let node_a = add_available(&mut graph, host, primary, &role, 0, &identity_a, b"a");
+        let node_a = add_available(&mut graph, host, primary, &role, &identity_a, b"a");
         let identity_b = dependency_identity(&authority, "b.asset");
         let source = if nested { node_a } else { primary };
-        add_available(&mut graph, host, source, &role, 1, &identity_b, b"b");
+        add_available(&mut graph, host, source, &role, &identity_b, b"b");
         graph.seal(host).unwrap();
         graph.take_manifest().unwrap()
     }
@@ -2265,11 +2440,11 @@ mod tests {
             .unwrap();
         let primary = graph.source_for_primary().unwrap();
         let identity_a = dependency_identity(&authority, "a.asset");
-        let node_a = add_available(&mut graph, host, primary, &role, 0, &identity_a, b"a");
+        let node_a = add_available(&mut graph, host, primary, &role, &identity_a, b"a");
         let identity_b = dependency_identity(&authority, "b.asset");
-        add_available(&mut graph, host, node_a, &role, 1, &identity_b, b"b");
+        add_available(&mut graph, host, node_a, &role, &identity_b, b"b");
         let identity_c = dependency_identity(&authority, "c.asset");
-        let node_c = add_available(&mut graph, host, primary, &role, 2, &identity_c, b"c");
+        let node_c = add_available(&mut graph, host, primary, &role, &identity_c, b"c");
         (graph, role, identity_a, node_c)
     }
 
@@ -2316,12 +2491,13 @@ mod tests {
         graph
             .prepare_target(host, &mut pending, &identity_a)
             .unwrap();
+        let (cache_index, snapshot) = cache_snapshot(&mut graph, host, &identity_a, b"a");
         graph
             .complete_available(
                 host,
                 pending,
-                0,
-                b"a",
+                cache_index,
+                snapshot.bytes(),
                 AvailableResourceIdentity::new(&identity_a, identity_a.path(), None),
             )
             .unwrap();
@@ -2407,7 +2583,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_arenas_hold_one_accounted_owner_per_storage_class() {
+    fn graph_arenas_and_paths_hold_their_complete_capacity_charge() {
         let limits = ResourceLimits::default();
         let owner = store_owner(&limits);
         let host = owner.host();
@@ -2416,20 +2592,17 @@ mod tests {
         let role = DependencyRoleId::new("test.resource").unwrap();
         let identity = dependency_identity(&authority, "dependency.asset");
         let mut graph = ResourceGraph::new(limits);
+        cache_snapshot(&mut graph, host, &identity, b"dependency");
+        let cache_storage = host
+            .dimension_state(ImportDimension::ScratchBytes)
+            .unwrap()
+            .live_bytes();
 
         graph
             .bind_primary(host, &authority, &primary_path, b"primary")
             .unwrap();
         let primary = graph.source_for_primary().unwrap();
-        add_available(
-            &mut graph,
-            host,
-            primary,
-            &role,
-            0,
-            &identity,
-            b"dependency",
-        );
+        add_available(&mut graph, host, primary, &role, &identity, b"dependency");
 
         let accounted = graph
             .nodes
@@ -2437,6 +2610,22 @@ mod tests {
             .checked_add(graph.relations.capacity_bytes())
             .and_then(|bytes| bytes.checked_add(graph.cache_to_node.capacity_bytes()))
             .unwrap();
+        let path_bytes = graph
+            .nodes
+            .iter()
+            .map(|node| {
+                node.exact_identity.path().capacity_bytes()
+                    + node.public_identity.value().capacity_bytes()
+            })
+            .sum::<usize>()
+            + graph
+                .relations
+                .iter()
+                .map(|relation| match &relation.reference {
+                    ManifestReference::Normalized(identity) => identity.value().capacity_bytes(),
+                    ManifestReference::Rejected { .. } => 0,
+                })
+                .sum::<usize>();
         assert!(graph.nodes.capacity_bytes() > 0);
         assert!(graph.relations.capacity_bytes() > 0);
         assert!(graph.cache_to_node.capacity_bytes() > 0);
@@ -2444,7 +2633,7 @@ mod tests {
             host.dimension_state(ImportDimension::ScratchBytes)
                 .unwrap()
                 .live_bytes(),
-            accounted
+            cache_storage + accounted + path_bytes as u64
         );
 
         drop(graph);
@@ -2810,7 +2999,9 @@ mod tests {
         let manifest_work = host
             .dimension_state(ImportDimension::InputManifestWork)
             .unwrap();
-        let expected_work = 3 + node_hash_work + 5_327;
+        // One relation-count scan, state initialization, two traversal steps, digest initialization,
+        // node projection, and replay/count classification surround the two byte hashes.
+        let expected_work = 7 + node_hash_work + 5_327;
         assert_eq!(manifest_work.attempted(), expected_work);
         assert_eq!(manifest_work.consumed(), expected_work);
         assert_eq!(manifest.schema_version(), 1);
@@ -2850,9 +3041,10 @@ mod tests {
             .dimension_state(ImportDimension::ScratchBytes)
             .unwrap()
             .live_bytes();
+        const PRE_HASH_WORK: u64 = 6;
         host.tighten_dimension_policy(
             ImportDimension::InputManifestWork,
-            DimensionPolicy::counter(3, 3, 0),
+            DimensionPolicy::counter(PRE_HASH_WORK, PRE_HASH_WORK, 0),
         )
         .unwrap();
 
@@ -2860,8 +3052,8 @@ mod tests {
         let work = host
             .dimension_state(ImportDimension::InputManifestWork)
             .unwrap();
-        assert_eq!(work.attempted(), 3 + node_hash_work);
-        assert_eq!(work.consumed(), 3);
+        assert_eq!(work.attempted(), PRE_HASH_WORK + node_hash_work);
+        assert_eq!(work.consumed(), PRE_HASH_WORK);
         assert_eq!(
             host.dimension_state(ImportDimension::InputManifestBytes)
                 .unwrap()

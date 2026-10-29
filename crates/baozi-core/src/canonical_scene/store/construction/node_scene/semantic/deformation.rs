@@ -24,13 +24,30 @@ use crate::math::{Mat4, Vec3};
 
 use super::{NodeSceneSemanticResult, invariant, read_scalar, read_u32_as_usize};
 
+mod read;
+
 type SceneCanonicalStore = PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>;
 
 const MATRIX_SCALAR_COUNT: usize = 16;
 const MORPH_VECTOR_WIDTH: usize = 3;
 
+#[cfg(test)]
+std::thread_local! {
+    static ROWS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(in crate::canonical_scene::store) fn take_row_read_count_for_test() -> usize {
+    ROWS_READ.with(|count| count.replace(0))
+}
+
+fn record_row_read() {
+    #[cfg(test)]
+    ROWS_READ.with(|count| count.set(count.get() + 1));
+}
+
 /// Proof-bound deformation tables and leaf payloads borrowed from one Scene.
-pub(super) struct NodeSceneDeformationTables<'scene> {
+pub(in crate::canonical_scene::store) struct NodeSceneDeformationTables<'scene> {
     skins: Option<CanonicalRecordView<'scene>>,
     logical_morphs: Option<CanonicalRecordView<'scene>>,
     morph_definitions: Option<CanonicalRecordView<'scene>>,
@@ -54,7 +71,7 @@ pub(super) struct NodeSceneDeformationTables<'scene> {
 }
 
 impl<'scene> NodeSceneDeformationTables<'scene> {
-    pub(super) fn try_new(
+    pub(in crate::canonical_scene::store) fn try_new(
         canonical: &'scene SceneCanonicalStore,
         proof: NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
@@ -198,6 +215,7 @@ impl<'scene> NodeSceneDeformationTables<'scene> {
             tables: self,
             proof,
             phase: DeformationCursorPhase::Skins,
+            validate_payloads: true,
             next_skin: 0,
             next_logical_morph: 0,
             next_morph_definition: 0,
@@ -303,6 +321,9 @@ pub(in crate::canonical_scene::store) struct NodeSceneDeformationCursor<'scene> 
     tables: NodeSceneDeformationTables<'scene>,
     proof: NodeSceneValidationProof,
     phase: DeformationCursorPhase,
+    // Exhaustive evidence traversal rechecks payload contents. Direct reads share its row
+    // decoder but rely on the immutable owner's central proof for already validated contents.
+    validate_payloads: bool,
     next_skin: usize,
     next_logical_morph: usize,
     next_morph_definition: usize,
@@ -367,6 +388,7 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
         else {
             return Ok(None);
         };
+        record_row_read();
         let table = self
             .tables
             .skins
@@ -404,8 +426,11 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
             self.tables.joint_nodes,
             "validated skin joint payload range or reference is inconsistent",
         )?;
-        let joints =
-            NodeSceneDeformationJointCursor::try_new(joint_values, self.proof.source_node_count())?;
+        let joints = NodeSceneDeformationJointCursor::try_new(
+            joint_values,
+            self.proof.source_node_count(),
+            self.validate_payloads,
+        )?;
 
         let inverse_offset = read_u32_as_usize(
             table,
@@ -437,7 +462,8 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
             self.tables.inverse_bind_matrices,
             "validated inverse-bind payload range or reference is inconsistent",
         )?;
-        let inverse_bind_matrices = NodeSceneDeformationMatrixCursor::try_new(inverse_values)?;
+        let inverse_bind_matrices =
+            NodeSceneDeformationMatrixCursor::try_new(inverse_values, self.validate_payloads)?;
 
         let skeleton_root = read_optional_source_node(
             table,
@@ -549,6 +575,7 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
         else {
             return Ok(None);
         };
+        record_row_read();
         let table = self
             .tables
             .logical_morphs
@@ -619,7 +646,7 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
             self.tables.morph_defaults,
             "validated logical-morph default payload range or reference is inconsistent",
         )?;
-        if default_values.iter().any(|weight| !weight.is_finite()) {
+        if self.validate_payloads && default_values.iter().any(|weight| !weight.is_finite()) {
             return Err(invariant(
                 "validated logical-morph defaults contain non-finite data",
             ));
@@ -656,6 +683,7 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
         else {
             return Ok(None);
         };
+        record_row_read();
         let table = self
             .tables
             .morph_definitions
@@ -802,6 +830,7 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
         else {
             return Ok(None);
         };
+        record_row_read();
         let table = self
             .tables
             .primitives
@@ -922,6 +951,7 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
                     joints,
                     weights,
                     source_orders,
+                    self.validate_payloads,
                 )?)
             }
             _ => return Err(invariant("validated influence presence code is unknown")),
@@ -997,6 +1027,7 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
         else {
             return Ok(None);
         };
+        record_row_read();
         let table = self
             .tables
             .morph_targets
@@ -1105,6 +1136,7 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
         else {
             return Ok(None);
         };
+        record_row_read();
         let table = self
             .tables
             .morph_deltas
@@ -1247,7 +1279,10 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
                 }
                 NodeSceneDeformationMorphPayload::Dense {
                     logical_count,
-                    values: NodeSceneDeformationVec3Cursor::try_new(values)?,
+                    values: NodeSceneDeformationVec3Cursor::try_new(
+                        values,
+                        self.validate_payloads,
+                    )?,
                 }
             }
             NodeSceneDeformationMorphPayloadKind::Sparse => {
@@ -1262,6 +1297,7 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
                         logical_count,
                         sparse_indices,
                         values,
+                        self.validate_payloads,
                     )?,
                 }
             }
@@ -1302,6 +1338,7 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
         else {
             return Ok(None);
         };
+        record_row_read();
         let table = self
             .tables
             .mesh_instances
@@ -1415,7 +1452,7 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
                     self.tables.instance_morph_weights,
                     "validated instance morph-weight range or reference is inconsistent",
                 )?;
-                if weights.iter().any(|weight| !weight.is_finite()) {
+                if self.validate_payloads && weights.iter().any(|weight| !weight.is_finite()) {
                     return Err(invariant(
                         "validated instance morph weights contain non-finite data",
                     ));
@@ -1879,9 +1916,9 @@ pub(in crate::canonical_scene::store) struct NodeSceneDeformationVec3Cursor<'sce
 }
 
 impl<'scene> NodeSceneDeformationVec3Cursor<'scene> {
-    fn try_new(scalars: &'scene [f32]) -> NodeSceneSemanticResult<Self> {
+    fn try_new(scalars: &'scene [f32], validate_payloads: bool) -> NodeSceneSemanticResult<Self> {
         if !scalars.len().is_multiple_of(MORPH_VECTOR_WIDTH)
-            || scalars.iter().any(|value| !value.is_finite())
+            || (validate_payloads && scalars.iter().any(|value| !value.is_finite()))
         {
             return Err(invariant(
                 "validated morph-vector payload is not finite F32x3 data",
@@ -1952,23 +1989,26 @@ impl<'scene> NodeSceneDeformationSparseDeltaCursor<'scene> {
         logical_count: usize,
         indices: &'scene [u32],
         scalars: &'scene [f32],
+        validate_payloads: bool,
     ) -> NodeSceneSemanticResult<Self> {
-        let values = NodeSceneDeformationVec3Cursor::try_new(scalars)?;
+        let values = NodeSceneDeformationVec3Cursor::try_new(scalars, validate_payloads)?;
         if values.declared_count() != indices.len() {
             return Err(invariant(
                 "validated sparse morph indices and values have different lengths",
             ));
         }
-        let mut previous = None;
-        for index in indices.iter().copied() {
-            let index = usize::try_from(index)
-                .map_err(|_| invariant("validated sparse morph index cannot address memory"))?;
-            if index >= logical_count || previous.is_some_and(|previous| previous >= index) {
-                return Err(invariant(
-                    "validated sparse morph indices are unordered or out of range",
-                ));
+        if validate_payloads {
+            let mut previous = None;
+            for index in indices.iter().copied() {
+                let index = usize::try_from(index)
+                    .map_err(|_| invariant("validated sparse morph index cannot address memory"))?;
+                if index >= logical_count || previous.is_some_and(|previous| previous >= index) {
+                    return Err(invariant(
+                        "validated sparse morph indices are unordered or out of range",
+                    ));
+                }
+                previous = Some(index);
             }
-            previous = Some(index);
         }
         Ok(Self {
             logical_count,
@@ -2076,6 +2116,7 @@ impl<'scene> NodeSceneDeformationInfluenceRowsCursor<'scene> {
         joints: &'scene [u32],
         weights: &'scene [f32],
         source_orders: &'scene [u32],
+        validate_payloads: bool,
     ) -> NodeSceneSemanticResult<Self> {
         if offsets.first().copied() != Some(0)
             || joints.len() != weights.len()
@@ -2087,21 +2128,24 @@ impl<'scene> NodeSceneDeformationInfluenceRowsCursor<'scene> {
                 "validated influence rows have inconsistent payload boundaries",
             ));
         }
-        for pair in offsets.windows(2) {
-            if pair[0] > pair[1] || usize::try_from(pair[1]).map_or(true, |end| end > joints.len())
+        if validate_payloads {
+            for pair in offsets.windows(2) {
+                if pair[0] > pair[1]
+                    || usize::try_from(pair[1]).map_or(true, |end| end > joints.len())
+                {
+                    return Err(invariant(
+                        "validated influence row offsets are unordered or out of range",
+                    ));
+                }
+            }
+            if weights
+                .iter()
+                .any(|weight| !weight.is_finite() || *weight < 0.0)
             {
                 return Err(invariant(
-                    "validated influence row offsets are unordered or out of range",
+                    "validated influence weights contain invalid data",
                 ));
             }
-        }
-        if weights
-            .iter()
-            .any(|weight| !weight.is_finite() || *weight < 0.0)
-        {
-            return Err(invariant(
-                "validated influence weights contain invalid data",
-            ));
         }
         Ok(Self {
             offsets,
@@ -2405,18 +2449,21 @@ impl<'scene> NodeSceneDeformationJointCursor<'scene> {
     fn try_new(
         canonical_nodes: &'scene [u32],
         source_node_count: usize,
+        validate_payloads: bool,
     ) -> NodeSceneSemanticResult<Self> {
-        for canonical in canonical_nodes {
-            let source = usize::try_from(*canonical)
-                .ok()
-                .and_then(|value| value.checked_sub(1))
-                .ok_or_else(|| {
-                    invariant("validated skin joint cannot address source-node space")
-                })?;
-            if source >= source_node_count {
-                return Err(invariant(
-                    "validated skin joint is outside source-node space",
-                ));
+        if validate_payloads {
+            for canonical in canonical_nodes {
+                let source = usize::try_from(*canonical)
+                    .ok()
+                    .and_then(|value| value.checked_sub(1))
+                    .ok_or_else(|| {
+                        invariant("validated skin joint cannot address source-node space")
+                    })?;
+                if source >= source_node_count {
+                    return Err(invariant(
+                        "validated skin joint is outside source-node space",
+                    ));
+                }
             }
         }
         Ok(Self {
@@ -2469,18 +2516,20 @@ pub(in crate::canonical_scene::store) struct NodeSceneDeformationMatrixCursor<'s
 }
 
 impl<'scene> NodeSceneDeformationMatrixCursor<'scene> {
-    fn try_new(scalars: &'scene [f32]) -> NodeSceneSemanticResult<Self> {
+    fn try_new(scalars: &'scene [f32], validate_payloads: bool) -> NodeSceneSemanticResult<Self> {
         if !scalars.len().is_multiple_of(MATRIX_SCALAR_COUNT) {
             return Err(invariant(
                 "validated matrix payload is not an exact matrix sequence",
             ));
         }
-        for chunk in scalars.chunks_exact(MATRIX_SCALAR_COUNT) {
-            let matrix = matrix_from_slice(chunk)?;
-            if !matrix.is_finite() || !matrix.is_affine() {
-                return Err(invariant(
-                    "validated matrix payload contains non-finite or non-affine data",
-                ));
+        if validate_payloads {
+            for chunk in scalars.chunks_exact(MATRIX_SCALAR_COUNT) {
+                let matrix = matrix_from_slice(chunk)?;
+                if !matrix.is_finite() || !matrix.is_affine() {
+                    return Err(invariant(
+                        "validated matrix payload contains non-finite or non-affine data",
+                    ));
+                }
             }
         }
         Ok(Self {

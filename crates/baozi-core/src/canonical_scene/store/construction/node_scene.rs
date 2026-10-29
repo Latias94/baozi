@@ -581,6 +581,18 @@ pub(in crate::canonical_scene::store) struct ValidatedNodeScene {
     semantic_read_fault: Option<semantic::NodeSceneSemanticReadFault>,
 }
 
+impl ValidatedNodeScene {
+    pub(in crate::canonical_scene::store) const fn read_proof(&self) -> NodeSceneValidationProof {
+        self.proof
+    }
+
+    pub(in crate::canonical_scene::store) const fn read_canonical(
+        &self,
+    ) -> &PublishedCanonicalStore<RecordBlock, SceneDirectorySchema> {
+        &self.canonical
+    }
+}
+
 #[cfg(test)]
 pub(in crate::canonical_scene::store) struct NodeSceneSuccessReport {
     outcome_evidence: PublishedOutcomeEvidenceStore<RecordBlock, NodeSceneOutcomeEvidenceSchema>,

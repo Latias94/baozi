@@ -118,6 +118,7 @@ const ATTRIBUTE_DOMAIN_FACE: u8 = 2;
 const SCALAR_F32: u8 = 0;
 const SCALAR_U32: u8 = 1;
 const SCALAR_I32: u8 = 2;
+const SCALAR_F64: u8 = 3;
 const NORMALIZATION_NONE: u8 = 0;
 const PAYLOAD_DENSE: u8 = 0;
 const PAYLOAD_SPARSE: u8 = 1;
@@ -209,6 +210,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSnapshotTotals {
     pub(in crate::canonical_scene::store) sparse_index_count: u64,
     pub(in crate::canonical_scene::store) canonical_scalar_count: u64,
     pub(in crate::canonical_scene::store) f32_scalar_count: u64,
+    pub(in crate::canonical_scene::store) f64_scalar_count: u64,
     pub(in crate::canonical_scene::store) u32_scalar_count: u64,
     pub(in crate::canonical_scene::store) i32_scalar_count: u64,
     pub(in crate::canonical_scene::store) attribute_semantic_name_bytes: u64,
@@ -308,6 +310,7 @@ struct GeometryPayloadTotals {
     sparse_indices: u64,
     canonical_scalars: u64,
     f32_scalars: u64,
+    f64_scalars: u64,
     u32_scalars: u64,
     i32_scalars: u64,
 }
@@ -376,6 +379,7 @@ impl GeometryPayloadTotals {
         )?;
         let typed = match kind {
             NodeSceneGeometryScalarKind::F32 => &mut self.f32_scalars,
+            NodeSceneGeometryScalarKind::F64 => &mut self.f64_scalars,
             NodeSceneGeometryScalarKind::U32 => &mut self.u32_scalars,
             NodeSceneGeometryScalarKind::I32 => &mut self.i32_scalars,
         };
@@ -728,6 +732,7 @@ fn capture_node_scene_with_encoder(
                 sparse_index_count: geometry_totals.sparse_indices,
                 canonical_scalar_count: geometry_totals.canonical_scalars,
                 f32_scalar_count: geometry_totals.f32_scalars,
+                f64_scalar_count: geometry_totals.f64_scalars,
                 u32_scalar_count: geometry_totals.u32_scalars,
                 i32_scalar_count: geometry_totals.i32_scalars,
                 attribute_semantic_name_bytes: geometry_totals.attribute_semantic_name_bytes,
@@ -1136,6 +1141,47 @@ fn write_attribute_payload(
             )?;
             values
         }
+        NodeSceneGeometryAttributePayload::DenseF64 { mut values }
+            if scalar_kind == NodeSceneGeometryScalarKind::F64
+                && payload_kind == NodeSceneGeometryPayloadKind::Dense =>
+        {
+            let count = values.declared_count();
+            work.observe()?;
+            transcript.write_tag(TAG_VALUES)?;
+            transcript.tagged_u8(TAG_PRESENCE, PRESENCE_PRESENT)?;
+            preview.begin_geometry_leaf(render, "values", true, count);
+            for ordinal in 0..count {
+                work.observe()?;
+                let value = values.next().map_err(map_snapshot_invariant)?.ok_or(
+                    NodeSceneSnapshotError::InconsistentView {
+                        reason: "f64 payload leaf ended before declared total",
+                    },
+                )?;
+                let bits = value.to_bits();
+                transcript.tagged_u64(TAG_FLOAT_BITS, bits)?;
+                preview.geometry_f64_bits(render, ordinal, bits)?;
+            }
+            values.finish().map_err(map_snapshot_invariant)?;
+            transcript.tagged_usize(TAG_COLLECTION_TOTAL, count)?;
+            preview.end_geometry_leaf(render);
+            write_absent_leaf(
+                transcript,
+                preview,
+                work,
+                TAG_SPARSE_INDICES,
+                "sparse_indices",
+                render,
+            )?;
+            write_absent_leaf(
+                transcript,
+                preview,
+                work,
+                TAG_SPARSE_DEFAULT,
+                "sparse_default",
+                render,
+            )?;
+            count
+        }
         NodeSceneGeometryAttributePayload::DenseU32 { values }
             if scalar_kind == NodeSceneGeometryScalarKind::U32
                 && payload_kind == NodeSceneGeometryPayloadKind::Dense =>
@@ -1539,6 +1585,7 @@ const fn attribute_domain_name(domain: AttributeDomain) -> &'static str {
 const fn encode_scalar_kind(kind: NodeSceneGeometryScalarKind) -> u8 {
     match kind {
         NodeSceneGeometryScalarKind::F32 => SCALAR_F32,
+        NodeSceneGeometryScalarKind::F64 => SCALAR_F64,
         NodeSceneGeometryScalarKind::U32 => SCALAR_U32,
         NodeSceneGeometryScalarKind::I32 => SCALAR_I32,
     }
@@ -1547,6 +1594,7 @@ const fn encode_scalar_kind(kind: NodeSceneGeometryScalarKind) -> u8 {
 const fn scalar_kind_name(kind: NodeSceneGeometryScalarKind) -> &'static str {
     match kind {
         NodeSceneGeometryScalarKind::F32 => "f32",
+        NodeSceneGeometryScalarKind::F64 => "f64",
         NodeSceneGeometryScalarKind::U32 => "u32",
         NodeSceneGeometryScalarKind::I32 => "i32",
     }
@@ -2046,6 +2094,23 @@ impl PreviewSink {
         Ok(())
     }
 
+    fn geometry_f64_bits(
+        &mut self,
+        render: bool,
+        ordinal: usize,
+        bits: u64,
+    ) -> Result<(), NodeSceneSnapshotError> {
+        if !render {
+            return Ok(());
+        }
+        if ordinal >= self.item_limit {
+            return self.omit_item();
+        }
+        self.delimit(ordinal);
+        self.push_hex_u64(bits);
+        Ok(())
+    }
+
     fn geometry_u32_value(
         &mut self,
         render: bool,
@@ -2263,6 +2328,10 @@ impl PreviewSink {
         self.push_u64(geometry_payloads.u32_scalars);
         self.push_str(",i32_scalars=");
         self.push_u64(geometry_payloads.i32_scalars);
+        if geometry_payloads.f64_scalars != 0 {
+            self.push_str(",f64_scalars=");
+            self.push_u64(geometry_payloads.f64_scalars);
+        }
         self.push_str(",skins=");
         self.push_usize(deformation.skins);
         self.push_str(",logical_morphs=");

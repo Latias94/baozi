@@ -29,6 +29,10 @@
 - Triangle faces and polygon faces from `vertex_indices` or `vertex_index` list properties.
 - Unknown scalar vertex properties preserved as `ply:<name>` custom vertex attributes when they map
   to Baozi's current typed attribute model.
+- Custom `float`/`float32` properties retain `f32` storage, and `double`/`float64` properties retain
+  `f64` storage in every encoding. Finite custom `f64` values preserve their exact parsed values,
+  including values outside the finite `f32` range. Non-finite custom floating-point values are
+  rejected. Supported integer custom properties retain the existing `i32`/`u32` storage mapping.
 - Comments and `obj_info` lines preserved as mesh metadata.
 - Resource-limit checks for primary and decoded UTF-8 bytes, header line/token/string sizes, numeric
   literals, vertex count, custom vertex attribute stream/cell counts, face count, list lengths, mesh

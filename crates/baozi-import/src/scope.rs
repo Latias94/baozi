@@ -1,10 +1,11 @@
 use crate::config::{ConformancePolicy, ImportLossKind, LossPolicy};
 use crate::dependency::{
-    AuthorizedDependency, CachedDependencyFailure, DependencyCacheDisposition, DependencyIdentity,
-    DependencyOrigin, DependencyOriginIssuer, DependencyOriginNode, DependencyOutcome,
-    DependencyReference, DependencyRequirement, DependencyRoleId, DependencySnapshot,
-    DependencySnapshotIdentity, OptionalDependencyEvidence, PendingNegativeObservation,
-    ResolverBinding, SharedDependencySnapshot, shared_dependency_snapshot_allocation_bytes,
+    AuthorizedDependency, CachedDependencyFailure, DependencyCacheDisposition,
+    DependencyFailureContext, DependencyIdentity, DependencyOrigin, DependencyOriginIssuer,
+    DependencyOriginNode, DependencyOutcome, DependencyReference, DependencyRequirement,
+    DependencyRoleId, DependencySnapshot, DependencySnapshotIdentity, OptionalDependencyEvidence,
+    PendingNegativeObservation, ResolverBinding, SharedDependencySnapshot,
+    shared_dependency_snapshot_allocation_bytes,
 };
 use crate::descriptor::TextDecodingMode;
 use crate::diagnostic::{
@@ -420,6 +421,7 @@ pub struct ParseScope<'session> {
     source_scope_record: &'session RefCell<Option<LiveSourceScopeRecord>>,
     format_failure_storage: &'session RefCell<Option<ImportStoreReservation>>,
     dependency_failure: RefCell<Option<DependencyResolutionContext>>,
+    dependency_failure_context: RefCell<Option<DependencyFailureContext>>,
     callback_active: Cell<bool>,
     work_outstanding: Cell<bool>,
     parent_work_outstanding: Cell<bool>,
@@ -540,6 +542,7 @@ impl<'session> ParseScope<'session> {
             source_scope_record: parts.source_scope_record,
             format_failure_storage: parts.format_failure_storage,
             dependency_failure: RefCell::new(None),
+            dependency_failure_context: RefCell::new(None),
             callback_active: Cell::new(false),
             work_outstanding: Cell::new(false),
             parent_work_outstanding: Cell::new(false),
@@ -620,6 +623,29 @@ impl<'session> ParseScope<'session> {
         self.limits
     }
 
+    /// Submits borrowed static Scene input with automatic primary-document provenance.
+    ///
+    /// Geometry-aligned empty deformation rows and owner provenance use this session's metered
+    /// storage. Validation and publication follow the same boundary as [`Self::submit_scene`].
+    pub fn submit_static_scene(
+        &self,
+        input: crate::authoring::StaticSceneBuilder<'_>,
+    ) -> ParseResult<CanonicalSceneDraft> {
+        self.preflight_active()?;
+        let content_digest = self
+            .resource_graph
+            .try_borrow()
+            .map_err(|_| self.reentrant_capability_failure())?
+            .primary_content_digest()
+            .map_err(|cause| self.abort(cause.into_scope_cause()))?;
+        crate::authoring::static_scene::submit(
+            self,
+            input,
+            self.entry.descriptor().id(),
+            content_digest,
+        )
+    }
+
     /// Submits one complete canonical Scene batch to this session's sole retained-store owner.
     pub fn submit_scene<'input>(
         &self,
@@ -635,9 +661,12 @@ impl<'session> ParseScope<'session> {
             .seal(self.host)
             .map_err(|cause| self.abort(cause.into_scope_cause()))?;
         let construction = SceneConstruction::try_new(input, scene_validation_limits(self.limits))
-            .map_err(|_| {
-                self.abort(ScopeAbortCause::DescriptorContract {
-                    code: "canonical-scene-request-rejected",
+            .map_err(|cause| {
+                self.abort(match cause.scene_validation_error() {
+                    Some(detail) => ScopeAbortCause::SceneValidation(detail),
+                    None => ScopeAbortCause::DescriptorContract {
+                        code: "canonical-scene-request-rejected",
+                    },
                 })
             })?;
         self.store_owner
@@ -649,6 +678,9 @@ impl<'session> ParseScope<'session> {
                     }
                     crate::store::ImportStoreActivationError::Control(cause) => {
                         return self.abort(ScopeAbortCause::Control(cause));
+                    }
+                    crate::store::ImportStoreActivationError::SceneValidation(detail) => {
+                        return self.abort(ScopeAbortCause::SceneValidation(detail));
                     }
                     crate::store::ImportStoreActivationError::AuthoringRejected => {
                         "canonical-scene-authoring-rejected"
@@ -1992,7 +2024,7 @@ impl<'session> ParseScope<'session> {
                 Ok(DependencyOutcome::available(snapshot))
             }
             (DependencyRequirement::Required, Err(failure)) => {
-                Err(self.abort_dependency_failure(failure))
+                Err(self.abort_required_dependency_failure(origin, role, raw_reference, failure))
             }
             (DependencyRequirement::Optional, Err(failure)) => {
                 self.resolve_optional_failure(role, failure)
@@ -2156,7 +2188,12 @@ impl<'session> ParseScope<'session> {
     }
 
     pub(crate) fn take_terminal_abort(&self) -> Option<ScopeAbort> {
-        self.terminal.borrow_mut().take().map(ScopeAbort::new)
+        self.terminal.borrow_mut().take().map(|cause| {
+            match self.dependency_failure_context.borrow_mut().take() {
+                Some(context) => ScopeAbort::with_dependency_context(cause, context),
+                None => ScopeAbort::new(cause),
+            }
+        })
     }
 
     fn dependency_failure(
@@ -3151,6 +3188,71 @@ impl<'session> ParseScope<'session> {
 
     fn abort_dependency_failure(&self, failure: DependencyResolutionFailure) -> ParseFailure {
         self.abort_dependency_context(self.take_dependency_failure(failure))
+    }
+
+    fn abort_required_dependency_failure(
+        &self,
+        origin: &DependencyOrigin<'_>,
+        role: &DependencyRoleId,
+        raw_reference: &str,
+        failure: DependencyResolutionFailure,
+    ) -> ParseFailure {
+        let failure = self.take_dependency_failure(failure);
+        let captured = (|| {
+            let graph = self.resource_graph.try_borrow().map_err(|_| {
+                ScopeAbortCause::DescriptorContract {
+                    code: "parse-capability-reentered",
+                }
+            })?;
+            // A ledger/control terminal may prohibit further admission. Preserve that original
+            // failure without attempting an allocation or weakening requiredness.
+            if !matches!(
+                failure.cause(&graph)?,
+                ScopeAbortCause::Path(_)
+                    | ScopeAbortCause::AssetOpen(_)
+                    | ScopeAbortCause::AssetRead(_)
+                    | ScopeAbortCause::DependencyPolicy(_)
+            ) {
+                return Ok(None);
+            }
+            if self.format_failure_storage.borrow().is_some() {
+                return Err(ScopeAbortCause::DescriptorContract {
+                    code: "failure-evidence-storage-already-active",
+                });
+            }
+            let (origin_authority, origin_path) = match origin.node() {
+                DependencyOriginNode::Primary => (self.primary_authority, self.primary_source),
+                DependencyOriginNode::Dependency(index) => {
+                    let identity = graph.origin_identity(index).ok_or(
+                        ScopeAbortCause::DescriptorContract {
+                            code: "dependency-origin-stale",
+                        },
+                    )?;
+                    (identity.authority(), identity.path())
+                }
+            };
+            DependencyFailureContext::try_capture(
+                self.host,
+                origin_authority,
+                origin_path,
+                role,
+                raw_reference,
+                failure.evidence.manifest_reference(),
+                failure.identity.as_ref(),
+            )
+            .map(Some)
+        })();
+        match captured {
+            Ok(Some((context, reservation))) => {
+                // Reuse the session's single terminal-failure evidence slot. Its existing owner
+                // keeps the charge live through parsing and releases it during terminal transfer.
+                *self.format_failure_storage.borrow_mut() = Some(reservation);
+                *self.dependency_failure_context.borrow_mut() = Some(context);
+            }
+            Ok(None) => {}
+            Err(cause) => return self.abort(cause),
+        }
+        self.abort_dependency_context(failure)
     }
 
     fn abort_dependency_context(&self, failure: DependencyResolutionContext) -> ParseFailure {
@@ -4198,7 +4300,7 @@ pub(crate) fn read_opened_asset(
     };
     let mut attempted_precharged = 0_u64;
     if let Some(length) = exact_length {
-        charge_asset_attempted(host, dimension, length)?;
+        admit_asset_bytes(host, dimension, length, per_resource_limit, aggregate_limit)?;
         attempted_precharged = length;
         if length > effective_limit {
             return Err(ScopeAbortCause::ResourceLimit {
@@ -4212,7 +4314,7 @@ pub(crate) fn read_opened_asset(
     let aggregate_capacity_limit = if exact_length.is_some() {
         u64::MAX
     } else {
-        remaining_attempted_asset_bytes(host, ImportDimension::TotalAssetBytes, aggregate_limit)?
+        remaining_asset_bytes(host, ImportDimension::TotalAssetBytes, aggregate_limit)?
     };
     let capacity_hint = observed_length
         .map(AssetLength::bytes)
@@ -4233,45 +4335,37 @@ pub(crate) fn read_opened_asset(
     loop {
         host.poll()
             .map_err(|cause| cause.into_scope_abort_cause())?;
-        let requested = if exact_length.is_some() {
-            chunk.len()
-        } else {
+        // Attempted bytes admit payload capacity once. A short read keeps the unused
+        // allowance for the next call; it does not refund or readmit that capacity.
+        let mut allowance = attempted_precharged.saturating_sub(opened.bytes_read());
+        if allowance == 0 && exact_length.is_none() {
             let resource_remaining = effective_limit.saturating_sub(attempted_precharged);
-            if resource_remaining == 0 {
-                return Err(ScopeAbortCause::ResourceLimit {
-                    resource: "asset-bytes",
-                    limit: effective_limit,
-                });
-            }
-            let aggregate_remaining = remaining_attempted_asset_bytes(
-                host,
-                ImportDimension::TotalAssetBytes,
-                aggregate_limit,
-            )?;
-            if aggregate_remaining == 0 {
-                return Err(attempted_asset_limit_cause(
-                    host,
-                    ImportDimension::TotalAssetBytes,
-                    aggregate_limit,
-                ));
-            }
-            let allowance = resource_remaining
+            let aggregate_remaining =
+                remaining_asset_bytes(host, ImportDimension::TotalAssetBytes, aggregate_limit)?;
+            allowance = resource_remaining
                 .min(aggregate_remaining)
                 .min(chunk.len() as u64);
-            let requested =
-                if allowance > 1 && allowance == resource_remaining.min(aggregate_remaining) {
-                    allowance - 1
-                } else {
-                    allowance
-                };
-            charge_asset_attempted(host, dimension, requested)?;
-            attempted_precharged = attempted_precharged.saturating_add(requested);
-            requested as usize
+            if allowance != 0 {
+                admit_asset_bytes(
+                    host,
+                    dimension,
+                    allowance,
+                    per_resource_limit,
+                    aggregate_limit,
+                )?;
+                attempted_precharged += allowance;
+            }
+        }
+        // A nonempty one-byte request distinguishes EOF from excess input when no
+        // payload credit remains. This is validation/read work, never stored payload.
+        let eof_probe = allowance == 0;
+        let requested = if eof_probe {
+            1
+        } else {
+            allowance.min(chunk.len() as u64) as usize
         };
         let before = opened.bytes_read();
-        let read = catch_unwind(AssertUnwindSafe(|| {
-            opened.read_chunk(&mut chunk[..requested])
-        }));
+        let read = read_asset_chunk(host, &mut opened, &mut chunk[..requested]);
         let after = opened.bytes_read();
         let observed = after.checked_sub(before).ok_or({
             ScopeAbortCause::TrustedExtension {
@@ -4279,36 +4373,21 @@ pub(crate) fn read_opened_asset(
                 code: "asset-read-counter-regressed",
             }
         })?;
-        if exact_length.is_none() && observed != 0 {
+        if after > attempted_precharged {
+            // Retain truthful observed excess in attempted evidence when the existing
+            // counters permit it. Failed admission never fabricates consumed bytes.
+            admit_asset_bytes(
+                host,
+                dimension,
+                observed,
+                per_resource_limit,
+                aggregate_limit,
+            )?;
+        }
+        if observed != 0 {
             charge_asset_consumed(host, dimension, observed)?;
         }
-        if exact_length.is_some() && after > attempted_precharged {
-            charge_asset_attempted(host, dimension, after - attempted_precharged)?;
-            attempted_precharged = after;
-        }
-        if exact_length.is_some() && observed != 0 {
-            charge_asset_consumed(host, dimension, observed)?;
-        }
-        if after > effective_limit {
-            return Err(ScopeAbortCause::ResourceLimit {
-                resource: "asset-bytes",
-                limit: effective_limit,
-            });
-        }
-        let count = match read {
-            Err(payload) => {
-                discard_untrusted_panic_payload(payload);
-                return Err(ScopeAbortCause::TrustedExtension {
-                    boundary: TrustedExtensionBoundary::AssetIo,
-                    code: "asset-read-panicked",
-                });
-            }
-            Ok(Err(cause)) => return Err(ScopeAbortCause::AssetRead(cause)),
-            Ok(Ok(count)) => count,
-        };
-        if count == 0 {
-            break;
-        }
+        let count = read?.map_err(ScopeAbortCause::AssetRead)?;
         let count_u64 = count as u64;
         if count_u64 != observed {
             return Err(ScopeAbortCause::TrustedExtension {
@@ -4316,24 +4395,25 @@ pub(crate) fn read_opened_asset(
                 code: "asset-read-counter-mismatch",
             });
         }
-        if exact_length.is_none() && attempted_precharged == effective_limit {
+        if count == 0 {
+            break;
+        }
+        if after > effective_limit {
             return Err(ScopeAbortCause::ResourceLimit {
                 resource: "asset-bytes",
                 limit: effective_limit,
             });
         }
-        if exact_length.is_none()
-            && remaining_attempted_asset_bytes(
-                host,
-                ImportDimension::TotalAssetBytes,
-                aggregate_limit,
-            )? == 0
-        {
-            return Err(attempted_asset_limit_cause(
-                host,
-                ImportDimension::TotalAssetBytes,
-                aggregate_limit,
-            ));
+        if eof_probe {
+            return Err(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                class: CounterClass::Attempted,
+                dimension: ImportDimension::TotalAssetBytes,
+                value: host
+                    .dimension_state(ImportDimension::TotalAssetBytes)
+                    .map_err(|cause| cause.into_scope_abort_cause())?
+                    .attempted(),
+                limit: aggregate_limit,
+            }));
         }
         let next_len = (bytes.len() as u64).saturating_add(count_u64);
         if next_len > effective_limit {
@@ -4369,42 +4449,92 @@ pub(crate) fn read_opened_asset(
     Ok(bytes)
 }
 
-fn charge_asset_attempted(
+fn read_asset_chunk(
+    host: ImportStoreHost<'_>,
+    opened: &mut OpenedAsset,
+    buffer: &mut [u8],
+) -> Result<Result<usize, baozi_io::AssetReadError>, ScopeAbortCause> {
+    host.with_observed_work([(ImportDimension::WorkUnits, 1)], |work| {
+        match catch_unwind(AssertUnwindSafe(|| opened.read_chunk(buffer))) {
+            Ok(read) => {
+                // EOF and returned read errors complete a call; a panic does not.
+                work.complete([1])
+                    .map_err(|cause| cause.into_scope_abort_cause())?;
+                Ok(read)
+            }
+            Err(payload) => {
+                discard_untrusted_panic_payload(payload);
+                Err(ScopeAbortCause::TrustedExtension {
+                    boundary: TrustedExtensionBoundary::AssetIo,
+                    code: "asset-read-panicked",
+                })
+            }
+        }
+    })
+    .map_err(|cause| match cause {
+        ImportObservedWorkFailure::Store(cause) => cause.into_scope_abort_cause(),
+        ImportObservedWorkFailure::Action(cause) => cause,
+    })
+}
+
+fn admit_asset_bytes(
     host: ImportStoreHost<'_>,
     dimension: ImportDimension,
     amount: u64,
+    per_resource_limit: u64,
+    aggregate_limit: u64,
 ) -> Result<(), ScopeAbortCause> {
-    host.charge_attempted(dimension, amount)
-        .and_then(|()| host.charge_attempted(ImportDimension::TotalAssetBytes, amount))
-        .map_err(|cause| cause.into_scope_abort_cause())
+    // Snapshot acquisition is serial. Unspent admission remains in the operation
+    // ledger and can cover the next resource, including a different byte class.
+    // Each dimension needs its own allowance; aggregate credit is not charged twice.
+    for (dimension, limit) in [
+        (
+            dimension,
+            if dimension == ImportDimension::PrimaryBytes {
+                per_resource_limit
+            } else {
+                aggregate_limit
+            },
+        ),
+        (ImportDimension::TotalAssetBytes, aggregate_limit),
+    ] {
+        let state = host
+            .dimension_state(dimension)
+            .map_err(|cause| cause.into_scope_abort_cause())?;
+        if state.attempted() > limit {
+            return Err(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                class: CounterClass::Attempted,
+                dimension,
+                value: state.attempted(),
+                limit,
+            }));
+        }
+        let unused = state.attempted().saturating_sub(state.consumed());
+        if amount > unused {
+            host.charge_attempted(dimension, amount - unused)
+                .map_err(|cause| cause.into_scope_abort_cause())?;
+        }
+    }
+    Ok(())
 }
 
-fn remaining_attempted_asset_bytes(
+fn remaining_asset_bytes(
     host: ImportStoreHost<'_>,
     dimension: ImportDimension,
     limit: u64,
 ) -> Result<u64, ScopeAbortCause> {
-    let attempted = host
+    let state = host
         .dimension_state(dimension)
-        .map_err(|cause| cause.into_scope_abort_cause())?
-        .attempted();
-    Ok(limit.saturating_sub(attempted))
-}
-
-fn attempted_asset_limit_cause(
-    host: ImportStoreHost<'_>,
-    dimension: ImportDimension,
-    limit: u64,
-) -> ScopeAbortCause {
-    let attempted = host
-        .dimension_state(dimension)
-        .map_or(limit, |evidence| evidence.attempted());
-    ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
-        class: CounterClass::Attempted,
-        dimension,
-        value: attempted.saturating_add(1),
-        limit,
-    })
+        .map_err(|cause| cause.into_scope_abort_cause())?;
+    if state.attempted() > limit {
+        return Err(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+            class: CounterClass::Attempted,
+            dimension,
+            value: state.attempted(),
+            limit,
+        }));
+    }
+    Ok(limit.saturating_sub(state.consumed()))
 }
 
 fn charge_asset_consumed(
@@ -4547,6 +4677,7 @@ mod tests {
         PhysicalStorageAccountLimits,
     };
     use std::io::Cursor;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TestStore {
         owner: ImportStoreSessionOwner,
@@ -4560,6 +4691,13 @@ mod tests {
     }
 
     fn test_store(limits: &ResourceLimits) -> TestStore {
+        test_store_with_control(limits, ImportOperationControl::default())
+    }
+
+    fn test_store_with_control(
+        limits: &ResourceLimits,
+        control: ImportOperationControl,
+    ) -> TestStore {
         let requirements = ImportStoreBootstrapRequirements::for_node_scene(limits)
             .expect("test retained-store requirements are valid");
         let bootstrap = try_import_store_bootstrap(limits, requirements)
@@ -4575,12 +4713,8 @@ mod tests {
                     .expect("test account limits are valid"),
             )
             .expect("test physical account must allocate");
-        let owner = ImportStoreSessionOwner::try_start(
-            ImportOperationControl::default(),
-            &account,
-            bootstrap,
-        )
-        .expect("test import store owner must start");
+        let owner = ImportStoreSessionOwner::try_start(control, &account, bootstrap)
+            .expect("test import store owner must start");
         TestStore {
             owner,
             _account: account,
@@ -4707,6 +4841,295 @@ mod tests {
 
         drop(snapshot);
         assert_eq!(current_live_bytes(host), 0);
+    }
+
+    #[test]
+    fn serial_asset_reads_reuse_aggregate_credit_across_resource_classes() {
+        for length in [None, Some(AssetLength::Hint(1024))] {
+            let limits = ResourceLimits {
+                max_total_asset_bytes: 2,
+                ..ResourceLimits::default()
+            };
+            let store = test_store(&limits);
+            let host = store.host();
+            for (dimension, ledger_phase, progress_phase) in [
+                (
+                    ImportDimension::PrimaryBytes,
+                    ImportLedgerPhase::PrimarySnapshot,
+                    ImportProgressPhase::AcquirePrimary,
+                ),
+                (
+                    ImportDimension::DependencyBytes,
+                    ImportLedgerPhase::DependencyAcquisition,
+                    ImportProgressPhase::AcquireDependency,
+                ),
+            ] {
+                let opened = OpenedAsset::new(
+                    AuthorityDomain::new(),
+                    AssetPath::new("one-byte.bin").unwrap(),
+                    Cursor::new(b"a"),
+                    length,
+                );
+                let snapshot =
+                    read_opened_asset(host, opened, ledger_phase, progress_phase, dimension, 4, 2)
+                        .expect("unspent total-byte credit must carry into the next resource");
+                assert_eq!(&*snapshot, b"a");
+            }
+            let total = host
+                .dimension_state(ImportDimension::TotalAssetBytes)
+                .unwrap();
+            assert_eq!(total.attempted(), 2);
+            assert_eq!(total.consumed(), 2);
+            let primary = host.dimension_state(ImportDimension::PrimaryBytes).unwrap();
+            assert_eq!(primary.attempted(), 2);
+            assert_eq!(primary.consumed(), 1);
+            let dependency = host
+                .dimension_state(ImportDimension::DependencyBytes)
+                .unwrap();
+            assert_eq!(dependency.attempted(), 1);
+            assert_eq!(dependency.consumed(), 1);
+            let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+            assert_eq!(work.attempted(), 4);
+            assert_eq!(work.consumed(), 4);
+            assert_eq!(current_live_bytes(host), 0);
+        }
+    }
+
+    #[test]
+    fn empty_opened_assets_validate_eof_at_zero_byte_limits() {
+        for length in [
+            None,
+            Some(AssetLength::Hint(1024)),
+            Some(AssetLength::Exact(0)),
+        ] {
+            let limits = ResourceLimits {
+                max_primary_asset_bytes: 0,
+                max_total_asset_bytes: 0,
+                ..ResourceLimits::default()
+            };
+            let store = test_store(&limits);
+            let host = store.host();
+            let opened = OpenedAsset::new(
+                AuthorityDomain::new(),
+                AssetPath::new("empty.bin").unwrap(),
+                Cursor::new(b""),
+                length,
+            )
+            .with_backend_hard_limit(0);
+
+            let snapshot = read_opened_asset(
+                host,
+                opened,
+                ImportLedgerPhase::PrimarySnapshot,
+                ImportProgressPhase::AcquirePrimary,
+                ImportDimension::PrimaryBytes,
+                0,
+                0,
+            )
+            .expect("a nonempty EOF probe must accept empty input at zero credit");
+
+            assert!(snapshot.is_empty());
+            assert_eq!(snapshot.capacity_bytes(), 0);
+            for dimension in [
+                ImportDimension::PrimaryBytes,
+                ImportDimension::TotalAssetBytes,
+            ] {
+                let state = host.dimension_state(dimension).unwrap();
+                assert_eq!(state.attempted(), 0);
+                assert_eq!(state.consumed(), 0);
+                assert_eq!(state.live_bytes(), 0);
+            }
+            let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+            assert_eq!(work.attempted(), 1);
+            assert_eq!(work.consumed(), 1);
+        }
+    }
+
+    #[test]
+    fn opened_assets_preserve_exact_length_truncation_and_overrun_evidence() {
+        for payload in [b"abc".as_slice(), b"abcde".as_slice()] {
+            let limits = ResourceLimits::default();
+            let store = test_store(&limits);
+            let host = store.host();
+            let opened = OpenedAsset::new(
+                AuthorityDomain::new(),
+                AssetPath::new("exact.bin").unwrap(),
+                Cursor::new(payload.to_vec()),
+                Some(AssetLength::Exact(4)),
+            );
+
+            let cause = read_opened_asset(
+                host,
+                opened,
+                ImportLedgerPhase::PrimarySnapshot,
+                ImportProgressPhase::AcquirePrimary,
+                ImportDimension::PrimaryBytes,
+                8,
+                8,
+            )
+            .expect_err("declared truncation or overrun must remain a backend contract error");
+
+            let ScopeAbortCause::AssetRead(error) = cause else {
+                panic!("expected an exact-length contract error")
+            };
+            assert!(
+                matches!(error.kind(),
+                    AssetReadErrorKind::ContractViolation(baozi_io::AssetReadContractViolation::ExactLengthTruncated { expected: 4, observed: 3 })
+                        if payload.len() == 3
+                ) || matches!(error.kind(),
+                    AssetReadErrorKind::ContractViolation(baozi_io::AssetReadContractViolation::ExactLengthExceeded { expected: 4, observed: 5 })
+                        if payload.len() == 5
+                )
+            );
+            for dimension in [
+                ImportDimension::PrimaryBytes,
+                ImportDimension::TotalAssetBytes,
+            ] {
+                let state = host.dimension_state(dimension).unwrap();
+                assert_eq!(state.attempted(), if payload.len() == 3 { 4 } else { 5 });
+                assert_eq!(state.consumed(), payload.len() as u64);
+            }
+            let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+            assert_eq!(work.attempted(), 2);
+            assert_eq!(work.consumed(), 2);
+            assert_eq!(current_live_bytes(host), 0);
+        }
+    }
+
+    struct InterruptedAssetReader {
+        calls: Arc<AtomicU64>,
+        panics: bool,
+    }
+
+    impl baozi_io::AssetReader for InterruptedAssetReader {
+        fn read_chunk(&mut self, buffer: &mut [u8]) -> Result<usize, baozi_io::AssetReadError> {
+            let calls = self.calls.fetch_add(1, Ordering::AcqRel);
+            if calls == 0 {
+                buffer[0] = b'a';
+                return Ok(1);
+            }
+            assert!(!self.panics, "injected read panic");
+            Err(baozi_io::AssetReadError::new(
+                AssetReadErrorKind::InvalidData,
+            ))
+        }
+    }
+
+    #[test]
+    fn interrupted_asset_reads_preserve_only_completed_byte_and_call_prefixes() {
+        for panics in [false, true] {
+            let store = test_store(&ResourceLimits::default());
+            let host = store.host();
+            let calls = Arc::new(AtomicU64::new(0));
+            let opened = OpenedAsset::new(
+                AuthorityDomain::new(),
+                AssetPath::new("interrupted.bin").unwrap(),
+                InterruptedAssetReader {
+                    calls: Arc::clone(&calls),
+                    panics,
+                },
+                None,
+            );
+
+            let cause = read_opened_asset(
+                host,
+                opened,
+                ImportLedgerPhase::PrimarySnapshot,
+                ImportProgressPhase::AcquirePrimary,
+                ImportDimension::PrimaryBytes,
+                4,
+                4,
+            )
+            .expect_err("the failing read must preserve the prior completed prefix");
+
+            assert!(
+                matches!(cause, ScopeAbortCause::AssetRead(_)) && !panics
+                    || matches!(
+                        cause,
+                        ScopeAbortCause::TrustedExtension {
+                            boundary: TrustedExtensionBoundary::AssetIo,
+                            code: "asset-read-panicked"
+                        }
+                    ) && panics
+            );
+            assert_eq!(calls.load(Ordering::Acquire), 2);
+            let primary = host.dimension_state(ImportDimension::PrimaryBytes).unwrap();
+            assert_eq!(primary.attempted(), 4);
+            assert_eq!(primary.consumed(), 1);
+            let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+            assert_eq!(work.attempted(), 2);
+            assert_eq!(work.consumed(), if panics { 1 } else { 2 });
+            assert_eq!(current_live_bytes(host), 0);
+        }
+    }
+
+    #[test]
+    fn asset_reads_poll_cancellation_and_admit_work_before_the_next_backend_call() {
+        for cancel in [false, true] {
+            let limits = ResourceLimits {
+                max_work_units: 1,
+                ..ResourceLimits::default()
+            };
+            let control = if cancel {
+                ImportOperationControl::default().with_progress_observer(
+                    |event: baozi_operation::ProgressEvent<
+                        ImportProgressPhase,
+                        ImportProgressUnit,
+                    >| {
+                        if event.phase() == ImportProgressPhase::AcquirePrimary {
+                            baozi_operation::ProgressDecision::Cancel
+                        } else {
+                            baozi_operation::ProgressDecision::Continue
+                        }
+                    },
+                )
+            } else {
+                ImportOperationControl::default()
+            };
+            let store = test_store_with_control(&limits, control);
+            let host = store.host();
+            let calls = Arc::new(AtomicU64::new(0));
+            let opened = OpenedAsset::new(
+                AuthorityDomain::new(),
+                AssetPath::new("controlled.bin").unwrap(),
+                InterruptedAssetReader {
+                    calls: Arc::clone(&calls),
+                    panics: true,
+                },
+                None,
+            );
+
+            let cause = read_opened_asset(
+                host,
+                opened,
+                ImportLedgerPhase::PrimarySnapshot,
+                ImportProgressPhase::AcquirePrimary,
+                ImportDimension::PrimaryBytes,
+                4,
+                4,
+            )
+            .expect_err("control or work admission must prevent a second backend call");
+
+            assert!(
+                matches!(cause, ScopeAbortCause::Control(_)) && cancel
+                    || matches!(
+                        cause,
+                        ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                            dimension: ImportDimension::WorkUnits,
+                            limit: 1,
+                            ..
+                        })
+                    ) && !cancel
+            );
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            let primary = host.dimension_state(ImportDimension::PrimaryBytes).unwrap();
+            assert_eq!(primary.attempted(), 4);
+            assert_eq!(primary.consumed(), 1);
+            let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+            assert_eq!(work.attempted(), if cancel { 1 } else { 2 });
+            assert_eq!(work.consumed(), 1);
+            assert_eq!(current_live_bytes(host), 0);
+        }
     }
 
     struct OwnedIterationDropProbe<'a> {

@@ -837,6 +837,11 @@ fn encode_gltf_source(
                     encode_u32_slice(encoder, indices);
                 });
             }
+            GeometryAttributePayloadAuthoring::DenseF64 { lanes, values } => {
+                encoder.u8(6);
+                encoder.u8(lanes);
+                encode_f64_slice(encoder, values);
+            }
             GeometryAttributePayloadAuthoring::DenseU32 { lanes, values } => {
                 encoder.u8(1);
                 encoder.u8(lanes);
@@ -2920,6 +2925,12 @@ fn observe_facade_typed_view(
             match attribute.into_payload() {
                 NodeSceneGeometryAttributePayload::DenseF32 { values } => {
                     let _ = drain_geometry_f32(values, &mut transcript, "attribute-value-f32")?;
+                }
+                NodeSceneGeometryAttributePayload::DenseF64 { mut values } => {
+                    while let Some(value) = values.next()? {
+                        transcript.debug("attribute-value-f64", &value.to_bits());
+                    }
+                    values.finish()?;
                 }
                 NodeSceneGeometryAttributePayload::DenseU32 { values } => {
                     let _ = drain_geometry_u32(values, &mut transcript, "attribute-value-u32")?;

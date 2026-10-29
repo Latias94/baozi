@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["vendor/gltf", "vendor/gltf-json"]
+exclude = ["tools/consumers/scene", "vendor/gltf", "vendor/gltf-json"]
 
 [workspace.package]
 version = "0.1.0"

@@ -2,7 +2,8 @@ mod common;
 
 use baozi_import::{
     ImportCause, ImportDiagnostic, ImportDimension, ImportReport, ImportResult,
-    SceneSnapshotLimits, ScopeAbortCause, SourceScopeDisposition, SourceScopeEntityKind,
+    ManifestResourceIdentityStability, SceneSnapshotLimits, ScopeAbortCause,
+    SourceScopeDisposition, SourceScopeEntityKind,
 };
 use baozi_operation::{CancellationOrigin, ControlCause};
 use base64::Engine as _;
@@ -71,6 +72,36 @@ fn buffer_view_image_fixture() -> (Vec<u8>, Vec<u8>) {
         )
         .into_bytes();
     (source, buffer)
+}
+
+fn split_buffer_provenance_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let buffer = triangle_bin();
+    let attributes = buffer[..96].to_vec();
+    let indices = buffer[96..102].to_vec();
+    let source = String::from_utf8(triangle_gltf())
+        .expect("fixture is valid utf-8")
+        .replace(
+            r#"  "buffers": [{ "uri": "triangle.bin", "byteLength": 104 }],"#,
+            r#"  "buffers": [{ "uri": "indices.bin", "byteLength": 6 }, { "uri": "attributes.bin", "byteLength": 96 }],"#,
+        )
+        .replace(
+            r#"{ "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 }"#,
+            r#"{ "buffer": 1, "byteOffset": 0, "byteLength": 36, "target": 34962 }"#,
+        )
+        .replace(
+            r#"{ "buffer": 0, "byteOffset": 36, "byteLength": 36, "target": 34962 }"#,
+            r#"{ "buffer": 1, "byteOffset": 36, "byteLength": 36, "target": 34962 }"#,
+        )
+        .replace(
+            r#"{ "buffer": 0, "byteOffset": 72, "byteLength": 24, "target": 34962 }"#,
+            r#"{ "buffer": 1, "byteOffset": 72, "byteLength": 24, "target": 34962 }"#,
+        )
+        .replace(
+            r#"{ "buffer": 0, "byteOffset": 96, "byteLength": 6, "target": 34963 }"#,
+            r#"{ "buffer": 0, "byteOffset": 0, "byteLength": 6, "target": 34963 }"#,
+        )
+        .into_bytes();
+    (source, indices, attributes)
 }
 
 fn selected_resource_closure_fixture() -> Vec<u8> {
@@ -200,28 +231,145 @@ fn selected_scene_does_not_acquire_omitted_resource_closure() -> TestResult<()> 
             .collect::<Vec<_>>();
         assert_eq!(identities, expected, "source order changed for {kind:?}");
     }
+
+    let manifest = report.successful_input_manifest();
+    assert_eq!(manifest.counts().node_class_count(), 3);
+    assert_eq!(manifest.counts().quotient_relation_record_count(), 2);
+    assert_eq!(manifest.counts().relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().available_relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().maximum_depth(), 1);
+    let mut identities = manifest
+        .node_classes()
+        .iter()
+        .map(|class| class.identity().value().as_str())
+        .collect::<Vec<_>>();
+    identities.sort_unstable();
+    assert_eq!(
+        identities,
+        [
+            "models/scene.gltf",
+            "models/textures/base.png",
+            "models/triangle.bin",
+        ]
+    );
+    assert!(
+        manifest
+            .node_classes()
+            .iter()
+            .all(|class| { !class.identity().value().as_str().contains("omitted") })
+    );
+    let mut roles = manifest
+        .node_classes()
+        .iter()
+        .flat_map(|class| class.outgoing_relations())
+        .map(|relation| relation.role().as_str())
+        .collect::<Vec<_>>();
+    roles.sort_unstable();
+    assert_eq!(roles, ["external-buffer", "external-image"]);
+    for identity in ["models/triangle.bin", "models/textures/base.png"] {
+        let dependency = manifest
+            .node_classes()
+            .iter()
+            .find(|class| class.identity().value().as_str() == identity)
+            .expect("selected dependency must enter the manifest");
+        assert!(matches!(
+            dependency.identity().stability(),
+            ManifestResourceIdentityStability::Stable { .. }
+        ));
+    }
+
+    let snapshot = report
+        .scene()
+        .capture_snapshot(SceneSnapshotLimits::try_new(32 * 1024, 256, 1_000_000)?)?;
+    assert_eq!(snapshot.profile_resource_count(), 3);
+    assert_eq!(snapshot.profile_source_count(), 3);
+    assert_eq!(snapshot.profile_provenance_node_count(), 3);
+    assert!(snapshot.profile_attachment_count() > snapshot.profile_owner_count());
+    Ok(())
+}
+
+#[test]
+fn acquired_external_buffer_tail_changes_manifest_without_changing_scene() -> TestResult<()> {
+    let baseline_buffer = triangle_bin();
+    let mut extended_buffer = baseline_buffer.clone();
+    extended_buffer.extend_from_slice(b"manifest-only-tail");
+
+    let (baseline, baseline_diagnostics) = import_assets(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", triangle_gltf()),
+            ("models/triangle.bin", baseline_buffer),
+            ("models/textures/base.png", triangle_png()),
+        ],
+        sidecar_options(),
+    )?;
+    let (extended, extended_diagnostics) = import_assets(
+        "models/scene.gltf",
+        [
+            ("models/scene.gltf", triangle_gltf()),
+            ("models/triangle.bin", extended_buffer.clone()),
+            ("models/textures/base.png", triangle_png()),
+        ],
+        sidecar_options(),
+    )?;
+
+    assert!(baseline_diagnostics.is_empty());
+    assert!(extended_diagnostics.is_empty());
+    let limits = SceneSnapshotLimits::try_new(32 * 1024, 256, 1_000_000)?;
+    let baseline_scene = baseline.scene().capture_snapshot(limits)?;
+    let extended_scene = extended.scene().capture_snapshot(limits)?;
+    assert_eq!(baseline_scene.digest(), extended_scene.digest());
+    assert_ne!(
+        baseline.successful_input_manifest().digest(),
+        extended.successful_input_manifest().digest()
+    );
+    let extended_node = extended
+        .successful_input_manifest()
+        .node_classes()
+        .iter()
+        .find(|class| class.identity().value().as_str() == "models/triangle.bin")
+        .expect("external buffer must enter the manifest");
+    assert_eq!(extended_node.byte_length(), extended_buffer.len() as u64);
+    Ok(())
+}
+
+#[test]
+fn multiple_buffer_provenance_is_canonicalized_by_source_id() -> TestResult<()> {
+    let (document, indices, attributes) = split_buffer_provenance_fixture();
+    let (report, diagnostics) = import_assets(
+        "models/split-buffer.gltf",
+        [
+            ("models/split-buffer.gltf", document),
+            ("models/indices.bin", indices),
+            ("models/attributes.bin", attributes),
+            ("models/textures/base.png", triangle_png()),
+        ],
+        sidecar_options(),
+    )?;
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        report
+            .successful_input_manifest()
+            .counts()
+            .node_class_count(),
+        4
+    );
+    let snapshot = report
+        .scene()
+        .capture_snapshot(SceneSnapshotLimits::try_new(32 * 1024, 256, 1_000_000)?)?;
+    assert_eq!(snapshot.profile_resource_count(), 4);
+    assert!(snapshot.profile_attachment_count() > snapshot.profile_owner_count());
     Ok(())
 }
 
 #[test]
 fn resource_closure_work_budget_fails_before_scope_or_dependency_io() -> TestResult<()> {
     let document = selected_resource_closure_fixture();
-    let (calibration, diagnostics) = import_assets_result(
-        "models/scene.gltf",
-        [("models/scene.gltf", document.clone())],
-        sidecar_options(),
-    )?;
-    let calibration_failure = expected_error(calibration)?;
-    assert!(diagnostics.is_empty());
-    let work_attempted = calibration_failure
-        .ledger()
-        .dimension(ImportDimension::WorkUnits)
-        .expect("work units are configured")
-        .attempted();
-    assert!(work_attempted > 1);
-
     let mut options = sidecar_options();
-    options.limits.max_work_units = work_attempted - 1;
+    // The immutable primary hash completes first. No subsequent semantic preflight work can
+    // start after this exact budget, regardless of later URI or source-scope work additions.
+    options.limits.max_work_units = document.len() as u64;
     let (result, diagnostics) = import_assets_result(
         "models/scene.gltf",
         [
@@ -357,5 +505,19 @@ fn selected_buffer_view_image_is_materialized_from_selected_buffer() -> TestResu
     assert_eq!(snapshot.texture_count(), 1);
     assert_eq!(snapshot.material_binding_count(), 1);
     assert_eq!(snapshot.image_payload_bytes(), triangle_png().len() as u64);
+    assert_eq!(snapshot.profile_resource_count(), 2);
+    assert_eq!(snapshot.profile_source_count(), 2);
+    assert_eq!(snapshot.profile_provenance_node_count(), 2);
+    assert!(snapshot.profile_attachment_count() > snapshot.profile_owner_count());
+    let manifest = report.successful_input_manifest();
+    assert_eq!(manifest.counts().node_class_count(), 2);
+    assert_eq!(manifest.counts().relation_occurrence_count(), 1);
+    let relation = manifest
+        .node_classes()
+        .iter()
+        .flat_map(|class| class.outgoing_relations())
+        .next()
+        .expect("buffer-view image must retain its external buffer relation");
+    assert_eq!(relation.role().as_str(), "external-buffer");
     Ok(())
 }

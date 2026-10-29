@@ -5,7 +5,7 @@ use super::super::semantic::{
 use super::{
     CanonicalDigestEncoder, NodeSceneSnapshotError, PRESENCE_ABSENT, PRESENCE_PRESENT, PreviewSink,
     SnapshotWorkMeter, TAG_COLLECTION_TOTAL, TAG_PRESENCE, TAG_REFERENCE,
-    begin_geometry_collection,
+    begin_geometry_collection, write_metered_bytes,
 };
 
 const TAG_ANIMATION: u8 = 120;
@@ -30,6 +30,10 @@ const TAG_IN_TANGENTS: u8 = 138;
 const TAG_OUT_TANGENTS: u8 = 139;
 const TAG_F64_BITS: u8 = 140;
 const TAG_F32_BITS: u8 = 141;
+// Optional, length-delimited UTF-8 field after the fixed clip fields. Absence writes no
+// extension; an authored empty name writes this tag and a zero u64 byte length.
+// Existing unnamed clips and non-animation transcripts therefore keep their encoding.
+const TAG_CLIP_NAME_BYTES: u8 = 223;
 
 #[derive(Clone, Copy)]
 pub(super) struct AnimationCollectionCounts {
@@ -93,11 +97,17 @@ fn write_clips(
         }
         transcript.tagged_usize(TAG_CHANNEL_OFFSET, clip.channel_offset())?;
         transcript.tagged_usize(TAG_COLLECTION_TOTAL, clip.channel_count())?;
+        if let Some(name) = clip.name() {
+            write_metered_bytes(transcript, work, TAG_CLIP_NAME_BYTES, name.as_bytes())?;
+        }
         let render = preview.begin_geometry_item("clip", clip.source_index())?;
         preview.geometry_field_u64(render, "duration_bits", clip.duration().to_bits());
         preview.geometry_field_u32(render, "time_domain", u32::from(domain));
         preview.geometry_field_usize(render, "channel_offset", clip.channel_offset());
         preview.geometry_field_usize(render, "channel_count", clip.channel_count());
+        if let Some(name) = clip.name() {
+            preview.geometry_field_word(render, "name", name);
+        }
         preview.end_geometry_item(render);
     }
     transcript.tagged_usize(TAG_COLLECTION_TOTAL, count)?;

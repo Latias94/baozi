@@ -121,17 +121,19 @@ fn non_finite_binary_float_reaches_canonical_validation() {
     let failure = import_bytes_with_limits("nan.stl", &bytes, ResourceLimits::default())
         .expect_err("non-finite geometry must fail validation");
 
-    let ImportCause::OperationTerminal(terminal) = failure.cause() else {
-        panic!(
-            "expected canonical authoring rejection, got {:?}",
-            failure.cause()
+    assert_eq!(
+        failure.scene_validation_error(),
+        Some(
+            &baozi_import::SceneValidationError::NonFiniteAttributeValue {
+                attribute: 0,
+                scalar: 3,
+            }
         )
+    );
+    let ImportTerminalCause::Failure(terminal) = failure.ledger().terminal_cause() else {
+        panic!("expected canonical authoring rejection")
     };
     assert_eq!(terminal.class(), ImportTerminalFailureClass::Requested);
-    assert_eq!(
-        failure.ledger().terminal_cause(),
-        ImportTerminalCause::Failure(*terminal)
-    );
 }
 
 #[test]

@@ -59,6 +59,10 @@ pub(in crate::canonical_scene::store) enum GeometryAttributePayloadAuthoring<'a>
         source_values: &'a [f32],
         source_indices: Presence<&'a [u32]>,
     },
+    DenseF64 {
+        lanes: u8,
+        values: &'a [f64],
+    },
     DenseU32 {
         lanes: u8,
         values: &'a [u32],
@@ -90,7 +94,7 @@ pub(in crate::canonical_scene::store) enum GeometryAttributePayloadAuthoring<'a>
     },
 }
 
-/// One primitive-owned built-in attribute descriptor.
+/// One primitive-owned built-in or namespaced custom attribute descriptor.
 #[derive(Debug, PartialEq)]
 pub struct GeometryAttributeAuthoring<'a> {
     semantic: AttributeSemantic,
@@ -114,6 +118,24 @@ impl<'a> GeometryAttributeAuthoring<'a> {
                 source_values,
                 source_indices,
             },
+        }
+    }
+
+    /// Authors a dense F64 custom attribute without reducing its precision.
+    ///
+    /// Validation requires finite values, 1..=16 lanes, and the owning domain's
+    /// cardinality. Built-in floating-point semantics, including POSITION and
+    /// NORMAL, require F32 and cannot use this payload.
+    pub const fn f64(
+        semantic: AttributeSemantic,
+        domain: AttributeDomain,
+        lanes: u8,
+        values: &'a [f64],
+    ) -> Self {
+        Self {
+            semantic,
+            domain,
+            payload: GeometryAttributePayloadAuthoring::DenseF64 { lanes, values },
         }
     }
 

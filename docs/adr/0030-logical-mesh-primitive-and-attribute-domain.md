@@ -189,6 +189,23 @@ formats, but those are explicit postprocess/helper outputs with remaps and loss 
 storage does not force fixed `Vertex`, fixed UV/color channel counts, or `f32` conversion of custom
 integer data.
 
+The current core authoring rail accepts dense namespaced custom `F64` attributes through
+`GeometryAttributeAuthoring::f64(semantic, domain, lanes, values)`. Primitive-owned Vertex, Corner,
+and Face streams retain `f64` scalar sequences exactly, including signed zero and finite values
+outside the `f32` range. Both authoring validation and central retained-store validation require
+finite values, `1..=16` lanes, and exact owner-domain cardinality. The F64 authoring constructor
+does not admit Instance attributes, sparse payloads, or a replacement for built-in floating-point
+semantics: POSITION, NORMAL, TANGENT, TEXCOORD, and COLOR continue to require their documented F32
+formats. Converting a source built-in to F32 remains an explicit adapter responsibility.
+
+F64 values count as one semantic cell and one scalar inspection each, with eight canonical payload
+bytes per scalar. Materialization retains typed F64 leaves; validation never lowers them through
+F32. Semantic snapshots identify `scalar=f64` and encode each scalar's full IEEE 754 `to_bits()`
+value as eight little-endian bytes. Preview values use sixteen hexadecimal digits. Geometry and
+snapshot schema revisions remain 3: scalar tag 3 extends the existing discriminated payload union,
+without changing existing tag meanings, table layouts, or the transcripts of scenes without F64
+attributes. A nonzero F64 scalar total is also included in the preview summary.
+
 Primitive bounds are `Derived<Bounds>` in primitive-local space. Logical-mesh bounds are a separate
 `Derived<Bounds>` combining primitives under the declared morph-bounds policy; scene bounds are a
 scene-owned `Derived<Bounds>` combining instances and node transforms. ADR 0032 defines valid versus

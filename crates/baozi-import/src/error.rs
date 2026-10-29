@@ -1,4 +1,4 @@
-use crate::dependency::DependencyPolicyError;
+use crate::dependency::{DependencyFailureContext, DependencyPolicyError};
 use crate::descriptor::FormatDescriptor;
 use crate::diagnostic::{
     DiagnosticCause, DiagnosticCode, MAX_DIAGNOSTIC_CODE_BYTES, valid_detail_key,
@@ -92,6 +92,8 @@ pub enum ScopeAbortCause {
     Ledger(LedgerCause<ImportDimension>),
     Control(ControlCause),
     Diagnostic(DiagnosticCause),
+    /// A bounded producer-local semantic rejection from Scene submission.
+    SceneValidation(baozi_core::SceneValidationError),
     FormatRecoveryRejectedByConformance {
         code: DiagnosticCode,
     },
@@ -134,6 +136,7 @@ impl ScopeAbortCause {
             Self::Path(_) | Self::AssetOpen(_) | Self::AssetRead(_) => CauseOwner::Io,
             Self::DependencyPolicy(_) => CauseOwner::DependencyPolicy,
             Self::Control(_) | Self::CapacityEnvelope { .. } => CauseOwner::Operation,
+            Self::SceneValidation(_) => CauseOwner::Core,
             Self::TrustedExtension { .. } => CauseOwner::TrustedExtension,
             Self::Ledger(_)
             | Self::Diagnostic(_)
@@ -159,6 +162,7 @@ impl fmt::Display for ScopeAbortCause {
             Self::Ledger(error) => error.fmt(formatter),
             Self::Control(error) => error.fmt(formatter),
             Self::Diagnostic(error) => error.fmt(formatter),
+            Self::SceneValidation(error) => error.fmt(formatter),
             Self::FormatRecoveryRejectedByConformance { code } => write!(
                 formatter,
                 "format recovery {} was rejected by the active conformance contract",
@@ -214,6 +218,7 @@ impl Error for ScopeAbortCause {
             Self::Ledger(error) => Some(error),
             Self::Control(error) => Some(error),
             Self::Diagnostic(error) => Some(error),
+            Self::SceneValidation(error) => Some(error),
             Self::FormatFailureDetail(error) => Some(error),
             Self::CapacityEnvelope { cause, .. } => Some(cause),
             Self::OptionTypeMismatch
@@ -231,32 +236,84 @@ impl Error for ScopeAbortCause {
 /// The opaque owner of a terminal capability failure moved out of one parse scope.
 #[derive(Debug)]
 pub struct ScopeAbort {
-    cause: ScopeAbortCause,
+    inner: ScopeAbortKind,
+}
+
+#[derive(Debug)]
+enum ScopeAbortKind {
+    Cause(ScopeAbortCause),
+    Dependency(DependencyFailureContext),
 }
 
 impl ScopeAbort {
     pub(crate) const fn new(cause: ScopeAbortCause) -> Self {
-        Self { cause }
+        Self {
+            inner: ScopeAbortKind::Cause(cause),
+        }
+    }
+
+    pub(crate) fn with_dependency_context(
+        cause: ScopeAbortCause,
+        mut context: DependencyFailureContext,
+    ) -> Self {
+        context.attach_cause(cause);
+        Self {
+            inner: ScopeAbortKind::Dependency(context),
+        }
     }
 
     pub fn owner(&self) -> CauseOwner {
-        self.cause.owner()
+        self.cause().owner()
     }
 
-    pub fn cause(&self) -> &ScopeAbortCause {
-        &self.cause
+    pub const fn cause(&self) -> &ScopeAbortCause {
+        match &self.inner {
+            ScopeAbortKind::Cause(cause) => cause,
+            ScopeAbortKind::Dependency(context) => context.cause(),
+        }
+    }
+
+    /// Identifies the required dependency attempt that produced this failure, when available.
+    pub const fn dependency_context(&self) -> Option<&DependencyFailureContext> {
+        match &self.inner {
+            ScopeAbortKind::Dependency(context) => Some(context),
+            ScopeAbortKind::Cause(_) => None,
+        }
     }
 }
 
 impl fmt::Display for ScopeAbort {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.cause.fmt(formatter)
+        if let Some(context) = self.dependency_context() {
+            write!(
+                formatter,
+                "required dependency role {} requested as {:?} from {}",
+                context.role(),
+                context.requested_reference(),
+                context.origin().path(),
+            )?;
+            if context.requested_reference_is_truncated() {
+                write!(
+                    formatter,
+                    " ({} reference bytes)",
+                    context.requested_reference_bytes()
+                )?;
+            }
+            if let Some(path) = context.normalized_path() {
+                write!(formatter, ", normalized as {path}")?;
+            }
+            if let Some(target) = context.target_identity() {
+                write!(formatter, ", resolved as {}", target.path())?;
+            }
+            formatter.write_str(": ")?;
+        }
+        self.cause().fmt(formatter)
     }
 }
 
 impl Error for ScopeAbort {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.cause)
+        Some(self.cause())
     }
 }
 
@@ -848,6 +905,8 @@ impl Error for FormatFailureEnvelope {
 #[non_exhaustive]
 pub enum ImportCause {
     Scope(ScopeAbort),
+    /// The original producer-local rule rejected by central Scene submission.
+    SceneValidation(baozi_core::SceneValidationError),
     Format(FormatFailureEnvelope),
     TrustedExtension {
         boundary: TrustedExtensionBoundary,
@@ -862,10 +921,31 @@ impl ImportCause {
     pub fn owner(&self) -> CauseOwner {
         match self {
             Self::Scope(abort) => abort.owner(),
+            Self::SceneValidation(_) => CauseOwner::Core,
             Self::Format(envelope) => CauseOwner::Format(envelope.format().clone()),
             Self::TrustedExtension { .. } => CauseOwner::TrustedExtension,
             Self::UnsupportedFormat | Self::Detection(_) => CauseOwner::Import,
             Self::OperationTerminal(_) => CauseOwner::Operation,
+        }
+    }
+
+    /// Returns the bounded semantic submission detail without activation internals or downcasts.
+    pub const fn scene_validation_error(&self) -> Option<&baozi_core::SceneValidationError> {
+        match self {
+            Self::SceneValidation(error) => Some(error),
+            Self::Scope(abort) => match abort.cause() {
+                ScopeAbortCause::SceneValidation(error) => Some(error),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Returns the origin, role, and target of a failed required dependency request.
+    pub const fn dependency_context(&self) -> Option<&DependencyFailureContext> {
+        match self {
+            Self::Scope(abort) => abort.dependency_context(),
+            _ => None,
         }
     }
 }
@@ -874,6 +954,7 @@ impl fmt::Display for ImportCause {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Scope(abort) => abort.fmt(formatter),
+            Self::SceneValidation(error) => error.fmt(formatter),
             Self::Format(envelope) => envelope.fmt(formatter),
             Self::TrustedExtension { boundary, code } => {
                 write!(
@@ -899,6 +980,7 @@ impl Error for ImportCause {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Scope(abort) => Some(abort),
+            Self::SceneValidation(error) => Some(error),
             Self::Format(envelope) => Some(envelope),
             Self::TrustedExtension { .. }
             | Self::UnsupportedFormat
@@ -1074,14 +1156,12 @@ mod tests {
 
     #[test]
     fn failure_transport_stays_below_the_large_error_threshold() {
+        assert!(!std::mem::needs_drop::<baozi_core::SceneValidationError>());
+        assert!(std::mem::size_of::<baozi_core::SceneValidationError>() < 128);
         if std::mem::size_of::<usize>() == 8 {
             assert_eq!(std::mem::size_of::<FormatFailureEvidence>(), 56);
             assert_eq!(std::mem::size_of::<FormatFailureEnvelope>(), 64);
         }
-        assert_eq!(
-            std::mem::size_of::<ScopeAbort>(),
-            std::mem::size_of::<ScopeAbortCause>()
-        );
         assert!(std::mem::size_of::<ScopeAbort>() < 128);
         assert!(std::mem::size_of::<FormatFailureEnvelope>() < 128);
         assert!(std::mem::size_of::<crate::scope::ParseFailure>() < 128);

@@ -49,6 +49,253 @@ fn reject_geometry(
 }
 
 #[test]
+fn f64_custom_attributes_charge_eight_bytes_per_scalar_and_exact_work() {
+    let positions = [0.0_f32; 9];
+    let values = [
+        16_777_217.0_f64,
+        -0.0,
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        -f64::MAX,
+    ];
+    let f32_values = [1.0_f32; 6];
+    let semantic = AttributeSemantic::Custom(CustomAttributeSemantic::new("ply:precise").unwrap());
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f64(semantic.clone(), AttributeDomain::Vertex, 2, &values),
+    ];
+    let f32_attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            &positions,
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f32(
+            semantic,
+            AttributeDomain::Vertex,
+            2,
+            &f32_values,
+            Presence::Absent,
+        ),
+    ];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 2),
+    )];
+    let input = GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]);
+    let mut control = TestControl::default();
+    let validated = validate_geometry_batch_with_control(
+        input,
+        0,
+        0,
+        SceneValidationLimits::default(),
+        &mut control,
+    )
+    .expect("finite F64 values must retain their own scalar type");
+    let mut f32_control = TestControl::default();
+    let f32_validated = validate_geometry_batch_with_control(
+        GeometryAuthoringBatch::new(&meshes, &primitives, &f32_attributes, &[]),
+        0,
+        0,
+        SceneValidationLimits::default(),
+        &mut f32_control,
+    )
+    .expect("equivalent F32 geometry shape");
+
+    assert_eq!(validated.f32_scalar_count(), 9);
+    assert_eq!(validated.f64_scalar_count(), 6);
+    assert_eq!(validated.payload_block_count(), 3);
+    assert_eq!(
+        validated.semantic_cell_count(),
+        f32_validated.semantic_cell_count()
+    );
+    assert_eq!(
+        validated.canonical_bytes(),
+        f32_validated.canonical_bytes() + 6 * 4
+    );
+    assert_eq!(validated.validation_work(), f32_validated.validation_work());
+    assert_eq!(control.work, validated.validation_work());
+    let primitive = validated.primitive(0).unwrap();
+    let attribute = primitive.attribute(1).unwrap();
+    assert_eq!(attribute.scalar_kind(), GeometryAttributeScalarKind::F64);
+    assert_eq!(
+        attribute.payload_kind(),
+        GeometryAttributePayloadKind::Dense
+    );
+    assert_eq!(attribute.element_count(), 3);
+    assert_eq!(attribute.canonical_scalar_count(), 6);
+
+    let mut limited = TestControl::default();
+    assert!(matches!(
+        expect_semantic(validate_geometry_batch_with_control(
+            input, 0, 0,
+            SceneValidationLimits::default().with_max_canonical_bytes(validated.canonical_bytes() - 1),
+            &mut limited,
+        )),
+        GeometryAuthoringSemanticError::LimitExceeded {
+            limit: GeometryAuthoringLimit::CanonicalBytes, actual, maximum,
+        } if actual == validated.canonical_bytes() && maximum + 1 == actual
+    ));
+    assert_eq!(limited.live.get(), 0);
+}
+
+#[test]
+fn f64_custom_attributes_reject_non_finite_values_in_every_primitive_domain() {
+    let positions = [0.0_f32; 9];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 2),
+    )];
+    for domain in [
+        AttributeDomain::Vertex,
+        AttributeDomain::Corner,
+        AttributeDomain::Face,
+    ] {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let values = [1.0, 2.0, invalid];
+            let attributes = [
+                GeometryAttributeAuthoring::f32(
+                    AttributeSemantic::Position,
+                    AttributeDomain::Vertex,
+                    3,
+                    &positions,
+                    Presence::Absent,
+                ),
+                GeometryAttributeAuthoring::f64(
+                    AttributeSemantic::Custom(CustomAttributeSemantic::new("ply:precise").unwrap()),
+                    domain,
+                    1,
+                    &values,
+                ),
+            ];
+            assert!(matches!(
+                reject_geometry(
+                    GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
+                    0
+                ),
+                GeometryAuthoringSemanticError::NonFiniteAttributeValue {
+                    attribute: 1,
+                    scalar: 2
+                }
+            ));
+        }
+    }
+}
+
+#[test]
+fn f64_custom_attributes_enforce_lanes_shape_and_domain_cardinality() {
+    let positions = [0.0_f32; 9];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 2),
+    )];
+    for (lanes, values) in [
+        (0, vec![]),
+        (2, vec![1.0; 3]),
+        (17, vec![1.0; 51]),
+        (1, vec![1.0; 2]),
+    ] {
+        for domain in [
+            AttributeDomain::Vertex,
+            AttributeDomain::Corner,
+            AttributeDomain::Face,
+        ] {
+            let attributes = [
+                GeometryAttributeAuthoring::f32(
+                    AttributeSemantic::Position,
+                    AttributeDomain::Vertex,
+                    3,
+                    &positions,
+                    Presence::Absent,
+                ),
+                GeometryAttributeAuthoring::f64(
+                    AttributeSemantic::Custom(CustomAttributeSemantic::new("ply:precise").unwrap()),
+                    domain,
+                    lanes,
+                    &values,
+                ),
+            ];
+            let error = reject_geometry(
+                GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
+                0,
+            );
+            match lanes {
+                0 => assert!(matches!(
+                    error,
+                    GeometryAuthoringSemanticError::ZeroAttributeLanes { attribute: 1 }
+                )),
+                2 => assert!(matches!(
+                    error,
+                    GeometryAuthoringSemanticError::AttributeScalarShape {
+                        attribute: 1,
+                        lanes: 2
+                    }
+                )),
+                17 => assert!(matches!(
+                    error,
+                    GeometryAuthoringSemanticError::AttributeSchema { attribute: 1 }
+                )),
+                1 => assert!(
+                    matches!(error, GeometryAuthoringSemanticError::AttributeCardinality { attribute: 1, domain: actual_domain, expected: 3, actual: 2 } if actual_domain == domain)
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn f64_payloads_cannot_replace_builtin_f32_semantics() {
+    let values = [0.0_f64; 4];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 1),
+    )];
+    for (semantic, lanes) in [
+        (AttributeSemantic::Position, 3),
+        (AttributeSemantic::Normal, 3),
+        (AttributeSemantic::Tangent, 4),
+        (AttributeSemantic::Texcoord(0), 2),
+        (AttributeSemantic::Color(0), 4),
+    ] {
+        let attributes = [GeometryAttributeAuthoring::f64(
+            semantic,
+            AttributeDomain::Vertex,
+            lanes,
+            &values[..usize::from(lanes)],
+        )];
+        assert!(matches!(
+            reject_geometry(
+                GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
+                0
+            ),
+            GeometryAuthoringSemanticError::AttributeSchema { attribute: 0 }
+        ));
+    }
+}
+
+#[test]
 fn compiled_geometry_facts_do_not_borrow_authored_storage() {
     let mut control = TestControl::default();
     let compiled = {

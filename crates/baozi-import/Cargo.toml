@@ -12,7 +12,7 @@ description.workspace = true
 
 [features]
 default = []
-tracing = ["dep:tracing", "baozi-core/tracing"]
+tracing = ["dep:tracing"]
 
 [dependencies]
 baozi-core = { workspace = true, features = ["_scene-integration"] }

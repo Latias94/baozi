@@ -1382,6 +1382,7 @@ impl AssetIo for SingleAuthorityQueryIo {
 struct RecordingReader {
     bytes: Arc<[u8]>,
     offset: usize,
+    max_chunk: usize,
     requests: Arc<Mutex<Vec<usize>>>,
     observed: Arc<AtomicUsize>,
 }
@@ -1393,7 +1394,7 @@ impl AssetReader for RecordingReader {
             .expect("read request mutex")
             .push(buffer.len());
         let remaining = &self.bytes[self.offset..];
-        let count = remaining.len().min(buffer.len());
+        let count = remaining.len().min(buffer.len()).min(self.max_chunk);
         buffer[..count].copy_from_slice(&remaining[..count]);
         self.offset += count;
         self.observed.fetch_add(count, Ordering::AcqRel);
@@ -1406,8 +1407,25 @@ struct VariableLengthIo {
     source: AssetPath,
     bytes: Arc<[u8]>,
     length: Option<AssetLength>,
+    max_chunk: usize,
+    backend_limit: Option<u64>,
     requests: Arc<Mutex<Vec<usize>>>,
     observed: Arc<AtomicUsize>,
+}
+
+impl VariableLengthIo {
+    fn new(source: AssetPath, bytes: &[u8], length: Option<AssetLength>) -> Self {
+        Self {
+            domain: AuthorityDomain::new(),
+            source,
+            bytes: Arc::from(bytes),
+            length,
+            max_chunk: usize::MAX,
+            backend_limit: None,
+            requests: Arc::new(Mutex::new(Vec::new())),
+            observed: Arc::new(AtomicUsize::new(0)),
+        }
+    }
 }
 
 impl AssetIo for VariableLengthIo {
@@ -1417,17 +1435,22 @@ impl AssetIo for VariableLengthIo {
 
     fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
         assert_eq!(path, &self.source);
-        Ok(OpenedAsset::new(
+        let opened = OpenedAsset::new(
             self.domain.clone(),
             self.source.clone(),
             RecordingReader {
                 bytes: Arc::clone(&self.bytes),
                 offset: 0,
+                max_chunk: self.max_chunk,
                 requests: Arc::clone(&self.requests),
                 observed: Arc::clone(&self.observed),
             },
             self.length,
-        ))
+        );
+        Ok(match self.backend_limit {
+            Some(limit) => opened.with_backend_hard_limit(limit),
+            None => opened,
+        })
     }
 }
 
@@ -1598,16 +1621,7 @@ fn variable_length_reads_are_admitted_before_backend_entry_and_retain_consumptio
     for (max_primary_asset_bytes, max_total_asset_bytes) in [(4, 1024), (10, 4)] {
         for length in [None, Some(AssetLength::Hint(1024))] {
             let source = AssetPath::new("asset.variable-budget").unwrap();
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let observed = Arc::new(AtomicUsize::new(0));
-            let io = VariableLengthIo {
-                domain: AuthorityDomain::new(),
-                source: source.clone(),
-                bytes: Arc::from(&b"ten bytes!"[..]),
-                length,
-                requests: Arc::clone(&requests),
-                observed: Arc::clone(&observed),
-            };
+            let io = VariableLengthIo::new(source.clone(), b"ten bytes!", length);
             let mut limits = ResourceLimits::default();
             limits.max_primary_asset_bytes = max_primary_asset_bytes;
             limits.max_total_asset_bytes = max_total_asset_bytes;
@@ -1619,17 +1633,149 @@ fn variable_length_reads_are_admitted_before_backend_entry_and_retain_consumptio
             let failure = import_asset(&request, &io, source, ImportOperationControl::default())
                 .expect_err("the bounded variable-length resource must fail closed at its limit");
 
-            let requests = requests.lock().expect("read request mutex");
+            let requests = io.requests.lock().expect("read request mutex");
             assert!(!requests.is_empty());
-            assert!(requests.iter().all(|request| *request <= 4));
-            assert_eq!(requests.iter().sum::<usize>(), 4);
-            assert_eq!(observed.load(Ordering::Acquire), 4);
+            assert_eq!(*requests, [4, 1], "payload read followed by one EOF probe");
+            assert_eq!(io.observed.load(Ordering::Acquire), 5);
             let primary = failure
                 .ledger()
                 .dimension(ImportDimension::PrimaryBytes)
                 .unwrap();
-            assert_eq!(primary.attempted(), 4);
+            assert_eq!(primary.attempted(), 5, "includes the observed excess byte");
             assert_eq!(primary.consumed(), 4);
+            let total = failure
+                .ledger()
+                .dimension(ImportDimension::TotalAssetBytes)
+                .unwrap();
+            assert_eq!(
+                total.attempted(),
+                if max_primary_asset_bytes == 4 { 4 } else { 5 }
+            );
+            assert_eq!(total.consumed(), 4);
+            let work = failure
+                .ledger()
+                .dimension(ImportDimension::WorkUnits)
+                .unwrap();
+            assert_eq!(work.attempted(), 2);
+            assert_eq!(work.consumed(), 2);
+        }
+    }
+}
+
+#[test]
+fn short_reads_reuse_byte_allowance_and_share_the_complete_snapshot() {
+    let payload = b"0123456789abcdef0123456789abcdef";
+    for length in [
+        None,
+        Some(AssetLength::Hint(1024)),
+        Some(AssetLength::Exact(32)),
+    ] {
+        for max_chunk in [1, usize::MAX] {
+            let source = AssetPath::new("asset.short-read").unwrap();
+            let mut io = VariableLengthIo::new(source.clone(), payload, length);
+            io.max_chunk = max_chunk;
+            io.backend_limit = Some(33);
+            let importer = RecordingImporter::plain("dev.baozi.test.short-read", "short-read");
+            let views = Arc::clone(&importer.primary_views);
+            let request = request_for(importer);
+
+            let report = import_asset(&request, &io, source, ImportOperationControl::default())
+                .expect("legal short reads must retain unused byte admission");
+
+            assert_eq!(*views.lock().unwrap(), [payload.to_vec(), payload.to_vec()]);
+            let primary = report
+                .ledger()
+                .dimension(ImportDimension::PrimaryBytes)
+                .unwrap();
+            assert_eq!(
+                primary.attempted(),
+                if length == Some(AssetLength::Exact(32)) {
+                    32
+                } else {
+                    33
+                }
+            );
+            assert_eq!(primary.consumed(), 32);
+            let requests = io.requests.lock().unwrap();
+            assert_eq!(requests.len(), if max_chunk == 1 { 33 } else { 2 });
+            assert_eq!(requests.last(), Some(&1));
+            if max_chunk == 1 {
+                assert!(
+                    requests.iter().sum::<usize>() > 33,
+                    "repeated requests reuse existing credit"
+                );
+            }
+            assert_eq!(io.observed.load(Ordering::Acquire), 32);
+        }
+    }
+}
+
+#[test]
+fn variable_length_primary_aggregate_and_backend_limits_accept_eof_and_reject_excess() {
+    for (primary_limit, total_limit, backend_limit) in
+        [(4, 64, None), (64, 4, None), (64, 64, Some(4))]
+    {
+        for length in [None, Some(AssetLength::Hint(1024))] {
+            for payload in [b"abc".as_slice(), b"abcd".as_slice(), b"abcde".as_slice()] {
+                let source = AssetPath::new("asset.eof-limit").unwrap();
+                let mut io = VariableLengthIo::new(source.clone(), payload, length);
+                io.backend_limit = backend_limit;
+                io.max_chunk = if payload.len() == 4 { 1 } else { usize::MAX };
+                let mut limits = ResourceLimits::default();
+                limits.max_primary_asset_bytes = primary_limit;
+                limits.max_total_asset_bytes = total_limit;
+                let importer = RecordingImporter::plain("dev.baozi.test.eof-limit", "eof-limit");
+                let views = Arc::clone(&importer.primary_views);
+                let request = request_for_with_limits(importer, limits);
+
+                let result = import_asset(&request, &io, source, ImportOperationControl::default());
+
+                if payload.len() <= 4 {
+                    let report = result.expect("below-limit and exact-limit EOF must succeed");
+                    assert_eq!(*views.lock().unwrap(), [payload.to_vec(), payload.to_vec()]);
+                    for dimension in [
+                        ImportDimension::PrimaryBytes,
+                        ImportDimension::TotalAssetBytes,
+                    ] {
+                        let evidence = report.ledger().dimension(dimension).unwrap();
+                        assert_eq!(evidence.attempted(), 4);
+                        assert_eq!(evidence.consumed(), payload.len() as u64);
+                    }
+                } else {
+                    let failure =
+                        result.expect_err("a positive EOF probe must reject excess bytes");
+                    let ImportCause::Scope(abort) = failure.cause() else {
+                        panic!("expected a typed byte-limit failure")
+                    };
+                    assert!(matches!(
+                        abort.cause(),
+                        ScopeAbortCause::ResourceLimit {
+                            resource: "asset-bytes",
+                            limit: 4
+                        } | ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                            dimension: ImportDimension::PrimaryBytes
+                                | ImportDimension::TotalAssetBytes,
+                            limit: 4,
+                            ..
+                        })
+                    ));
+                    assert!(
+                        views.lock().unwrap().is_empty(),
+                        "excess input must not reach detection or parsing"
+                    );
+                    assert_eq!(io.observed.load(Ordering::Acquire), 5);
+                    assert_eq!(*io.requests.lock().unwrap(), [4, 1]);
+                    let primary = failure
+                        .ledger()
+                        .dimension(ImportDimension::PrimaryBytes)
+                        .unwrap();
+                    assert_eq!(primary.attempted(), 5);
+                    assert_eq!(
+                        primary.consumed(),
+                        if backend_limit.is_some() { 5 } else { 4 }
+                    );
+                }
+            }
         }
     }
 }
@@ -1820,8 +1966,17 @@ fn terminal_latch_rejects_every_late_capability_without_side_effects() {
             .ledger()
             .dimension(ImportDimension::WorkUnits)
             .unwrap();
-        assert_eq!(work.attempted(), 0, "{trigger:?}");
-        assert_eq!(work.consumed(), 0, "{trigger:?}");
+        let acquisition_work = b"primary".len() as u64 + 2;
+        assert_eq!(
+            work.attempted(),
+            acquisition_work,
+            "primary snapshot hash, payload read and EOF; {trigger:?}"
+        );
+        assert_eq!(
+            work.consumed(),
+            acquisition_work,
+            "primary snapshot hash, payload read and EOF; {trigger:?}"
+        );
         let expected_opens = if expected_references == 0 { 1 } else { 2 };
         assert_eq!(io.open_count(), expected_opens, "{trigger:?}");
         assert_eq!(failure.ledger().current_live_bytes(), 0, "{trigger:?}");

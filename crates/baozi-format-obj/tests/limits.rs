@@ -658,26 +658,78 @@ fn material_sort_cancellation_is_bounded_by_comparison_chunks() -> TestResult<()
     let total_polls = calibration_polls.load(Ordering::SeqCst);
     assert!(total_polls > 0);
 
-    let (_, failure) = first_cancelled_dimension_prefix_at_least(
+    let mut run_cancelled = |cancel_on| -> TestResult<baozi_import::ImportFailure> {
+        let (control, polls) = controlled_import(Some(cancel_on));
+        let failure = expected_failure(import_assets_result_with_control(
+            "model.obj",
+            assets(),
+            ResourceLimits::default(),
+            true,
+            control,
+        )?);
+        assert_cancelled(&failure);
+        assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
+        Ok(failure)
+    };
+    let parsed_tokens = (std::str::from_utf8(obj)?.split_ascii_whitespace().count()
+        + mtl.split_ascii_whitespace().count()) as u64;
+    // All source tokens precede material sorting. This prefix includes acquisition and hashing
+    // without assuming their WorkUnits amount or their cancellation checkpoint count.
+    let (parsed_poll, parsed) = first_cancelled_dimension_prefix_at_least(
+        total_polls,
+        ImportDimension::Tokens,
+        parsed_tokens,
+        &mut run_cancelled,
+    )?;
+    assert_eq!(
+        work_consumed(&parsed, ImportDimension::Tokens),
+        parsed_tokens
+    );
+    let work_before_sort = work_consumed(&parsed, ImportDimension::WorkUnits);
+    assert_eq!(
+        parsed
+            .ledger()
+            .dimension(ImportDimension::WorkUnits)
+            .unwrap()
+            .attempted(),
+        work_before_sort,
+        "the source-token prefix must precede comparison work admission"
+    );
+
+    let (comparison_poll, failure) = first_cancelled_dimension_prefix_at_least(
         total_polls,
         ImportDimension::WorkUnits,
-        SORT_COMPARISON_CHUNK,
-        |cancel_on| {
-            let (control, polls) = controlled_import(Some(cancel_on));
-            let failure = expected_failure(import_assets_result_with_control(
-                "model.obj",
-                assets(),
-                ResourceLimits::default(),
-                true,
-                control,
-            )?);
-            assert_cancelled(&failure);
-            assert_eq!(polls.load(Ordering::SeqCst), cancel_on);
-            Ok(failure)
-        },
+        work_before_sort + SORT_COMPARISON_CHUNK,
+        &mut run_cancelled,
     )?;
-    let consumed = work_consumed(&failure, ImportDimension::WorkUnits);
-    assert_eq!(consumed, SORT_COMPARISON_CHUNK);
+    assert!(comparison_poll > parsed_poll);
+    let work = failure
+        .ledger()
+        .dimension(ImportDimension::WorkUnits)
+        .unwrap();
+    assert_eq!(work.attempted() - work_before_sort, SORT_COMPARISON_CHUNK);
+    assert_eq!(work.consumed() - work_before_sort, SORT_COMPARISON_CHUNK);
+    assert_eq!(
+        work_consumed(&failure, ImportDimension::Tokens),
+        parsed_tokens
+    );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(failure.ledger().active_reservations(), 0);
+
+    // The next checkpoint must complete exactly one more comparison chunk, rather than letting
+    // the remainder of the 512-material sort run without observing cancellation.
+    let next = run_cancelled(comparison_poll + 1)?;
+    let work = next.ledger().dimension(ImportDimension::WorkUnits).unwrap();
+    assert_eq!(
+        work.attempted() - work_before_sort,
+        2 * SORT_COMPARISON_CHUNK
+    );
+    assert_eq!(
+        work.consumed() - work_before_sort,
+        2 * SORT_COMPARISON_CHUNK
+    );
+    assert_eq!(next.ledger().current_live_bytes(), 0);
+    assert_eq!(next.ledger().active_reservations(), 0);
     Ok(())
 }
 
@@ -950,12 +1002,12 @@ fn repeating_the_current_state_name_does_not_raise_live_peak() -> TestResult<()>
     assert_eq!(repeated.len(), padded.len());
 
     let repeated = expected_success(import_bytes_result(
-        "state-repeated.obj",
+        "state-name.obj",
         repeated,
         ResourceLimits::default(),
     )?);
     let padded = expected_success(import_bytes_result(
-        "state-padded.obj",
+        "state-name.obj",
         padded,
         ResourceLimits::default(),
     )?);
@@ -971,7 +1023,7 @@ fn repeating_the_current_state_name_does_not_raise_live_peak() -> TestResult<()>
 fn state_name_allocation_respects_the_exact_live_limit() -> TestResult<()> {
     let document = format!("o {}\n", "x".repeat(4_096));
     let baseline = expected_failure(import_bytes_result(
-        "state-live-baseline.obj",
+        "state-live.obj",
         document.as_bytes(),
         ResourceLimits::default(),
     )?);
@@ -983,7 +1035,7 @@ fn state_name_allocation_respects_the_exact_live_limit() -> TestResult<()> {
     let mut limits = ResourceLimits::default();
     limits.max_live_bytes = limit;
     let failure = expected_failure(import_bytes_result(
-        "state-live-excess.obj",
+        "state-live.obj",
         document.as_bytes(),
         limits,
     )?);
@@ -1365,7 +1417,7 @@ fn live_byte_limit_is_exact_across_normalization_and_scene_handoff() -> TestResu
     let bytes = b"o bounded\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2/1 3/3/1\n";
 
     let baseline = expected_success(import_bytes_result(
-        "live-baseline.obj",
+        "live-limit.obj",
         bytes,
         ResourceLimits::default(),
     )?);
@@ -1375,13 +1427,13 @@ fn live_byte_limit_is_exact_across_normalization_and_scene_handoff() -> TestResu
 
     let mut exact = ResourceLimits::default();
     exact.max_live_bytes = exact_peak;
-    let exact_report = expected_success(import_bytes_result("live-exact.obj", bytes, exact)?);
+    let exact_report = expected_success(import_bytes_result("live-limit.obj", bytes, exact)?);
     assert_eq!(exact_report.ledger().peak_live_bytes(), exact_peak);
 
     let excess_limit = exact_peak - 1;
     let mut excess = ResourceLimits::default();
     excess.max_live_bytes = excess_limit;
-    let failure = expected_failure(import_bytes_result("live-excess.obj", bytes, excess)?);
+    let failure = expected_failure(import_bytes_result("live-limit.obj", bytes, excess)?);
     assert_live_limit(&failure, excess_limit);
     Ok(())
 }

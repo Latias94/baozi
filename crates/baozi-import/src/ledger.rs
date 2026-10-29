@@ -295,9 +295,21 @@ impl ImportDimension {
                 limits.max_dependency_acquisition_work,
                 0,
             ),
-            Self::PrimaryBytes => bytes(limits.max_primary_asset_bytes),
+            // Payload limits count input bytes. Buffer capacity and replacement overlap belong
+            // to the independently configured live-memory budget.
+            Self::PrimaryBytes => DimensionPolicy::reservable_bytes(
+                limits.max_primary_asset_bytes,
+                limits.max_primary_asset_bytes,
+                0,
+                limits.max_live_bytes,
+            ),
             // The per-dependency bound is enforced locally. This dimension is aggregate.
-            Self::DependencyBytes => bytes(limits.max_total_asset_bytes),
+            Self::DependencyBytes => DimensionPolicy::reservable_bytes(
+                limits.max_total_asset_bytes,
+                limits.max_total_asset_bytes,
+                0,
+                limits.max_live_bytes,
+            ),
             Self::TotalAssetBytes => counter(limits.max_total_asset_bytes),
             Self::DataUriBytes => bytes(limits.max_data_uri_bytes),
             Self::DiagnosticCount => DimensionPolicy::counter(

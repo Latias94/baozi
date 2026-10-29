@@ -33,13 +33,14 @@ use gltf::buffer::Source as BufferSource;
 use gltf::image::Source as ImageSource;
 use gltf::json;
 use gltf::json::validation::Checked;
-use gltf::mesh::Mode;
+use gltf::mesh::{Mode, Semantic};
 use gltf::texture::{MagFilter, MinFilter, WrappingMode};
 use serde::Deserialize as _;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 mod animation;
+mod uri;
 
 type Result<T> = std::result::Result<T, ContentError>;
 
@@ -178,23 +179,20 @@ struct PreparedDocument<'scope, 'document> {
 fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
     let surface = admission::admit(ctx)?;
     let primary_len = to_u64(ctx.primary_bytes().len());
-    let (json, _document_allowance) = ctx.with_work(
-        ImportWorkClass::DecodeWork,
-        primary_len,
-        |work| -> Result<_> {
+    let (json, _document_allowance) =
+        ctx.with_parent_work(ImportWorkClass::DecodeWork, primary_len, || -> Result<_> {
             let backend_allowance = gltf_backend_allocation_allowance(ctx, surface)?;
             let document_allowance =
                 ctx.metered_opaque_allowance(ImportStorageClass::BackendDecode, backend_allowance)?;
+            preflight_asset_versions(ctx, surface.json_bytes())?;
             let json = safe_gltf(ctx, "glTF JSON parse", || {
                 gltf::json::Root::from_slice(surface.json_bytes())
             })?
             .map_err(|error| {
                 GltfFailure::invalid_document(format_args!("invalid glTF JSON: {error}"))
             })?;
-            work.complete_all()?;
             Ok((json, document_allowance))
-        },
-    )?;
+        })?;
     preflight_extension_declarations(ctx, &json)?;
     let gltf = safe_gltf(ctx, "glTF document parse", || {
         gltf::Document::from_json(json)
@@ -228,7 +226,180 @@ fn read_gltf_inner(ctx: &ParseScope<'_>) -> Result<SceneDraft> {
         &prepared.resource_closure,
     )?;
     let buffers = load_buffers(ctx, &gltf, surface.bin_bytes(), &prepared.resource_closure)?;
-    scene_from_document(ctx, &gltf, buffers.as_slice(), &prepared)
+    scene_from_document(ctx, &gltf, &buffers, &prepared)
+}
+
+struct VersionHeader {
+    asset: AssetVersionHeader,
+}
+
+struct AssetVersionHeader {
+    version: String,
+    min_version: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for VersionHeader {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct HeaderVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for HeaderVisitor {
+            type Value = VersionHeader;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a glTF document object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut asset = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "asset" {
+                        asset = Some(map.next_value()?);
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                let asset =
+                    asset.ok_or_else(|| <A::Error as serde::de::Error>::missing_field("asset"))?;
+                Ok(VersionHeader { asset })
+            }
+        }
+
+        deserializer.deserialize_map(HeaderVisitor)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AssetVersionHeader {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct AssetVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for AssetVisitor {
+            type Value = AssetVersionHeader;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an asset object containing version metadata")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut version = None;
+                let mut min_version = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "version" => {
+                            version = Some(map.next_value::<String>().map_err(|error| {
+                                <A::Error as serde::de::Error>::custom(format_args!(
+                                    "asset.version: {error}"
+                                ))
+                            })?)
+                        }
+                        // Optional means absent, not an explicit JSON null.
+                        "minVersion" => {
+                            min_version = Some(map.next_value::<String>().map_err(|error| {
+                                <A::Error as serde::de::Error>::custom(format_args!(
+                                    "asset.minVersion: {error}"
+                                ))
+                            })?)
+                        }
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let version = version.ok_or_else(|| {
+                    <A::Error as serde::de::Error>::custom("asset.version is required")
+                })?;
+                Ok(AssetVersionHeader {
+                    version,
+                    min_version,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(AssetVisitor)
+    }
+}
+
+fn preflight_asset_versions(ctx: &ParseScope<'_>, bytes: &[u8]) -> Result<()> {
+    // This schema pass retains only version metadata and skips all other values. Its
+    // validation scan is separate from the backend's existing DecodeWork admission.
+    ctx.with_work(
+        ImportWorkClass::WorkUnits,
+        to_u64(bytes.len()),
+        |work| -> Result<()> {
+            // Unlike Serde's derived struct visitors, these visitors require JSON objects.
+            let header = safe_gltf(ctx, "glTF version metadata parse", || {
+                serde_json::from_slice::<VersionHeader>(bytes)
+            })?
+            .map_err(|error| {
+                GltfFailure::invalid_document(format_args!("glTF asset metadata: {error}"))
+            })?;
+            let version = parse_asset_version(&header.asset.version).ok_or_else(|| {
+                GltfFailure::invalid_document(
+                    "asset.version must be two decimal components without leading zeros",
+                )
+            })?;
+            let min_version = header
+                .asset
+                .min_version
+                .as_deref()
+                .map(|value| {
+                    parse_asset_version(value).ok_or_else(|| {
+                        GltfFailure::invalid_document(
+                            "asset.minVersion must be two decimal components without leading zeros",
+                        )
+                    })
+                })
+                .transpose()?;
+            work.complete_all()?;
+            if min_version.is_some_and(|minimum| minimum > version) {
+                return Err(GltfFailure::invalid_document(
+                    "asset.minVersion must not exceed asset.version",
+                )
+                .into());
+            }
+            if version.0 != 2 {
+                return Err(GltfFailure::unsupported(
+                    "asset.version",
+                    "asset.version major version is outside the glTF 2.x profile",
+                )
+                .into());
+            }
+            if min_version.is_some_and(|minimum| minimum != (2, 0)) {
+                return Err(GltfFailure::unsupported(
+                    "asset.minVersion",
+                    "asset.minVersion requires an unsupported glTF version; supported: 2.0",
+                )
+                .into());
+            }
+            Ok(())
+        },
+    )
+}
+
+fn parse_asset_version(value: &str) -> Option<(u32, u32)> {
+    fn component(value: &str) -> Option<u32> {
+        if value.is_empty() || value.len() > 9 || (value.len() > 1 && value.starts_with('0')) {
+            return None;
+        }
+        value.bytes().try_fold(0, |number, byte| {
+            byte.is_ascii_digit()
+                .then(|| number * 10 + u32::from(byte - b'0'))
+        })
+    }
+
+    let (major, minor) = value.split_once('.')?;
+    Some((component(major)?, component(minor)?))
 }
 
 fn gltf_backend_allocation_allowance(
@@ -904,18 +1075,25 @@ fn preflight_texture_reference<'scope>(
     let resolved_uri_len = match image.source() {
         ImageSource::Uri { uri, .. } if !is_data_uri(uri) => {
             if !resolved_uris.contains_key(&image_index) {
-                let resolution_bytes = texture_path_resolution_allowance(ctx, uri)?;
+                let reference = uri::relative_path(ctx, uri, uri::Resource::Image(image_index))?;
+                let reference = reference.as_str();
+                let resolution_bytes = texture_path_resolution_allowance(ctx, reference)?;
                 let _resolution_allowance = ctx.metered_opaque_allowance(
                     ImportStorageClass::FormatNormalization,
                     resolution_bytes,
                 )?;
                 let resolved = ctx.with_work(
                     ImportWorkClass::WorkUnits,
-                    to_u64(ctx.source().as_str().len().saturating_add(uri.len())),
+                    to_u64(ctx.source().as_str().len().saturating_add(reference.len())),
                     |work| -> Result<_> {
-                        let resolved = ctx.source().resolve_from_file(uri).map_err(|error| {
-                            GltfFailure::invalid_reference("texture-uri", Some(image_index), error)
-                        })?;
+                        let resolved =
+                            ctx.source().resolve_from_file(reference).map_err(|error| {
+                                GltfFailure::invalid_reference(
+                                    "texture-uri",
+                                    Some(image_index),
+                                    error,
+                                )
+                            })?;
                         work.complete_all()?;
                         Ok(resolved)
                     },
@@ -1037,13 +1215,44 @@ fn complete_canonical_string_work(ctx: &ParseScope<'_>, bytes: usize) -> Result<
     )
 }
 
-struct BufferData<'scope> {
-    bytes: MeteredVec<'scope, u8>,
+enum BufferData<'scope> {
+    Owned(MeteredVec<'scope, u8>),
+    External {
+        identity: uri::ProfileIdentity<'scope>,
+        snapshot: DependencySnapshot<'scope>,
+        declared_length: usize,
+        provenance: u32,
+    },
 }
 
 impl BufferData<'_> {
     fn as_slice(&self) -> &[u8] {
-        self.bytes.as_slice()
+        match self {
+            Self::Owned(bytes) => bytes.as_slice(),
+            Self::External {
+                snapshot,
+                declared_length,
+                ..
+            } => &snapshot.bytes()[..*declared_length],
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    const fn provenance(&self) -> u32 {
+        match self {
+            Self::Owned(_) => 0,
+            Self::External { provenance, .. } => *provenance,
+        }
+    }
+
+    fn external_identity(&self) -> Option<&ResourceIdentity> {
+        match self {
+            Self::Owned(_) => None,
+            Self::External { identity, .. } => Some(identity.value()),
+        }
     }
 }
 
@@ -1055,6 +1264,82 @@ impl BufferSet<'_> {
     fn as_slice(&self) -> &[Option<BufferData<'_>>] {
         self.values.as_slice()
     }
+
+    fn external_resource_count(&self) -> usize {
+        self.values
+            .as_slice()
+            .iter()
+            .filter_map(Option::as_ref)
+            .filter(|buffer| buffer.external_identity().is_some())
+            .count()
+    }
+
+    fn external_resources(&self) -> impl Iterator<Item = (usize, &ResourceIdentity)> {
+        self.values
+            .as_slice()
+            .iter()
+            .enumerate()
+            .filter_map(|(buffer_index, buffer)| {
+                buffer
+                    .as_ref()?
+                    .external_identity()
+                    .map(|identity| (buffer_index, identity))
+            })
+    }
+}
+
+fn accessor_provenance(
+    ctx: &ParseScope<'_>,
+    buffers: &[Option<BufferData<'_>>],
+    accessor: gltf::Accessor<'_>,
+) -> Result<u32> {
+    let view = accessor.view().ok_or_else(|| {
+        gltf_parse_error(
+            ctx,
+            format!(
+                "glTF accessor {} has no bufferView after provenance preflight",
+                accessor.index()
+            ),
+        )
+    })?;
+    let buffer_index = view.buffer().index();
+    buffers
+        .get(buffer_index)
+        .and_then(Option::as_ref)
+        .map(BufferData::provenance)
+        .ok_or_else(|| {
+            gltf_parse_error(
+                ctx,
+                format!(
+                    "glTF accessor {} references unavailable buffer {buffer_index}",
+                    accessor.index()
+                ),
+            )
+        })
+}
+
+fn push_unique_provenance_range(
+    values: &mut MeteredVec<'_, u32>,
+    offset: usize,
+    provenance: u32,
+) -> Result<()> {
+    let current = values
+        .as_slice()
+        .get(offset..)
+        .ok_or_else(|| ContentError::from(GltfFailure::internal("provenance range is invalid")))?;
+    if !current.contains(&provenance) {
+        values.try_push_reserved(provenance)?;
+    }
+    Ok(())
+}
+
+fn sort_provenance_range(values: &mut MeteredVec<'_, u32>, offset: usize) -> Result<()> {
+    let current = values
+        .as_mut_slice()
+        .get_mut(offset..)
+        .ok_or_else(|| ContentError::from(GltfFailure::internal("provenance range is invalid")))?;
+    current.sort_unstable();
+    Ok(())
 }
 
 fn load_buffers<'scope>(
@@ -1066,6 +1351,7 @@ fn load_buffers<'scope>(
     let buffer_count = safe_gltf(ctx, "glTF buffer count", || gltf.buffers().count())?;
     let mut buffers = ctx.metered_vec(ImportStorageClass::BackendDecode, "gltf-buffer-list");
     buffers.try_reserve(buffer_count)?;
+    let mut external_resource_count = 0usize;
     for (ordinal, buffer) in gltf.buffers().enumerate() {
         poll_parser_loop(ctx, ordinal)?;
         if !closure
@@ -1099,11 +1385,21 @@ fn load_buffers<'scope>(
                 load_data_uri_buffer(ctx, uri, buffer.index(), buffer.length())?
             }
             BufferSource::Uri(uri) => {
-                load_external_buffer(ctx, uri, buffer.index(), buffer.length())?
+                let resource_index = external_resource_count
+                    .checked_add(1)
+                    .ok_or_else(|| ctx.allocation_failure("gltf-external-buffer-resource"))?;
+                let provenance =
+                    authoring_u32(ctx, resource_index, "gltf-external-buffer-provenance")?;
+                let loaded =
+                    load_external_buffer(ctx, uri, buffer.index(), buffer.length(), provenance)?;
+                external_resource_count = external_resource_count
+                    .checked_add(1)
+                    .ok_or_else(|| ctx.allocation_failure("gltf-external-buffer-count"))?;
+                loaded
             }
         };
 
-        if loaded.bytes.len() != buffer.length() {
+        if loaded.len() != buffer.length() {
             return Err(ContentError::parse(
                 ctx.source().to_string(),
                 None,
@@ -1111,7 +1407,7 @@ fn load_buffers<'scope>(
                     "glTF buffer {} declares {} bytes but only {} bytes are available",
                     buffer.index(),
                     buffer.length(),
-                    loaded.bytes.len()
+                    loaded.len()
                 ),
             ));
         }
@@ -1129,15 +1425,12 @@ fn load_data_uri_buffer<'scope>(
     let decoded = decode_data_uri_payload(
         ctx,
         uri,
-        "buffer",
-        buffer_index,
+        uri::Resource::Buffer(buffer_index),
         "data-uri-buffer",
         "gltf-data-uri-buffer",
         Some(declared_length),
     )?;
-    Ok(BufferData {
-        bytes: decoded.bytes,
-    })
+    Ok(BufferData::Owned(decoded.bytes))
 }
 
 struct DecodedDataUri<'scope, 'uri> {
@@ -1148,12 +1441,13 @@ struct DecodedDataUri<'scope, 'uri> {
 fn decode_data_uri_payload<'scope, 'uri>(
     ctx: &'scope ParseScope<'_>,
     uri: &'uri str,
-    subject: &'static str,
-    subject_index: usize,
+    resource: uri::Resource,
     reference: &'static str,
     allocation: &'static str,
     retained_length: Option<usize>,
 ) -> Result<DecodedDataUri<'scope, 'uri>> {
+    let subject = resource.name();
+    let subject_index = resource.index();
     enforce_usize_limit(
         ctx,
         "max_string_bytes",
@@ -1172,17 +1466,17 @@ fn decode_data_uri_payload<'scope, 'uri>(
             format!("glTF {subject} {subject_index} data URI has no comma separator"),
         ));
     };
+    if metadata.contains('%') {
+        return Err(resource.unsupported(ctx, "percent-encoded data URLs are unsupported"));
+    }
     if !metadata
-        .split(';')
-        .any(|part| part.eq_ignore_ascii_case("base64"))
+        .rsplit_once(';')
+        .is_some_and(|(_, encoding)| encoding.eq_ignore_ascii_case("base64"))
     {
-        return Err(ContentError::FeatureUnsupported {
-            format: "gltf",
-            feature: format!("{subject} {subject_index} uses a non-base64 data URI"),
-        });
+        return Err(resource.unsupported(ctx, "non-base64 data URI is unsupported"));
     }
 
-    let decoded_len = base64_decoded_len(ctx, encoded, subject, subject_index)?;
+    let decoded_len = base64_decoded_len(ctx, encoded, resource)?;
     let decoded_len = usize::try_from(decoded_len)
         .map_err(|_| ctx.allocation_failure("gltf-data-uri-decoded-length"))?;
     let retained_length = retained_length.unwrap_or(decoded_len);
@@ -1262,12 +1556,9 @@ fn decode_data_uri_payload<'scope, 'uri>(
     })
 }
 
-fn base64_decoded_len(
-    ctx: &ParseScope<'_>,
-    encoded: &str,
-    subject: &'static str,
-    subject_index: usize,
-) -> Result<u64> {
+fn base64_decoded_len(ctx: &ParseScope<'_>, encoded: &str, resource: uri::Resource) -> Result<u64> {
+    let subject = resource.name();
+    let subject_index = resource.index();
     if encoded.is_empty() {
         return Ok(0);
     }
@@ -1278,6 +1569,9 @@ fn base64_decoded_len(
     for chunk in encoded.as_bytes().chunks(PARSER_POLL_INTERVAL) {
         ctx.poll()?;
         for &byte in chunk {
+            if byte == b'%' {
+                return Err(resource.unsupported(ctx, "percent-encoded data URLs are unsupported"));
+            }
             if byte.is_ascii_whitespace() {
                 return Err(gltf_parse_error(
                     ctx,
@@ -1332,6 +1626,7 @@ fn load_external_buffer<'scope>(
     uri: &str,
     buffer_index: usize,
     declared_length: usize,
+    provenance: u32,
 ) -> Result<BufferData<'scope>> {
     enforce_usize_limit(
         ctx,
@@ -1339,16 +1634,27 @@ fn load_external_buffer<'scope>(
         uri.len(),
         ctx.limits().max_string_bytes,
     )?;
+    let reference = uri::relative_path(ctx, uri, uri::Resource::Buffer(buffer_index))?;
     let origin = ctx.root_origin();
-    let outcome = ctx.dependency(&origin, &external_buffer_role(), uri)?;
+    let outcome = ctx.dependency(&origin, &external_buffer_role(), reference.as_str())?;
     let snapshot = ctx.into_available_dependency(outcome)?;
-    copy_buffer_prefix(
-        ctx,
-        snapshot.bytes(),
+    if snapshot.bytes().len() < declared_length {
+        return Err(ContentError::parse(
+            ctx.source().to_string(),
+            None,
+            format!(
+                "glTF buffer {buffer_index} declares {declared_length} bytes but only {} bytes are available",
+                snapshot.bytes().len()
+            ),
+        ));
+    }
+    let identity = uri::profile_identity(ctx, snapshot.identity().path().as_str())?;
+    Ok(BufferData::External {
+        identity,
+        snapshot,
         declared_length,
-        "gltf-external-buffer-copy",
-        buffer_index,
-    )
+        provenance,
+    })
 }
 
 fn copy_buffer<'scope>(
@@ -1356,7 +1662,9 @@ fn copy_buffer<'scope>(
     source: &[u8],
     allocation: &'static str,
 ) -> Result<BufferData<'scope>> {
-    copy_buffer_bytes(ctx, source, allocation)
+    Ok(BufferData::Owned(copy_buffer_bytes(
+        ctx, source, allocation,
+    )?))
 }
 
 fn copy_buffer_prefix<'scope>(
@@ -1376,14 +1684,14 @@ fn copy_buffer_prefix<'scope>(
             ),
         ));
     }
-    copy_buffer_bytes(ctx, &source[..declared_length], allocation)
+    copy_buffer(ctx, &source[..declared_length], allocation)
 }
 
 fn copy_buffer_bytes<'scope>(
     ctx: &'scope ParseScope<'_>,
     source: &[u8],
     allocation: &'static str,
-) -> Result<BufferData<'scope>> {
+) -> Result<MeteredVec<'scope, u8>> {
     let copied = ctx.with_work(
         ImportWorkClass::DecodeWork,
         to_u64(source.len()),
@@ -1398,7 +1706,7 @@ fn copy_buffer_bytes<'scope>(
             Ok(copied)
         },
     )?;
-    Ok(BufferData { bytes: copied })
+    Ok(copied)
 }
 
 fn gltf_parse_error(ctx: &ParseScope<'_>, message: impl Into<String>) -> ContentError {
@@ -1408,19 +1716,28 @@ fn gltf_parse_error(ctx: &ParseScope<'_>, message: impl Into<String>) -> Content
 fn scene_from_document(
     ctx: &ParseScope<'_>,
     gltf: &gltf::Document,
-    buffers: &[Option<BufferData<'_>>],
+    buffers: &BufferSet<'_>,
     prepared: &PreparedDocument<'_, '_>,
 ) -> Result<SceneDraft> {
+    let external_image_resource_offset = authoring_u32(
+        ctx,
+        buffers
+            .external_resource_count()
+            .checked_add(1)
+            .ok_or_else(|| ctx.allocation_failure("gltf-external-image-resource-offset"))?,
+        "gltf-external-image-resource-offset",
+    )?;
     let external_images = load_external_image_resources(
         ctx,
         gltf,
         &prepared.resolved_texture_uris,
         &prepared.resource_closure,
+        external_image_resource_offset,
     )?;
     let appearance_storage = build_appearance_storage(
         ctx,
         gltf,
-        buffers,
+        buffers.as_slice(),
         &prepared.resolved_texture_uris,
         &external_images,
         &prepared.texture_binding_contracts,
@@ -1429,7 +1746,7 @@ fn scene_from_document(
     let geometry_storage = build_geometry_storage(
         ctx,
         gltf,
-        buffers,
+        buffers.as_slice(),
         &prepared.geometry_contracts,
         &appearance_storage.material_ids,
     )?;
@@ -1442,14 +1759,14 @@ fn scene_from_document(
     )?;
     let animation_storage = animation::build_storage(
         ctx,
-        buffers,
+        buffers.as_slice(),
         node_storage.node_ids.as_slice(),
         &prepared.animation_contracts,
     )?;
     let skin_storage = build_skins(
         ctx,
         gltf,
-        buffers,
+        buffers.as_slice(),
         node_storage.node_ids.as_slice(),
         &prepared.resource_closure,
     )?;
@@ -1466,6 +1783,7 @@ fn scene_from_document(
         &node_storage,
         &skin_storage,
         &mesh_instance_deformations,
+        buffers,
         &external_images,
         &animation_storage,
     )
@@ -1473,12 +1791,13 @@ fn scene_from_document(
 
 struct ExternalImageResource<'scope> {
     image_index: usize,
-    identity: ResourceIdentity,
+    identity: uri::ProfileIdentity<'scope>,
     snapshot: DependencySnapshot<'scope>,
 }
 
 struct ExternalImageResources<'scope> {
     values: MeteredVec<'scope, ExternalImageResource<'scope>>,
+    resource_offset: u32,
 }
 
 impl ExternalImageResources<'_> {
@@ -1489,7 +1808,9 @@ impl ExternalImageResources<'_> {
             .enumerate()
             .find(|(_, resource)| resource.image_index == image_index)
             .and_then(|(index, resource)| {
-                let index = u32::try_from(index).ok()?.checked_add(1)?;
+                let index = u32::try_from(index)
+                    .ok()?
+                    .checked_add(self.resource_offset)?;
                 Some((index, &resource.snapshot))
             })
     }
@@ -1500,6 +1821,7 @@ fn load_external_image_resources<'scope>(
     gltf: &gltf::Document,
     resolved_texture_uris: &ResolvedTextureUris<'_>,
     closure: &ResourceClosure<'_>,
+    resource_offset: u32,
 ) -> Result<ExternalImageResources<'scope>> {
     let mut values = ctx.metered_vec(
         ImportStorageClass::FormatNormalization,
@@ -1523,24 +1845,21 @@ fn load_external_image_resources<'scope>(
         if resolved_texture_uris.get(&image.index()).is_none() {
             continue;
         }
+        let reference = uri::relative_path(ctx, uri, uri::Resource::Image(image.index()))?;
         let origin = ctx.root_origin();
-        let outcome = ctx.dependency(&origin, &external_image_role(), uri)?;
+        let outcome = ctx.dependency(&origin, &external_image_role(), reference.as_str())?;
         let snapshot = ctx.into_available_dependency(outcome)?;
-        let identity =
-            ResourceIdentity::new(snapshot.identity().path().as_str()).map_err(|_| {
-                GltfFailure::invalid_reference(
-                    "texture-uri",
-                    Some(image.index()),
-                    "resolved image identity is not canonical",
-                )
-            })?;
+        let identity = uri::profile_identity(ctx, snapshot.identity().path().as_str())?;
         values.try_push_reserved(ExternalImageResource {
             image_index: image.index(),
             identity,
             snapshot,
         })?;
     }
-    Ok(ExternalImageResources { values })
+    Ok(ExternalImageResources {
+        values,
+        resource_offset,
+    })
 }
 
 enum ImagePayloadStorage {
@@ -1743,8 +2062,7 @@ fn build_shared_appearance_resources<'scope, 'document>(
                 let decoded = decode_data_uri_payload(
                     ctx,
                     uri,
-                    "image",
-                    image_index,
+                    uri::Resource::Image(image_index),
                     "data-uri-image",
                     "gltf-data-uri-image",
                     None,
@@ -1790,10 +2108,10 @@ fn build_shared_appearance_resources<'scope, 'document>(
                 )
             }
             ImageSource::View { view, mime_type } => {
-                let bytes = copy_buffer_view_image(ctx, buffers, view, image_index)?;
+                let (bytes, provenance) = copy_buffer_view_image(ctx, buffers, view, image_index)?;
                 (
                     store_encoded_image_payload(storage, bytes)?,
-                    0,
+                    provenance,
                     image_media_type(ctx, image_index, Some(mime_type))?,
                 )
             }
@@ -1965,7 +2283,7 @@ fn copy_buffer_view_image<'scope>(
     buffers: &[Option<BufferData<'_>>],
     view: gltf::buffer::View<'_>,
     image_index: usize,
-) -> Result<MeteredVec<'scope, u8>> {
+) -> Result<(MeteredVec<'scope, u8>, u32)> {
     let buffer_index = view.buffer().index();
     let buffer = buffers
         .get(buffer_index)
@@ -1989,7 +2307,10 @@ fn copy_buffer_view_image<'scope>(
             ),
         )
     })?;
-    Ok(copy_buffer(ctx, bytes, "gltf-buffer-view-image")?.bytes)
+    Ok((
+        copy_buffer_bytes(ctx, bytes, "gltf-buffer-view-image")?,
+        buffer.provenance(),
+    ))
 }
 
 fn add_material_authoring<'scope, 'document>(
@@ -3069,6 +3390,7 @@ struct AttributeStorage<'scope> {
     semantic: AttributeSemantic,
     lanes: u8,
     values: MeteredVec<'scope, f32>,
+    provenance: u32,
 }
 
 struct PrimitiveStorage<'scope> {
@@ -3079,6 +3401,8 @@ struct PrimitiveStorage<'scope> {
     attributes: MeteredVec<'scope, AttributeStorage<'scope>>,
     influence_offsets: MeteredVec<'scope, u32>,
     influences: MeteredVec<'scope, InfluenceAuthoring>,
+    provenance_offset: usize,
+    provenance_count: usize,
 }
 
 struct LogicalMeshStorage<'scope, 'document> {
@@ -3089,6 +3413,7 @@ struct LogicalMeshStorage<'scope, 'document> {
 struct GeometryStorage<'scope, 'document> {
     logical_meshes: MeteredVec<'scope, LogicalMeshStorage<'scope, 'document>>,
     logical_mesh_ids: MeteredVec<'scope, Option<LogicalMeshLocalId>>,
+    primitive_provenance: MeteredVec<'scope, u32>,
 }
 
 fn build_geometry_storage<'scope, 'document>(
@@ -3122,6 +3447,28 @@ fn build_geometry_storage<'scope, 'document>(
         mesh_count,
         None,
         "gltf-logical-mesh-id-map",
+    )?;
+    let available_provenance_count = buffers
+        .iter()
+        .filter(|buffer| buffer.is_some())
+        .count()
+        .max(1);
+    let primitive_provenance_capacity = contracts
+        .meshes
+        .as_slice()
+        .iter()
+        .filter_map(Option::as_ref)
+        .flat_map(|mesh| mesh.primitives.as_slice())
+        .try_fold(0usize, |count, primitive| {
+            let reference_count = primitive.attribute_stream_count.checked_add(1)?;
+            count.checked_add(reference_count.min(available_provenance_count))
+        })
+        .ok_or_else(|| ctx.allocation_failure("gltf-primitive-buffer-provenance-count"))?;
+    let mut primitive_provenance = try_vec_capacity(
+        ctx,
+        ImportStorageClass::FormatNormalization,
+        primitive_provenance_capacity,
+        "gltf-primitive-buffer-provenance",
     )?;
     for (mesh_ordinal, mesh) in gltf.meshes().enumerate() {
         poll_parser_loop(ctx, mesh_ordinal)?;
@@ -3186,6 +3533,7 @@ fn build_geometry_storage<'scope, 'document>(
                 primitive,
                 contract,
                 material_ids,
+                &mut primitive_provenance,
             )?)?;
         }
         logical_meshes.try_push_reserved(LogicalMeshStorage {
@@ -3196,6 +3544,7 @@ fn build_geometry_storage<'scope, 'document>(
     Ok(GeometryStorage {
         logical_meshes,
         logical_mesh_ids,
+        primitive_provenance,
     })
 }
 
@@ -3206,6 +3555,7 @@ fn build_primitive_authoring<'scope>(
     primitive: gltf::Primitive<'_>,
     contract: PrimitiveContract,
     material_ids: &MeteredVec<'_, Option<MaterialLocalId>>,
+    provenance: &mut MeteredVec<'scope, u32>,
 ) -> Result<PrimitiveStorage<'scope>> {
     let topology = map_topology(contract.mode).ok_or_else(|| ContentError::FeatureUnsupported {
         format: "gltf",
@@ -3232,6 +3582,22 @@ fn build_primitive_authoring<'scope>(
             ),
         ],
         |work| -> Result<PrimitiveStorage<'scope>> {
+            let provenance_offset = provenance.len();
+            for (_, accessor) in primitive.attributes() {
+                push_unique_provenance_range(
+                    provenance,
+                    provenance_offset,
+                    accessor_provenance(ctx, buffers, accessor)?,
+                )?;
+            }
+            if let Some(accessor) = primitive.indices() {
+                push_unique_provenance_range(
+                    provenance,
+                    provenance_offset,
+                    accessor_provenance(ctx, buffers, accessor)?,
+                )?;
+            }
+            sort_provenance_range(provenance, provenance_offset)?;
             let reader = safe_gltf(ctx, "glTF primitive reader construction", || {
                 primitive.reader(|buffer| {
                     buffers
@@ -3317,12 +3683,26 @@ fn build_primitive_authoring<'scope>(
                 semantic: AttributeSemantic::Position,
                 lanes: 3,
                 values: positions,
+                provenance: accessor_provenance(
+                    ctx,
+                    buffers,
+                    primitive.get(&Semantic::Positions).ok_or_else(|| {
+                        gltf_parse_error(ctx, "glTF POSITION accessor disappeared after preflight")
+                    })?,
+                )?,
             })?;
             if !normals.is_empty() {
                 attributes.try_push(AttributeStorage {
                     semantic: AttributeSemantic::Normal,
                     lanes: 3,
                     values: normals,
+                    provenance: accessor_provenance(
+                        ctx,
+                        buffers,
+                        primitive.get(&Semantic::Normals).ok_or_else(|| {
+                            gltf_parse_error(ctx, "glTF NORMAL accessor disappeared after preflight")
+                        })?,
+                    )?,
                 })?;
             }
             if !tangents.is_empty() {
@@ -3330,6 +3710,13 @@ fn build_primitive_authoring<'scope>(
                     semantic: AttributeSemantic::Tangent,
                     lanes: 4,
                     values: tangents,
+                    provenance: accessor_provenance(
+                        ctx,
+                        buffers,
+                        primitive.get(&Semantic::Tangents).ok_or_else(|| {
+                            gltf_parse_error(ctx, "glTF TANGENT accessor disappeared after preflight")
+                        })?,
+                    )?,
                 })?;
             }
             for set in 0..8 {
@@ -3352,6 +3739,16 @@ fn build_primitive_authoring<'scope>(
                     semantic: AttributeSemantic::Texcoord(set),
                     lanes: 2,
                     values,
+                    provenance: accessor_provenance(
+                        ctx,
+                        buffers,
+                        primitive.get(&Semantic::TexCoords(set)).ok_or_else(|| {
+                            gltf_parse_error(
+                                ctx,
+                                format!("glTF TEXCOORD_{set} accessor disappeared after preflight"),
+                            )
+                        })?,
+                    )?,
                 })?;
             }
             for set in 0..8 {
@@ -3374,6 +3771,16 @@ fn build_primitive_authoring<'scope>(
                     semantic: AttributeSemantic::Color(set),
                     lanes: 4,
                     values,
+                    provenance: accessor_provenance(
+                        ctx,
+                        buffers,
+                        primitive.get(&Semantic::Colors(set)).ok_or_else(|| {
+                            gltf_parse_error(
+                                ctx,
+                                format!("glTF COLOR_{set} accessor disappeared after preflight"),
+                            )
+                        })?,
+                    )?,
                 })?;
             }
             let joint_indices = safe_gltf(ctx, "glTF JOINTS reader", || {
@@ -3453,6 +3860,8 @@ fn build_primitive_authoring<'scope>(
                 attributes,
                 influence_offsets,
                 influences,
+                provenance_offset,
+                provenance_count: provenance.len() - provenance_offset,
             })
         },
     )
@@ -5089,6 +5498,7 @@ struct SkinStorageRow<'scope> {
     joints: MeteredVec<'scope, NodeLocalId>,
     inverse_bind_matrices: MeteredVec<'scope, Mat4>,
     skeleton_root: Option<NodeLocalId>,
+    provenance: u32,
 }
 
 struct SkinStorage<'scope> {
@@ -5186,6 +5596,11 @@ fn build_skins<'scope>(
 
         let has_inverse_bind_matrices =
             validate_skin_inverse_bind_accessor(ctx, gltf, skin.index(), mapped_joints.len())?;
+        let provenance = skin
+            .inverse_bind_matrices()
+            .map(|accessor| accessor_provenance(ctx, buffers, accessor))
+            .transpose()?
+            .unwrap_or(0);
         let inverse_bind_matrices = if has_inverse_bind_matrices {
             let reader = safe_gltf(ctx, "glTF skin reader construction", || {
                 skin.reader(|buffer| {
@@ -5257,6 +5672,7 @@ fn build_skins<'scope>(
             joints: mapped_joints,
             inverse_bind_matrices,
             skeleton_root,
+            provenance,
         })?;
         let Some(slot) = storage.skin_ids.as_mut_slice().get_mut(skin_index) else {
             return Err(gltf_parse_error(
@@ -5441,7 +5857,8 @@ fn build_cameras<'scope, 'document>(
 
 struct OwnerSource {
     owner: ProfileOwner,
-    provenance: [ProvenanceLocalId; 1],
+    provenance_offset: usize,
+    provenance_count: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5453,6 +5870,7 @@ fn submit_complete_batch(
     nodes: &NodeStorage<'_, '_>,
     skins: &SkinStorage<'_>,
     mesh_instance_deformations: &MeteredVec<'_, MeshInstanceDeformationAuthoring<'static>>,
+    buffers: &BufferSet<'_>,
     external_images: &ExternalImageResources<'_>,
     animation_storage: &animation::AnimationStorage<'_>,
 ) -> Result<SceneDraft> {
@@ -5701,12 +6119,11 @@ fn submit_complete_batch(
         Presence::Present(nodes.roots.as_slice()),
         nodes.nodes.as_slice(),
     );
-    let primary_identity = ResourceIdentity::new(ctx.source().as_str())
-        .map_err(|_| gltf_parse_error(ctx, "glTF primary resource identity is not canonical"))?;
-    let resource_count = external_images
-        .values
-        .len()
-        .checked_add(1)
+    let primary_identity = uri::profile_identity(ctx, ctx.source().as_str())?;
+    let resource_count = buffers
+        .external_resource_count()
+        .checked_add(external_images.values.len())
+        .and_then(|count| count.checked_add(1))
         .ok_or_else(|| ctx.allocation_failure("gltf-profile-resource-count"))?;
     let mut resources = ctx.metered_vec(
         ImportStorageClass::SceneConstruction,
@@ -5724,14 +6141,26 @@ fn submit_complete_batch(
     snapshots.try_reserve(resource_count)?;
     locators.try_reserve(resource_count)?;
     resources.try_push_reserved(ObservedResourceAuthoring::session_opaque(
-        &primary_identity,
+        primary_identity.value(),
         SessionOpaqueReason::CallerLabel,
     ))?;
     snapshots.try_push_reserved(ResourceSnapshotAuthoring::absent())?;
     locators.try_push_reserved(SourceObjectLocator::indexed(SourceObjectKind::Document, 0))?;
+    for (buffer_index, identity) in buffers.external_resources() {
+        resources.try_push_reserved(ObservedResourceAuthoring::session_opaque(
+            identity,
+            SessionOpaqueReason::UnregisteredResolver,
+        ))?;
+        snapshots.try_push_reserved(ResourceSnapshotAuthoring::absent())?;
+        locators.try_push_reserved(SourceObjectLocator::indexed(
+            SourceObjectKind::Buffer,
+            u64::try_from(buffer_index)
+                .map_err(|_| ctx.allocation_failure("gltf-profile-buffer-locator"))?,
+        ))?;
+    }
     for resource in external_images.values.as_slice() {
         resources.try_push_reserved(ObservedResourceAuthoring::session_opaque(
-            &resource.identity,
+            resource.identity.value(),
             SessionOpaqueReason::UnregisteredResolver,
         ))?;
         snapshots.try_push_reserved(ResourceSnapshotAuthoring::snapshotted(
@@ -5771,15 +6200,105 @@ fn submit_complete_batch(
         ))?;
     }
 
+    let owner_count = [
+        2,
+        nodes.nodes.len(),
+        cameras.authored.len(),
+        appearance_storage.images.len(),
+        appearance_storage.samplers.len(),
+        appearance_storage.textures.len(),
+        appearance_storage.bindings.len(),
+        materials.len(),
+        logical_meshes.len(),
+        primitives.len(),
+        attributes.len(),
+        mesh_instances.len(),
+        skins.skins.len(),
+        animation_storage.clip_count(),
+        animation_storage.channel_count(),
+    ]
+    .into_iter()
+    .try_fold(0usize, |count, value| count.checked_add(value))
+    .ok_or_else(|| ctx.allocation_failure("gltf-profile-owner-count"))?;
+    let additional_owner_source_count = [
+        appearance_storage
+            .images
+            .as_slice()
+            .iter()
+            .filter(|image| image.provenance != 0)
+            .count(),
+        appearance_storage
+            .sampler_provenance
+            .as_slice()
+            .iter()
+            .filter(|&&source| source != 0)
+            .count(),
+        appearance_storage
+            .texture_provenance
+            .as_slice()
+            .iter()
+            .filter(|&&source| source != 0)
+            .count(),
+        appearance_storage
+            .bindings
+            .as_slice()
+            .iter()
+            .filter(|binding| binding.provenance != 0)
+            .count(),
+        geometry_storage
+            .primitive_provenance
+            .as_slice()
+            .iter()
+            .filter(|&&source| source != 0)
+            .count(),
+        geometry_storage
+            .logical_meshes
+            .as_slice()
+            .iter()
+            .flat_map(|mesh| mesh.primitives.as_slice())
+            .flat_map(|primitive| primitive.attributes.as_slice())
+            .filter(|attribute| attribute.provenance != 0)
+            .count(),
+        skins
+            .skins
+            .as_slice()
+            .iter()
+            .filter(|skin| skin.provenance != 0)
+            .count(),
+        animation_storage.non_primary_provenance_count(),
+    ]
+    .into_iter()
+    .try_fold(0usize, |count, value| count.checked_add(value))
+    .ok_or_else(|| ctx.allocation_failure("gltf-profile-owner-source-count"))?;
+    let owner_source_count = owner_count
+        .checked_add(additional_owner_source_count)
+        .ok_or_else(|| ctx.allocation_failure("gltf-profile-owner-source-count"))?;
     let mut owner_sources = ctx.metered_vec(
         ImportStorageClass::SceneConstruction,
         "gltf-complete-batch-owner-sources",
     );
-    push_owner_source(&mut owner_sources, ProfileOwner::Scene, 0)?;
-    push_owner_source(&mut owner_sources, ProfileOwner::SyntheticRoot, 0)?;
+    let mut owner_source_values = ctx.metered_vec(
+        ImportStorageClass::SceneConstruction,
+        "gltf-complete-batch-owner-source-values",
+    );
+    owner_sources.try_reserve(owner_count)?;
+    owner_source_values.try_reserve(owner_source_count)?;
+    push_owner_source(
+        &mut owner_sources,
+        &mut owner_source_values,
+        ProfileOwner::Scene,
+        0,
+    )?;
+    push_owner_source(
+        &mut owner_sources,
+        &mut owner_source_values,
+        ProfileOwner::SyntheticRoot,
+        0,
+    )?;
     for index in 0..nodes.nodes.len() {
         push_owner_source(
             &mut owner_sources,
+            &mut owner_source_values,
             ProfileOwner::Node(NodeLocalId::new(authoring_u32(
                 ctx,
                 index,
@@ -5791,6 +6310,7 @@ fn submit_complete_batch(
     for index in 0..cameras.authored.len() {
         push_owner_source(
             &mut owner_sources,
+            &mut owner_source_values,
             ProfileOwner::Camera(authoring_u32(ctx, index, "gltf-profile-camera-owner")?),
             0,
         )?;
@@ -5798,7 +6318,12 @@ fn submit_complete_batch(
     for (index, image) in appearance_storage.images.as_slice().iter().enumerate() {
         let provenance = image.provenance;
         let index = authoring_u32(ctx, index, "gltf-profile-image-owner")?;
-        push_owner_source(&mut owner_sources, ProfileOwner::Image(index), provenance)?;
+        push_owner_source(
+            &mut owner_sources,
+            &mut owner_source_values,
+            ProfileOwner::Image(index),
+            provenance,
+        )?;
     }
     for (index, &provenance) in appearance_storage
         .sampler_provenance
@@ -5807,7 +6332,12 @@ fn submit_complete_batch(
         .enumerate()
     {
         let index = authoring_u32(ctx, index, "gltf-profile-sampler-owner")?;
-        push_owner_source(&mut owner_sources, ProfileOwner::Sampler(index), provenance)?;
+        push_owner_source(
+            &mut owner_sources,
+            &mut owner_source_values,
+            ProfileOwner::Sampler(index),
+            provenance,
+        )?;
     }
     for (index, &provenance) in appearance_storage
         .texture_provenance
@@ -5816,12 +6346,18 @@ fn submit_complete_batch(
         .enumerate()
     {
         let index = authoring_u32(ctx, index, "gltf-profile-texture-owner")?;
-        push_owner_source(&mut owner_sources, ProfileOwner::Texture(index), provenance)?;
+        push_owner_source(
+            &mut owner_sources,
+            &mut owner_source_values,
+            ProfileOwner::Texture(index),
+            provenance,
+        )?;
     }
     for (index, binding) in appearance_storage.bindings.as_slice().iter().enumerate() {
         let index = authoring_u32(ctx, index, "gltf-profile-texture-binding-owner")?;
         push_owner_source(
             &mut owner_sources,
+            &mut owner_source_values,
             ProfileOwner::TextureBinding(index),
             binding.provenance,
         )?;
@@ -5829,51 +6365,105 @@ fn submit_complete_batch(
     push_indexed_owner_sources(
         ctx,
         &mut owner_sources,
+        &mut owner_source_values,
         materials.len(),
         ProfileOwner::Material,
     )?;
     push_indexed_owner_sources(
         ctx,
         &mut owner_sources,
+        &mut owner_source_values,
         logical_meshes.len(),
         ProfileOwner::LogicalMesh,
     )?;
+    let mut primitive_owner_index = 0usize;
+    let mut attribute_owner_index = 0usize;
+    for mesh in geometry_storage.logical_meshes.as_slice() {
+        for primitive in mesh.primitives.as_slice() {
+            let provenance_end = primitive
+                .provenance_offset
+                .checked_add(primitive.provenance_count)
+                .ok_or_else(|| ctx.allocation_failure("gltf-profile-primitive-provenance"))?;
+            let provenance = geometry_storage
+                .primitive_provenance
+                .as_slice()
+                .get(primitive.provenance_offset..provenance_end)
+                .ok_or_else(|| gltf_parse_error(ctx, "glTF primitive provenance is incomplete"))?;
+            push_owner_sources(
+                &mut owner_sources,
+                &mut owner_source_values,
+                ProfileOwner::Primitive(authoring_u32(
+                    ctx,
+                    primitive_owner_index,
+                    "gltf-profile-primitive-owner",
+                )?),
+                provenance.iter().copied(),
+            )?;
+            primitive_owner_index = primitive_owner_index
+                .checked_add(1)
+                .ok_or_else(|| ctx.allocation_failure("gltf-profile-primitive-owner"))?;
+            for attribute in primitive.attributes.as_slice() {
+                push_owner_source(
+                    &mut owner_sources,
+                    &mut owner_source_values,
+                    ProfileOwner::Attribute(authoring_u32(
+                        ctx,
+                        attribute_owner_index,
+                        "gltf-profile-attribute-owner",
+                    )?),
+                    attribute.provenance,
+                )?;
+                attribute_owner_index = attribute_owner_index
+                    .checked_add(1)
+                    .ok_or_else(|| ctx.allocation_failure("gltf-profile-attribute-owner"))?;
+            }
+        }
+    }
     push_indexed_owner_sources(
         ctx,
         &mut owner_sources,
-        primitives.len(),
-        ProfileOwner::Primitive,
-    )?;
-    push_indexed_owner_sources(
-        ctx,
-        &mut owner_sources,
-        attributes.len(),
-        ProfileOwner::Attribute,
-    )?;
-    push_indexed_owner_sources(
-        ctx,
-        &mut owner_sources,
+        &mut owner_source_values,
         mesh_instances.len(),
         ProfileOwner::MeshInstance,
     )?;
-    push_indexed_owner_sources(
-        ctx,
-        &mut owner_sources,
-        skin_authoring.len(),
-        ProfileOwner::Skin,
-    )?;
-    push_indexed_owner_sources(
-        ctx,
-        &mut owner_sources,
-        animation_storage.clip_count(),
-        ProfileOwner::AnimationClip,
-    )?;
-    push_indexed_owner_sources(
-        ctx,
-        &mut owner_sources,
-        animation_storage.channel_count(),
-        ProfileOwner::AnimationChannel,
-    )?;
+    for (index, skin) in skins.skins.as_slice().iter().enumerate() {
+        push_owner_source(
+            &mut owner_sources,
+            &mut owner_source_values,
+            ProfileOwner::Skin(authoring_u32(ctx, index, "gltf-profile-skin-owner")?),
+            skin.provenance,
+        )?;
+    }
+    for index in 0..animation_storage.clip_count() {
+        let provenance = animation_storage
+            .clip_provenance(index)
+            .ok_or_else(|| gltf_parse_error(ctx, "glTF animation clip provenance is incomplete"))?;
+        push_owner_sources(
+            &mut owner_sources,
+            &mut owner_source_values,
+            ProfileOwner::AnimationClip(authoring_u32(
+                ctx,
+                index,
+                "gltf-profile-animation-clip-owner",
+            )?),
+            provenance.iter().copied(),
+        )?;
+    }
+    for index in 0..animation_storage.channel_count() {
+        let provenance = animation_storage.channel_provenance(index).ok_or_else(|| {
+            gltf_parse_error(ctx, "glTF animation channel provenance is incomplete")
+        })?;
+        push_owner_sources(
+            &mut owner_sources,
+            &mut owner_source_values,
+            ProfileOwner::AnimationChannel(authoring_u32(
+                ctx,
+                index,
+                "gltf-profile-animation-channel-owner",
+            )?),
+            provenance.iter().copied(),
+        )?;
+    }
 
     let mut owner_provenance = ctx.metered_vec(
         ImportStorageClass::SceneConstruction,
@@ -5881,10 +6471,16 @@ fn submit_complete_batch(
     );
     owner_provenance.try_reserve(owner_sources.len())?;
     for owner in owner_sources.as_slice() {
-        owner_provenance.try_push_reserved(OwnerProvenanceAuthoring::new(
-            owner.owner,
-            &owner.provenance,
-        ))?;
+        let end = owner
+            .provenance_offset
+            .checked_add(owner.provenance_count)
+            .ok_or_else(|| ctx.allocation_failure("gltf-profile-owner-provenance-range"))?;
+        let provenance = owner_source_values
+            .as_slice()
+            .get(owner.provenance_offset..end)
+            .ok_or_else(|| gltf_parse_error(ctx, "glTF owner provenance is incomplete"))?;
+        owner_provenance
+            .try_push_reserved(OwnerProvenanceAuthoring::new(owner.owner, provenance))?;
     }
 
     let source_name_key = NamespacedName::new("org.baozi.gltf:source-name")
@@ -5943,12 +6539,38 @@ fn submit_complete_batch(
 
 fn push_owner_source(
     owners: &mut MeteredVec<'_, OwnerSource>,
+    values: &mut MeteredVec<'_, ProvenanceLocalId>,
     owner: ProfileOwner,
     provenance: u32,
 ) -> Result<()> {
+    push_owner_sources(owners, values, owner, [provenance])
+}
+
+fn push_owner_sources(
+    owners: &mut MeteredVec<'_, OwnerSource>,
+    values: &mut MeteredVec<'_, ProvenanceLocalId>,
+    owner: ProfileOwner,
+    provenance: impl IntoIterator<Item = u32>,
+) -> Result<()> {
+    let offset = values.len();
+    values.try_push(ProvenanceLocalId::new(0))?;
+    let mut previous = 0;
+    for source in provenance {
+        if source == 0 {
+            continue;
+        }
+        if source <= previous {
+            return Err(ContentError::from(GltfFailure::internal(
+                "owner provenance sources are not strictly ordered",
+            )));
+        }
+        values.try_push(ProvenanceLocalId::new(source))?;
+        previous = source;
+    }
     owners.try_push(OwnerSource {
         owner,
-        provenance: [ProvenanceLocalId::new(provenance)],
+        provenance_offset: offset,
+        provenance_count: values.len() - offset,
     })?;
     Ok(())
 }
@@ -5956,14 +6578,17 @@ fn push_owner_source(
 fn push_indexed_owner_sources(
     ctx: &ParseScope<'_>,
     owners: &mut MeteredVec<'_, OwnerSource>,
+    values: &mut MeteredVec<'_, ProvenanceLocalId>,
     count: usize,
     owner: impl Fn(u32) -> ProfileOwner,
 ) -> Result<()> {
     for index in 0..count {
         owners.try_push(OwnerSource {
             owner: owner(authoring_u32(ctx, index, "gltf-profile-owner-index")?),
-            provenance: [ProvenanceLocalId::new(0)],
+            provenance_offset: values.len(),
+            provenance_count: 1,
         })?;
+        values.try_push(ProvenanceLocalId::new(0))?;
     }
     Ok(())
 }

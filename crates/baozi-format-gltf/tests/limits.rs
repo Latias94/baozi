@@ -500,8 +500,8 @@ fn data_uri_work_admission_precedes_decode_buffer_allocation() -> TestResult<()>
     let mut calibration_options = GltfTestOptions::memory();
     calibration_options.limits.max_decode_work = decode_limit;
     let (calibration_result, calibration_diagnostics) = import_assets_result_with_control(
-        "data-uri-admission-calibration.gltf",
-        [("data-uri-admission-calibration.gltf", document.clone())],
+        "data-uri-admission.gltf",
+        [("data-uri-admission.gltf", document.clone())],
         calibration_options,
         ImportOperationControl::default(),
     )?;
@@ -550,59 +550,76 @@ fn data_uri_work_admission_precedes_decode_buffer_allocation() -> TestResult<()>
 }
 
 #[test]
-fn external_buffer_work_admission_precedes_copy_allocation() -> TestResult<()> {
-    const BUFFER_BYTES: usize = 128 * 1024;
+fn external_buffer_snapshot_size_does_not_add_copy_decode_work() -> TestResult<()> {
+    const SMALL_BUFFER_BYTES: usize = 128 * 1024;
+    const LARGE_BUFFER_BYTES: usize = 256 * 1024;
 
-    let document = triangle_gltf_with_buffer_uri("payload.bin", BUFFER_BYTES);
-    let payload = vec![0_u8; BUFFER_BYTES];
-    let decode_limit = (document.len() * 2) as u64;
+    let small_document = triangle_gltf_with_buffer_uri("payload.bin", SMALL_BUFFER_BYTES);
+    let large_document = triangle_gltf_with_buffer_uri("payload.bin", LARGE_BUFFER_BYTES);
+    assert_eq!(small_document.len(), large_document.len());
 
-    let mut calibration_options = sidecar_options();
-    calibration_options.limits.max_decode_work = decode_limit;
-    let (calibration_result, calibration_diagnostics) = import_assets_result_with_control(
-        "external-admission-calibration.gltf",
+    let (small_result, small_diagnostics) = import_assets_result_with_control(
+        "external-borrowed-small.gltf",
         [
-            ("external-admission-calibration.gltf", document.clone()),
-            ("payload.bin", payload.clone()),
+            ("external-borrowed-small.gltf", small_document),
+            ("payload.bin", vec![0_u8; SMALL_BUFFER_BYTES]),
         ],
-        calibration_options,
+        sidecar_options(),
         ImportOperationControl::default(),
     )?;
-    let calibration_failure = expected_error(calibration_result)?;
-    assert!(calibration_diagnostics.is_empty());
-    assert_ledger_limit(
-        &calibration_failure,
-        ImportDimension::DecodeWork,
-        decode_limit,
-    );
-    let pre_copy_peak = calibration_failure.ledger().peak_live_bytes();
-    assert!(pre_copy_peak > 0);
-
-    let mut options = sidecar_options();
-    options.limits.max_decode_work = decode_limit;
-    options.limits.max_live_bytes = pre_copy_peak;
-    let (result, diagnostics) = import_assets_result_with_control(
-        "external-admission.gltf",
+    let (large_result, large_diagnostics) = import_assets_result_with_control(
+        "external-borrowed-large.gltf",
         [
-            ("external-admission.gltf", document.clone()),
-            ("payload.bin", payload),
+            ("external-borrowed-large.gltf", large_document),
+            ("payload.bin", vec![0_u8; LARGE_BUFFER_BYTES]),
         ],
-        options,
+        sidecar_options(),
         ImportOperationControl::default(),
     )?;
-    let failure = expected_error(result)?;
+    let small_report = small_result?;
+    let large_report = large_result?;
 
-    assert!(diagnostics.is_empty());
-    assert_ledger_limit(&failure, ImportDimension::DecodeWork, decode_limit);
+    assert!(small_diagnostics.is_empty());
+    assert!(large_diagnostics.is_empty());
+    let small_decode = small_report
+        .ledger()
+        .dimension(ImportDimension::DecodeWork)
+        .expect("decode work is configured");
+    let large_decode = large_report
+        .ledger()
+        .dimension(ImportDimension::DecodeWork)
+        .expect("decode work is configured");
+    assert_eq!(small_decode.attempted(), large_decode.attempted());
+    assert_eq!(small_decode.consumed(), large_decode.consumed());
+    let small_dependency = small_report
+        .ledger()
+        .dimension(ImportDimension::DependencyBytes)
+        .expect("dependency bytes are configured");
+    let large_dependency = large_report
+        .ledger()
+        .dimension(ImportDimension::DependencyBytes)
+        .expect("dependency bytes are configured");
+    assert_eq!(small_dependency.consumed(), SMALL_BUFFER_BYTES as u64);
+    assert_eq!(large_dependency.consumed(), LARGE_BUFFER_BYTES as u64);
     assert_eq!(
-        dimension_attempted(&failure, ImportDimension::DecodeWork),
-        (document.len() * 2 + BUFFER_BYTES) as u64
+        small_report
+            .successful_input_manifest()
+            .node_classes()
+            .iter()
+            .find(|class| class.identity().value().as_str() == "payload.bin")
+            .expect("external buffer must enter the input manifest")
+            .byte_length(),
+        SMALL_BUFFER_BYTES as u64
     );
     assert_eq!(
-        dimension_consumed(&failure, ImportDimension::DecodeWork),
-        (document.len() * 2) as u64
+        large_report
+            .successful_input_manifest()
+            .node_classes()
+            .iter()
+            .find(|class| class.identity().value().as_str() == "payload.bin")
+            .expect("external buffer must enter the input manifest")
+            .byte_length(),
+        LARGE_BUFFER_BYTES as u64
     );
-    assert_eq!(failure.ledger().peak_live_bytes(), pre_copy_peak);
-    assert_eq!(failure.ledger().current_live_bytes(), 0);
     Ok(())
 }

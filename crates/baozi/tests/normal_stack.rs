@@ -7,7 +7,7 @@ use baozi::{
 use std::process::Command;
 
 const CHILD_ENV: &str = "BAOZI_NORMAL_STACK_TEST";
-const TRIANGLE: &[u8] = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+const TRIANGLE: &[u8] = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n";
 
 #[test]
 fn import_success_and_failure_fit_a_one_mib_stack() {
@@ -29,6 +29,8 @@ fn import_success_and_failure_fit_a_one_mib_stack() {
                     .expect("the imported Scene is observable");
                 assert_eq!(snapshot.logical_mesh_count(), 1);
                 assert_eq!(snapshot.primitive_index_count(), 3);
+                assert!(report.scene().meshes().next().unwrap()
+                    .primitives().next().unwrap().texcoords(0).is_some());
                 assert!(importer.read_bytes("broken.obj", b"f 1 2 3\n").is_err());
                 let request = importer.prepare_default_request().expect("default request compiles");
                 let cancellation = CancellationToken::new();

@@ -949,7 +949,10 @@ impl<'a> ImportSession<'a> {
                     |cause| ImportCause::Scope(ScopeAbort::new(ScopeAbortCause::Control(cause))),
                 );
                 Err(ImportRunError::operation(terminal_failure(
-                    cause,
+                    TerminalFailureCause {
+                        cause,
+                        terminal_control_cause: None,
+                    },
                     source,
                     Some(format.id().clone()),
                     staging,
@@ -969,7 +972,10 @@ impl<'a> ImportSession<'a> {
                     |cause| ImportCause::Scope(ScopeAbort::new(ScopeAbortCause::Control(cause))),
                 );
                 Err(ImportRunError::operation(terminal_failure(
-                    cause,
+                    TerminalFailureCause {
+                        cause,
+                        terminal_control_cause: None,
+                    },
                     source,
                     Some(format.id().clone()),
                     staging,
@@ -1197,18 +1203,38 @@ fn select_terminal_failure_cause(
     evidence: &ImportStoreTerminalEvidence,
     control_cause: Option<ControlCause>,
     cause_authority: ImportStoreFailureCauseAuthority,
-) -> ImportCause {
-    if let Some(cause) = control_cause {
-        return ImportCause::Scope(ScopeAbort::new(ScopeAbortCause::Control(cause)));
+) -> TerminalFailureCause {
+    let validation_error = match cause_authority {
+        ImportStoreFailureCauseAuthority::SceneValidation(detail) => Some(detail),
+        _ => original.scene_validation_error().copied(),
+    };
+    if let Some(detail) = validation_error {
+        return TerminalFailureCause {
+            cause: ImportCause::SceneValidation(detail),
+            terminal_control_cause: control_cause,
+        };
     }
-    match cause_authority {
+    if let Some(cause) = control_cause {
+        return TerminalFailureCause {
+            cause: ImportCause::Scope(ScopeAbort::new(ScopeAbortCause::Control(cause))),
+            terminal_control_cause: None,
+        };
+    }
+    let cause = match cause_authority {
         ImportStoreFailureCauseAuthority::OriginalImport => original,
         ImportStoreFailureCauseAuthority::OperationTerminal => operation_terminal_cause(evidence),
+        ImportStoreFailureCauseAuthority::SceneValidation(detail) => {
+            ImportCause::SceneValidation(detail)
+        }
+    };
+    TerminalFailureCause {
+        cause,
+        terminal_control_cause: None,
     }
 }
 
 fn terminal_failure(
-    cause: ImportCause,
+    cause: TerminalFailureCause,
     source: AssetPath,
     selected_format: Option<FormatId>,
     report: TerminalReportEvidence,
@@ -1216,6 +1242,10 @@ fn terminal_failure(
     store_owner: ImportFailureStoreOwner,
     last_completed: ImportPhaseEvidence,
 ) -> ImportFailure {
+    let TerminalFailureCause {
+        cause,
+        terminal_control_cause,
+    } = cause;
     let TerminalReportEvidence {
         detection,
         diagnostics,
@@ -1226,6 +1256,7 @@ fn terminal_failure(
     } = report;
     ImportFailure::from_parts(ImportFailureParts {
         cause,
+        terminal_control_cause,
         source,
         selected_format,
         detection,
@@ -1251,7 +1282,10 @@ impl LiveFailureCause {
             cause,
             format_failure_storage,
         } = self;
-        let terminal = TerminalFailureCause { cause };
+        let terminal = TerminalFailureCause {
+            cause,
+            terminal_control_cause: None,
+        };
         drop(format_failure_storage);
         terminal
     }
@@ -1259,6 +1293,7 @@ impl LiveFailureCause {
 
 struct TerminalFailureCause {
     cause: ImportCause,
+    terminal_control_cause: Option<ControlCause>,
 }
 
 trait PhaseState {}

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-26
+updated: 2026-10-29
 authors:
   - Codex
 decision_type: architecture
@@ -176,6 +176,16 @@ Normative consequences:
 `all-features` is Cargo's mechanical union of every facade feature and is not an alias for
 `all-formats`. CI exercises both because integration capabilities can interact with format
 features.
+
+Baozi always requires the Rust standard library. The facade and core have no `std` feature;
+`default-features = false` on the facade disables built-in formats, not standard-library use.
+`tracing` enables instrumentation in import/postprocess, with no unused core forwarding.
+`mint` enables the implemented core math conversions. Native filesystem candidate features and the
+core `_scene-integration` bridge remain in place pending separately reviewed boundary changes.
+
+Facade registry methods use `builtin_formats` to mean every enabled first-party format:
+`ImporterBuilder::with_builtin_formats()` and `Importer::builder_with_builtin_formats()`.
+The Cargo `default-formats` aggregate continues to mean only the curated subset.
 
 ### Feature and Target Separation
 

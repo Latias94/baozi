@@ -9,18 +9,18 @@ use crate::canonical_scene::store::schema::geometry::{
     GEOMETRY_ATTRIBUTE_FIELD_COUNT, GEOMETRY_DOMAIN_CORNER, GEOMETRY_DOMAIN_FACE,
     GEOMETRY_DOMAIN_VERTEX, GEOMETRY_LOGICAL_MESH_FIELD_COUNT, GEOMETRY_MESH_INSTANCE_FIELD_COUNT,
     GEOMETRY_NORMALIZATION_NONE, GEOMETRY_PAYLOAD_DENSE, GEOMETRY_PAYLOAD_SPARSE,
-    GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32, GEOMETRY_SCALAR_I32, GEOMETRY_SCALAR_U32,
-    GEOMETRY_SEMANTIC_COLOR, GEOMETRY_SEMANTIC_CUSTOM, GEOMETRY_SEMANTIC_NORMAL,
-    GEOMETRY_SEMANTIC_POSITION, GEOMETRY_SEMANTIC_SMOOTHING_GROUP, GEOMETRY_SEMANTIC_TANGENT,
-    GEOMETRY_SEMANTIC_TEXCOORD, GEOMETRY_TOPOLOGY_LINE_LIST, GEOMETRY_TOPOLOGY_LINE_LOOP,
-    GEOMETRY_TOPOLOGY_LINE_STRIP, GEOMETRY_TOPOLOGY_POINTS, GEOMETRY_TOPOLOGY_POLYGONS,
-    GEOMETRY_TOPOLOGY_TRIANGLE_FAN, GEOMETRY_TOPOLOGY_TRIANGLE_LIST,
+    GEOMETRY_PRIMITIVE_FIELD_COUNT, GEOMETRY_SCALAR_F32, GEOMETRY_SCALAR_F64, GEOMETRY_SCALAR_I32,
+    GEOMETRY_SCALAR_U32, GEOMETRY_SEMANTIC_COLOR, GEOMETRY_SEMANTIC_CUSTOM,
+    GEOMETRY_SEMANTIC_NORMAL, GEOMETRY_SEMANTIC_POSITION, GEOMETRY_SEMANTIC_SMOOTHING_GROUP,
+    GEOMETRY_SEMANTIC_TANGENT, GEOMETRY_SEMANTIC_TEXCOORD, GEOMETRY_TOPOLOGY_LINE_LIST,
+    GEOMETRY_TOPOLOGY_LINE_LOOP, GEOMETRY_TOPOLOGY_LINE_STRIP, GEOMETRY_TOPOLOGY_POINTS,
+    GEOMETRY_TOPOLOGY_POLYGONS, GEOMETRY_TOPOLOGY_TRIANGLE_FAN, GEOMETRY_TOPOLOGY_TRIANGLE_LIST,
     GEOMETRY_TOPOLOGY_TRIANGLE_STRIP, GeometryAttributeSemanticNameSchema, GeometryF32ValuesSchema,
-    GeometryI32ValuesSchema, GeometryLogicalMeshNameSchema, GeometryPolygonBoundariesSchema,
-    GeometryPrimitiveIndicesSchema, GeometrySparseF32DefaultsSchema,
-    GeometrySparseI32DefaultsSchema, GeometrySparseIndicesSchema, GeometrySparseU32DefaultsSchema,
-    GeometryU32ValuesSchema, geometry_attribute_field, geometry_logical_mesh_field,
-    geometry_mesh_instance_field, geometry_primitive_field,
+    GeometryF64ValuesSchema, GeometryI32ValuesSchema, GeometryLogicalMeshNameSchema,
+    GeometryPolygonBoundariesSchema, GeometryPrimitiveIndicesSchema,
+    GeometrySparseF32DefaultsSchema, GeometrySparseI32DefaultsSchema, GeometrySparseIndicesSchema,
+    GeometrySparseU32DefaultsSchema, GeometryU32ValuesSchema, geometry_attribute_field,
+    geometry_logical_mesh_field, geometry_mesh_instance_field, geometry_primitive_field,
 };
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, PRESENCE_ABSENT, PRESENCE_PRESENT, SceneDirectorySchema,
@@ -30,10 +30,12 @@ use crate::geometry::TopologyKind;
 
 use super::{NodeSceneSemanticResult, invariant, read_scalar, read_u32_as_usize};
 
+mod read;
+
 type SceneCanonicalStore = PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>;
 
 /// The four proof-bound geometry table projections retained by the one Scene.
-pub(super) struct NodeSceneGeometryTables<'scene> {
+pub(in crate::canonical_scene::store) struct NodeSceneGeometryTables<'scene> {
     canonical: &'scene SceneCanonicalStore,
     logical_meshes: Option<CanonicalRecordView<'scene>>,
     primitives: Option<CanonicalRecordView<'scene>>,
@@ -44,7 +46,7 @@ pub(super) struct NodeSceneGeometryTables<'scene> {
 }
 
 impl<'scene> NodeSceneGeometryTables<'scene> {
-    pub(super) fn try_new(
+    pub(in crate::canonical_scene::store) fn try_new(
         canonical: &'scene SceneCanonicalStore,
         proof: NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
@@ -898,6 +900,7 @@ pub(in crate::canonical_scene::store) enum NodeSceneGeometryAttributeSemantic<'s
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) enum NodeSceneGeometryScalarKind {
     F32,
+    F64,
     U32,
     I32,
 }
@@ -991,6 +994,9 @@ pub(in crate::canonical_scene::store) enum NodeSceneGeometryAttributePayload<'sc
     DenseF32 {
         values: NodeSceneGeometryF32Cursor<'scene>,
     },
+    DenseF64 {
+        values: NodeSceneGeometryLeafCursor<'scene, f64>,
+    },
     DenseU32 {
         values: NodeSceneGeometryU32Cursor<'scene>,
     },
@@ -1057,6 +1063,10 @@ impl<'scene, T: StoredScalar> NodeSceneGeometryLeafCursor<'scene, T> {
 
     pub(in crate::canonical_scene::store) const fn declared_count(&self) -> usize {
         self.values.len()
+    }
+
+    pub(in crate::canonical_scene::store) const fn into_slice(self) -> &'scene [T] {
+        self.values
     }
 
     pub(in crate::canonical_scene::store) fn next(&mut self) -> NodeSceneSemanticResult<Option<T>> {
@@ -1156,6 +1166,31 @@ fn read_attribute_payload<'scene>(
                 "validated dense attribute retains a sparse default",
             )?;
             Ok(NodeSceneGeometryAttributePayload::DenseF32 { values })
+        }
+        (NodeSceneGeometryScalarKind::F64, NodeSceneGeometryPayloadKind::Dense) => {
+            let values = resolve_leaf::<f64, GeometryF64ValuesSchema>(
+                canonical,
+                table,
+                row,
+                geometry_attribute_field::VALUES,
+                value_count,
+                "validated dense f64 values are unavailable or mistyped",
+            )?;
+            require_absent_cell(
+                table,
+                row,
+                geometry_attribute_field::SPARSE_INDICES,
+                "validated dense attribute retains sparse indices",
+            )?;
+            require_absent_cell(
+                table,
+                row,
+                geometry_attribute_field::SPARSE_DEFAULT,
+                "validated dense attribute retains a sparse default",
+            )?;
+            Ok(NodeSceneGeometryAttributePayload::DenseF64 {
+                values: NodeSceneGeometryLeafCursor::new(values),
+            })
         }
         (NodeSceneGeometryScalarKind::U32, NodeSceneGeometryPayloadKind::Dense) => {
             let values = read_u32_leaf::<GeometryU32ValuesSchema>(
@@ -1296,6 +1331,9 @@ fn read_attribute_payload<'scene>(
                 default,
             })
         }
+        (NodeSceneGeometryScalarKind::F64, NodeSceneGeometryPayloadKind::Sparse) => Err(invariant(
+            "validated f64 attribute has an unsupported sparse payload",
+        )),
     }
 }
 
@@ -1655,6 +1693,7 @@ fn decode_domain(value: u8) -> NodeSceneSemanticResult<AttributeDomain> {
 fn decode_scalar_kind(value: u8) -> NodeSceneSemanticResult<NodeSceneGeometryScalarKind> {
     match value {
         GEOMETRY_SCALAR_F32 => Ok(NodeSceneGeometryScalarKind::F32),
+        GEOMETRY_SCALAR_F64 => Ok(NodeSceneGeometryScalarKind::F64),
         GEOMETRY_SCALAR_U32 => Ok(NodeSceneGeometryScalarKind::U32),
         GEOMETRY_SCALAR_I32 => Ok(NodeSceneGeometryScalarKind::I32),
         _ => Err(invariant("validated attribute scalar-kind code is unknown")),

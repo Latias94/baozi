@@ -27,6 +27,7 @@ const LOGICAL_U8_BYTES: u64 = 1;
 const LOGICAL_U32_BYTES: u64 = 4;
 const LOGICAL_U64_BYTES: u64 = 8;
 const LOGICAL_F32_BYTES: u64 = 4;
+const LOGICAL_F64_BYTES: u64 = 8;
 const LOGICAL_I32_BYTES: u64 = 4;
 const LOGICAL_REFERENCE_BYTES: u64 = 4;
 
@@ -137,7 +138,7 @@ pub(in crate::canonical_scene::store) enum GeometryAuthoringSemanticError {
     AttributeScalarShape { attribute: usize, lanes: u8 },
     #[error("attribute {attribute} uses unsupported built-in domain or scalar format")]
     AttributeSchema { attribute: usize },
-    #[error("attribute {attribute} has non-finite f32 source value at scalar {scalar}")]
+    #[error("attribute {attribute} has non-finite floating-point source value at scalar {scalar}")]
     NonFiniteAttributeValue { attribute: usize, scalar: usize },
     #[error("attribute {attribute} source projection is valid only for the Corner domain")]
     SourceProjectionDomain { attribute: usize },
@@ -274,6 +275,7 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) enum GeometryAttributeScalarKind {
     F32,
+    F64,
     U32,
     I32,
 }
@@ -497,6 +499,7 @@ impl<'input> ValidatedGeometryAttributeView<'_, 'input> {
     pub(in crate::canonical_scene::store) const fn lanes(&self) -> u8 {
         match self.input.payload() {
             GeometryAttributePayloadAuthoring::DenseF32 { lanes, .. }
+            | GeometryAttributePayloadAuthoring::DenseF64 { lanes, .. }
             | GeometryAttributePayloadAuthoring::DenseU32 { lanes, .. }
             | GeometryAttributePayloadAuthoring::DenseI32 { lanes, .. }
             | GeometryAttributePayloadAuthoring::SparseF32 { lanes, .. }
@@ -520,6 +523,7 @@ struct GeometryValidationStorage<R> {
     mesh_instance_count: u32,
     attribute_count: u32,
     f32_scalar_count: u64,
+    f64_scalar_count: u64,
     u32_scalar_count: u64,
     i32_scalar_count: u64,
     payload_block_count: u32,
@@ -578,6 +582,10 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
 
     pub(in crate::canonical_scene::store) const fn f32_scalar_count(&self) -> u64 {
         self.compiled.f32_scalar_count
+    }
+
+    pub(in crate::canonical_scene::store) const fn f64_scalar_count(&self) -> u64 {
+        self.compiled.f64_scalar_count
     }
 
     pub(in crate::canonical_scene::store) const fn u32_scalar_count(&self) -> u64 {
@@ -696,6 +704,7 @@ impl<R> fmt::Debug for ValidatedGeometryBatch<'_, R> {
             .field("mesh_instance_count", &self.compiled.mesh_instance_count)
             .field("attribute_count", &self.compiled.attribute_count)
             .field("f32_scalar_count", &self.compiled.f32_scalar_count)
+            .field("f64_scalar_count", &self.compiled.f64_scalar_count)
             .field("u32_scalar_count", &self.compiled.u32_scalar_count)
             .field("i32_scalar_count", &self.compiled.i32_scalar_count)
             .field("payload_block_count", &self.compiled.payload_block_count)
@@ -744,6 +753,7 @@ struct GeometryValidationContext<'control, C: CanonicalAuthoringControl> {
     references: u64,
     semantic_cells: u64,
     f32_scalars: u64,
+    f64_scalars: u64,
     u32_scalars: u64,
     i32_scalars: u64,
     payload_blocks: u32,
@@ -761,6 +771,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
             references: 0,
             semantic_cells: 0,
             f32_scalars: 0,
+            f64_scalars: 0,
             u32_scalars: 0,
             i32_scalars: 0,
             payload_blocks: 0,
@@ -853,12 +864,14 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
     fn add_payload(
         &mut self,
         f32_scalars: u64,
+        f64_scalars: u64,
         u32_scalars: u64,
         i32_scalars: u64,
         payload_blocks: u32,
     ) -> GeometryValidationResult<(), C> {
         let added_cells = f32_scalars
-            .checked_add(u32_scalars)
+            .checked_add(f64_scalars)
+            .and_then(|count| count.checked_add(u32_scalars))
             .and_then(|count| count.checked_add(i32_scalars))
             .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
                 dimension: "semantic cells",
@@ -871,6 +884,11 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         let final_f32 = self.f32_scalars.checked_add(f32_scalars).ok_or(
             GeometryAuthoringSemanticError::AccountingOverflow {
                 dimension: "f32 scalar count",
+            },
+        )?;
+        let final_f64 = self.f64_scalars.checked_add(f64_scalars).ok_or(
+            GeometryAuthoringSemanticError::AccountingOverflow {
+                dimension: "f64 scalar count",
             },
         )?;
         let final_u32 = self.u32_scalars.checked_add(u32_scalars).ok_or(
@@ -894,6 +912,11 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
                     f32_scalars,
                     LOGICAL_F32_BYTES,
                     "canonical f32 scalar payload",
+                )?,
+                checked_bytes(
+                    f64_scalars,
+                    LOGICAL_F64_BYTES,
+                    "canonical f64 scalar payload",
                 )?,
                 checked_bytes(
                     u32_scalars,
@@ -926,6 +949,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
 
         self.semantic_cells = final_cells;
         self.f32_scalars = final_f32;
+        self.f64_scalars = final_f64;
         self.u32_scalars = final_u32;
         self.i32_scalars = final_i32;
         self.payload_blocks = final_blocks;
@@ -1330,6 +1354,7 @@ where
         mesh_instance_count,
         attribute_count,
         f32_scalar_count: context.f32_scalars,
+        f64_scalar_count: context.f64_scalars,
         u32_scalar_count: context.u32_scalars,
         i32_scalar_count: context.i32_scalars,
         payload_block_count: context.payload_blocks,
@@ -1538,7 +1563,13 @@ where
         Presence::Absent => Ok((vertex_count, 0)),
         Presence::Present(indices) => {
             let index_count = collection_count(indices.len(), "primitive indices")?;
-            context.add_payload(0, u64::from(index_count), 0, block_for_len(indices.len()))?;
+            context.add_payload(
+                0,
+                0,
+                u64::from(index_count),
+                0,
+                block_for_len(indices.len()),
+            )?;
             for (corner, &index) in indices.iter().enumerate() {
                 context.run_unit(SceneValidationWork::PayloadCell, || {
                     if index >= vertex_count {
@@ -1621,7 +1652,13 @@ where
         }
         GeometryTopologyAuthoring::Polygons(boundaries) => {
             let face_count = collection_count(boundaries.len(), "polygon faces")?;
-            context.add_payload(0, u64::from(face_count), 0, block_for_len(boundaries.len()))?;
+            context.add_payload(
+                0,
+                0,
+                u64::from(face_count),
+                0,
+                block_for_len(boundaries.len()),
+            )?;
             let mut boundary_corners = 0_u32;
             for (face, &face_corner_count) in boundaries.iter().enumerate() {
                 boundary_corners = context.run_unit(SceneValidationWork::PayloadCell, || {
@@ -1753,7 +1790,7 @@ where
             )?;
             let canonical_scalar_count = checked_scalar_count(element_count, lanes)?;
             let payload_block_count = block_for_u64(canonical_scalar_count);
-            context.add_payload(canonical_scalar_count, 0, 0, payload_block_count)?;
+            context.add_payload(canonical_scalar_count, 0, 0, 0, payload_block_count)?;
 
             inspect_f32_values(attribute_index, source_values, context)?;
             if let Some(indices) = projection {
@@ -1786,6 +1823,42 @@ where
                 semantic_name_count,
             })
         }
+        GeometryAttributePayloadAuthoring::DenseF64 { lanes, values } => {
+            let element_count = scalar_element_count(
+                attribute_index,
+                lanes,
+                values.len(),
+                "f64 attribute elements",
+            )?;
+            validate_attribute_schema(
+                attribute_index,
+                attribute,
+                GeometryAttributeScalarKind::F64,
+                lanes,
+            )?;
+            check_attribute_cardinality(
+                attribute_index,
+                attribute.domain(),
+                element_count,
+                expected_cardinality,
+            )?;
+            let canonical_scalar_count = usize_to_u64(values.len(), "f64 attribute scalars")?;
+            let payload_block_count = block_for_len(values.len());
+            context.add_payload(0, canonical_scalar_count, 0, 0, payload_block_count)?;
+            inspect_f64_values(attribute_index, values, context)?;
+            Ok(ValidatedGeometryAttribute {
+                input_index: attribute_index,
+                scalar_kind: GeometryAttributeScalarKind::F64,
+                payload_kind: GeometryAttributePayloadKind::Dense,
+                source_element_count: element_count,
+                element_count,
+                explicit_element_count: element_count,
+                canonical_scalar_count,
+                payload_block_count,
+                semantic_name_offset,
+                semantic_name_count,
+            })
+        }
         GeometryAttributePayloadAuthoring::DenseU32 { lanes, values } => {
             let element_count = scalar_element_count(
                 attribute_index,
@@ -1807,7 +1880,7 @@ where
             )?;
             let canonical_scalar_count = usize_to_u64(values.len(), "u32 attribute scalars")?;
             let payload_block_count = block_for_len(values.len());
-            context.add_payload(0, canonical_scalar_count, 0, payload_block_count)?;
+            context.add_payload(0, 0, canonical_scalar_count, 0, payload_block_count)?;
             inspect_u32_values(values, context)?;
             Ok(ValidatedGeometryAttribute {
                 input_index: attribute_index,
@@ -1843,7 +1916,7 @@ where
             )?;
             let canonical_scalar_count = usize_to_u64(values.len(), "i32 attribute scalars")?;
             let payload_block_count = block_for_len(values.len());
-            context.add_payload(0, 0, canonical_scalar_count, payload_block_count)?;
+            context.add_payload(0, 0, 0, canonical_scalar_count, payload_block_count)?;
             inspect_i32_values(values, context)?;
             Ok(ValidatedGeometryAttribute {
                 input_index: attribute_index,
@@ -2039,6 +2112,7 @@ where
         GeometryAttributeScalarKind::F32 => {
             context.add_payload(
                 canonical_scalar_count,
+                0,
                 index_scalar_count,
                 0,
                 payload_block_count,
@@ -2050,15 +2124,22 @@ where
                 .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
                     dimension: "u32 scalar count",
                 })?;
-            context.add_payload(0, u32_scalars, 0, payload_block_count)?;
+            context.add_payload(0, 0, u32_scalars, 0, payload_block_count)?;
         }
         GeometryAttributeScalarKind::I32 => {
             context.add_payload(
+                0,
                 0,
                 index_scalar_count,
                 canonical_scalar_count,
                 payload_block_count,
             )?;
+        }
+        GeometryAttributeScalarKind::F64 => {
+            return Err(GeometryAuthoringSemanticError::AttributeSchema {
+                attribute: attribute_index,
+            }
+            .into());
         }
     }
 
@@ -2121,6 +2202,12 @@ fn attribute_element_count(
                 }
             }
         }
+        GeometryAttributePayloadAuthoring::DenseF64 { lanes, values } => scalar_element_count(
+            attribute_index,
+            lanes,
+            values.len(),
+            "f64 attribute elements",
+        ),
         GeometryAttributePayloadAuthoring::DenseU32 { lanes, values } => scalar_element_count(
             attribute_index,
             lanes,
@@ -2169,6 +2256,20 @@ fn validate_attribute_authored_shape(
                 }
                 collection_count(indices.len(), "attribute source projection elements")?;
             }
+        }
+        GeometryAttributePayloadAuthoring::DenseF64 { lanes, values } => {
+            scalar_element_count(
+                attribute_index,
+                lanes,
+                values.len(),
+                "f64 attribute elements",
+            )?;
+            validate_attribute_schema(
+                attribute_index,
+                attribute,
+                GeometryAttributeScalarKind::F64,
+                lanes,
+            )?;
         }
         GeometryAttributePayloadAuthoring::DenseU32 { lanes, values } => {
             scalar_element_count(
@@ -2385,6 +2486,7 @@ fn validate_attribute_schema(
             matches!(
                 scalar_kind,
                 GeometryAttributeScalarKind::F32
+                    | GeometryAttributeScalarKind::F64
                     | GeometryAttributeScalarKind::U32
                     | GeometryAttributeScalarKind::I32
             ) && (1..=16).contains(&lanes)
@@ -2433,6 +2535,29 @@ where
                 });
             }
             Ok(())
+        })??;
+    }
+    Ok(())
+}
+
+fn inspect_f64_values<C>(
+    attribute_index: usize,
+    values: &[f64],
+    context: &mut GeometryValidationContext<'_, C>,
+) -> GeometryValidationResult<(), C>
+where
+    C: CanonicalAuthoringControl,
+{
+    for (scalar, value) in values.iter().enumerate() {
+        context.run_unit(SceneValidationWork::PayloadCell, || {
+            if value.is_finite() {
+                Ok(())
+            } else {
+                Err(GeometryAuthoringSemanticError::NonFiniteAttributeValue {
+                    attribute: attribute_index,
+                    scalar,
+                })
+            }
         })??;
     }
     Ok(())
@@ -2582,6 +2707,9 @@ where
                     false,
                     false,
                 ),
+                GeometryAttributePayloadAuthoring::DenseF64 { values, .. } => {
+                    (!values.is_empty(), false, false)
+                }
                 GeometryAttributePayloadAuthoring::DenseU32 { values, .. } => {
                     (!values.is_empty(), false, false)
                 }

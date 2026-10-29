@@ -779,6 +779,7 @@ fn direct_inherited_leaf_count(input: &ValidatedNodeScene) -> usize {
         proof.deformation_morph_sparse_indices().is_some(),
         proof.deformation_instance_morph_weights().is_some(),
         proof.animation_times().is_some(),
+        proof.animation_clip_names().is_some(),
         proof.animation_values().is_some(),
         proof.animation_in_tangents().is_some(),
         proof.animation_out_tangents().is_some(),
