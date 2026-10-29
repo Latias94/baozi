@@ -1,10 +1,13 @@
 use super::account::{AccountPoisonReason, AdmissionCharge};
+#[cfg(test)]
 use super::allocation::{
-    AccountPoisonEventWitness, FinalOwnerReleaseOutcome, PolicyRetainedAllocation,
-    RetainedAllocation, RetainedAllocationError, RetainedAllocationPlan, RetainedBuildFailureCode,
-    RetainedFinalOwnerInner, RetainedLease, RetainedMembership, RetainedMembershipDestination,
-    RetainedPayload, RetainedReleaseMode, RetainedSetId, RetainedValuePolicy,
-    RetainedValueReleaseOutcome, observe_retained_payload_drop_failure,
+    AccountPoisonEventWitness, RetainedLease, observe_retained_payload_drop_failure,
+};
+use super::allocation::{
+    FinalOwnerReleaseOutcome, PolicyRetainedAllocation, RetainedAllocation,
+    RetainedAllocationError, RetainedAllocationPlan, RetainedBuildFailureCode,
+    RetainedFinalOwnerInner, RetainedMembership, RetainedMembershipDestination, RetainedPayload,
+    RetainedReleaseMode, RetainedSetId, RetainedValuePolicy, RetainedValueReleaseOutcome,
 };
 use super::final_owner::{FinalOwnerAllocation, unreachable_final_owner_state};
 use super::ownership::{
@@ -53,6 +56,7 @@ impl<Block>
     }
 }
 
+#[cfg(test)]
 fn observe_retained_table_pre_forget<Block>(
     payload: &RetainedPayload<RetainedBlockTable<Block>>,
     lease: &RetainedLease,
@@ -70,6 +74,7 @@ fn observe_retained_table_pre_forget<Block>(
 impl<Block> RetainedValuePolicy<RetainedPayload<RetainedBlockTable<Block>>>
     for TableRetainedPolicy
 {
+    #[cfg(test)]
     fn observe_pre_forget(
         payload: &RetainedPayload<RetainedBlockTable<Block>>,
         lease: &RetainedLease,
@@ -177,9 +182,11 @@ impl RetainedSlotIdentity {
 ///
 /// A slot is valid only for the retained set that issued it. Sharing the same physical block into a
 /// later generation issues a fresh slot; the old slot is rejected by the new aggregate.
+/// The invariant type brand carries the schema tag; dynamic lookup still checks the actual member.
 #[must_use = "a retained slot is required to reference and validate its block"]
 pub(crate) struct CanonicalRetainedSlot<Block, Tag> {
-    pub(super) identity: RetainedSlotIdentity,
+    pub(super) set_id: RetainedSetId,
+    pub(super) index: usize,
     pub(super) marker: InvariantRetainedBrand<Block, Tag>,
 }
 
@@ -193,7 +200,7 @@ impl<Block, Tag> Clone for CanonicalRetainedSlot<Block, Tag> {
 
 impl<Block, Tag> PartialEq for CanonicalRetainedSlot<Block, Tag> {
     fn eq(&self, other: &Self) -> bool {
-        self.identity == other.identity
+        self.set_id == other.set_id && self.index == other.index
     }
 }
 
@@ -205,26 +212,37 @@ impl<Block, Tag> fmt::Debug for CanonicalRetainedSlot<Block, Tag> {
     }
 }
 
-impl<Block, Tag> CanonicalRetainedSlot<Block, Tag> {
-    pub(crate) const fn from_identity(identity: RetainedSlotIdentity) -> Self {
+impl<Block, Tag: 'static> CanonicalRetainedSlot<Block, Tag> {
+    pub(crate) fn from_identity(identity: RetainedSlotIdentity) -> Self {
+        assert!(
+            identity.matches_tag::<Tag>(),
+            "canonical retained slot identity must match its schema tag"
+        );
         Self {
-            identity,
+            set_id: identity.set_id,
+            index: identity.index,
             marker: PhantomData,
         }
     }
 
-    pub(crate) const fn identity(self) -> RetainedSlotIdentity {
-        self.identity
+    pub(crate) fn identity(self) -> RetainedSlotIdentity {
+        RetainedSlotIdentity {
+            set_id: self.set_id,
+            index: self.index,
+            tag: TypeId::of::<Tag>(),
+        }
     }
 }
 
 /// Non-owning projection to one outcome-evidence block in a branded retained publication.
 ///
 /// Like a canonical slot, this identity is set-local and cannot be retagged or persisted as a
-/// cross-generation identity.
+/// cross-generation identity. Its invariant type brand carries the schema tag; dynamic lookup
+/// still checks the actual member.
 #[must_use = "a retained slot is required to reference and validate its block"]
 pub(crate) struct OutcomeEvidenceRetainedSlot<Block, Tag> {
-    pub(super) identity: RetainedSlotIdentity,
+    pub(super) set_id: RetainedSetId,
+    pub(super) index: usize,
     pub(super) marker: InvariantRetainedBrand<Block, Tag>,
 }
 
@@ -238,7 +256,7 @@ impl<Block, Tag> Clone for OutcomeEvidenceRetainedSlot<Block, Tag> {
 
 impl<Block, Tag> PartialEq for OutcomeEvidenceRetainedSlot<Block, Tag> {
     fn eq(&self, other: &Self) -> bool {
-        self.identity == other.identity
+        self.set_id == other.set_id && self.index == other.index
     }
 }
 
@@ -250,16 +268,25 @@ impl<Block, Tag> fmt::Debug for OutcomeEvidenceRetainedSlot<Block, Tag> {
     }
 }
 
-impl<Block, Tag> OutcomeEvidenceRetainedSlot<Block, Tag> {
-    pub(crate) const fn from_identity(identity: RetainedSlotIdentity) -> Self {
+impl<Block, Tag: 'static> OutcomeEvidenceRetainedSlot<Block, Tag> {
+    pub(crate) fn from_identity(identity: RetainedSlotIdentity) -> Self {
+        assert!(
+            identity.matches_tag::<Tag>(),
+            "outcome-evidence retained slot identity must match its schema tag"
+        );
         Self {
-            identity,
+            set_id: identity.set_id,
+            index: identity.index,
             marker: PhantomData,
         }
     }
 
-    pub(crate) const fn identity(self) -> RetainedSlotIdentity {
-        self.identity
+    pub(crate) fn identity(self) -> RetainedSlotIdentity {
+        RetainedSlotIdentity {
+            set_id: self.set_id,
+            index: self.index,
+            tag: TypeId::of::<Tag>(),
+        }
     }
 }
 
@@ -1690,15 +1717,16 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        if slot.identity.set_id != self.set_id || slot.identity.tag != TypeId::of::<Tag>() {
+        let identity = slot.identity();
+        if identity.set_id != self.set_id {
             self.valid = false;
             return None;
         }
-        let Some(member) = self.canonical.members.get(slot.identity.index) else {
+        let Some(member) = self.canonical.members.get(identity.index) else {
             self.valid = false;
             return None;
         };
-        if member.tag != slot.identity.tag {
+        if member.tag != identity.tag {
             self.valid = false;
             return None;
         }
@@ -1712,15 +1740,16 @@ impl<'a, CanonicalBlock, EvidenceBlock> RetainedClosureSession<'a, CanonicalBloc
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        if slot.identity.set_id != self.set_id || slot.identity.tag != TypeId::of::<Tag>() {
+        let identity = slot.identity();
+        if identity.set_id != self.set_id {
             self.valid = false;
             return None;
         }
-        let Some(member) = self.evidence.members.get(slot.identity.index) else {
+        let Some(member) = self.evidence.members.get(identity.index) else {
             self.valid = false;
             return None;
         };
-        if member.tag != slot.identity.tag {
+        if member.tag != identity.tag {
             self.valid = false;
             return None;
         }
@@ -1949,15 +1978,16 @@ impl<'a, EvidenceBlock> RetainedEvidenceClosureSession<'a, EvidenceBlock> {
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        if slot.identity.set_id != self.set_id || slot.identity.tag != TypeId::of::<Tag>() {
+        let identity = slot.identity();
+        if identity.set_id != self.set_id {
             self.valid = false;
             return None;
         }
-        let Some(member) = self.evidence.members.get(slot.identity.index) else {
+        let Some(member) = self.evidence.members.get(identity.index) else {
             self.valid = false;
             return None;
         };
-        if member.tag != slot.identity.tag {
+        if member.tag != identity.tag {
             self.valid = false;
             return None;
         }
@@ -2085,10 +2115,7 @@ impl<Block> PublishedCanonicalAggregate<Block> {
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        if slot.identity.tag != TypeId::of::<Tag>() {
-            return None;
-        }
-        self.inner.member(slot.identity)
+        self.inner.member(slot.identity())
     }
 
     pub(crate) fn lookup_member<Tag>(
@@ -2099,7 +2126,7 @@ impl<Block> PublishedCanonicalAggregate<Block> {
         Tag: Copy + Send + Sync + 'static,
     {
         self.inner
-            .lookup_member::<Tag>(slot.identity, RetainedMembershipDestination::Canonical)
+            .lookup_member::<Tag>(slot.identity(), RetainedMembershipDestination::Canonical)
     }
 
     pub(crate) fn belongs_to(&self, account: &PhysicalStorageAccount) -> bool {
@@ -2272,10 +2299,7 @@ impl<Block> PublishedOutcomeEvidenceAggregate<Block> {
     where
         Tag: Copy + Send + Sync + 'static,
     {
-        if slot.identity.tag != TypeId::of::<Tag>() {
-            return None;
-        }
-        self.inner.member(slot.identity)
+        self.inner.member(slot.identity())
     }
 
     pub(crate) fn lookup_member<Tag>(
@@ -2286,7 +2310,7 @@ impl<Block> PublishedOutcomeEvidenceAggregate<Block> {
         Tag: Copy + Send + Sync + 'static,
     {
         self.inner.lookup_member::<Tag>(
-            slot.identity,
+            slot.identity(),
             RetainedMembershipDestination::OutcomeEvidence,
         )
     }

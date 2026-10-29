@@ -1,20 +1,21 @@
+#[cfg(test)]
+use super::RetainedSlotIdentity;
 use super::account::AdmissionCharge;
 use super::allocation::RetainedAllocationPlan;
 use super::block_table::{
-    BlockEmplacer, BlockPlacement, CompletedCanonicalRetainBatch, InvariantRetainedBrand,
-    QualifiedCanonicalRetainBatch, RetainedTableAllocation, try_qualify_canonical_retain_batch,
+    BlockEmplacer, BlockPlacement, CompletedCanonicalRetainBatch, QualifiedCanonicalRetainBatch,
+    RetainedTableAllocation, try_qualify_canonical_retain_batch,
 };
 use super::{
     CanonicalRetainedSlot, PhysicalStorageAccount, RetainedAllocationError, RetainedBlockTablePlan,
     RetainedBuildFailureCode, RetainedHandleSharePlan, RetainedPublicationError, RetainedSetId,
-    RetainedSlotIdentity, RetainedWriterError,
+    RetainedWriterError,
 };
 use crate::OperationOwner;
 use crate::ledger::{AttributionReservationBatch, CanonicalOutput, Ledger};
 #[cfg(test)]
 use std::any::TypeId;
 use std::fmt;
-use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
@@ -202,9 +203,8 @@ where
 /// Construction stays inside the retained publication rail. The range carries no table,
 /// allocation, mutation, retagging, or ownership authority.
 pub(crate) struct CanonicalRetainedRange<Block, Tag> {
-    first: RetainedSlotIdentity,
+    first: CanonicalRetainedSlot<Block, Tag>,
     len: NonZeroUsize,
-    marker: InvariantRetainedBrand<Block, Tag>,
 }
 
 impl<Block, Tag: 'static> CanonicalRetainedRange<Block, Tag> {
@@ -213,9 +213,8 @@ impl<Block, Tag: 'static> CanonicalRetainedRange<Block, Tag> {
     ) -> Self {
         let (first, len) = completed.into_parts();
         Self {
-            first,
+            first: CanonicalRetainedSlot::from_identity(first),
             len,
-            marker: PhantomData,
         }
     }
 
@@ -228,9 +227,8 @@ impl<Block, Tag: 'static> CanonicalRetainedRange<Block, Tag> {
         let last_offset = len.get().checked_sub(1)?;
         first.index.checked_add(last_offset)?;
         Some(Self {
-            first,
+            first: CanonicalRetainedSlot::from_identity(first),
             len,
-            marker: PhantomData,
         })
     }
 
@@ -246,12 +244,9 @@ impl<Block, Tag: 'static> CanonicalRetainedRange<Block, Tag> {
         if index >= self.len.get() {
             return None;
         }
-        let member_index = self.first.index.checked_add(index)?;
-        Some(CanonicalRetainedSlot::from_identity(RetainedSlotIdentity {
-            set_id: self.first.set_id,
-            index: member_index,
-            tag: self.first.tag,
-        }))
+        let mut slot = self.first;
+        slot.index = slot.index.checked_add(index)?;
+        Some(slot)
     }
 }
 
@@ -318,8 +313,14 @@ mod tests {
             CanonicalRetainedRange::<Block, ExpectedTag>::from_identity_for_test(expected, 3)
                 .expect("qualified test range");
         assert_eq!(range.len(), 3);
-        assert_eq!(range.get(0).map(|slot| slot.identity().index), Some(4));
-        assert_eq!(range.get(2).map(|slot| slot.identity().index), Some(6));
+        assert_eq!(range.get(0).map(|slot| slot.identity()), Some(expected));
+        assert_eq!(
+            range.get(2).map(|slot| slot.identity()),
+            Some(RetainedSlotIdentity {
+                index: 6,
+                ..expected
+            })
+        );
         assert!(range.get(3).is_none());
     }
 }

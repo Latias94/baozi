@@ -93,6 +93,12 @@ Scene. Central validation is non-bypassable and uses the materialized canonical 
 description's exact evidence. Generation reservation occurs only after validation succeeds and
 before the infallible public handoff.
 
+Construction must work on the caller's normal platform stack in debug and release builds. Large
+execution plans belong in fallible, metered preflight storage and are borrowed by materialization;
+they must not be copied through each activation wrapper. This storage is released before its live
+reservation and before the operation verifies that scoped planning work has ended. No terminal
+transition needs to allocate a replacement plan or require a larger host stack.
+
 ### Descriptor and Owner Separation
 
 `SceneDraft` is a non-owning, non-cloneable descriptor paired with exactly one pending construction

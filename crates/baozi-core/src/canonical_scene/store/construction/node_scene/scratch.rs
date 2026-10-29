@@ -56,12 +56,12 @@ impl NodeSceneCentralValidationPlan {
     }
 
     pub(in crate::canonical_scene::store) const fn scratch_plan(
-        self,
+        &self,
     ) -> NodeSceneValidationScratchPlan {
         self.scratch
     }
 
-    pub(in crate::canonical_scene::store) const fn work(self) -> NonZeroU64 {
+    pub(in crate::canonical_scene::store) const fn work(&self) -> NonZeroU64 {
         self.work
     }
 
@@ -105,54 +105,54 @@ impl NodeSceneCentralValidationPlan {
 /// Exact validation-scratch capacity and initialization work derived from one sealed Scene plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
-    node_transform_kinds: CapacityPlan,
-    node_names: CapacityPlan,
-    camera_placement_counts: CapacityPlan,
-    light_placement_counts: CapacityPlan,
-    appearance_image_media_counts: CapacityPlan,
-    appearance_bindings: CapacityPlan,
-    appearance_materials: CapacityPlan,
-    geometry_attributes: CapacityPlan,
-    geometry_primitives: CapacityPlan,
-    geometry_logical_meshes: CapacityPlan,
-    geometry_primitive_projections: CapacityPlan,
-    geometry_mesh_instances: CapacityPlan,
-    deformation_skins: CapacityPlan,
-    deformation_morph_definitions: CapacityPlan,
-    deformation_logical_morphs: CapacityPlan,
-    deformation_morph_deltas: CapacityPlan,
-    deformation_morph_targets: CapacityPlan,
-    deformation_primitives: CapacityPlan,
-    deformation_mesh_instances: CapacityPlan,
-    deformation_influence_row_offsets: CapacityPlan,
-    deformation_influence_joints: CapacityPlan,
-    deformation_influence_source_orders: CapacityPlan,
-    deformation_palette_maxima: CapacityPlan,
-    deformation_uniqueness_marks: CapacityPlan,
-    animation_clip_descriptors: CapacityPlan,
-    animation_channel_descriptors: CapacityPlan,
-    animation_target_marks: CapacityPlan,
-    profile_segments: CapacityPlan,
-    profile_resources: CapacityPlan,
-    profile_sources: CapacityPlan,
-    profile_provenance: CapacityPlan,
-    profile_operations: CapacityPlan,
-    profile_evidence: CapacityPlan,
-    profile_parents: CapacityPlan,
-    profile_wide: CapacityPlan,
-    profile_lineage_text: CapacityPlan,
-    profile_lineage_digests: CapacityPlan,
-    profile_provenance_depths: CapacityPlan,
-    profile_owner_rows: CapacityPlan,
-    profile_attachments: CapacityPlan,
-    profile_metadata_rows: CapacityPlan,
-    profile_metadata_text: CapacityPlan,
-    profile_metadata_bytes: CapacityPlan,
-    profile_metadata_bools: CapacityPlan,
-    profile_metadata_i64s: CapacityPlan,
-    profile_metadata_u64s: CapacityPlan,
-    profile_metadata_f64s: CapacityPlan,
-    profile_metadata_f32s: CapacityPlan,
+    node_transform_kinds: ScratchCapacityPlan,
+    node_names: ScratchCapacityPlan,
+    camera_placement_counts: ScratchCapacityPlan,
+    light_placement_counts: ScratchCapacityPlan,
+    appearance_image_media_counts: ScratchCapacityPlan,
+    appearance_bindings: ScratchCapacityPlan,
+    appearance_materials: ScratchCapacityPlan,
+    geometry_attributes: ScratchCapacityPlan,
+    geometry_primitives: ScratchCapacityPlan,
+    geometry_logical_meshes: ScratchCapacityPlan,
+    geometry_primitive_projections: ScratchCapacityPlan,
+    geometry_mesh_instances: ScratchCapacityPlan,
+    deformation_skins: ScratchCapacityPlan,
+    deformation_morph_definitions: ScratchCapacityPlan,
+    deformation_logical_morphs: ScratchCapacityPlan,
+    deformation_morph_deltas: ScratchCapacityPlan,
+    deformation_morph_targets: ScratchCapacityPlan,
+    deformation_primitives: ScratchCapacityPlan,
+    deformation_mesh_instances: ScratchCapacityPlan,
+    deformation_influence_row_offsets: ScratchCapacityPlan,
+    deformation_influence_joints: ScratchCapacityPlan,
+    deformation_influence_source_orders: ScratchCapacityPlan,
+    deformation_palette_maxima: ScratchCapacityPlan,
+    deformation_uniqueness_marks: ScratchCapacityPlan,
+    animation_clip_descriptors: ScratchCapacityPlan,
+    animation_channel_descriptors: ScratchCapacityPlan,
+    animation_target_marks: ScratchCapacityPlan,
+    profile_segments: ScratchCapacityPlan,
+    profile_resources: ScratchCapacityPlan,
+    profile_sources: ScratchCapacityPlan,
+    profile_provenance: ScratchCapacityPlan,
+    profile_operations: ScratchCapacityPlan,
+    profile_evidence: ScratchCapacityPlan,
+    profile_parents: ScratchCapacityPlan,
+    profile_wide: ScratchCapacityPlan,
+    profile_lineage_text: ScratchCapacityPlan,
+    profile_lineage_digests: ScratchCapacityPlan,
+    profile_provenance_depths: ScratchCapacityPlan,
+    profile_owner_rows: ScratchCapacityPlan,
+    profile_attachments: ScratchCapacityPlan,
+    profile_metadata_rows: ScratchCapacityPlan,
+    profile_metadata_text: ScratchCapacityPlan,
+    profile_metadata_bytes: ScratchCapacityPlan,
+    profile_metadata_bools: ScratchCapacityPlan,
+    profile_metadata_i64s: ScratchCapacityPlan,
+    profile_metadata_u64s: ScratchCapacityPlan,
+    profile_metadata_f64s: ScratchCapacityPlan,
+    profile_metadata_f32s: ScratchCapacityPlan,
     appearance_requirements: AppearanceValidationScratchRequirements,
     geometry_requirements: GeometryValidationScratchRequirements,
     deformation_requirements: DeformationValidationScratchRequirements,
@@ -391,10 +391,9 @@ impl NodeSceneValidationScratchPlan {
         ]
         .into_iter()
         .try_fold(0_u64, |total, plan| {
-            let bytes = plan
-                .envelope_delta_bytes()
-                .map_err(|_| StorePlanError::SizeOverflow)?;
-            total.checked_add(bytes).ok_or(StorePlanError::SizeOverflow)
+            total
+                .checked_add(plan.envelope_bytes)
+                .ok_or(StorePlanError::SizeOverflow)
         })?;
         let base_initialization_work = [
             node_count,
@@ -536,39 +535,39 @@ impl NodeSceneValidationScratchPlan {
         )
     }
 
-    pub(super) const fn initialization_work_units(self) -> u64 {
+    pub(super) const fn initialization_work_units(&self) -> u64 {
         self.initialization_work
     }
 
-    pub(super) const fn semantic_projection_work_units(self) -> u64 {
+    pub(super) const fn semantic_projection_work_units(&self) -> u64 {
         self.semantic_projection_work
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_requirements(
-        self,
+        &self,
     ) -> AppearanceValidationScratchRequirements {
         self.appearance_requirements
     }
 
     pub(in crate::canonical_scene::store) const fn geometry_requirements(
-        self,
+        &self,
     ) -> GeometryValidationScratchRequirements {
         self.geometry_requirements
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_requirements(
-        self,
+        &self,
     ) -> DeformationValidationScratchRequirements {
         self.deformation_requirements
     }
 
     pub(in crate::canonical_scene::store) const fn animation_counts(
-        self,
+        &self,
     ) -> AnimationMeteredCounts {
         self.animation_counts
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_counts(self) -> ProfileMeteredCounts {
+    pub(in crate::canonical_scene::store) const fn profile_counts(&self) -> ProfileMeteredCounts {
         self.profile_counts
     }
 }
@@ -665,7 +664,7 @@ where
             ($field:ident) => {{
                 let values =
                     allocate_scratch(plan.$field).map_err(validation_scratch_runtime_error)?;
-                let bytes = qualified_bytes(plan.$field, values.len(), values.capacity())
+                let bytes = qualified_bytes(plan.$field, &values)
                     .map_err(validation_scratch_runtime_error)?;
                 actual = actual.checked_add(bytes).ok_or_else(|| {
                     validation_scratch_runtime_error(StoreRuntimeError::Plan(
@@ -1101,8 +1100,39 @@ where
     }
 }
 
-fn scratch_capacity_plan<T>(count: usize) -> Result<CapacityPlan, StorePlanError> {
-    CapacityPlan::for_type::<T>(0, 0, count).map_err(|_| StorePlanError::SizeOverflow)
+/// Scratch allocations always start empty. Keep only their count and checked byte envelope,
+/// rather than copying a general growth plan through every candidate and validation proof.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ScratchCapacityPlan {
+    count: usize,
+    envelope_bytes: u64,
+}
+
+impl ScratchCapacityPlan {
+    const fn desired_capacity(self) -> usize {
+        self.count
+    }
+
+    fn capacity_plan<T>(self) -> Result<CapacityPlan, StoreRuntimeError> {
+        let plan = CapacityPlan::for_type::<T>(0, 0, self.count)
+            .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
+        if plan.envelope_delta_bytes().ok() != Some(self.envelope_bytes) {
+            return Err(StoreRuntimeError::ConstructionInvariantUnverified);
+        }
+        Ok(plan)
+    }
+}
+
+fn scratch_capacity_plan<T>(count: usize) -> Result<ScratchCapacityPlan, StorePlanError> {
+    let plan =
+        CapacityPlan::for_type::<T>(0, 0, count).map_err(|_| StorePlanError::SizeOverflow)?;
+    let envelope_bytes = plan
+        .envelope_delta_bytes()
+        .map_err(|_| StorePlanError::SizeOverflow)?;
+    Ok(ScratchCapacityPlan {
+        count,
+        envelope_bytes,
+    })
 }
 
 fn profile_count(count: u32) -> Result<usize, StorePlanError> {
@@ -1121,7 +1151,8 @@ fn validation_scratch_runtime_error(
     CanonicalValidationPreparationError::runtime(cause, NODE_SCENE_STORAGE_REJECTION_CODE)
 }
 
-fn allocate_scratch<T>(plan: CapacityPlan) -> Result<Vec<T>, StoreRuntimeError> {
+fn allocate_scratch<T>(plan: ScratchCapacityPlan) -> Result<Vec<T>, StoreRuntimeError> {
+    let plan = plan.capacity_plan::<T>()?;
     plan.verify_preflight(0, 0)
         .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
     let mut values = Vec::new();
@@ -1131,19 +1162,19 @@ fn allocate_scratch<T>(plan: CapacityPlan) -> Result<Vec<T>, StoreRuntimeError> 
     Ok(values)
 }
 
-fn qualified_bytes(
-    plan: CapacityPlan,
-    len: usize,
-    capacity: usize,
+fn qualified_bytes<T>(
+    plan: ScratchCapacityPlan,
+    values: &Vec<T>,
 ) -> Result<u64, StoreRuntimeError> {
-    plan.finish(len, capacity)
+    plan.capacity_plan::<T>()?
+        .finish(values.len(), values.capacity())
         .map_err(|_| StoreRuntimeError::Plan(StorePlanError::SizeOverflow))
 }
 
 fn initialize_scratch_values<O, PP, U, T>(
     session: &mut CanonicalValidationSession<'_, '_, '_, '_, O, PP, U>,
     values: &mut Vec<T>,
-    plan: CapacityPlan,
+    plan: ScratchCapacityPlan,
     value: T,
 ) -> Result<bool, StoreWorkError>
 where

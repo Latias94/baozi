@@ -1,4 +1,5 @@
 use super::*;
+use std::any::TypeId;
 use std::num::NonZeroU64;
 
 type ValidatedScalarSuccess = ValidatedRetainedSuccess<
@@ -2796,12 +2797,12 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
     let canonical_shares_before = source_canonical
         .aggregate()
         .inner
-        .test_member_share_call_count(source_canonical_slot.identity)
+        .test_member_share_call_count(source_canonical_slot.identity())
         .expect("canonical source slot must resolve");
     let evidence_shares_before = source_evidence
         .aggregate()
         .inner
-        .test_member_share_call_count(source_evidence_slot.identity)
+        .test_member_share_call_count(source_evidence_slot.identity())
         .expect("evidence source slot must resolve");
 
     let operation = test_derived_operation_on_account_with_control(
@@ -2883,7 +2884,7 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
         source_canonical
             .aggregate()
             .inner
-            .test_member_share_call_count(source_canonical_slot.identity)
+            .test_member_share_call_count(source_canonical_slot.identity())
             .expect("canonical source slot must remain observable"),
         canonical_shares_before + 1
     );
@@ -2891,7 +2892,7 @@ fn inherited_blocks_deduplicate_source_slots_without_new_attribution_or_physical
         source_evidence
             .aggregate()
             .inner
-            .test_member_share_call_count(source_evidence_slot.identity)
+            .test_member_share_call_count(source_evidence_slot.identity())
             .expect("evidence source slot must remain observable"),
         evidence_shares_before + 3
     );
@@ -3263,7 +3264,7 @@ fn non_authoritative_same_account_aggregate_is_rejected_before_member_access_or_
     let block_shares_before = source_canonical
         .aggregate()
         .inner
-        .test_member_share_call_count(source_slot.identity)
+        .test_member_share_call_count(source_slot.identity())
         .expect("source slot must resolve");
     let _ = take_test_member_lookups();
 
@@ -3296,7 +3297,7 @@ fn non_authoritative_same_account_aggregate_is_rejected_before_member_access_or_
         source_canonical
             .aggregate()
             .inner
-            .test_member_share_call_count(source_slot.identity)
+            .test_member_share_call_count(source_slot.identity())
             .expect("source slot must remain observable"),
         block_shares_before
     );
@@ -3321,7 +3322,7 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
     let block_shares_before = source_canonical
         .aggregate()
         .inner
-        .test_member_share_call_count(source_slot.identity)
+        .test_member_share_call_count(source_slot.identity())
         .expect("source slot must resolve");
     let physical_before_operation = account.snapshot();
     let policy = DimensionPolicy::reservable_bytes(u64::MAX, 16, u64::MAX, u64::MAX)
@@ -3393,7 +3394,7 @@ fn share_work_rejection_does_not_clone_or_mutate_the_target_table() {
         source_canonical
             .aggregate()
             .inner
-            .test_member_share_call_count(source_slot.identity)
+            .test_member_share_call_count(source_slot.identity())
             .expect("source slot must remain observable"),
         block_shares_before
     );
@@ -3778,6 +3779,78 @@ fn repeated_semantic_rejection_preserves_the_product_graph_fallback_cause() {
 }
 
 #[test]
+fn typed_slot_identity_round_trips_and_rejects_mismatched_tags() {
+    let set_id = try_next_retained_set_id().expect("test retained set id");
+    let canonical_identity = RetainedSlotIdentity {
+        set_id,
+        index: 3,
+        tag: TypeId::of::<CanonicalRootTag>(),
+    };
+    let canonical =
+        CanonicalRetainedSlot::<u64, CanonicalRootTag>::from_identity(canonical_identity);
+    assert_eq!(canonical.identity(), canonical_identity);
+    assert!(
+        catch_unwind(|| {
+            CanonicalRetainedSlot::<u64, CanonicalLeafTag>::from_identity(canonical_identity)
+        })
+        .is_err()
+    );
+
+    let evidence_identity = RetainedSlotIdentity {
+        set_id,
+        index: 5,
+        tag: TypeId::of::<EvidenceRootTag>(),
+    };
+    let evidence =
+        OutcomeEvidenceRetainedSlot::<u64, EvidenceRootTag>::from_identity(evidence_identity);
+    assert_eq!(evidence.identity(), evidence_identity);
+    assert!(
+        catch_unwind(|| {
+            OutcomeEvidenceRetainedSlot::<u64, EvidenceDetailTag>::from_identity(evidence_identity)
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn published_lookup_checks_actual_member_tags_for_retagged_typed_slots() {
+    let factory = account_factory(1);
+    let account = account(&factory, u64::MAX, 128);
+    let (canonical, canonical_slot, evidence, evidence_slot) = publish_scalar_source(&account);
+    let retagged_canonical: CanonicalRetainedSlot<u64, CanonicalLeafTag> = CanonicalRetainedSlot {
+        set_id: canonical_slot.set_id,
+        index: canonical_slot.index,
+        marker: PhantomData,
+    };
+    let canonical_member = canonical
+        .aggregate()
+        .lookup_member(retagged_canonical)
+        .expect("retagged slot still addresses the original canonical member");
+    assert!(!canonical_member.schema_tag_matches());
+    assert!(canonical.aggregate().get(retagged_canonical).is_none());
+    assert_eq!(canonical.aggregate().get(canonical_slot), Some(&11));
+
+    let retagged_evidence: OutcomeEvidenceRetainedSlot<u64, EvidenceDetailTag> =
+        OutcomeEvidenceRetainedSlot {
+            set_id: evidence_slot.set_id,
+            index: evidence_slot.index,
+            marker: PhantomData,
+        };
+    let evidence_member = evidence
+        .aggregate()
+        .lookup_member(retagged_evidence)
+        .expect("retagged slot still addresses the original evidence member");
+    assert!(!evidence_member.schema_tag_matches());
+    assert!(evidence.aggregate().get(retagged_evidence).is_none());
+    assert_eq!(evidence.aggregate().get(evidence_slot), Some(&7));
+
+    drop(canonical);
+    drop(evidence);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
 fn consuming_closure_validation_rejects_orphans_and_retagged_slots() {
     let factory = account_factory(1);
     let operation = test_operation_with_writer_limits(&factory, 64, RetainedBatchLimits::new(3, 2));
@@ -3842,7 +3915,8 @@ fn consuming_closure_validation_rejects_orphans_and_retagged_slots() {
         .unwrap_or_else(|_| panic!("evidence must retain"));
     let retagged: CanonicalRetainedSlot<TestCanonicalBlock, CanonicalRootTag> =
         CanonicalRetainedSlot {
-            identity: orphan.identity,
+            set_id: orphan.set_id,
+            index: orphan.index,
             marker: PhantomData,
         };
     let rejected = match assembly.validate_success(root, evidence, |session, root, evidence| {
@@ -5080,6 +5154,132 @@ fn prepared_published_and_baseline_owners_contain_payload_drop_panics() {
     assert!(catch_unwind(AssertUnwindSafe(|| drop(operation))).is_ok());
     assert_eq!(BASELINE_DROPS.load(Ordering::SeqCst), 1);
     assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
+fn healthy_prepared_and_published_owners_release_during_unrelated_host_unwind() {
+    static CANONICAL_DROPS: AtomicU64 = AtomicU64::new(0);
+    static CANONICAL_BYTES: AtomicU64 = AtomicU64::new(0);
+    static CANONICAL_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+    static EVIDENCE_DROPS: AtomicU64 = AtomicU64::new(0);
+    static EVIDENCE_BYTES: AtomicU64 = AtomicU64::new(0);
+    static EVIDENCE_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+
+    for publish in [false, true] {
+        for counter in [
+            &CANONICAL_DROPS,
+            &CANONICAL_BYTES,
+            &CANONICAL_ALLOCATIONS,
+            &EVIDENCE_DROPS,
+            &EVIDENCE_BYTES,
+            &EVIDENCE_ALLOCATIONS,
+        ] {
+            counter.store(0, Ordering::SeqCst);
+        }
+        let factory = account_factory(1);
+        let operation = test_operation(&factory, 64);
+        let account = operation.account().share_after_test_admission().unwrap();
+        let canonical_charge = account
+            .checked_retained_charge::<PhysicalDropObservation>(empty_plan())
+            .unwrap();
+        let canonical_table_charge = account
+            .test_checked_retained_table_charge::<PhysicalDropObservation>(1)
+            .unwrap();
+        let mut assembly: TestPublication<PhysicalDropObservation, PhysicalDropObservation> =
+            operation
+                .try_publication_assembly(publication_plan(1, 1))
+                .unwrap_or_else(|_| panic!("host-unwind publication must open"));
+        let canonical = assembly
+            .try_retain_canonical(empty_plan(), |emplacer| {
+                Ok(emplacer.place(
+                    PhysicalDropObservation {
+                        account: account.share_after_test_admission().unwrap(),
+                        drop_count: &CANONICAL_DROPS,
+                        observed_bytes: &CANONICAL_BYTES,
+                        observed_allocations: &CANONICAL_ALLOCATIONS,
+                    },
+                    CanonicalRootTag,
+                ))
+            })
+            .unwrap_or_else(|_| panic!("host-unwind canonical root must retain"));
+        let evidence = assembly
+            .try_retain_outcome_evidence(empty_plan(), |emplacer| {
+                Ok(emplacer.place(
+                    PhysicalDropObservation {
+                        account: account.share_after_test_admission().unwrap(),
+                        drop_count: &EVIDENCE_DROPS,
+                        observed_bytes: &EVIDENCE_BYTES,
+                        observed_allocations: &EVIDENCE_ALLOCATIONS,
+                    },
+                    EvidenceRootTag,
+                ))
+            })
+            .unwrap_or_else(|_| panic!("host-unwind evidence root must retain"));
+        let validated =
+            match assembly.validate_success(canonical, evidence, |session, canonical, evidence| {
+                session.canonical(canonical).is_some()
+                    && session.outcome_evidence(evidence).is_some()
+            }) {
+                RetainedSuccessValidation::Valid(validated) => validated,
+                _ => panic!("host-unwind publication must validate"),
+            };
+        let prepared = validated
+            .try_prepare(final_progress())
+            .unwrap_or_else(|_| panic!("host-unwind publication must prepare"));
+        let charged = account.snapshot();
+        assert_eq!(CANONICAL_DROPS.load(Ordering::SeqCst), 0);
+        assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 0);
+
+        let result = if publish {
+            let prepared = match prepared.into_outcome() {
+                PreparedRetainedPublicationOutcome::Success(prepared) => prepared,
+                _ => panic!("host-unwind publication must prepare success"),
+            };
+            let published = prepared.handoff();
+            catch_unwind(AssertUnwindSafe(move || {
+                let _published = published;
+                panic!("unrelated host panic");
+            }))
+        } else {
+            catch_unwind(AssertUnwindSafe(move || {
+                let _prepared = prepared;
+                panic!("unrelated host panic");
+            }))
+        };
+        assert_eq!(
+            result.unwrap_err().downcast_ref::<&str>(),
+            Some(&"unrelated host panic")
+        );
+        assert_eq!(CANONICAL_DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(EVIDENCE_DROPS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            CANONICAL_BYTES.load(Ordering::SeqCst),
+            charged.live_retained_bytes()
+        );
+        assert_eq!(
+            CANONICAL_ALLOCATIONS.load(Ordering::SeqCst),
+            charged.live_retained_allocations()
+        );
+        assert_eq!(
+            EVIDENCE_BYTES.load(Ordering::SeqCst),
+            charged.live_retained_bytes() - canonical_charge.bytes - canonical_table_charge.bytes
+        );
+        assert_eq!(
+            EVIDENCE_ALLOCATIONS.load(Ordering::SeqCst),
+            charged.live_retained_allocations()
+                - canonical_charge.allocations
+                - canonical_table_charge.allocations
+        );
+        let released = account.snapshot();
+        assert_eq!(released.live_retained_bytes(), 0);
+        assert_eq!(released.live_retained_allocations(), 0);
+        assert!(!released.poisoned());
+        assert_eq!(released.poison_event_count(), 0);
+        assert_eq!(released.first_poison_evidence(), None);
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+        assert_eq!(factory.snapshot().live_account_control_bytes(), 0);
+    }
 }
 
 #[test]

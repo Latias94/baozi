@@ -1507,10 +1507,9 @@ where
                 }
             };
             return match prepared {
-                Ok(prepared) => Ok(RootedFailureValidation::Fallback(VerifiedMinimalFallback {
-                    prepared,
-                    cause: runtime_cause,
-                })),
+                Ok(prepared) => Ok(RootedFailureValidation::Fallback(
+                    VerifiedMinimalFallback::new(prepared, runtime_cause),
+                )),
                 Err(StorePrepareError::FinalizationContainment(cause)) => {
                     Err(StoreActivationContainment { cause })
                 }
@@ -1543,12 +1542,9 @@ where
                             });
                         }
                         match validated.prepare_minimal_fallback() {
-                            Ok(prepared) => {
-                                Ok(RootedFailureValidation::Fallback(VerifiedMinimalFallback {
-                                    prepared,
-                                    cause: runtime_cause,
-                                }))
-                            }
+                            Ok(prepared) => Ok(RootedFailureValidation::Fallback(
+                                VerifiedMinimalFallback::new(prepared, runtime_cause),
+                            )),
                             Err(StorePrepareError::FinalizationContainment(cause)) => {
                                 Err(StoreActivationContainment { cause })
                             }
@@ -1592,10 +1588,10 @@ where
         let cause = ManuallyDrop::new(cause);
         let prepared = failure.prepare_minimal_fallback();
         match prepared {
-            Ok(prepared) => Ok(VerifiedMinimalFallback {
+            Ok(prepared) => Ok(VerifiedMinimalFallback::new(
                 prepared,
-                cause: ManuallyDrop::into_inner(cause),
-            }),
+                ManuallyDrop::into_inner(cause),
+            )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
                 Err(error)
@@ -1623,11 +1619,11 @@ where
         let cause = ManuallyDrop::new(cause);
         let prepared = validated.try_prepare_with_control(0, final_progress);
         match prepared {
-            Ok((prepared, final_control_cause)) => Ok(PreparedFailureEvidence {
+            Ok((prepared, final_control_cause)) => Ok(PreparedFailureEvidence::new(
                 prepared,
-                cause: ManuallyDrop::into_inner(cause),
+                ManuallyDrop::into_inner(cause),
                 final_control_cause,
-            }),
+            )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
                 Err(error)
@@ -1654,11 +1650,11 @@ where
         let cause = ManuallyDrop::new(cause);
         let prepared = validated.try_prepare_frozen();
         match prepared {
-            Ok(prepared) => Ok(PreparedFailureEvidence {
+            Ok(prepared) => Ok(PreparedFailureEvidence::new(
                 prepared,
-                cause: ManuallyDrop::into_inner(cause),
-                final_control_cause: None,
-            }),
+                ManuallyDrop::into_inner(cause),
+                None,
+            )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
                 Err(error)
@@ -1689,10 +1685,10 @@ where
         let cause = ManuallyDrop::new(cause);
         let prepared = validated.prepare_minimal_fallback();
         match prepared {
-            Ok(prepared) => Ok(VerifiedMinimalFallback {
+            Ok(prepared) => Ok(VerifiedMinimalFallback::new(
                 prepared,
-                cause: ManuallyDrop::into_inner(cause),
-            }),
+                ManuallyDrop::into_inner(cause),
+            )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
                 Err(error)
@@ -1702,8 +1698,22 @@ where
 }
 
 impl<Cause, EvidenceKind, EvidenceTag> PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag> {
+    fn new(
+        prepared: PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
+        cause: Cause,
+        final_control_cause: Option<ControlCause>,
+    ) -> Self {
+        Self {
+            cause: Some(cause),
+            final_control_cause,
+            prepared: Some(prepared),
+        }
+    }
+
     pub const fn cause(&self) -> &Cause {
-        &self.cause
+        self.cause
+            .as_ref()
+            .expect("prepared failure evidence retains its cause until handoff")
     }
 
     pub fn into_parts(
@@ -1712,17 +1722,47 @@ impl<Cause, EvidenceKind, EvidenceTag> PreparedFailureEvidence<Cause, EvidenceKi
         PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
         Cause,
     ) {
-        (self.prepared, self.cause)
+        let (prepared, cause, _) = self.into_parts_with_control();
+        (prepared, cause)
     }
 
     pub fn into_parts_with_control(
-        self,
+        mut self,
     ) -> (
         PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
         Cause,
         Option<ControlCause>,
     ) {
-        (self.prepared, self.cause, self.final_control_cause)
+        let prepared = self
+            .prepared
+            .take()
+            .expect("prepared failure evidence retains its physical owner until handoff");
+        let cause = self
+            .cause
+            .take()
+            .expect("prepared failure evidence retains its cause until handoff");
+        (prepared, cause, self.final_control_cause.take())
+    }
+}
+
+impl<Cause, EvidenceKind, EvidenceTag> Drop
+    for PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag>
+{
+    fn drop(&mut self) {
+        let Some(cause) = self.cause.take() else {
+            return;
+        };
+        let already_unwinding = std::thread::panicking();
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(cause))) {
+            if let Some(prepared) = self.prepared.take() {
+                prepared.quarantine_cause_drop_failure();
+            }
+            if already_unwinding {
+                discard_untrusted_panic_payload(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
     }
 }
 
@@ -1743,10 +1783,10 @@ where
         let Self { failure, cause } = self;
         let cause = ManuallyDrop::new(cause);
         match failure.prepare_minimal_fallback() {
-            Ok(prepared) => Ok(VerifiedMinimalFallback {
+            Ok(prepared) => Ok(VerifiedMinimalFallback::new(
                 prepared,
-                cause: ManuallyDrop::into_inner(cause),
-            }),
+                ManuallyDrop::into_inner(cause),
+            )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
                 Err(error)
@@ -1756,12 +1796,48 @@ where
 }
 
 impl<Cause> VerifiedMinimalFallback<Cause> {
-    pub const fn cause(&self) -> &Cause {
-        &self.cause
+    pub(super) fn new(prepared: PreparedStoreFallback, cause: Cause) -> Self {
+        Self {
+            cause: Some(cause),
+            prepared: Some(prepared),
+        }
     }
 
-    pub fn into_parts(self) -> (PreparedStoreFallback, Cause) {
-        (self.prepared, self.cause)
+    pub const fn cause(&self) -> &Cause {
+        self.cause
+            .as_ref()
+            .expect("verified minimal fallback retains its cause until handoff")
+    }
+
+    pub fn into_parts(mut self) -> (PreparedStoreFallback, Cause) {
+        let prepared = self
+            .prepared
+            .take()
+            .expect("verified minimal fallback retains its physical owner until handoff");
+        let cause = self
+            .cause
+            .take()
+            .expect("verified minimal fallback retains its cause until handoff");
+        (prepared, cause)
+    }
+}
+
+impl<Cause> Drop for VerifiedMinimalFallback<Cause> {
+    fn drop(&mut self) {
+        let Some(cause) = self.cause.take() else {
+            return;
+        };
+        let already_unwinding = std::thread::panicking();
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(cause))) {
+            if let Some(prepared) = self.prepared.take() {
+                prepared.quarantine_cause_drop_failure();
+            }
+            if already_unwinding {
+                discard_untrusted_panic_payload(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
     }
 }
 
@@ -1786,10 +1862,10 @@ where
             .map(|prepared| classify_prepared_fallback(prepared, domain))
             .map_err(StorePrepareError::from_raw)
         {
-            Ok(prepared) => Ok(VerifiedMinimalFallback {
+            Ok(prepared) => Ok(VerifiedMinimalFallback::new(
                 prepared,
-                cause: ManuallyDrop::into_inner(cause),
-            }),
+                ManuallyDrop::into_inner(cause),
+            )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
                 Err(error)
@@ -1866,10 +1942,7 @@ where
                         .map(|prepared| classify_prepared_fallback(prepared, domain));
                     return match prepared {
                         Ok(prepared) => Ok(FailureEvidenceOutcome::MinimalFallback(
-                            VerifiedMinimalFallback {
-                                prepared,
-                                cause: ManuallyDrop::into_inner(cause),
-                            },
+                            VerifiedMinimalFallback::new(prepared, ManuallyDrop::into_inner(cause)),
                         )),
                         Err(error) => {
                             let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));

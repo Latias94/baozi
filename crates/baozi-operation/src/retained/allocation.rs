@@ -159,6 +159,7 @@ pub(super) enum RetainedReleaseMode {
 pub(super) type RetainedLease = AdmissionLease<PhysicalStorageAccount>;
 
 pub(super) trait RetainedValuePolicy<T> {
+    #[cfg(test)]
     fn observe_pre_forget(value: &T, lease: &RetainedLease) -> AccountPoisonEventWitness;
 
     fn release(value: T, mode: RetainedReleaseMode) -> RetainedValueReleaseOutcome;
@@ -212,19 +213,11 @@ where
             return FinalOwnerReleaseOutcome::Clean;
         }
 
-        if std::thread::panicking() {
-            if let Some(value) = value {
-                let poisoned = P::observe_pre_forget(&value, self.lease.get());
-                std::mem::forget(value);
-                return FinalOwnerReleaseOutcome::StorageReleaseUnverified(poisoned);
-            }
-            return FinalOwnerReleaseOutcome::Clean;
-        }
-
         let Some(value) = value else {
             return FinalOwnerReleaseOutcome::Clean;
         };
 
+        // An unrelated host unwind still permits verified storage cleanup before charge release.
         match catch_unwind(AssertUnwindSafe(|| P::release(value, mode))) {
             Ok(RetainedValueReleaseOutcome::Clean) => {
                 match self.lease.release_after_verified_storage_drop() {
@@ -550,6 +543,7 @@ pub(super) fn observe_retained_payload_drop_failure(
 }
 
 impl<T> RetainedValuePolicy<RetainedPayload<T>> for LeafRetainedPolicy {
+    #[cfg(test)]
     fn observe_pre_forget(
         _payload: &RetainedPayload<T>,
         lease: &RetainedLease,

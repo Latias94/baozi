@@ -695,7 +695,7 @@ fn poisoned_inherited_share_has_no_lookup_work_clone_or_target_side_effect() {
     let source_allocation = source
         .aggregate
         .inner
-        .test_source_allocation(source_slot.identity)
+        .test_source_allocation(source_slot.identity())
         .unwrap_or_else(|| panic!("source slot must resolve before poison"));
     let source_share_calls = source_allocation.share_call_count();
     let target_len = assembly.canonical_len();
@@ -809,12 +809,12 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
     let source_share_calls = source
         .aggregate
         .inner
-        .test_member_share_call_count(source_slot.identity)
+        .test_member_share_call_count(source_slot.identity())
         .unwrap_or_else(|| panic!("source slot must resolve"));
     let source_allocation = source
         .aggregate
         .inner
-        .test_source_allocation(source_slot.identity)
+        .test_source_allocation(source_slot.identity())
         .unwrap_or_else(|| panic!("source slot must resolve"));
     let ledger = assembly
         .operation
@@ -841,7 +841,7 @@ fn admission_first_inherited_share_completes_then_later_share_is_rejected() {
         RetainedMembershipDestination::Canonical,
         0,
         1,
-        source_slot.identity,
+        source_slot.identity(),
         source_allocation,
     )
     .unwrap_or_else(|_| panic!("admission-first share must complete"));
@@ -1523,6 +1523,75 @@ fn concurrent_shared_drops_select_exactly_one_final_owner() {
 }
 
 #[test]
+fn healthy_single_and_shared_final_owners_release_during_unrelated_host_unwind() {
+    static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+    static OBSERVED_BYTES: AtomicU64 = AtomicU64::new(0);
+    static OBSERVED_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+
+    for shared in [false, true] {
+        DROP_COUNT.store(0, Ordering::SeqCst);
+        OBSERVED_BYTES.store(0, Ordering::SeqCst);
+        OBSERVED_ALLOCATIONS.store(0, Ordering::SeqCst);
+        let factory = account_factory(1);
+        let account = account(&factory, 4_096, 8);
+        let retained = account
+            .try_retain_with(empty_plan(), || {
+                Ok::<_, RetainedBuildFailureCode>(PhysicalDropObservation {
+                    account: account.share_after_test_admission().unwrap(),
+                    drop_count: &DROP_COUNT,
+                    observed_bytes: &OBSERVED_BYTES,
+                    observed_allocations: &OBSERVED_ALLOCATIONS,
+                })
+            })
+            .unwrap();
+        let charged = account.snapshot();
+        assert_eq!(charged.live_retained_bytes(), retained.charged_bytes());
+        assert_eq!(charged.live_retained_allocations(), 1);
+
+        if shared {
+            let sibling = retained.share_after_test_admission();
+            let result = catch_unwind(AssertUnwindSafe(move || {
+                let _sibling = sibling;
+                panic!("unrelated host panic");
+            }));
+            assert_eq!(
+                result.unwrap_err().downcast_ref::<&str>(),
+                Some(&"unrelated host panic")
+            );
+            assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 0);
+            assert_eq!(account.snapshot(), charged);
+        }
+
+        let result = catch_unwind(AssertUnwindSafe(move || {
+            let _retained = retained;
+            panic!("unrelated host panic");
+        }));
+        assert_eq!(
+            result.unwrap_err().downcast_ref::<&str>(),
+            Some(&"unrelated host panic")
+        );
+        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            OBSERVED_BYTES.load(Ordering::SeqCst),
+            charged.live_retained_bytes()
+        );
+        assert_eq!(
+            OBSERVED_ALLOCATIONS.load(Ordering::SeqCst),
+            charged.live_retained_allocations()
+        );
+        let released = account.snapshot();
+        assert_eq!(released.live_retained_bytes(), 0);
+        assert_eq!(released.live_retained_allocations(), 0);
+        assert!(!released.poisoned());
+        assert_eq!(released.poison_event_count(), 0);
+        assert_eq!(released.first_poison_evidence(), None);
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+        assert_eq!(factory.snapshot().live_account_control_bytes(), 0);
+    }
+}
+
+#[test]
 fn final_shared_owner_contains_payload_drop_panic_and_retains_the_lease() {
     static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -1551,6 +1620,46 @@ fn final_shared_owner_contains_payload_drop_panic_and_retains_the_lease() {
     assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
     assert_eq!(account.snapshot().live_retained_bytes(), charged);
     assert_eq!(account.snapshot().live_retained_allocations(), 1);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
+fn payload_drop_panic_during_host_unwind_retains_its_charge() {
+    static DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    struct PanickingDrop;
+
+    impl Drop for PanickingDrop {
+        fn drop(&mut self) {
+            DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+            panic!("payload destructor failure");
+        }
+    }
+
+    let factory = account_factory(1);
+    let account = account(&factory, 4_096, 8);
+    DROP_COUNT.store(0, Ordering::SeqCst);
+    let retained = account
+        .try_retain_with(empty_plan(), || {
+            Ok::<_, RetainedBuildFailureCode>(PanickingDrop)
+        })
+        .unwrap();
+    let charged_bytes = retained.charged_bytes();
+    let result = catch_unwind(AssertUnwindSafe(move || {
+        let _retained = retained;
+        panic!("unrelated host panic");
+    }));
+
+    assert_eq!(
+        result.unwrap_err().downcast_ref::<&str>(),
+        Some(&"unrelated host panic")
+    );
+    assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 1);
+    let failed = account.snapshot();
+    assert!(failed.poisoned());
+    assert_eq!(failed.live_retained_bytes(), charged_bytes);
+    assert_eq!(failed.live_retained_allocations(), 1);
     drop(account);
     assert_eq!(factory.snapshot().live_accounts(), 1);
 }

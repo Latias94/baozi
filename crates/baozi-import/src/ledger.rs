@@ -388,8 +388,8 @@ pub(crate) fn import_ledger_limits(
 }
 
 pub type ImportOperationControl = OperationControl<ImportProgressPhase, ImportProgressUnit>;
-/// Import-owned immutable projection of the unique retained-store terminal evidence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Immutable owner of the unique retained terminal ledger, queried without copying its tables.
+#[derive(Debug, PartialEq, Eq)]
 pub struct ImportLedgerSnapshot {
     evidence: ImportStoreTerminalEvidence,
 }
@@ -434,7 +434,7 @@ impl ImportLedgerSnapshot {
     /// This is terminal attribution, not physical byte ownership. The producer-visible
     /// [`ImportDimension::CanonicalOutputBytes`] row therefore remains a live-storage view and
     /// does not duplicate this committed destination count.
-    pub const fn committed_canonical_members(&self) -> u64 {
+    pub fn committed_canonical_members(&self) -> u64 {
         self.evidence.committed_canonical_members()
     }
 

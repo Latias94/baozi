@@ -19,10 +19,10 @@ use baozi_operation::__retained_store_integration::producer::{
 #[cfg(test)]
 use baozi_operation::FinalProgress;
 use baozi_operation::{
-    OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit, RecordBlock,
-    RecordPlan, RetainedStoreBatchLimits, SequencePlan, StoreBuildError, StoreControlledError,
-    StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError, StoreWorkError,
-    StoredScalar, Utf8Plan,
+    CapacityPlan, OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit,
+    RecordBlock, RecordPlan, RetainedStoreBatchLimits, SequencePlan, StoreBuildError,
+    StoreControlledError, StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError,
+    StoreWorkError, StoredScalar, Utf8Plan,
 };
 
 use crate::SceneValidationLimits;
@@ -327,7 +327,8 @@ where
 {
     brand: super::super::ConstructionBrand,
     activation_request: CanonicalActivationRequest,
-    sealed: NodeSceneSealedPlan<'input, CanonicalReservation<'scope, O>>,
+    sealed: ScopedNodeScenePlan<'input, 'scope, O>,
+    success_requirements: CanonicalSuccessRequirements,
 }
 
 /// Exact execution payload paired with its success facts by [`NodeSceneLanePlan`].
@@ -337,7 +338,14 @@ where
     O: OperationOwner,
 {
     brand: super::super::ConstructionBrand,
-    execution: NodeSceneExecutionPlan<'input, CanonicalReservation<'scope, O>>,
+    sealed: ScopedNodeScenePlan<'input, 'scope, O>,
+}
+
+/// The complete execution plan stays at one admitted address throughout activation. Keep the
+/// allocation before its reservation so plan storage is destroyed before its charge is released.
+struct ScopedNodeScenePlan<'input, 'scope, O: OperationOwner> {
+    storage: Vec<NodeSceneExecutionPlan<'input, CanonicalReservation<'scope, O>>>,
+    _reservation: CanonicalReservation<'scope, O>,
 }
 
 /// Opaque Scene descriptor and validation recipe emitted by lane-only materialization.
@@ -499,6 +507,41 @@ impl<'input> NodeSceneActivationTransaction<'input> {
             validation_limits,
             failure_evidence,
         } = execution;
+        let capacity = CapacityPlan::for_type::<
+            NodeSceneExecutionPlan<'input, CanonicalReservation<'scope, O>>,
+        >(0, 0, 1)
+        .map_err(|_| {
+            NodeSceneLaneRejection::from(NodeSceneConstructionRejection::Planning(
+                StorePlanError::SizeOverflow,
+            ))
+        })?;
+        let mut reservation = semantic
+            .reserve(capacity.envelope_delta_bytes().map_err(|_| {
+                NodeSceneLaneRejection::from(NodeSceneConstructionRejection::Planning(
+                    StorePlanError::SizeOverflow,
+                ))
+            })?)
+            .map_err(NodeSceneConstructionRejection::Materialization)?;
+        // Declare storage after the reservation as well: an early return must release the
+        // allocation before making its headroom available again.
+        let mut storage = Vec::new();
+        storage
+            .try_reserve_exact(capacity.allocator_additional())
+            .map_err(|_| {
+                NodeSceneLaneRejection::from(NodeSceneConstructionRejection::Materialization(
+                    StoreRuntimeError::BatchAllocationFailed,
+                ))
+            })?;
+        let bytes = capacity
+            .finish(storage.len(), storage.capacity())
+            .map_err(|_| {
+                NodeSceneLaneRejection::from(NodeSceneConstructionRejection::Materialization(
+                    StoreRuntimeError::ConstructionInvariantUnverified,
+                ))
+            })?;
+        semantic
+            .resize(&mut reservation, bytes)
+            .map_err(NodeSceneConstructionRejection::Materialization)?;
         let sealed = {
             let mut control = ScopedAuthoringControl::new(semantic);
             validate_and_seal_node_scene_plan(
@@ -510,11 +553,20 @@ impl<'input> NodeSceneActivationTransaction<'input> {
             )
         }
         .map_err(NodeSceneLaneRejection::from)?;
-        self.sealed_counts = sealed.execution.materialization.evidence_counts();
+        let NodeSceneSealedPlan {
+            execution,
+            success_requirements,
+        } = sealed;
+        self.sealed_counts = execution.materialization.evidence_counts();
+        storage.push(execution);
         Ok(NodeSceneLanePlan {
             brand,
             activation_request,
-            sealed,
+            sealed: ScopedNodeScenePlan {
+                storage,
+                _reservation: reservation,
+            },
+            success_requirements,
         })
     }
 
@@ -544,12 +596,12 @@ where
             brand,
             activation_request,
             sealed,
+            success_requirements,
         } = self;
-        let (execution, requirements) = sealed.into_seal_parts();
         (
             activation_request,
-            requirements,
-            NodeSceneLaneExecutionPlan { brand, execution },
+            success_requirements,
+            NodeSceneLaneExecutionPlan { brand, sealed },
         )
     }
 }
@@ -612,7 +664,7 @@ where
     {
         materialize_node_scene_mapped(
             lane,
-            &self.execution,
+            &self.sealed.storage[0],
             self.brand,
             #[cfg(test)]
             faults,
@@ -1097,15 +1149,6 @@ impl<'input, R> NodeSceneSealedPlan<'input, R> {
             },
             success_requirements,
         })
-    }
-
-    fn into_seal_parts(
-        self,
-    ) -> (
-        NodeSceneExecutionPlan<'input, R>,
-        CanonicalSuccessRequirements,
-    ) {
-        (self.execution, self.success_requirements)
     }
 }
 

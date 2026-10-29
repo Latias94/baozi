@@ -522,524 +522,524 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
 
 impl NodeSceneValidationProof {
     pub(in crate::canonical_scene::store) const fn directory(
-        self,
+        &self,
     ) -> CanonicalBlockRef<SceneDirectorySchema> {
         self.directory
     }
 
     pub(in crate::canonical_scene::store) const fn spatial_directory(
-        self,
+        &self,
     ) -> CanonicalBlockRef<SpatialDirectorySchema> {
         self.spatial.directory
     }
 
     pub(in crate::canonical_scene::store) const fn cameras(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<SpatialCameraTableSchema>> {
         self.spatial.cameras
     }
 
     pub(in crate::canonical_scene::store) const fn lights(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<SpatialLightTableSchema>> {
         self.spatial.lights
     }
 
     pub(in crate::canonical_scene::store) const fn tangent_basis_schema_name(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<SpatialTangentBasisSchemaNameSchema>> {
         self.spatial.tangent_basis_schema_name
     }
 
     pub(in crate::canonical_scene::store) const fn tangent_encoding_schema_name(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<SpatialTangentEncodingSchemaNameSchema>> {
         self.spatial.tangent_encoding_schema_name
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_directory(
-        self,
+        &self,
     ) -> CanonicalBlockRef<AppearanceDirectorySchema> {
         self.appearance_directory
     }
 
     pub(in crate::canonical_scene::store) const fn geometry_directory(
-        self,
+        &self,
     ) -> CanonicalBlockRef<SceneGeometryDirectorySchema> {
         self.geometry_directory
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_directory(
-        self,
+        &self,
     ) -> CanonicalBlockRef<DeformationDirectorySchema> {
         self.deformation_directory
     }
 
     pub(in crate::canonical_scene::store) const fn animation_directory(
-        self,
+        &self,
     ) -> CanonicalBlockRef<AnimationDirectorySchema> {
         self.animation_directory
     }
 
     pub(in crate::canonical_scene::store) const fn nodes(
-        self,
+        &self,
     ) -> CanonicalBlockRef<NodeSceneNodeTableSchema> {
         self.nodes
     }
 
     pub(in crate::canonical_scene::store) const fn references(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>> {
         self.references
     }
 
     pub(in crate::canonical_scene::store) const fn transforms(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>> {
         self.transforms
     }
 
     pub(in crate::canonical_scene::store) const fn node_names(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<NodeSceneNodeNameSchema>> {
         self.node_names
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_images(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AppearanceImageTableSchema>> {
         self.appearance.images
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_samplers(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AppearanceSamplerTableSchema>> {
         self.appearance.samplers
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_textures(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AppearanceTextureTableSchema>> {
         self.appearance.textures
     }
 
     pub(in crate::canonical_scene::store) const fn materials(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AppearanceMaterialTableSchema>> {
         self.appearance.materials
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_bindings(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AppearanceBindingTableSchema>> {
         self.appearance.bindings
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_image_payloads(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AppearanceEncodedImagePayloadSchema>> {
         self.appearance.image_payloads
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_media_types(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AppearanceMediaTypeSchema>> {
         self.appearance.media_types
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_source_keys(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AppearanceSourceKeySchema>> {
         self.appearance.source_keys
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_binding_semantic_scalars(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AppearanceBindingSemanticScalarSchema>> {
         self.appearance.binding_semantic_scalars
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_material_factor_scalars(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AppearanceMaterialFactorScalarSchema>> {
         self.appearance.material_factor_scalars
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_material_names(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AppearanceMaterialNameSchema>> {
         self.appearance.material_names
     }
 
     pub(in crate::canonical_scene::store) const fn logical_meshes(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>> {
         self.geometry.logical_meshes
     }
 
     pub(in crate::canonical_scene::store) const fn logical_mesh_names(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<GeometryLogicalMeshNameSchema>> {
         self.geometry.logical_mesh_names
     }
 
     pub(in crate::canonical_scene::store) const fn attribute_semantic_names(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<GeometryAttributeSemanticNameSchema>> {
         self.geometry.attribute_semantic_names
     }
 
     pub(in crate::canonical_scene::store) const fn primitives(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>> {
         self.geometry.primitives
     }
 
     pub(in crate::canonical_scene::store) const fn attributes(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<GeometryAttributeTableSchema>> {
         self.geometry.attributes
     }
 
     pub(in crate::canonical_scene::store) const fn mesh_instances(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<GeometryMeshInstanceTableSchema>> {
         self.geometry.mesh_instances
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_skins(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationSkinTableSchema>> {
         self.deformation.skins
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_logical_morphs(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationLogicalMorphTableSchema>> {
         self.deformation.logical_morphs
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_morph_definitions(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationMorphDefinitionTableSchema>> {
         self.deformation.morph_definitions
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_primitives(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationPrimitiveTableSchema>> {
         self.deformation.primitives
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_morph_targets(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationMorphTargetTableSchema>> {
         self.deformation.morph_targets
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_morph_deltas(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationMorphDeltaTableSchema>> {
         self.deformation.morph_deltas
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_mesh_instances(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationMeshInstanceTableSchema>> {
         self.deformation.mesh_instances
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_joint_nodes(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationSkinJointNodeSchema>> {
         self.deformation.joint_nodes
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_inverse_bind_matrices(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationInverseBindMatrixSchema>> {
         self.deformation.inverse_bind_matrices
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_skin_correction_matrices(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationSkinCorrectionMatrixSchema>> {
         self.deformation.skin_correction_matrices
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_skin_names(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationSkinNameSchema>> {
         self.deformation.skin_names
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_influence_row_offsets(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationInfluenceRowOffsetSchema>> {
         self.deformation.influence_row_offsets
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_influence_joints(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationInfluenceJointSchema>> {
         self.deformation.influence_joints
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_influence_weights(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationInfluenceWeightSchema>> {
         self.deformation.influence_weights
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_influence_source_orders(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationInfluenceSourceOrderSchema>> {
         self.deformation.influence_source_orders
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_morph_defaults(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationMorphDefaultWeightSchema>> {
         self.deformation.morph_defaults
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_morph_names(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationMorphNameSchema>> {
         self.deformation.morph_names
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_morph_values(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationMorphValueSchema>> {
         self.deformation.morph_values
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_morph_sparse_indices(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationMorphSparseIndexSchema>> {
         self.deformation.morph_sparse_indices
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_instance_morph_weights(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<DeformationInstanceMorphWeightSchema>> {
         self.deformation.instance_morph_weights
     }
 
     pub(in crate::canonical_scene::store) const fn animation_clips(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AnimationClipTableSchema>> {
         self.animation.clips
     }
 
     pub(in crate::canonical_scene::store) const fn animation_channels(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AnimationChannelTableSchema>> {
         self.animation.channels
     }
 
     pub(in crate::canonical_scene::store) const fn animation_times(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AnimationTimesSchema>> {
         self.animation.times
     }
 
     pub(in crate::canonical_scene::store) const fn animation_values(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AnimationValuesSchema>> {
         self.animation.values
     }
 
     pub(in crate::canonical_scene::store) const fn animation_in_tangents(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AnimationInTangentsSchema>> {
         self.animation.in_tangents
     }
 
     pub(in crate::canonical_scene::store) const fn animation_out_tangents(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<AnimationOutTangentsSchema>> {
         self.animation.out_tangents
     }
 
     pub(in crate::canonical_scene::store) const fn profile_directory(
-        self,
+        &self,
     ) -> CanonicalBlockRef<ProfileDirectorySchema> {
         self.profile.directory
     }
 
     pub(in crate::canonical_scene::store) const fn profile_segments(
-        self,
+        &self,
     ) -> CanonicalBlockRef<ProfileSegmentTableSchema> {
         self.profile.segments
     }
 
-    pub(in crate::canonical_scene::store) fn profile_segment_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn profile_segment_count(&self) -> usize {
         count_as_usize(self.profile.segment_count)
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_resource_count(self) -> u32 {
+    pub(in crate::canonical_scene::store) const fn profile_resource_count(&self) -> u32 {
         self.profile.resource_count
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_source_count(self) -> u32 {
+    pub(in crate::canonical_scene::store) const fn profile_source_count(&self) -> u32 {
         self.profile.source_count
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_provenance_count(self) -> u32 {
+    pub(in crate::canonical_scene::store) const fn profile_provenance_count(&self) -> u32 {
         self.profile.provenance_count
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_operation_count(self) -> u32 {
+    pub(in crate::canonical_scene::store) const fn profile_operation_count(&self) -> u32 {
         self.profile.operation_count
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_evidence_count(self) -> u32 {
+    pub(in crate::canonical_scene::store) const fn profile_evidence_count(&self) -> u32 {
         self.profile.evidence_count
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_parent_count(self) -> u32 {
+    pub(in crate::canonical_scene::store) const fn profile_parent_count(&self) -> u32 {
         self.profile.parent_count
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_wide_count(self) -> u32 {
+    pub(in crate::canonical_scene::store) const fn profile_wide_count(&self) -> u32 {
         self.profile.wide_count
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_lineage_text_bytes(self) -> u32 {
+    pub(in crate::canonical_scene::store) const fn profile_lineage_text_bytes(&self) -> u32 {
         self.profile.lineage_text_bytes
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_lineage_digest_bytes(self) -> u32 {
+    pub(in crate::canonical_scene::store) const fn profile_lineage_digest_bytes(&self) -> u32 {
         self.profile.lineage_digest_bytes
     }
 
     pub(in crate::canonical_scene::store) const fn profile_owners(
-        self,
+        &self,
     ) -> CanonicalBlockRef<ProfileOwnerTableSchema> {
         self.profile.owners
     }
 
     pub(in crate::canonical_scene::store) const fn profile_metadata_directory(
-        self,
+        &self,
     ) -> CanonicalBlockRef<ProfileMetadataDirectorySchema> {
         self.profile.metadata_directory
     }
 
     pub(in crate::canonical_scene::store) const fn profile_metadata_entries(
-        self,
+        &self,
     ) -> Option<CanonicalBlockRef<ProfileMetadataEntryTableSchema>> {
         self.profile.metadata_entries
     }
 
-    pub(in crate::canonical_scene::store) const fn source_node_count(self) -> usize {
+    pub(in crate::canonical_scene::store) const fn source_node_count(&self) -> usize {
         self.source_node_count
     }
 
-    pub(in crate::canonical_scene::store) const fn source_root_count(self) -> usize {
+    pub(in crate::canonical_scene::store) const fn source_root_count(&self) -> usize {
         self.source_root_count
     }
 
-    pub(in crate::canonical_scene::store) const fn source_edge_count(self) -> usize {
+    pub(in crate::canonical_scene::store) const fn source_edge_count(&self) -> usize {
         self.source_edge_count
     }
 
-    pub(in crate::canonical_scene::store) const fn counts(self) -> SceneEvidenceCounts {
+    pub(in crate::canonical_scene::store) const fn counts(&self) -> SceneEvidenceCounts {
         self.counts
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_uniqueness_mark_count(
-        self,
+        &self,
     ) -> usize {
         self.deformation_uniqueness_mark_count
     }
 
     pub(in crate::canonical_scene::store) const fn validation_scratch_plan(
-        self,
+        &self,
     ) -> NodeSceneValidationScratchPlan {
         self.central_validation_plan.scratch_plan()
     }
 
     pub(in crate::canonical_scene::store) const fn central_validation_plan(
-        self,
+        &self,
     ) -> NodeSceneCentralValidationPlan {
         self.central_validation_plan
     }
 
-    pub(in crate::canonical_scene::store) fn material_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn material_count(&self) -> usize {
         count_as_usize(self.counts.material_count)
     }
 
-    pub(in crate::canonical_scene::store) fn camera_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn camera_count(&self) -> usize {
         count_as_usize(self.counts.camera_count)
     }
 
-    pub(in crate::canonical_scene::store) fn light_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn light_count(&self) -> usize {
         count_as_usize(self.counts.light_count)
     }
 
-    pub(in crate::canonical_scene::store) fn image_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn image_count(&self) -> usize {
         count_as_usize(self.counts.image_count)
     }
 
-    pub(in crate::canonical_scene::store) fn sampler_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn sampler_count(&self) -> usize {
         count_as_usize(self.counts.sampler_count)
     }
 
-    pub(in crate::canonical_scene::store) fn texture_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn texture_count(&self) -> usize {
         count_as_usize(self.counts.texture_count)
     }
 
-    pub(in crate::canonical_scene::store) fn material_binding_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn material_binding_count(&self) -> usize {
         count_as_usize(self.counts.material_binding_count)
     }
 
-    pub(in crate::canonical_scene::store) fn logical_mesh_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn logical_mesh_count(&self) -> usize {
         count_as_usize(self.counts.logical_mesh_count)
     }
 
-    pub(in crate::canonical_scene::store) fn primitive_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn primitive_count(&self) -> usize {
         count_as_usize(self.counts.primitive_count)
     }
 
-    pub(in crate::canonical_scene::store) fn attribute_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn attribute_count(&self) -> usize {
         count_as_usize(self.counts.attribute_count)
     }
 
-    pub(in crate::canonical_scene::store) fn mesh_instance_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn mesh_instance_count(&self) -> usize {
         count_as_usize(self.counts.mesh_instance_count)
     }
 
-    pub(in crate::canonical_scene::store) fn skin_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn skin_count(&self) -> usize {
         count_as_usize(self.counts.skin_count)
     }
 
-    pub(in crate::canonical_scene::store) fn logical_morph_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn logical_morph_count(&self) -> usize {
         count_as_usize(self.counts.logical_morph_count)
     }
 
-    pub(in crate::canonical_scene::store) fn morph_definition_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn morph_definition_count(&self) -> usize {
         count_as_usize(self.counts.morph_definition_count)
     }
 
-    pub(in crate::canonical_scene::store) fn primitive_deformation_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn primitive_deformation_count(&self) -> usize {
         count_as_usize(self.counts.primitive_deformation_count)
     }
 
-    pub(in crate::canonical_scene::store) fn morph_target_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn morph_target_count(&self) -> usize {
         count_as_usize(self.counts.morph_target_count)
     }
 
-    pub(in crate::canonical_scene::store) fn morph_delta_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn morph_delta_count(&self) -> usize {
         count_as_usize(self.counts.morph_delta_count)
     }
 
-    pub(in crate::canonical_scene::store) fn animation_clip_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn animation_clip_count(&self) -> usize {
         count_as_usize(self.counts.animation_clip_count)
     }
 
-    pub(in crate::canonical_scene::store) fn animation_channel_count(self) -> usize {
+    pub(in crate::canonical_scene::store) fn animation_channel_count(&self) -> usize {
         count_as_usize(self.counts.animation_channel_count)
     }
 

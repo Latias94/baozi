@@ -1226,7 +1226,7 @@ impl CanonicalRecordRowWriter<'_> {
     }
 
     /// Writes a canonical scalar-sequence reference field.
-    pub fn write_sequence_ref<T: StoredScalar, Tag>(
+    pub fn write_sequence_ref<T: StoredScalar, Tag: 'static>(
         &mut self,
         value: CanonicalSequenceRef<T, Tag>,
     ) -> Result<(), StoreBuildError> {
@@ -1237,7 +1237,7 @@ impl CanonicalRecordRowWriter<'_> {
     }
 
     /// Writes a canonical binary reference field.
-    pub fn write_bytes_ref<Tag>(
+    pub fn write_bytes_ref<Tag: 'static>(
         &mut self,
         value: CanonicalBytesRef<Tag>,
     ) -> Result<(), StoreBuildError> {
@@ -1248,7 +1248,7 @@ impl CanonicalRecordRowWriter<'_> {
     }
 
     /// Writes a canonical UTF-8 reference field.
-    pub fn write_utf8_ref<Tag>(
+    pub fn write_utf8_ref<Tag: 'static>(
         &mut self,
         value: CanonicalUtf8Ref<Tag>,
     ) -> Result<(), StoreBuildError> {
@@ -1259,7 +1259,7 @@ impl CanonicalRecordRowWriter<'_> {
     }
 
     /// Writes a canonical record reference field.
-    pub fn write_record_ref<Tag>(
+    pub fn write_record_ref<Tag: 'static>(
         &mut self,
         value: CanonicalRecordRef<Tag>,
     ) -> Result<(), StoreBuildError> {
@@ -1293,7 +1293,7 @@ impl OutcomeEvidenceRecordRowWriter<'_> {
     }
 
     /// Writes an outcome-evidence scalar-sequence reference field.
-    pub fn write_sequence_ref<T: StoredScalar, Tag>(
+    pub fn write_sequence_ref<T: StoredScalar, Tag: 'static>(
         &mut self,
         value: OutcomeEvidenceSequenceRef<T, Tag>,
     ) -> Result<(), StoreBuildError> {
@@ -1304,7 +1304,7 @@ impl OutcomeEvidenceRecordRowWriter<'_> {
     }
 
     /// Writes an outcome-evidence binary reference field.
-    pub fn write_bytes_ref<Tag>(
+    pub fn write_bytes_ref<Tag: 'static>(
         &mut self,
         value: OutcomeEvidenceBytesRef<Tag>,
     ) -> Result<(), StoreBuildError> {
@@ -1315,7 +1315,7 @@ impl OutcomeEvidenceRecordRowWriter<'_> {
     }
 
     /// Writes an outcome-evidence UTF-8 reference field.
-    pub fn write_utf8_ref<Tag>(
+    pub fn write_utf8_ref<Tag: 'static>(
         &mut self,
         value: OutcomeEvidenceUtf8Ref<Tag>,
     ) -> Result<(), StoreBuildError> {
@@ -1326,7 +1326,7 @@ impl OutcomeEvidenceRecordRowWriter<'_> {
     }
 
     /// Writes an outcome-evidence record reference field.
-    pub fn write_record_ref<Tag>(
+    pub fn write_record_ref<Tag: 'static>(
         &mut self,
         value: OutcomeEvidenceRecordRef<Tag>,
     ) -> Result<(), StoreBuildError> {

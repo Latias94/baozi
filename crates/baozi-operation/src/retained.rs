@@ -121,7 +121,6 @@ pub use physical::{
     PhysicalStorageAccount, PhysicalStorageAccountCreateError, PhysicalStorageAccountFactory,
     PhysicalStorageAccountFactoryCreateError,
 };
-use std::any::TypeId;
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
@@ -1047,13 +1046,11 @@ where
         };
         let canonical = canonical.as_ref();
         let evidence = evidence.as_ref();
-        if canonical_root.identity.tag != TypeId::of::<CanonicalTag>()
-            || evidence_root.identity.tag != TypeId::of::<EvidenceTag>()
-            || canonical
-                .member(canonical_root.identity, self.set_id)
-                .is_none()
+        if canonical
+            .member(canonical_root.identity(), self.set_id)
+            .is_none()
             || evidence
-                .member(evidence_root.identity, self.set_id)
+                .member(evidence_root.identity(), self.set_id)
                 .is_none()
         {
             return Err(RetainedClosureValidationError::InvalidRoot);
@@ -1088,8 +1085,8 @@ where
             set_id: self.set_id,
             canonical_count: canonical.member_count(),
             evidence_count: evidence.member_count(),
-            canonical_root: canonical_root.identity,
-            evidence_root: evidence_root.identity,
+            canonical_root: canonical_root.identity(),
+            evidence_root: evidence_root.identity(),
             marker: PhantomData,
         })
     }
@@ -1119,10 +1116,9 @@ where
             return Err(RetainedClosureValidationError::Poisoned);
         };
         let evidence = evidence.as_ref();
-        if evidence_root.identity.tag != TypeId::of::<EvidenceTag>()
-            || evidence
-                .member(evidence_root.identity, self.set_id)
-                .is_none()
+        if evidence
+            .member(evidence_root.identity(), self.set_id)
+            .is_none()
         {
             return Err(RetainedClosureValidationError::InvalidRoot);
         }
@@ -1149,7 +1145,7 @@ where
         Ok(RetainedEvidenceClosureProof {
             set_id: self.set_id,
             evidence_count: evidence.member_count(),
-            evidence_root: evidence_root.identity,
+            evidence_root: evidence_root.identity(),
             marker: PhantomData,
         })
     }
@@ -1284,13 +1280,11 @@ where
             };
             match parts {
                 Some((canonical, evidence, control, epoch)) => {
-                    if canonical_root.identity.tag != TypeId::of::<CanonicalTag>()
-                        || evidence_root.identity.tag != TypeId::of::<EvidenceTag>()
-                        || canonical
-                            .member(canonical_root.identity, self.set_id)
-                            .is_none()
+                    if canonical
+                        .member(canonical_root.identity(), self.set_id)
+                        .is_none()
                         || evidence
-                            .member(evidence_root.identity, self.set_id)
+                            .member(evidence_root.identity(), self.set_id)
                             .is_none()
                     {
                         Err(RetainedClosureValidationError::InvalidRoot)
@@ -1348,8 +1342,8 @@ where
                                 set_id: self.set_id,
                                 canonical_count: canonical.member_count(),
                                 evidence_count: evidence.member_count(),
-                                canonical_root: canonical_root.identity,
-                                evidence_root: evidence_root.identity,
+                                canonical_root: canonical_root.identity(),
+                                evidence_root: evidence_root.identity(),
                                 marker: PhantomData,
                             })
                         } else {
@@ -1467,10 +1461,9 @@ where
             };
             match parts {
                 Some((evidence, control, epoch)) => {
-                    if evidence_root.identity.tag != TypeId::of::<EvidenceTag>()
-                        || evidence
-                            .member(evidence_root.identity, self.set_id)
-                            .is_none()
+                    if evidence
+                        .member(evidence_root.identity(), self.set_id)
+                        .is_none()
                     {
                         Err(RetainedClosureValidationError::InvalidRoot)
                     } else {
@@ -1501,7 +1494,7 @@ where
                             Ok(RetainedEvidenceClosureProof {
                                 set_id: self.set_id,
                                 evidence_count: evidence.member_count(),
-                                evidence_root: evidence_root.identity,
+                                evidence_root: evidence_root.identity(),
                                 marker: PhantomData,
                             })
                         } else {
@@ -1557,11 +1550,12 @@ where
         Tag: Copy + Send + Sync + 'static,
     {
         self.containment == AssemblyContainmentProvenance::Healthy
-            && slot.identity.tag == TypeId::of::<Tag>()
-            && self
-                .canonical_table
-                .as_ref()
-                .is_some_and(|table| table.as_ref().member(slot.identity, self.set_id).is_some())
+            && self.canonical_table.as_ref().is_some_and(|table| {
+                table
+                    .as_ref()
+                    .member(slot.identity(), self.set_id)
+                    .is_some()
+            })
     }
 
     pub fn outcome_evidence_len(&self) -> usize {
@@ -1763,10 +1757,7 @@ where
             |emplacer, _| build(emplacer),
         );
         match result {
-            Ok(identity) => Ok(CanonicalRetainedSlot {
-                identity,
-                marker: PhantomData,
-            }),
+            Ok(identity) => Ok(CanonicalRetainedSlot::from_identity(identity)),
             Err(error) => {
                 self.observe_publication_error(&error);
                 Err(error)
@@ -1829,10 +1820,7 @@ where
             move |emplacer, _| build(emplacer, control),
         );
         match result {
-            Ok(identity) => Ok(CanonicalRetainedSlot {
-                identity,
-                marker: PhantomData,
-            }),
+            Ok(identity) => Ok(CanonicalRetainedSlot::from_identity(identity)),
             Err(error) => {
                 self.observe_publication_error(&error);
                 Err(error)
@@ -1885,15 +1873,12 @@ where
                 .ok_or(RetainedPublicationError::Poisoned)?,
             self.set_id,
             source,
-            source_slot.identity,
+            source_slot.identity(),
             plan,
             build,
         );
         match result {
-            Ok(identity) => Ok(CanonicalRetainedSlot {
-                identity,
-                marker: PhantomData,
-            }),
+            Ok(identity) => Ok(CanonicalRetainedSlot::from_identity(identity)),
             Err(error) => {
                 self.observe_publication_error(&error);
                 Err(error)
@@ -1948,15 +1933,12 @@ where
                 .ok_or(RetainedPublicationError::Poisoned)?,
             self.set_id,
             source,
-            source_slot.identity,
+            source_slot.identity(),
             plan,
             move |emplacer| build(emplacer, control),
         );
         match result {
-            Ok(identity) => Ok(CanonicalRetainedSlot {
-                identity,
-                marker: PhantomData,
-            }),
+            Ok(identity) => Ok(CanonicalRetainedSlot::from_identity(identity)),
             Err(error) => {
                 self.observe_publication_error(&error);
                 Err(error)
@@ -2143,13 +2125,10 @@ where
             RetainedMembershipDestination::Canonical,
             RetainedPublicationError::CanonicalSlotLimit,
             &source.inner,
-            source_slot.identity,
+            source_slot.identity(),
         );
         match result {
-            Ok(identity) => Ok(CanonicalRetainedSlot {
-                identity,
-                marker: PhantomData,
-            }),
+            Ok(identity) => Ok(CanonicalRetainedSlot::from_identity(identity)),
             Err(error) => {
                 self.observe_publication_error(&error);
                 Err(error)
@@ -2209,16 +2188,13 @@ where
                 .ok_or(RetainedPublicationError::Poisoned)?,
             self.set_id,
             source,
-            source_slot.identity,
+            source_slot.identity(),
             allocation_plan,
             control,
             build,
         );
         match result {
-            Ok(identity) => Ok(CanonicalRetainedSlot {
-                identity,
-                marker: PhantomData,
-            }),
+            Ok(identity) => Ok(CanonicalRetainedSlot::from_identity(identity)),
             Err(error) => {
                 self.observe_publication_error(&error);
                 Err(error)
@@ -2272,10 +2248,7 @@ where
             |emplacer, _| build(emplacer),
         );
         match result {
-            Ok(identity) => Ok(OutcomeEvidenceRetainedSlot {
-                identity,
-                marker: PhantomData,
-            }),
+            Ok(identity) => Ok(OutcomeEvidenceRetainedSlot::from_identity(identity)),
             Err(error) => {
                 self.observe_publication_error(&error);
                 if protected_action {
@@ -2338,10 +2311,7 @@ where
             move |emplacer, _| build(emplacer, control),
         );
         match result {
-            Ok(identity) => Ok(OutcomeEvidenceRetainedSlot {
-                identity,
-                marker: PhantomData,
-            }),
+            Ok(identity) => Ok(OutcomeEvidenceRetainedSlot::from_identity(identity)),
             Err(error) => {
                 self.observe_publication_error(&error);
                 Err(error)
@@ -2397,10 +2367,7 @@ where
             move |emplacer, _| build(emplacer, control),
         );
         match result {
-            Ok(identity) => Ok(OutcomeEvidenceRetainedSlot {
-                identity,
-                marker: PhantomData,
-            }),
+            Ok(identity) => Ok(OutcomeEvidenceRetainedSlot::from_identity(identity)),
             Err(error) => {
                 self.observe_publication_error(&error);
                 if protected_action {
@@ -2444,13 +2411,10 @@ where
             RetainedMembershipDestination::OutcomeEvidence,
             RetainedPublicationError::OutcomeEvidenceSlotLimit,
             &source.inner,
-            source_slot.identity,
+            source_slot.identity(),
         );
         match result {
-            Ok(identity) => Ok(OutcomeEvidenceRetainedSlot {
-                identity,
-                marker: PhantomData,
-            }),
+            Ok(identity) => Ok(OutcomeEvidenceRetainedSlot::from_identity(identity)),
             Err(error) => {
                 self.observe_publication_error(&error);
                 if protected_action {

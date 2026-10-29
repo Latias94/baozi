@@ -284,6 +284,15 @@ pub enum PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag> {
     MinimalFallback(PreparedStoreFallback),
 }
 
+impl<EvidenceKind, EvidenceTag> PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag> {
+    pub(super) fn quarantine_cause_drop_failure(self) {
+        match self {
+            Self::RichFailure(prepared) => prepared.raw.quarantine_cause_drop_failure(),
+            Self::MinimalFallback(prepared) => prepared.quarantine_cause_drop_failure(),
+        }
+    }
+}
+
 /// Exact preparation outcome for a success that publishes no retained primary output.
 #[must_use = "every exact terminal branch owns frozen ledger evidence"]
 pub enum PreparedStoreEvidenceOnlyOutcome {
@@ -352,6 +361,10 @@ pub struct PreparedStoreFallback {
 }
 
 impl PreparedStoreFallback {
+    pub(super) fn quarantine_cause_drop_failure(self) {
+        self.raw.quarantine_cause_drop_failure();
+    }
+
     /// Performs the allocation-free handoff directly into exact fallback owners.
     pub fn handoff(self) -> PublishedStoreFallbackParts {
         let raw = self.raw.handoff();

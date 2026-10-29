@@ -1,5 +1,9 @@
 use super::*;
 
+use baozi_operation::__retained_store_integration::activation::{
+    NeverActivatedStoreSession, PreparedFailureEvidence,
+};
+
 struct FailureCausePanicOnDrop;
 
 impl Drop for FailureCausePanicOnDrop {
@@ -217,6 +221,243 @@ fn minimal_fallback_cause_drop_panic_poison_contains_the_physical_owner() {
     let fallback = state.prepare_minimal_fallback().unwrap();
 
     assert_panicking_cause_drop_fails_closed(&account, fallback);
+}
+
+struct CountedFailureCause<'a>(&'a Cell<usize>);
+
+impl Drop for CountedFailureCause<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+struct FailureCauseWithPanickingPayload;
+
+impl Drop for FailureCauseWithPanickingPayload {
+    fn drop(&mut self) {
+        std::panic::panic_any(FailureCausePanicOnDrop);
+    }
+}
+
+fn rejected_session_with_cause<Cause>(
+    account: &PhysicalStorageAccount,
+    cause: Cause,
+) -> NeverActivatedStoreSession<TestOwner, TestProgress, TestUnit, Cause> {
+    let (operation, keys) = operation(account);
+    let TestScopedActivation {
+        policy,
+        failure,
+        success: _,
+    } = scoped_activation_shape(keys, 1, 1);
+    let owner = operation
+        .into_test_session_outcome_owner(policy, failure)
+        .unwrap();
+    let mut cause = Some(cause);
+    let outcome: CanonicalActivationOutcome<
+        TestOwner,
+        TestProgress,
+        TestUnit,
+        (),
+        Cause,
+        ScalarSequence<u8>,
+        SequenceTag,
+    > = owner
+        .plan_and_activate_scoped(|planning| {
+            planning.reject(cause.take().expect("the test rejects exactly once"), 11)
+        })
+        .unwrap();
+    match outcome {
+        CanonicalActivationOutcome::NeverActivated(state) => state,
+        CanonicalActivationOutcome::Activated(_)
+        | CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::Fallback(_) => {
+            panic!("preflight rejection must remain NeverActivated")
+        }
+    }
+}
+
+fn prepared_failure_with_cause<Cause>(
+    account: &PhysicalStorageAccount,
+    cause: Cause,
+) -> PreparedFailureEvidence<StoreNeverActivatedCause<Cause>, ScalarSequence<u8>, EvidenceLeafTag> {
+    let outcome = rejected_session_with_cause(account, cause)
+        .build_failure_evidence(|lane| {
+            let root = lane
+                .try_retain_sequence(
+                    SequencePlan::<u8>::new(1).unwrap(),
+                    EvidenceLeafTag,
+                    |writer| writer.push(7),
+                )
+                .unwrap();
+            lane.complete(root)
+        })
+        .unwrap();
+    let rooted = match outcome {
+        FailureEvidenceOutcome::Rooted(rooted) => rooted,
+        FailureEvidenceOutcome::MinimalFallback(_) => {
+            panic!("valid evidence must retain a rooted failure owner")
+        }
+    };
+    let validation = rooted
+        .validate_rich_failure(|session, root| {
+            session
+                .visit_sequence(root, |_index, value| value == 7)
+                .unwrap()
+        })
+        .unwrap();
+    match validation {
+        RootedFailureValidation::Valid(validated) => {
+            validated.try_prepare(final_progress()).unwrap()
+        }
+        RootedFailureValidation::Rejected(_) | RootedFailureValidation::Fallback(_) => {
+            panic!("valid evidence must retain a validated failure owner")
+        }
+    }
+}
+
+fn assert_owner_drops_during_host_unwind<T>(owner: T) {
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _owner = owner;
+        panic!("unrelated host panic");
+    }))
+    .unwrap_err();
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"unrelated host panic"),
+        "the original host panic must survive cause cleanup"
+    );
+}
+
+fn assert_cause_fault_during_host_unwind_fails_closed<T>(
+    account: &PhysicalStorageAccount,
+    owner: T,
+) {
+    let before = account.snapshot();
+    assert!(!before.poisoned());
+    assert!(before.live_retained_allocations() > 0);
+    assert_owner_drops_during_host_unwind(owner);
+    let after = account.snapshot();
+    assert!(after.poisoned());
+    assert_eq!(after.poison_event_count(), 1);
+    assert_eq!(
+        after.first_poison_evidence().unwrap().reason(),
+        AccountPoisonReason::OwnershipGraphUnverified
+    );
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations()
+    );
+    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+}
+
+#[test]
+fn prepared_failure_healthy_cause_releases_during_unrelated_host_unwind() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let cause_drops = Cell::new(0);
+    let prepared = prepared_failure_with_cause(&account, CountedFailureCause(&cause_drops));
+    assert_eq!(cause_drops.get(), 0);
+    assert!(account.snapshot().live_retained_allocations() > 0);
+
+    assert_owner_drops_during_host_unwind(prepared);
+
+    let after = account.snapshot();
+    assert_eq!(cause_drops.get(), 1);
+    assert!(!after.poisoned());
+    assert_eq!(after.poison_event_count(), 0);
+    assert_eq!(after.live_retained_allocations(), 0);
+    assert_eq!(after.live_retained_bytes(), 0);
+}
+
+#[test]
+fn minimal_fallback_healthy_cause_releases_during_unrelated_host_unwind() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let cause_drops = Cell::new(0);
+    let fallback = rejected_session_with_cause(&account, CountedFailureCause(&cause_drops))
+        .prepare_minimal_fallback()
+        .unwrap();
+    assert_eq!(cause_drops.get(), 0);
+    assert!(account.snapshot().live_retained_allocations() > 0);
+
+    assert_owner_drops_during_host_unwind(fallback);
+
+    let after = account.snapshot();
+    assert_eq!(cause_drops.get(), 1);
+    assert!(!after.poisoned());
+    assert_eq!(after.poison_event_count(), 0);
+    assert_eq!(after.live_retained_allocations(), 0);
+    assert_eq!(after.live_retained_bytes(), 0);
+}
+
+#[test]
+fn prepared_failure_cause_fault_during_host_unwind_preserves_the_outer_panic() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let prepared = prepared_failure_with_cause(&account, FailureCauseWithPanickingPayload);
+
+    assert_cause_fault_during_host_unwind_fails_closed(&account, prepared);
+}
+
+#[test]
+fn minimal_fallback_cause_fault_during_host_unwind_preserves_the_outer_panic() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let fallback = rejected_session_with_cause(&account, FailureCauseWithPanickingPayload)
+        .prepare_minimal_fallback()
+        .unwrap();
+
+    assert_cause_fault_during_host_unwind_fails_closed(&account, fallback);
+}
+
+#[test]
+fn prepared_failure_into_parts_transfers_cause_and_owner_without_dropping_either() {
+    for with_control in [false, true] {
+        let factory = factory(1);
+        let account = account(&factory);
+        let cause_drops = Cell::new(0);
+        let prepared = prepared_failure_with_cause(&account, CountedFailureCause(&cause_drops));
+        let before = account.snapshot();
+        let (prepared, cause) = if with_control {
+            let (prepared, cause, control) = prepared.into_parts_with_control();
+            assert_eq!(control, None);
+            (prepared, cause)
+        } else {
+            prepared.into_parts()
+        };
+        assert_eq!(cause_drops.get(), 0);
+        assert_eq!(account.snapshot(), before);
+
+        drop(prepared);
+        assert_eq!(cause_drops.get(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        drop(cause);
+        assert_eq!(cause_drops.get(), 1);
+        assert!(!account.snapshot().poisoned());
+    }
+}
+
+#[test]
+fn minimal_fallback_into_parts_transfers_cause_and_owner_without_dropping_either() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let cause_drops = Cell::new(0);
+    let fallback = rejected_session_with_cause(&account, CountedFailureCause(&cause_drops))
+        .prepare_minimal_fallback()
+        .unwrap();
+    let before = account.snapshot();
+    let (prepared, cause) = fallback.into_parts();
+    assert_eq!(cause_drops.get(), 0);
+    assert_eq!(account.snapshot(), before);
+
+    drop(prepared);
+    assert_eq!(cause_drops.get(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    drop(cause);
+    assert_eq!(cause_drops.get(), 1);
+    assert!(!account.snapshot().poisoned());
 }
 
 fn one_unit_rooted_failure_protected_work() -> (u64, u64) {

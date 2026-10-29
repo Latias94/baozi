@@ -886,7 +886,7 @@ impl CanonicalRecordBuildRow<'_, '_> {
         })
     }
 
-    pub fn write_sequence_ref<T: StoredScalar, Tag>(
+    pub fn write_sequence_ref<T: StoredScalar, Tag: 'static>(
         &mut self,
         value: CanonicalSequenceRef<T, Tag>,
     ) -> Result<(), StoreControlledError> {
@@ -895,7 +895,7 @@ impl CanonicalRecordBuildRow<'_, '_> {
         })
     }
 
-    pub fn write_bytes_ref<Tag>(
+    pub fn write_bytes_ref<Tag: 'static>(
         &mut self,
         value: CanonicalBytesRef<Tag>,
     ) -> Result<(), StoreControlledError> {
@@ -904,7 +904,7 @@ impl CanonicalRecordBuildRow<'_, '_> {
         })
     }
 
-    pub fn write_utf8_ref<Tag>(
+    pub fn write_utf8_ref<Tag: 'static>(
         &mut self,
         value: CanonicalUtf8Ref<Tag>,
     ) -> Result<(), StoreControlledError> {
@@ -913,7 +913,7 @@ impl CanonicalRecordBuildRow<'_, '_> {
         })
     }
 
-    pub fn write_record_ref<Tag>(
+    pub fn write_record_ref<Tag: 'static>(
         &mut self,
         value: CanonicalRecordRef<Tag>,
     ) -> Result<(), StoreControlledError> {
@@ -1461,10 +1461,10 @@ where
     U: ProgressUnit,
 {
     match fallback.prepare_minimal_fallback() {
-        Ok(prepared) => Ok(VerifiedMinimalFallback {
+        Ok(prepared) => Ok(VerifiedMinimalFallback::new(
             prepared,
-            cause: activation_product_graph_cause(),
-        }),
+            activation_product_graph_cause(),
+        )),
         Err(StorePrepareError::FinalizationContainment(cause)) => {
             Err(StoreActivationContainment { cause })
         }
@@ -2921,10 +2921,10 @@ pub struct ValidatedFailureEvidence<
 
 #[must_use = "prepared failure evidence must be handed to the terminal publisher"]
 pub struct PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag> {
-    cause: Cause,
+    cause: Option<Cause>,
     final_control_cause: Option<ControlCause>,
-    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
-    prepared: PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>,
+    // The cause drop boundary either releases this owner normally or quarantines it intact.
+    prepared: Option<PreparedStoreFailureOutcome<EvidenceKind, EvidenceTag>>,
 }
 
 #[must_use = "rejected failure evidence must prepare the minimal fallback"]
@@ -2942,9 +2942,9 @@ where
 /// Minimal fallback whose typed source cause remains available without exposing physical state.
 #[must_use = "the verified minimal fallback must be handed to the terminal publisher"]
 pub struct VerifiedMinimalFallback<Cause> {
-    cause: Cause,
-    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
-    prepared: PreparedStoreFallback,
+    cause: Option<Cause>,
+    // The cause drop boundary either releases this owner normally or quarantines it intact.
+    prepared: Option<PreparedStoreFallback>,
 }
 
 // Both variants are linear terminal owners. Boxing the larger owner would bypass the store ledger.
@@ -3020,7 +3020,7 @@ where
         .prepare_minimal_fallback::<super::StoredBlock, super::StoredBlock>(failure_code)
         .map(|raw| classify_prepared_fallback(raw, domain));
     match prepared {
-        Ok(prepared) => Ok(VerifiedMinimalFallback { prepared, cause }),
+        Ok(prepared) => Ok(VerifiedMinimalFallback::new(prepared, cause)),
         Err(error) => {
             let _ = drop_scoped_value(cause);
             Err(StoreActivationContainment {
@@ -3061,10 +3061,10 @@ where
         .prepare_minimal_fallback_with(failure_code)
         .map(|prepared| classify_prepared_fallback(prepared, domain))
     {
-        Ok(prepared) => Ok(VerifiedMinimalFallback {
+        Ok(prepared) => Ok(VerifiedMinimalFallback::new(
             prepared,
-            cause: ManuallyDrop::into_inner(cause),
-        }),
+            ManuallyDrop::into_inner(cause),
+        )),
         Err(error) => {
             let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
             Err(StoreActivationContainment {

@@ -134,15 +134,6 @@ impl ImportStoreTerminalDimension {
             Self::CanonicalStructuralWork => CANONICAL_STRUCTURAL_WORK_SEMANTIC,
         }
     }
-
-    const fn index(self) -> usize {
-        match self {
-            Self::StartupOutcomeEvidence => 0,
-            Self::FailureTerminalWork => 1,
-            Self::CanonicalRetainedMembers => 2,
-            Self::CanonicalStructuralWork => 3,
-        }
-    }
 }
 
 /// Import-owned copied accounting for one terminal phase.
@@ -154,14 +145,6 @@ pub(crate) struct ImportStorePhaseEvidence {
 }
 
 impl ImportStorePhaseEvidence {
-    const fn empty(phase: ImportLedgerPhase) -> Self {
-        Self {
-            phase,
-            current_live_bytes: 0,
-            peak_live_bytes: 0,
-        }
-    }
-
     fn from_store(phase: ImportLedgerPhase, snapshot: StorePhaseSnapshot) -> Self {
         Self {
             phase,
@@ -196,20 +179,6 @@ pub(crate) struct ImportStoreDimensionEvidence {
 }
 
 impl ImportStoreDimensionEvidence {
-    const fn empty(dimension: ImportDimension) -> Self {
-        Self {
-            dimension,
-            attempted: 0,
-            consumed: 0,
-            current_live_bytes: 0,
-            peak_live_bytes: 0,
-            pending_publication: 0,
-            committed: 0,
-            committed_canonical_output: 0,
-            published_outcome_evidence: 0,
-        }
-    }
-
     fn from_store(dimension: ImportDimension, snapshot: StoreDimensionSnapshot) -> Self {
         Self {
             dimension,
@@ -274,20 +243,6 @@ pub(crate) struct ImportStoreTerminalDimensionEvidence {
 }
 
 impl ImportStoreTerminalDimensionEvidence {
-    const fn empty(dimension: ImportStoreTerminalDimension) -> Self {
-        Self {
-            dimension,
-            attempted: 0,
-            consumed: 0,
-            current_live_bytes: 0,
-            peak_live_bytes: 0,
-            pending_publication: 0,
-            committed: 0,
-            committed_canonical_output: 0,
-            published_outcome_evidence: 0,
-        }
-    }
-
     fn from_store(
         dimension: ImportStoreTerminalDimension,
         snapshot: StoreDimensionSnapshot,
@@ -332,12 +287,10 @@ impl ImportStoreTerminalDimensionEvidence {
 
 /// Import-owned immutable projection of one real canonical Scene terminal.
 ///
-/// No retained-store key, domain, snapshot, or ledger owner escapes this value. Every cause is
-/// copied exclusively from the frozen ledger header and every accounting row is resolved through
-/// the complete import semantic catalog.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Owns the already retained frozen ledger. Accounting access projects one row at a time through
+/// the complete import semantic catalog, without a second full copy of every dimension.
+/// No raw retained-store key, domain, or ledger authority escapes this value.
 pub(crate) struct ImportStoreTerminalEvidence {
-    schema_revision: u32,
     cause: ImportStoreTerminalCause,
     last_completed_phase: Option<ImportLedgerPhase>,
     current_live_bytes: u64,
@@ -345,22 +298,12 @@ pub(crate) struct ImportStoreTerminalEvidence {
     active_reservations: u64,
     current_evidence_bytes: u64,
     peak_evidence_bytes: u64,
-    phases: [ImportStorePhaseEvidence; ImportLedgerPhase::ALL.len()],
-    dimensions: [ImportStoreDimensionEvidence; IMPORT_DIMENSION_COUNT],
-    terminal_dimensions:
-        [ImportStoreTerminalDimensionEvidence; IMPORT_STORE_TERMINAL_DIMENSION_COUNT],
+    ledger: StoreLedgerEvidence,
 }
 
 impl ImportStoreTerminalEvidence {
-    #[cfg(test)]
-    fn try_from_terminal(
-        terminal: &ImportStoreTerminalOutcome,
-    ) -> Result<Self, ImportStoreTerminalProjectionError> {
-        Self::try_from_ledger(terminal.ledger_evidence())
-    }
-
     fn try_from_ledger(
-        evidence: &StoreLedgerEvidence,
+        evidence: StoreLedgerEvidence,
     ) -> Result<Self, ImportStoreTerminalProjectionError> {
         let header = evidence.header();
         if header.phase_count() != ImportLedgerPhase::ALL.len() {
@@ -391,15 +334,11 @@ impl ImportStoreTerminalEvidence {
             .last_completed_phase()
             .map(import_phase_from_semantic)
             .transpose()?;
-        let phases = project_import_phases(|semantic| evidence.phase_by_semantic(semantic))?;
-        let dimensions =
-            project_import_dimensions(|semantic| evidence.dimension_by_semantic(semantic))?;
-        let terminal_dimensions = project_import_terminal_dimensions(|semantic| {
-            evidence.dimension_by_semantic(semantic)
-        })?;
+        validate_import_phases(|semantic| evidence.phase_by_semantic(semantic))?;
+        validate_import_dimensions(|semantic| evidence.dimension_by_semantic(semantic))?;
+        validate_import_terminal_dimensions(|semantic| evidence.dimension_by_semantic(semantic))?;
 
         Ok(Self {
-            schema_revision: header.schema_revision(),
             cause,
             last_completed_phase,
             current_live_bytes: header.current_live_bytes(),
@@ -407,9 +346,7 @@ impl ImportStoreTerminalEvidence {
             active_reservations: header.active_reservations(),
             current_evidence_bytes: header.current_evidence_bytes(),
             peak_evidence_bytes: header.peak_evidence_bytes(),
-            phases,
-            dimensions,
-            terminal_dimensions,
+            ledger: evidence,
         })
     }
 
@@ -442,51 +379,94 @@ impl ImportStoreTerminalEvidence {
     }
 
     #[cfg(test)]
-    pub(crate) const fn phases(&self) -> &[ImportStorePhaseEvidence] {
-        &self.phases
+    pub(crate) fn phases(&self) -> [ImportStorePhaseEvidence; ImportLedgerPhase::ALL.len()] {
+        ImportLedgerPhase::ALL.map(|phase| {
+            self.phase(phase)
+                .expect("the immutable terminal catalog was validated at handoff")
+        })
     }
 
     #[cfg(test)]
-    pub(crate) const fn dimensions(&self) -> &[ImportStoreDimensionEvidence] {
-        &self.dimensions
+    pub(crate) fn dimensions(&self) -> [ImportStoreDimensionEvidence; IMPORT_DIMENSION_COUNT] {
+        ImportDimension::ALL.map(|dimension| {
+            self.dimension(dimension)
+                .expect("the immutable terminal catalog was validated at handoff")
+        })
     }
 
     #[cfg(test)]
-    pub(crate) const fn terminal_dimensions(&self) -> &[ImportStoreTerminalDimensionEvidence] {
-        &self.terminal_dimensions
+    pub(crate) fn terminal_dimensions(
+        &self,
+    ) -> [ImportStoreTerminalDimensionEvidence; IMPORT_STORE_TERMINAL_DIMENSION_COUNT] {
+        ImportStoreTerminalDimension::ALL.map(|dimension| {
+            self.terminal_dimension(dimension)
+                .expect("the immutable terminal catalog was validated at handoff")
+        })
     }
 
-    #[cfg(test)]
-    pub(crate) fn phase(&self, phase: ImportLedgerPhase) -> Option<ImportStorePhaseEvidence> {
-        self.phases.get(phase_index(phase)).copied()
+    fn phase(&self, phase: ImportLedgerPhase) -> Option<ImportStorePhaseEvidence> {
+        self.ledger
+            .phase_by_semantic(import_phase_semantic_id(phase))
+            .map(|row| ImportStorePhaseEvidence::from_store(phase, row))
     }
 
     pub(crate) fn dimension(
         &self,
         dimension: ImportDimension,
     ) -> Option<ImportStoreDimensionEvidence> {
-        self.dimensions.get(dimension as usize).copied()
+        self.ledger
+            .dimension_by_semantic(import_dimension_semantic_id(dimension))
+            .map(|row| ImportStoreDimensionEvidence::from_store(dimension, row))
     }
 
-    #[cfg(test)]
-    pub(crate) fn terminal_dimension(
+    fn terminal_dimension(
         &self,
         dimension: ImportStoreTerminalDimension,
     ) -> Option<ImportStoreTerminalDimensionEvidence> {
-        self.terminal_dimensions.get(dimension.index()).copied()
+        self.ledger
+            .dimension_by_semantic(dimension.semantic_id())
+            .map(|row| ImportStoreTerminalDimensionEvidence::from_store(dimension, row))
     }
 
-    pub(crate) const fn committed_canonical_members(&self) -> u64 {
-        self.terminal_dimensions[ImportStoreTerminalDimension::CanonicalRetainedMembers.index()]
+    pub(crate) fn committed_canonical_members(&self) -> u64 {
+        self.terminal_dimension(ImportStoreTerminalDimension::CanonicalRetainedMembers)
+            .expect("the immutable terminal catalog was validated at handoff")
             .committed_canonical_output()
     }
 }
+
+impl fmt::Debug for ImportStoreTerminalEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportStoreTerminalEvidence")
+            .field("header", &self.ledger.header())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ImportStoreTerminalEvidence {
+    fn eq(&self, other: &Self) -> bool {
+        self.ledger.header() == other.ledger.header()
+            && ImportLedgerPhase::ALL
+                .into_iter()
+                .all(|phase| self.phase(phase) == other.phase(phase))
+            && ImportDimension::ALL
+                .into_iter()
+                .all(|dimension| self.dimension(dimension) == other.dimension(dimension))
+            && ImportStoreTerminalDimension::ALL
+                .into_iter()
+                .all(|dimension| {
+                    self.terminal_dimension(dimension) == other.terminal_dimension(dimension)
+                })
+    }
+}
+
+impl Eq for ImportStoreTerminalEvidence {}
 
 /// Import-owned outcome evidence jointly published with a successful canonical Scene.
 #[must_use = "the success report owns the published outcome-evidence store"]
 pub(crate) struct ImportStoreSuccessReport {
     _outcome_evidence: PublishedOutcomeEvidenceStore<RecordBlock, SceneOutcomeEvidenceTag>,
-    _ledger_evidence: StoreLedgerEvidence,
 }
 
 #[cfg(test)]
@@ -494,38 +474,18 @@ impl ImportStoreSuccessReport {
     pub(crate) fn outcome_evidence_block_count(&self) -> usize {
         self._outcome_evidence.len()
     }
-
-    pub(crate) const fn ledger_evidence(&self) -> &StoreLedgerEvidence {
-        &self._ledger_evidence
-    }
 }
 
 /// Import-owned structured failure evidence from the unique Scene transaction.
 #[must_use = "the rich failure owns the published outcome-evidence store"]
 pub(crate) struct ImportStoreRichFailure {
     _outcome_evidence: PublishedRichFailureStore<RecordBlock, SceneOutcomeEvidenceTag>,
-    _ledger_evidence: StoreLedgerEvidence,
-}
-
-#[cfg(test)]
-impl ImportStoreRichFailure {
-    pub(crate) const fn ledger_evidence(&self) -> &StoreLedgerEvidence {
-        &self._ledger_evidence
-    }
 }
 
 /// Import-owned bounded fallback from the unique Scene transaction.
 #[must_use = "the fallback owns its bounded published failure state"]
 pub(crate) struct ImportStoreMinimalFallback {
     _fallback: PublishedStoreFallbackOutput,
-    _ledger_evidence: StoreLedgerEvidence,
-}
-
-#[cfg(test)]
-impl ImportStoreMinimalFallback {
-    pub(crate) const fn ledger_evidence(&self) -> &StoreLedgerEvidence {
-        &self._ledger_evidence
-    }
 }
 
 /// Selects which pre-terminal cause remains authoritative after a failed import.
@@ -563,6 +523,14 @@ pub(crate) enum ImportStoreTerminalOutcome {
 
 #[cfg(test)]
 impl ImportStoreTerminalOutcome {
+    fn evidence(&self) -> &ImportStoreTerminalEvidence {
+        match self {
+            Self::Success { evidence, .. }
+            | Self::RichFailure { evidence, .. }
+            | Self::MinimalFallback { evidence, .. } => evidence,
+        }
+    }
+
     fn is_success(&self) -> bool {
         matches!(self, Self::Success { .. })
     }
@@ -576,9 +544,9 @@ impl ImportStoreTerminalOutcome {
 
     fn ledger_evidence(&self) -> &StoreLedgerEvidence {
         match self {
-            Self::Success { report, .. } => report.ledger_evidence(),
-            Self::RichFailure { failure, .. } => failure.ledger_evidence(),
-            Self::MinimalFallback { fallback, .. } => fallback.ledger_evidence(),
+            Self::Success { evidence, .. }
+            | Self::RichFailure { evidence, .. }
+            | Self::MinimalFallback { evidence, .. } => &evidence.ledger,
         }
     }
 
@@ -630,50 +598,34 @@ fn import_phase_from_semantic(
         .ok_or(ImportStoreTerminalProjectionError::UnknownLastCompletedPhase)
 }
 
-fn project_import_phases(
+fn validate_import_phases(
     mut lookup: impl FnMut(StorePhaseSemanticId) -> Option<StorePhaseSnapshot>,
-) -> Result<
-    [ImportStorePhaseEvidence; ImportLedgerPhase::ALL.len()],
-    ImportStoreTerminalProjectionError,
-> {
-    let mut projected = ImportLedgerPhase::ALL.map(ImportStorePhaseEvidence::empty);
-    for (index, phase) in ImportLedgerPhase::ALL.into_iter().enumerate() {
-        let snapshot = lookup(import_phase_semantic_id(phase))
+) -> Result<(), ImportStoreTerminalProjectionError> {
+    for phase in ImportLedgerPhase::ALL {
+        lookup(import_phase_semantic_id(phase))
             .ok_or(ImportStoreTerminalProjectionError::MissingPhase { phase })?;
-        projected[index] = ImportStorePhaseEvidence::from_store(phase, snapshot);
     }
-    Ok(projected)
+    Ok(())
 }
 
-fn project_import_dimensions(
+fn validate_import_dimensions(
     mut lookup: impl FnMut(StoreDimensionSemanticId) -> Option<StoreDimensionSnapshot>,
-) -> Result<
-    [ImportStoreDimensionEvidence; IMPORT_DIMENSION_COUNT],
-    ImportStoreTerminalProjectionError,
-> {
-    let mut projected = ImportDimension::ALL.map(ImportStoreDimensionEvidence::empty);
-    for (index, dimension) in ImportDimension::ALL.into_iter().enumerate() {
-        let snapshot = lookup(import_dimension_semantic_id(dimension))
+) -> Result<(), ImportStoreTerminalProjectionError> {
+    for dimension in ImportDimension::ALL {
+        lookup(import_dimension_semantic_id(dimension))
             .ok_or(ImportStoreTerminalProjectionError::MissingDimension { dimension })?;
-        projected[index] = ImportStoreDimensionEvidence::from_store(dimension, snapshot);
     }
-    Ok(projected)
+    Ok(())
 }
 
-fn project_import_terminal_dimensions(
+fn validate_import_terminal_dimensions(
     mut lookup: impl FnMut(StoreDimensionSemanticId) -> Option<StoreDimensionSnapshot>,
-) -> Result<
-    [ImportStoreTerminalDimensionEvidence; IMPORT_STORE_TERMINAL_DIMENSION_COUNT],
-    ImportStoreTerminalProjectionError,
-> {
-    let mut projected =
-        ImportStoreTerminalDimension::ALL.map(ImportStoreTerminalDimensionEvidence::empty);
-    for (index, dimension) in ImportStoreTerminalDimension::ALL.into_iter().enumerate() {
-        let snapshot = lookup(dimension.semantic_id())
+) -> Result<(), ImportStoreTerminalProjectionError> {
+    for dimension in ImportStoreTerminalDimension::ALL {
+        lookup(dimension.semantic_id())
             .ok_or(ImportStoreTerminalProjectionError::MissingTerminalDimension { dimension })?;
-        projected[index] = ImportStoreTerminalDimensionEvidence::from_store(dimension, snapshot);
     }
-    Ok(projected)
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2521,7 +2473,7 @@ mod tests {
                 .expect("terminal evidence includes the startup fallback baseline")
         );
         assert!(matches!(
-            report.ledger_evidence().header().terminal_cause(),
+            evidence.ledger.header().terminal_cause(),
             StoreTerminalCause::Success
         ));
 
@@ -2557,8 +2509,7 @@ mod tests {
                 if cause.code() == IMPORT_SCENE_NOT_SUBMITTED_CODE
         ));
 
-        let evidence = ImportStoreTerminalEvidence::try_from_terminal(&terminal)
-            .expect("the unactivated terminal must project into the complete import vocabulary");
+        let evidence = terminal.evidence();
         assert_eq!(
             evidence.cause().class(),
             ImportStoreTerminalClass::Requested
@@ -2595,8 +2546,7 @@ mod tests {
             .handoff()
             .expect("the successful Scene terminal must project");
 
-        let evidence = ImportStoreTerminalEvidence::try_from_terminal(&terminal)
-            .expect("the exact terminal evidence must project into import vocabulary");
+        let evidence = terminal.evidence();
         assert_eq!(evidence.cause(), ImportStoreTerminalCause::Success);
         assert_eq!(evidence.cause().class(), ImportStoreTerminalClass::Success);
         assert_eq!(evidence.cause().code(), None);
@@ -2636,20 +2586,20 @@ mod tests {
     #[test]
     fn terminal_projection_fails_closed_when_a_semantic_row_is_missing() {
         assert_eq!(
-            project_import_phases(|_| None).expect_err("a missing phase must fail closed"),
+            validate_import_phases(|_| None).expect_err("a missing phase must fail closed"),
             ImportStoreTerminalProjectionError::MissingPhase {
                 phase: ImportLedgerPhase::PrimarySnapshot,
             }
         );
         assert_eq!(
-            project_import_dimensions(|_| None)
+            validate_import_dimensions(|_| None)
                 .expect_err("a missing import dimension must fail closed"),
             ImportStoreTerminalProjectionError::MissingDimension {
                 dimension: ImportDimension::AssetOpen,
             }
         );
         assert_eq!(
-            project_import_terminal_dimensions(|_| None)
+            validate_import_terminal_dimensions(|_| None)
                 .expect_err("a missing terminal dimension must fail closed"),
             ImportStoreTerminalProjectionError::MissingTerminalDimension {
                 dimension: ImportStoreTerminalDimension::StartupOutcomeEvidence,
@@ -2674,8 +2624,7 @@ mod tests {
             panic!("a missing parser descriptor must publish a failure cause")
         };
 
-        let evidence = ImportStoreTerminalEvidence::try_from_terminal(&terminal)
-            .expect("the missing-draft terminal must retain complete import evidence");
+        let evidence = terminal.evidence();
         assert_eq!(
             evidence.cause().class(),
             ImportStoreTerminalClass::Requested
@@ -2702,8 +2651,7 @@ mod tests {
             panic!("an authoring rejection must publish a failure cause")
         };
 
-        let evidence = ImportStoreTerminalEvidence::try_from_terminal(&terminal)
-            .expect("the authoring rejection must retain complete import evidence");
+        let evidence = terminal.evidence();
         assert_eq!(
             evidence.cause().class(),
             ImportStoreTerminalClass::Requested
@@ -2751,8 +2699,7 @@ mod tests {
             panic!("cancelled authoring must publish a failure cause")
         };
 
-        let evidence = ImportStoreTerminalEvidence::try_from_terminal(&terminal)
-            .expect("the control terminal must retain complete import evidence");
+        let evidence = terminal.evidence();
         assert_eq!(evidence.cause().class(), ImportStoreTerminalClass::Control);
         assert_eq!(evidence.cause().code(), Some(header_cause.code()));
         assert_eq!(evidence.current_live_bytes(), 0);
@@ -2782,8 +2729,7 @@ mod tests {
             panic!("work exhaustion must publish a failure cause")
         };
 
-        let evidence = ImportStoreTerminalEvidence::try_from_terminal(&terminal)
-            .expect("the ledger terminal must retain complete import evidence");
+        let evidence = terminal.evidence();
         assert_eq!(evidence.cause().class(), ImportStoreTerminalClass::Ledger);
         assert_eq!(evidence.cause().code(), Some(header_cause.code()));
         assert_eq!(evidence.current_live_bytes(), 0);
@@ -2975,8 +2921,7 @@ mod tests {
             .handoff()
             .expect("the deferred ledger terminal must project");
         assert!(!terminal.is_success());
-        let evidence = ImportStoreTerminalEvidence::try_from_terminal(&terminal)
-            .expect("the ledger rejection must project from its unique terminal evidence");
+        let evidence = terminal.evidence();
         assert_eq!(evidence.cause().class(), ImportStoreTerminalClass::Ledger);
 
         drop(terminal);

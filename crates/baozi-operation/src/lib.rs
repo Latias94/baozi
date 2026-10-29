@@ -266,13 +266,13 @@ pub mod __retained_store_integration {
     /// Consumer-facing canonical activation capabilities.
     pub mod activation {
         pub use crate::concrete_store::activation::{
-            CanonicalActivationOutcome, CanonicalActivationPermit, CanonicalActivationSeal,
-            CanonicalActivationSealFailure, CanonicalActivationSessionPolicy,
-            CanonicalBuildControl, CanonicalCandidateStoreSession,
-            CanonicalCentralValidationOutcome, CanonicalFailureRequirements,
-            CanonicalFailureTerminalWorkPlan, CanonicalFreezeInterruptionClass,
-            CanonicalFreezePermit, CanonicalFreezePermitIssue, CanonicalJointCommit,
-            CanonicalJointSeal, CanonicalLane, CanonicalMaterialization,
+            ActivatedCanonicalStoreSession, CanonicalActivationOutcome, CanonicalActivationPermit,
+            CanonicalActivationSeal, CanonicalActivationSealFailure,
+            CanonicalActivationSessionPolicy, CanonicalBuildControl,
+            CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome,
+            CanonicalFailureRequirements, CanonicalFailureTerminalWorkPlan,
+            CanonicalFreezeInterruptionClass, CanonicalFreezePermit, CanonicalFreezePermitIssue,
+            CanonicalJointCommit, CanonicalJointSeal, CanonicalLane, CanonicalMaterialization,
             CanonicalMaterializationRole, CanonicalRecordBuildRow, CanonicalReservation,
             CanonicalScopedDisposition, CanonicalSemanticCompletion, CanonicalSemanticWorkSession,
             CanonicalValidationCheckpoint, CanonicalValidationDecision, CanonicalValidationMember,
@@ -281,7 +281,7 @@ pub mod __retained_store_integration {
             CentrallyRejectedCanonicalStoreSession, FailureEvidenceDecision, FailureEvidenceMember,
             FailureEvidenceOutcome, FailureEvidenceValidationSession, FrozenFailureState,
             InterruptedCanonicalStoreSession, NeverActivatedStoreSession, OutcomeEvidenceDecision,
-            OutcomeEvidenceValidationMember, RejectedCanonicalStoreSession,
+            OutcomeEvidenceValidationMember, PreparedFailureEvidence, RejectedCanonicalStoreSession,
             RetainedStoreSessionOutcomeOwner, RootedFailureValidation, StoreActivationContainment,
             StoreCanonicalRejection, StoreNeverActivatedCause, VerifiedMinimalFallback,
         };

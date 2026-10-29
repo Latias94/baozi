@@ -889,11 +889,8 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let VerifiedMinimalFallback {
-        prepared,
-        cause: _product_graph_cause,
-    } = prepare_product_graph_fallback(fallback)?;
-    Ok(VerifiedMinimalFallback { prepared, cause })
+    let (prepared, _product_graph_cause) = prepare_product_graph_fallback(fallback)?.into_parts();
+    Ok(VerifiedMinimalFallback::new(prepared, cause))
 }
 
 impl<Proof, E> CanonicalValidationDecision<Proof, E> {

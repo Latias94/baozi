@@ -4030,7 +4030,7 @@ fn prepared_store_surfaces_expose_only_consuming_classification_or_handoff() {
         ),
         implementation_block(
             store,
-            "impl<EvidenceKind, EvidenceTag> PreparedStoreFailure",
+            "impl<EvidenceKind, EvidenceTag> PreparedStoreFailure<",
         ),
         implementation_block(store, "impl PreparedStoreFallback"),
         implementation_block(store, "impl PreparedStoreEvidenceOnlySuccess"),

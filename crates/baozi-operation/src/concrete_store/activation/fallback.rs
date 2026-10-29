@@ -170,10 +170,10 @@ where
         };
         let cause = ManuallyDrop::new(cause);
         match prepare_operation_minimal_direct(operation, failure_code) {
-            Ok(prepared) => Ok(VerifiedMinimalFallback {
+            Ok(prepared) => Ok(VerifiedMinimalFallback::new(
                 prepared,
-                cause: ManuallyDrop::into_inner(cause),
-            }),
+                ManuallyDrop::into_inner(cause),
+            )),
             Err(error) => {
                 let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
                 Err(error)

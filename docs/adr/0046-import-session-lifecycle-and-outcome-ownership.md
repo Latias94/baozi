@@ -72,6 +72,11 @@ The session owns:
 No parser, format adapter, core construction, or facade layer may create a second import operation,
 outcome builder, or finalizer.
 
+Large construction state must be admitted before activation and borrowed through its phase work.
+Failure transitions cannot allocate replacement state. Any session storage surviving central
+validation must account for early fallback preparation as well as the normal finalizer; introducing
+a new long-lived scratch reservation cannot silently change which failure paths may freeze.
+
 ### Capability-Limited Stages
 
 ```mermaid
@@ -130,6 +135,11 @@ authority for final operation class and code; a parallel runtime classifier is f
 Successful reports own the validated Scene, ledger snapshot, phase evidence, diagnostics, source
 scope, loss evidence, and any completed successful input manifest. Failures own only evidence that
 was safely finalized. Postprocess begins a separate operation and is never an import phase.
+
+The public ledger snapshot owns the already retained frozen ledger and projects semantic rows on
+demand. It does not materialize another complete dimension/phase table in each result or error.
+Borrowed reads neither allocate nor share an account handle. The snapshot has linear ownership;
+an implicit `Clone` must not introduce unadmitted retained sharing or an unaccounted table copy.
 
 ### Stable Lifecycle Phases
 

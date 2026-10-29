@@ -1,9 +1,10 @@
 #[cfg(test)]
 use super::unreachable_final_owner_state;
 use super::{
-    DimensionSnapshot, FallbackHeaderSnapshot, PhaseSnapshot, PhysicalStorageAccount,
-    PublishedCanonicalAggregate, PublishedOutcomeEvidenceAggregate, PublishedPart,
-    RetainedSlotIdentity, TerminalEvidenceCause, TerminalEvidenceKey, TerminalLedgerEvidence,
+    AccountPoisonReason, DimensionSnapshot, FallbackHeaderSnapshot, PhaseSnapshot,
+    PhysicalStorageAccount, PublishedCanonicalAggregate, PublishedOutcomeEvidenceAggregate,
+    PublishedPart, RetainedSlotIdentity, TerminalEvidenceCause, TerminalEvidenceKey,
+    TerminalLedgerEvidence,
 };
 
 pub(super) enum RetainedPublicationPayload<CanonicalBlock, EvidenceBlock, F> {
@@ -295,6 +296,14 @@ where
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey,
 {
+    /// Retains the complete physical graph after its coupled cause failed to drop.
+    pub(crate) fn quarantine_cause_drop_failure(self) {
+        let _ = self
+            .account
+            .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        std::mem::forget(self);
+    }
+
     /// Performs a pure ownership handoff directly into exact rich-failure owners.
     pub fn handoff(self) -> PublishedRetainedRichFailureParts<EvidenceBlock, P, D> {
         let Self {
@@ -321,6 +330,15 @@ where
     P: TerminalEvidenceKey,
     D: TerminalEvidenceKey,
 {
+    /// Retains payload and ledger evidence using the already-owned account anchor.
+    pub(crate) fn quarantine_cause_drop_failure(self) {
+        let _ = self
+            .part
+            .account()
+            .record_poison(AccountPoisonReason::OwnershipGraphUnverified);
+        std::mem::forget(self);
+    }
+
     /// Performs a pure ownership handoff directly into exact fallback owners.
     pub fn handoff(self) -> PublishedRetainedFallbackParts<F, P, D> {
         let Self { part, evidence } = self;
