@@ -915,8 +915,9 @@ static IMMUTABLE_MEMORY_ABSENCE_SCHEME_ENTRY: NegativeProofSchemeEntry = Negativ
     },
 };
 
-static SAME_AUTHORITY_NEGATIVE_PROOF_SCHEMES: &[RegisteredNegativeProofScheme] =
-    &[RegisteredNegativeProofScheme {
+// Own the wrappers in named static storage so const and runtime access share pointer identity.
+static SAME_AUTHORITY_NEGATIVE_PROOF_SCHEMES: [RegisteredNegativeProofScheme; 1] =
+    [RegisteredNegativeProofScheme {
         entry: &IMMUTABLE_MEMORY_ABSENCE_SCHEME_ENTRY,
     }];
 
@@ -954,7 +955,7 @@ static SAME_AUTHORITY_RESOLVER_ENTRY: ResolverEntry = ResolverEntry {
         namespace_semantics: PORTABLE_LOGICAL_NAMESPACE,
         normalizer: &PORTABLE_ASSET_PATH_NORMALIZER,
         parameters: SemanticParameterSchema::SameAuthorityResolverV1,
-        proof_schemes: SAME_AUTHORITY_NEGATIVE_PROOF_SCHEMES,
+        proof_schemes: &SAME_AUTHORITY_NEGATIVE_PROOF_SCHEMES,
     },
     identity_schema: &SAME_AUTHORITY_RESOURCE_IDENTITY_SCHEMA,
 };
@@ -1057,6 +1058,14 @@ mod tests {
 
     #[test]
     fn same_authority_profile_issues_the_registered_stable_identity() {
+        const CONST_SCHEME: &RegisteredNegativeProofScheme =
+            immutable_memory_namespace_absence_v1();
+        const CONST_PROFILE_SCHEME: &RegisteredNegativeProofScheme = &same_authority_resolver_v1()
+            .semantic_subject()
+            .proof_schemes()[0];
+        static STATIC_SCHEME: &RegisteredNegativeProofScheme =
+            immutable_memory_namespace_absence_v1();
+
         let resolver = same_authority_resolver_v1();
         assert!(std::ptr::eq(resolver, same_authority_resolver_v1()));
         let subject = resolver.semantic_subject();
@@ -1065,10 +1074,14 @@ mod tests {
             portable_asset_path_normalizer_v1()
         ));
         assert_eq!(subject.proof_schemes().len(), 1);
-        assert!(std::ptr::eq(
-            &subject.proof_schemes()[0],
-            immutable_memory_namespace_absence_v1()
-        ));
+        for scheme in [
+            CONST_SCHEME,
+            CONST_PROFILE_SCHEME,
+            STATIC_SCHEME,
+            immutable_memory_namespace_absence_v1(),
+        ] {
+            assert!(std::ptr::eq(&subject.proof_schemes()[0], scheme));
+        }
 
         let io = MemoryAssetIo::new();
         let authority = io.authority_domain();
@@ -1163,10 +1176,7 @@ mod tests {
             .verify(&target, RegisteredUnavailableCause::Missing)
             .unwrap();
 
-        assert_eq!(
-            first_proof.proof.proof_digest(),
-            repeated.proof.proof_digest()
-        );
+        assert_eq!(first_proof.proof, repeated.proof);
         assert_eq!(
             first_proof.proof.namespace_snapshot_digest(),
             repeated.proof.namespace_snapshot_digest()
@@ -1175,10 +1185,7 @@ mod tests {
             first_proof.proof.namespace_snapshot_digest(),
             other_namespace.proof.namespace_snapshot_digest()
         );
-        assert_ne!(
-            first_proof.proof.proof_digest(),
-            other_namespace.proof.proof_digest()
-        );
+        assert_ne!(first_proof.proof, other_namespace.proof);
 
         let present = AssetPath::new("models/scene.obj").unwrap();
         let present_result = resolver
