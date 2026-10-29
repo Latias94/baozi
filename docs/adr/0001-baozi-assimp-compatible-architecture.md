@@ -29,8 +29,9 @@ evidence:
 ## Status and Scope
 
 This accepted decision defines Baozi's top-level architecture and ownership boundaries. It does not
-claim implementation completion. Current progress, verification results, and known gaps live in the
-canonical refactor plan and engineering evidence records linked below.
+claim implementation completion. Current execution scope lives in the
+[active delivery plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md); verification results
+and known gaps live in the review and engineering evidence records linked below.
 
 Assimp is a mature comparative input for behavior, format breadth, failure cases, and test design.
 It is not Baozi's architecture source, public compatibility target, or implementation dependency.
@@ -281,7 +282,9 @@ Negative:
 Implementation and verification change over time; consult these evidence locations rather than
 editing the accepted decision to report transient status:
 
-- [Canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
+- [Active delivery and core simplification plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md)
+- [2026-10-29 library state review](../reviews/2026-10-29-library-state-review.md)
+- [Superseded canonical architecture execution plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
 - [Facade source](../../crates/baozi/src/lib.rs)
 - [Core source](../../crates/baozi-core/src/lib.rs)
 - [Import source](../../crates/baozi-import/src/lib.rs)

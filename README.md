@@ -76,6 +76,8 @@ cargo bench -p baozi --bench import_baseline --no-run --all-features
 
 Start here:
 
+- [Active development plan](docs/plans/2026-10-29-001-refactor-library-delivery-plan.md)
+- [2026-10-29 library state review](docs/reviews/2026-10-29-library-state-review.md)
 - [`docs/research/assimp-replication-study.md`](docs/research/assimp-replication-study.md)
 - [`docs/adr/README.md`](docs/adr/README.md)
 - [`docs/adr/0001-baozi-assimp-compatible-architecture.md`](docs/adr/0001-baozi-assimp-compatible-architecture.md)

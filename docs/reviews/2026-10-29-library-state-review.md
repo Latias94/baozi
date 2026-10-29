@@ -364,10 +364,15 @@ Sources: [Criterion](https://crates.io/api/v1/crates/criterion),
 [Triomphe](https://crates.io/api/v1/crates/triomphe), [cap-std](https://crates.io/api/v1/crates/cap-std),
 [rustix](https://crates.io/api/v1/crates/rustix), [glTF](https://crates.io/api/v1/crates/gltf).
 
-## Recommended decision
+## Decision and adoption
 
-Use the accompanying [development plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md) as
-the next execution proposal. Start with normal-stack consumption, truthful loss handling, usable
+The user adopted the accompanying [development plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md)
+on 2026-10-29 and explicitly authorized necessary architecture refactoring, API replacement,
+dependency updates, and removal of obsolete unpublished implementations. It is now the active
+execution plan; the 2026-07-10 plan remains superseded history. This adoption records the approved
+direction and does not change the observed test results or mark any finding resolved.
+
+Start with normal-stack consumption, truthful loss handling, usable
 typed access, and bounded validation; then simplify storage, complete glTF and concrete postprocessing,
 and prove release behavior through the facade. Each abstraction should justify its cost through a
 visible behavior, security boundary, or measured workload. Format, test, and ADR counts are not

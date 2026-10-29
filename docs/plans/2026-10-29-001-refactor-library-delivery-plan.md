@@ -2,26 +2,39 @@
 title: Baozi Usable Import Library and Core Simplification
 type: refactor
 date: 2026-10-29
-status: proposed
+status: active
 ---
 
 # Baozi Usable Import Library and Core Simplification
 
 ## Decision and starting point
 
-This is a proposed replacement execution plan for the remaining unpublished-library work, based on
+This is the active execution plan for the remaining unpublished-library work, based on
 the [2026-10-29 review](../reviews/2026-10-29-library-state-review.md). The working-tree glTF/profile
-changes reviewed there are part of the baseline. This proposal does not mark ADRs superseded,
-format profiles admitted, or work complete.
+changes reviewed there are part of the baseline. The user adopted this direction on 2026-10-29 and
+explicitly authorized necessary architecture refactoring without preserving unpublished compatibility.
+Plan adoption does not mark implementation complete, admit a format, or publish a package.
 
-On adoption, archive the 2026-07-10 execution plan, update the roadmap, and amend only ADR decisions
-that actually change. Never restore retired collectors to satisfy obsolete plan commands. Retain
-the old reasoning and test evidence as history, without making it an execution dependency.
+This plan replaces the [2026-07-10 execution plan](2026-07-10-001-refactor-baozi-canonical-architecture-plan.md),
+which remains at its original path as superseded history. The [roadmap](../roadmap.md) follows this
+sequence. Never restore retired collectors to satisfy obsolete plan commands. Historical checkboxes
+and commands are evidence to inspect, not outstanding instructions to execute.
 
 Breaking API changes, deleting obsolete code, changing crate boundaries, and dependency upgrades are
-allowed. Each increment must remain buildable and delete the implementation and tests it replaces.
-Use one production Scene representation after each completed cutover. Temporary development branches
-may compare implementations, but no duplicate public model or compatibility facade is retained.
+authorized. This includes replacing the generic record store and publication architecture when their
+design causes the reviewed defects. A local patch is sufficient only when it resolves the underlying
+cause; obsolete internal APIs and state machines do not have a compatibility requirement.
+
+Each increment must remain buildable and delete the implementation and tests it replaces, retaining
+their meaningful behavioral coverage. Use one production Scene representation after each completed
+cutover. Temporary development branches may compare implementations, but no duplicate public model,
+compatibility facade, or permanent migration adapter is retained.
+
+Architecture decision changes are part of the corresponding implementation unit. Update or replace
+the affected ADR, its ownership/index references, and any directly affected conformance record in the
+same change as the new boundary. Existing ADRs record the current contract; they are not a reason to
+preserve a rejected architecture or seek the same refactoring authorization again. Keep retained
+guarantees explicit and never declare conformance from a documentation change alone.
 
 ## Product completion criteria
 
@@ -48,11 +61,15 @@ sampler, texture, and binding identities; variable influences; authored matrix/T
 immutable validated output; scoped IO; stable input snapshots; central validation; explicit loss;
 and cooperative control. Preserve source identity separately from scene-local identity.
 
-Prefer a private typed `SceneStorage` containing typed tables and immutable contiguous payloads.
+The selected target is a private typed `SceneStorage` containing typed tables and immutable contiguous payloads.
 The scene root owns tables; records use typed logical indices. Public borrowed views hide storage
 layout. Scene-generation qualification belongs at lookup/edit boundaries. Validators borrow the
 actual tables, allocating only marks, traversal state, and necessary summaries. Edits share unchanged
 tables or pages where the complexity is justified by measured use.
+
+Core owns typed tables and payloads through a private owner that binds their lifetime to centrally
+managed leases. The common release mechanism destroys storage before releasing its charge; neither
+payload ownership nor its charge can be detached independently.
 
 Operation code should own budgeting, cancellation, fallible storage admission, and lifetime-bound
 leases. It should not become a generic schema engine for Scene semantics. Initialize heavy state
@@ -63,7 +80,26 @@ Keep crate boundaries initially. Merge or privatize operation components as thei
 shrinks; crate count is not an objective. A plain private typed table is preferable to a new generic
 framework. Preserve proven behavior and tests during deletion, not the exact internal API.
 
+### Architecture changes included in the plan
+
+| Boundary | Target and required decision work | Preserved behavior |
+| --- | --- | --- |
+| Core storage / physical allocation | D1 replaces dynamic Scene records with core-owned typed tables. Rework ADR 0044's opaque-aggregate-only seam; use a replacement decision if the allocation/payload ownership boundary changes, with reciprocal index/reference updates. Operation retains the single admission and release mechanism; core does not implement a second allocator/account protocol. | Charge before allocation; bind charge to live storage; one charge per shared allocation; storage-first final release; no semantic identity from physical topology. |
+| Import and final publication | A removes large by-value state transitions in favor of startup-admitted state and small handles/borrows. ADRs 0045/0046 do not require the current typestate layout. Revise any actual publication seam that must change with its implementation. | One session/finalizer; central validation before success; paired ownership/evidence; no partial public Scene; bounded failure reporting. |
+| Validation and resource evidence | B/D validate borrowed typed data and attach leases to actual graph/manifest/evidence ownership. ADR 0047 governs accounting meaning, not projection copies or a prescribed terminal container. | Monotonic attempted/consumed work; truthful live/peak lifetimes; cancellable metered traversal; explicit loss. |
+| Concrete postprocessing | F starts with one typed operation prepared against the input, using SceneEdit, remaps, and final validation. ADRs 0013/0032 must permit a single-operation implementation without first building a general dependency scheduler, replay framework, or plugin system. | Parameter/loss preflight; unchanged input on failure; correct domain remaps and invalidation; deterministic outcomes. |
+
+Public read views and automatic default provenance can be implemented under the existing Scene
+ownership rules. Do not create a new architecture decision for ordinary accessors or builder helpers.
+Likewise, neither generic records nor an allocation-heavy typestate chain is a security invariant.
+
 ## Execution units
+
+At adoption the implementation units below remain open; review reproductions establish the baseline
+and do not count as fixes. The first implementation increment is **A1: normal-stack triangle import**.
+Keep it focused on the shared cause in the import/construction/finalization call chain and its actual
+public smoke test. Continue with A2 ordinary-unwind cleanup, A3 identity, and A4 example/baseline repair.
+No new format or full-domain storage migration is required to close A1.
 
 ### A — Establish a usable and truthful baseline
 

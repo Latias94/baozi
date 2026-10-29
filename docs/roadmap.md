@@ -1,8 +1,10 @@
 # Baozi Roadmap
 
-This roadmap states product direction and implementation order. It is not an implementation-status
-ledger, a format-maturity claim, or a substitute for Accepted ADRs. Current progress belongs in the
-engineering-state record and repository conformance inventory.
+This roadmap states product direction and implementation order. The
+[active delivery plan](plans/2026-10-29-001-refactor-library-delivery-plan.md) owns execution scope and
+acceptance. The [2026-10-29 review](reviews/2026-10-29-library-state-review.md) records the starting
+evidence. This roadmap does not claim implementation completion, format maturity, or publication
+readiness. The former U4 execution sequence is superseded history.
 
 ## Product Direction
 
@@ -10,10 +12,10 @@ Baozi is trusted, fidelity-preserving, engine-neutral 3D asset ingestion and off
 infrastructure for Rust ecosystems. Its differentiation is not the number of filename extensions it
 can open. It is the combination of:
 
-- one canonical, immutable Scene lifecycle;
+- one usable, typed, immutable Scene lifecycle;
 - bounded and attributable resource use for untrusted inputs;
 - explicit loss, provenance, source scope, and successful-input evidence;
-- deterministic, typed post-process compilation;
+- explicit, deterministic postprocessing with useful geometry operations;
 - format-profile maturity backed by reproducible evidence; and
 - engine-neutral output suitable for runtime loaders, editors, and offline cookers.
 
@@ -21,61 +23,59 @@ Baozi may use narrow native or isolated adapters when a format cannot be impleme
 economically in pure Rust. Decoder ownership, failure containment, and canonical semantics remain
 Baozi-owned. Assimp is a compatibility and differential oracle, not the production architecture.
 
-## Current Architecture Sequence
+## Current Delivery Sequence
 
-### 1. Complete the Canonical Scene Cutover
+### 1. Repair Basic Execution and Source Fidelity
 
-The immediate priority is the U4 sequence defined by the canonical architecture plan:
+Start with normal-stack Windows triangle import, ordinary host-unwind cleanup, stable registered
+identity, and executable examples. Close successful data-discard paths in OBJ/PLY, legal short-read
+handling, unmetered quadratic validation, repeated cache-hit hashing, and live-memory accounting
+gaps. Use specific reproductions and public behavior tests.
 
-1. complete the profile of the opaque core-owned Scene construction continuation;
-2. make import, every format producer, post-process, snapshot, fuzz, and facade use that one path in
-   an atomic workspace switch;
-3. delete the legacy Scene, `SceneBuilder`, `SharedStorage`, bridge code, and migration-only seams;
-4. remove the unused BZIR request wire; and
-5. record the resulting implementation state in the focused repository conformance inventory.
+The unpublished status permits replacing the responsible architecture. API compatibility and the
+private shape of the current state machine do not justify retaining a defective design.
 
-The cutover is incomplete while a public or production path can choose between legacy and canonical
-storage. No compatibility adapter is retained after the switch.
+### 2. Deliver Typed Consumers and Simplify Scene Storage
 
-Before the atomic switch, the U4 lifecycle and production comparators must match the current ledger
-and report vocabulary, run in CI, and fail closed on source-closure or evidence drift. The minimum U4
-contract and gate records must also exist so the cutover cannot silently bypass its architecture
-evidence.
+Expose borrowed geometry, material, hierarchy, instance, deformation, and animation views. A small
+independent consumer must read actual data; snapshots remain test/debug evidence. Simplify plugin
+authoring with default document provenance and useful validation errors.
 
-### 2. Close Resource and Text Input Boundaries
+Replace generic Scene records and duplicate validation projections with private typed tables and
+immutable payloads. Start with node/geometry, then migrate other domains alongside their consumers.
+Keep one production representation per completed domain cutover and delete the replaced code.
+Operation mechanisms retain allocation admission and lifetime-bound charging; core owns Scene
+semantics. Revise the affected architecture decisions together with the implementation boundary.
 
-After the single Scene lifecycle is established:
+### 3. Complete glTF/GLB and Useful Geometry Processing
 
-- centralize the origin-qualified resource graph and complete successful-input manifest;
-- centralize BOM, UTF-8, newline, and source-span mapping while keeping each grammar format-owned;
-- preserve bounded role, alias, cycle, depth, digest, and source identity evidence; and
-- keep producer/build qualification separate until its Proposed decision is accepted and has a real
-  consumer.
+Timebox the glTF backend fix/fork/replacement decision around its known malformed-input reproducer.
+Keep glTF outside facade registration until baseline sanitizer admission passes. Deliver selected
+static PBR assets in GLB and external-resource forms, then the declared skin/morph/animation profile,
+with readable output and precise support claims.
 
-### 3. Prove the Canonical Profile with Existing Formats
+Implement triangulation, normals, and explicit coordinate/unit conversion through transactional edits.
+Preserve winding and attribute-domain remaps, authorize loss, and retain the input on failure.
+Deliver the first concrete operation without requiring an extensible scheduling/replay framework.
+Add corner-to-application-vertex lowering so consumers can build actual vertex/index buffers.
 
-Existing STL, OBJ/MTL, PLY, and glTF work is used as proof material for the canonical contracts, not
-as four competing Scene models. OBJ/MTL proves text, sidecars, topology, materials, and unchanged
-typed views. glTF/GLB proves scenes, authored transforms, PBR appearance, external resources, skins,
-morphs, and animation.
+The node/geometry storage cutover enables the first processing operation. Other domain migrations
+must not force every product increment to wait for a whole-library rewrite.
 
-No format receives a maturity promotion merely because its parser crate exists. Promotion follows
-the exact profile and evidence rules in ADR 0011.
+### 4. Reduce Governance and Prove Distribution
 
-### 4. Replace Fixed Post-Process Flags
+Retain meaningful compiler-boundary, ownership, budget, failure, filesystem-race, and sanitizer tests.
+Remove test-source hashes, AST-shape proofs, dead collector features, and repeated metadata scans.
+Use a short behavior-to-test index, retained fuzz corpus, and a few explicit growth workloads. Do not
+reintroduce retired `u4c-metrics` infrastructure.
 
-Implement ADR 0013 as a compiled, typed, loss-aware dependency plan rather than a fixed bitmask and
-global execution order. Each pass must declare prerequisites, invalidation, mutation, validation,
-loss, diagnostics, outcome, and generation/remap behavior. Tessellation remains behind its admitted
-adapter and resource envelope.
+Update dependencies in focused changes with relevant semantic/platform checks. Run independent
+consumers against unpacked packages and supported targets. Finish licenses, notices, examples,
+feature coverage, and exact profile claims before release. External attestation, signing, and cache
+identity require a real distribution consumer; they do not precede basic library usability.
 
-### 5. Build the Evidence and Release System
-
-Complete the architecture conformance inventory, gate catalog, canonical lifecycle fuzzing, packaged
-facade consumer, provenance-qualified regression corpus, digest snapshots with bounded previews,
-feature/target/package matrices, and cross-platform evidence. Release work then closes locked tools,
-licenses, SBOM, attestation, signing, and reproducibility without conflating publication readiness
-with ADR acceptance or format maturity.
+Formats gain maturity only through their exact tested profiles. Neither an ADR, a parser crate, nor
+a passing snapshot alone constitutes supported format behavior.
 
 ## Format Priorities
 
@@ -88,7 +88,7 @@ Format work begins only when it strengthens a current architecture or product go
 | P0 | PLY mesh and PLY point cloud | Two explicit scanning/tooling profiles rather than one ambiguous capability. |
 | P0 | STL | Manufacturing and regression baseline; not the default game-content format. |
 | P1 | VRM 1.0 | A glTF profile, not an independent parser architecture. |
-| P1 | Binary FBX 7.x game profile | Optional isolated ingestion path after U4 and evidence infrastructure are stable. |
+| P1 | Binary FBX 7.x game profile | Optional isolated ingestion after the existing typed-consumer and processing workflows are usable. |
 | P2 | Resolved USD stage | A composed Scene snapshot profile, not a claim of complete USD implementation. |
 | P2 | BVH / PMX / VMD | Demand-driven motion-capture and avatar profiles. |
 | P3 | Collada | Demand-driven legacy migration only. |
@@ -109,20 +109,21 @@ architecture contract.
 
 | Metric | Target |
 | --- | --- |
-| Canonical lifecycle | Every producer and consumer uses one Scene path; legacy storage and adapters are absent. |
-| Resource safety | Hard caller limits include protected terminal evidence and all input-dependent work is bounded, cancellable, or isolated. |
-| Evidence integrity | Contract, gate, snapshot, corpus, and format evidence is reproducible and CI-enforced. |
-| Semantic fidelity | Loss, provenance, source scope, authored representation, and deterministic digests remain explicit. |
+| Basic usability | Independent consumers run on normal platform stacks; normal drop and ordinary unwind release healthy owned allocations. |
+| Canonical lifecycle | Typed public reads and central validation use one Scene path; completed cutovers delete replaced storage and adapters. |
+| Resource safety | Actual work and overlapping live allocations follow the declared limits; terminal evidence remains bounded. |
+| Evidence integrity | Direct behavior tests, bounded corpus growth, and explicit workload results are reproducible. |
+| Semantic fidelity | Known source loss requires authorization and evidence; numeric precision and authored representation are preserved. |
 | Format honesty | Support statements describe exact verified profiles and named evidence authority. |
 | Engine neutrality | Packaged downstream consumers can ingest canonical output without a Baozi-specific engine runtime. |
-| Release readiness | Locked builds, package consumers, licenses, SBOM, attestation, signatures, and supported target matrices pass independently of ADR status. |
+| Release readiness | Locked package consumers, licenses, notices, and executed target/profile checks pass independently of ADR status. |
 
 ## Primary Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| Accepted decisions outrun implementation | Maintain explicit `unassessed`, `partial`, `conforming`, and `nonconforming` contract records with executable gates. |
-| Legacy and canonical paths diverge | Make U4e an atomic switch and U4f immediate deletion, with no compatibility adapter. |
-| Resource accounting leaks through helpers | Keep ownership and terminal policy in deep modules; expose bounded capabilities rather than raw ledger or retained-storage types. |
+| Architecture work delays usable features | Deliver typed consumption first and migrate domains in bounded cuts tied to actual consumers. |
+| Old and replacement paths diverge | Keep one production path per completed domain and delete obsolete implementations in that cutover. |
+| Resource accounting diverges from live data | Bind reservations to actual allocation owners and test overlapping lifetimes, cache hits, short reads, and ordinary unwind. |
 | Format breadth outruns evidence | Promote exact profiles only after corpus, fuzz, malformed, limit, facade, and provenance gates pass. |
-| Infrastructure becomes architecture | Keep current progress, hashes, commands, and implementation type names out of durable ADR semantics. |
+| Infrastructure becomes architecture | Remove source-shape proof systems; require concrete risks and bounded behavioral checks for every replacement tool. |

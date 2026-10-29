@@ -4,12 +4,18 @@ type: refactor
 date: 2026-07-10
 deepened: 2026-08-01
 artifact_contract: ce-unified-plan/v1
-artifact_readiness: implementation-ready
+status: superseded
 product_contract_source: ce-plan-bootstrap
-execution: code
+superseded_by: 2026-10-29-001-refactor-library-delivery-plan.md
 ---
 
 # Baozi Canonical Architecture Fearless Refactor - Plan
+
+> Superseded on 2026-10-29 by the
+> [Baozi Usable Import Library and Core Simplification plan](2026-10-29-001-refactor-library-delivery-plan.md).
+> This document remains implementation history. Its checkboxes, U4 sequencing, retired collector
+> commands, and verification contract are not active execution requirements. Use the new plan and
+> current code/tests to determine remaining work; do not restore retired tooling from this record.
 
 ## Goal Capsule
 
