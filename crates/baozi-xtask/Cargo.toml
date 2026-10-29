@@ -12,12 +12,7 @@ default = []
 repository-input-candidate = ["dep:baozi-io"]
 
 [dependencies]
-proc-macro2 = "1"
-quote = "1"
-serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
-sha2.workspace = true
-syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "visit"] }
 toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 
 [target.'cfg(any(all(target_arch = "x86_64", target_vendor = "unknown", target_os = "linux", target_env = "gnu", target_abi = ""), all(target_arch = "x86_64", target_vendor = "pc", target_os = "windows", target_env = "msvc", target_abi = ""), all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos", target_env = "", target_abi = "")))'.dependencies]

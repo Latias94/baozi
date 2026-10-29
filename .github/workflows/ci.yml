@@ -159,9 +159,6 @@ jobs:
       - name: Test all baozi-xtask features
         run: cargo nextest run --locked -p baozi-xtask --all-features
 
-      - name: Check focused conformance inventory
-        run: cargo run --locked -p baozi-xtask -- repository-conformance-check
-
       - name: Check dependency policy
         run: cargo deny --locked check
 

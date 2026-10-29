@@ -187,12 +187,11 @@ Promotion is one atomic reviewed change containing the decision, implementation 
 metadata, gate evidence, index update, and `status: accepted` transition. An implementation may be
 developed before acceptance; its authority changes only at promotion.
 
-Promotion requirements are stable gate IDs, not ADR-number special cases. The canonical gate catalog
-is `docs/conformance/gates.toml`; it defines the implementation, test, and CI tracer classes plus the
-executable command or workflow that supplies passing evidence. An unknown gate, absent required
-tracer class, or missing passing result blocks promotion. Tracer presence alone never proves a gate
-passed. A cataloged `success_condition` describes how an external runner recognizes success; it is
-not itself a passing result.
+Promotion requires concrete implementation and behavioral evidence for the affected contract,
+including the executed command or workflow, result, target, and reviewed revision. Use the
+[behavior gate index](../testing/behavior-gates.md) to locate checks, then inspect their actual
+coverage. A source path, source digest, catalog entry, or self-attested receipt does not establish
+that a command ran or that the contract holds.
 
 Every future first transition from Proposed to Accepted, and every authority-affecting amendment,
 must retain a repository-auditable approval record identifying the approver, approval date, reviewed
@@ -215,69 +214,24 @@ The index also keeps stable requirement-to-authority traceability. Delivery unit
 progress remain in plans. Generated reports may mirror the registry, but no second handwritten owner
 catalog is allowed.
 
-## Conformance Inventory
+## Conformance Evidence
 
-The canonical architecture conformance inventory is `docs/conformance/contracts.toml`. It is separate
-from ADR status. Its minimum record contains:
+ADR acceptance, implementation conformance, format maturity, and publication readiness remain
+separate decisions. State unverified work explicitly in the relevant review or delivery progress
+record. A passing dependency check establishes its dependency policy; it cannot establish runtime
+scheduling, storage ownership, parser behavior, or platform support.
 
-- stable `contract_id` and one Accepted `authority_adr`;
-- `conformance_status`: `unassessed`, `partial`, `conforming`, or `nonconforming`;
-- separate tracked implementation, test, and CI tracers; and
-- one or more stable gate IDs resolved through the executable gate catalog.
+The [behavior gate index](../testing/behavior-gates.md) maps concrete contracts to compiler checks,
+behavior tests, fault injection, and CI commands. Keep it short and update it when meaningful
+coverage moves. Record actual executed commands, outcomes, targets, and revisions with the change.
+Tests should fail when the protected behavior breaks and survive ordinary source refactors.
 
-`conforming` requires every tracer class applicable to the contract, complete passing executable
-gate receipts, and admission by a trusted receipt adapter. Missing files, unknown gates,
-non-Accepted authority, self-reported status, or evidence without a trusted receipt fail closed.
-Format maturity and publication readiness remain in their own inventories and may reference the same
-stable contract IDs.
-
-Until that inventory exists, plans and progress records may locate incomplete work but cannot claim
-repository-wide conformance, format maturity, or release readiness.
-
-`docs/conformance/contracts.toml` and `docs/conformance/gates.toml` are the only handwritten
-structured authorities for architecture conformance and executable gate identity. Each file carries
-an explicit schema revision. Contract records identify their evidence subject and revision; gate
-records identify their gate class, exact command or workflow/job identity, applicability, success
-condition, evidence identity, and any exact `evidence_claims` binding the gate may report. An
-evidence claim is a typed identifier tuple, not a signature, endorsement, or promotion authority.
-This policy owns the schema semantics; `baozi-xtask` implements the bounded parser and checker but
-cannot infer or extend fields from source or ADR prose. A change that adds or removes a required gate
-or evidence claim updates both files atomically.
-
-The focused repository checker reads only these two TOML files and repository-relative paths they
-explicitly reference. It must not scan ADR prose, the ADR index, source prose, Git history, or the
-repository tree to infer contracts or gates, and it must not recursively invoke Cargo. Human ADR
-review remains responsible for semantic authority, workflow identity, and directness; the checker
-validates the bounded structured inventory and its explicit references. The structural checker does
-not execute commands or parse workflow contents. Until a trusted receipt adapter exists, the ordinary
-`repository-conformance-check` command rejects every declared `conforming` record even when its
-handwritten shape is complete.
-
-The separate `repository-conformance-evidence-binding-check` command accepts only a
-`trust_model = "self-attested"` typed bundle. It checks that each required result has the exact gate
-executor, success condition, evidence identity, repository revision, raw inventory digests, and
-`claims` set declared by the catalog. Missing, failed, stale, mismatched, duplicate, or unknown
-required results fail closed. A known result not referenced by a currently declared-conforming
-contract does not participate in its binding result. Success means only that caller-provided records
-are internally shape- and binding-consistent; it does not prove that a command ran, that a workflow
-completed, or that the contract is conforming, and it never authorizes promotion.
-
-### Self-Attested Evidence Threat Model
-
-The self-attested checker is intended for diagnostics over a `trusted-static-worktree`: the caller
-must provide an immutable repository snapshot and prevent concurrent mutation for the duration of
-the read. Catalog hashes detect accidental or stale byte mismatches, but a local actor can rewrite the
-catalog, bundle, revision argument, and hashes together. Repository-relative path checks also have a
-metadata-to-read time-of-check/time-of-use window. Consequently, this checker is not a security
-boundary and its output must not be consumed as a release, publication, or architecture-promotion
-decision.
-
-A future promotion path must use a separate trusted receipt adapter. That adapter must bind an
-immutable repository revision to receipts produced by an admitted trusted runner and process,
-validate signed provenance or an equivalent OIDC-backed identity, verify the exact command or
-workflow/job outcome and artifacts, and make the promotion decision outside the mutable worktree.
-Adding that adapter requires an explicit governance amendment and dedicated adversarial tests; the
-self-attested bundle format cannot silently acquire trusted semantics.
+The previous `docs/conformance/contracts.toml` and `gates.toml` catalogs are historical evidence of
+the superseded execution plan. Their self-attested binding checker has been retired. Their status
+fields, hashes, and receipt shapes do not authorize promotion and are no longer CI requirements.
+The active [library delivery plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md) replaces
+that framework with the compiler and executable behavior gates. No trusted receipt or attestation
+system is required before a real distribution consumer needs one.
 
 ## Human Review Responsibilities
 

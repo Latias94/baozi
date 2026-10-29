@@ -1,3 +1,6 @@
+# Historical catalog, superseded by the 2026-10-29 library delivery plan.
+# Current executable coverage: docs/testing/behavior-gates.md. No active receipt checker consumes this file.
+
 schema_version = 1
 
 # A `conforming` value is only a declaration. Repository checks reject it until a separate trusted

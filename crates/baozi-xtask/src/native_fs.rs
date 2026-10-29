@@ -7,27 +7,15 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-mod candidate;
 mod contract;
-mod source_policy;
-mod support;
 
-pub use candidate::{
-    candidate_production_source_violations, candidate_test_source_violations,
-    repository_candidate_surface_violations, repository_candidate_test_source_violations,
-    repository_candidate_test_tree_violations, runtime_candidate_surface_violations,
-};
-use candidate::{
-    candidate_test_crate_ancestor_violations, check_candidate_implementation_cfg_sources,
-    check_repository_target_partition, string_set,
-};
 use contract::*;
 pub use contract::{NativeFsReport, RepositoryMetadataProfiles};
-use source_policy::check_format_import_production_sources;
-pub use source_policy::production_source_text_violations;
-use support::string_field;
 
-/// Checks the checked-in manifest and target-filtered resolved closure.
+/// Checks manifests, target-filtered dependency closures, and reviewed package identities.
+///
+/// Compiler target checks and native behavior tests cover adapter availability and behavior;
+/// this check does not inspect Rust sources or promote candidate targets to release support.
 pub fn check_repository(repository_root: &Path) -> NativeFsReport {
     let baseline = match read_json(&repository_root.join(BASELINE_PATH), "native-fs baseline") {
         Ok(value) => value,
@@ -75,21 +63,6 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
                 };
             }
         };
-    let source_metadata = match load_metadata(
-        repository_root,
-        FACADE_MANIFEST_PATH,
-        None,
-        Some(FACADE_FORMAT_FEATURE),
-        false,
-    ) {
-        Ok(value) => value,
-        Err(violation) => {
-            return NativeFsReport {
-                profiles_checked: 0,
-                violations: vec![violation],
-            };
-        }
-    };
     let lockfile = match read_lockfile(repository_root) {
         Ok(value) => value,
         Err(violation) => {
@@ -106,7 +79,6 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
     let mut xtask_empty_metadata = None;
     let mut xtask_all_metadata = None;
     let mut violations = Vec::new();
-    check_format_import_production_sources(repository_root, &source_metadata, &mut violations);
     for profile in DEPENDENCY_AUDIT_PROFILES {
         match load_metadata(
             repository_root,
@@ -199,7 +171,7 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
         xtask_empty_metadata.expect("successful metadata load must populate the empty profile");
     let xtask_all_metadata =
         xtask_all_metadata.expect("successful metadata load must populate the all-feature profile");
-    let mut report = check_metadata_fixture_with_repository(
+    check_metadata_fixture_with_repository(
         &manifest_metadata,
         &lockfile,
         &baseline,
@@ -212,44 +184,7 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
             xtask_empty: &xtask_empty_metadata,
             xtask_all: &xtask_all_metadata,
         },
-    );
-    match fs::read_to_string(repository_root.join(CANDIDATE_TEST_SOURCE_PATH)) {
-        Ok(source) => report
-            .violations
-            .extend(candidate_test_source_violations(&source)),
-        Err(error) => report.violations.push(format!(
-            "native-fs candidate tests: failed to read {CANDIDATE_TEST_SOURCE_PATH}: {error}"
-        )),
-    }
-    report
-        .violations
-        .extend(candidate_test_crate_ancestor_violations(
-            repository_root,
-            "native-fs candidate tests",
-        ));
-    check_candidate_implementation_cfg_sources(repository_root, &mut report.violations);
-    report
-        .violations
-        .extend(repository_candidate_test_tree_violations(repository_root));
-    match fs::read_to_string(repository_root.join(RUNTIME_CANDIDATE_SURFACE_PATH)) {
-        Ok(source) => report
-            .violations
-            .extend(runtime_candidate_surface_violations(&source)),
-        Err(error) => report.violations.push(format!(
-            "native-fs runtime candidate surface: failed to read {RUNTIME_CANDIDATE_SURFACE_PATH}: {error}"
-        )),
-    }
-    match fs::read_to_string(repository_root.join(REPOSITORY_CANDIDATE_SURFACE_PATH)) {
-        Ok(source) => report
-            .violations
-            .extend(repository_candidate_surface_violations(&source)),
-        Err(error) => report.violations.push(format!(
-            "native-fs repository candidate surface: failed to read {REPOSITORY_CANDIDATE_SURFACE_PATH}: {error}"
-        )),
-    }
-    report.violations.sort_unstable();
-    report.violations.dedup();
-    report
+    )
 }
 
 /// Checks already-loaded Cargo metadata documents. This is public for adversarial fixture tests.
@@ -402,29 +337,6 @@ pub fn repository_resolved_closure_snapshot(
         (Some(snapshot), true) => Ok(snapshot),
         _ => Err(violations),
     }
-}
-
-/// Loads Cargo metadata and checks the production parser source graph.
-///
-/// This is public only so adversarial workspace fixtures can exercise the same
-/// metadata boundary as the repository check.
-#[doc(hidden)]
-pub fn repository_production_source_violations(repository_root: &Path) -> Vec<String> {
-    let metadata = match load_metadata(
-        repository_root,
-        FACADE_MANIFEST_PATH,
-        None,
-        Some(FACADE_FORMAT_FEATURE),
-        false,
-    ) {
-        Ok(metadata) => metadata,
-        Err(violation) => return vec![violation],
-    };
-    let mut violations = Vec::new();
-    check_format_import_production_sources(repository_root, &metadata, &mut violations);
-    violations.sort_unstable();
-    violations.dedup();
-    violations
 }
 
 fn load_metadata(
@@ -818,7 +730,7 @@ fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
         .get("native-fs-candidate")
         .and_then(Value::as_array)
         .and_then(|values| sorted_strings(values).ok());
-    let expected_facade_native_fs = vec!["baozi-io/fs-candidate".to_owned(), "std".to_owned()];
+    let expected_facade_native_fs = vec!["baozi-io/fs-candidate".to_owned()];
     if facade_native_fs.as_ref() != Some(&expected_facade_native_fs) {
         violations.push(format!(
             "native-fs manifest: baozi/native-fs-candidate must be exactly {expected_facade_native_fs:?}, found {facade_native_fs:?}"
@@ -2423,6 +2335,27 @@ fn check_baseline_shape(baseline: &Value, violations: &mut Vec<String>) {
     }
 }
 
+fn check_repository_target_partition(violations: &mut Vec<String>) {
+    let candidates = string_set(REPOSITORY_CANDIDATE_TARGETS);
+    let operational = string_set(REPOSITORY_OPERATIONAL_CANDIDATE_TARGETS);
+    let fail_closed = string_set(REPOSITORY_FAIL_CLOSED_TARGETS);
+    let overlap = operational
+        .intersection(&fail_closed)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !overlap.is_empty() {
+        violations.push(format!(
+            "native-fs repository targets: operational and fail-closed sets overlap at {overlap:?}"
+        ));
+    }
+    let qualified = operational.union(&fail_closed).cloned().collect();
+    if candidates != qualified {
+        violations.push(format!(
+            "native-fs repository targets: operational and fail-closed union must be {candidates:?}, found {qualified:?}"
+        ));
+    }
+}
+
 fn check_repository_baseline_shape(baseline: &Value, violations: &mut Vec<String>) {
     check_repository_target_partition(violations);
     if baseline.get("schema").and_then(Value::as_u64) != Some(2) {
@@ -2715,6 +2648,14 @@ fn find_unique_package<'a>(
             None
         }
     }
+}
+
+fn string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value.get(field).and_then(Value::as_str)
+}
+
+fn string_set(values: &[&str]) -> BTreeSet<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
 }
 
 fn sorted_strings(values: &[Value]) -> Result<Vec<String>, String> {

@@ -1,306 +1,241 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use baozi_xtask::runtime_admission::check_metadata;
+use serde_json::{Value, json};
 
 #[test]
-fn runtime_admission_accepts_runtime_neutral_production_sources() {
-    let workspace = TestWorkspace::new("valid-runtime-neutrality");
-    workspace.write_package(
-        "baozi-core",
-        "",
-        r#"
-use std::sync::{Arc, OnceLock};
-
-struct Codec;
-
-static CODEC: OnceLock<Arc<Codec>> = OnceLock::new();
-
-fn parser_local_graph_walk() {
-    let mut queue = Vec::new();
-    queue.push(1_u8);
-    let _ = queue.pop();
-    let _example = "std::thread::spawn and Semaphore are documentation text";
-    // std::thread::spawn is forbidden in production, but comments are not code.
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_threads_are_not_production_scheduling() {
-        std::thread::spawn(|| {}).join().unwrap();
-    }
-}
-
-#[cfg(test)]
-mod external_test_helpers;
-"#,
-    );
-    workspace.write_source(
-        "baozi-core",
-        "src/external_test_helpers.rs",
-        "pub fn helper() { std::thread::spawn(|| {}); }",
-    );
-    workspace.write_source(
-        "baozi-core",
-        "tests/integration.rs",
-        "#[test] fn host_thread() { std::thread::spawn(|| {}); }",
-    );
-    workspace.write_package(
-        "baozi-xtask",
-        "",
-        "pub fn run_command() { let _ = std::process::Command::new(\"cargo\").spawn(); }",
+fn runtime_admission_accepts_runtime_neutral_dependencies() {
+    let metadata = metadata(
+        &[
+            (
+                "baozi-core",
+                "baozi-core",
+                vec![dependency("futures-core", json!(null))],
+            ),
+            ("futures-core", "futures-core", vec![]),
+        ],
+        &["baozi-core"],
     );
 
-    let report = baozi_xtask::runtime_admission::check_repository(workspace.path());
+    let report = check_metadata(&metadata).expect("valid resolved metadata");
 
-    assert!(report.violations.is_empty(), "{:#?}", report.violations);
     assert_eq!(report.production_packages_checked, 1);
-    assert_eq!(report.production_source_files_checked, 1);
+    assert!(report.violations.is_empty(), "{report:#?}");
 }
 
 #[test]
-fn runtime_admission_rejects_normal_build_optional_and_transitive_schedulers() {
-    for (fixture, manifest) in [
-        ("normal", "rayon = { path = \"../rayon\" }"),
-        (
-            "build",
-            "\n[build-dependencies]\nrayon = { path = \"../rayon\" }",
-        ),
-        (
-            "optional",
-            concat!(
-                "rayon = { path = \"../rayon\", optional = true }\n\n",
-                "[features]\nparallel = [\"dep:rayon\"]",
-            ),
-        ),
-        (
-            "transitive",
-            "runtime-helper = { path = \"../runtime-helper\" }",
-        ),
+fn runtime_admission_rejects_normal_build_and_target_specific_schedulers() {
+    for (kind, target) in [
+        (json!(null), json!(null)),
+        (json!("build"), json!(null)),
+        (json!(null), json!("cfg(target_os = \"linux\")")),
     ] {
-        let workspace = TestWorkspace::new(&format!("forbidden-{fixture}-dependency"));
-        workspace.write_package("baozi-core", manifest, "");
-        workspace.write_package("rayon", "", "");
-        workspace.write_package("runtime-helper", "rayon = { path = \"../rayon\" }", "");
+        let mut scheduler = dependency("rayon", kind);
+        scheduler["dep_kinds"][0]["target"] = target;
+        let metadata = metadata(
+            &[
+                ("baozi-core", "baozi-core", vec![scheduler]),
+                ("rayon", "rayon", vec![]),
+            ],
+            &["baozi-core"],
+        );
 
-        let report = baozi_xtask::runtime_admission::check_repository(workspace.path());
+        let report = check_metadata(&metadata).expect("valid resolved metadata");
 
+        assert_eq!(report.violations.len(), 1, "{report:#?}");
         assert!(
-            report.violations.iter().any(|violation| {
-                violation.contains("forbidden runtime dependency")
-                    && violation.contains("baozi-core")
-                    && violation.contains("rayon")
-            }),
-            "fixture {fixture}: {:#?}",
-            report.violations
+            report.violations[0].ends_with("baozi-core -> rayon"),
+            "{report:#?}"
         );
     }
 }
 
 #[test]
-fn runtime_admission_excludes_dev_only_scheduler_dependencies() {
-    let workspace = TestWorkspace::new("allowed-dev-scheduler");
-    workspace.write_package(
-        "baozi-core",
-        "\n[dev-dependencies]\nrayon = { path = \"../rayon\" }",
-        "",
-    );
-    workspace.write_package("rayon", "", "");
-
-    let report = baozi_xtask::runtime_admission::check_repository(workspace.path());
-
-    assert!(report.violations.is_empty(), "{:#?}", report.violations);
-}
-
-#[test]
-fn runtime_admission_rejects_explicit_production_thread_entry_points() {
-    for (fixture, source) in [
-        (
-            "qualified-spawn",
-            "pub fn run() { std::thread::spawn(|| {}); }",
-        ),
-        (
-            "aliased-spawn",
-            concat!(
-                "use std::thread as worker_thread;\n",
-                "pub fn run() { worker_thread::spawn(|| {}); }",
+fn runtime_admission_follows_transitive_package_ids_despite_dependency_renames() {
+    let scheduler_id = "registry+https://example.invalid/index#tokio@1.0.0";
+    let mut scheduler = dependency(scheduler_id, json!(null));
+    scheduler["name"] = json!("renamed_scheduler");
+    let metadata = metadata(
+        &[
+            (
+                "baozi-core",
+                "baozi-core",
+                vec![dependency("codec", json!(null))],
             ),
-        ),
-        (
-            "scoped-threads",
-            "pub fn run() { std::thread::scope(|scope| { scope.spawn(|| {}); }); }",
-        ),
-        (
-            "builder-spawn",
-            concat!(
-                "pub fn run() {\n",
-                "    std::thread::Builder::new().spawn(|| {}).unwrap();\n",
-                "}\n",
-            ),
-        ),
-        (
-            "not-test-only",
-            concat!(
-                "#[cfg(any(test, feature = \"parallel\"))]\n",
-                "pub fn run() { std::thread::spawn(|| {}); }\n",
-            ),
-        ),
-    ] {
-        let workspace = TestWorkspace::new(&format!("forbidden-{fixture}"));
-        workspace.write_package_with_features("baozi-core", "", "parallel = []", source);
-
-        let report = baozi_xtask::runtime_admission::check_repository(workspace.path());
-
-        assert!(
-            report.violations.iter().any(|violation| {
-                violation.contains("production thread entry point")
-                    && violation.contains("baozi-core")
-            }),
-            "fixture {fixture}: {:#?}",
-            report.violations
-        );
-    }
-}
-
-#[test]
-fn runtime_admission_rejects_global_semaphore_and_worker_pool_state() {
-    for (fixture, source, type_name) in [
-        (
-            "semaphore",
-            "struct Semaphore; static GLOBAL_GATE: Semaphore = Semaphore;",
-            "Semaphore",
-        ),
-        (
-            "thread-pool",
-            "struct ThreadPool; static GLOBAL_POOL: ThreadPool = ThreadPool;",
-            "ThreadPool",
-        ),
-    ] {
-        let workspace = TestWorkspace::new(&format!("forbidden-global-{fixture}"));
-        workspace.write_package("baozi-core", "", source);
-
-        let report = baozi_xtask::runtime_admission::check_repository(workspace.path());
-
-        assert!(
-            report.violations.iter().any(|violation| {
-                violation.contains("global admission or worker-pool state")
-                    && violation.contains(type_name)
-            }),
-            "fixture {fixture}: {:#?}",
-            report.violations
-        );
-    }
-}
-
-#[test]
-fn runtime_admission_includes_unlinked_format_ownership_sources() {
-    let workspace = TestWorkspace::new("unlinked-format-ownership-source");
-    workspace.write_package("baozi-format-stl", "", "");
-    workspace.write_source(
-        "baozi-format-stl",
-        "src/generated/orphan.rs",
-        "struct HeldReservation;",
+            ("codec", "codec", vec![scheduler]),
+            (scheduler_id, "tokio", vec![]),
+        ],
+        &["baozi-core"],
     );
 
-    let report = baozi_xtask::runtime_admission::check_repository(workspace.path());
+    let report = check_metadata(&metadata).expect("valid resolved metadata");
 
+    assert_eq!(report.violations.len(), 1, "{report:#?}");
     assert!(
-        report.violations.iter().any(|violation| {
-            violation.contains("first-party format ownership")
-                && violation.contains("forbidden protocol \"HeldReservation\"")
-                && violation.contains("orphan.rs")
-        }),
-        "{:#?}",
-        report.violations
+        report.violations[0].ends_with("baozi-core -> codec -> tokio"),
+        "{report:#?}"
     );
 }
 
 #[test]
-fn runtime_admission_cli_checks_the_repository() {
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("xtask crate must be under the workspace root");
-    let output = Command::new(env!("CARGO_BIN_EXE_baozi-xtask"))
-        .arg("runtime-admission-check")
-        .current_dir(repository_root)
-        .output()
-        .expect("run runtime admission check");
+fn runtime_admission_excludes_dev_only_paths_and_repository_tooling_roots() {
+    let metadata = metadata(
+        &[
+            (
+                "baozi-core",
+                "baozi-core",
+                vec![dependency("codec", json!("dev"))],
+            ),
+            ("codec", "codec", vec![dependency("rayon", json!(null))]),
+            (
+                "baozi-test-support",
+                "baozi-test-support",
+                vec![dependency("rayon", json!(null))],
+            ),
+            (
+                "baozi-xtask",
+                "baozi-xtask",
+                vec![dependency("rayon", json!(null))],
+            ),
+            ("rayon", "rayon", vec![]),
+        ],
+        &["baozi-core", "baozi-test-support", "baozi-xtask", "codec"],
+    );
 
-    assert_eq!(output.status.code(), Some(0), "{output:#?}");
+    let report = check_metadata(&metadata).expect("valid resolved metadata");
+
+    assert_eq!(report.production_packages_checked, 1);
+    assert!(report.violations.is_empty(), "{report:#?}");
+}
+
+#[test]
+fn runtime_admission_keeps_normal_and_build_kinds_on_mixed_dev_edges() {
+    for kind in [json!(null), json!("build")] {
+        let mut scheduler = dependency("rayon", json!("dev"));
+        scheduler["dep_kinds"]
+            .as_array_mut()
+            .expect("dependency kinds array")
+            .push(json!({"kind": kind, "target": null}));
+        let metadata = metadata(
+            &[
+                ("baozi-core", "baozi-core", vec![scheduler]),
+                ("rayon", "rayon", vec![]),
+            ],
+            &["baozi-core"],
+        );
+
+        let report = check_metadata(&metadata).expect("valid resolved metadata");
+
+        assert_eq!(report.violations.len(), 1, "{report:#?}");
+    }
+}
+
+#[test]
+fn runtime_admission_reports_each_production_root_and_terminates_on_cycles() {
+    let metadata = metadata(
+        &[
+            (
+                "baozi",
+                "baozi",
+                vec![dependency("baozi-core", json!(null))],
+            ),
+            (
+                "baozi-core",
+                "baozi-core",
+                vec![dependency("codec", json!(null))],
+            ),
+            (
+                "codec",
+                "codec",
+                vec![
+                    dependency("baozi-core", json!(null)),
+                    dependency("smol", json!(null)),
+                ],
+            ),
+            ("smol", "smol", vec![]),
+        ],
+        &["baozi", "baozi-core"],
+    );
+
+    let report = check_metadata(&metadata).expect("valid resolved metadata");
+
+    assert_eq!(report.production_packages_checked, 2);
+    assert_eq!(report.violations.len(), 2, "{report:#?}");
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("Runtime admission check passed"),
-        "{output:#?}"
+        report.violations[0].ends_with("baozi -> baozi-core -> codec -> smol"),
+        "{report:#?}"
+    );
+    assert!(
+        report.violations[1].ends_with("baozi-core -> codec -> smol"),
+        "{report:#?}"
     );
 }
 
-struct TestWorkspace {
-    root: PathBuf,
-}
-
-impl TestWorkspace {
-    fn new(name: &str) -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "baozi-runtime-admission-{name}-{}-{nonce}",
-            std::process::id()
-        ));
-        fs::create_dir_all(root.join("crates")).expect("create test workspace");
-        fs::write(
-            root.join("Cargo.toml"),
-            "[workspace]\nresolver = \"3\"\nmembers = [\"crates/*\"]\n",
-        )
-        .expect("write workspace manifest");
-        Self { root }
-    }
-
-    fn path(&self) -> &Path {
-        &self.root
-    }
-
-    fn write_package(&self, name: &str, dependencies: &str, source: &str) {
-        self.write_package_with_features(name, dependencies, "", source);
-    }
-
-    fn write_package_with_features(
-        &self,
-        name: &str,
-        dependencies: &str,
-        features: &str,
-        source: &str,
-    ) {
-        let directory = self.root.join("crates").join(name);
-        fs::create_dir_all(directory.join("src")).expect("create package directory");
-        let features = if features.is_empty() {
-            String::new()
-        } else {
-            format!("\n[features]\n{features}\n")
-        };
-        fs::write(
-            directory.join("Cargo.toml"),
-            format!(
-                "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\n{dependencies}\n{features}"
+#[test]
+fn runtime_admission_rejects_incomplete_resolve_graphs() {
+    let valid = metadata(
+        &[
+            (
+                "baozi-core",
+                "baozi-core",
+                vec![dependency("rayon", json!(null))],
             ),
-        )
-        .expect("write package manifest");
-        fs::write(directory.join("src/lib.rs"), source).expect("write package target");
-    }
+            ("rayon", "rayon", vec![]),
+        ],
+        &["baozi-core"],
+    );
+    let mut missing_resolve = valid.clone();
+    missing_resolve["resolve"] = Value::Null;
+    let mut missing_node = valid.clone();
+    missing_node["resolve"]["nodes"]
+        .as_array_mut()
+        .expect("resolve nodes")
+        .pop();
+    let mut missing_package = valid;
+    missing_package["packages"]
+        .as_array_mut()
+        .expect("packages")
+        .pop();
 
-    fn write_source(&self, package: &str, relative: &str, source: &str) {
-        let path = self.root.join("crates").join(package).join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create source parent");
-        }
-        fs::write(path, source).expect("write source fixture");
+    for invalid in [missing_resolve, missing_node, missing_package] {
+        assert!(check_metadata(&invalid).is_err(), "{invalid:#?}");
     }
 }
 
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+#[test]
+fn runtime_admission_rejects_missing_or_unknown_dependency_kinds() {
+    for kinds in [
+        json!([]),
+        json!([{}]),
+        json!([{"kind": "unknown"}]),
+        Value::Null,
+    ] {
+        let mut scheduler = dependency("rayon", json!(null));
+        scheduler["dep_kinds"] = kinds;
+        let metadata = metadata(
+            &[
+                ("baozi-core", "baozi-core", vec![scheduler]),
+                ("rayon", "rayon", vec![]),
+            ],
+            &["baozi-core"],
+        );
+
+        assert!(check_metadata(&metadata).is_err(), "{metadata:#?}");
     }
+}
+
+fn dependency(package: &str, kind: Value) -> Value {
+    json!({
+        "name": package,
+        "pkg": package,
+        "dep_kinds": [{"kind": kind, "target": null}],
+    })
+}
+
+fn metadata(packages: &[(&str, &str, Vec<Value>)], workspace_members: &[&str]) -> Value {
+    json!({
+        "packages": packages.iter().map(|(id, name, _)| json!({"id": id, "name": name})).collect::<Vec<_>>(),
+        "workspace_members": workspace_members,
+        "resolve": {
+            "nodes": packages.iter().map(|(id, _, deps)| json!({"id": id, "deps": deps})).collect::<Vec<_>>(),
+        },
+    })
 }

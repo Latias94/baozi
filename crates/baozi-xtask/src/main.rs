@@ -3,10 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const USAGE: &str = concat!(
-    "usage: cargo run -p baozi-xtask -- ",
-    "<crate-graph-check|native-fs-check|repository-conformance-check|runtime-admission-check>\n",
-    "       cargo run -p baozi-xtask -- repository-conformance-evidence-binding-check ",
-    "--evidence <path> --repository-revision <sha>"
+    "usage: cargo run --locked -p baozi-xtask -- ",
+    "<crate-graph-check|native-fs-check|runtime-admission-check>"
 );
 
 fn main() -> ExitCode {
@@ -18,96 +16,11 @@ fn main() -> ExitCode {
         }
         [command] if command == "crate-graph-check" => run_crate_graph_check(),
         [command] if command == "native-fs-check" => run_native_fs_check(),
-        [command] if command == "repository-conformance-check" => {
-            run_repository_conformance_check()
-        }
-        [command, evidence_flag, evidence, revision_flag, revision]
-            if command == "repository-conformance-evidence-binding-check"
-                && evidence_flag == "--evidence"
-                && revision_flag == "--repository-revision" =>
-        {
-            run_repository_conformance_evidence_binding_check(Path::new(evidence), revision)
-        }
         [command] if command == "runtime-admission-check" => run_runtime_admission_check(),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
         }
-    }
-}
-
-fn run_repository_conformance_evidence_binding_check(
-    evidence_path: &Path,
-    repository_revision: &str,
-) -> ExitCode {
-    let current_directory = match env::current_dir() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("failed to read the current directory: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let Some(repository_root) = find_repository_root(&current_directory) else {
-        eprintln!("failed to find a Baozi repository root from {current_directory:?}");
-        return ExitCode::FAILURE;
-    };
-
-    let report = baozi_xtask::conformance::check_repository_evidence_bindings(
-        &repository_root,
-        evidence_path,
-        repository_revision,
-    );
-    if report.violations.is_empty() {
-        println!(
-            "Self-attested repository evidence is shape- and binding-consistent for {} declared-conforming contract records across a catalog of {} gates; this result does not authorize conformance promotion",
-            report.self_attested_contract_bindings_matched, report.gates_checked
-        );
-        ExitCode::SUCCESS
-    } else {
-        for violation in &report.violations {
-            eprintln!("{violation}");
-        }
-        eprintln!(
-            "Self-attested repository evidence binding check failed ({} violations across {} contracts and {} gates)",
-            report.violations.len(),
-            report.contracts_checked,
-            report.gates_checked
-        );
-        ExitCode::FAILURE
-    }
-}
-
-fn run_repository_conformance_check() -> ExitCode {
-    let current_directory = match env::current_dir() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("failed to read the current directory: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let Some(repository_root) = find_repository_root(&current_directory) else {
-        eprintln!("failed to find a Baozi repository root from {current_directory:?}");
-        return ExitCode::FAILURE;
-    };
-
-    let report = baozi_xtask::conformance::check_repository(&repository_root);
-    if report.violations.is_empty() {
-        println!(
-            "Repository conformance inventory is structurally valid ({} contracts, {} gates, {} declared conforming)",
-            report.contracts_checked, report.gates_checked, report.declared_conforming_contracts
-        );
-        ExitCode::SUCCESS
-    } else {
-        for violation in &report.violations {
-            eprintln!("{violation}");
-        }
-        eprintln!(
-            "Repository conformance inventory failed ({} violations across {} contracts and {} gates)",
-            report.violations.len(),
-            report.contracts_checked,
-            report.gates_checked
-        );
-        ExitCode::FAILURE
     }
 }
 
@@ -127,8 +40,8 @@ fn run_runtime_admission_check() -> ExitCode {
     let report = baozi_xtask::runtime_admission::check_repository(&repository_root);
     if report.violations.is_empty() {
         println!(
-            "Runtime admission check passed ({} production packages, {} source files)",
-            report.production_packages_checked, report.production_source_files_checked
+            "Runtime dependency check passed ({} production packages)",
+            report.production_packages_checked
         );
         ExitCode::SUCCESS
     } else {
@@ -136,10 +49,9 @@ fn run_runtime_admission_check() -> ExitCode {
             eprintln!("{violation}");
         }
         eprintln!(
-            "Runtime admission check failed ({} violations across {} production packages and {} source files)",
+            "Runtime dependency check failed ({} violations across {} production packages)",
             report.violations.len(),
-            report.production_packages_checked,
-            report.production_source_files_checked
+            report.production_packages_checked
         );
         ExitCode::FAILURE
     }
