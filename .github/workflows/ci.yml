@@ -30,36 +30,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Parse scale runner
-        shell: pwsh
+      - name: Check scale runner syntax and CLI
         run: |
-          $ErrorActionPreference = 'Stop'
-          Set-StrictMode -Version Latest
-          $parseTokens = $null
-          $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path -LiteralPath './scripts/run-scale-profile.ps1').Path,
-            [ref] $parseTokens,
-            [ref] $parseErrors
-          ) | Out-Null
-          if ($parseErrors.Count -ne 0) {
-            throw ($parseErrors.Message -join "`n")
-          }
-
-      - name: Validate scale runner contract
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Set-StrictMode -Version Latest
-          $validationRoot = "target/scale-runner-validation-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          ./scripts/run-scale-profile.ps1 -ValidateOnly -ArtifactRoot $validationRoot
-          $validationPath = Join-Path $validationRoot 'validation.json'
-          $validationReport = Get-Content -Raw -LiteralPath $validationPath | ConvertFrom-Json
-          if ($validationReport.schema -ne 'baozi-scale-report/v1' -or
-              $validationReport.execution_mode -ne 'validate_only' -or
-              $validationReport.status -ne 'passed') {
-            throw 'scale runner validation did not produce a passing validation report'
-          }
+          python3 -m py_compile scripts/run_scale_profile.py
+          python3 scripts/run_scale_profile.py --help
 
       - name: Install Go
         uses: actions/setup-go@v6

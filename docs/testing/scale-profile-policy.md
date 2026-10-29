@@ -1,144 +1,91 @@
-# Scale Profile Policy
+# Scale Profile
 
-Baozi separates deterministic resource correctness from statistical performance evidence. The
-repository gate does not treat wall-clock timing as a pull-request correctness oracle.
+Baozi separates deterministic resource correctness from advisory performance measurements. Rust
+tests and benchmarks own the fixtures and assertions. The Python driver only runs fixed commands,
+keeps their output, and writes a short report; timing and RSS have no pass thresholds.
 
-## U3 Profile
+## Rust Workloads and Contract
 
-The U3 profile uses one Baozi-owned generated OBJ case, `obj_repeated_triangle_faces`. It contains
-three fixed vertices followed by repeated fixed-width triangle records. A logical 1x fixture has 256
-faces. The correctness suite imports 1x, 10x, and 100x. The scheduled profile additionally imports
-the selected 1000x case.
+`baozi-test-support::ObjScaleFixture` generates `obj_repeated_triangle_faces`: three vertices followed
+by repeated triangle records, with 256 faces at 1x. `import_scale_contract` checks 1x, 10x, and 100x.
+`import_baseline` and `import_scale_probe` also exercise 1000x.
 
-The generator lives in `baozi-test-support`; generated assets are not checked in and have no
-third-party provenance or redistribution requirement. Fixture construction reserves its final byte
-capacity before filling it so generator reallocation does not become parser evidence.
-
-## Deterministic Gate
-
-Run the local correctness gate with:
-
-```powershell
-cargo +1.95.0 nextest run --locked -p baozi --test import_scale_contract --all-features
-```
-
-For every correctness scale, the test requires affine OBJ face, record, token, and primary-byte
-counters; the expected canonical index count; and a clean terminal ledger. A clean terminal ledger
-has zero current live bytes, active reservations, ledger evidence bytes, phase-owned live bytes, and
-pending publication. Consumed work cannot exceed attempted work.
-
-Declared peak-live memory must remain below this reviewed affine envelope:
+The deterministic test checks affine primary-byte, record, token, and face counters, the expected
+scene shape and index count, and a terminal ledger with no retained live bytes or reservations.
+Consumed work must not exceed attempted work. Declared peak-live memory must fit the reviewed affine
+envelope owned by the Rust fixture:
 
 ```text
 8 MiB + 16 * input_bytes + 2048 * face_count
 ```
 
-The same constants are duplicated deliberately in `ci/scale-profile-policy.json` and the typed
-fixture implementation. The scheduled runner rejects disagreement. Changing them requires a review
-of the generated fixture, ledger ownership, and fresh scale evidence; a prior CI artifact is never a
-correctness baseline.
+Run that test independently with the OBJ feature set:
 
-The Criterion harness can be checked without collecting measurements:
-
-```powershell
-cargo +1.95.0 bench --locked -p baozi --bench import_baseline --all-features -- --test
+```text
+cargo nextest run --locked -p baozi --no-default-features --features format-obj --test import_scale_contract
 ```
 
-## Runner Contract Gate
+The existing probe also checks terminal ledger state, scene shape, and the declared-memory envelope.
+These Rust assertions remain correctness requirements. Declared ledger memory and external process
+RSS measure different things and must be reviewed separately.
 
-Pull-request CI parses `scripts/run-scale-profile.ps1` with PowerShell's AST parser and runs its
-`-ValidateOnly` mode. This mode reads the production `ci/scale-profile-policy.json` through
-`ci/scale-profile-policy.schema.json`, constructs the exact Criterion, probe-build, and GNU time
-argument arrays used by scheduled collection, and exercises the production probe, unsigned-counter,
-GNU time RSS, bounded command-output, report-construction, JSON round-trip, and
-`ci/scale-profile-report.schema.json` paths with synthetic evidence. Hostile duplicate or overflowing
-probe values, malformed RSS evidence, zero-byte output limits, and command output beyond either
-stream limit must be rejected for the gate to pass. Output exactly at the configured byte boundary
-remains valid.
+## Local Collection
 
-Validation writes `validation.json` with `execution_mode: validate_only`. It launches short instances
-of the current PowerShell executable solely to verify stdout/stderr enforcement; it does not run
-Cargo, Criterion, the compiled probe, or GNU time and is never scheduled scale evidence. Only the
-weekly or manually dispatched full collection can produce `report.json` with
-`execution_mode: collection`.
+Use Python 3.10 or newer, Rust, and cargo-nextest. The scheduled workflow pins Rust 1.95.0. No Python
+packages are required. From the repository root, run:
 
-## Scheduled Evidence
+```text
+python scripts/run_scale_profile.py --help
+python scripts/run_scale_profile.py
+python scripts/run_scale_profile.py --artifact-root target/scale-artifacts/local-review
+```
 
-`.github/workflows/scale.yml` runs weekly and on manual dispatch on a fixed Ubuntu 24.04 runner. Its
-PowerShell runner reads `ci/scale-profile-policy.json` from the repository. The workflow has no
-environment variable or input that can replace the policy or its thresholds.
+The script can also be invoked by absolute path from another directory. An artifact path is relative
+to the repository unless absolute. It must be new; an existing directory is rejected to preserve
+earlier measurements. The default creates a timestamped directory below `target/scale-artifacts/`.
+Commands run sequentially in the repository and reuse Cargo's normal target directory.
+`CARGO_BUILD_JOBS` defaults to 1 when unset.
 
-Criterion 0.5.1 records time distributions for all four scales. The runner resolves locked Cargo
-metadata and fails unless the single resolved `criterion` package is exactly 0.5.1; the policy value
-is therefore checked, not merely copied into the report. Median time and its confidence interval are
-normalized into Baozi's report schema. A missing case, missing or non-finite estimate, or wrong sample
-count fails the workflow. Iteration and time series must both be finite, positive, equally sized, and
-match the policy sample count; confidence bounds must contain the median point estimate. A per-decade
-power exponent above 1.25 is an advisory trend regression in U3 and is recorded without turning
-wall-clock variance into a hard correctness failure.
+The driver runs the deterministic nextest target, the `obj_face_import_scale` Criterion group, and a
+build of the existing `import_scale_probe` benchmark. Every Cargo invocation uses `--locked`,
+`--no-default-features`, and `--features format-obj`. Criterion uses a one-second warm-up, three-second
+measurement, 20 samples, and 2,000 resamples. Cargo's JSON build output supplies the probe executable
+path. The driver then invokes that executable directly once for idle and once for each scale.
 
-The independently built `import_scale_probe` benchmark executable imports each fixture once. GNU
-time runs that executable in a separate process three times per scale and records the largest maximum
-resident set size. An idle process with the same default registry supplies the fixed-process baseline.
-The hard delta conservatively subtracts the smallest idle RSS from the largest scale RSS; a noisy
-high baseline cannot hide scale growth. RSS is external process evidence; it is not called heap
-allocation count and is not substituted for ledger evidence. Every repetition must emit the expected
-schema, case, numeric scale, and scale label, and all non-RSS probe values must agree across
-repetitions.
+On Linux with `/usr/bin/time`, each probe is a separate measured child, invoked with an argument
+array. GNU time's `%M` value is converted from KiB to bytes. It excludes Cargo and compilation, but
+includes the probe's registry, fixture construction, import, and scene snapshot. Idle RSS is recorded
+separately; the driver does not subtract a baseline or enforce a growth envelope. On other platforms,
+or when GNU time provides no positive peak, `peak_rss_bytes` is `null` with an unavailable reason.
+Missing RSS does not turn a successful Rust process into a failed correctness check.
 
-The policy gives tool identity, Cargo metadata, Criterion, probe build, and individual probe
-processes independent timeouts. Every command also has a 16 MiB limit for stdout and a separate
-16 MiB limit for stderr. Both streams are copied asynchronously from the process pipes directly into
-artifact files; they are decoded only after the command finishes and both files satisfy their limits.
-A timeout or output-limit breach kills the command process tree. An over-limit artifact is truncated
-to the configured boundary before the runner fails closed, so failure evidence stays bounded. These
-limits are repository policy and cannot be replaced by workflow inputs. A 40-minute script-wide
-deadline caps their cumulative runtime before the collection step's 45-minute timeout. The 75-minute
-job timeout and 15-minute deterministic-check timeout leave a separate tail for setup and
-failure-artifact upload.
+Each subprocess has a timeout: 900 seconds for nextest and Criterion, 600 seconds for the probe
+build, and 180 seconds per probe. The driver uses Python's standard subprocess timeout handling;
+it does not implement process-tree management or output polling. Output streams go directly to files
+without an in-memory capture or a custom byte-limit protocol. A launch error, nonzero process exit,
+or timeout stops collection, writes the partial report, and returns a nonzero exit code.
 
-RSS checks are hard failures:
+## CI and Artifacts
 
-- maximum process RSS must not exceed 1 GiB;
-- RSS above the idle probe must fit `input_bytes + 1.25 * ledger_peak + 16 MiB`;
-- each tenfold scale increase must fit `12 * previous_delta + 8 MiB`.
+Pull-request CI compiles the Python script and checks `--help`. It does not run a synthetic validation
+mode. `.github/workflows/scale.yml` runs the complete driver weekly and on manual dispatch on
+Ubuntu 24.04, with a 60-minute collection limit and a 75-minute job limit.
 
-Missing GNU time, a probe failure, a timeout, missing RSS, a schema mismatch, or a missing artifact
-fails closed. Thresholds are intentionally coarse security and complexity envelopes, not microbench
-regression percentages.
+Each run directory contains:
 
-## Artifact Contract
+- `report.json`: completion or failure, timestamps, executed argument arrays, timeouts, return codes,
+  command elapsed times, log paths, and each probe's measured peak RSS or unavailable reason;
+- `<command>.stdout.log` and `<command>.stderr.log`, including Cargo build messages and the existing
+  Rust probe output;
+- `probe-<scale>.rss-kib.txt` when GNU time is used, including the separate idle observation;
+- `criterion/`: Criterion's original measurements for the selected benchmark group.
 
-The normalized artifact schema is `baozi-scale-report/v1` and is machine-defined in
-`ci/scale-profile-report.schema.json`. `report.json` records `execution_mode: collection` and:
+`status: completed` means all commands succeeded. It makes no timing or RSS pass claim. Command
+elapsed time includes build and harness overhead; inspect Criterion's own measurements for import
+timing. Compare results in the context of the host, toolchain, and run variability.
 
-- profile, policy SHA-256, GitHub run identity, Rust, Cargo, Criterion, and GNU time identity;
-- Ubuntu runner-image identity, kernel identity, logical processor count, and structured `lscpu`
-  evidence;
-- case ID, scale, logical units, input bytes, Criterion median/confidence/sample count;
-- every scale and idle RSS repetition, their min/max aggregates, and the conservative delta;
-- ledger peak live/evidence bytes, reviewed envelope, and committed canonical output;
-- every hard and advisory check with observed value, limit, unit, and result.
-
-Criterion runs below the runner's temporary directory, outside the uploaded artifact root and Cargo
-target cache. Only each scale's `estimates.json` and `sample.json` are copied into the artifact, and
-the runner rejects any HTML file or unexpected Criterion artifact. Probe output, GNU time output, and
-command logs accompany the normalized report. A script bootstrap or collection failure writes
-`report.json` with `status: error`, the failed step, and bounded exception identity/message. A final
-`always()` workflow step validates that report against the repository schema and creates the same
-minimal error schema when checkout,
-the deterministic contract, or collection failed before the script could do so. The workflow uploads
-evidence even after failure, rejects an empty artifact set, and retains artifacts for 90 days.
-Generated fixture bytes and Criterion HTML are not uploaded.
-
-## Future Units
-
-U4 through U7 add graph validation, canonical IR, format, glTF admission, remap, and postprocess cases
-when those behaviors land. glTF admission still requires its own bounded subprocess RSS and timeout
-proof; this trend workflow cannot waive it. U8 completes million-cell and selected 1000x snapshot and
-semantic coverage. U9 makes workflow, feature, maturity, and evidence registration machine-checked;
-it does not defer the first scheduled scale run until release work.
-
-Criterion is already an `Apache-2.0 OR MIT` development dependency. The profile adds no allocator or
-registry dependency. GNU time is an external CI executable and is neither linked into nor distributed
-with Baozi.
+The workflow uploads available artifacts even after collection fails and retains them for 90 days.
+Failures before the driver starts use GitHub Actions' step logs; the workflow does not fabricate a
+measurement report. The legacy `baozi-scale-report/v1` report schema and PowerShell `ValidateOnly`
+contract are retired. The driver does not read `ci/scale-profile-policy.json` or its schema: Rust owns
+the correctness constants, and the driver contains only fixed collection settings.

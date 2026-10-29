@@ -52,19 +52,20 @@ jobs:
 
       - name: Run scheduled fuzz
         run: |
-          mkdir -p "fuzz/artifacts/${{ matrix.target }}"
+          mkdir -p "fuzz/artifacts/${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}"
           set -o pipefail
           cargo fuzz run "${{ matrix.target }}" -- -max_total_time=120 2>&1 | tee "fuzz/artifacts/${{ matrix.target }}/fuzz.log"
 
-      - name: Upload fuzz artifacts
-        if: failure()
+      - name: Retain fuzz corpus and logs
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.target }}-fuzz-artifacts
+          name: ${{ matrix.target }}-fuzz-${{ github.sha }}-${{ github.run_id }}
           path: |
             fuzz/artifacts/${{ matrix.target }}/**
+            fuzz/corpus/${{ matrix.target }}/**
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 30
 
   non-admitted-check:
     name: ${{ matrix.target }} non-admitted candidate check

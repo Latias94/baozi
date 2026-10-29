@@ -2,3 +2,4 @@
 /repo-ref
 /fuzz/target
 /fuzz/artifacts
+__pycache__/

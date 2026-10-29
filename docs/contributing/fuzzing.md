@@ -15,7 +15,9 @@ Fuzz targets have two CI tiers:
 
 Longer fuzz campaigns run from `.github/workflows/fuzz.yml` on a schedule and
 through manual dispatch. That workflow is Linux-only, has a bounded job timeout,
-and uploads `fuzz/artifacts/<target>/**` only when the run fails.
+and retains both `fuzz/artifacts/<target>/**` logs and the resulting `fuzz/corpus/<target>/**`
+after successful or failed runs. Downloaded campaign corpora can seed a later bounded run; a
+retained artifact records progress without declaring a format admitted or a fuzz campaign complete.
 
 Local fuzzing is still useful for quick parser work, but local platform failures
 must be recorded as toolchain evidence rather than parser evidence.
