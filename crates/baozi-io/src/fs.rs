@@ -41,6 +41,7 @@ impl NativeDirectoryCapability {
         &self.domain
     }
 
+    #[cfg(feature = "repository-fs-candidate")]
     pub(crate) fn directory(&self) -> &Dir {
         &self.directory
     }
