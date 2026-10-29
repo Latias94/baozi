@@ -651,7 +651,7 @@ impl<'scene> NodeSceneAnimationCursor<'scene> {
                 require_exact_record_reference(
                     table,
                     row,
-                    animation_channel_field::TARGETS,
+                    animation_channel_field::TARGET_CONTEXT,
                     reference,
                     "validated morph-weight target reference is unreadable",
                     "validated morph-weight target reference disagrees with validation proof",
@@ -676,14 +676,14 @@ fn require_node_target(
             "validated animation-channel node target is outside canonical node space",
         ));
     }
-    require_exact_record_reference(
-        table,
-        row,
-        animation_channel_field::TARGETS,
-        proof.nodes(),
-        "validated animation-channel node target reference is unreadable",
-        "validated animation-channel node target reference disagrees with validation proof",
-    )
+    if table.scalar::<u32>(row, animation_channel_field::TARGET_CONTEXT)
+        != u32::try_from(proof.source_node_count() + 1).ok()
+    {
+        return Err(invariant(
+            "validated animation node domain count disagrees with central proof",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

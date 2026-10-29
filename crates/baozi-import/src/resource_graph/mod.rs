@@ -199,6 +199,10 @@ struct DigestedManifestNode {
 }
 
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the existing-target branch moves its admitted scratch vector owner without a second allocation"
+)]
 enum TargetAdmission {
     Existing {
         index: usize,
@@ -841,7 +845,7 @@ impl ResourceGraph {
             for relation in self.outgoing_relations(index)? {
                 let relation = relation?;
                 charge_manifest_work(host, 1)?;
-                let relation = project_relation(relation, &digests)?;
+                let relation = project_relation(host, relation, &digests)?;
                 let canonical_len = relation_key_len(
                     relation.role(),
                     relation.requirement(),
@@ -899,7 +903,7 @@ impl ResourceGraph {
             .ok_or(ResourceGraphError::MissingPrimary)?;
         let (counts, replay_status) =
             manifest_counts_and_replay_status(host, &classes, self.maximum_depth)?;
-        let mut provisional = SuccessfulInputManifest::new(
+        let provisional = SuccessfulInputManifest::new(
             ManifestDigest::zero(),
             primary_digest,
             classes,
@@ -927,7 +931,6 @@ impl ResourceGraph {
         let digest = hash_manifest_bytes(host, &canonical)?;
         charge_consumed(host, ImportDimension::InputManifestBytes, byte_count)?;
         drop(canonical);
-        provisional.release_live_reservations();
         self.sealed_manifest = Some(provisional.with_digest(digest));
         Ok(())
     }
@@ -1359,7 +1362,7 @@ fn fold_manifest_relations(
     mut digested: AccountedVec<DigestedManifestRelation>,
 ) -> Result<AccountedVec<ManifestRelation>, ResourceGraphError> {
     sort_by_manifest_digest(host, &mut digested, |entry| entry.digest)?;
-    let mut relations = manifest_scratch_vec(host, digested.len(), "resource-manifest-relations")?;
+    let mut relations = manifest_output_vec(host, digested.len(), "resource-manifest-relations")?;
     let mut entries = digested.into_iter().peekable();
     while let Some(first) = entries.next() {
         let mut multiplicity = first.relation.multiplicity();
@@ -1385,7 +1388,7 @@ fn fold_manifest_nodes(
     graph_nodes: &[GraphNode],
 ) -> Result<AccountedVec<ManifestNodeClass>, ResourceGraphError> {
     sort_by_manifest_digest(host, &mut digested, |entry| entry.digest)?;
-    let mut classes = manifest_scratch_vec(
+    let mut classes = manifest_output_vec(
         host,
         digested.len(),
         "resource-manifest-folded-node-classes",
@@ -1403,13 +1406,21 @@ fn fold_manifest_nodes(
                 return Err(ResourceGraphError::DigestCollision);
             }
         }
-        classes.push_reserved_infallible(ManifestNodeClass::new(
-            first.digest,
-            source.public_identity.clone(),
-            source.byte_length,
-            source.content_digest,
-            first.relations,
-        ));
+        let (identity, reservation) = clone_manifest_identity(
+            host,
+            &source.public_identity,
+            "resource-manifest-node-identity",
+        )?;
+        classes.push_reserved_infallible(
+            ManifestNodeClass::new(
+                first.digest,
+                identity,
+                source.byte_length,
+                source.content_digest,
+                first.relations,
+            )
+            .with_path_reservation(reservation),
+        );
     }
     Ok(classes)
 }
@@ -1510,9 +1521,11 @@ fn manifest_bytes_equal(
 }
 
 fn project_relation(
+    host: ImportStoreHost<'_>,
     relation: &GraphRelation,
     digests: &[Option<ManifestDigest>],
 ) -> Result<ManifestRelation, ResourceGraphError> {
+    let mut outcome_reservation = None;
     let outcome = match &relation.outcome {
         GraphRelationOutcome::Available { target } => ManifestRelationOutcome::Available {
             target_node_class_digest: digests
@@ -1528,16 +1541,59 @@ fn project_relation(
         } => ManifestRelationOutcome::Unavailable {
             class: *class,
             code: *code,
-            identity_evidence: identity_evidence.clone(),
+            identity_evidence: identity_evidence
+                .as_ref()
+                .map(|identity| {
+                    let (identity, reservation) = clone_manifest_identity(
+                        host,
+                        identity,
+                        "resource-manifest-unavailable-identity",
+                    )?;
+                    outcome_reservation = Some(reservation);
+                    Ok::<_, ResourceGraphError>(identity)
+                })
+                .transpose()?,
             replay: *replay,
         },
+    };
+    let (reference, reference_reservation) = match &relation.reference {
+        ManifestReference::Normalized(identity) => {
+            let (identity, reservation) =
+                clone_manifest_identity(host, identity, "resource-manifest-reference")?;
+            (ManifestReference::Normalized(identity), Some(reservation))
+        }
+        ManifestReference::Rejected {
+            class,
+            code,
+            reference_digest,
+        } => (
+            ManifestReference::Rejected {
+                class: *class,
+                code: *code,
+                reference_digest: *reference_digest,
+            },
+            None,
+        ),
     };
     Ok(ManifestRelation::new(
         relation.role.clone(),
         relation.requirement,
-        relation.reference.clone(),
+        reference,
         outcome,
         1,
+    )
+    .with_path_reservations([reference_reservation, outcome_reservation]))
+}
+
+fn clone_manifest_identity(
+    host: ImportStoreHost<'_>,
+    source: &ManifestResourceIdentity,
+    resource: &'static str,
+) -> Result<(ManifestResourceIdentity, ImportStoreReservation), ResourceGraphError> {
+    let (path, reservation) = clone_owned_path(host, source.value(), resource, true)?;
+    Ok((
+        ManifestResourceIdentity::new(path, source.stability().clone()),
+        reservation,
     ))
 }
 
@@ -1678,12 +1734,31 @@ fn clone_graph_path(
     source: &AssetPath,
     resource: &'static str,
 ) -> Result<(AssetPath, ImportStoreReservation), ResourceGraphError> {
+    clone_owned_path(host, source, resource, false)
+}
+
+fn clone_owned_path(
+    host: ImportStoreHost<'_>,
+    source: &AssetPath,
+    resource: &'static str,
+    retained: bool,
+) -> Result<(AssetPath, ImportStoreReservation), ResourceGraphError> {
     let plan = CapacityPlan::for_type::<u8>(0, 0, source.as_str().len())
         .map_err(|cause| ResourceGraphError::Scope(capacity_plan_cause(resource, cause)))?;
     let bytes = plan
         .envelope_delta_bytes()
         .map_err(|cause| ResourceGraphError::Scope(capacity_plan_cause(resource, cause)))?;
-    let mut reservation = reserve_graph_storage(host, bytes).map_err(ResourceGraphError::Scope)?;
+    let mut reservation = if retained {
+        host.reserve_retained(
+            ImportLedgerPhase::OutcomeFinalization,
+            ImportDimension::ScratchBytes,
+            bytes,
+            u64::from(bytes != 0),
+        )
+        .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?
+    } else {
+        reserve_graph_storage(host, bytes).map_err(ResourceGraphError::Scope)?
+    };
     let path = source
         .try_clone()
         .map_err(|_| ResourceGraphError::Allocation { resource })?;
@@ -1900,6 +1975,26 @@ fn manifest_scratch_vec<T>(
     Ok(values)
 }
 
+fn manifest_output_vec<T>(
+    host: ImportStoreHost<'_>,
+    capacity: usize,
+    resource: &'static str,
+) -> Result<AccountedVec<T>, ResourceGraphError> {
+    let mut values = AccountedVec::new();
+    values
+        .try_reserve_capacity(capacity, resource, |bytes| {
+            host.reserve_retained(
+                ImportLedgerPhase::OutcomeFinalization,
+                ImportDimension::ScratchBytes,
+                bytes,
+                u64::from(bytes != 0),
+            )
+            .map_err(|cause| cause.into_scope_abort_cause())
+        })
+        .map_err(ResourceGraphError::Scope)?;
+    Ok(values)
+}
+
 fn graph_scratch_vec<T>(
     host: ImportStoreHost<'_>,
     capacity: usize,
@@ -2029,8 +2124,8 @@ mod tests {
         ImportStoreBootstrapRequirements, ImportStoreSessionOwner, try_import_store_bootstrap,
     };
     use baozi_operation::{
-        DimensionPolicy, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
-        PhysicalStorageAccountLimits,
+        DimensionPolicy, PhysicalStorageAccount, PhysicalStorageAccountFactory,
+        PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
     };
 
     mod accounting;
@@ -2044,6 +2139,13 @@ mod tests {
         limits: &ResourceLimits,
         control: ImportOperationControl,
     ) -> ImportStoreSessionOwner {
+        store_owner_and_account(limits, control).0
+    }
+
+    fn store_owner_and_account(
+        limits: &ResourceLimits,
+        control: ImportOperationControl,
+    ) -> (ImportStoreSessionOwner, PhysicalStorageAccount) {
         let requirements = ImportStoreBootstrapRequirements::for_node_scene(limits).unwrap();
         let bootstrap = try_import_store_bootstrap(limits, requirements).unwrap();
         let factory = PhysicalStorageAccountFactory::try_new(
@@ -2053,7 +2155,16 @@ mod tests {
         let account = factory
             .try_create_account(PhysicalStorageAccountLimits::new(u64::MAX, u64::MAX).unwrap())
             .unwrap();
-        ImportStoreSessionOwner::try_start(control, &account, bootstrap).unwrap()
+        let owner = ImportStoreSessionOwner::try_start(control, &account, bootstrap).unwrap();
+        (owner, account)
+    }
+
+    fn assert_store_released(owner: ImportStoreSessionOwner, account: PhysicalStorageAccount) {
+        drop(owner);
+        let released = account.snapshot();
+        assert_eq!(released.live_retained_bytes(), 0);
+        assert_eq!(released.live_retained_allocations(), 0);
+        assert!(!released.poisoned());
     }
 
     fn dependency_identity(authority: &AuthorityDomain, path: &str) -> DependencyIdentity {
@@ -2585,8 +2696,12 @@ mod tests {
     #[test]
     fn graph_arenas_and_paths_hold_their_complete_capacity_charge() {
         let limits = ResourceLimits::default();
-        let owner = store_owner(&limits);
+        let (owner, account) = store_owner_and_account(&limits, ImportOperationControl::default());
         let host = owner.host();
+        let baseline = host
+            .dimension_state(ImportDimension::ScratchBytes)
+            .unwrap()
+            .live_bytes();
         let authority = AuthorityDomain::default();
         let primary_path = AssetPath::new("main.asset").unwrap();
         let role = DependencyRoleId::new("test.resource").unwrap();
@@ -2596,7 +2711,8 @@ mod tests {
         let cache_storage = host
             .dimension_state(ImportDimension::ScratchBytes)
             .unwrap()
-            .live_bytes();
+            .live_bytes()
+            - baseline;
 
         graph
             .bind_primary(host, &authority, &primary_path, b"primary")
@@ -2633,7 +2749,7 @@ mod tests {
             host.dimension_state(ImportDimension::ScratchBytes)
                 .unwrap()
                 .live_bytes(),
-            cache_storage + accounted + path_bytes as u64
+            baseline + cache_storage + accounted + path_bytes as u64
         );
 
         drop(graph);
@@ -2641,8 +2757,9 @@ mod tests {
             host.dimension_state(ImportDimension::ScratchBytes)
                 .unwrap()
                 .live_bytes(),
-            0
+            baseline
         );
+        assert_store_released(owner, account);
     }
 
     #[test]
@@ -2663,11 +2780,26 @@ mod tests {
 
         graph.seal(host).unwrap();
 
+        let retained_manifest_storage = host
+            .dimension_state(ImportDimension::ScratchBytes)
+            .unwrap()
+            .live_bytes();
+        assert!(retained_manifest_storage > graph_storage);
+        let manifest = graph.take_manifest().unwrap();
         assert_eq!(
             host.dimension_state(ImportDimension::ScratchBytes)
                 .unwrap()
                 .live_bytes(),
-            graph_storage
+            retained_manifest_storage,
+            "moving a sealed manifest must retain its actual tables and paths",
+        );
+        drop(manifest);
+        assert_eq!(
+            host.dimension_state(ImportDimension::ScratchBytes)
+                .unwrap()
+                .live_bytes(),
+            graph_storage,
+            "only the original graph remains after manifest and seal scratch are destroyed",
         );
     }
 
@@ -2739,14 +2871,24 @@ mod tests {
     #[test]
     fn dependency_cache_preallocation_failure_is_bookkeeping_not_structural_graph_limit() {
         let limits = ResourceLimits::default();
-        let owner = store_owner(&limits);
+        let (owner, account) = store_owner_and_account(&limits, ImportOperationControl::default());
         let host = owner.host();
+        let baseline = host
+            .dimension_state(ImportDimension::ScratchBytes)
+            .unwrap()
+            .live_bytes();
         host.tighten_dimension_policy(
             ImportDimension::ScratchBytes,
-            DimensionPolicy::reservable_bytes(0, 0, 0, 0),
+            DimensionPolicy::reservable_bytes(0, 0, 0, baseline),
         )
         .unwrap();
         let mut graph = ResourceGraph::new(limits);
+        let entry_envelope = graph
+            .cache
+            .capacity_plan()
+            .unwrap()
+            .temporary_envelope_bytes(DependencyCacheStorage::Entries)
+            .unwrap();
 
         let failure = graph
             .reserve_acquisition_capacity(host)
@@ -2755,10 +2897,15 @@ mod tests {
         match failure {
             ResourceGraphError::Scope(ScopeAbortCause::Ledger(
                 baozi_operation::LedgerCause::LimitExceeded {
+                    class: baozi_operation::CounterClass::Live,
                     dimension: ImportDimension::ScratchBytes,
-                    ..
+                    value,
+                    limit,
                 },
-            )) => {}
+            )) => {
+                assert_eq!(value, baseline + entry_envelope);
+                assert_eq!(limit, baseline);
+            }
             ResourceGraphError::Limit {
                 resource:
                     "max_resource_graph_nodes"
@@ -2772,12 +2919,14 @@ mod tests {
             host.dimension_state(ImportDimension::ScratchBytes)
                 .unwrap()
                 .live_bytes(),
-            0
+            baseline
         );
         assert!(
             graph.cache.capacity_plan().unwrap().requires_apply(),
             "failed preallocation must leave cache growth unapplied"
         );
+        drop(graph);
+        assert_store_released(owner, account);
     }
 
     #[test]

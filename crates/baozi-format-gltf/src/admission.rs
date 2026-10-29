@@ -1,5 +1,6 @@
 use crate::GltfFailure;
 use crate::json_syntax;
+use crate::source_map::GltfSourceMap;
 use baozi_import::{ImportWorkClass, ParseResult, ParseScope};
 
 const GLB_MAGIC: &[u8; 4] = b"glTF";
@@ -9,34 +10,38 @@ const GLB_CHUNK_HEADER_BYTES: usize = 8;
 const GLB_JSON_CHUNK: &[u8; 4] = b"JSON";
 const GLB_BIN_CHUNK: &[u8; 4] = b"BIN\0";
 
-#[derive(Clone, Copy)]
-pub(crate) struct AdmittedSurfaces<'bytes> {
-    json_bytes: &'bytes [u8],
-    json_raw_base: u64,
-    bin_bytes: Option<&'bytes [u8]>,
+pub(crate) struct AdmittedSurfaces<'scope> {
+    json_bytes: &'scope [u8],
+    bin_bytes: Option<&'scope [u8]>,
+    source_map: GltfSourceMap<'scope>,
 }
 
-impl<'bytes> AdmittedSurfaces<'bytes> {
-    pub(crate) const fn json_bytes(self) -> &'bytes [u8] {
+impl<'scope> AdmittedSurfaces<'scope> {
+    pub(crate) const fn json_bytes(&self) -> &'scope [u8] {
         self.json_bytes
     }
 
-    pub(crate) const fn json_raw_base(self) -> u64 {
-        self.json_raw_base
+    pub(crate) const fn bin_bytes(&self) -> Option<&'scope [u8]> {
+        self.bin_bytes
     }
 
-    pub(crate) const fn bin_bytes(self) -> Option<&'bytes [u8]> {
-        self.bin_bytes
+    pub(crate) const fn source_map(&self) -> &GltfSourceMap<'scope> {
+        &self.source_map
+    }
+
+    /// Transfer the complete metered map into the normalized owner after copying the BIN view.
+    pub(crate) fn into_source_map(self) -> GltfSourceMap<'scope> {
+        self.source_map
     }
 }
 
-pub(crate) fn admit<'bytes>(ctx: &'bytes ParseScope<'_>) -> ParseResult<AdmittedSurfaces<'bytes>> {
+pub(crate) fn admit<'scope>(ctx: &'scope ParseScope<'_>) -> ParseResult<AdmittedSurfaces<'scope>> {
     let document_bytes = ctx.primary_bytes();
     let (surface, is_glb) = if document_bytes.starts_with(GLB_MAGIC) {
         (locate_glb_surfaces(ctx, document_bytes)?, true)
     } else {
         (
-            AdmittedSurfaces {
+            LocatedSurfaces {
                 json_bytes: document_bytes,
                 json_raw_base: 0,
                 bin_bytes: None,
@@ -44,14 +49,24 @@ pub(crate) fn admit<'bytes>(ctx: &'bytes ParseScope<'_>) -> ParseResult<Admitted
             false,
         )
     };
-    json_syntax::admit(ctx, surface.json_bytes(), surface.json_raw_base(), is_glb)?;
-    Ok(surface)
+    let source_map = json_syntax::admit(ctx, surface.json_bytes, surface.json_raw_base, is_glb)?;
+    Ok(AdmittedSurfaces {
+        json_bytes: surface.json_bytes,
+        bin_bytes: surface.bin_bytes,
+        source_map,
+    })
+}
+
+struct LocatedSurfaces<'bytes> {
+    json_bytes: &'bytes [u8],
+    json_raw_base: u64,
+    bin_bytes: Option<&'bytes [u8]>,
 }
 
 fn locate_glb_surfaces<'bytes>(
     ctx: &ParseScope<'_>,
     document_bytes: &'bytes [u8],
-) -> ParseResult<AdmittedSurfaces<'bytes>> {
+) -> ParseResult<LocatedSurfaces<'bytes>> {
     if document_bytes.len() < GLB_HEADER_BYTES || !document_bytes.len().is_multiple_of(4) {
         return Err(invalid_glb(
             ctx,
@@ -127,7 +142,7 @@ fn locate_glb_surfaces<'bytes>(
                 .ok_or_else(|| invalid_glb(ctx, "GLB BIN range is outside the input"))
         })
         .transpose()?;
-    Ok(AdmittedSurfaces {
+    Ok(LocatedSurfaces {
         json_bytes,
         json_raw_base,
         bin_bytes,

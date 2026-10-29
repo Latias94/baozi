@@ -414,44 +414,38 @@ fn filtered_animation_cancellation_preserves_duration_only_prefix_and_evidence()
 }
 
 #[test]
-fn morph_weight_animation_remains_an_explicit_controlled_diagnostic() -> TestResult<()> {
+fn morph_weight_animation_without_mesh_is_rejected() -> TestResult<()> {
     let bin = [0.0_f32, 1.0]
         .into_iter()
         .flat_map(f32::to_le_bytes)
         .collect::<Vec<_>>();
     let document = animation_glb(morph_animation_json(), &bin);
-    let mut options = GltfTestOptions::memory();
-    options.loss_policy = LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss);
-    let (report, diagnostics) = import_assets(
+    let (result, diagnostics) = import_assets_result(
         "morph-animation.glb",
         [("morph-animation.glb", document)],
-        options,
+        GltfTestOptions::memory(),
     )?;
-
-    assert_eq!(diagnostics.len(), 1);
+    let failure = expected_error(result)?;
+    assert!(diagnostics.is_empty());
+    assert_gltf_failure(
+        &failure,
+        GltfFailureCode::InvalidDocument,
+        Some("meshless node"),
+    )?;
     assert_eq!(
-        diagnostics[0].code().as_str(),
-        "gltf.animation_morph_weights_ignored"
+        failure
+            .ledger()
+            .dimension(ImportDimension::AnimationCells)
+            .unwrap()
+            .attempted(),
+        0
     );
-    assert_eq!(
-        diagnostics[0].object_path(),
-        Some("/animations/0/channels/0")
-    );
-    assert_source_channel_loss(
-        report.loss_evidence(),
-        "gltf.animation_morph_weights_ignored",
-        ImportLossDisposition::Applied,
-    );
-    let snapshot = scene_snapshot(&report);
-    assert!(snapshot.preview().contains("animation(present)"));
-    assert!(snapshot.preview().contains("clips(present,total=0)"));
-    assert!(snapshot.preview().contains("channels(present,total=0)"));
     Ok(())
 }
 
 #[test]
 fn animation_loss_diagnostics_are_scoped_to_their_source_clip() -> TestResult<()> {
-    let document = multi_animation_morph_loss_glb();
+    let document = multi_animation_scope_loss_glb();
     let mut options = GltfTestOptions::memory();
     options.loss_policy = LossPolicy::preserve_or_fail().allow(ImportLossKind::SourceSemanticLoss);
     let (report, diagnostics) = import_assets(
@@ -463,7 +457,7 @@ fn animation_loss_diagnostics_are_scoped_to_their_source_clip() -> TestResult<()
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(
         diagnostics[0].code().as_str(),
-        "gltf.animation_morph_weights_ignored"
+        "gltf.animation_channel_outside_scene_omitted"
     );
     assert_eq!(
         diagnostics[0].object_path(),
@@ -471,7 +465,7 @@ fn animation_loss_diagnostics_are_scoped_to_their_source_clip() -> TestResult<()
     );
     assert_source_channel_loss(
         report.loss_evidence(),
-        "gltf.animation_morph_weights_ignored",
+        "gltf.animation_channel_outside_scene_omitted",
         ImportLossDisposition::Applied,
     );
     Ok(())
@@ -1038,13 +1032,25 @@ fn outside_animation_glb() -> Vec<u8> {
     animation_glb(json.as_bytes(), &base_animation_bin())
 }
 
-fn multi_animation_morph_loss_glb() -> Vec<u8> {
-    let json = replace_once(
-        base_animation_json(),
-        "  }]\n}",
-        "  }, {\n    \"name\": \"Morph\",\n    \"samplers\": [{ \"input\": 0, \"output\": 0, \"interpolation\": \"LINEAR\" }],\n    \"channels\": [\n      { \"sampler\": 0, \"target\": { \"node\": 0, \"path\": \"weights\" } }\n    ]\n  }]\n}",
-    );
-    animation_glb(json.as_bytes(), &base_animation_bin())
+fn multi_animation_scope_loss_glb() -> Vec<u8> {
+    let mut json: serde_json::Value = serde_json::from_slice(base_animation_json()).unwrap();
+    json["scenes"] = serde_json::json!([{ "nodes": [0] }, { "nodes": [1] }]);
+    json["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"name": "Outside"}));
+    json["animations"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "name": "PartlySelected",
+            "samplers": [{"input": 0, "output": 1}],
+            "channels": [
+                {"sampler": 0, "target": {"node": 1, "path": "translation"}},
+                {"sampler": 0, "target": {"node": 0, "path": "translation"}}
+            ]
+        }));
+    animation_glb(&serde_json::to_vec(&json).unwrap(), &base_animation_bin())
 }
 
 fn base_animation_bin() -> Vec<u8> {

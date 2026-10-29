@@ -553,6 +553,19 @@ pub enum SceneValidationError {
         expected: u32,
         actual: usize,
     },
+    #[error("skin {skin} has an invalid name: {source}")]
+    InvalidSkinName {
+        skin: usize,
+        #[source]
+        source: EntityNameError,
+    },
+    #[error("logical mesh {logical_mesh} morph target {target} has an invalid name: {source}")]
+    InvalidMorphTargetName {
+        logical_mesh: usize,
+        target: usize,
+        #[source]
+        source: EntityNameError,
+    },
     #[error("skin {skin} uses a non-canonical matrix-space contract")]
     NonCanonicalSkinMatrixSpaces { skin: usize },
     #[error("skin {skin} has {joint_count} joints but {inverse_bind_count} inverse-bind matrices")]
@@ -1076,6 +1089,8 @@ impl SceneValidationError {
             | Self::NamespacedMaterialBehaviorUnsupported { .. }
             | Self::InvalidMaterialBindingSemantics { .. } => SceneValidationDomain::Appearance,
             Self::GeometryTableCardinality { .. }
+            | Self::InvalidSkinName { .. }
+            | Self::InvalidMorphTargetName { .. }
             | Self::NonCanonicalSkinMatrixSpaces { .. }
             | Self::InverseBindCountMismatch { .. }
             | Self::JointNodeOutOfRange { .. }
@@ -1242,6 +1257,8 @@ impl SceneValidationError {
                 "appearance.invalid-material-binding-semantics"
             }
             Self::GeometryTableCardinality { .. } => "deformation.geometry-table-cardinality",
+            Self::InvalidSkinName { .. } => "deformation.invalid-skin-name",
+            Self::InvalidMorphTargetName { .. } => "deformation.invalid-morph-target-name",
             Self::NonCanonicalSkinMatrixSpaces { .. } => {
                 "deformation.non-canonical-skin-matrix-spaces"
             }

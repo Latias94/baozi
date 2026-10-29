@@ -44,12 +44,20 @@ use account::{
     AdmissionCharge, AdmissionError, CounterState, lock_recovering_poison,
     quarantined_account_reason, release, release_locked, try_admit, try_admit_locked,
 };
+pub(crate) use allocation::RetainedStorageLease;
 use allocation::{
     AccountPoisonEventWitness, AdmissionLease, AdmissionOwner, FinalOwnerReleaseOutcome,
     PolicyRetainedAllocation, RetainedAllocation, RetainedLeaseGuard,
     RetainedMembershipDestination, RetainedPayload, RetainedSetId, RetainedValuePolicy,
     map_retained_admission_error, record_account_poison_event, try_next_retained_set_id,
 };
+pub use allocation::{RetainedStorage, SharedRetainedStorage};
+pub(crate) fn release_owned_storage<T>(lease: RetainedStorageLease, value: T) -> bool {
+    matches!(
+        lease.bind(value).release_before_attribution(),
+        FinalOwnerReleaseOutcome::Clean
+    )
+}
 #[cfg(test)]
 use allocation::{LeafRetainedPolicy, RetainedFinalOwnerInner, test_retained_set_id_requests};
 #[allow(
@@ -305,6 +313,76 @@ where
     CanonicalBlock: Send + Sync + 'static,
     EvidenceBlock: Send + Sync + 'static,
 {
+    #[allow(
+        clippy::type_complexity,
+        reason = "the existing operation owner remains borrowed with its exact ledger vocabulary"
+    )]
+    pub(crate) fn storage_operation(
+        &mut self,
+    ) -> Result<&mut RetainedOperation<O, P, PP, U, D, F>, RetainedPublicationError<D>>
+    where
+        P: TerminalEvidenceKey,
+        D: TerminalEvidenceKey,
+    {
+        if self.containment != AssemblyContainmentProvenance::Healthy {
+            return Err(RetainedPublicationError::Poisoned);
+        }
+        self.ensure_canonical_work_available()?;
+        self.operation
+            .as_mut()
+            .ok_or(RetainedPublicationError::Poisoned)
+    }
+
+    pub(crate) fn storage_destination(&self) -> Result<(P, D), RetainedPublicationError<D>> {
+        let plan = self
+            .canonical_plan
+            .as_ref()
+            .ok_or(RetainedPublicationError::WrongOutcomeMode)?;
+        Ok((plan.writer.phase, plan.writer.capacity_dimension))
+    }
+
+    pub(crate) fn share_typed_storage<T: Send + Sync + 'static>(
+        &mut self,
+        source: &SharedRetainedStorage<T>,
+        work_dimension: D,
+    ) -> Result<SharedRetainedStorage<T>, RetainedPublicationError<D>>
+    where
+        P: TerminalEvidenceKey,
+        D: TerminalEvidenceKey,
+    {
+        self.ensure_canonical_work_available()?;
+        let account = self
+            .account
+            .as_ref()
+            .ok_or(RetainedPublicationError::Poisoned)?;
+        if !source.belongs_to(account) {
+            return Err(RetainedPublicationError::Writer(
+                RetainedWriterError::OwnershipUnverified,
+            ));
+        }
+        let preflight = account.try_begin_account_preflight().map_err(|cause| {
+            RetainedPublicationError::Writer(RetainedWriterError::AccountPoisoned(cause))
+        })?;
+        let action = preflight.admit_action().map_err(|cause| {
+            RetainedPublicationError::Writer(map_account_action_admission_error(cause))
+        })?;
+        let (_control, ledger) = self
+            .operation
+            .as_mut()
+            .ok_or(RetainedPublicationError::Poisoned)?
+            .split_work_control(work_dimension);
+        let admitted = try_admit_retained_share_work(ledger, self.ordinary_handle_share_work)
+            .map_err(RetainedPublicationError::Writer)?;
+        let allocation = action
+            .run(|_| admitted.try_share_allocation(source.allocation()))
+            .map_err(|failure| {
+                let (allocation, cause) = failure.into_parts();
+                drop(allocation);
+                RetainedPublicationError::Writer(RetainedWriterError::Ledger(cause))
+            })?;
+        Ok(SharedRetainedStorage::from_allocation(allocation))
+    }
+
     pub(crate) fn require_canonical_source<SourceBlock>(
         &mut self,
         source: &PublishedCanonicalAggregate<SourceBlock>,

@@ -1,10 +1,12 @@
 use crate::dependency::OptionalDependencyEvidence;
 use crate::descriptor::FormatDescriptor;
+use crate::diagnostic::RetainedDiagnostics;
 use crate::diagnostic::{DiagnosticSummary, ImportDiagnostic};
 use crate::error::ImportCause;
 use crate::format::DetectionOutcome;
 use crate::ledger::{ImportDimension, ImportLedgerSnapshot};
 use crate::loss::ImportLossEvidence;
+use crate::metered_storage::AccountedVec;
 use crate::resource_graph::SuccessfulInputManifest;
 use crate::source_scope::SourceScopeRecord;
 use crate::store::{ImportStoreMinimalFallback, ImportStoreRichFailure, ImportStoreSuccessReport};
@@ -223,11 +225,11 @@ pub struct ImportEvidence {
     _scene_report: ImportStoreSuccessReport,
     source: AssetPath,
     format: Arc<FormatDescriptor>,
-    detection: Vec<DetectionEvidence>,
-    diagnostics: Vec<ImportDiagnostic>,
+    detection: AccountedVec<DetectionEvidence>,
+    diagnostics: RetainedDiagnostics,
     diagnostic_summary: DiagnosticSummary,
-    optional_dependency_evidence: Vec<OptionalDependencyEvidence>,
-    loss_evidence: Vec<ImportLossEvidence>,
+    optional_dependency_evidence: AccountedVec<OptionalDependencyEvidence>,
+    loss_evidence: AccountedVec<ImportLossEvidence>,
     source_scope_record: Option<SourceScopeRecord>,
     successful_input_manifest: SuccessfulInputManifest,
     ledger: ImportLedgerSnapshot,
@@ -239,11 +241,11 @@ pub(crate) struct ImportReportParts {
     pub scene_report: ImportStoreSuccessReport,
     pub source: AssetPath,
     pub format: Arc<FormatDescriptor>,
-    pub detection: Vec<DetectionEvidence>,
-    pub diagnostics: Vec<ImportDiagnostic>,
+    pub detection: AccountedVec<DetectionEvidence>,
+    pub diagnostics: RetainedDiagnostics,
     pub diagnostic_summary: DiagnosticSummary,
-    pub optional_dependency_evidence: Vec<OptionalDependencyEvidence>,
-    pub loss_evidence: Vec<ImportLossEvidence>,
+    pub optional_dependency_evidence: AccountedVec<OptionalDependencyEvidence>,
+    pub loss_evidence: AccountedVec<ImportLossEvidence>,
     pub source_scope_record: Option<SourceScopeRecord>,
     pub successful_input_manifest: SuccessfulInputManifest,
     pub ledger: ImportLedgerSnapshot,
@@ -432,16 +434,59 @@ impl fmt::Debug for ImportEvidence {
     }
 }
 
-pub struct ImportFailure {
+/// One failure cause coupled to the lease for its captured detail storage.
+///
+/// This same owner moves through finalization into rich or minimal failure. Replacing a cause
+/// destroys its old payload before releasing its charge, including during ordinary host unwind.
+pub(crate) struct AccountedErrorContext {
     cause: ImportCause,
+    storage: Option<crate::store::ImportStoreReservation>,
+}
+
+impl AccountedErrorContext {
+    pub(crate) const fn new(
+        cause: ImportCause,
+        storage: Option<crate::store::ImportStoreReservation>,
+    ) -> Self {
+        Self { cause, storage }
+    }
+
+    pub(crate) const fn cause(&self) -> &ImportCause {
+        &self.cause
+    }
+
+    pub(crate) fn replace_cause(&mut self, replacement: ImportCause) {
+        let previous = std::mem::replace(&mut self.cause, replacement);
+        if let Some(storage) = self.storage.take() {
+            storage.release_storage(previous);
+        } else {
+            drop(previous);
+        }
+    }
+}
+
+impl Drop for AccountedErrorContext {
+    fn drop(&mut self) {
+        self.replace_cause(ImportCause::UnsupportedFormat);
+    }
+}
+
+impl fmt::Debug for AccountedErrorContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.cause.fmt(formatter)
+    }
+}
+
+pub struct ImportFailure {
+    cause: AccountedErrorContext,
     terminal_control_cause: Option<baozi_operation::ControlCause>,
     source: AssetPath,
     selected_format: Option<FormatId>,
-    detection: Vec<DetectionEvidence>,
-    diagnostics: Vec<ImportDiagnostic>,
+    detection: AccountedVec<DetectionEvidence>,
+    diagnostics: RetainedDiagnostics,
     diagnostic_summary: DiagnosticSummary,
-    optional_dependency_evidence: Vec<OptionalDependencyEvidence>,
-    loss_evidence: Vec<ImportLossEvidence>,
+    optional_dependency_evidence: AccountedVec<OptionalDependencyEvidence>,
+    loss_evidence: AccountedVec<ImportLossEvidence>,
     source_scope_record: Option<SourceScopeRecord>,
     ledger: ImportLedgerSnapshot,
     _store_owner: ImportFailureStoreOwner,
@@ -449,15 +494,15 @@ pub struct ImportFailure {
 }
 
 pub(crate) struct ImportFailureParts {
-    pub cause: ImportCause,
+    pub cause: AccountedErrorContext,
     pub terminal_control_cause: Option<baozi_operation::ControlCause>,
     pub source: AssetPath,
     pub selected_format: Option<FormatId>,
-    pub detection: Vec<DetectionEvidence>,
-    pub diagnostics: Vec<ImportDiagnostic>,
+    pub detection: AccountedVec<DetectionEvidence>,
+    pub diagnostics: RetainedDiagnostics,
     pub diagnostic_summary: DiagnosticSummary,
-    pub optional_dependency_evidence: Vec<OptionalDependencyEvidence>,
-    pub loss_evidence: Vec<ImportLossEvidence>,
+    pub optional_dependency_evidence: AccountedVec<OptionalDependencyEvidence>,
+    pub loss_evidence: AccountedVec<ImportLossEvidence>,
     pub source_scope_record: Option<SourceScopeRecord>,
     pub ledger: ImportLedgerSnapshot,
     pub store_owner: ImportFailureStoreOwner,
@@ -484,12 +529,12 @@ impl ImportFailure {
     }
 
     pub const fn cause(&self) -> &ImportCause {
-        &self.cause
+        self.cause.cause()
     }
 
     /// Returns the original producer-local Scene submission rule.
     pub const fn scene_validation_error(&self) -> Option<&baozi_core::SceneValidationError> {
-        self.cause.scene_validation_error()
+        self.cause().scene_validation_error()
     }
 
     /// Returns a later terminal interruption retained alongside a primary semantic rejection.
@@ -568,7 +613,7 @@ pub(crate) enum ImportFailureStoreOwner {
 
 impl fmt::Display for ImportFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.cause.fmt(formatter)?;
+        self.cause().fmt(formatter)?;
         if let Some(cause) = &self.terminal_control_cause {
             write!(formatter, "; terminal finalization also reported: {cause}")?;
         }
@@ -578,7 +623,7 @@ impl fmt::Display for ImportFailure {
 
 impl std::error::Error for ImportFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.cause)
+        Some(self.cause())
     }
 }
 

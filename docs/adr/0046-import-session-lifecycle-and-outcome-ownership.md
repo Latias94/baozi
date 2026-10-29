@@ -76,6 +76,16 @@ Large construction state must be admitted before activation and borrowed through
 Failure transitions cannot allocate replacement state. Any session storage surviving central
 validation must account for early fallback preparation as well as the normal finalizer; introducing
 a new long-lived scratch reservation cannot silently change which failure paths may freeze.
+The import state slot and semantic vocabulary live in one startup-admitted `AccountedVec` cell.
+Phase transitions borrow that cell instead of moving the full state through the outer import
+frames. Before terminal preparation, the session extracts its pending linear owner, destroys
+the empty cell allocation, and releases its charge. Early fallback paths obey the same lifetime
+boundary; no additional allocation occurs at the terminal pivot.
+Dropping an intact dormant session, including during unrelated host unwind, destroys its healthy
+operation baseline normally. A host that extracts that owner from its stable session slot marks
+the transient activation obligation explicitly. Abandoning that transfer or an active scoped
+driver remains an ownership fault and invokes containment; a panic flag alone does not establish
+that fault.
 
 ### Capability-Limited Stages
 
@@ -134,7 +144,36 @@ authority for final operation class and code; a parallel runtime classifier is f
 
 Successful reports own the validated Scene, ledger snapshot, phase evidence, diagnostics, source
 scope, loss evidence, and any completed successful input manifest. Failures own only evidence that
-was safely finalized. Postprocess begins a separate operation and is never an import phase.
+was safely finalized. Actual container and path storage moves into these outcomes with its central
+physical lease; moving to a terminal draft never releases a live token while retaining an unowned
+allocation. `ImportEvidence` remains an independent owner when a caller moves out or drops the Scene.
+Rich failure and minimal fallback retain the same safely captured evidence, including bounded
+required-dependency context and format failure detail. Replacing a failure cause destroys its old
+payload before releasing its matching lease. Handoff allocates and copies no output storage.
+Postprocess begins a separate operation and is never an import phase.
+
+The private `AccountedErrorContext` carries an import cause and its captured-detail lease together
+from finalization into `ImportFailure`. Rich and minimal failure use this same owner. Terminal cause
+selection replaces a payload through that owner rather than extracting a bare cause or duplicating
+its destructor protocol in the report.
+
+An owned parser failure transport can outlive its parse call when extension code retains it. Its
+format-failure envelope therefore carries the lease for its actual evidence buffers. The session's
+capture marker detects swallowed or duplicate failures without owning those external buffers. A
+terminal rejection cannot release their physical charge while the extension still owns the payload.
+The envelope keeps only a descriptor handle and a one-element vector handle. Its concrete cell
+contains the packed evidence and the existing reservation for all three backing allocations.
+The cell capacity is admitted and fallibly allocated with both payload buffers before any producer
+callback. Destruction extracts the lease, destroys the evidence and cell allocation, then releases
+the charge through the central storage-release API. No shared header or generic allocation
+framework is introduced. Size guards keep parser failure transport below the large-error threshold;
+normal-stack consumer coverage remains the acceptance check for cumulative call frames.
+
+Ambiguous detection also returns a small vector handle. Its concrete one-element cell moves the
+existing accounted candidate vector without copying its identities; the cell's own allocation is
+admitted separately before it is allocated. Public cause transport therefore stays bounded without
+adding per-function large-error exceptions. The candidate and cell allocations both release through
+their actual owners.
 
 The public ledger snapshot owns the already retained frozen ledger and projects semantic rows on
 demand. It does not materialize another complete dimension/phase table in each result or error.

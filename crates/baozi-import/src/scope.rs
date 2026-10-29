@@ -399,6 +399,19 @@ impl<const N: usize> Drop for ImportWorkScope<'_, '_, N> {
     }
 }
 
+/// Single-capture status plus detail storage not yet transferred into its actual error owner.
+#[derive(Default)]
+pub(crate) struct FailureEvidenceStorage {
+    pub(crate) reservation: Option<ImportStoreReservation>,
+    pub(crate) format_captured: bool,
+}
+
+impl FailureEvidenceStorage {
+    pub(crate) fn is_active(&self) -> bool {
+        self.reservation.is_some() || self.format_captured
+    }
+}
+
 /// A capability-limited parser view valid only for one selected importer call.
 pub struct ParseScope<'session> {
     entry: RegistryEntry,
@@ -419,7 +432,7 @@ pub struct ParseScope<'session> {
     optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
     loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
     source_scope_record: &'session RefCell<Option<LiveSourceScopeRecord>>,
-    format_failure_storage: &'session RefCell<Option<ImportStoreReservation>>,
+    format_failure_storage: &'session RefCell<FailureEvidenceStorage>,
     dependency_failure: RefCell<Option<DependencyResolutionContext>>,
     dependency_failure_context: RefCell<Option<DependencyFailureContext>>,
     callback_active: Cell<bool>,
@@ -448,7 +461,7 @@ pub(crate) struct ParseScopeParts<'session> {
     pub optional_dependency_evidence: &'session RefCell<AccountedVec<OptionalDependencyEvidence>>,
     pub loss_evidence: &'session RefCell<AccountedVec<ImportLossEvidence>>,
     pub source_scope_record: &'session RefCell<Option<LiveSourceScopeRecord>>,
-    pub format_failure_storage: &'session RefCell<Option<ImportStoreReservation>>,
+    pub format_failure_storage: &'session RefCell<FailureEvidenceStorage>,
     pub terminal: &'session RefCell<Option<ScopeAbortCause>>,
 }
 
@@ -1080,21 +1093,6 @@ impl<'session> ParseScope<'session> {
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))
     }
 
-    fn reserve_live(
-        &self,
-        storage: ImportStorageClass,
-        bytes: u64,
-    ) -> ParseResult<ImportLiveReservation<'_>> {
-        self.preflight_active()?;
-        let reservation = self
-            .reserve_storage_cause(storage, bytes)
-            .map_err(|cause| self.abort(cause))?;
-        Ok(ImportLiveReservation {
-            reservation,
-            scope: PhantomData,
-        })
-    }
-
     pub(crate) fn reserve_storage_cause(
         &self,
         storage: ImportStorageClass,
@@ -1103,6 +1101,18 @@ impl<'session> ParseScope<'session> {
         let (phase, dimension) = storage.accounting();
         self.host
             .reserve(phase, dimension, bytes)
+            .map_err(|cause| cause.into_scope_abort_cause())
+    }
+
+    pub(crate) fn reserve_retained_storage_cause(
+        &self,
+        storage: ImportStorageClass,
+        bytes: u64,
+        allocations: u64,
+    ) -> Result<ImportStoreReservation, ScopeAbortCause> {
+        let (phase, dimension) = storage.accounting();
+        self.host
+            .reserve_retained(phase, dimension, bytes, allocations)
             .map_err(|cause| cause.into_scope_abort_cause())
     }
 
@@ -1440,14 +1450,18 @@ impl<'session> ParseScope<'session> {
         self.host
             .charge_attempted(ImportDimension::LossEvidenceCount, 1)
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
-        let source_envelope = u64::try_from(source.path().as_str().len())
-            .map_err(|_| self.resource_limit_exceeded("loss-evidence-source", u64::MAX))?;
+        let source_plan = CapacityPlan::for_type::<u8>(0, 0, source.path().as_str().len())
+            .map_err(|cause| self.capacity_plan_error("loss-evidence-source", cause))?;
+        let source_envelope = source_plan
+            .envelope_delta_bytes()
+            .map_err(|cause| self.capacity_plan_error("loss-evidence-source", cause))?;
         let mut reservation = self
             .host
-            .reserve(
+            .reserve_retained(
                 ImportLedgerPhase::FormatNormalization,
                 ImportDimension::LossEvidenceBytes,
                 source_envelope,
+                u64::from(source_envelope != 0),
             )
             .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?;
 
@@ -1457,6 +1471,9 @@ impl<'session> ParseScope<'session> {
             .map_err(|_| self.allocation_failure("loss-evidence-source"))?;
         let source_bytes = u64::try_from(retained_source.capacity_bytes())
             .map_err(|_| self.resource_limit_exceeded("loss-evidence-source", u64::MAX))?;
+        source_plan
+            .finish(0, retained_source.capacity_bytes())
+            .map_err(|cause| self.capacity_plan_error("loss-evidence-source", cause))?;
         if source_bytes != source_envelope {
             self.host
                 .resize(&mut reservation, source_bytes)
@@ -1471,10 +1488,11 @@ impl<'session> ParseScope<'session> {
             let prior_capacity_bytes = evidence.capacity_bytes();
             let result = evidence.try_reserve(1, "loss-evidence-capacity", |capacity_bytes| {
                 self.host
-                    .reserve(
+                    .reserve_retained(
                         ImportLedgerPhase::FormatNormalization,
                         ImportDimension::LossEvidenceBytes,
                         capacity_bytes,
+                        u64::from(capacity_bytes != 0),
                     )
                     .map_err(|cause| cause.into_scope_abort_cause())
             });
@@ -1725,21 +1743,23 @@ impl<'session> ParseScope<'session> {
         } else {
             Some(
                 self.host
-                    .reserve(
+                    .reserve_retained(
                         ImportLedgerPhase::FormatNormalization,
                         ImportDimension::DiagnosticBytes,
                         admission.payload_capacity_envelope(),
+                        admission.payload_allocation_count(),
                     )
                     .map_err(|cause| self.abort(cause.into_scope_abort_cause()))?,
             )
         };
         let mut structural_reservation = if stores_diagnostic {
             Some(
-                self.reserve_live(
+                self.reserve_retained_storage_cause(
                     ImportStorageClass::FormatNormalization,
                     admission.structural_capacity_envelope(),
-                )?
-                .into_reservation(),
+                    u64::from(admission.structural_capacity_envelope() != 0),
+                )
+                .map_err(|cause| self.abort(cause))?,
             )
         } else {
             None
@@ -1904,10 +1924,11 @@ impl<'session> ParseScope<'session> {
         capacity_bytes: u64,
     ) -> Result<ImportStoreReservation, ScopeAbortCause> {
         self.host
-            .reserve(
+            .reserve_retained(
                 ImportLedgerPhase::FormatNormalization,
                 ImportDimension::ScratchBytes,
                 capacity_bytes,
+                u64::from(capacity_bytes != 0),
             )
             .map_err(|cause| cause.into_scope_abort_cause())
     }
@@ -2068,10 +2089,10 @@ impl<'session> ParseScope<'session> {
         P: FormatFailureEvidenceProducer,
     {
         let mut producer = Some(producer);
-        let captured = (|| -> ParseResult<FormatFailureEvidence> {
+        let captured = (|| -> ParseResult<(FormatFailureEnvelope, FormatFailureEvidence)> {
             self.preflight_active()?;
             let failure_storage_is_active = match self.format_failure_storage.try_borrow() {
-                Ok(storage) => storage.is_some(),
+                Ok(storage) => storage.is_active(),
                 Err(_) => return Err(self.reentrant_capability_failure()),
             };
             if failure_storage_is_active {
@@ -2086,16 +2107,35 @@ impl<'session> ParseScope<'session> {
             let envelope_bytes = capacity_plan.envelope_bytes().map_err(|cause| {
                 self.capacity_plan_error("format-failure-evidence-storage", cause)
             })?;
-            let mut storage =
-                self.reserve_live(ImportStorageClass::FormatNormalization, envelope_bytes)?;
+            let mut storage = ImportLiveReservation {
+                reservation: self
+                    .reserve_retained_storage_cause(
+                        ImportStorageClass::FormatNormalization,
+                        envelope_bytes,
+                        3,
+                    )
+                    .map_err(|cause| self.abort(cause))?,
+                scope: PhantomData,
+            };
+            let allocation_error = |cause| match cause {
+                FormatFailureDetailCause::CapacityPlan(cause) => {
+                    self.capacity_plan_error("format-failure-evidence-storage", cause)
+                }
+                cause => self.abort(ScopeAbortCause::FormatFailureDetail(cause)),
+            };
+            let (envelope, owner_storage_bytes) =
+                FormatFailureEnvelope::try_allocate(self.entry.descriptor_handle(), capacity_plan)
+                    .map_err(allocation_error)?;
             let (mut evidence, actual_storage_bytes) =
-                BoundedFormatFailureDetailSink::try_allocate(capacity_plan).map_err(|cause| {
-                    match cause {
-                        FormatFailureDetailCause::CapacityPlan(cause) => {
-                            self.capacity_plan_error("format-failure-evidence-storage", cause)
-                        }
-                        cause => self.abort(ScopeAbortCause::FormatFailureDetail(cause)),
-                    }
+                BoundedFormatFailureDetailSink::try_allocate(capacity_plan)
+                    .map_err(allocation_error)?;
+            let actual_storage_bytes = actual_storage_bytes
+                .checked_add(owner_storage_bytes)
+                .ok_or_else(|| {
+                    self.capacity_plan_error(
+                        "format-failure-evidence-storage",
+                        CapacityPlanError::CapacityOverflow,
+                    )
                 })?;
             self.resize_live(&mut storage, actual_storage_bytes)?;
             {
@@ -2103,12 +2143,13 @@ impl<'session> ParseScope<'session> {
                     Ok(storage) => storage,
                     Err(_) => return Err(self.reentrant_capability_failure()),
                 };
-                if failure_storage.is_some() {
+                if failure_storage.is_active() {
                     return Err(self.abort(ScopeAbortCause::DescriptorContract {
                         code: "format-failure-storage-already-active",
                     }));
                 }
-                *failure_storage = Some(storage.into_reservation());
+                failure_storage.reservation = Some(storage.into_reservation());
+                failure_storage.format_captured = true;
             }
 
             let Some(producer) = producer.as_ref() else {
@@ -2155,6 +2196,7 @@ impl<'session> ParseScope<'session> {
             self.preflight_active()?;
             evidence
                 .finish()
+                .map(|evidence| (envelope, evidence))
                 .map_err(|cause| self.abort(ScopeAbortCause::FormatFailureDetail(cause)))
         })();
 
@@ -2176,11 +2218,16 @@ impl<'session> ParseScope<'session> {
         }
 
         match captured {
-            Ok(evidence) => match self.preflight_active() {
-                Ok(()) => ParseFailure::format(FormatFailureEnvelope::seal(
-                    self.entry.descriptor_handle(),
-                    evidence,
-                )),
+            Ok((envelope, evidence)) => match self.preflight_active() {
+                Ok(()) => {
+                    let storage = self.format_failure_storage.borrow_mut().reservation.take();
+                    if storage.is_none() {
+                        return self.abort(ScopeAbortCause::DescriptorContract {
+                            code: "format-failure-without-storage-reservation",
+                        });
+                    }
+                    ParseFailure::format(envelope.seal(evidence, storage))
+                }
                 Err(failure) => failure,
             },
             Err(failure) => failure,
@@ -3215,7 +3262,7 @@ impl<'session> ParseScope<'session> {
             ) {
                 return Ok(None);
             }
-            if self.format_failure_storage.borrow().is_some() {
+            if self.format_failure_storage.borrow().is_active() {
                 return Err(ScopeAbortCause::DescriptorContract {
                     code: "failure-evidence-storage-already-active",
                 });
@@ -3244,9 +3291,9 @@ impl<'session> ParseScope<'session> {
         })();
         match captured {
             Ok(Some((context, reservation))) => {
-                // Reuse the session's single terminal-failure evidence slot. Its existing owner
-                // keeps the charge live through parsing and releases it during terminal transfer.
-                *self.format_failure_storage.borrow_mut() = Some(reservation);
+                // The single failure slot keeps this physical lease coupled to the cause until
+                // the terminal owner destroys it, including rich and minimal outcomes.
+                self.format_failure_storage.borrow_mut().reservation = Some(reservation);
                 *self.dependency_failure_context.borrow_mut() = Some(context);
             }
             Ok(None) => {}
@@ -3303,22 +3350,15 @@ impl<'session> ParseScope<'session> {
         owner: &crate::CauseOwner,
         cache_disposition: DependencyCacheDisposition,
     ) -> ParseResult<OptionalDependencyEvidence> {
-        let normalized_path_reservation =
-            self.reserve_dependency_storage(normalized_path.as_str().len() as u64)?;
-        let normalized_path = normalized_path.try_clone().map_err(|_| {
-            self.abort(ScopeAbortCause::Allocation {
-                resource: "optional-dependency-evidence-path",
-            })
-        })?;
+        let (normalized_path, normalized_path_reservation) = self
+            .clone_retained_dependency_path(normalized_path, "optional-dependency-evidence-path")?;
         let (identity, identity_path_reservation) = match identity {
             Some(identity) => {
-                let reservation =
-                    self.reserve_dependency_storage(identity.path().as_str().len() as u64)?;
-                let identity = identity.try_clone().map_err(|_| {
-                    self.abort(ScopeAbortCause::Allocation {
-                        resource: "optional-dependency-evidence-identity",
-                    })
-                })?;
+                let (path, reservation) = self.clone_retained_dependency_path(
+                    identity.path(),
+                    "optional-dependency-evidence-identity",
+                )?;
+                let identity = DependencyIdentity::new(identity.authority().clone(), path);
                 (Some(identity), Some(reservation))
             }
             None => (None, None),
@@ -3333,9 +3373,28 @@ impl<'session> ParseScope<'session> {
         ))
     }
 
-    fn reserve_dependency_storage(&self, bytes: u64) -> ParseResult<ImportStoreReservation> {
-        self.reserve_dependency_storage_cause(bytes)
-            .map_err(|cause| self.abort(cause))
+    fn clone_retained_dependency_path(
+        &self,
+        path: &AssetPath,
+        resource: &'static str,
+    ) -> ParseResult<(AssetPath, ImportStoreReservation)> {
+        let plan = CapacityPlan::for_type::<u8>(0, 0, path.as_str().len())
+            .map_err(|cause| self.capacity_plan_error(resource, cause))?;
+        let bytes = plan
+            .envelope_delta_bytes()
+            .map_err(|cause| self.capacity_plan_error(resource, cause))?;
+        let mut reservation = self
+            .reserve_dependency_storage_cause(bytes)
+            .map_err(|cause| self.abort(cause))?;
+        let path = path
+            .try_clone()
+            .map_err(|_| self.allocation_failure(resource))?;
+        let bytes = plan
+            .finish(0, path.capacity_bytes())
+            .map_err(|cause| self.capacity_plan_error(resource, cause))?;
+        self.resize_dependency_storage_cause(&mut reservation, bytes)
+            .map_err(|cause| self.abort(cause))?;
+        Ok((path, reservation))
     }
 
     fn reserve_dependency_storage_cause(
@@ -3343,10 +3402,11 @@ impl<'session> ParseScope<'session> {
         bytes: u64,
     ) -> Result<ImportStoreReservation, ScopeAbortCause> {
         self.host
-            .reserve(
+            .reserve_retained(
                 ImportLedgerPhase::DependencyAcquisition,
                 ImportDimension::ScratchBytes,
                 bytes,
+                u64::from(bytes != 0),
             )
             .map_err(|cause| cause.into_scope_abort_cause())
     }
@@ -4681,12 +4741,21 @@ mod tests {
 
     struct TestStore {
         owner: ImportStoreSessionOwner,
-        _account: PhysicalStorageAccount,
+        account: PhysicalStorageAccount,
     }
 
     impl TestStore {
         fn host(&self) -> ImportStoreHost<'_> {
             self.owner.host()
+        }
+
+        fn assert_released(self) {
+            let Self { owner, account } = self;
+            drop(owner);
+            let released = account.snapshot();
+            assert_eq!(released.live_retained_bytes(), 0);
+            assert_eq!(released.live_retained_allocations(), 0);
+            assert!(!released.poisoned());
         }
     }
 
@@ -4715,10 +4784,7 @@ mod tests {
             .expect("test physical account must allocate");
         let owner = ImportStoreSessionOwner::try_start(control, &account, bootstrap)
             .expect("test import store owner must start");
-        TestStore {
-            owner,
-            _account: account,
-        }
+        TestStore { owner, account }
     }
 
     fn current_live_bytes(host: ImportStoreHost<'_>) -> u64 {
@@ -4816,6 +4882,7 @@ mod tests {
         let limits = ResourceLimits::default();
         let store = test_store(&limits);
         let host = store.host();
+        let baseline = current_live_bytes(host);
         let payload = b"metered snapshot".to_vec();
         let opened = OpenedAsset::new(
             AuthorityDomain::new(),
@@ -4837,10 +4904,14 @@ mod tests {
 
         assert_eq!(&*snapshot, payload.as_slice());
         assert!(snapshot.capacity_bytes() >= payload.len() as u64);
-        assert!(current_live_bytes(host) > 0);
+        assert_eq!(
+            current_live_bytes(host),
+            baseline + snapshot.capacity_bytes()
+        );
 
         drop(snapshot);
-        assert_eq!(current_live_bytes(host), 0);
+        assert_eq!(current_live_bytes(host), baseline);
+        store.assert_released();
     }
 
     #[test]
@@ -4852,6 +4923,7 @@ mod tests {
             };
             let store = test_store(&limits);
             let host = store.host();
+            let baseline = current_live_bytes(host);
             for (dimension, ledger_phase, progress_phase) in [
                 (
                     ImportDimension::PrimaryBytes,
@@ -4874,6 +4946,12 @@ mod tests {
                     read_opened_asset(host, opened, ledger_phase, progress_phase, dimension, 4, 2)
                         .expect("unspent total-byte credit must carry into the next resource");
                 assert_eq!(&*snapshot, b"a");
+                assert_eq!(
+                    current_live_bytes(host),
+                    baseline + snapshot.capacity_bytes()
+                );
+                drop(snapshot);
+                assert_eq!(current_live_bytes(host), baseline);
             }
             let total = host
                 .dimension_state(ImportDimension::TotalAssetBytes)
@@ -4891,7 +4969,8 @@ mod tests {
             let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
             assert_eq!(work.attempted(), 4);
             assert_eq!(work.consumed(), 4);
-            assert_eq!(current_live_bytes(host), 0);
+            assert_eq!(current_live_bytes(host), baseline);
+            store.assert_released();
         }
     }
 
@@ -4951,6 +5030,7 @@ mod tests {
             let limits = ResourceLimits::default();
             let store = test_store(&limits);
             let host = store.host();
+            let baseline = current_live_bytes(host);
             let opened = OpenedAsset::new(
                 AuthorityDomain::new(),
                 AssetPath::new("exact.bin").unwrap(),
@@ -4992,7 +5072,8 @@ mod tests {
             let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
             assert_eq!(work.attempted(), 2);
             assert_eq!(work.consumed(), 2);
-            assert_eq!(current_live_bytes(host), 0);
+            assert_eq!(current_live_bytes(host), baseline);
+            store.assert_released();
         }
     }
 
@@ -5020,6 +5101,7 @@ mod tests {
         for panics in [false, true] {
             let store = test_store(&ResourceLimits::default());
             let host = store.host();
+            let baseline = current_live_bytes(host);
             let calls = Arc::new(AtomicU64::new(0));
             let opened = OpenedAsset::new(
                 AuthorityDomain::new(),
@@ -5059,7 +5141,8 @@ mod tests {
             let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
             assert_eq!(work.attempted(), 2);
             assert_eq!(work.consumed(), if panics { 1 } else { 2 });
-            assert_eq!(current_live_bytes(host), 0);
+            assert_eq!(current_live_bytes(host), baseline);
+            store.assert_released();
         }
     }
 
@@ -5088,6 +5171,7 @@ mod tests {
             };
             let store = test_store_with_control(&limits, control);
             let host = store.host();
+            let baseline = current_live_bytes(host);
             let calls = Arc::new(AtomicU64::new(0));
             let opened = OpenedAsset::new(
                 AuthorityDomain::new(),
@@ -5128,7 +5212,8 @@ mod tests {
             let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
             assert_eq!(work.attempted(), if cancel { 1 } else { 2 });
             assert_eq!(work.consumed(), 1);
-            assert_eq!(current_live_bytes(host), 0);
+            assert_eq!(current_live_bytes(host), baseline);
+            store.assert_released();
         }
     }
 
@@ -5136,6 +5221,7 @@ mod tests {
         id: u8,
         host: ImportStoreHost<'a>,
         observations: &'a RefCell<Vec<(u8, bool)>>,
+        expected_live_bytes: u64,
     }
 
     impl Drop for OwnedIterationDropProbe<'_> {
@@ -5145,7 +5231,7 @@ mod tests {
                 .dimension_state(ImportDimension::CanonicalOutputBytes)
                 .expect("canonical-output dimension")
                 .live_bytes()
-                > 0;
+                == self.expected_live_bytes;
             self.observations
                 .borrow_mut()
                 .push((self.id, capacity_is_live));
@@ -5155,6 +5241,7 @@ mod tests {
     fn assert_owned_iteration_drop_observations(
         observations: &RefCell<Vec<(u8, bool)>>,
         host: ImportStoreHost<'_>,
+        baseline: u64,
     ) {
         let mut observations = observations.borrow().clone();
         observations.sort_unstable_by_key(|(id, _)| *id);
@@ -5163,7 +5250,7 @@ mod tests {
             vec![(0, true), (1, true), (2, true)],
             "the current and remaining elements must all drop under the live capacity reservation"
         );
-        assert_eq!(current_live_bytes(host), 0);
+        assert_eq!(current_live_bytes(host), baseline);
     }
 
     #[test]
@@ -5171,6 +5258,11 @@ mod tests {
         let limits = ResourceLimits::default();
         let store = test_store(&limits);
         let host = store.host();
+        let baseline = current_live_bytes(host);
+        let canonical_baseline = host
+            .dimension_state(ImportDimension::CanonicalOutputBytes)
+            .unwrap()
+            .live_bytes();
         let callback_active = Cell::new(false);
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
@@ -5186,12 +5278,28 @@ mod tests {
             class: ImportStorageClass::SceneConstruction,
             resource: "owned-iteration-error",
         };
+        values
+            .try_reserve(3)
+            .expect("owned-iteration fixture capacity");
+        let expected_live_bytes = canonical_baseline
+            + values
+                .capacity
+                .as_ref()
+                .expect("owned capacity token")
+                .bytes();
+        assert_eq!(
+            host.dimension_state(ImportDimension::CanonicalOutputBytes)
+                .unwrap()
+                .live_bytes(),
+            expected_live_bytes
+        );
         for id in 0..3 {
             values
                 .try_push(OwnedIterationDropProbe {
                     id,
                     host,
                     observations: &observations,
+                    expected_live_bytes,
                 })
                 .expect("owned-iteration fixture capacity");
         }
@@ -5202,7 +5310,8 @@ mod tests {
         });
 
         assert_eq!(result, Err("injected visitor failure"));
-        assert_owned_iteration_drop_observations(&observations, host);
+        assert_owned_iteration_drop_observations(&observations, host, baseline);
+        store.assert_released();
     }
 
     #[test]
@@ -5210,6 +5319,11 @@ mod tests {
         let limits = ResourceLimits::default();
         let store = test_store(&limits);
         let host = store.host();
+        let baseline = current_live_bytes(host);
+        let canonical_baseline = host
+            .dimension_state(ImportDimension::CanonicalOutputBytes)
+            .unwrap()
+            .live_bytes();
         let callback_active = Cell::new(false);
         let terminal = RefCell::new(None);
         let meter = StorageMeter {
@@ -5225,12 +5339,28 @@ mod tests {
             class: ImportStorageClass::SceneConstruction,
             resource: "owned-iteration-panic",
         };
+        values
+            .try_reserve(3)
+            .expect("owned-iteration fixture capacity");
+        let expected_live_bytes = canonical_baseline
+            + values
+                .capacity
+                .as_ref()
+                .expect("owned capacity token")
+                .bytes();
+        assert_eq!(
+            host.dimension_state(ImportDimension::CanonicalOutputBytes)
+                .unwrap()
+                .live_bytes(),
+            expected_live_bytes
+        );
         for id in 0..3 {
             values
                 .try_push(OwnedIterationDropProbe {
                     id,
                     host,
                     observations: &observations,
+                    expected_live_bytes,
                 })
                 .expect("owned-iteration fixture capacity");
         }
@@ -5243,7 +5373,8 @@ mod tests {
         }));
 
         assert!(result.is_err(), "the visitor panic must be observed");
-        assert_owned_iteration_drop_observations(&observations, host);
+        assert_owned_iteration_drop_observations(&observations, host, baseline);
+        store.assert_released();
     }
 
     #[test]

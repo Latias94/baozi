@@ -3,7 +3,7 @@ mod common;
 use baozi_format_gltf::GltfFailureCode;
 use baozi_import::{
     FormatFailureDetailValue, FormatFailureEnvelope, ImportCause, ImportDimension,
-    SceneSnapshotLimits, ScopeAbortCause,
+    SceneSnapshotLimits, ScopeAbortCause, SourceScopeEntityKind,
 };
 use base64::Engine as _;
 use common::{
@@ -240,7 +240,8 @@ fn compatible_minor_versions_are_accepted_and_minimums_are_negotiated_numericall
 
 #[test]
 fn utf8_paths_and_percent_encoded_paths_have_identical_canonical_resources() -> TestResult<()> {
-    let mut digest = None;
+    let mut previous_resources = None;
+    let mut previous_profile_digest = None;
     for (buffer, image) in [
         ("géométrie.bin", "textures/grande_sphère.png"),
         ("g%C3%A9om%C3%A9trie.bin", "textures/grande_sph%c3%a8re.png"),
@@ -266,13 +267,46 @@ fn utf8_paths_and_percent_encoded_paths_have_identical_canonical_resources() -> 
             .collect::<Vec<_>>();
         assert!(identities.contains(&"models/géométrie.bin"));
         assert!(identities.contains(&"models/textures/grande_sphère.png"));
+        let mut resources = report
+            .successful_input_manifest()
+            .node_classes()
+            .iter()
+            .filter(|class| class.identity().value().as_str() != "models/uri.gltf")
+            .map(|class| {
+                (
+                    class.identity().value().as_str().to_owned(),
+                    class.byte_length(),
+                    class.content_digest(),
+                )
+            })
+            .collect::<Vec<_>>();
+        resources.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(resources.len(), 2);
+        if let Some(previous) = previous_resources {
+            assert_eq!(resources, previous);
+        }
+        previous_resources = Some(resources);
+        let primitive = report
+            .scene()
+            .meshes()
+            .next()
+            .unwrap()
+            .primitives()
+            .next()
+            .unwrap();
+        assert_eq!(primitive.indices(), Some(&[0, 1, 2][..]));
+        assert_eq!(
+            report.scene().images().next().unwrap().encoded_bytes(),
+            triangle_png()
+        );
         let snapshot = report
             .scene()
             .capture_snapshot(SceneSnapshotLimits::try_new(32 * 1024, 256, 1_000_000)?)?;
-        if let Some(previous) = digest {
-            assert_eq!(snapshot.digest(), previous);
+        if let Some(previous) = previous_profile_digest {
+            // The physical JSON spelling and its source ranges remain observable provenance.
+            assert_ne!(snapshot.digest(), previous);
         }
-        digest = Some(snapshot.digest());
+        previous_profile_digest = Some(snapshot.digest());
     }
     Ok(())
 }
@@ -305,7 +339,45 @@ fn uri_decoding_is_single_pass_and_preserves_literal_plus_and_escaped_fragment_c
         .scene()
         .capture_snapshot(SceneSnapshotLimits::try_new(32 * 1024, 256, 1_000_000)?)?;
     assert_eq!(snapshot.profile_resource_count(), 3);
-    assert_eq!(snapshot.profile_source_count(), 3);
+    let record = report
+        .source_scope_record()
+        .expect("URI decoding must retain the selected source inventory");
+    let expected_selected_inventory = [
+        (SourceScopeEntityKind::Scene, 1),
+        (SourceScopeEntityKind::Node, 2),
+        (SourceScopeEntityKind::Mesh, 1),
+        (SourceScopeEntityKind::Primitive, 1),
+        (SourceScopeEntityKind::Material, 1),
+        (SourceScopeEntityKind::Texture, 1),
+        (SourceScopeEntityKind::Image, 1),
+        (SourceScopeEntityKind::Sampler, 1),
+        (SourceScopeEntityKind::Skin, 0),
+        (SourceScopeEntityKind::Camera, 0),
+        (SourceScopeEntityKind::Animation, 0),
+        (SourceScopeEntityKind::AnimationChannel, 0),
+        (SourceScopeEntityKind::AnimationSampler, 0),
+        (SourceScopeEntityKind::Buffer, 1),
+        (SourceScopeEntityKind::BufferView, 4),
+        (SourceScopeEntityKind::Accessor, 4),
+    ];
+    let selected_source_count: usize = expected_selected_inventory
+        .iter()
+        .map(|(_, count)| count)
+        .sum();
+    for (kind, expected) in expected_selected_inventory {
+        assert_eq!(
+            record.counts(kind).selected(),
+            u64::try_from(expected)?,
+            "selected inventory changed for {kind:?}",
+        );
+    }
+    // URI escaping preserves the three resource leaves and the full selected declaration set.
+    let expected_source_count = snapshot.profile_resource_count() + selected_source_count;
+    assert_eq!(snapshot.profile_source_count(), expected_source_count);
+    assert_eq!(
+        snapshot.profile_provenance_node_count(),
+        expected_source_count + 1,
+    );
     Ok(())
 }
 

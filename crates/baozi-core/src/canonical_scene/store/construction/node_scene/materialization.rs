@@ -8,9 +8,9 @@ use baozi_operation::__retained_store_integration::activation::{
 };
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationSessionPolicy, CanonicalFailureRequirements, CanonicalLane,
-    CanonicalMaterialization, CanonicalMaterializationRole, CanonicalRecordBuildRow,
-    CanonicalReservation, CanonicalSemanticWorkSession, CanonicalValidationDecision,
-    CanonicalValidationPlanning, CanonicalValidationRole, RetainedStoreWriterRole,
+    CanonicalMaterialization, CanonicalMaterializationRole, CanonicalReservation,
+    CanonicalSemanticWorkSession, CanonicalValidationDecision, CanonicalValidationPlanning,
+    CanonicalValidationRole, RetainedStoreWriterRole,
 };
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
@@ -21,8 +21,8 @@ use baozi_operation::FinalProgress;
 use baozi_operation::{
     CapacityPlan, OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit,
     RecordBlock, RecordPlan, RetainedStoreBatchLimits, SequencePlan, StoreBuildError,
-    StoreControlledError, StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError,
-    StoreWorkError, StoredScalar, Utf8Plan,
+    StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError, StoreWorkError,
+    StoredScalar, Utf8Plan,
 };
 
 use crate::SceneValidationLimits;
@@ -34,11 +34,10 @@ use crate::canonical_scene::store::production::{
     ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::production::{
-    AnimationTargetCatalog, CanonicalAuthoringControl, Presence, ProfileOwnerCatalog,
-    SceneAuthoringBatch, SceneInputEnvelope, ScopedAuthoringControl, ValidatedAnimationBatch,
-    ValidatedAppearanceBatch, ValidatedDeformationBatch, ValidatedGeometryBatch,
-    ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
-    animation_limits_after_deformation, appearance_limits_after_nodes,
+    AnimationTargetCatalog, CanonicalAuthoringControl, ProfileOwnerCatalog, SceneAuthoringBatch,
+    SceneInputEnvelope, ScopedAuthoringControl, ValidatedAnimationBatch, ValidatedAppearanceBatch,
+    ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch,
+    ValidatedSpatialBatch, animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
     profile_limits_after_animation, validate_animation_batch_with_control,
     validate_appearance_batch_with_control, validate_deformation_batch_with_control,
@@ -49,20 +48,12 @@ use crate::canonical_scene::store::production::{
 use crate::canonical_scene::store::schema::animation::AnimationDirectorySchema;
 use crate::canonical_scene::store::schema::appearance::AppearanceDirectorySchema;
 use crate::canonical_scene::store::schema::deformation::DeformationDirectorySchema;
-use crate::canonical_scene::store::schema::spatial::{
-    SpatialCameraTableSchema, SpatialDirectorySchema, SpatialLightTableSchema,
-};
+use crate::canonical_scene::store::schema::spatial::SpatialDirectorySchema;
 use crate::canonical_scene::store::schema::{
-    CanonicalBlockRef, CanonicalSchema, NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT,
-    NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
-    NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_NODE_FIELD_COUNT, NODE_SCENE_TRANSFORM_MATRIX,
-    NODE_SCENE_TRANSFORM_SYNTHETIC, NODE_SCENE_TRANSFORM_TRS, NODE_SCENE_TRS_SCALAR_COUNT,
-    NodeSceneAuthoredTransformSchema, NodeSceneChildReferenceTableSchema, NodeSceneNodeNameSchema,
-    NodeSceneNodeTableSchema, NodeSceneOutcomeEvidenceSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
-    SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION, SceneDirectorySchema,
-    SceneGeometryDirectorySchema,
+    CanonicalBlockRef, NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
+    NodeSceneOutcomeEvidenceSchema, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
+    SceneDirectorySchema,
 };
-use crate::entity::AuthoredTransformKind;
 #[cfg(test)]
 use crate::provenance::{OperationKind, OptionsDigest};
 #[cfg(test)]
@@ -76,14 +67,15 @@ use super::appearance::{AppearanceMaterializationPlans, retain_appearance};
 use super::deformation::{
     DeformationDependencyTableRefs, DeformationMaterializationPlans, retain_deformation,
 };
-use super::geometry::{
-    GeometryMaterializationPlans, GeometryReferenceScratch, GeometryReferenceScratchPlan,
-    retain_geometry,
-};
+use super::geometry::{retain_geometry, retain_nodes};
 use super::profile::{ProfileMaterializationPlans, retain_profile};
 use super::scratch::{
     NodeSceneCentralValidationPlan, NodeSceneValidationScratchPlan,
     ScopedNodeSceneValidationScratchOwner,
+};
+use crate::canonical_scene::store::typed_storage::{
+    NodeGeometryStorage,
+    build::{GeometryStoragePlan, NodeStoragePlan},
 };
 mod spatial;
 mod validation;
@@ -350,7 +342,6 @@ struct ScopedNodeScenePlan<'input, 'scope, O: OperationOwner> {
 }
 
 /// Opaque Scene descriptor and validation recipe emitted by lane-only materialization.
-#[derive(Clone, Copy)]
 pub struct NodeSceneLaneOutput(NodeSceneActivationOutput);
 
 /// Opaque proof minted only by exact central validation of a lane output.
@@ -741,11 +732,15 @@ impl NodeSceneLaneOutput {
         Self(output)
     }
 
-    pub(in crate::canonical_scene::store) const fn inner(self) -> NodeSceneActivationOutput {
-        self.0
+    pub(super) fn into_tables(self) -> NodeGeometryStorage {
+        self.0.tables
     }
 
-    pub(in crate::canonical_scene::store) const fn node_scene_draft(self) -> NodeSceneDraft {
+    pub(in crate::canonical_scene::store) const fn inner(&self) -> &NodeSceneActivationOutput {
+        &self.0
+    }
+
+    pub(in crate::canonical_scene::store) const fn node_scene_draft(&self) -> NodeSceneDraft {
         self.0.draft
     }
 }
@@ -827,7 +822,7 @@ impl NodeSceneActivationPostflight {
         PP: ProgressPhase,
         U: ProgressUnit,
     {
-        let output = output.0;
+        let output = &output.0;
         let validation_plan = output.central_validation;
         let scratch_plan = validation_plan.scratch_plan();
         planning.validate_with(
@@ -844,6 +839,7 @@ impl NodeSceneActivationPostflight {
                         evidence,
                         output.evidence_counts,
                         output.refs,
+                        &output.tables,
                         validation_plan,
                         &mut scratch,
                     )?
@@ -901,10 +897,7 @@ fn validate_node_scene_batches<'input, C>(
     input: SceneAuthoringBatch<'input>,
     limits: SceneValidationLimits,
     control: &mut C,
-) -> Result<
-    ValidatedNodeSceneBatches<'input, C::Reservation>,
-    NodeSceneConstructionRejection<C::Error>,
->
+) -> Result<SceneStorageBatches<'input, C::Reservation>, NodeSceneConstructionRejection<C::Error>>
 where
     C: CanonicalAuthoringControl,
 {
@@ -979,7 +972,7 @@ where
         limits,
     )
     .map_err(NodeSceneConstructionRejection::Aggregate)?;
-    Ok(ValidatedNodeSceneBatches {
+    Ok(SceneStorageBatches {
         profile,
         animations,
         deformation,
@@ -1018,24 +1011,16 @@ where
 }
 
 #[derive(Clone, Copy)]
-struct NodeSceneDirectoryRefs {
-    nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
-    references: Option<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>>,
-    transforms: Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
-}
-
-#[derive(Clone, Copy)]
 struct SceneDomainDirectoryRefs {
     spatial: CanonicalBlockRef<SpatialDirectorySchema>,
     appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
-    geometry: CanonicalBlockRef<SceneGeometryDirectorySchema>,
     deformation: CanonicalBlockRef<DeformationDirectorySchema>,
     animation: CanonicalBlockRef<AnimationDirectorySchema>,
     profile:
         CanonicalBlockRef<crate::canonical_scene::store::schema::profile::ProfileDirectorySchema>,
 }
 
-struct ValidatedNodeSceneBatches<'input, R> {
+struct SceneStorageBatches<'input, R> {
     profile: ValidatedProfileBatch<'input, R>,
     animations: ValidatedAnimationBatch<'input, R>,
     deformation: ValidatedDeformationBatch<'input, R>,
@@ -1056,9 +1041,8 @@ pub(super) struct NodeSceneSealedPlan<'input, R> {
 }
 
 struct NodeSceneExecutionPlan<'input, R> {
-    batches: ValidatedNodeSceneBatches<'input, R>,
+    batches: SceneStorageBatches<'input, R>,
     materialization: NodeSceneMaterializationPlans,
-    geometry_reference_scratch: GeometryReferenceScratchPlan,
     central_validation: NodeSceneCentralValidationPlan,
 }
 
@@ -1114,23 +1098,16 @@ pub(in crate::canonical_scene::store) fn maximum_node_scene_structural_work(
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneMaterializedRefs {
     pub(in crate::canonical_scene::store) directory: CanonicalBlockRef<SceneDirectorySchema>,
-    pub(in crate::canonical_scene::store) nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
-    pub(in crate::canonical_scene::store) references:
-        Option<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>>,
-    pub(in crate::canonical_scene::store) transforms:
-        Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
-    pub(in crate::canonical_scene::store) node_names:
-        Option<CanonicalBlockRef<NodeSceneNodeNameSchema>>,
     pub(in crate::canonical_scene::store) spatial: RetainedSpatialRefs,
     pub(in crate::canonical_scene::store) appearance: super::appearance::RetainedAppearanceRefs,
-    pub(in crate::canonical_scene::store) geometry: super::geometry::RetainedGeometryRefs,
     pub(in crate::canonical_scene::store) deformation: super::deformation::RetainedDeformationRefs,
     pub(in crate::canonical_scene::store) animation: super::animation::RetainedAnimationRefs,
     pub(in crate::canonical_scene::store) profile: super::profile::RetainedProfileRefs,
 }
 
-#[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneActivationOutput {
+    pub(in crate::canonical_scene::store) tables:
+        crate::canonical_scene::store::typed_storage::NodeGeometryStorage,
     pub(in crate::canonical_scene::store) draft: NodeSceneDraft,
     pub(in crate::canonical_scene::store) refs: NodeSceneMaterializedRefs,
     pub(in crate::canonical_scene::store) evidence_counts: SceneEvidenceCounts,
@@ -1138,23 +1115,17 @@ pub(in crate::canonical_scene::store) struct NodeSceneActivationOutput {
 }
 
 struct NodeSceneMaterializationPlans {
-    transforms: Option<SequencePlan<f32>>,
-    node_names: Option<Utf8Plan>,
-    references: Option<RecordPlan>,
-    nodes: RecordPlan,
+    nodes: NodeStoragePlan,
     spatial: SpatialMaterializationPlans,
     appearance: AppearanceMaterializationPlans,
-    geometry: GeometryMaterializationPlans,
+    geometry: GeometryStoragePlan,
     deformation: DeformationMaterializationPlans,
     animation: AnimationMaterializationPlans,
     profile: ProfileMaterializationPlans,
     directory: RecordPlan,
     canonical_block_count: u32,
     node_count: u32,
-    source_node_count: u32,
     source_root_count: u32,
-    transform_scalar_count: u32,
-    node_name_byte_count: u32,
     canonical_string_bytes: u64,
     payload_block_count: u32,
     shareable_leaf_block_count: u32,
@@ -1163,12 +1134,11 @@ struct NodeSceneMaterializationPlans {
 
 impl<'input, R> NodeSceneSealedPlan<'input, R> {
     fn try_new(
-        batches: ValidatedNodeSceneBatches<'input, R>,
+        batches: SceneStorageBatches<'input, R>,
         failure_evidence: NodeSceneFailureEvidencePlan,
         brand: super::super::ConstructionBrand,
     ) -> Result<Self, StorePlanError> {
         let materialization = NodeSceneMaterializationPlans::new(&batches)?;
-        let geometry_reference_scratch = GeometryReferenceScratchPlan::try_new(&batches.geometry)?;
         let validation_scratch = NodeSceneValidationScratchPlan::try_new(
             materialization.evidence_counts(),
             batches.deformation.maximum_uniqueness_capacity(),
@@ -1187,7 +1157,6 @@ impl<'input, R> NodeSceneSealedPlan<'input, R> {
             execution: NodeSceneExecutionPlan {
                 batches,
                 materialization,
-                geometry_reference_scratch,
                 central_validation,
             },
             success_requirements,
@@ -1223,13 +1192,10 @@ impl NodeSceneMaterializationPlans {
     ) -> Result<u64, StorePlanError> {
         [
             failure_evidence.validation_work_units()?,
-            optional_sequence_validation_work(self.transforms)?,
-            optional_utf8_validation_work(self.node_names)?,
-            optional_record_validation_work(self.references)?,
-            record_validation_work(self.nodes)?,
+            self.nodes.validation_work()?,
             self.spatial.validation_work_units()?,
             self.appearance.validation_work_units()?,
-            self.geometry.validation_work_units()?,
+            self.geometry.validation_work()?,
             self.deformation.validation_work_units()?,
             self.animation.validation_work_units()?,
             self.profile.validation_work_units()?,
@@ -1283,7 +1249,7 @@ impl NodeSceneMaterializationPlans {
         }
     }
 
-    fn new<R>(batches: &ValidatedNodeSceneBatches<'_, R>) -> Result<Self, StorePlanError> {
+    fn new<R>(batches: &SceneStorageBatches<'_, R>) -> Result<Self, StorePlanError> {
         let spatial_batch = &batches.spatial;
         let nodes_batch = &batches.nodes;
         let appearance_batch = &batches.appearance;
@@ -1293,23 +1259,10 @@ impl NodeSceneMaterializationPlans {
         let profile_batch = &batches.profile;
         let node_count = u32::try_from(nodes_batch.canonical_node_count())
             .map_err(|_| StorePlanError::SizeOverflow)?;
-        let source_node_count_usize = nodes_batch.authored_node_count();
-        let source_node_count =
-            u32::try_from(source_node_count_usize).map_err(|_| StorePlanError::SizeOverflow)?;
         let source_root_count = nodes_batch.source_root_count();
-        let transform_scalar_count_u64 = nodes_batch
-            .matrix_scalar_count()
-            .checked_add(nodes_batch.trs_scalar_count())
-            .ok_or(StorePlanError::SizeOverflow)?;
-        let transform_scalar_count =
-            u32::try_from(transform_scalar_count_u64).map_err(|_| StorePlanError::SizeOverflow)?;
-        let transform_scalar_count_usize =
-            usize::try_from(transform_scalar_count).map_err(|_| StorePlanError::SizeOverflow)?;
-        let node_name_byte_count = u32::try_from(nodes_batch.node_name_byte_count())
-            .map_err(|_| StorePlanError::SizeOverflow)?;
         let profile_shape = profile_batch.retention_shape();
         let canonical_string_bytes = [
-            u64::from(node_name_byte_count),
+            nodes_batch.node_name_byte_count(),
             u64::from(spatial_batch.tangent_basis_schema_name_bytes()),
             u64::from(spatial_batch.tangent_encoding_schema_name_bytes()),
             u64::from(appearance_batch.media_type_byte_count()),
@@ -1319,6 +1272,7 @@ impl NodeSceneMaterializationPlans {
             u64::from(geometry_batch.attribute_semantic_name_byte_count()),
             u64::from(deformation_batch.skin_name_byte_count()),
             u64::from(deformation_batch.morph_name_byte_count()),
+            u64::from(animation_batch.clip_name_byte_count()),
             u64::from(profile_shape.lineage_text_bytes()),
             u64::from(profile_shape.metadata_text_bytes()),
         ]
@@ -1326,50 +1280,17 @@ impl NodeSceneMaterializationPlans {
         .try_fold(0_u64, u64::checked_add)
         .ok_or(StorePlanError::SizeOverflow)?;
 
-        let nodes = RecordPlan::new(
-            usize::try_from(node_count).map_err(|_| StorePlanError::SizeOverflow)?,
-            NODE_SCENE_NODE_FIELD_COUNT,
-        )?;
+        let nodes = NodeStoragePlan::new(nodes_batch)?;
         let spatial = SpatialMaterializationPlans::new(spatial_batch)?;
         let appearance = AppearanceMaterializationPlans::new(appearance_batch)?;
-        let geometry = GeometryMaterializationPlans::new(geometry_batch)?;
+        let geometry = GeometryStoragePlan::new(geometry_batch)?;
         let deformation = DeformationMaterializationPlans::new(deformation_batch)?;
         let animation = AnimationMaterializationPlans::new(animation_batch)?;
         let profile = ProfileMaterializationPlans::new(profile_batch)?;
         let directory = RecordPlan::new(1, SCENE_DIRECTORY_FIELD_COUNT)?;
-        let references = if source_node_count == 0 {
-            None
-        } else {
-            Some(RecordPlan::new(
-                source_node_count_usize,
-                NODE_SCENE_CHILD_REFERENCE_FIELD_COUNT,
-            )?)
-        };
-        let transforms = if source_node_count == 0 {
-            None
-        } else {
-            Some(SequencePlan::<f32>::new(transform_scalar_count_usize)?)
-        };
-        let node_names = if node_name_byte_count == 0 {
-            None
-        } else {
-            Some(Utf8Plan::new(
-                usize::try_from(node_name_byte_count).map_err(|_| StorePlanError::SizeOverflow)?,
-            )?)
-        };
-
-        let record_block_count = [Some(nodes), Some(directory), references]
-            .into_iter()
-            .flatten()
-            .count();
-        let sequence_block_count = [transforms].into_iter().flatten().count();
-        let utf8_block_count = [node_names].into_iter().flatten().count();
-        let canonical_block_count_usize = record_block_count
-            .checked_add(sequence_block_count)
-            .and_then(|count| count.checked_add(utf8_block_count))
-            .and_then(|count| count.checked_add(spatial.canonical_block_count()))
+        let canonical_block_count_usize = 1_usize
+            .checked_add(spatial.canonical_block_count())
             .and_then(|count| count.checked_add(appearance.canonical_block_count()))
-            .and_then(|count| count.checked_add(geometry.canonical_block_count()))
             .and_then(|count| count.checked_add(deformation.canonical_block_count()))
             .and_then(|count| count.checked_add(animation.canonical_block_count()))
             .and_then(|count| count.checked_add(profile.canonical_block_count()))
@@ -1379,10 +1300,8 @@ impl NodeSceneMaterializationPlans {
         let domain_payload_block_count = appearance
             .payload_block_count()
             .checked_add(spatial.payload_block_count())
-            .and_then(|count| count.checked_add(geometry.payload_block_count()))
             .and_then(|count| count.checked_add(deformation.payload_block_count()))
             .and_then(|count| count.checked_add(animation.payload_block_count()))
-            .and_then(|count| count.checked_add(u32::from(node_names.is_some())))
             .ok_or(StorePlanError::SizeOverflow)?;
         let payload_block_count = domain_payload_block_count
             .checked_add(profile.payload_block_count())
@@ -1393,9 +1312,6 @@ impl NodeSceneMaterializationPlans {
         let build_invariant = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)?;
 
         Ok(Self {
-            transforms,
-            node_names,
-            references,
             nodes,
             spatial,
             appearance,
@@ -1406,10 +1322,7 @@ impl NodeSceneMaterializationPlans {
             directory,
             canonical_block_count,
             node_count,
-            source_node_count,
             source_root_count,
-            transform_scalar_count,
-            node_name_byte_count,
             canonical_string_bytes,
             payload_block_count,
             shareable_leaf_block_count,
@@ -1519,7 +1432,6 @@ where
     let NodeSceneExecutionPlan {
         batches,
         materialization: plans,
-        geometry_reference_scratch,
         central_validation,
     } = plan;
     let failure = plans.build_invariant;
@@ -1529,45 +1441,12 @@ where
         &batches.spatial,
         failure,
     ));
-    let transforms = match plans.transforms {
-        Some(plan) => Some(materialize!(retain_node_scene_transforms(
-            &mut lane,
-            plan,
-            &batches.nodes,
-            plans,
-            #[cfg(test)]
-            &mut faults,
-        ))),
-        None => None,
-    };
-    let node_names = match plans.node_names {
-        Some(plan) => Some(materialize!(retain_node_scene_names(
-            &mut lane,
-            plan,
-            &batches.nodes,
-            plans,
-        ))),
-        None => None,
-    };
-    let references = match plans.references {
-        Some(plan) => Some(materialize!(retain_node_scene_references(
-            &mut lane,
-            plan,
-            &batches.nodes,
-            plans,
-        ))),
-        None => None,
-    };
-    let nodes = materialize!(retain_node_scene_nodes(
+    let nodes = materialize!(retain_nodes(
         &mut lane,
         plans.nodes,
-        RetainedNodePayloadRefs {
-            transforms,
-            names: node_names,
-            spatial,
-        },
         &batches.nodes,
-        plans,
+        #[cfg(test)]
+        &mut faults,
     ));
     let appearance = materialize!(retain_appearance(
         &mut lane,
@@ -1575,40 +1454,30 @@ where
         &batches.appearance,
         failure,
     ));
-    let geometry_scratch = materialize!(GeometryReferenceScratch::try_new(
-        &mut lane,
-        *geometry_reference_scratch,
-    ));
     let geometry = materialize!(retain_geometry(
         &mut lane,
-        &plans.geometry,
-        geometry_scratch,
+        plans.geometry,
         &batches.geometry,
         &batches.nodes,
-        nodes,
-        appearance.materials(),
         #[cfg(test)]
         &mut faults,
-        failure,
     ));
     let deformation = materialize!(retain_deformation(
         &mut lane,
         &plans.deformation,
         &batches.deformation,
         &batches.nodes,
-        DeformationDependencyTableRefs::new(
-            nodes,
-            geometry.logical_meshes(),
-            geometry.primitives(),
-            geometry.mesh_instances(),
-        ),
+        materialize!(DeformationDependencyTableRefs::new(
+            nodes.as_ref(),
+            geometry.as_ref()
+        )),
         failure,
     ));
     let animation = materialize!(retain_animation(
         &mut lane,
         &plans.animation,
         &batches.animations,
-        AnimationTargetTableRefs::new(nodes, deformation.mesh_instances()),
+        AnimationTargetTableRefs::new(plans.node_count, deformation.mesh_instances()),
         failure,
     ));
     let profile = materialize!(retain_profile(
@@ -1622,15 +1491,9 @@ where
     let directory = materialize!(retain_node_scene_directory(
         &mut lane,
         plans.directory,
-        NodeSceneDirectoryRefs {
-            nodes,
-            references,
-            transforms,
-        },
         SceneDomainDirectoryRefs {
             spatial: spatial.directory(),
             appearance: appearance.directory(),
-            geometry: geometry.directory(),
             deformation: deformation.directory(),
             animation: animation.directory(),
             profile: profile.directory(),
@@ -1639,16 +1502,12 @@ where
     ));
     let draft = NodeSceneDraft { brand, directory };
     let output = NodeSceneActivationOutput {
+        tables: NodeGeometryStorage { nodes, geometry },
         draft,
         refs: NodeSceneMaterializedRefs {
             directory,
-            nodes,
-            references,
-            transforms,
-            node_names,
             spatial,
             appearance,
-            geometry,
             deformation,
             animation,
             profile,
@@ -1890,270 +1749,9 @@ pub(super) fn write_node_scene_evidence_row(
     row.write_scalar(counts.shareable_leaf_block_count)
 }
 
-fn retain_node_scene_transforms<'lane, O, PP, U, L, R>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
-    plan: SequencePlan<f32>,
-    batch: &ValidatedNodeBatch<'_, R>,
-    plans: &NodeSceneMaterializationPlans,
-    #[cfg(test)] faults: &mut NodeSceneBuildFaults,
-) -> Result<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let nodes = batch.input().nodes();
-    let failure = plans.build_invariant;
-    lane.try_retain_sequence(plan, NodeSceneAuthoredTransformSchema, |control| {
-        for &local in batch.canonical_order() {
-            let authored = nodes.get(local).ok_or(failure)?.authored_transform();
-            if let Some(matrix) = authored.authored_matrix() {
-                for column in matrix.cols {
-                    #[cfg(test)]
-                    let mut column = column;
-                    #[cfg(test)]
-                    {
-                        column[0] = faults.transform_scalar(column[0]);
-                    }
-                    control.extend_from_slice(&column)?;
-                }
-            } else if let Some(trs) = authored.authored_trs() {
-                let translation = trs.translation();
-                let rotation = trs.rotation();
-                let scale = trs.scale();
-                let translation_x = translation.x;
-                #[cfg(test)]
-                let translation_x = faults.transform_scalar(translation_x);
-                control.extend_from_slice(&[
-                    translation_x,
-                    translation.y,
-                    translation.z,
-                    rotation.x,
-                    rotation.y,
-                    rotation.z,
-                    rotation.w,
-                    scale.x,
-                    scale.y,
-                    scale.z,
-                ])?;
-            } else {
-                return Err(failure.into());
-            }
-        }
-        Ok(())
-    })
-    .map(CanonicalBlockRef::from_store)
-}
-
-fn retain_node_scene_names<'lane, O, PP, U, L, R>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
-    plan: Utf8Plan,
-    batch: &ValidatedNodeBatch<'_, R>,
-    plans: &NodeSceneMaterializationPlans,
-) -> Result<CanonicalBlockRef<NodeSceneNodeNameSchema>, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let nodes = batch.input().nodes();
-    let failure = plans.build_invariant;
-    lane.try_retain_utf8(plan, NodeSceneNodeNameSchema, |control| {
-        let mut written = 0_u32;
-        for &local in batch.canonical_order() {
-            let authored = nodes.get(local).ok_or(failure)?;
-            let Presence::Present(name) = authored.name() else {
-                continue;
-            };
-            control.write_str(name)?;
-            written = written
-                .checked_add(u32::try_from(name.len()).map_err(|_| failure)?)
-                .ok_or(failure)?;
-        }
-        if written != plans.node_name_byte_count {
-            return Err(failure.into());
-        }
-        Ok(())
-    })
-    .map(CanonicalBlockRef::from_store)
-}
-
-fn retain_node_scene_references<'lane, O, PP, U, L, R>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
-    plan: RecordPlan,
-    batch: &ValidatedNodeBatch<'_, R>,
-    plans: &NodeSceneMaterializationPlans,
-) -> Result<CanonicalBlockRef<NodeSceneChildReferenceTableSchema>, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let mapping = batch.canonical_index_by_local();
-    let failure = plans.build_invariant;
-    lane.try_retain_records(plan, NodeSceneChildReferenceTableSchema, |control| {
-        for (source_row, &local) in batch.canonical_order().iter().enumerate() {
-            let reference = u32::try_from(source_row).map_err(|_| failure)?;
-            let child = *mapping.get(local).ok_or(failure)?;
-            control.write_row(|row| {
-                row.write_scalar(reference)?;
-                row.write_scalar(child)
-            })?;
-        }
-        Ok(())
-    })
-    .map(CanonicalBlockRef::from_store)
-}
-
-#[derive(Clone, Copy)]
-struct RetainedNodePayloadRefs {
-    transforms: Option<CanonicalBlockRef<NodeSceneAuthoredTransformSchema>>,
-    names: Option<CanonicalBlockRef<NodeSceneNodeNameSchema>>,
-    spatial: RetainedSpatialRefs,
-}
-
-fn retain_node_scene_nodes<'lane, O, PP, U, L, R>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, L>,
-    plan: RecordPlan,
-    payloads: RetainedNodePayloadRefs,
-    batch: &ValidatedNodeBatch<'_, R>,
-    plans: &NodeSceneMaterializationPlans,
-) -> Result<CanonicalBlockRef<NodeSceneNodeTableSchema>, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let RetainedNodePayloadRefs {
-        transforms,
-        names,
-        spatial,
-    } = payloads;
-    let authored_nodes = batch.input().nodes();
-    let mapping = batch.canonical_index_by_local();
-    let failure = plans.build_invariant;
-    lane.try_retain_records(plan, NodeSceneNodeTableSchema, |control| {
-        control.write_row(|row| {
-            row.write_scalar(0_u32)?;
-            row.write_scalar(PRESENCE_PRESENT)?;
-            row.write_scalar(0_u32)?;
-            row.write_scalar(plans.source_root_count)?;
-            row.write_scalar(NODE_SCENE_TRANSFORM_SYNTHETIC)?;
-            row.write_scalar(0_u32)?;
-            row.write_scalar(0_u32)?;
-            row.write_scalar(0_u8)?;
-            row.write_scalar(PRESENCE_ABSENT)?;
-            row.write_scalar(0_u32)?;
-            row.write_scalar(0_u32)?;
-            row.write_scalar(0_u8)?;
-            write_node_spatial_attachment::<SpatialCameraTableSchema>(
-                row,
-                None,
-                spatial.cameras(),
-                failure,
-            )?;
-            write_node_spatial_attachment::<SpatialLightTableSchema>(
-                row,
-                None,
-                spatial.lights(),
-                failure,
-            )
-        })?;
-
-        if batch.canonical_order().is_empty() {
-            if transforms.is_some()
-                || plans.transform_scalar_count != 0
-                || plans.source_root_count != 0
-            {
-                return Err(failure.into());
-            }
-            return Ok(());
-        }
-        let transforms = transforms.ok_or(failure)?;
-        let mut transform_offset = 0_u32;
-        let mut name_offset = 0_u32;
-        let mut child_reference_offset = plans.source_root_count;
-        for &local in batch.canonical_order() {
-            let authored_node = authored_nodes.get(local).ok_or(failure)?;
-            let authored = authored_node.authored_transform();
-            let (kind, transform_length) = match authored.kind() {
-                AuthoredTransformKind::Matrix => (
-                    NODE_SCENE_TRANSFORM_MATRIX,
-                    u32::try_from(NODE_SCENE_MATRIX_SCALAR_COUNT).map_err(|_| failure)?,
-                ),
-                AuthoredTransformKind::Trs => (
-                    NODE_SCENE_TRANSFORM_TRS,
-                    u32::try_from(NODE_SCENE_TRS_SCALAR_COUNT).map_err(|_| failure)?,
-                ),
-            };
-            let node = *mapping.get(local).ok_or(failure)?;
-            let child_count = batch.child_count_by_local(local).ok_or(failure)?;
-            let (name_presence, name_count) = match authored_node.name() {
-                Presence::Absent => (PRESENCE_ABSENT, 0_u32),
-                Presence::Present(name) => (
-                    PRESENCE_PRESENT,
-                    u32::try_from(name.len()).map_err(|_| failure)?,
-                ),
-            };
-            control.write_row(|row| {
-                row.write_scalar(node)?;
-                row.write_scalar(PRESENCE_PRESENT)?;
-                row.write_scalar(child_reference_offset)?;
-                row.write_scalar(child_count)?;
-                row.write_scalar(kind)?;
-                row.write_scalar(transform_offset)?;
-                row.write_scalar(transform_length)?;
-                row.write_sequence_ref(transforms.into_store())?;
-                row.write_scalar(name_presence)?;
-                row.write_scalar(name_offset)?;
-                row.write_scalar(name_count)?;
-                if name_count == 0 {
-                    row.write_scalar(0_u8)?;
-                } else {
-                    row.write_utf8_ref(names.ok_or(failure)?.into_store())?;
-                }
-                write_node_spatial_attachment::<SpatialCameraTableSchema>(
-                    row,
-                    match authored_node.camera() {
-                        Presence::Absent => None,
-                        Presence::Present(camera) => Some(camera.index()),
-                    },
-                    spatial.cameras(),
-                    failure,
-                )?;
-                write_node_spatial_attachment::<SpatialLightTableSchema>(
-                    row,
-                    match authored_node.light() {
-                        Presence::Absent => None,
-                        Presence::Present(light) => Some(light.index()),
-                    },
-                    spatial.lights(),
-                    failure,
-                )
-            })?;
-            transform_offset = transform_offset
-                .checked_add(transform_length)
-                .ok_or(failure)?;
-            name_offset = name_offset.checked_add(name_count).ok_or(failure)?;
-            child_reference_offset = child_reference_offset
-                .checked_add(child_count)
-                .ok_or(failure)?;
-        }
-        if transform_offset != plans.transform_scalar_count
-            || name_offset != plans.node_name_byte_count
-            || child_reference_offset != plans.source_node_count
-        {
-            return Err(failure.into());
-        }
-        Ok(())
-    })
-    .map(CanonicalBlockRef::from_store)
-}
-
 fn retain_node_scene_directory<'lane, O, PP, U, L>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plan: RecordPlan,
-    refs: NodeSceneDirectoryRefs,
     domains: SceneDomainDirectoryRefs,
     plans: &NodeSceneMaterializationPlans,
 ) -> Result<CanonicalBlockRef<SceneDirectorySchema>, StoreRuntimeError>
@@ -2162,77 +1760,21 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let failure = plans.build_invariant;
-    let NodeSceneDirectoryRefs {
-        nodes,
-        references,
-        transforms,
-    } = refs;
-    let SceneDomainDirectoryRefs {
-        spatial,
-        appearance,
-        geometry,
-        deformation,
-        animation,
-        profile,
-    } = domains;
     lane.try_retain_records(plan, SceneDirectorySchema, |control| {
         control.write_row(|row| {
             row.write_scalar(SCENE_SCHEMA_REVISION)?;
-            row.write_scalar(0_u32)?;
             row.write_scalar(plans.node_count)?;
-            row.write_record_ref(nodes.into_store())?;
-            if plans.source_node_count == 0 {
-                if references.is_some() || transforms.is_some() {
-                    return Err(failure.into());
-                }
-                row.write_scalar(PRESENCE_ABSENT)?;
-                row.write_scalar(0_u32)?;
-                row.write_scalar(0_u8)?;
-                row.write_scalar(PRESENCE_ABSENT)?;
-                row.write_scalar(0_u32)?;
-                row.write_scalar(0_u8)?;
-            } else {
-                let references = references.ok_or(failure)?;
-                let transforms = transforms.ok_or(failure)?;
-                row.write_scalar(PRESENCE_PRESENT)?;
-                row.write_scalar(plans.source_node_count)?;
-                row.write_record_ref(references.into_store())?;
-                row.write_scalar(PRESENCE_PRESENT)?;
-                row.write_scalar(plans.transform_scalar_count)?;
-                row.write_sequence_ref(transforms.into_store())?;
-            }
             row.write_scalar(plans.source_root_count)?;
-            row.write_record_ref(spatial.into_store())?;
-            row.write_record_ref(appearance.into_store())?;
-            row.write_record_ref(geometry.into_store())?;
-            row.write_record_ref(deformation.into_store())?;
-            row.write_record_ref(animation.into_store())?;
-            row.write_record_ref(profile.into_store())
+            row.write_scalar(plans.geometry.logical_mesh_count())?;
+            row.write_scalar(plans.geometry.primitive_count())?;
+            row.write_scalar(plans.geometry.attribute_count())?;
+            row.write_scalar(plans.geometry.mesh_instance_count())?;
+            row.write_record_ref(domains.spatial.into_store())?;
+            row.write_record_ref(domains.appearance.into_store())?;
+            row.write_record_ref(domains.deformation.into_store())?;
+            row.write_record_ref(domains.animation.into_store())?;
+            row.write_record_ref(domains.profile.into_store())
         })
     })
     .map(CanonicalBlockRef::from_store)
-}
-
-fn write_node_spatial_attachment<Tag>(
-    row: &mut CanonicalRecordBuildRow<'_, '_>,
-    local: Option<u32>,
-    table: Option<CanonicalBlockRef<Tag>>,
-    failure: StoreBuildError,
-) -> Result<(), StoreControlledError>
-where
-    Tag: CanonicalSchema<StoreKind = RecordBlock>,
-{
-    match local {
-        Some(local) => {
-            row.write_scalar(PRESENCE_PRESENT)?;
-            row.write_scalar(local)?;
-            row.write_record_ref(table.ok_or(failure)?.into_store())
-        }
-        None => {
-            row.write_scalar(PRESENCE_ABSENT)?;
-            row.write_scalar(0_u8)?;
-            row.write_scalar(0_u8)
-        }
-    }
 }

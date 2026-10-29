@@ -35,7 +35,7 @@ use super::super::tests::{
     build_gltf_capability_scene_for_probe, profile_fixture, single_trs_batch, test_account,
     test_factory, test_limits,
 };
-use super::super::{NodeSceneSuccessParts, NodeSceneTestTransaction, ValidatedNodeScene};
+use super::super::{NodeSceneSuccessParts, NodeSceneTestTransaction, SceneStorage};
 use super::execution::NodeSceneEditPrepareError;
 use super::plan::NodeSceneEditPlanError;
 use super::report::{CanonicalRemapSet, DerivedAbsenceReason, RemapChange};
@@ -46,7 +46,7 @@ use super::{SceneEditCompilation, SceneNodeTransformEditRequest, compile_node_tr
 use crate::canonical_scene::store::construction::SceneConstructionLimits;
 
 fn authored_transform_at(
-    scene: &ValidatedNodeScene,
+    scene: &SceneStorage,
     source_index: usize,
     context: &str,
 ) -> AuthoredTransform {
@@ -244,8 +244,8 @@ fn edit_options_digest(seed: u8) -> OptionsDigest {
 }
 
 fn assert_transform_edit_lineage(
-    source: &super::super::ValidatedNodeScene,
-    output: &super::super::ValidatedNodeScene,
+    source: &super::super::SceneStorage,
+    output: &super::super::SceneStorage,
     target_owner_row: usize,
     options_digest: OptionsDigest,
 ) {
@@ -554,10 +554,6 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     let target_owner_row = pending.counts.profile.target_owner_row.as_usize();
     let expected_parent_delta = pending.counts.profile.target_attachment_count.as_u32();
     let expected_attachment_count = pending.counts.profile.output_attachment_count.as_u32();
-    let source_transform_work = u64::try_from(pending.counts.source_transform_scalars.as_usize())
-        .expect("source transform validation work");
-    let output_transform_work = u64::try_from(pending.counts.output_transform_scalars.as_usize())
-        .expect("output transform validation work");
     let physical_before = account.snapshot();
 
     let prepared = pending
@@ -573,6 +569,12 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     assert_ne!(output_generation, input_generation);
     assert_eq!(generation_source.load(Ordering::Relaxed), 2);
     assert!(output.scene.account().is_same_account(source.account()));
+    assert!(!source.read_geometry().primitives.is_empty());
+    assert!(
+        std::ptr::eq(source.read_geometry(), output.scene.read_geometry()),
+        "a transform edit must share the complete geometry owner and all of its scalar pools",
+    );
+    let first_geometry_scalar = source.read_geometry().f32_values.first().copied();
     let source_central_validation = source.proof.central_validation_plan();
     let output_central_validation = output.scene.proof.central_validation_plan();
     let source_validation = source_central_validation.scratch_plan();
@@ -584,10 +586,6 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
     assert_eq!(
         output_validation.appearance_requirements(),
         source_validation.appearance_requirements(),
-    );
-    assert_eq!(
-        output_validation.geometry_requirements(),
-        source_validation.geometry_requirements(),
     );
     assert_eq!(
         output_validation.deformation_requirements(),
@@ -607,7 +605,6 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
                 .validation_work()
                 .expect("source profile validation work"),
         )
-        .and_then(|work| work.checked_sub(source_transform_work))
         .and_then(|work| {
             work.checked_add(
                 output_profile
@@ -615,7 +612,6 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
                     .expect("output profile validation work"),
             )
         })
-        .and_then(|work| work.checked_add(output_transform_work))
         .expect("output central validation work");
     assert_eq!(
         output_central_validation.work().get(),
@@ -683,6 +679,63 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
             .expect("unchanged node relation must remain valid"),
         Some(NodeId::new(output_generation, 0)),
     );
+    drop(parts);
+    assert_eq!(
+        output.scene.read_geometry().f32_values.first().copied(),
+        first_geometry_scalar,
+        "the edited generation must retain geometry after the source owner is released",
+    );
+    assert!(account.snapshot().live_retained_bytes() > 0);
+    drop(output);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert!(!account.snapshot().poisoned());
+}
+
+#[test]
+fn host_unwind_releases_edited_tables_and_preserves_shared_source_geometry() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let original = build_gltf_capability_scene_for_probe(&account, &generation_source);
+    let source_snapshot = account.snapshot();
+    let node = NodeId::new(original.scene.generation(), 0);
+    let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
+        &original.scene,
+        node,
+        changed_trs(29.0),
+        edit_options_digest(29),
+    )
+    .expect("unwind edit plan") else {
+        panic!("the unwind fixture must change the transform");
+    };
+    let prepared = pending
+        .prepare_with_generation_source(&original.scene, test_limits(), || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("unwind edit preparation");
+    let super::NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
+        panic!("the unwind fixture must publish the edit");
+    };
+    assert!(std::ptr::eq(
+        original.scene.read_geometry(),
+        edited.scene.read_geometry(),
+    ));
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _edited = edited;
+        panic!("ordinary host unwind with a shared geometry owner");
+    }));
+    assert!(caught.is_err());
+    drop(caught);
+    assert_no_live_storage_change(source_snapshot, &account);
+    assert!(!account.snapshot().poisoned());
+    assert!(
+        authored_transform_at(&original.scene, 0, "source after edited owner unwind")
+            .has_same_authored_bits(AuthoredTransform::identity_trs()),
+    );
+    drop(original);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]
@@ -780,7 +833,7 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
         panic!("right sibling edit must publish success");
     };
 
-    let segment_nonce = |scene: &super::super::ValidatedNodeScene, row: usize| {
+    let segment_nonce = |scene: &super::super::SceneStorage, row: usize| {
         scene
             .canonical
             .records(scene.proof.profile_segments().into_store())
@@ -874,7 +927,7 @@ fn central_validation_rejects_each_corrupted_parent_address_component() {
 }
 
 #[test]
-fn trs_to_matrix_rewrites_node_offsets_and_directory_shape_before_publication() {
+fn trs_to_matrix_preserves_typed_node_layout_before_publication() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
@@ -1141,7 +1194,7 @@ fn operation_start_rejection_does_not_consume_a_profile_segment_nonce() {
 }
 
 #[test]
-fn physical_plan_rebuilds_every_record_and_inherits_each_unchanged_shareable_leaf() {
+fn physical_plan_rebuilds_remaining_records_and_shares_typed_geometry() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
@@ -1187,23 +1240,9 @@ fn physical_plan_rebuilds_every_record_and_inherits_each_unchanged_shareable_lea
         "the destination table root and every actual new block require attribution",
     );
     assert_eq!(
-        same_layout
-            .program
-            .shape()
-            .operation_specific_rewrite_blocks(),
-        1,
-    );
-    assert_eq!(
-        shape_change
-            .program
-            .shape()
-            .operation_specific_rewrite_blocks(),
-        3,
-    );
-    assert_eq!(
         shape_change.counts.new_canonical_blocks.as_usize(),
         total - shareable,
-        "the one/three custom rewrite distinction must not undercount physical new blocks",
+        "typed transform variants use the same legacy-record rewrite count",
     );
     assert_eq!(
         shape_change.counts.evidence_leaves.inherited.as_usize(),
@@ -1215,10 +1254,8 @@ fn physical_plan_rebuilds_every_record_and_inherits_each_unchanged_shareable_lea
     assert_eq!(leaf_plan.deleted.as_usize(), 0);
     assert_eq!(
         same_layout.counts.inherited_leaf_scan.inspection_work(),
-        same_layout.counts.primitives.as_usize()
-            + same_layout.counts.attributes.as_usize()
-            + same_layout.counts.profile.source_segment_count.as_usize()
-            + 1,
+        same_layout.counts.profile.source_segment_count.as_usize() + 1,
+        "geometry shares one typed owner; only profile segments and metadata are scanned",
     );
     assert_eq!(
         leaf_plan.source.as_usize(),

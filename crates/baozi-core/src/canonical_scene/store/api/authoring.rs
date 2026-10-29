@@ -50,14 +50,15 @@ pub use crate::deform::{MorphDeltaSemantic, SkinMatrixSpaces};
 pub use crate::entity::{
     AuthoredTransform, CameraProjection, EntityName, LightKind, MAX_ENTITY_NAME_BYTES,
 };
-pub use crate::extension::{ExtensionMediaType, ExtensionValueRef};
+pub use crate::extension::{ExtensionMediaType, ExtensionSchemaId, ExtensionValueRef};
 pub use crate::image::{MipmapFilter, SamplerState, TexelFilter, TextureAddressMode};
 pub use crate::math::{Color, Mat4, Quat, Vec2, Vec3};
 pub use crate::namespaced::NamespacedName;
 pub use crate::provenance::{
     ContentDigest, DIGEST_LEN, DigestAlgorithm, EvidenceDigest, MAX_RESOURCE_IDENTITY_LEN,
     OperationEvidenceSummary, OperationKind, OptionsDigest, ResourceIdentity,
-    ResourceIdentityError, SourceDisplayName, SourceObjectKind, SourceObjectLocator,
+    ResourceIdentityError, SourceDisplayName, SourceLocatorValue, SourceObjectKind,
+    SourceObjectLocator,
 };
 pub use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,

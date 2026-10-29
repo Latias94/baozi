@@ -67,6 +67,20 @@ edge:
 Reciprocal storage is not canonical. Derived indexes may accelerate reverse queries, but validation
 can rebuild them from the owner edge and they do not become a second source of truth.
 
+Node and geometry storage use private typed tables in one `SceneStorage` root. Node transforms are
+explicit Matrix/TRS values, children are ordered logical indices, and optional names preserve absent
+versus present empty text. Geometry descriptors use typed ranges into contiguous scalar pools;
+Vertex/Corner/Face domains, sparse defaults, and F64 custom values remain directly borrowable.
+These ranges describe semantic ownership within a table and never identify allocator blocks or a
+publication's dynamic slot numbers.
+
+Construction derives each Vec capacity before entering operation's retained admission. The same
+central mechanism binds physical charges to the actual table owner and releases storage before its
+lease. Central validation reads those actual tables, without allocating complete immutable row
+projections. A node-transform edit shares the unchanged geometry table owner and all its scalar
+pools. The remaining domains retain their existing representation under that same root until their
+own cutover; their node/geometry dependencies already use the actual typed rows.
+
 The local matrix exposed by a node view is derived from its preserved authored transform form. TRS
 animation overlays only TRS-authored base-pose components; it does not implicitly decompose a
 matrix-authored node. Source documents with scene declarations follow

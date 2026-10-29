@@ -1165,9 +1165,9 @@ where
 
     /// Opens one unforgeable joint-commit scope.
     ///
-    /// The higher-ranked callback prevents either branded capability from escaping. Requiring the
-    /// descriptor and proof to be `Copy` keeps arbitrary drop behavior on the pre-bind candidate,
-    /// permit, and rejection paths while making the successful core handoff destructor-free.
+    /// The higher-ranked callback prevents either branded capability from escaping. The actual
+    /// typed output moves into the core handoff together with the proof; its retained owners keep
+    /// their physical leases through success, rejection, and ordinary caller unwind.
     #[allow(clippy::type_complexity)]
     pub fn bind_joint_commit<R>(
         self,
@@ -1188,7 +1188,6 @@ where
         ) -> R,
     ) -> R
     where
-        T: Copy,
         Proof: Copy,
     {
         let Self {

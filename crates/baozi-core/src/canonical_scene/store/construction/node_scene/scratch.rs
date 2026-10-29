@@ -24,10 +24,6 @@ use crate::canonical_scene::store::validation::{
     DeformationMorphDeltaValidationProjection, DeformationMorphTargetValidationProjection,
     DeformationPrimitiveValidationProjection, DeformationSkinValidationProjection,
     DeformationValidationScratch, DeformationValidationScratchRequirements,
-    GeometryAttributeValidationScratch, GeometryCanonicalCounts,
-    GeometryLogicalMeshValidationProjection, GeometryMeshInstanceValidationProjection,
-    GeometryPrimitiveValidationProjection, GeometryPrimitiveValidationScratch,
-    GeometryValidationScratch, GeometryValidationScratchRequirements, NodeNameValidationScratch,
     NodeSceneValidationScratch, ProfileMeteredCounts, ProfileMeteredScratch,
     ProfileSegmentValidationScratch,
 };
@@ -69,8 +65,6 @@ impl NodeSceneCentralValidationPlan {
         self,
         counts: SceneEvidenceCounts,
         profile_counts: ProfileMeteredCounts,
-        source_transform_scalars: usize,
-        output_transform_scalars: usize,
     ) -> Result<Self, StorePlanError> {
         let scratch = self
             .scratch
@@ -84,19 +78,13 @@ impl NodeSceneCentralValidationPlan {
             .profile_counts()
             .validation_work()
             .ok_or(StorePlanError::SizeOverflow)?;
-        let source_transform_work =
-            u64::try_from(source_transform_scalars).map_err(|_| StorePlanError::SizeOverflow)?;
-        let output_transform_work =
-            u64::try_from(output_transform_scalars).map_err(|_| StorePlanError::SizeOverflow)?;
-        let unchanged_work = self
+        // Transform variants live inline in typed node rows; central validation performs
+        // one checked authored-transform action per node regardless of Matrix/TRS width.
+        let output_work = self
             .work
             .get()
             .checked_sub(source_profile_work)
-            .and_then(|work| work.checked_sub(source_transform_work))
-            .ok_or(StorePlanError::InvalidBlockTable)?;
-        let output_work = unchanged_work
-            .checked_add(output_profile_work)
-            .and_then(|work| work.checked_add(output_transform_work))
+            .and_then(|work| work.checked_add(output_profile_work))
             .ok_or(StorePlanError::SizeOverflow)?;
         Self::try_new(scratch, output_work)
     }
@@ -105,18 +93,11 @@ impl NodeSceneCentralValidationPlan {
 /// Exact validation-scratch capacity and initialization work derived from one sealed Scene plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
-    node_transform_kinds: ScratchCapacityPlan,
-    node_names: ScratchCapacityPlan,
     camera_placement_counts: ScratchCapacityPlan,
     light_placement_counts: ScratchCapacityPlan,
     appearance_image_media_counts: ScratchCapacityPlan,
     appearance_bindings: ScratchCapacityPlan,
     appearance_materials: ScratchCapacityPlan,
-    geometry_attributes: ScratchCapacityPlan,
-    geometry_primitives: ScratchCapacityPlan,
-    geometry_logical_meshes: ScratchCapacityPlan,
-    geometry_primitive_projections: ScratchCapacityPlan,
-    geometry_mesh_instances: ScratchCapacityPlan,
     deformation_skins: ScratchCapacityPlan,
     deformation_morph_definitions: ScratchCapacityPlan,
     deformation_logical_morphs: ScratchCapacityPlan,
@@ -143,15 +124,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
     profile_owner_rows: ScratchCapacityPlan,
     profile_attachments: ScratchCapacityPlan,
     profile_metadata_rows: ScratchCapacityPlan,
-    profile_metadata_text: ScratchCapacityPlan,
-    profile_metadata_bytes: ScratchCapacityPlan,
-    profile_metadata_bools: ScratchCapacityPlan,
-    profile_metadata_i64s: ScratchCapacityPlan,
-    profile_metadata_u64s: ScratchCapacityPlan,
-    profile_metadata_f64s: ScratchCapacityPlan,
-    profile_metadata_f32s: ScratchCapacityPlan,
     appearance_requirements: AppearanceValidationScratchRequirements,
-    geometry_requirements: GeometryValidationScratchRequirements,
     deformation_requirements: DeformationValidationScratchRequirements,
     animation_counts: AnimationMeteredCounts,
     animation_requirements: AnimationValidationScratchRequirements,
@@ -170,8 +143,6 @@ impl NodeSceneValidationScratchPlan {
         animation_counts: AnimationMeteredCounts,
         profile_counts: ProfileMeteredCounts,
     ) -> Result<Self, StorePlanError> {
-        let node_count =
-            usize::try_from(counts.node_count).map_err(|_| StorePlanError::SizeOverflow)?;
         let camera_count = NodeSceneValidationScratch::required_camera_placement_counts(counts)
             .ok_or(StorePlanError::SizeOverflow)?;
         let light_count = NodeSceneValidationScratch::required_light_placement_counts(counts)
@@ -185,14 +156,6 @@ impl NodeSceneValidationScratchPlan {
                 counts.texture_count,
                 counts.material_count,
                 counts.material_binding_count,
-            ))
-            .ok_or(StorePlanError::SizeOverflow)?;
-        let geometry_requirements =
-            GeometryValidationScratchRequirements::from_counts(GeometryCanonicalCounts::new(
-                counts.logical_mesh_count,
-                counts.primitive_count,
-                counts.attribute_count,
-                counts.mesh_instance_count,
             ))
             .ok_or(StorePlanError::SizeOverflow)?;
         let deformation_requirements = DeformationValidationScratchRequirements::try_new(
@@ -213,8 +176,6 @@ impl NodeSceneValidationScratchPlan {
             counts.mesh_instance_count,
         )
         .ok_or(StorePlanError::SizeOverflow)?;
-        let node_transform_kinds = scratch_capacity_plan::<u8>(node_count)?;
-        let node_names = scratch_capacity_plan::<NodeNameValidationScratch>(node_count)?;
         let camera_placement_counts = scratch_capacity_plan::<u32>(camera_count)?;
         let light_placement_counts = scratch_capacity_plan::<u32>(light_count)?;
         let appearance_image_media_counts =
@@ -225,21 +186,6 @@ impl NodeSceneValidationScratchPlan {
         let appearance_materials = scratch_capacity_plan::<AppearanceMaterialValidationScratch>(
             appearance_requirements.materials(),
         )?;
-        let geometry_attributes = scratch_capacity_plan::<
-            GeometryAttributeValidationScratch<'static>,
-        >(geometry_requirements.attributes())?;
-        let geometry_primitives = scratch_capacity_plan::<
-            GeometryPrimitiveValidationScratch<'static>,
-        >(geometry_requirements.primitives())?;
-        let geometry_logical_meshes = scratch_capacity_plan::<
-            GeometryLogicalMeshValidationProjection,
-        >(geometry_requirements.logical_meshes())?;
-        let geometry_primitive_projections = scratch_capacity_plan::<
-            GeometryPrimitiveValidationProjection,
-        >(geometry_requirements.primitives())?;
-        let geometry_mesh_instances = scratch_capacity_plan::<
-            GeometryMeshInstanceValidationProjection,
-        >(geometry_requirements.mesh_instances())?;
         let deformation_skins = scratch_capacity_plan::<DeformationSkinValidationProjection>(
             deformation_requirements.skins,
         )?;
@@ -316,33 +262,12 @@ impl NodeSceneValidationScratchPlan {
             profile_counts.metadata_entry_count,
             13,
         )?)?;
-        let profile_metadata_text =
-            scratch_capacity_plan::<u8>(profile_count(profile_counts.metadata_text_bytes)?)?;
-        let profile_metadata_bytes =
-            scratch_capacity_plan::<u8>(profile_count(profile_counts.metadata_payload_bytes)?)?;
-        let profile_metadata_bools =
-            scratch_capacity_plan::<u8>(profile_count(profile_counts.metadata_bool_count)?)?;
-        let profile_metadata_i64s =
-            scratch_capacity_plan::<i64>(profile_count(profile_counts.metadata_i64_count)?)?;
-        let profile_metadata_u64s =
-            scratch_capacity_plan::<u64>(profile_count(profile_counts.metadata_u64_count)?)?;
-        let profile_metadata_f64s =
-            scratch_capacity_plan::<f64>(profile_count(profile_counts.metadata_f64_count)?)?;
-        let profile_metadata_f32s =
-            scratch_capacity_plan::<f32>(profile_count(profile_counts.metadata_f32_count)?)?;
         let envelope_bytes = [
-            node_transform_kinds,
-            node_names,
             camera_placement_counts,
             light_placement_counts,
             appearance_image_media_counts,
             appearance_bindings,
             appearance_materials,
-            geometry_attributes,
-            geometry_primitives,
-            geometry_logical_meshes,
-            geometry_primitive_projections,
-            geometry_mesh_instances,
             deformation_skins,
             deformation_morph_definitions,
             deformation_logical_morphs,
@@ -369,13 +294,6 @@ impl NodeSceneValidationScratchPlan {
             profile_owner_rows,
             profile_attachments,
             profile_metadata_rows,
-            profile_metadata_text,
-            profile_metadata_bytes,
-            profile_metadata_bools,
-            profile_metadata_i64s,
-            profile_metadata_u64s,
-            profile_metadata_f64s,
-            profile_metadata_f32s,
         ]
         .into_iter()
         .try_fold(0_u64, |total, plan| {
@@ -384,8 +302,6 @@ impl NodeSceneValidationScratchPlan {
                 .ok_or(StorePlanError::SizeOverflow)
         })?;
         let base_initialization_work = [
-            node_count,
-            node_count,
             camera_count,
             light_count,
             palette_count,
@@ -402,11 +318,6 @@ impl NodeSceneValidationScratchPlan {
                     .initialization_work_units()
                     .ok_or(StorePlanError::SizeOverflow)?,
             )
-            .and_then(|work| {
-                geometry_requirements
-                    .initialization_work_units()
-                    .and_then(|additional| work.checked_add(additional))
-            })
             .and_then(|work| {
                 deformation_requirements
                     .initialization_work_units()
@@ -426,11 +337,6 @@ impl NodeSceneValidationScratchPlan {
         let semantic_projection_work = appearance_requirements
             .semantic_projection_work_units()
             .and_then(|work| {
-                geometry_requirements
-                    .semantic_projection_work_units()
-                    .and_then(|additional| work.checked_add(additional))
-            })
-            .and_then(|work| {
                 profile_counts
                     .semantic_work()
                     .and_then(|additional| work.checked_add(additional))
@@ -438,18 +344,11 @@ impl NodeSceneValidationScratchPlan {
             .ok_or(StorePlanError::SizeOverflow)?;
 
         Ok(Self {
-            node_transform_kinds,
-            node_names,
             camera_placement_counts,
             light_placement_counts,
             appearance_image_media_counts,
             appearance_bindings,
             appearance_materials,
-            geometry_attributes,
-            geometry_primitives,
-            geometry_logical_meshes,
-            geometry_primitive_projections,
-            geometry_mesh_instances,
             deformation_skins,
             deformation_morph_definitions,
             deformation_logical_morphs,
@@ -476,15 +375,7 @@ impl NodeSceneValidationScratchPlan {
             profile_owner_rows,
             profile_attachments,
             profile_metadata_rows,
-            profile_metadata_text,
-            profile_metadata_bytes,
-            profile_metadata_bools,
-            profile_metadata_i64s,
-            profile_metadata_u64s,
-            profile_metadata_f64s,
-            profile_metadata_f32s,
             appearance_requirements,
-            geometry_requirements,
             deformation_requirements,
             animation_counts,
             animation_requirements,
@@ -529,12 +420,6 @@ impl NodeSceneValidationScratchPlan {
         self.appearance_requirements
     }
 
-    pub(in crate::canonical_scene::store) const fn geometry_requirements(
-        &self,
-    ) -> GeometryValidationScratchRequirements {
-        self.geometry_requirements
-    }
-
     pub(in crate::canonical_scene::store) const fn deformation_requirements(
         &self,
     ) -> DeformationValidationScratchRequirements {
@@ -561,18 +446,11 @@ pub(in crate::canonical_scene::store) struct ScopedNodeSceneValidationScratchOwn
     O: OperationOwner,
 {
     // Storage must drop before the reservation that accounts for it.
-    node_transform_kinds: Vec<u8>,
-    node_names: Vec<NodeNameValidationScratch>,
     camera_placement_counts: Vec<u32>,
     light_placement_counts: Vec<u32>,
     appearance_image_media_counts: Vec<u32>,
     appearance_bindings: Vec<AppearanceBindingValidationScratch>,
     appearance_materials: Vec<AppearanceMaterialValidationScratch>,
-    geometry_attributes: Vec<GeometryAttributeValidationScratch<'session>>,
-    geometry_primitives: Vec<GeometryPrimitiveValidationScratch<'session>>,
-    geometry_logical_meshes: Vec<GeometryLogicalMeshValidationProjection>,
-    geometry_primitive_projections: Vec<GeometryPrimitiveValidationProjection>,
-    geometry_mesh_instances: Vec<GeometryMeshInstanceValidationProjection>,
     deformation_skins: Vec<DeformationSkinValidationProjection>,
     deformation_morph_definitions: Vec<DeformationMorphDefinitionValidationProjection>,
     deformation_logical_morphs: Vec<DeformationLogicalMorphValidationProjection>,
@@ -599,23 +477,13 @@ pub(in crate::canonical_scene::store) struct ScopedNodeSceneValidationScratchOwn
     profile_owner_rows: Vec<u32>,
     profile_attachments: Vec<u64>,
     profile_metadata_rows: Vec<u32>,
-    profile_metadata_text: Vec<u8>,
-    profile_metadata_bytes: Vec<u8>,
-    profile_metadata_bools: Vec<u8>,
-    profile_metadata_i64s: Vec<i64>,
-    profile_metadata_u64s: Vec<u64>,
-    profile_metadata_f64s: Vec<f64>,
-    profile_metadata_f32s: Vec<f32>,
     _reservation: CanonicalReservation<'scope, O>,
 }
 
 pub(in crate::canonical_scene::store) struct NodeSceneMeteredValidationScratch<'scratch, 'session> {
-    pub(in crate::canonical_scene::store) node_transform_kinds: &'scratch mut [u8],
-    pub(in crate::canonical_scene::store) node_names: &'scratch mut [NodeNameValidationScratch],
     pub(in crate::canonical_scene::store) camera_placement_counts: &'scratch mut [u32],
     pub(in crate::canonical_scene::store) light_placement_counts: &'scratch mut [u32],
     pub(in crate::canonical_scene::store) appearance: AppearanceValidationScratch<'scratch>,
-    pub(in crate::canonical_scene::store) geometry: GeometryValidationScratch<'scratch, 'session>,
     pub(in crate::canonical_scene::store) deformation: DeformationValidationScratch<'scratch>,
     pub(in crate::canonical_scene::store) animation: AnimationValidationScratch<'scratch>,
     pub(in crate::canonical_scene::store) profile: ProfileMeteredScratch<'scratch, 'session>,
@@ -651,19 +519,11 @@ where
                 values
             }};
         }
-
-        let node_transform_kinds = allocate!(node_transform_kinds);
-        let node_names = allocate!(node_names);
         let camera_placement_counts = allocate!(camera_placement_counts);
         let light_placement_counts = allocate!(light_placement_counts);
         let appearance_image_media_counts = allocate!(appearance_image_media_counts);
         let appearance_bindings = allocate!(appearance_bindings);
         let appearance_materials = allocate!(appearance_materials);
-        let geometry_attributes = allocate!(geometry_attributes);
-        let geometry_primitives = allocate!(geometry_primitives);
-        let geometry_logical_meshes = allocate!(geometry_logical_meshes);
-        let geometry_primitive_projections = allocate!(geometry_primitive_projections);
-        let geometry_mesh_instances = allocate!(geometry_mesh_instances);
         let deformation_skins = allocate!(deformation_skins);
         let deformation_morph_definitions = allocate!(deformation_morph_definitions);
         let deformation_logical_morphs = allocate!(deformation_logical_morphs);
@@ -690,28 +550,14 @@ where
         let profile_owner_rows = allocate!(profile_owner_rows);
         let profile_attachments = allocate!(profile_attachments);
         let profile_metadata_rows = allocate!(profile_metadata_rows);
-        let profile_metadata_text = allocate!(profile_metadata_text);
-        let profile_metadata_bytes = allocate!(profile_metadata_bytes);
-        let profile_metadata_bools = allocate!(profile_metadata_bools);
-        let profile_metadata_i64s = allocate!(profile_metadata_i64s);
-        let profile_metadata_u64s = allocate!(profile_metadata_u64s);
-        let profile_metadata_f64s = allocate!(profile_metadata_f64s);
-        let profile_metadata_f32s = allocate!(profile_metadata_f32s);
         checkpoint.resize(&mut reservation, actual)?;
 
         Ok(Self {
-            node_transform_kinds,
-            node_names,
             camera_placement_counts,
             light_placement_counts,
             appearance_image_media_counts,
             appearance_bindings,
             appearance_materials,
-            geometry_attributes,
-            geometry_primitives,
-            geometry_logical_meshes,
-            geometry_primitive_projections,
-            geometry_mesh_instances,
             deformation_skins,
             deformation_morph_definitions,
             deformation_logical_morphs,
@@ -738,13 +584,6 @@ where
             profile_owner_rows,
             profile_attachments,
             profile_metadata_rows,
-            profile_metadata_text,
-            profile_metadata_bytes,
-            profile_metadata_bools,
-            profile_metadata_i64s,
-            profile_metadata_u64s,
-            profile_metadata_f64s,
-            profile_metadata_f32s,
             _reservation: reservation,
         })
     }
@@ -765,9 +604,6 @@ where
                 }
             };
         }
-
-        initialize!(node_transform_kinds, 0);
-        initialize!(node_names, NodeNameValidationScratch::EMPTY);
         initialize!(camera_placement_counts, 0);
         initialize!(light_placement_counts, 0);
         initialize!(appearance_image_media_counts, 0);
@@ -778,26 +614,6 @@ where
         initialize!(
             appearance_materials,
             AppearanceMaterialValidationScratch::EMPTY
-        );
-        initialize!(
-            geometry_attributes,
-            GeometryAttributeValidationScratch::EMPTY
-        );
-        initialize!(
-            geometry_primitives,
-            GeometryPrimitiveValidationScratch::EMPTY
-        );
-        initialize!(
-            geometry_logical_meshes,
-            GeometryLogicalMeshValidationProjection::EMPTY
-        );
-        initialize!(
-            geometry_primitive_projections,
-            GeometryPrimitiveValidationProjection::EMPTY
-        );
-        initialize!(
-            geometry_mesh_instances,
-            GeometryMeshInstanceValidationProjection::EMPTY
         );
         initialize!(
             deformation_skins,
@@ -852,13 +668,6 @@ where
         initialize!(profile_owner_rows, 0);
         initialize!(profile_attachments, 0);
         initialize!(profile_metadata_rows, 0);
-        initialize!(profile_metadata_text, 0);
-        initialize!(profile_metadata_bytes, 0);
-        initialize!(profile_metadata_bools, 0);
-        initialize!(profile_metadata_i64s, 0);
-        initialize!(profile_metadata_u64s, 0);
-        initialize!(profile_metadata_f64s, 0.0);
-        initialize!(profile_metadata_f32s, 0.0);
         Ok(true)
     }
 
@@ -866,21 +675,12 @@ where
         &mut self,
     ) -> NodeSceneMeteredValidationScratch<'_, 'session> {
         NodeSceneMeteredValidationScratch {
-            node_transform_kinds: &mut self.node_transform_kinds,
-            node_names: &mut self.node_names,
             camera_placement_counts: &mut self.camera_placement_counts,
             light_placement_counts: &mut self.light_placement_counts,
             appearance: AppearanceValidationScratch::new(
                 &mut self.appearance_image_media_counts,
                 &mut self.appearance_bindings,
                 &mut self.appearance_materials,
-            ),
-            geometry: GeometryValidationScratch::new(
-                &mut self.geometry_attributes,
-                &mut self.geometry_primitives,
-                &mut self.geometry_logical_meshes,
-                &mut self.geometry_primitive_projections,
-                &mut self.geometry_mesh_instances,
             ),
             deformation: DeformationValidationScratch::new(
                 &mut self.deformation_skins,
@@ -913,152 +713,8 @@ where
                 owner_rows: &mut self.profile_owner_rows,
                 attachments: &mut self.profile_attachments,
                 metadata_rows: &mut self.profile_metadata_rows,
-                metadata_text: &mut self.profile_metadata_text,
-                metadata_bytes: &mut self.profile_metadata_bytes,
-                metadata_bools: &mut self.profile_metadata_bools,
-                metadata_i64s: &mut self.profile_metadata_i64s,
-                metadata_u64s: &mut self.profile_metadata_u64s,
-                metadata_f64s: &mut self.profile_metadata_f64s,
-                metadata_f32s: &mut self.profile_metadata_f32s,
             },
         }
-    }
-
-    pub(in crate::canonical_scene::store) fn validation_view(
-        &mut self,
-    ) -> NodeSceneValidationScratch<'_> {
-        NodeSceneValidationScratch::new(
-            &mut self.camera_placement_counts,
-            &mut self.light_placement_counts,
-            &mut self.deformation_palette_maxima,
-            &mut self.deformation_uniqueness_marks,
-            &mut self.animation_target_marks,
-            &mut self.profile_provenance_depths,
-        )
-    }
-
-    pub(in crate::canonical_scene::store) fn appearance_view(
-        &mut self,
-    ) -> AppearanceValidationScratch<'_> {
-        AppearanceValidationScratch::new(
-            &mut self.appearance_image_media_counts,
-            &mut self.appearance_bindings,
-            &mut self.appearance_materials,
-        )
-    }
-
-    pub(in crate::canonical_scene::store) fn geometry_view(
-        &mut self,
-    ) -> GeometryValidationScratch<'_, 'session> {
-        GeometryValidationScratch::new(
-            &mut self.geometry_attributes,
-            &mut self.geometry_primitives,
-            &mut self.geometry_logical_meshes,
-            &mut self.geometry_primitive_projections,
-            &mut self.geometry_mesh_instances,
-        )
-    }
-
-    pub(in crate::canonical_scene::store) fn deformation_view(
-        &mut self,
-    ) -> DeformationValidationScratch<'_> {
-        DeformationValidationScratch::new(
-            &mut self.deformation_skins,
-            &mut self.deformation_morph_definitions,
-            &mut self.deformation_logical_morphs,
-            &mut self.deformation_morph_deltas,
-            &mut self.deformation_morph_targets,
-            &mut self.deformation_primitives,
-            &mut self.deformation_mesh_instances,
-            &mut self.deformation_palette_maxima,
-            &mut self.deformation_uniqueness_marks,
-        )
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_requirements(
-        plan: NodeSceneValidationScratchPlan,
-    ) -> AppearanceValidationScratchRequirements {
-        plan.appearance_requirements
-    }
-
-    pub(in crate::canonical_scene::store) const fn geometry_requirements(
-        plan: NodeSceneValidationScratchPlan,
-    ) -> GeometryValidationScratchRequirements {
-        plan.geometry_requirements
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_requirements(
-        plan: NodeSceneValidationScratchPlan,
-    ) -> DeformationValidationScratchRequirements {
-        plan.deformation_requirements
-    }
-
-    pub(in crate::canonical_scene::store) const fn animation_requirements(
-        plan: NodeSceneValidationScratchPlan,
-    ) -> AnimationValidationScratchRequirements {
-        plan.animation_requirements
-    }
-
-    pub(in crate::canonical_scene::store) const fn animation_counts(
-        plan: NodeSceneValidationScratchPlan,
-    ) -> AnimationMeteredCounts {
-        plan.animation_counts
-    }
-
-    pub(in crate::canonical_scene::store) fn animation_view(
-        &mut self,
-    ) -> AnimationValidationScratch<'_> {
-        AnimationValidationScratch::new(
-            &mut self.animation_clip_descriptors,
-            &mut self.animation_channel_descriptors,
-            &mut self.animation_target_marks,
-        )
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_counts(
-        plan: NodeSceneValidationScratchPlan,
-    ) -> ProfileMeteredCounts {
-        plan.profile_counts
-    }
-
-    pub(in crate::canonical_scene::store) fn profile_view(
-        &mut self,
-    ) -> ProfileMeteredScratch<'_, 'session> {
-        ProfileMeteredScratch {
-            segments: &mut self.profile_segments,
-            resources: &mut self.profile_resources,
-            sources: &mut self.profile_sources,
-            provenance: &mut self.profile_provenance,
-            operations: &mut self.profile_operations,
-            evidence: &mut self.profile_evidence,
-            parents: &mut self.profile_parents,
-            wide: &mut self.profile_wide,
-            lineage_text: &mut self.profile_lineage_text,
-            lineage_digests: &mut self.profile_lineage_digests,
-            provenance_depths: &mut self.profile_provenance_depths,
-            owner_rows: &mut self.profile_owner_rows,
-            attachments: &mut self.profile_attachments,
-            metadata_rows: &mut self.profile_metadata_rows,
-            metadata_text: &mut self.profile_metadata_text,
-            metadata_bytes: &mut self.profile_metadata_bytes,
-            metadata_bools: &mut self.profile_metadata_bools,
-            metadata_i64s: &mut self.profile_metadata_i64s,
-            metadata_u64s: &mut self.profile_metadata_u64s,
-            metadata_f64s: &mut self.profile_metadata_f64s,
-            metadata_f32s: &mut self.profile_metadata_f32s,
-        }
-    }
-
-    pub(in crate::canonical_scene::store) fn animation_target_marks(&mut self) -> &mut [u32] {
-        &mut self.animation_target_marks
-    }
-
-    pub(in crate::canonical_scene::store) fn node_transform_kinds(&mut self) -> &mut [u8] {
-        &mut self.node_transform_kinds
-    }
-
-    pub(in crate::canonical_scene::store) fn profile_provenance_depths(&mut self) -> &mut [u32] {
-        &mut self.profile_provenance_depths
     }
 }
 

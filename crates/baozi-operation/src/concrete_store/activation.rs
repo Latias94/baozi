@@ -52,6 +52,8 @@ mod canonical_validation;
 mod failure_evidence;
 mod fallback;
 mod preflight;
+mod typed_storage;
+pub use typed_storage::CanonicalRetainedStorageBuildControl;
 mod work_batch;
 
 pub use canonical_validation::{
@@ -1148,7 +1150,7 @@ where
 {
     operation: Option<RetainedStoreOperation<O, PP, U, L>>,
     containment_anchor: RetainedPlanningContainmentAnchor,
-    armed: bool,
+    contain_if_abandoned: bool,
 }
 
 impl<O, PP, U, L> ScopedDormantActivation<O, PP, U, L>
@@ -1174,12 +1176,12 @@ where
     ) -> Result<RetainedStoreOperation<O, PP, U, L>, StoreActivationContainment> {
         let Some(operation) = self.operation.take() else {
             let containment_anchor = self.containment_anchor.share();
-            self.armed = false;
+            self.contain_if_abandoned = false;
             return Err(StoreActivationContainment {
                 cause: containment_anchor.contain(),
             });
         };
-        self.armed = false;
+        self.contain_if_abandoned = false;
         Ok(operation)
     }
 }
@@ -1191,7 +1193,9 @@ where
     U: ProgressUnit,
 {
     fn drop(&mut self) {
-        if !self.armed {
+        if !self.contain_if_abandoned {
+            // An intact session may be dropped before it starts a scoped transaction.
+            // Its ordinary operation owner releases healthy retained storage, even on unwind.
             return;
         }
         if let Some(operation) = self.operation.take() {
@@ -2985,13 +2989,71 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    cause: StoreNeverActivatedCause<E>,
+    owner: NeverActivatedOwner<O, PP, U, E, L>,
     failure_code: PreparationFailureCode,
     outcome_evidence_plan: RetainedStoreBlockTablePlan,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
-    // The physical owner must drop last so an untrusted requested cause is observed fail-closed.
-    authority: NeverActivatedAuthority<O, PP, U, L>,
+}
+
+struct NeverActivatedOwner<O, PP, U, E, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    cause: Option<StoreNeverActivatedCause<E>>,
+    authority: Option<NeverActivatedAuthority<O, PP, U, L>>,
+}
+
+impl<O, PP, U, E, L> NeverActivatedOwner<O, PP, U, E, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn into_parts(
+        mut self,
+    ) -> (
+        StoreNeverActivatedCause<E>,
+        NeverActivatedAuthority<O, PP, U, L>,
+    ) {
+        (
+            self.cause.take().expect("the cause is transferred once"),
+            self.authority
+                .take()
+                .expect("the authority is transferred once"),
+        )
+    }
+}
+
+impl<O, PP, U, E, L> Drop for NeverActivatedOwner<O, PP, U, E, L>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    fn drop(&mut self) {
+        let Some(value) = self.cause.take() else {
+            return;
+        };
+        let unwinding = std::thread::panicking();
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(value))) {
+            if let Some(authority) = self.authority.take() {
+                match authority {
+                    NeverActivatedAuthority::Operation(operation)
+                    | NeverActivatedAuthority::FallbackOnly(operation) => {
+                        let _ = contain_operation(operation);
+                    }
+                }
+            }
+            if unwinding {
+                discard_untrusted_panic_payload(payload);
+            } else {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
 }
 
 fn prepare_operation_minimal<O, PP, U, L, Cause>(

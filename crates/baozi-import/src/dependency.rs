@@ -267,13 +267,14 @@ impl DependencyFailureContext {
                 .checked_add(bytes)
                 .ok_or_else(|| capacity_error(CapacityPlanError::CapacityOverflow))?;
         }
-        // The existing terminal-failure slot retains this reservation until the session moves
-        // its failure evidence into the terminal outcome. Nothing is allocated before admission.
+        // One terminal-failure owner retains every backing allocation, including paths. Admission
+        // precedes allocation and the lease moves with the actual terminal cause.
         let mut reservation = host
-            .reserve(
+            .reserve_retained(
                 ImportLedgerPhase::DependencyAcquisition,
                 ImportDimension::ScratchBytes,
                 envelope,
+                1 + text.iter().filter(|text| !text.is_empty()).count() as u64,
             )
             .map_err(|cause| cause.into_scope_abort_cause())?;
         let mut details = Vec::new();
@@ -714,11 +715,6 @@ impl OptionalDependencyEvidence {
         }
     }
 
-    pub(crate) fn release_reservations(&mut self) {
-        drop(self._identity_path_reservation.take());
-        drop(self._normalized_path_reservation.take());
-    }
-
     pub fn identity(&self) -> Option<&DependencyIdentity> {
         self.identity.as_ref()
     }
@@ -740,6 +736,10 @@ pub struct DependencyOutcome<'scope> {
     inner: DependencyOutcomeKind<'scope>,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "linear snapshot and optional evidence retain their admitted path owners without another failure-path allocation"
+)]
 enum DependencyOutcomeKind<'scope> {
     Available(DependencySnapshot<'scope>),
     Unavailable(OptionalDependencyEvidence),
@@ -1608,12 +1608,13 @@ mod tests {
         ImmutableMemoryAssetIo, MemoryAssetIo,
     };
     use baozi_operation::{
-        PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
+        PhysicalStorageAccount, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
         PhysicalStorageAccountLimits,
     };
 
     struct StoreHarness {
         owner: ImportStoreSessionOwner,
+        account: PhysicalStorageAccount,
     }
 
     impl StoreHarness {
@@ -1640,9 +1641,8 @@ mod tests {
                 bootstrap,
             )
             .expect("test import store owner must start");
-            drop(account);
             drop(factory);
-            Self { owner }
+            Self { owner, account }
         }
 
         fn host(&self) -> ImportStoreHost<'_> {
@@ -1664,6 +1664,15 @@ mod tests {
                 .dimension_state(ImportDimension::ScratchBytes)
                 .expect("test scratch dimension must remain observable")
                 .live_bytes()
+        }
+
+        fn assert_released(self) {
+            let Self { owner, account } = self;
+            drop(owner);
+            let released = account.snapshot();
+            assert_eq!(released.live_retained_bytes(), 0);
+            assert_eq!(released.live_retained_allocations(), 0);
+            assert!(!released.poisoned());
         }
     }
 
@@ -1687,6 +1696,7 @@ mod tests {
     #[test]
     fn failure_context_bounds_utf8_and_keeps_all_owned_storage_admitted() {
         let store = StoreHarness::new();
+        let baseline = store.live_scratch_bytes();
         let authority = AuthorityDomain::new();
         let source = AssetPath::new("models/materials/library.side").unwrap();
         let role = DependencyRoleId::new("payload.required").unwrap();
@@ -1708,11 +1718,12 @@ mod tests {
         assert!(context.requested_reference_is_truncated());
         assert_eq!(context.requested_reference().len(), 4095);
         assert!(reference.starts_with(context.requested_reference()));
-        assert_eq!(store.live_scratch_bytes(), reservation.bytes());
+        assert_eq!(store.live_scratch_bytes(), baseline + reservation.bytes());
         assert!(reservation.bytes() >= context.requested_reference().len() as u64);
         drop(context);
         drop(reservation);
-        assert_eq!(store.live_scratch_bytes(), 0);
+        assert_eq!(store.live_scratch_bytes(), baseline);
+        store.assert_released();
     }
 
     #[test]
@@ -1773,6 +1784,7 @@ mod tests {
         assert!(index_envelope > 0);
 
         let store = StoreHarness::new();
+        let baseline = store.live_scratch_bytes();
         let mut entry_reservation = store.reserve_scratch(entry_envelope);
         let mut index_reservation = store.reserve_scratch(index_envelope);
 
@@ -1819,10 +1831,14 @@ mod tests {
 
         assert_eq!(
             store.live_scratch_bytes(),
-            entry_bytes.checked_add(index_bytes).unwrap()
+            baseline
+                .checked_add(entry_bytes)
+                .and_then(|bytes| bytes.checked_add(index_bytes))
+                .unwrap()
         );
         drop(cache);
-        assert_eq!(store.live_scratch_bytes(), 0);
+        assert_eq!(store.live_scratch_bytes(), baseline);
+        store.assert_released();
     }
 
     #[test]

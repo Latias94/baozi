@@ -29,12 +29,10 @@ use crate::canonical_scene::store::schema::deformation::{
     encode_deformation_morph_payload, encode_deformation_morph_semantic,
     encode_deformation_skin_matrix_spaces, encode_deformation_skin_space,
 };
-use crate::canonical_scene::store::schema::geometry::{
-    GeometryLogicalMeshTableSchema, GeometryMeshInstanceTableSchema, GeometryPrimitiveTableSchema,
-};
 use crate::canonical_scene::store::schema::{
-    CanonicalBlockRef, CanonicalSchema, NodeSceneNodeTableSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
+    CanonicalBlockRef, CanonicalSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
 };
+use crate::canonical_scene::store::typed_storage::{GeometryStorage, NodeStorage};
 
 use super::{
     checked_validation_work_sum, optional_record_validation_work,
@@ -349,31 +347,32 @@ impl DeformationMaterializationPlans {
 
 #[derive(Clone, Copy)]
 pub(super) struct DeformationDependencyTableRefs {
-    nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
-    logical_meshes: Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>>,
-    primitives: Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>>,
-    mesh_instances: Option<CanonicalBlockRef<GeometryMeshInstanceTableSchema>>,
+    node_count: u32,
+    logical_mesh_count: u32,
+    primitive_count: u32,
+    mesh_instance_count: u32,
 }
-
 impl DeformationDependencyTableRefs {
-    pub(super) const fn new(
-        nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
-        logical_meshes: Option<CanonicalBlockRef<GeometryLogicalMeshTableSchema>>,
-        primitives: Option<CanonicalBlockRef<GeometryPrimitiveTableSchema>>,
-        mesh_instances: Option<CanonicalBlockRef<GeometryMeshInstanceTableSchema>>,
-    ) -> Self {
-        Self {
-            nodes,
-            logical_meshes,
-            primitives,
-            mesh_instances,
-        }
+    pub(super) fn new(
+        nodes: &NodeStorage,
+        geometry: &GeometryStorage,
+    ) -> Result<Self, StoreRuntimeError> {
+        Ok(Self {
+            node_count: u32::try_from(nodes.nodes.len())
+                .map_err(|_| StoreRuntimeError::InvalidSourceSlot)?,
+            logical_mesh_count: u32::try_from(geometry.logical_meshes.len())
+                .map_err(|_| StoreRuntimeError::InvalidSourceSlot)?,
+            primitive_count: u32::try_from(geometry.primitives.len())
+                .map_err(|_| StoreRuntimeError::InvalidSourceSlot)?,
+            mesh_instance_count: u32::try_from(geometry.mesh_instances.len())
+                .map_err(|_| StoreRuntimeError::InvalidSourceSlot)?,
+        })
     }
-
     const fn matches_plans(self, plans: &DeformationMaterializationPlans) -> bool {
-        self.logical_meshes.is_some() == (plans.logical_morph_count != 0)
-            && self.primitives.is_some() == (plans.primitive_count != 0)
-            && self.mesh_instances.is_some() == (plans.mesh_instance_count != 0)
+        self.node_count != 0
+            && self.logical_mesh_count == plans.logical_morph_count
+            && self.primitive_count == plans.primitive_count
+            && self.mesh_instance_count == plans.mesh_instance_count
     }
 }
 
@@ -469,7 +468,7 @@ where
             plan,
             plans,
             batch,
-            dependencies.nodes,
+            dependencies.node_count,
             nodes,
             payloads,
             failure,
@@ -795,7 +794,7 @@ where
                     }
                 }
                 Presence::Present(name) => {
-                    let value = name.as_str();
+                    let value = name;
                     let count = u32::try_from(value.len()).map_err(|_| failure)?;
                     if skin.name_byte_offset() != cursor || skin.name_byte_count() != count {
                         return Err(failure.into());
@@ -1055,7 +1054,7 @@ where
                     }
                 }
                 Presence::Present(name) => {
-                    let value = name.as_str();
+                    let value = name;
                     let count = u32::try_from(value.len()).map_err(|_| failure)?;
                     if definition.name_byte_offset() != cursor
                         || definition.name_byte_count() != count
@@ -1237,7 +1236,7 @@ fn retain_skin_table<'lane, O, PP, U, L, R, NR>(
     plan: RecordPlan,
     plans: &DeformationMaterializationPlans,
     batch: &ValidatedDeformationBatch<'_, R>,
-    nodes_ref: CanonicalBlockRef<NodeSceneNodeTableSchema>,
+    node_count: u32,
     nodes: &ValidatedNodeBatch<'_, NR>,
     payloads: DeformationPayloadRefs,
     failure: StoreBuildError,
@@ -1306,7 +1305,7 @@ where
                     (PRESENCE_ABSENT, 0, 0)
                 }
                 Presence::Present(name) => {
-                    let count = u32::try_from(name.as_str().len()).map_err(|_| failure)?;
+                    let count = u32::try_from(name.len()).map_err(|_| failure)?;
                     if skin.name_byte_offset() != name_cursor || skin.name_byte_count() != count {
                         return Err(failure.into());
                     }
@@ -1337,11 +1336,7 @@ where
                     Some(root) => row.write_scalar(root)?,
                     None => row.write_scalar(0_u32)?,
                 }
-                if joint_count != 0 || root_index.is_some() {
-                    row.write_record_ref(nodes_ref.into_store())?;
-                } else {
-                    row.write_scalar(0_u8)?;
-                }
+                row.write_scalar(node_count)?;
                 for encoded in encoded_spaces {
                     row.write_scalar(encoded)?;
                 }
@@ -1426,7 +1421,7 @@ where
                     (PRESENCE_ABSENT, 0, 0)
                 }
                 Presence::Present(name) => {
-                    let count = u32::try_from(name.as_str().len()).map_err(|_| failure)?;
+                    let count = u32::try_from(name.len()).map_err(|_| failure)?;
                     if definition.name_byte_offset() != name_cursor
                         || definition.name_byte_count() != count
                     {

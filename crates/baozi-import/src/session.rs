@@ -17,13 +17,16 @@ use crate::limits::ResourceLimits;
 use crate::loss::ImportLossEvidence;
 use crate::metered_storage::AccountedVec;
 use crate::outcome::{
-    DetectionEvidence, ImportFailure, ImportFailureParts, ImportFailureStoreOwner, ImportPhase,
-    ImportPhaseEvidence, ImportReport, ImportReportParts, ImportResult, ImportRunError,
+    AccountedErrorContext, DetectionEvidence, ImportFailure, ImportFailureParts,
+    ImportFailureStoreOwner, ImportPhase, ImportPhaseEvidence, ImportReport, ImportReportParts,
+    ImportResult, ImportRunError,
 };
 use crate::registry::{ParseInvocationError, RegistryEntry};
 use crate::request::PreparedImportRequest;
 use crate::resource_graph::ResourceGraph;
-use crate::scope::{ParseFailureKind, ParseScope, ParseScopeParts, read_opened_asset};
+use crate::scope::{
+    FailureEvidenceStorage, ParseFailureKind, ParseScope, ParseScopeParts, read_opened_asset,
+};
 use crate::source_scope::{LiveSourceScopeRecord, SourceScopeRecord};
 use crate::store::{
     ImportStoreBootstrapRequirements, ImportStoreFailureCauseAuthority, ImportStoreReservation,
@@ -229,7 +232,7 @@ struct ImportSession<'a> {
     primary_authority: Option<AuthorityDomain>,
     primary_backend_hard_limit: Option<u64>,
     primary_snapshot: Option<AccountedVec<u8>>,
-    format_failure_storage: RefCell<Option<ImportStoreReservation>>,
+    format_failure_storage: RefCell<FailureEvidenceStorage>,
     selected: Option<RegistryEntry>,
     effective_limits: Option<ResourceLimits>,
     detection: AccountedVec<DetectionEvidence>,
@@ -265,7 +268,7 @@ impl<'a> ImportSession<'a> {
             primary_authority: None,
             primary_backend_hard_limit: None,
             primary_snapshot: None,
-            format_failure_storage: RefCell::new(None),
+            format_failure_storage: RefCell::new(FailureEvidenceStorage::default()),
             selected: None,
             effective_limits: None,
             detection: AccountedVec::new(),
@@ -482,7 +485,7 @@ impl<'a> ImportSession<'a> {
         let host = self.store.host();
         self.detection
             .try_reserve(entries.len(), "detection-evidence", |bytes| {
-                reserve_required_bytes(
+                reserve_retained_bytes(
                     host,
                     ImportLedgerPhase::OutcomeFinalization,
                     ImportDimension::ScratchBytes,
@@ -651,9 +654,15 @@ impl<'a> ImportSession<'a> {
         match &*extension_matches {
             [(entry, _)] => Ok((*entry).clone()),
             [] if candidates.len() == 1 && unique_unhinted_allowed => Ok(candidates[0].0.clone()),
-            [] if unique_unhinted_allowed => self.ambiguous(candidates),
+            [] if unique_unhinted_allowed => {
+                drop(extension_matches);
+                self.ambiguous(candidates)
+            }
             [] => Err(self.no_selection_cause()),
-            _ => self.ambiguous(candidates),
+            _ => {
+                drop(extension_matches);
+                self.ambiguous(candidates)
+            }
         }
     }
 
@@ -688,7 +697,7 @@ impl<'a> ImportSession<'a> {
         let mut format_ids = AccountedVec::new();
         format_ids
             .try_reserve(candidates.len(), "ambiguous-format-candidates", |bytes| {
-                reserve_required_bytes(
+                reserve_retained_bytes(
                     self.host(),
                     ImportLedgerPhase::OutcomeFinalization,
                     ImportDimension::ScratchBytes,
@@ -705,11 +714,13 @@ impl<'a> ImportSession<'a> {
                     })
                 })?;
         }
-        format_ids.sort();
+        drop(candidates);
+        format_ids.sort_unstable();
         format_ids.dedup();
-        let format_ids = format_ids.into_terminal();
+        let candidates = crate::error::DetectionCandidates::try_new(format_ids, self.host())
+            .map_err(|cause| self.scope_cause(cause))?;
         Err(ImportCause::Detection(DetectionFailure::Ambiguous {
-            candidates: format_ids.into_values(),
+            candidates,
         }))
     }
 
@@ -840,7 +851,9 @@ impl<'a> ImportSession<'a> {
                     }));
                 }
                 ParseFailureKind::Format(envelope) => {
-                    if self.format_failure_storage.borrow().is_none() {
+                    if !self.format_failure_storage.borrow().format_captured
+                        || !envelope.has_storage()
+                    {
                         return Err(self.scope_cause(ScopeAbortCause::DescriptorContract {
                             code: "format-failure-without-storage-reservation",
                         }));
@@ -849,7 +862,7 @@ impl<'a> ImportSession<'a> {
                 }
             },
             Ok(Ok(draft)) => {
-                if self.format_failure_storage.borrow().is_some() {
+                if self.format_failure_storage.borrow().is_active() {
                     return Err(self.scope_cause(ScopeAbortCause::DescriptorContract {
                         code: "format-failure-was-swallowed",
                     }));
@@ -866,7 +879,7 @@ impl<'a> ImportSession<'a> {
         reason = "terminal import failures retain complete bounded session evidence without heap indirection"
     )]
     fn finalize_success(mut self, draft: SceneDraft) -> ImportResult<ImportReport> {
-        if self.format_failure_storage.get_mut().is_some() {
+        if self.format_failure_storage.get_mut().is_active() {
             drop(draft);
             let cause = self.scope_cause(ScopeAbortCause::DescriptorContract {
                 code: "format-failure-was-swallowed",
@@ -950,7 +963,7 @@ impl<'a> ImportSession<'a> {
                 );
                 Err(ImportRunError::operation(terminal_failure(
                     TerminalFailureCause {
-                        cause,
+                        context: AccountedErrorContext::new(cause, None),
                         terminal_control_cause: None,
                     },
                     source,
@@ -973,7 +986,7 @@ impl<'a> ImportSession<'a> {
                 );
                 Err(ImportRunError::operation(terminal_failure(
                     TerminalFailureCause {
-                        cause,
+                        context: AccountedErrorContext::new(cause, None),
                         terminal_control_cause: None,
                     },
                     source,
@@ -997,7 +1010,7 @@ impl<'a> ImportSession<'a> {
             .as_ref()
             .map(|entry| entry.format_id().clone());
         let staging = self.take_report_staging();
-        let cause = self.take_failure_cause(cause).into_terminal().cause;
+        let cause = self.take_failure_cause(cause);
         self.release_transient_live();
         let staging = staging.into_terminal();
         let source = self.source;
@@ -1073,10 +1086,13 @@ impl<'a> ImportSession<'a> {
         }
     }
 
-    fn take_failure_cause(&mut self, cause: ImportCause) -> LiveFailureCause {
-        LiveFailureCause {
-            cause,
-            format_failure_storage: self.format_failure_storage.get_mut().take(),
+    fn take_failure_cause(&mut self, cause: ImportCause) -> TerminalFailureCause {
+        TerminalFailureCause {
+            context: AccountedErrorContext::new(
+                cause,
+                self.format_failure_storage.get_mut().reservation.take(),
+            ),
+            terminal_control_cause: None,
         }
     }
 
@@ -1154,38 +1170,31 @@ struct LiveReportStaging {
 
 impl LiveReportStaging {
     fn into_terminal(self) -> TerminalReportEvidence {
-        let detection = self.detection.into_terminal();
+        let detection = self.detection;
         let diagnostics = self.diagnostics.into_terminal();
-        let optional_dependency_evidence = self.optional_dependency_evidence.into_terminal();
-        let loss_evidence = self.loss_evidence.into_terminal();
+        let optional_dependency_evidence = self.optional_dependency_evidence;
+        let loss_evidence = self.loss_evidence;
         let source_scope_record = self
             .source_scope_record
             .map(LiveSourceScopeRecord::into_terminal);
         let (diagnostics, diagnostic_summary) = diagnostics.into_parts();
-        let mut terminal = TerminalReportEvidence {
-            detection: detection.into_values(),
+        TerminalReportEvidence {
+            detection,
             diagnostics,
             diagnostic_summary,
-            optional_dependency_evidence: optional_dependency_evidence.into_values(),
-            loss_evidence: loss_evidence.into_values(),
+            optional_dependency_evidence,
+            loss_evidence,
             source_scope_record,
-        };
-        for evidence in &mut terminal.optional_dependency_evidence {
-            evidence.release_reservations();
         }
-        for evidence in &mut terminal.loss_evidence {
-            evidence.release_reservation();
-        }
-        terminal
     }
 }
 
 struct TerminalReportEvidence {
-    detection: Vec<DetectionEvidence>,
-    diagnostics: Vec<crate::ImportDiagnostic>,
+    detection: AccountedVec<DetectionEvidence>,
+    diagnostics: crate::diagnostic::RetainedDiagnostics,
     diagnostic_summary: crate::DiagnosticSummary,
-    optional_dependency_evidence: Vec<crate::OptionalDependencyEvidence>,
-    loss_evidence: Vec<ImportLossEvidence>,
+    optional_dependency_evidence: AccountedVec<crate::OptionalDependencyEvidence>,
+    loss_evidence: AccountedVec<ImportLossEvidence>,
     source_scope_record: Option<SourceScopeRecord>,
 }
 
@@ -1199,38 +1208,42 @@ fn operation_terminal_cause(evidence: &ImportStoreTerminalEvidence) -> ImportCau
 }
 
 fn select_terminal_failure_cause(
-    original: ImportCause,
+    mut original: TerminalFailureCause,
     evidence: &ImportStoreTerminalEvidence,
     control_cause: Option<ControlCause>,
     cause_authority: ImportStoreFailureCauseAuthority,
 ) -> TerminalFailureCause {
     let validation_error = match cause_authority {
         ImportStoreFailureCauseAuthority::SceneValidation(detail) => Some(detail),
-        _ => original.scene_validation_error().copied(),
+        _ => original.context.cause().scene_validation_error().copied(),
     };
     if let Some(detail) = validation_error {
-        return TerminalFailureCause {
-            cause: ImportCause::SceneValidation(detail),
-            terminal_control_cause: control_cause,
-        };
+        original
+            .context
+            .replace_cause(ImportCause::SceneValidation(detail));
+        original.terminal_control_cause = control_cause;
+        return original;
     }
     if let Some(cause) = control_cause {
-        return TerminalFailureCause {
-            cause: ImportCause::Scope(ScopeAbort::new(ScopeAbortCause::Control(cause))),
-            terminal_control_cause: None,
-        };
+        original
+            .context
+            .replace_cause(ImportCause::Scope(ScopeAbort::new(
+                ScopeAbortCause::Control(cause),
+            )));
+        return original;
     }
-    let cause = match cause_authority {
-        ImportStoreFailureCauseAuthority::OriginalImport => original,
-        ImportStoreFailureCauseAuthority::OperationTerminal => operation_terminal_cause(evidence),
+    match cause_authority {
+        ImportStoreFailureCauseAuthority::OriginalImport => {}
+        ImportStoreFailureCauseAuthority::OperationTerminal => original
+            .context
+            .replace_cause(operation_terminal_cause(evidence)),
         ImportStoreFailureCauseAuthority::SceneValidation(detail) => {
-            ImportCause::SceneValidation(detail)
+            original
+                .context
+                .replace_cause(ImportCause::SceneValidation(detail));
         }
-    };
-    TerminalFailureCause {
-        cause,
-        terminal_control_cause: None,
     }
+    original
 }
 
 fn terminal_failure(
@@ -1243,7 +1256,7 @@ fn terminal_failure(
     last_completed: ImportPhaseEvidence,
 ) -> ImportFailure {
     let TerminalFailureCause {
-        cause,
+        context: cause,
         terminal_control_cause,
     } = cause;
     let TerminalReportEvidence {
@@ -1271,28 +1284,8 @@ fn terminal_failure(
     })
 }
 
-struct LiveFailureCause {
-    cause: ImportCause,
-    format_failure_storage: Option<ImportStoreReservation>,
-}
-
-impl LiveFailureCause {
-    fn into_terminal(self) -> TerminalFailureCause {
-        let Self {
-            cause,
-            format_failure_storage,
-        } = self;
-        let terminal = TerminalFailureCause {
-            cause,
-            terminal_control_cause: None,
-        };
-        drop(format_failure_storage);
-        terminal
-    }
-}
-
 struct TerminalFailureCause {
-    cause: ImportCause,
+    context: AccountedErrorContext,
     terminal_control_cause: Option<ControlCause>,
 }
 
@@ -1349,6 +1342,19 @@ fn reserve_required_bytes(
     host.reserve(phase, dimension, bytes)
         .map_err(crate::store::ImportStoreHostError::into_scope_abort_cause)
 }
+
+fn reserve_retained_bytes(
+    host: crate::store::ImportStoreHost<'_>,
+    phase: ImportLedgerPhase,
+    dimension: ImportDimension,
+    bytes: u64,
+) -> Result<ImportStoreReservation, ScopeAbortCause> {
+    host.reserve_retained(phase, dimension, bytes, u64::from(bytes != 0))
+        .map_err(|cause| cause.into_scope_abort_cause())
+}
+
+#[cfg(test)]
+mod retained_output_tests;
 
 #[cfg(test)]
 mod tests {

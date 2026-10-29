@@ -6,7 +6,10 @@ use super::{
 use crate::{CapacityPlan, OperationOwner};
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+
+pub(crate) struct RetainedStorageOperation;
+impl OperationOwner for RetainedStorageOperation {}
 
 /// A linear live-byte reservation issued by one ledger.
 ///
@@ -108,6 +111,8 @@ where
     D: Copy + Ord,
 {
     pub(super) owner: Option<Arc<Mutex<LedgerState<P, D>>>>,
+    pub(super) retained_output: bool,
+    retained_output_owner: Option<Weak<Mutex<LedgerState<P, D>>>>,
     pub(super) phase: P,
     pub(super) phase_position: usize,
     pub(super) dimension: D,
@@ -133,6 +138,8 @@ where
     ) -> Self {
         Self {
             owner: Some(owner),
+            retained_output: false,
+            retained_output_owner: None,
             phase,
             phase_position,
             dimension,
@@ -147,16 +154,36 @@ where
         self.owner
             .as_ref()
             .is_some_and(|candidate| Arc::ptr_eq(candidate, owner))
+            || self
+                .retained_output_owner
+                .as_ref()
+                .is_some_and(|candidate| candidate.as_ptr() == Arc::as_ptr(owner))
     }
 
     fn release(&mut self) {
         if !self.active {
             return;
         }
-        let Some(owner) = self.owner.as_ref() else {
-            return;
+        let retained_owner;
+        let owner = match self.owner.as_ref() {
+            Some(owner) => owner,
+            None => {
+                retained_owner = self.retained_output_owner.as_ref().and_then(Weak::upgrade);
+                let Some(owner) = retained_owner.as_ref() else {
+                    return;
+                };
+                owner
+            }
         };
         let mut state = lock(owner);
+        if self.retained_output {
+            state.retained_output_bytes -= self.bytes;
+            state.retained_output_reservations -= 1;
+            state.dimensions[self.dimension_position]
+                .state
+                .retained_output_bytes -= self.bytes;
+            state.phase_states[self.phase_position].retained_output_bytes -= self.bytes;
+        }
         release_positioned_locked(
             &mut state,
             self.phase_position,
@@ -235,6 +262,74 @@ where
     /// Returns the live bytes owned by this token.
     pub const fn bytes(&self) -> u64 {
         self.core.bytes
+    }
+
+    pub(crate) fn retain_fail_closed_in_place(&mut self) {
+        self.core.active = false;
+    }
+
+    pub(crate) fn take_storage_owner(&mut self) -> LiveReservation<RetainedStorageOperation, P, D> {
+        let core = ReservationCore {
+            owner: self.core.owner.take(),
+            retained_output: self.core.retained_output,
+            retained_output_owner: self.core.retained_output_owner.take(),
+            phase: self.core.phase,
+            phase_position: self.core.phase_position,
+            dimension: self.core.dimension,
+            dimension_position: self.core.dimension_position,
+            bytes: self.core.bytes,
+            active: self.core.active,
+            operation_owner: PhantomData,
+        };
+        self.core.active = false;
+        LiveReservation { core }
+    }
+
+    /// Classifies an allocation-bound output owner without refunding live bytes.
+    ///
+    /// The physical subsystem invokes this only while the actual payload and its physical lease
+    /// remain coupled and the unique finalizer owns the complete output until terminal freeze.
+    /// Ownership of live attribution moves into existing catalog rows. The weak edge to that same
+    /// ledger allocation supports exact rollback before publication without another shared header.
+    /// Joint publication retires attribution while the physical lease remains allocation-bound.
+    pub(crate) fn retain_for_output(&mut self) -> Result<(), LedgerCause<D>> {
+        if self.core.retained_output {
+            return Ok(());
+        }
+        let owner = self.core.owner.as_ref().ok_or(LedgerCause::OwnerMismatch)?;
+        let mut state = lock(owner);
+        if !self.core.active || state.publication != super::PublicationState::Open {
+            return Err(LedgerCause::OwnerMismatch);
+        }
+        let overflow = || LedgerCause::LiveReservationsRemain { bytes: u64::MAX };
+        let bytes = state
+            .retained_output_bytes
+            .checked_add(self.core.bytes)
+            .ok_or_else(overflow)?;
+        let count = state
+            .retained_output_reservations
+            .checked_add(1)
+            .ok_or_else(overflow)?;
+        let dimension_bytes = state.dimensions[self.core.dimension_position]
+            .state
+            .retained_output_bytes
+            .checked_add(self.core.bytes)
+            .ok_or_else(overflow)?;
+        let phase_bytes = state.phase_states[self.core.phase_position]
+            .retained_output_bytes
+            .checked_add(self.core.bytes)
+            .ok_or_else(overflow)?;
+        state.retained_output_bytes = bytes;
+        state.retained_output_reservations = count;
+        state.dimensions[self.core.dimension_position]
+            .state
+            .retained_output_bytes = dimension_bytes;
+        state.phase_states[self.core.phase_position].retained_output_bytes = phase_bytes;
+        self.core.retained_output = true;
+        self.core.retained_output_owner = Some(Arc::downgrade(owner));
+        drop(state);
+        drop(self.core.owner.take());
+        Ok(())
     }
 }
 

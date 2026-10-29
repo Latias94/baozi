@@ -7,13 +7,6 @@ use baozi_operation::{
     StoreRuntimeError,
 };
 
-use crate::canonical_scene::store::schema::geometry::{
-    GEOMETRY_ATTRIBUTE_FIELD_COUNT, GEOMETRY_PRIMITIVE_FIELD_COUNT, GeometryF32ValuesSchema,
-    GeometryI32ValuesSchema, GeometryPolygonBoundariesSchema, GeometryPrimitiveIndicesSchema,
-    GeometrySparseF32DefaultsSchema, GeometrySparseI32DefaultsSchema, GeometrySparseIndicesSchema,
-    GeometrySparseU32DefaultsSchema, GeometryU32ValuesSchema, geometry_attribute_field,
-    geometry_primitive_field,
-};
 use crate::canonical_scene::store::schema::profile::{
     PROFILE_METADATA_DIRECTORY_FIELD_COUNT, PROFILE_SEGMENT_FIELD_COUNT,
     ProfileLineageDigestSchema, ProfileLineageEvidenceSchema, ProfileLineageOperationSchema,
@@ -25,22 +18,13 @@ use crate::canonical_scene::store::schema::profile::{
 };
 use crate::canonical_scene::store::schema::{CanonicalBlockRef, CanonicalSchema};
 
-use super::super::ValidatedNodeScene;
+use super::super::SceneStorage;
 use super::super::profile::MetadataLeafRefs;
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditPlanError, NodeSceneEvidenceLeafPlan};
 use super::required_record_view;
 
 #[derive(Clone, Copy)]
 enum NodeSceneInheritedLeaf {
-    GeometryPolygonBoundaries(CanonicalBlockRef<GeometryPolygonBoundariesSchema>),
-    GeometryPrimitiveIndices(CanonicalBlockRef<GeometryPrimitiveIndicesSchema>),
-    GeometryF32Values(CanonicalBlockRef<GeometryF32ValuesSchema>),
-    GeometryU32Values(CanonicalBlockRef<GeometryU32ValuesSchema>),
-    GeometryI32Values(CanonicalBlockRef<GeometryI32ValuesSchema>),
-    GeometrySparseIndices(CanonicalBlockRef<GeometrySparseIndicesSchema>),
-    GeometrySparseF32Defaults(CanonicalBlockRef<GeometrySparseF32DefaultsSchema>),
-    GeometrySparseU32Defaults(CanonicalBlockRef<GeometrySparseU32DefaultsSchema>),
-    GeometrySparseI32Defaults(CanonicalBlockRef<GeometrySparseI32DefaultsSchema>),
     ProfileResources(CanonicalBlockRef<ProfileLineageResourceSchema>),
     ProfileSources(CanonicalBlockRef<ProfileLineageSourceSchema>),
     ProfileProvenance(CanonicalBlockRef<ProfileLineageProvenanceSchema>),
@@ -70,17 +54,13 @@ pub(super) struct NodeSceneInheritedLeafScanPlan {
 
 impl NodeSceneInheritedLeafScanPlan {
     pub(super) fn try_new(
-        input: &ValidatedNodeScene,
-        primitive_rows: usize,
-        attribute_rows: usize,
+        input: &SceneStorage,
         source_segments: usize,
         evidence: NodeSceneEvidenceLeafPlan,
     ) -> Result<Self, NodeSceneEditPlanError> {
         Self::try_from_counts(
             direct_inherited_leaf_count(input),
             evidence.inherited.as_usize(),
-            primitive_rows,
-            attribute_rows,
             source_segments,
         )
     }
@@ -88,33 +68,21 @@ impl NodeSceneInheritedLeafScanPlan {
     fn try_from_counts(
         direct_inherited: usize,
         inherited: usize,
-        primitive_rows: usize,
-        attribute_rows: usize,
         source_segments: usize,
     ) -> Result<Self, NodeSceneEditPlanError> {
-        let structural_upper = primitive_rows
-            .checked_mul(2)
-            .and_then(|count| {
-                attribute_rows
-                    .checked_mul(3)
-                    .and_then(|attributes| count.checked_add(attributes))
-            })
-            .and_then(|count| {
-                source_segments
-                    .checked_mul(9)
-                    .and_then(|segments| count.checked_add(segments))
-            })
+        // Geometry is one shared typed owner; this scan only discovers remaining profile leaves.
+        let structural_upper = source_segments
+            .checked_mul(9)
             .and_then(|count| count.checked_add(7))
             .ok_or(NodeSceneEditPlanError::SizeOverflow {
-                quantity: "inherited shareable leaf structural upper bound",
+                quantity: "profile inherited leaf upper bound",
             })?;
-        let exact_inspection_work = primitive_rows
-            .checked_add(attribute_rows)
-            .and_then(|count| count.checked_add(source_segments))
-            .and_then(|count| count.checked_add(1))
-            .ok_or(NodeSceneEditPlanError::SizeOverflow {
-                quantity: "inherited shareable leaf inspection work",
-            })?;
+        let exact_inspection_work =
+            source_segments
+                .checked_add(1)
+                .ok_or(NodeSceneEditPlanError::SizeOverflow {
+                    quantity: "profile inherited leaf inspection work",
+                })?;
         let expected_dynamic = inherited.checked_sub(direct_inherited).ok_or(
             NodeSceneEditPlanError::InvalidSource {
                 reason: "direct inherited leaves exceed the sealed inherited leaf set",
@@ -219,7 +187,6 @@ where
             expected_dynamic,
             inspected: 0,
         };
-        collect_geometry_leaves(pending, semantic, &mut collector)?;
         collect_profile_leaves(pending, semantic, &mut collector)?;
         if collector.leaves.len() != expected_dynamic
             || collector.leaves.len() > scan.structural_upper()
@@ -237,7 +204,7 @@ where
     pub(super) fn inherit<'lane, PP, U>(
         &self,
         lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-        input: &ValidatedNodeScene,
+        input: &SceneStorage,
         inherited: &mut usize,
     ) -> Result<MetadataLeafRefs, StoreRuntimeError>
     where
@@ -265,7 +232,7 @@ impl NodeSceneInheritedLeaf {
     fn inherit<'lane, O, PP, U>(
         self,
         lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-        input: &ValidatedNodeScene,
+        input: &SceneStorage,
         inherited: &mut usize,
         metadata: &mut MetadataLeafRefs,
     ) -> Result<(), StoreRuntimeError>
@@ -275,33 +242,6 @@ impl NodeSceneInheritedLeaf {
         U: ProgressUnit,
     {
         match self {
-            Self::GeometryPolygonBoundaries(reference) => {
-                inherit_discarded_leaf(lane, input, reference, inherited)
-            }
-            Self::GeometryPrimitiveIndices(reference) => {
-                inherit_discarded_leaf(lane, input, reference, inherited)
-            }
-            Self::GeometryF32Values(reference) => {
-                inherit_discarded_leaf(lane, input, reference, inherited)
-            }
-            Self::GeometryU32Values(reference) => {
-                inherit_discarded_leaf(lane, input, reference, inherited)
-            }
-            Self::GeometryI32Values(reference) => {
-                inherit_discarded_leaf(lane, input, reference, inherited)
-            }
-            Self::GeometrySparseIndices(reference) => {
-                inherit_discarded_leaf(lane, input, reference, inherited)
-            }
-            Self::GeometrySparseF32Defaults(reference) => {
-                inherit_discarded_leaf(lane, input, reference, inherited)
-            }
-            Self::GeometrySparseU32Defaults(reference) => {
-                inherit_discarded_leaf(lane, input, reference, inherited)
-            }
-            Self::GeometrySparseI32Defaults(reference) => {
-                inherit_discarded_leaf(lane, input, reference, inherited)
-            }
             Self::ProfileResources(reference) => {
                 inherit_discarded_leaf(lane, input, reference, inherited)
             }
@@ -363,7 +303,7 @@ impl NodeSceneInheritedLeaf {
 
 fn inherit_discarded_leaf<'lane, O, PP, U, Schema>(
     lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-    input: &ValidatedNodeScene,
+    input: &SceneStorage,
     source: CanonicalBlockRef<Schema>,
     inherited: &mut usize,
 ) -> Result<(), StoreRuntimeError>
@@ -393,7 +333,7 @@ where
 
 pub(super) fn inherit_optional_leaf<'lane, O, PP, U, Schema>(
     lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-    input: &ValidatedNodeScene,
+    input: &SceneStorage,
     source: Option<CanonicalBlockRef<Schema>>,
     inherited: &mut usize,
 ) -> Result<Option<CanonicalBlockRef<Schema>>, StoreRuntimeError>
@@ -439,142 +379,6 @@ impl InheritedLeafCollector<'_> {
             .ok_or(StoreRuntimeError::AccountingOverflow)?;
         Ok(())
     }
-}
-
-fn collect_geometry_leaves<'borrow, 'scope, O, PP, U>(
-    pending: &BoundPendingNodeSceneEdit<'_>,
-    semantic: &mut CanonicalSemanticWorkSession<
-        'borrow,
-        'scope,
-        O,
-        PP,
-        U,
-        CanonicalInheritanceSource,
-    >,
-    collector: &mut InheritedLeafCollector<'_>,
-) -> Result<(), StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    match pending.input.proof.primitives() {
-        None if pending.counts.primitives.as_usize() == 0 => {}
-        Some(reference) => {
-            let primitives = required_record_view(pending.input, reference)?;
-            if primitives.rows() != pending.counts.primitives.as_usize()
-                || primitives.fields() != GEOMETRY_PRIMITIVE_FIELD_COUNT
-            {
-                return Err(StoreRuntimeError::InvalidSourceSlot);
-            }
-            for row in 0..primitives.rows() {
-                semantic.run_unit(|| -> Result<(), StoreRuntimeError> {
-                    collector.push(
-                        primitives
-                            .sequence_ref::<u32, GeometryPolygonBoundariesSchema>(
-                                row,
-                                geometry_primitive_field::POLYGON_BOUNDARIES,
-                            )
-                            .map(CanonicalBlockRef::from_store)
-                            .map(NodeSceneInheritedLeaf::GeometryPolygonBoundaries),
-                    )?;
-                    collector.push(
-                        primitives
-                            .sequence_ref::<u32, GeometryPrimitiveIndicesSchema>(
-                                row,
-                                geometry_primitive_field::INDICES,
-                            )
-                            .map(CanonicalBlockRef::from_store)
-                            .map(NodeSceneInheritedLeaf::GeometryPrimitiveIndices),
-                    )?;
-                    collector.note_inspected()
-                })??;
-            }
-        }
-        None => return Err(StoreRuntimeError::InvalidSourceSlot),
-    }
-
-    match pending.input.proof.attributes() {
-        None if pending.counts.attributes.as_usize() == 0 => {}
-        Some(reference) => {
-            let attributes = required_record_view(pending.input, reference)?;
-            if attributes.rows() != pending.counts.attributes.as_usize()
-                || attributes.fields() != GEOMETRY_ATTRIBUTE_FIELD_COUNT
-            {
-                return Err(StoreRuntimeError::InvalidSourceSlot);
-            }
-            for row in 0..attributes.rows() {
-                semantic.run_unit(|| -> Result<(), StoreRuntimeError> {
-                    collector.push(
-                        attributes
-                            .sequence_ref::<f32, GeometryF32ValuesSchema>(
-                                row,
-                                geometry_attribute_field::VALUES,
-                            )
-                            .map(CanonicalBlockRef::from_store)
-                            .map(NodeSceneInheritedLeaf::GeometryF32Values),
-                    )?;
-                    collector.push(
-                        attributes
-                            .sequence_ref::<u32, GeometryU32ValuesSchema>(
-                                row,
-                                geometry_attribute_field::VALUES,
-                            )
-                            .map(CanonicalBlockRef::from_store)
-                            .map(NodeSceneInheritedLeaf::GeometryU32Values),
-                    )?;
-                    collector.push(
-                        attributes
-                            .sequence_ref::<i32, GeometryI32ValuesSchema>(
-                                row,
-                                geometry_attribute_field::VALUES,
-                            )
-                            .map(CanonicalBlockRef::from_store)
-                            .map(NodeSceneInheritedLeaf::GeometryI32Values),
-                    )?;
-                    collector.push(
-                        attributes
-                            .sequence_ref::<u32, GeometrySparseIndicesSchema>(
-                                row,
-                                geometry_attribute_field::SPARSE_INDICES,
-                            )
-                            .map(CanonicalBlockRef::from_store)
-                            .map(NodeSceneInheritedLeaf::GeometrySparseIndices),
-                    )?;
-                    collector.push(
-                        attributes
-                            .sequence_ref::<f32, GeometrySparseF32DefaultsSchema>(
-                                row,
-                                geometry_attribute_field::SPARSE_DEFAULT,
-                            )
-                            .map(CanonicalBlockRef::from_store)
-                            .map(NodeSceneInheritedLeaf::GeometrySparseF32Defaults),
-                    )?;
-                    collector.push(
-                        attributes
-                            .sequence_ref::<u32, GeometrySparseU32DefaultsSchema>(
-                                row,
-                                geometry_attribute_field::SPARSE_DEFAULT,
-                            )
-                            .map(CanonicalBlockRef::from_store)
-                            .map(NodeSceneInheritedLeaf::GeometrySparseU32Defaults),
-                    )?;
-                    collector.push(
-                        attributes
-                            .sequence_ref::<i32, GeometrySparseI32DefaultsSchema>(
-                                row,
-                                geometry_attribute_field::SPARSE_DEFAULT,
-                            )
-                            .map(CanonicalBlockRef::from_store)
-                            .map(NodeSceneInheritedLeaf::GeometrySparseI32Defaults),
-                    )?;
-                    collector.note_inspected()
-                })??;
-            }
-        }
-        None => return Err(StoreRuntimeError::InvalidSourceSlot),
-    }
-    Ok(())
 }
 
 fn collect_profile_leaves<'borrow, 'scope, O, PP, U>(
@@ -751,10 +555,9 @@ where
     Ok(())
 }
 
-fn direct_inherited_leaf_count(input: &ValidatedNodeScene) -> usize {
+fn direct_inherited_leaf_count(input: &SceneStorage) -> usize {
     let proof = input.proof;
     [
-        proof.node_names().is_some(),
         proof.tangent_basis_schema_name().is_some(),
         proof.tangent_encoding_schema_name().is_some(),
         proof.appearance_image_payloads().is_some(),
@@ -763,8 +566,6 @@ fn direct_inherited_leaf_count(input: &ValidatedNodeScene) -> usize {
         proof.appearance_binding_semantic_scalars().is_some(),
         proof.appearance_material_factor_scalars().is_some(),
         proof.appearance_material_names().is_some(),
-        proof.logical_mesh_names().is_some(),
-        proof.attribute_semantic_names().is_some(),
         proof.deformation_joint_nodes().is_some(),
         proof.deformation_inverse_bind_matrices().is_some(),
         proof.deformation_skin_correction_matrices().is_some(),
@@ -796,29 +597,29 @@ mod tests {
 
     #[test]
     fn inherited_leaf_scan_plan_seals_the_structural_upper_and_exact_work() {
-        let plan = NodeSceneInheritedLeafScanPlan::try_from_counts(4, 14, 2, 3, 1)
+        let plan = NodeSceneInheritedLeafScanPlan::try_from_counts(4, 14, 1)
             .expect("an exact inherited-leaf scan must seal");
 
         assert_eq!(plan.expected_dynamic(), 10);
-        assert_eq!(plan.structural_upper(), 29);
-        assert_eq!(plan.inspection_work(), 7);
+        assert_eq!(plan.structural_upper(), 16);
+        assert_eq!(plan.inspection_work(), 2);
         assert_eq!(plan.capacity().desired_capacity(), 10);
         assert!(matches!(
-            NodeSceneInheritedLeafScanPlan::try_from_counts(4, 34, 2, 3, 1),
+            NodeSceneInheritedLeafScanPlan::try_from_counts(4, 21, 1),
             Err(NodeSceneEditPlanError::InvalidSource { .. })
         ));
     }
 
     #[test]
     fn inherited_leaf_scan_plan_checks_zero_shape_and_arithmetic_overflow() {
-        let empty = NodeSceneInheritedLeafScanPlan::try_from_counts(0, 0, 0, 0, 0)
+        let empty = NodeSceneInheritedLeafScanPlan::try_from_counts(0, 0, 0)
             .expect("metadata inspection remains mandatory for an empty dynamic shape");
 
         assert_eq!(empty.expected_dynamic(), 0);
         assert_eq!(empty.structural_upper(), 7);
         assert_eq!(empty.inspection_work(), 1);
         assert!(matches!(
-            NodeSceneInheritedLeafScanPlan::try_from_counts(0, 0, usize::MAX, 0, 0),
+            NodeSceneInheritedLeafScanPlan::try_from_counts(0, 0, usize::MAX),
             Err(NodeSceneEditPlanError::SizeOverflow { .. })
         ));
     }

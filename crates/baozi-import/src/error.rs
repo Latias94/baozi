@@ -3,7 +3,9 @@ use crate::descriptor::FormatDescriptor;
 use crate::diagnostic::{
     DiagnosticCause, DiagnosticCode, MAX_DIAGNOSTIC_CODE_BYTES, valid_detail_key,
 };
-use crate::ledger::{ImportDimension, ImportTerminalFailure};
+use crate::ledger::{ImportDimension, ImportLedgerPhase, ImportTerminalFailure};
+use crate::metered_storage::{AccountedVec, capacity_plan_cause};
+use crate::store::{ImportStoreHost, ImportStoreReservation};
 use baozi_core::FormatId;
 use baozi_io::{AssetOpenError, AssetReadError, PathError};
 use baozi_operation::{CapacityPlan, CapacityPlanError, ControlCause, LedgerCause};
@@ -32,7 +34,93 @@ pub enum TrustedExtensionBoundary {
     FormatFailureDetail,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Retained candidate identities from one ambiguous format decision.
+pub struct DetectionCandidates {
+    owned: Vec<OwnedDetectionCandidates>,
+}
+
+struct OwnedDetectionCandidates {
+    candidates: AccountedVec<FormatId>,
+    storage: Option<ImportStoreReservation>,
+}
+
+impl DetectionCandidates {
+    pub(crate) fn try_new(
+        candidates: AccountedVec<FormatId>,
+        host: ImportStoreHost<'_>,
+    ) -> Result<Self, ScopeAbortCause> {
+        const RESOURCE: &str = "ambiguous-format-candidate-owner";
+        let capacity_error = |cause| capacity_plan_cause(RESOURCE, cause);
+        let plan =
+            CapacityPlan::for_type::<OwnedDetectionCandidates>(0, 0, 1).map_err(capacity_error)?;
+        let mut storage = host
+            .reserve_retained(
+                ImportLedgerPhase::OutcomeFinalization,
+                ImportDimension::ScratchBytes,
+                plan.envelope_delta_bytes().map_err(capacity_error)?,
+                1,
+            )
+            .map_err(|cause| cause.into_scope_abort_cause())?;
+        let mut owned = Vec::new();
+        plan.verify_preflight(owned.len(), owned.capacity())
+            .map_err(capacity_error)?;
+        owned
+            .try_reserve_exact(plan.allocator_additional())
+            .map_err(|_| ScopeAbortCause::Allocation { resource: RESOURCE })?;
+        let actual = plan
+            .finish(owned.len(), owned.capacity())
+            .map_err(capacity_error)?;
+        host.resize(&mut storage, actual)
+            .map_err(|cause| cause.into_scope_abort_cause())?;
+        owned.push(OwnedDetectionCandidates {
+            candidates,
+            storage: Some(storage),
+        });
+        Ok(Self { owned })
+    }
+
+    pub fn as_slice(&self) -> &[FormatId] {
+        &self.owned[0].candidates
+    }
+}
+
+impl Drop for DetectionCandidates {
+    fn drop(&mut self) {
+        if let Some(storage) = self
+            .owned
+            .first_mut()
+            .and_then(|owner| owner.storage.take())
+        {
+            storage.release_storage(std::mem::take(&mut self.owned));
+        }
+    }
+}
+
+impl fmt::Debug for DetectionCandidates {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("DetectionCandidates")
+            .field(&self.as_slice())
+            .finish()
+    }
+}
+
+impl PartialEq for DetectionCandidates {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for DetectionCandidates {}
+
+impl std::ops::Deref for DetectionCandidates {
+    type Target = [FormatId];
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DetectionFailure {
     ForcedFormatContradiction {
@@ -47,7 +135,7 @@ pub enum DetectionFailure {
         had_fault: bool,
     },
     Ambiguous {
-        candidates: Vec<FormatId>,
+        candidates: DetectionCandidates,
     },
 }
 
@@ -550,6 +638,7 @@ impl From<CapacityPlanError> for FormatFailureDetailCause {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FormatFailureEvidenceCapacityPlan {
+    owner: CapacityPlan,
     entries: CapacityPlan,
     text: CapacityPlan,
 }
@@ -557,6 +646,7 @@ pub(crate) struct FormatFailureEvidenceCapacityPlan {
 impl FormatFailureEvidenceCapacityPlan {
     fn new() -> Result<Self, CapacityPlanError> {
         Ok(Self {
+            owner: CapacityPlan::for_type::<OwnedFormatFailureEvidence>(0, 0, 1)?,
             entries: CapacityPlan::for_type::<InlineFormatFailureDetail>(
                 0,
                 0,
@@ -567,9 +657,12 @@ impl FormatFailureEvidenceCapacityPlan {
     }
 
     pub(crate) fn envelope_bytes(self) -> Result<u64, CapacityPlanError> {
-        self.entries
-            .envelope_delta_bytes()?
-            .checked_add(self.text.envelope_delta_bytes()?)
+        let owner = self.owner.envelope_delta_bytes()?;
+        let entries = self.entries.envelope_delta_bytes()?;
+        let text = self.text.envelope_delta_bytes()?;
+        owner
+            .checked_add(entries)
+            .and_then(|bytes| bytes.checked_add(text))
             .ok_or(CapacityPlanError::CapacityOverflow)
     }
 
@@ -849,12 +942,45 @@ pub trait FormatFailureEvidenceProducer {
 
 pub struct FormatFailureEnvelope {
     format: Arc<FormatDescriptor>,
+    owned: Vec<OwnedFormatFailureEvidence>,
+}
+
+struct OwnedFormatFailureEvidence {
     evidence: FormatFailureEvidence,
+    // The envelope can escape its ParseScope. It releases all three backing allocations before
+    // refunding this lease, including the cell allocation that contains the lease itself.
+    storage: Option<crate::store::ImportStoreReservation>,
 }
 
 impl FormatFailureEnvelope {
-    pub(crate) fn seal(format: Arc<FormatDescriptor>, evidence: FormatFailureEvidence) -> Self {
-        Self { format, evidence }
+    pub(crate) fn try_allocate(
+        format: Arc<FormatDescriptor>,
+        plan: FormatFailureEvidenceCapacityPlan,
+    ) -> Result<(Self, u64), FormatFailureDetailCause> {
+        let mut owned = Vec::new();
+        plan.owner.verify_preflight(owned.len(), owned.capacity())?;
+        owned
+            .try_reserve_exact(plan.owner.allocator_additional())
+            .map_err(|_| FormatFailureDetailCause::AllocationFailed)?;
+        let actual = plan.owner.finish(owned.len(), owned.capacity())?;
+        Ok((Self { format, owned }, actual))
+    }
+
+    pub(crate) fn seal(
+        mut self,
+        evidence: FormatFailureEvidence,
+        storage: Option<crate::store::ImportStoreReservation>,
+    ) -> Self {
+        // The only constructor admits and allocates one empty cell before producer callbacks.
+        self.owned
+            .push(OwnedFormatFailureEvidence { evidence, storage });
+        self
+    }
+
+    pub(crate) fn has_storage(&self) -> bool {
+        self.owned
+            .first()
+            .is_some_and(|owner| owner.storage.is_some())
     }
 
     pub fn format(&self) -> &FormatId {
@@ -862,15 +988,27 @@ impl FormatFailureEnvelope {
     }
 
     pub fn code(&self) -> &str {
-        self.evidence.code()
+        self.evidence().code()
     }
 
     pub fn details(&self) -> FormatFailureDetails<'_> {
-        self.evidence.details()
+        self.evidence().details()
     }
 
     pub const fn evidence(&self) -> &FormatFailureEvidence {
-        &self.evidence
+        &self.owned.as_slice()[0].evidence
+    }
+}
+
+impl Drop for FormatFailureEnvelope {
+    fn drop(&mut self) {
+        if let Some(storage) = self
+            .owned
+            .first_mut()
+            .and_then(|owner| owner.storage.take())
+        {
+            storage.release_storage(std::mem::take(&mut self.owned));
+        }
     }
 }
 
@@ -879,7 +1017,7 @@ impl fmt::Debug for FormatFailureEnvelope {
         formatter
             .debug_struct("FormatFailureEnvelope")
             .field("format", &self.format())
-            .field("evidence", &self.evidence)
+            .field("evidence", self.evidence())
             .finish_non_exhaustive()
     }
 }
@@ -897,7 +1035,7 @@ impl fmt::Display for FormatFailureEnvelope {
 
 impl Error for FormatFailureEnvelope {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.evidence)
+        Some(self.evidence())
     }
 }
 
@@ -1155,30 +1293,22 @@ mod tests {
     }
 
     #[test]
-    fn failure_transport_stays_below_the_large_error_threshold() {
+    fn failure_transport_keeps_only_a_small_owned_evidence_handle() {
+        use std::mem::size_of;
+
         assert!(!std::mem::needs_drop::<baozi_core::SceneValidationError>());
-        assert!(std::mem::size_of::<baozi_core::SceneValidationError>() < 128);
-        if std::mem::size_of::<usize>() == 8 {
-            assert_eq!(std::mem::size_of::<FormatFailureEvidence>(), 56);
-            assert_eq!(std::mem::size_of::<FormatFailureEnvelope>(), 64);
-        }
-        assert!(std::mem::size_of::<ScopeAbort>() < 128);
-        assert!(std::mem::size_of::<FormatFailureEnvelope>() < 128);
-        assert!(std::mem::size_of::<crate::scope::ParseFailure>() < 128);
-        assert!(std::mem::size_of::<ImportCause>() < 128);
+        assert!(size_of::<baozi_core::SceneValidationError>() < 128);
+        // One descriptor handle and one Vec handle; the reservation lives in its admitted cell.
+        assert_eq!(size_of::<FormatFailureEnvelope>(), 4 * size_of::<usize>());
+        assert!(size_of::<crate::scope::ParseFailure>() <= 5 * size_of::<usize>());
+        assert!(size_of::<ScopeAbort>() < 128);
+        assert_eq!(size_of::<DetectionCandidates>(), 3 * size_of::<usize>());
+        assert!(size_of::<DetectionFailure>() < 128);
+        assert!(size_of::<ImportCause>() < 128);
     }
 
     #[test]
     fn sealed_envelope_moves_packed_stable_evidence_without_reallocation() {
-        let mut sink = new_sink();
-        sink.store_code("test.inline_failure")
-            .expect("valid code must fit preallocated evidence");
-        sink.signed("offset", -7);
-        let evidence = sink.finish().expect("valid details must finish");
-        let entry_pointer = evidence.entries.as_ptr();
-        let entry_capacity = evidence.entries.capacity();
-        let text_pointer = evidence.text.as_ptr();
-        let text_capacity = evidence.text.capacity();
         let descriptor = Arc::new(
             FormatDescriptor::builder(
                 FormatId::new("dev.baozi.test.packed-failure").expect("valid format id"),
@@ -1196,7 +1326,22 @@ mod tests {
         );
         let injected_descriptor = Arc::clone(&descriptor);
         let descriptor_strong_count = Arc::strong_count(&descriptor);
-        let envelope = FormatFailureEnvelope::seal(injected_descriptor, evidence);
+        let plan = BoundedFormatFailureDetailSink::capacity_plan().unwrap();
+        let (envelope, owner_bytes) =
+            FormatFailureEnvelope::try_allocate(injected_descriptor, plan).unwrap();
+        let cell_pointer = envelope.owned.as_ptr();
+        let cell_capacity = envelope.owned.capacity();
+        let (mut sink, payload_bytes) = BoundedFormatFailureDetailSink::try_allocate(plan).unwrap();
+        assert!(owner_bytes + payload_bytes <= plan.envelope_bytes().unwrap());
+        sink.store_code("test.inline_failure")
+            .expect("valid code must fit preallocated evidence");
+        sink.signed("offset", -7);
+        let evidence = sink.finish().expect("valid details must finish");
+        let entry_pointer = evidence.entries.as_ptr();
+        let entry_capacity = evidence.entries.capacity();
+        let text_pointer = evidence.text.as_ptr();
+        let text_capacity = evidence.text.capacity();
+        let envelope = envelope.seal(evidence, None);
 
         assert!(!std::mem::needs_drop::<FormatFailureDetailString<'static>>());
         assert!(std::mem::needs_drop::<FormatFailureEvidence>());
@@ -1204,10 +1349,13 @@ mod tests {
         assert!(Arc::ptr_eq(&envelope.format, &descriptor));
         assert_eq!(Arc::strong_count(&descriptor), descriptor_strong_count);
         assert_eq!(envelope.format(), descriptor.id());
-        assert_eq!(envelope.evidence.entries.as_ptr(), entry_pointer);
-        assert_eq!(envelope.evidence.entries.capacity(), entry_capacity);
-        assert_eq!(envelope.evidence.text.as_ptr(), text_pointer);
-        assert_eq!(envelope.evidence.text.capacity(), text_capacity);
+        assert_eq!(envelope.owned.len(), 1);
+        assert_eq!(envelope.owned.as_ptr(), cell_pointer);
+        assert_eq!(envelope.owned.capacity(), cell_capacity);
+        assert_eq!(envelope.evidence().entries.as_ptr(), entry_pointer);
+        assert_eq!(envelope.evidence().entries.capacity(), entry_capacity);
+        assert_eq!(envelope.evidence().text.as_ptr(), text_pointer);
+        assert_eq!(envelope.evidence().text.capacity(), text_capacity);
         assert_eq!(envelope.code(), "test.inline_failure");
         assert_eq!(envelope.details().len(), 1);
         let detail_view = envelope.details();

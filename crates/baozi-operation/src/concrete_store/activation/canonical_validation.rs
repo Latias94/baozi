@@ -767,15 +767,33 @@ where
         &mut self,
         member: CanonicalValidationMember<'session, ByteBlock, Tag>,
         expected_len: usize,
-        mut inspect: impl FnMut(usize, u8) -> bool,
+        inspect: impl FnMut(usize, u8) -> bool,
     ) -> Result<bool, StoreWorkError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.validate_canonical_bytes(member, expected_len, inspect)
+            .map(|values| values.is_some())
+    }
+
+    /// Borrows immutable bytes after their complete metered visit and member completion.
+    ///
+    /// The returned slice borrows canonical storage, allowing subsequent validation actions
+    /// without allocating a duplicate payload. Completed members are polled and length-checked
+    /// without repeating inspection or charging the same bytes again.
+    pub fn validate_canonical_bytes<Tag>(
+        &mut self,
+        member: CanonicalValidationMember<'session, ByteBlock, Tag>,
+        expected_len: usize,
+        mut inspect: impl FnMut(usize, u8) -> bool,
+    ) -> Result<Option<&'storage [u8]>, StoreWorkError>
     where
         Tag: Copy + Send + Sync + 'static,
     {
         self.poll_visit()?;
         let Some(visit) = self.raw.peek_canonical_bytes(member.raw) else {
             self.reject_contract();
-            return Ok(false);
+            return Ok(None);
         };
         let (view, completion) = match visit {
             StoreCanonicalMemberVisit::Completed(view) => (view, None),
@@ -783,23 +801,23 @@ where
         };
         if view.len() != expected_len {
             self.reject_contract();
-            return Ok(false);
+            return Ok(None);
         }
         let Some(completion) = completion else {
-            return Ok(true);
+            return Ok(Some(view));
         };
         for index in 0..expected_len {
             let Some(accepted) =
                 self.run_unit(|_raw| view.get(index).copied().map(|value| inspect(index, value)))?
             else {
-                return Ok(false);
+                return Ok(None);
             };
             if !accepted {
                 self.reject_semantic()?;
-                return Ok(false);
+                return Ok(None);
             }
         }
-        self.complete_canonical(completion)
+        Ok(self.complete_canonical(completion)?.then_some(view))
     }
 
     /// Visits every encoded byte in one canonical UTF-8 block exactly once.
@@ -807,15 +825,32 @@ where
         &mut self,
         member: CanonicalValidationMember<'session, Utf8Block, Tag>,
         expected_len: usize,
-        mut inspect: impl FnMut(usize, u8) -> bool,
+        inspect: impl FnMut(usize, u8) -> bool,
     ) -> Result<bool, StoreWorkError>
+    where
+        Tag: Copy + Send + Sync + 'static,
+    {
+        self.validate_canonical_utf8_bytes(member, expected_len, inspect)
+            .map(|values| values.is_some())
+    }
+
+    /// Borrows canonical UTF-8 text only after every encoded byte passes its metered visit.
+    ///
+    /// The storage lifetime and completed-member behavior match
+    /// [`Self::validate_canonical_bytes`].
+    pub fn validate_canonical_utf8_bytes<Tag>(
+        &mut self,
+        member: CanonicalValidationMember<'session, Utf8Block, Tag>,
+        expected_len: usize,
+        mut inspect: impl FnMut(usize, u8) -> bool,
+    ) -> Result<Option<&'storage str>, StoreWorkError>
     where
         Tag: Copy + Send + Sync + 'static,
     {
         self.poll_visit()?;
         let Some(visit) = self.raw.peek_canonical_utf8(member.raw) else {
             self.reject_contract();
-            return Ok(false);
+            return Ok(None);
         };
         let (view, completion) = match visit {
             StoreCanonicalMemberVisit::Completed(view) => (view, None),
@@ -823,10 +858,10 @@ where
         };
         if view.len() != expected_len {
             self.reject_contract();
-            return Ok(false);
+            return Ok(None);
         }
         let Some(completion) = completion else {
-            return Ok(true);
+            return Ok(Some(view));
         };
         for index in 0..expected_len {
             let Some(accepted) = self.run_unit(|_raw| {
@@ -836,14 +871,14 @@ where
                     .map(|value| inspect(index, value))
             })?
             else {
-                return Ok(false);
+                return Ok(None);
             };
             if !accepted {
                 self.reject_semantic()?;
-                return Ok(false);
+                return Ok(None);
             }
         }
-        self.complete_canonical(completion)
+        Ok(self.complete_canonical(completion)?.then_some(view))
     }
 
     /// Visits every row and cell in one canonical record block exactly once.

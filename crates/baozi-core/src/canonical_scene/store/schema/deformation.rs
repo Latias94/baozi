@@ -6,7 +6,7 @@ use crate::deform::{MorphDeltaSemantic, SkinMatrixSpace, SkinMatrixSpaces};
 
 use super::CanonicalSchema;
 
-pub(in super::super) const DEFORMATION_SCHEMA_REVISION: u32 = 1;
+pub(in super::super) const DEFORMATION_SCHEMA_REVISION: u32 = 2;
 pub(in super::super) const DEFORMATION_DIRECTORY_FIELD_COUNT: usize = 39;
 pub(in super::super) const DEFORMATION_SKIN_FIELD_COUNT: usize = 26;
 pub(in super::super) const DEFORMATION_LOGICAL_MORPH_FIELD_COUNT: usize = 7;
@@ -139,7 +139,7 @@ pub(in super::super) mod deformation_skin_field {
     pub(crate) const INVERSE_BINDS: usize = 6;
     pub(crate) const SKELETON_ROOT_PRESENCE: usize = 7;
     pub(crate) const SKELETON_ROOT: usize = 8;
-    pub(crate) const NODES: usize = 9;
+    pub(crate) const NODE_COUNT: usize = 9;
     pub(crate) const INPUT_POSITION_SPACE: usize = 10;
     pub(crate) const INVERSE_BIND_FROM_SPACE: usize = 11;
     pub(crate) const INVERSE_BIND_TO_SPACE: usize = 12;

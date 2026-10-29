@@ -285,6 +285,126 @@ fn centrally_rejected_sequence_work(elements: usize) -> (u64, u64) {
 
 const CANONICAL_VALIDATION_STACK_BUDGET: usize = 2 * 1024 * 1024;
 
+#[test]
+fn validated_byte_and_text_borrows_survive_other_visits_without_reinspection() {
+    const BYTES: &[u8] = &[0, 255, 42];
+    const TEXT: &str = "包子";
+    // Two root reference cells, both payloads, and the evidence scalar.
+    const WORK: u64 = 2 + BYTES.len() as u64 + TEXT.len() as u64 + 1;
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let outcome = plan_scoped_activation!(
+        operation,
+        scoped_activation_shape_with_validation_work(keys, 3, 1, NonZeroU64::new(WORK).unwrap(),),
+        |mut lane| {
+            let bytes = lane
+                .try_retain_bytes(BytesPlan::new(BYTES.len()).unwrap(), BytesTag, |writer| {
+                    writer.write_bytes(BYTES)
+                })
+                .unwrap();
+            let text = lane
+                .try_retain_utf8(Utf8Plan::new(TEXT.len()).unwrap(), TextTag, |writer| {
+                    writer.write_str(TEXT)
+                })
+                .unwrap();
+            let root = lane
+                .try_retain_records(RecordPlan::new(1, 2).unwrap(), CanonicalRootTag, |writer| {
+                    writer.write_row(|row| {
+                        row.write_bytes_ref(bytes)?;
+                        row.write_utf8_ref(text)
+                    })
+                })
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, root)
+        },
+    )
+    .unwrap();
+    let CanonicalActivationOutcome::Activated(activated) = outcome else {
+        panic!("both immutable payloads must materialize");
+    };
+    let visited_bytes = Cell::new(0);
+    let visited_text = Cell::new(0);
+    let validated = activated
+        .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
+            |lane, _output| {
+                let evidence = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.push(9),
+                    )
+                    .unwrap();
+                lane.complete(evidence)
+            },
+            |planning, _output| {
+                planning.validate_with(
+                    |_| Ok(()),
+                    |session, root, evidence, &mut ()| {
+                        let mut bytes = None;
+                        let mut text = None;
+                        assert!(session.visit_canonical_records(root, 1, 2, |_index, row| {
+                            let bytes_valid = row.bytes_ref::<BytesTag, _>(0, |member| {
+                                bytes = Some(member);
+                                true
+                            })? == Some(true);
+                            let text_valid = row.utf8_ref::<TextTag, _>(1, |member| {
+                                text = Some(member);
+                                true
+                            })? == Some(true);
+                            Ok(bytes_valid && text_valid)
+                        })?);
+                        let bytes = bytes.unwrap();
+                        let text = text.unwrap();
+                        let borrowed_bytes = session
+                            .validate_canonical_bytes(bytes, BYTES.len(), |index, byte| {
+                                visited_bytes.set(visited_bytes.get() + 1);
+                                byte == BYTES[index]
+                            })?
+                            .unwrap();
+                        let borrowed_text = session
+                            .validate_canonical_utf8_bytes(text, TEXT.len(), |index, byte| {
+                                visited_text.set(visited_text.get() + 1);
+                                byte == TEXT.as_bytes()[index]
+                            })?
+                            .unwrap();
+                        assert!(session.visit_outcome_evidence_sequence(
+                            evidence,
+                            1,
+                            |_index, value| value == 9,
+                        )?);
+                        let repeated_bytes = session
+                            .validate_canonical_bytes(bytes, BYTES.len(), |_, _| {
+                                panic!("completed bytes are not inspected twice")
+                            })?
+                            .unwrap();
+                        let repeated_text = session
+                            .validate_canonical_utf8_bytes(text, TEXT.len(), |_, _| {
+                                panic!("completed text is not inspected twice")
+                            })?
+                            .unwrap();
+                        assert_eq!(borrowed_bytes, BYTES);
+                        assert_eq!(borrowed_text, TEXT);
+                        assert!(std::ptr::eq(borrowed_bytes, repeated_bytes));
+                        assert!(std::ptr::eq(borrowed_text, repeated_text));
+                        Ok(CanonicalValidationDecision::<_, ValidationRejection>::accept(()))
+                    },
+                )
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        validated,
+        CanonicalCentralValidationOutcome::Candidate(_)
+    ));
+    assert_eq!(visited_bytes.get(), BYTES.len());
+    assert_eq!(visited_text.get(), TEXT.len());
+    drop(validated);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert!(!account.snapshot().poisoned());
+}
+
 fn run_with_canonical_validation_stack_budget(test: fn()) {
     let result = std::thread::Builder::new()
         .name("canonical-validation-stack-budget".into())

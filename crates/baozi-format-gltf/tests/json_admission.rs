@@ -122,14 +122,14 @@ fn assert_ledger_limit(
 }
 
 #[test]
-fn unknown_optional_extension_is_explicitly_diagnosed() -> TestResult<()> {
+fn unknown_optional_extension_payload_is_explicitly_rejected() -> TestResult<()> {
     let document = br#"{
   "asset": { "version": "2.0" },
   "extensionsUsed": ["VENDOR_physics"],
   "extensions": { "VENDOR_physics": { "gravity": 9.8 } }
 }"#
     .to_vec();
-    let (report, diagnostics) = import_assets(
+    let (result, diagnostics) = import_assets_result(
         "optional-extension.gltf",
         [("optional-extension.gltf", document)],
         GltfTestOptions::memory(),
@@ -138,7 +138,12 @@ fn unknown_optional_extension_is_explicitly_diagnosed() -> TestResult<()> {
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code().as_str(), "gltf.extension_ignored");
     assert!(diagnostics[0].message().contains("VENDOR_physics"));
-    assert!(report.source_scope_record().is_some());
+    let error = expected_error(result)?;
+    common::assert_gltf_failure(
+        &error,
+        GltfFailureCode::UnsupportedFeature,
+        Some("extension payload"),
+    )?;
     Ok(())
 }
 
@@ -484,7 +489,7 @@ fn strict_json_failures_retain_the_offending_raw_range() -> TestResult<()> {
 }
 
 #[test]
-fn valid_escapes_unicode_surrogates_and_number_forms_match_the_backend_family() -> TestResult<()> {
+fn valid_json_with_unsupported_extras_reaches_the_explicit_profile_check() -> TestResult<()> {
     let document = br#"{
         "asset": {
             "version": "2.0",
@@ -497,14 +502,15 @@ fn valid_escapes_unicode_surrogates_and_number_forms_match_the_backend_family() 
     .to_vec();
     assert!(gltf::Gltf::from_slice(&document).is_ok());
 
-    let (report, diagnostics) = import_assets(
+    let (result, diagnostics) = import_assets_result(
         "grammar-family.gltf",
         [("grammar-family.gltf", document)],
         GltfTestOptions::memory(),
     )?;
 
     assert!(diagnostics.is_empty());
-    assert_eq!(report.ledger().current_live_bytes(), 0);
+    let error = expected_error(result)?;
+    common::assert_gltf_failure(&error, GltfFailureCode::UnsupportedFeature, Some("extras"))?;
     Ok(())
 }
 

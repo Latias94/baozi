@@ -121,19 +121,28 @@ account remain independently linearized and expose no combined atomic snapshot.
 membership, final-owner release, account poisoning, and publication-side disposition. The subsystem
 may change its private data structures and concrete APIs without revising this ADR.
 
-During construction, core and higher layers receive semantic construction capabilities and
-non-owning typed references. A published domain value may structurally hold an opaque exact-terminal
-aggregate owner solely to keep its retained storage alive. That aggregate exposes no generic payload,
-physical token, release operation, or semantic identity; its destruction remains implemented by the
-operation-owned subsystem. Semantic access continues through non-owning typed projections.
+Core owns shareable private typed tables and immutable pools through an operation-owned
+`SharedRetainedStorage<T>`. Its single shared header and complete backing capacities are admitted
+before allocation; derived generations share the existing final-owner allocation and charge.
+Import uses the inline `RetainedStorage<T>` mechanism for actual manifest, diagnostic,
+loss, source-scope, and failure data without adding a shared header for every path or row. Both
+forms use the same account and storage-first final release. This replaces the opaque-aggregate-only restriction: an owning
+header may expose borrowed typed data while keeping its physical lease private and inseparable.
+It does not grant Scene identity, validation authority, or an independent publication route.
 
-Domain layers must not receive:
+An inline owner does not allocate another shared header for every path or vector. Its containing
+allocation covers its inline fields; its lease covers only its own qualified backing allocations.
+Separately owned children retain their own charge and are not also counted in the parent. Sharing
+an immutable table or page uses the existing admitted shared-allocation mechanism when needed.
+Both ownership forms use the same storage-first release and poison handling, including ordinary
+host unwind. A destructor failure preserves uncertain charges rather than reporting clean release.
 
-- a generic or physically introspectable owning payload wrapper;
-- a raw reservation, lease, pending charge, or final-owner token;
-- callbacks or visitors that can detach owning storage;
-- a caller-declared physical footprint accepted as authority; or
-- a second implementation of account release or cleanup containment.
+Trusted integration adapters derive admission from the same existing `CapacityPlan` values consumed
+by allocation. Already-owned caller storage is admitted when ownership transfers into the library.
+Producer and supported consumer APIs do not expose raw physical accounts, leases, detachable payload
+ownership, or arbitrary footprint authority. A typed owner exposes no consuming payload accessor or
+unrestricted mutable borrow that could detach its backing allocation. Domain layers do not implement
+another account, allocator protocol, or cleanup-containment mechanism.
 
 Semantic validation remains in core. The physical subsystem proves allocation ownership, account
 membership, destination membership, and the structural closure required by its own publication
@@ -335,7 +344,7 @@ Negative:
 | Release ordering | Storage release precedes the final charge release on every verified path | Destructor-order probes |
 | Failure conservation | No uncertain path refunds or exposes retry/success ownership | Panic, poison, and cleanup-failure state-machine tests |
 | Lineage isolation | Unrelated same-account Scenes cannot share; exact derived inputs can share admitted immutable payloads | Cross-generation positive and negative tests |
-| Authority opacity | Opaque aggregate owners expose no generic payload, physical operation, or raw accounting token to domain layers | API, source, and compile-fail checks |
+| Authority boundary | Private typed owners expose borrowed data while keeping payload ownership and physical leases inseparable | Compiler boundaries and owner/drop tests |
 | Semantic independence | Equivalent semantics keep the same digest across private layout and sharing permutations | Independently authored semantic vectors |
 
 ## Acceptance Criteria
@@ -346,8 +355,8 @@ Negative:
   covered until final storage-first account destruction.
 - Every account clone observes one linearized counter/poison/publication state and one
   account-qualified current/peak/live-allocation snapshot.
-- Published domain values may hold only opaque exact-terminal aggregate owners; semantic access uses
-  non-owning projections and no domain layer obtains physical control.
+- Private domain storage may use central inline typed owners or admitted shared aggregates;
+  public semantic reads borrow data and do not expose physical control or detachable ownership.
 - Physical planning and execution consume one linear authority; caller-declared totals cannot authorize
   allocation or publication.
 - Every successful allocation is precharged, remains charged while live, and releases storage before
@@ -362,4 +371,4 @@ Negative:
 ## Sources
 
 - [Fallible shared-storage admission research](../research/fallible-shared-storage-admission.md)
-- [Canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
+- [Active library delivery plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md)

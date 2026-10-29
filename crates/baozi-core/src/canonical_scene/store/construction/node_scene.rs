@@ -204,66 +204,6 @@ impl NodeSceneBuildFaults {
             ..Self::none()
         }
     }
-
-    fn transform_scalar(&mut self, value: f32) -> f32 {
-        if !self.alter_first_authored_transform {
-            return value;
-        }
-        self.alter_first_authored_transform = false;
-        f32::NAN
-    }
-
-    fn geometry_f32(&mut self, value: f32) -> f32 {
-        if !self.alter_first_geometry_f32 {
-            return value;
-        }
-        self.alter_first_geometry_f32 = false;
-        f32::NAN
-    }
-}
-
-fn process_slice_in_chunks<T, E>(
-    values: &[T],
-    chunk_size: usize,
-    mut invalid_chunk_size: impl FnMut() -> E,
-    mut observe: impl FnMut(usize) -> Result<(), E>,
-    mut process: impl FnMut(&[T]) -> Result<(), E>,
-) -> Result<(), E> {
-    if chunk_size == 0 {
-        return Err(invalid_chunk_size());
-    }
-    for chunk in values.chunks(chunk_size) {
-        observe(chunk.len())?;
-        process(chunk)?;
-    }
-    Ok(())
-}
-
-fn process_str_in_chunks<E>(
-    value: &str,
-    chunk_size: usize,
-    mut invalid_chunk_size: impl FnMut() -> E,
-    mut observe: impl FnMut(usize) -> Result<(), E>,
-    mut process: impl FnMut(&str) -> Result<(), E>,
-) -> Result<(), E> {
-    if chunk_size == 0 {
-        return Err(invalid_chunk_size());
-    }
-    let mut start = 0;
-    while start != value.len() {
-        let mut end = start.saturating_add(chunk_size).min(value.len());
-        while end != start && !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end == start {
-            return Err(invalid_chunk_size());
-        }
-        let chunk = value.get(start..end).ok_or_else(&mut invalid_chunk_size)?;
-        observe(chunk.len())?;
-        process(chunk)?;
-        start = end;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -573,15 +513,27 @@ impl From<PreparedNodeSceneFailure> for PreparedNodeSceneConstruction {
 }
 
 /// Private inspector over a centrally validated node-domain Scene.
-pub(in crate::canonical_scene::store) struct ValidatedNodeScene {
+pub(in crate::canonical_scene::store) struct SceneStorage {
     generation: SceneGenerationId,
+    tables: super::super::typed_storage::NodeGeometryStorage,
     canonical: PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>,
     proof: NodeSceneValidationProof,
     #[cfg(test)]
     semantic_read_fault: Option<semantic::NodeSceneSemanticReadFault>,
 }
 
-impl ValidatedNodeScene {
+impl SceneStorage {
+    pub(in crate::canonical_scene::store) fn read_nodes(
+        &self,
+    ) -> &super::super::typed_storage::NodeStorage {
+        self.tables.nodes.as_ref()
+    }
+
+    pub(in crate::canonical_scene::store) fn read_geometry(
+        &self,
+    ) -> &super::super::typed_storage::GeometryStorage {
+        self.tables.geometry.as_ref()
+    }
     pub(in crate::canonical_scene::store) const fn read_proof(&self) -> NodeSceneValidationProof {
         self.proof
     }
@@ -601,7 +553,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSuccessReport {
 
 #[cfg(test)]
 pub(in crate::canonical_scene::store) struct NodeSceneSuccessParts {
-    pub(in crate::canonical_scene::store) scene: ValidatedNodeScene,
+    pub(in crate::canonical_scene::store) scene: SceneStorage,
     pub(in crate::canonical_scene::store) report: NodeSceneSuccessReport,
 }
 

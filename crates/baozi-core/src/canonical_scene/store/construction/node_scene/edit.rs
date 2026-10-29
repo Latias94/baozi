@@ -7,7 +7,7 @@ use crate::entity::AuthoredTransform;
 use crate::identity::{NodeId, SceneGenerationId};
 use crate::provenance::OptionsDigest;
 
-use super::ValidatedNodeScene;
+use super::SceneStorage;
 
 mod execution;
 mod graph;
@@ -164,7 +164,7 @@ pub(in crate::canonical_scene::store) use source::{
 };
 
 fn required_record_view<'scene, Schema>(
-    input: &'scene ValidatedNodeScene,
+    input: &'scene SceneStorage,
     source: CanonicalBlockRef<Schema>,
 ) -> Result<CanonicalRecordView<'scene>, StoreRuntimeError>
 where

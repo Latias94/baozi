@@ -5,7 +5,7 @@ This package contains `gltf-json` 1.4.1 from gltf-rs, release source revision
 licenses. Both license files and upstream authorship are retained.
 
 The package name is `baozi-gltf-json`; the library name remains `gltf_json`.
-`gltf-derive` remains the unchanged registry release 1.4.1. The two source changes
+`gltf-derive` remains the unchanged registry release 1.4.1. The source changes
 are:
 
 1. `src/mesh.rs`: use a checked accessor lookup in `primitive_validate_hook`.
@@ -15,6 +15,9 @@ are:
 2. `src/camera.rs`: require the projection payload selected by the validated
    camera discriminator. Having only the other payload must not yield a validated
    document whose projection getter later panics.
+3. `src/mesh.rs`: retain other morph attribute references in a flattened map.
+   The format adapter can explicitly reject unsupported semantics instead of
+   silently discarding attributes that the upstream three-field type omits.
 
 Baozi's `backend_malformed` integration target exercises these paths directly,
 without the adapter's panic containment, and through JSON and GLB import. Upstream

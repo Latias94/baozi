@@ -282,8 +282,42 @@ fn selected_scene_does_not_acquire_omitted_resource_closure() -> TestResult<()> 
         .scene()
         .capture_snapshot(SceneSnapshotLimits::try_new(32 * 1024, 256, 1_000_000)?)?;
     assert_eq!(snapshot.profile_resource_count(), 3);
-    assert_eq!(snapshot.profile_source_count(), 3);
-    assert_eq!(snapshot.profile_provenance_node_count(), 3);
+    let expected_selected_inventory = [
+        (SourceScopeEntityKind::Scene, 1),
+        (SourceScopeEntityKind::Node, 2),
+        (SourceScopeEntityKind::Mesh, 1),
+        (SourceScopeEntityKind::Primitive, 1),
+        (SourceScopeEntityKind::Material, 1),
+        (SourceScopeEntityKind::Texture, 1),
+        (SourceScopeEntityKind::Image, 1),
+        (SourceScopeEntityKind::Sampler, 1),
+        (SourceScopeEntityKind::Skin, 0),
+        (SourceScopeEntityKind::Camera, 0),
+        (SourceScopeEntityKind::Animation, 0),
+        (SourceScopeEntityKind::AnimationChannel, 0),
+        (SourceScopeEntityKind::AnimationSampler, 0),
+        (SourceScopeEntityKind::Buffer, 1),
+        (SourceScopeEntityKind::BufferView, 4),
+        (SourceScopeEntityKind::Accessor, 4),
+    ];
+    let selected_source_count: usize = expected_selected_inventory
+        .iter()
+        .map(|(_, count)| count)
+        .sum();
+    for (kind, expected) in expected_selected_inventory {
+        assert_eq!(
+            record.counts(kind).selected(),
+            u64::try_from(expected)?,
+            "selected inventory changed for {kind:?}",
+        );
+    }
+    // Document reuses resource leaf zero; only the selected declarations add source leaves.
+    let expected_source_count = snapshot.profile_resource_count() + selected_source_count;
+    assert_eq!(snapshot.profile_source_count(), expected_source_count);
+    assert_eq!(
+        snapshot.profile_provenance_node_count(),
+        expected_source_count + 1,
+    );
     assert!(snapshot.profile_attachment_count() > snapshot.profile_owner_count());
     Ok(())
 }
@@ -506,8 +540,46 @@ fn selected_buffer_view_image_is_materialized_from_selected_buffer() -> TestResu
     assert_eq!(snapshot.material_binding_count(), 1);
     assert_eq!(snapshot.image_payload_bytes(), triangle_png().len() as u64);
     assert_eq!(snapshot.profile_resource_count(), 2);
-    assert_eq!(snapshot.profile_source_count(), 2);
-    assert_eq!(snapshot.profile_provenance_node_count(), 2);
+    let record = report
+        .source_scope_record()
+        .expect("buffer-view image must retain source scope evidence");
+    let expected_selected_inventory = [
+        (SourceScopeEntityKind::Scene, 1),
+        (SourceScopeEntityKind::Node, 2),
+        (SourceScopeEntityKind::Mesh, 1),
+        (SourceScopeEntityKind::Primitive, 1),
+        (SourceScopeEntityKind::Material, 1),
+        (SourceScopeEntityKind::Texture, 1),
+        (SourceScopeEntityKind::Image, 1),
+        (SourceScopeEntityKind::Sampler, 1),
+        (SourceScopeEntityKind::Skin, 0),
+        (SourceScopeEntityKind::Camera, 0),
+        (SourceScopeEntityKind::Animation, 0),
+        (SourceScopeEntityKind::AnimationChannel, 0),
+        (SourceScopeEntityKind::AnimationSampler, 0),
+        (SourceScopeEntityKind::Buffer, 1),
+        // Four geometry views and the additional encoded-image view are all selected.
+        (SourceScopeEntityKind::BufferView, 5),
+        (SourceScopeEntityKind::Accessor, 4),
+    ];
+    let selected_source_count: usize = expected_selected_inventory
+        .iter()
+        .map(|(_, count)| count)
+        .sum();
+    for (kind, expected) in expected_selected_inventory {
+        assert_eq!(
+            record.counts(kind).selected(),
+            u64::try_from(expected)?,
+            "selected inventory changed for {kind:?}",
+        );
+    }
+    // The image has a source declaration but shares the selected buffer's resource leaf.
+    let expected_source_count = snapshot.profile_resource_count() + selected_source_count;
+    assert_eq!(snapshot.profile_source_count(), expected_source_count);
+    assert_eq!(
+        snapshot.profile_provenance_node_count(),
+        expected_source_count + 1,
+    );
     assert!(snapshot.profile_attachment_count() > snapshot.profile_owner_count());
     let manifest = report.successful_input_manifest();
     assert_eq!(manifest.counts().node_class_count(), 2);

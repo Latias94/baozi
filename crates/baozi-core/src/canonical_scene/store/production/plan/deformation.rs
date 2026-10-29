@@ -10,6 +10,7 @@ use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
 use crate::deform::{MorphDeltaSemantic, SkinMatrixSpace, SkinMatrixSpaces};
+use crate::entity::{EntityNameError, validate_entity_name_str};
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
 use super::super::super::schema::deformation::{
@@ -66,6 +67,19 @@ pub(in crate::canonical_scene::store) enum DeformationAuthoringSemanticError {
         table: &'static str,
         expected: u32,
         actual: usize,
+    },
+    #[error("skin {skin} has an invalid name: {source}")]
+    InvalidSkinName {
+        skin: usize,
+        #[source]
+        source: EntityNameError,
+    },
+    #[error("logical mesh {logical_mesh} morph target {target} has an invalid name: {source}")]
+    InvalidMorphTargetName {
+        logical_mesh: usize,
+        target: usize,
+        #[source]
+        source: EntityNameError,
     },
     #[error("skin {skin} uses a non-canonical matrix-space contract")]
     NonCanonicalSkinMatrixSpaces { skin: usize },
@@ -1724,6 +1738,14 @@ where
     for (skin_index, skin) in input.skins().iter().copied().enumerate() {
         let matrix_spaces = skin.matrix_spaces();
         context.run_unit(SceneValidationWork::Entity, || {
+            if let Presence::Present(name) = skin.name() {
+                validate_entity_name_str(name).map_err(|source| {
+                    DeformationAuthoringSemanticError::InvalidSkinName {
+                        skin: skin_index,
+                        source,
+                    }
+                })?;
+            }
             if !has_canonical_skin_base_spaces(matrix_spaces) {
                 return Err(
                     DeformationAuthoringSemanticError::NonCanonicalSkinMatrixSpaces {
@@ -1772,9 +1794,9 @@ where
         let (name_byte_offset, skin_name_byte_count) = match skin.name() {
             Presence::Absent => (0, 0),
             Presence::Present(name) => {
-                let count = collection_count(name.as_str().len(), "skin name bytes")?;
+                let count = collection_count(name.len(), "skin name bytes")?;
                 let offset = advance_cursor(&mut cursors.name_bytes, count, "skin name bytes")?;
-                for byte in name.as_str().as_bytes() {
+                for byte in name.as_bytes() {
                     context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
                 }
                 context.add_payload_bytes(u64::from(count))?;
@@ -1959,6 +1981,15 @@ where
         for (target, definition) in authored_definitions.iter().copied().enumerate() {
             let identity = definition.identity().value();
             context.run_unit(SceneValidationWork::Entity, || {
+                if let Presence::Present(name) = definition.name() {
+                    validate_entity_name_str(name).map_err(|source| {
+                        DeformationAuthoringSemanticError::InvalidMorphTargetName {
+                            logical_mesh,
+                            target,
+                            source,
+                        }
+                    })?;
+                }
                 if identity >= target_count {
                     return Err(
                         DeformationAuthoringSemanticError::MorphTargetIdentityOutOfRange {
@@ -1995,9 +2026,9 @@ where
             let (name_byte_offset, definition_name_byte_count) = match definition.name() {
                 Presence::Absent => (0, 0),
                 Presence::Present(name) => {
-                    let count = collection_count(name.as_str().len(), "morph target name bytes")?;
+                    let count = collection_count(name.len(), "morph target name bytes")?;
                     let offset = advance_cursor(name_byte_count, count, "morph target name bytes")?;
-                    for byte in name.as_str().as_bytes() {
+                    for byte in name.as_bytes() {
                         context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
                     }
                     context.add_payload_bytes(u64::from(count))?;
@@ -2745,7 +2776,7 @@ fn deformation_scratch_shape(
     for skin in input.skins() {
         if let Presence::Present(name) = skin.name() {
             skin_name_byte_count =
-                checked_add_len(skin_name_byte_count, name.as_str().len(), "skin name bytes")?;
+                checked_add_len(skin_name_byte_count, name.len(), "skin name bytes")?;
         }
         joint_node_count = checked_add_len(joint_node_count, skin.joints().len(), "skin joints")?;
         inverse_bind_scalar_count = inverse_bind_scalar_count
@@ -2769,11 +2800,8 @@ fn deformation_scratch_shape(
     }
     for definition in input.morph_target_definitions() {
         if let Presence::Present(name) = definition.name() {
-            morph_name_byte_count = checked_add_len(
-                morph_name_byte_count,
-                name.as_str().len(),
-                "morph target name bytes",
-            )?;
+            morph_name_byte_count =
+                checked_add_len(morph_name_byte_count, name.len(), "morph target name bytes")?;
         }
     }
     for logical in input.logical_meshes() {
@@ -2931,7 +2959,7 @@ where
         context.run_unit(SceneValidationWork::Traversal, || {
             let name_bytes = match skin.name() {
                 Presence::Absent => 0,
-                Presence::Present(name) => name.as_str().len(),
+                Presence::Present(name) => name.len(),
             };
             skin_name_bytes = checked_add_len(skin_name_bytes, name_bytes, "skin name bytes")?;
             joint_nodes = checked_add_len(joint_nodes, skin.joints().len(), "skin joint nodes")?;
@@ -2978,7 +3006,7 @@ where
         context.run_unit(SceneValidationWork::Traversal, || {
             let name_bytes = match definition.name() {
                 Presence::Absent => 0,
-                Presence::Present(name) => name.as_str().len(),
+                Presence::Present(name) => name.len(),
             };
             morph_name_bytes =
                 checked_add_len(morph_name_bytes, name_bytes, "morph target name bytes")?;

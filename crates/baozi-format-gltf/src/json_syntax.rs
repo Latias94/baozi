@@ -1,4 +1,8 @@
 use crate::GltfFailure;
+use crate::source_map::{
+    GltfSourceMap, SourceEntityId, SourceEntityKind, SourceExtensionKind, SourcePayload,
+    SourcePayloadKind, SourcePayloadSite, SourceRange,
+};
 use baozi_import::{
     ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredVec, ParseFailure, ParseResult,
     ParseScope,
@@ -29,12 +33,12 @@ impl From<ParseFailure> for ScanAbort {
     }
 }
 
-pub(crate) fn admit(
-    ctx: &ParseScope<'_>,
+pub(crate) fn admit<'scope>(
+    ctx: &'scope ParseScope<'_>,
     bytes: &[u8],
     raw_base: u64,
     is_glb: bool,
-) -> ParseResult<()> {
+) -> ParseResult<GltfSourceMap<'scope>> {
     ctx.enforce_resource_limit(
         "gltf-decoded-utf8-bytes",
         to_u64(bytes.len()),
@@ -57,8 +61,9 @@ pub(crate) fn admit(
 
     let JsonScanner {
         frames,
-        keys,
+        mut keys,
         stats,
+        mut source_map,
         ..
     } = scanner;
     debug_assert!(frames.is_empty());
@@ -66,21 +71,24 @@ pub(crate) fn admit(
     debug_assert!(stats.numbers <= stats.tokens);
     drop(frames);
 
-    let mut map = JsonSyntaxMap { keys, stats };
     ctx.with_parent_work_group(
         [
             (ImportWorkClass::Tokens, stats.tokens),
             (ImportWorkClass::Records, stats.containers),
         ],
-        || validate_duplicate_keys(ctx, bytes, raw_base, &mut map),
-    )
+        || validate_duplicate_keys(ctx, bytes, raw_base, &mut keys),
+    )?;
+    debug_assert_eq!(stats.containers, stats.objects + stats.arrays);
+    drop(keys);
+    source_map.finish(ctx)?;
+    Ok(source_map)
 }
 
-fn publish_ledger_limit(
+fn publish_ledger_limit<T>(
     ctx: &ParseScope<'_>,
     class: ImportWorkClass,
     attempted: u64,
-) -> ParseResult<()> {
+) -> ParseResult<T> {
     let result: ParseResult<()> = ctx.with_work(class, attempted, |work| work.complete_all());
     match result {
         Err(failure) => Err(failure),
@@ -113,11 +121,6 @@ impl JsonStats {
     }
 }
 
-struct JsonSyntaxMap<'scope> {
-    keys: MeteredVec<'scope, JsonKey>,
-    stats: JsonStats,
-}
-
 #[derive(Clone, Copy)]
 struct JsonKey {
     object_id: u64,
@@ -133,6 +136,77 @@ struct JsonKey {
 struct JsonFrame {
     state: FrameState,
     object_id: u64,
+    raw_start: usize,
+    next_ordinal: usize,
+    member: SourceMember,
+    member_key_start: usize,
+    member_key_end: usize,
+    source: SourceContext,
+}
+
+#[derive(Clone, Copy)]
+enum SourceContext {
+    Other,
+    Entity {
+        id: SourceEntityId,
+        map_index: usize,
+    },
+    EntityArray {
+        kind: SourceEntityKind,
+        parent_index: Option<usize>,
+    },
+    Property {
+        owner: SourceEntityId,
+        site: SourcePayloadSite,
+    },
+    Payload {
+        payload_index: usize,
+    },
+    Extensions {
+        payload_index: usize,
+        owner: SourceEntityId,
+        site: SourcePayloadSite,
+    },
+    TextureTransform {
+        payload_index: usize,
+        owner: SourceEntityId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceMember {
+    Other,
+    Scenes,
+    Nodes,
+    Meshes,
+    Primitives,
+    Materials,
+    Textures,
+    Images,
+    Samplers,
+    Skins,
+    Buffers,
+    BufferViews,
+    Accessors,
+    Animations,
+    Channels,
+    Cameras,
+    Extensions,
+    Extras,
+    Asset,
+    PbrMetallicRoughness,
+    BaseColorTexture,
+    MetallicRoughnessTexture,
+    NormalTexture,
+    OcclusionTexture,
+    EmissiveTexture,
+    Sparse,
+    Indices,
+    Values,
+    Target,
+    Orthographic,
+    Perspective,
+    KhrTextureTransform,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -158,6 +232,7 @@ struct JsonScanner<'scope, 'session, 'bytes> {
     root_end: Option<usize>,
     frames: MeteredVec<'scope, JsonFrame>,
     keys: MeteredVec<'scope, JsonKey>,
+    source_map: GltfSourceMap<'scope>,
     stats: JsonStats,
 }
 
@@ -185,6 +260,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 ImportStorageClass::FormatNormalization,
                 "gltf-json-object-keys",
             ),
+            source_map: GltfSourceMap::new(ctx),
             stats: JsonStats::new(),
         }
     }
@@ -214,7 +290,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     );
                 }
                 self.root_started = true;
-                self.scan_value(work)?;
+                self.scan_value(work, None)?;
                 if self.frames.is_empty() {
                     self.root_end = Some(self.cursor);
                 }
@@ -255,7 +331,12 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     );
                 }
                 self.set_frame_state(FrameState::ArrayCommaOrEnd)?;
-                self.scan_value(work)
+                let next_ordinal = frame
+                    .next_ordinal
+                    .checked_add(1)
+                    .ok_or_else(|| self.ctx.allocation_failure("gltf-json-array-ordinal"))?;
+                self.active_frame_mut()?.next_ordinal = next_ordinal;
+                self.scan_value(work, Some(frame))
             }
             FrameState::ArrayCommaOrEnd => match self.peek() {
                 Some(b',') => {
@@ -293,6 +374,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     );
                 }
                 let key = self.scan_string(work, true)?;
+                let member = source_member(self.bytes, key.content_start, key.content_end);
                 work.poll()?;
                 self.keys.try_push(JsonKey {
                     object_id: frame.object_id,
@@ -302,7 +384,12 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     content_end: key.content_end,
                     digest: key.digest,
                 })?;
-                self.set_frame_state(FrameState::ObjectColon)
+                let frame = self.active_frame_mut()?;
+                frame.member = member;
+                frame.member_key_start = key.raw_start;
+                frame.member_key_end = key.raw_end;
+                frame.state = FrameState::ObjectColon;
+                Ok(())
             }
             FrameState::ObjectColon => match self.peek() {
                 Some(b':') => {
@@ -335,7 +422,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                     );
                 }
                 self.set_frame_state(FrameState::ObjectCommaOrEnd)?;
-                self.scan_value(work)
+                self.scan_value(work, Some(frame))
             }
             FrameState::ObjectCommaOrEnd => match self.peek() {
                 Some(b',') => {
@@ -361,10 +448,16 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         }
     }
 
-    fn scan_value(&mut self, work: &mut ImportWorkScope<'_, 'session, 1>) -> ScanResult<()> {
+    fn scan_value(
+        &mut self,
+        work: &mut ImportWorkScope<'_, 'session, 1>,
+        parent: Option<JsonFrame>,
+    ) -> ScanResult<()> {
+        let raw_start = self.cursor;
+        let source = self.value_source(parent)?;
         match self.peek() {
-            Some(b'{') => self.open_container(work, FrameState::ObjectKeyOrEnd),
-            Some(b'[') => self.open_container(work, FrameState::ArrayValueOrEnd),
+            Some(b'{') => return self.open_container(work, FrameState::ObjectKeyOrEnd, source),
+            Some(b'[') => return self.open_container(work, FrameState::ArrayValueOrEnd, source),
             Some(b'"') => self.scan_string(work, false).map(|_| ()),
             Some(b't') => self.scan_literal(work, b"true"),
             Some(b'f') => self.scan_literal(work, b"false"),
@@ -394,13 +487,195 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 0,
                 "glTF JSON is missing a value",
             ),
+        }?;
+        self.finish_source_range(source, raw_start)
+    }
+
+    fn value_source(&mut self, parent: Option<JsonFrame>) -> ScanResult<SourceContext> {
+        let first = self.peek();
+        match parent {
+            None if first == Some(b'{') => self.begin_source_entity(SourceEntityId {
+                kind: SourceEntityKind::Document,
+                parent_index: None,
+                source_index: 0,
+            }),
+            Some(
+                frame @ JsonFrame {
+                    source: SourceContext::Entity { id, .. },
+                    ..
+                },
+            ) => {
+                if matches!(
+                    frame.member,
+                    SourceMember::Extensions | SourceMember::Extras
+                ) {
+                    return self.begin_source_payload(id, SourcePayloadSite::Entity, frame);
+                }
+                if first == Some(b'[') {
+                    return Ok(source_entity_array(id, frame.member)
+                        .map_or(SourceContext::Other, |(kind, parent_index)| {
+                            SourceContext::EntityArray { kind, parent_index }
+                        }));
+                }
+                Ok(source_property(
+                    id,
+                    SourcePayloadSite::Entity,
+                    frame.member,
+                    first,
+                ))
+            }
+            Some(
+                frame @ JsonFrame {
+                    source: SourceContext::Property { owner, site },
+                    ..
+                },
+            ) => {
+                if matches!(
+                    frame.member,
+                    SourceMember::Extensions | SourceMember::Extras
+                ) {
+                    return self.begin_source_payload(owner, site, frame);
+                }
+                Ok(source_property(owner, site, frame.member, first))
+            }
+            Some(
+                frame @ JsonFrame {
+                    source: SourceContext::Extensions { owner, site, .. },
+                    ..
+                },
+            ) => self.begin_source_payload(owner, site, frame),
+            Some(
+                frame @ JsonFrame {
+                    source: SourceContext::TextureTransform { owner, .. },
+                    ..
+                },
+            ) if matches!(
+                frame.member,
+                SourceMember::Extras | SourceMember::Extensions
+            ) =>
+            {
+                self.begin_source_payload(owner, SourcePayloadSite::TextureTransform, frame)
+            }
+            Some(JsonFrame {
+                source: SourceContext::EntityArray { kind, parent_index },
+                next_ordinal,
+                ..
+            }) if first == Some(b'{') => self.begin_source_entity(SourceEntityId {
+                kind,
+                parent_index,
+                source_index: next_ordinal,
+            }),
+            _ => Ok(SourceContext::Other),
         }
+    }
+
+    fn begin_source_entity(&mut self, id: SourceEntityId) -> ScanResult<SourceContext> {
+        let start = self.source_range(self.cursor)?;
+        let map_index = self.source_map.begin_entity(id, start)?;
+        Ok(SourceContext::Entity { id, map_index })
+    }
+
+    fn source_range(&self, raw_start: usize) -> ParseResult<SourceRange> {
+        SourceRange::from_json_offsets(self.raw_base, raw_start, self.cursor)
+            .ok_or_else(|| self.ctx.allocation_failure("gltf-source-byte-range"))
+    }
+
+    fn begin_source_payload(
+        &mut self,
+        owner: SourceEntityId,
+        site: SourcePayloadSite,
+        frame: JsonFrame,
+    ) -> ScanResult<SourceContext> {
+        let kind = if matches!(frame.source, SourceContext::Extensions { .. }) {
+            let extension = if frame.member == SourceMember::KhrTextureTransform {
+                SourceExtensionKind::KhrTextureTransform
+            } else {
+                SourceExtensionKind::Other
+            };
+            SourcePayloadKind::Extension(extension)
+        } else if frame.member == SourceMember::Extensions {
+            SourcePayloadKind::Extensions
+        } else {
+            SourcePayloadKind::Extras
+        };
+        let key_range = SourceRange::from_json_offsets(
+            self.raw_base,
+            frame.member_key_start,
+            frame.member_key_end,
+        )
+        .ok_or_else(|| self.ctx.allocation_failure("gltf-source-key-range"))?;
+        let payload_index = self.source_map.begin_payload(SourcePayload {
+            owner,
+            site,
+            kind,
+            key_range,
+            member_range: self.source_range(frame.member_key_start)?,
+            value_range: self.source_range(self.cursor)?,
+        })?;
+        if kind == SourcePayloadKind::Extensions && self.peek() == Some(b'{') {
+            Ok(SourceContext::Extensions {
+                payload_index,
+                owner,
+                site,
+            })
+        } else if kind == SourcePayloadKind::Extension(SourceExtensionKind::KhrTextureTransform)
+            && matches!(
+                site,
+                SourcePayloadSite::BaseColorTexture
+                    | SourcePayloadSite::MetallicRoughnessTexture
+                    | SourcePayloadSite::NormalTexture
+                    | SourcePayloadSite::OcclusionTexture
+                    | SourcePayloadSite::EmissiveTexture
+            )
+            && self.peek() == Some(b'{')
+        {
+            Ok(SourceContext::TextureTransform {
+                payload_index,
+                owner,
+            })
+        } else {
+            Ok(SourceContext::Payload { payload_index })
+        }
+    }
+
+    fn finish_source_range(&mut self, source: SourceContext, raw_start: usize) -> ScanResult<()> {
+        match source {
+            SourceContext::Entity { map_index, .. } => {
+                let range = self.source_range(raw_start)?;
+                let entity = self.source_map.entity_mut(map_index).ok_or_else(|| {
+                    self.ctx.format_failure(GltfFailure::internal(
+                        "JSON source range refers to a missing glTF entity",
+                    ))
+                })?;
+                entity.range = range;
+            }
+            SourceContext::Payload { payload_index }
+            | SourceContext::Extensions { payload_index, .. }
+            | SourceContext::TextureTransform { payload_index, .. } => {
+                let range = self.source_range(raw_start)?;
+                let raw_end = self.absolute_offset(self.cursor)?;
+                let payload = self.source_map.payload_mut(payload_index).ok_or_else(|| {
+                    self.ctx.format_failure(GltfFailure::internal(
+                        "JSON source range refers to a missing glTF payload",
+                    ))
+                })?;
+                payload.value_range = range;
+                payload.member_range.byte_length = raw_end
+                    .checked_sub(payload.member_range.byte_offset)
+                    .ok_or_else(|| self.ctx.allocation_failure("gltf-source-member-range"))?;
+            }
+            SourceContext::Other
+            | SourceContext::EntityArray { .. }
+            | SourceContext::Property { .. } => {}
+        }
+        Ok(())
     }
 
     fn open_container(
         &mut self,
         work: &mut ImportWorkScope<'_, 'session, 1>,
         state: FrameState,
+        source: SourceContext,
     ) -> ScanResult<()> {
         let depth = self
             .frames
@@ -435,7 +710,16 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         self.stats.containers = containers;
 
         work.poll()?;
-        self.frames.try_push(JsonFrame { state, object_id })?;
+        self.frames.try_push(JsonFrame {
+            state,
+            object_id,
+            raw_start: self.cursor,
+            next_ordinal: 0,
+            member: SourceMember::Other,
+            member_key_start: 0,
+            member_key_end: 0,
+            source,
+        })?;
         self.consume(work, 1)
     }
 
@@ -457,7 +741,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
         }
         self.count_token(work)?;
         self.consume(work, 1)?;
-        let Some(_closed) = self.frames.pop() else {
+        let Some(closed) = self.frames.pop() else {
             return Err(self
                 .ctx
                 .format_failure(GltfFailure::invalid_json(
@@ -468,6 +752,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 ))
                 .into());
         };
+        self.finish_source_range(closed.source, closed.raw_start)?;
         if self.frames.is_empty() {
             self.root_end = Some(self.cursor);
         }
@@ -909,19 +1194,24 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
     }
 
     fn set_frame_state(&mut self, state: FrameState) -> ScanResult<()> {
+        self.active_frame_mut()?.state = state;
+        Ok(())
+    }
+
+    fn active_frame_mut(&mut self) -> ScanResult<&mut JsonFrame> {
+        let byte_offset = self.absolute_offset(self.cursor)?;
         let Some(frame) = self.frames.as_mut_slice().last_mut() else {
             return Err(self
                 .ctx
                 .format_failure(GltfFailure::invalid_json(
                     "json-syntax-map",
-                    self.absolute_offset(self.cursor)?,
+                    byte_offset,
                     0,
                     "glTF JSON frame state update has no active frame",
                 ))
                 .into());
         };
-        frame.state = state;
-        Ok(())
+        Ok(frame)
     }
 
     fn current_scalar_length(
@@ -1101,37 +1391,174 @@ struct ScannedString {
     digest: [u8; 32],
 }
 
+/// Only glTF table and payload names are retained; arbitrary keys never allocate path strings.
+/// The extra decode is bounded by the longest recognized ASCII name, even for escaped keys.
+fn source_member(bytes: &[u8], content_start: usize, content_end: usize) -> SourceMember {
+    let mut scalars = DecodedScalars::new(bytes, content_start, content_end);
+    let mut name = [0_u8; 24];
+    let mut length = 0;
+    loop {
+        match scalars.next_scalar() {
+            Ok(None) => break,
+            Ok(Some(scalar)) if scalar <= 0x7f && length < name.len() => {
+                name[length] = scalar as u8;
+                length += 1;
+            }
+            _ => return SourceMember::Other,
+        }
+    }
+    match &name[..length] {
+        b"scenes" => SourceMember::Scenes,
+        b"nodes" => SourceMember::Nodes,
+        b"meshes" => SourceMember::Meshes,
+        b"primitives" => SourceMember::Primitives,
+        b"materials" => SourceMember::Materials,
+        b"textures" => SourceMember::Textures,
+        b"images" => SourceMember::Images,
+        b"samplers" => SourceMember::Samplers,
+        b"skins" => SourceMember::Skins,
+        b"buffers" => SourceMember::Buffers,
+        b"bufferViews" => SourceMember::BufferViews,
+        b"accessors" => SourceMember::Accessors,
+        b"animations" => SourceMember::Animations,
+        b"channels" => SourceMember::Channels,
+        b"cameras" => SourceMember::Cameras,
+        b"extensions" => SourceMember::Extensions,
+        b"extras" => SourceMember::Extras,
+        b"asset" => SourceMember::Asset,
+        b"pbrMetallicRoughness" => SourceMember::PbrMetallicRoughness,
+        b"baseColorTexture" => SourceMember::BaseColorTexture,
+        b"metallicRoughnessTexture" => SourceMember::MetallicRoughnessTexture,
+        b"normalTexture" => SourceMember::NormalTexture,
+        b"occlusionTexture" => SourceMember::OcclusionTexture,
+        b"emissiveTexture" => SourceMember::EmissiveTexture,
+        b"sparse" => SourceMember::Sparse,
+        b"indices" => SourceMember::Indices,
+        b"values" => SourceMember::Values,
+        b"target" => SourceMember::Target,
+        b"orthographic" => SourceMember::Orthographic,
+        b"perspective" => SourceMember::Perspective,
+        b"KHR_texture_transform" => SourceMember::KhrTextureTransform,
+        _ => SourceMember::Other,
+    }
+}
+
+/// These are concrete core property objects, not paths through arbitrary extension JSON.
+fn source_property(
+    owner: SourceEntityId,
+    parent_site: SourcePayloadSite,
+    member: SourceMember,
+    first: Option<u8>,
+) -> SourceContext {
+    if first != Some(b'{') {
+        return SourceContext::Other;
+    }
+    let site = match (owner.kind, parent_site, member) {
+        (SourceEntityKind::Document, SourcePayloadSite::Entity, SourceMember::Asset) => {
+            SourcePayloadSite::Asset
+        }
+        (SourceEntityKind::Material, SourcePayloadSite::Entity, member) => match member {
+            SourceMember::PbrMetallicRoughness => SourcePayloadSite::MaterialPbrMetallicRoughness,
+            SourceMember::NormalTexture => SourcePayloadSite::NormalTexture,
+            SourceMember::OcclusionTexture => SourcePayloadSite::OcclusionTexture,
+            SourceMember::EmissiveTexture => SourcePayloadSite::EmissiveTexture,
+            _ => return SourceContext::Other,
+        },
+        (SourceEntityKind::Material, SourcePayloadSite::MaterialPbrMetallicRoughness, member) => {
+            match member {
+                SourceMember::BaseColorTexture => SourcePayloadSite::BaseColorTexture,
+                SourceMember::MetallicRoughnessTexture => {
+                    SourcePayloadSite::MetallicRoughnessTexture
+                }
+                _ => return SourceContext::Other,
+            }
+        }
+        (SourceEntityKind::Accessor, SourcePayloadSite::Entity, SourceMember::Sparse) => {
+            SourcePayloadSite::AccessorSparse
+        }
+        (SourceEntityKind::Accessor, SourcePayloadSite::AccessorSparse, SourceMember::Indices) => {
+            SourcePayloadSite::AccessorSparseIndices
+        }
+        (SourceEntityKind::Accessor, SourcePayloadSite::AccessorSparse, SourceMember::Values) => {
+            SourcePayloadSite::AccessorSparseValues
+        }
+        (SourceEntityKind::AnimationChannel, SourcePayloadSite::Entity, SourceMember::Target) => {
+            SourcePayloadSite::AnimationChannelTarget
+        }
+        (SourceEntityKind::Camera, SourcePayloadSite::Entity, SourceMember::Orthographic) => {
+            SourcePayloadSite::CameraOrthographic
+        }
+        (SourceEntityKind::Camera, SourcePayloadSite::Entity, SourceMember::Perspective) => {
+            SourcePayloadSite::CameraPerspective
+        }
+        _ => return SourceContext::Other,
+    };
+    SourceContext::Property { owner, site }
+}
+
+/// A table is recognized only at its schema owner, never by a matching key at an arbitrary depth.
+fn source_entity_array(
+    owner: SourceEntityId,
+    member: SourceMember,
+) -> Option<(SourceEntityKind, Option<usize>)> {
+    let kind = match (owner.kind, member) {
+        (SourceEntityKind::Document, SourceMember::Scenes) => SourceEntityKind::Scene,
+        (SourceEntityKind::Document, SourceMember::Nodes) => SourceEntityKind::Node,
+        (SourceEntityKind::Document, SourceMember::Meshes) => SourceEntityKind::Mesh,
+        (SourceEntityKind::Document, SourceMember::Materials) => SourceEntityKind::Material,
+        (SourceEntityKind::Document, SourceMember::Textures) => SourceEntityKind::Texture,
+        (SourceEntityKind::Document, SourceMember::Images) => SourceEntityKind::Image,
+        (SourceEntityKind::Document, SourceMember::Samplers) => SourceEntityKind::Sampler,
+        (SourceEntityKind::Document, SourceMember::Skins) => SourceEntityKind::Skin,
+        (SourceEntityKind::Document, SourceMember::Buffers) => SourceEntityKind::Buffer,
+        (SourceEntityKind::Document, SourceMember::BufferViews) => SourceEntityKind::BufferView,
+        (SourceEntityKind::Document, SourceMember::Accessors) => SourceEntityKind::Accessor,
+        (SourceEntityKind::Document, SourceMember::Animations) => SourceEntityKind::Animation,
+        (SourceEntityKind::Document, SourceMember::Cameras) => SourceEntityKind::Camera,
+        (SourceEntityKind::Mesh, SourceMember::Primitives) => {
+            return Some((SourceEntityKind::Primitive, Some(owner.source_index)));
+        }
+        (SourceEntityKind::Animation, SourceMember::Channels) => {
+            return Some((SourceEntityKind::AnimationChannel, Some(owner.source_index)));
+        }
+        (SourceEntityKind::Animation, SourceMember::Samplers) => {
+            return Some((SourceEntityKind::AnimationSampler, Some(owner.source_index)));
+        }
+        _ => return None,
+    };
+    Some((kind, None))
+}
+
 fn validate_duplicate_keys(
     ctx: &ParseScope<'_>,
     bytes: &[u8],
     raw_base: u64,
-    map: &mut JsonSyntaxMap<'_>,
+    keys: &mut MeteredVec<'_, JsonKey>,
 ) -> ParseResult<()> {
-    let sort_work = duplicate_sort_work(map.keys.len());
+    let sort_work = duplicate_sort_work(keys.len());
     if sort_work != 0 {
         ctx.with_work(
             ImportWorkClass::WorkUnits,
             sort_work,
             |work| -> ParseResult<()> {
                 let mut comparisons = 0_u64;
-                map.keys
-                    .try_sort_unstable_by(|left, right| -> Result<Ordering, ParseFailure> {
-                        comparisons = comparisons.saturating_add(1);
-                        if comparisons.is_multiple_of(DUPLICATE_POLL_COMPARISONS) {
-                            work.poll()?;
-                        }
-                        Ok(left
-                            .object_id
-                            .cmp(&right.object_id)
-                            .then_with(|| left.digest.cmp(&right.digest))
-                            .then_with(|| left.raw_start.cmp(&right.raw_start)))
-                    })?;
+                keys.try_sort_unstable_by(|left, right| -> Result<Ordering, ParseFailure> {
+                    comparisons = comparisons.saturating_add(1);
+                    if comparisons.is_multiple_of(DUPLICATE_POLL_COMPARISONS) {
+                        work.poll()?;
+                    }
+                    Ok(left
+                        .object_id
+                        .cmp(&right.object_id)
+                        .then_with(|| left.digest.cmp(&right.digest))
+                        .then_with(|| left.raw_start.cmp(&right.raw_start)))
+                })?;
                 work.complete_all()
             },
         )?;
     }
 
-    let keys = map.keys.as_slice();
+    let keys = keys.as_slice();
     let mut group_start = 0usize;
     while group_start < keys.len() {
         ctx.poll()?;
@@ -1167,7 +1594,6 @@ fn validate_duplicate_keys(
         group_start = group_end;
     }
 
-    debug_assert_eq!(map.stats.containers, map.stats.objects + map.stats.arrays);
     Ok(())
 }
 
@@ -1343,4 +1769,400 @@ const fn is_value_delimiter(byte: u8) -> bool {
 
 fn to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use baozi_import::{
+        DetectionOutcome, DetectionResult, DetectionScope, FormatDescriptor, FormatImporter,
+        FormatSelection, ImportConfigOverlay, ImportOperationControl, ImportRequest,
+        ImportRequestLayer, OptionCompileLimits, Probe, ReadConfidence, ReadHint,
+        RegistryBuildLimits, RegistryBuilder, SceneDraft, import_bytes,
+    };
+    use baozi_io::AssetPath;
+    use std::error::Error;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    };
+
+    type TestResult = Result<(), Box<dyn Error>>;
+    type Inspect = fn(&ParseScope<'_>, &GltfSourceMap<'_>);
+
+    struct InspectAdmission {
+        inspect: Inspect,
+        inspected: Arc<AtomicBool>,
+    }
+
+    impl FormatImporter for InspectAdmission {
+        fn descriptor(&self) -> FormatDescriptor {
+            crate::format_descriptor_for_development()
+        }
+
+        fn detect(
+            &self,
+            _: &Probe<'_>,
+            _: &ReadHint,
+            _: &DetectionScope<'_>,
+        ) -> DetectionResult<DetectionOutcome> {
+            Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+        }
+
+        fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+            let map = GltfSourceMap::from_primary_for_test(scope)?;
+            (self.inspect)(scope, &map);
+            self.inspected.store(true, AtomicOrdering::SeqCst);
+            // The test stops at admission, before either backend decode or scene construction.
+            Err(scope.format_failure(GltfFailure::internal("source map inspection completed")))
+        }
+    }
+
+    fn inspect_admission(bytes: &[u8], inspect: Inspect) -> TestResult {
+        let inspected = Arc::new(AtomicBool::new(false));
+        let mut registry = RegistryBuilder::new();
+        registry.register(InspectAdmission {
+            inspect,
+            inspected: Arc::clone(&inspected),
+        })?;
+        let request = registry
+            .freeze(RegistryBuildLimits::default())?
+            .compile_request(
+                &ImportRequest::from_layers(
+                    ImportRequestLayer::default(),
+                    ImportRequestLayer::new(ImportConfigOverlay::default().with_format_selection(
+                        FormatSelection::Forced(baozi_import::authoring::FormatId::new(
+                            crate::FORMAT_ID,
+                        )?),
+                    )),
+                ),
+                OptionCompileLimits::default(),
+            )?;
+        let result = import_bytes(
+            &request,
+            AssetPath::new("mapping.gltf")?,
+            bytes,
+            ImportOperationControl::default(),
+        );
+        assert!(
+            inspected.load(AtomicOrdering::SeqCst),
+            "admission failed before inspection"
+        );
+        let failure = result
+            .expect_err("inspection must stop before scene construction")
+            .into_operation_failure()?;
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+        Ok(())
+    }
+
+    fn id(
+        kind: SourceEntityKind,
+        parent_index: Option<usize>,
+        source_index: usize,
+    ) -> SourceEntityId {
+        SourceEntityId {
+            kind,
+            parent_index,
+            source_index,
+        }
+    }
+
+    fn assert_raw(scope: &ParseScope<'_>, range: SourceRange, expected: &str) {
+        let raw = range.raw_range();
+        let start = usize::try_from(raw.start).expect("fixture offset fits usize");
+        let end = usize::try_from(raw.end).expect("fixture offset fits usize");
+        assert_eq!(
+            scope.primary_bytes().get(start..end),
+            Some(expected.as_bytes())
+        );
+    }
+
+    fn glb(json: &[u8]) -> Vec<u8> {
+        let json_length = (json.len() + 3) & !3;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"glTF");
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(20 + json_length).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(json_length).unwrap().to_le_bytes());
+        bytes.extend_from_slice(b"JSON");
+        bytes.extend_from_slice(json);
+        bytes.resize(20 + json_length, b' ');
+        bytes
+    }
+
+    #[test]
+    fn raw_ranges_preserve_unicode_escaped_keys_and_glb_offsets() -> TestResult {
+        let json = " \r\n{\"asset\":{\"version\":\"2.0\"},\"n\\u006fdes\":[{\"name\":\"包子🦀\",\"e\\u0078tras\": [\"原始\",{\"nodes\":[{}]}]}]}\n";
+        fn inspect(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) {
+            let base = if scope.primary_bytes().starts_with(b"glTF") {
+                20
+            } else {
+                0
+            };
+            let document = map.get(id(SourceEntityKind::Document, None, 0)).unwrap();
+            assert_eq!(document.range.byte_offset, base + 3);
+            assert_raw(
+                scope,
+                document.range,
+                "{\"asset\":{\"version\":\"2.0\"},\"n\\u006fdes\":[{\"name\":\"包子🦀\",\"e\\u0078tras\": [\"原始\",{\"nodes\":[{}]}]}]}",
+            );
+            let node = map.get(id(SourceEntityKind::Node, None, 0)).unwrap();
+            assert_raw(
+                scope,
+                node.range,
+                "{\"name\":\"包子🦀\",\"e\\u0078tras\": [\"原始\",{\"nodes\":[{}]}]}",
+            );
+            let payloads = map.payloads_for(node.id);
+            assert_eq!(payloads.len(), 1);
+            assert_eq!(payloads[0].kind, SourcePayloadKind::Extras);
+            assert_raw(scope, payloads[0].key_range, "\"e\\u0078tras\"");
+            assert_raw(
+                scope,
+                payloads[0].member_range,
+                "\"e\\u0078tras\": [\"原始\",{\"nodes\":[{}]}]",
+            );
+            assert_raw(
+                scope,
+                payloads[0].value_range,
+                "[\"原始\",{\"nodes\":[{}]}]",
+            );
+            assert_eq!(
+                map.entities().len(),
+                2,
+                "payload contents must not create entities"
+            );
+        }
+        inspect_admission(json.as_bytes(), inspect)?;
+        inspect_admission(&glb(json.as_bytes()), inspect)
+    }
+
+    #[test]
+    fn indexed_entities_keep_local_ordinals_and_missing_ranges() -> TestResult {
+        let json = br#"{
+            "scenes":[{"name":"scene"}], "nodes":[null,{"name":"node"},[{}]],
+            "meshes":[{"primitives":[{"name":"m0p0"},{"name":"m0p1"}]},
+                      {"primitives":[{"name":"m1p0"}]}],
+            "materials":[{"name":"material"}], "textures":[{"name":"texture"}],
+            "images":[{"name":"image"}], "samplers":[{"name":"sampler"}],
+            "skins":[{"name":"skin"}], "buffers":[{"name":"buffer"}],
+            "bufferViews":[{"name":"view"}], "accessors":[{"name":"accessor"}],
+            "animations":[{"channels":[],"samplers":[{"name":"a0s0"}]},
+                          {"channels":[{"name":"a1c0"}],"samplers":[{"name":"a1s0"}]}],
+            "cameras":[{"name":"camera"}], "extras":{"meshes":[{}]}
+        }"#;
+        inspect_admission(json, |scope, map| {
+            let top_level = [
+                (SourceEntityKind::Scene, "scene"),
+                (SourceEntityKind::Material, "material"),
+                (SourceEntityKind::Texture, "texture"),
+                (SourceEntityKind::Image, "image"),
+                (SourceEntityKind::Sampler, "sampler"),
+                (SourceEntityKind::Skin, "skin"),
+                (SourceEntityKind::Buffer, "buffer"),
+                (SourceEntityKind::BufferView, "view"),
+                (SourceEntityKind::Accessor, "accessor"),
+                (SourceEntityKind::Camera, "camera"),
+            ];
+            for (kind, name) in top_level {
+                assert_raw(
+                    scope,
+                    map.get(id(kind, None, 0)).unwrap().range,
+                    &format!(r#"{{"name":"{name}"}}"#),
+                );
+            }
+            assert_raw(
+                scope,
+                map.get(id(SourceEntityKind::Node, None, 1)).unwrap().range,
+                r#"{"name":"node"}"#,
+            );
+            assert!(map.get(id(SourceEntityKind::Node, None, 0)).is_none());
+            assert!(map.get(id(SourceEntityKind::Node, None, 2)).is_none());
+            for (kind, parent, index, name) in [
+                (SourceEntityKind::Primitive, 0, 0, "m0p0"),
+                (SourceEntityKind::Primitive, 0, 1, "m0p1"),
+                (SourceEntityKind::Primitive, 1, 0, "m1p0"),
+                (SourceEntityKind::AnimationSampler, 0, 0, "a0s0"),
+                (SourceEntityKind::AnimationSampler, 1, 0, "a1s0"),
+                (SourceEntityKind::AnimationChannel, 1, 0, "a1c0"),
+            ] {
+                assert_raw(
+                    scope,
+                    map.get(id(kind, Some(parent), index)).unwrap().range,
+                    &format!(r#"{{"name":"{name}"}}"#),
+                );
+            }
+            assert!(
+                map.get(id(SourceEntityKind::AnimationChannel, Some(0), 0))
+                    .is_none()
+            );
+            assert!(
+                map.get(id(SourceEntityKind::Primitive, Some(2), 0))
+                    .is_none()
+            );
+            assert_eq!(map.entities().len(), 22);
+        })
+    }
+
+    #[test]
+    fn payloads_retain_owners_sites_unknown_names_and_all_texture_binding_locations() -> TestResult
+    {
+        let json = br#"{
+          "asset":{"extras":null},
+          "materials":[{
+            "extensions":{"KHR_texture_transform":{"extras":{"nodes":[{}]}}},
+            "pbrMetallicRoughness":{
+              "extras":true,
+              "baseColorTexture":{"extensions":{"KHR_texture_transform":{"texCoord":0,"extras":null},"VENDOR_\u0078":[]}},
+              "metallicRoughnessTexture":{"extensions":{"KHR_texture_transform":{"texCoord":1}}}
+            },
+            "normalTexture":{"extensions":{"KHR_texture_transform":{"texCoord":2}}},
+            "occlusionTexture":{"extensions":{"KHR_texture_transform":{"texCoord":3}}},
+            "emissiveTexture":{"e\u0078tras":"raw", "extensions":{"KHR_texture_\u0074ransform":{"texCoord":4}}}
+          }],
+          "nodes":[{"extras":false,"extensions":{}},{"extensions":{"extras":0}}],
+          "accessors":[{"sparse":{"extras":[],"indices":{"extras":2},"values":{"extensions":{"VENDOR_sparse":{}}}}}],
+          "animations":[{"channels":[{"target":{"extras":3}}],"samplers":[{"extras":4}]}],
+          "cameras":[{"perspective":{"extras":5}}]
+        }"#;
+        inspect_admission(json, |scope, map| {
+            let material = id(SourceEntityKind::Material, None, 0);
+            let payloads = map.payloads_for(material);
+            for (site, tex_coord) in [
+                (SourcePayloadSite::BaseColorTexture, 0),
+                (SourcePayloadSite::MetallicRoughnessTexture, 1),
+                (SourcePayloadSite::NormalTexture, 2),
+                (SourcePayloadSite::OcclusionTexture, 3),
+                (SourcePayloadSite::EmissiveTexture, 4),
+            ] {
+                let payload = payloads
+                    .iter()
+                    .find(|payload| {
+                        payload.site == site
+                            && payload.kind
+                                == SourcePayloadKind::Extension(
+                                    SourceExtensionKind::KhrTextureTransform,
+                                )
+                    })
+                    .unwrap();
+                let expected = if tex_coord == 0 {
+                    r#"{"texCoord":0,"extras":null}"#.to_owned()
+                } else {
+                    format!(r#"{{"texCoord":{tex_coord}}}"#)
+                };
+                assert_raw(scope, payload.value_range, &expected);
+            }
+            let unknown = payloads
+                .iter()
+                .find(|payload| {
+                    payload.kind == SourcePayloadKind::Extension(SourceExtensionKind::Other)
+                })
+                .unwrap();
+            assert_eq!(unknown.site, SourcePayloadSite::BaseColorTexture);
+            assert_raw(scope, unknown.key_range, r#""VENDOR_\u0078""#);
+            assert_raw(scope, unknown.value_range, "[]");
+            let unsupported_site = payloads
+                .iter()
+                .find(|payload| {
+                    payload.site == SourcePayloadSite::Entity
+                        && payload.kind
+                            == SourcePayloadKind::Extension(
+                                SourceExtensionKind::KhrTextureTransform,
+                            )
+                })
+                .unwrap();
+            assert_raw(
+                scope,
+                unsupported_site.value_range,
+                r#"{"extras":{"nodes":[{}]}}"#,
+            );
+            assert_eq!(
+                map.entities()
+                    .iter()
+                    .filter(|entity| entity.id.kind == SourceEntityKind::Node)
+                    .count(),
+                2
+            );
+            let node_payloads = map.payloads_for(id(SourceEntityKind::Node, None, 1));
+            assert_eq!(node_payloads.len(), 2);
+            assert_eq!(
+                node_payloads[1].kind,
+                SourcePayloadKind::Extension(SourceExtensionKind::Other)
+            );
+            assert_raw(scope, node_payloads[1].key_range, r#""extras""#);
+            for (owner, site) in [
+                (
+                    id(SourceEntityKind::Document, None, 0),
+                    SourcePayloadSite::Asset,
+                ),
+                (material, SourcePayloadSite::MaterialPbrMetallicRoughness),
+                (material, SourcePayloadSite::EmissiveTexture),
+                (material, SourcePayloadSite::TextureTransform),
+                (
+                    id(SourceEntityKind::Accessor, None, 0),
+                    SourcePayloadSite::AccessorSparse,
+                ),
+                (
+                    id(SourceEntityKind::Accessor, None, 0),
+                    SourcePayloadSite::AccessorSparseIndices,
+                ),
+                (
+                    id(SourceEntityKind::AnimationChannel, Some(0), 0),
+                    SourcePayloadSite::AnimationChannelTarget,
+                ),
+                (
+                    id(SourceEntityKind::AnimationSampler, Some(0), 0),
+                    SourcePayloadSite::Entity,
+                ),
+                (
+                    id(SourceEntityKind::Camera, None, 0),
+                    SourcePayloadSite::CameraPerspective,
+                ),
+            ] {
+                assert!(
+                    map.payloads_for(owner)
+                        .iter()
+                        .any(|payload| payload.site == site
+                            && payload.kind == SourcePayloadKind::Extras),
+                    "missing payload at {owner:?}/{site:?}"
+                );
+            }
+            assert!(
+                map.payloads_for(id(SourceEntityKind::Node, None, 99))
+                    .is_empty()
+            );
+        })
+    }
+
+    #[test]
+    fn empty_objects_and_arrays_do_not_fabricate_source_entities() -> TestResult {
+        inspect_admission(b"{}", |scope, map| {
+            assert_eq!(map.entities().len(), 1);
+            assert_raw(scope, map.entities()[0].range, "{}");
+            assert!(map.payloads().is_empty());
+        })?;
+        inspect_admission(
+            br#"{"scenes":[],"nodes":[],"meshes":[],"animations":[]}"#,
+            |_, map| {
+                assert_eq!(map.entities().len(), 1);
+                assert!(map.get(id(SourceEntityKind::Scene, None, 0)).is_none());
+                assert!(map.payloads().is_empty());
+            },
+        )?;
+        inspect_admission(b"[]", |_, map| {
+            assert!(map.entities().is_empty());
+            assert!(map.get(id(SourceEntityKind::Document, None, 0)).is_none());
+        })
+    }
+
+    #[test]
+    fn raw_range_construction_rejects_reversed_or_overflowing_offsets() {
+        assert_eq!(
+            SourceRange::from_json_offsets(20, 3, 9)
+                .unwrap()
+                .raw_range(),
+            23..29
+        );
+        assert!(SourceRange::from_json_offsets(0, 9, 3).is_none());
+        assert!(SourceRange::from_json_offsets(u64::MAX, 0, 1).is_none());
+    }
 }

@@ -67,7 +67,25 @@ fn measured_scene(
             build.publish_for_test().expect("scale publication"),
         ));
     });
-    (result.expect("measured Scene output"), allocations)
+    let parts = result.expect("measured Scene output");
+    let nodes = parts.scene.read_nodes();
+    let geometry = parts.scene.read_geometry();
+    eprintln!(
+        "typed-layout: node_rows={}, node_row_bytes={}, child_index_bytes={}, logical_mesh_row_bytes={}, \
+        primitive_row_bytes={}, attribute_row_bytes={}, mesh_instance_row_bytes={}, geometry_rows={}/{}/{}/{}",
+        nodes.nodes.len(),
+        size_of_val(nodes.nodes.as_slice()),
+        size_of_val(nodes.children.as_slice()),
+        size_of_val(geometry.logical_meshes.as_slice()),
+        size_of_val(geometry.primitives.as_slice()),
+        size_of_val(geometry.attributes.as_slice()),
+        size_of_val(geometry.mesh_instances.as_slice()),
+        geometry.logical_meshes.len(),
+        geometry.primitives.len(),
+        geometry.attributes.len(),
+        geometry.mesh_instances.len()
+    );
+    (parts, allocations)
 }
 
 fn measured_edit(
@@ -371,7 +389,7 @@ fn independent_indexed_primitive_buffers_scale() {
             assert_eq!(indices, [0, 1, 2]);
             assert!(
                 index_addresses.insert(indices.as_ptr()),
-                "each indexed primitive must own a distinct buffer"
+                "each indexed primitive must retain a distinct contiguous index slice"
             );
             let AttributeData::DenseF32 { lanes: 3, values } =
                 primitive.positions().unwrap().data()
@@ -489,6 +507,13 @@ fn shared_eight_mib_points_payload_node_edit_scale() {
         assert_eq!(
             destination_primitive.vertex_count(),
             u32::try_from(VERTICES).unwrap()
+        );
+        assert!(
+            std::ptr::eq(
+                source.as_node_scene().read_geometry(),
+                destination.as_node_scene().read_geometry()
+            ),
+            "a node edit must share the actual geometry table owner, not rebuild its rows"
         );
         assert!(
             std::ptr::eq(positions(&source), positions(&destination)),
@@ -692,6 +717,13 @@ fn influence_and_metadata_validation_scale() {
             let NodeSceneEditTerminal::Success(edited) = terminal else {
                 panic!("influence/metadata node edit must publish");
             };
+            // This edit shares the large immutable payloads. Its validation marks and
+            // descriptors are small, so its peak cannot include a metadata-sized copy.
+            assert!(
+                allocations.bytes_max < u64::try_from(metadata_size).unwrap(),
+                "shared metadata validation allocated a payload-sized temporary: peak={}, payload={metadata_size}",
+                allocations.bytes_max
+            );
             record_measurement(
                 &format!("influences/{vertices}/metadata/{metadata_size}/edit"),
                 edited.report.ledger_evidence(),

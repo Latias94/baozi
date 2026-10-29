@@ -4,7 +4,8 @@ use crate::entity::AuthoredTransform;
 use crate::identity::{NodeId, NodeIndex, SceneEntityKind, SceneLookupError, SceneStorageIndex};
 use crate::provenance::{OperationIdentity, OperationKind, OptionsDigest};
 
-use super::super::{ValidatedNodeScene, semantic::NodeSceneSemanticError};
+use super::super::SceneStorage;
+use super::super::semantic::NodeSceneSemanticError;
 use super::plan::{NodeSceneEditPlanError, PendingNodeSceneEdit};
 
 /// The allocation-free result of classifying one transform-only edit request.
@@ -15,7 +16,7 @@ use super::plan::{NodeSceneEditPlanError, PendingNodeSceneEdit};
 )]
 pub(in crate::canonical_scene::store) enum NodeTransformEditStart<'scene> {
     /// The requested authored bits already exist; this is the exact input Scene.
-    Unchanged(&'scene ValidatedNodeScene),
+    Unchanged(&'scene SceneStorage),
     /// The request changes authored bits and is ready for operation admission.
     Changed(PendingNodeSceneEdit),
 }
@@ -39,7 +40,7 @@ pub(in crate::canonical_scene::store) enum NodeTransformEditStartError {
 /// result borrows `input` directly and performs no allocation, operation start, or generation
 /// reservation. A changed result contains only logical coordinates and checked fixed counts.
 pub(in crate::canonical_scene::store) fn try_begin_node_transform_edit<'scene>(
-    input: &'scene ValidatedNodeScene,
+    input: &'scene SceneStorage,
     node: NodeId,
     replacement: AuthoredTransform,
     options_digest: OptionsDigest,
@@ -60,14 +61,11 @@ pub(in crate::canonical_scene::store) fn try_begin_node_transform_edit<'scene>(
         input,
         target.source_index,
         target.canonical_row,
-        target_transform.transform_offset(),
-        old_transform,
         replacement,
         OperationIdentity::new(OperationKind::Transform, options_digest),
         source_node_count,
         proof.source_root_count(),
         proof.source_edge_count(),
-        target_transform.sequence_scalar_count(),
     )
     .map(NodeTransformEditStart::Changed)
     .map_err(NodeTransformEditStartError::from)

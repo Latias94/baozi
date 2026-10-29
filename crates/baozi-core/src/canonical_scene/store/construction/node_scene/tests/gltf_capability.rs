@@ -28,7 +28,7 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionTerminal, NodeSceneDraftBuild, NodeSceneSuccessParts,
-    NodeSceneTestTransaction, ValidatedNodeScene,
+    NodeSceneTestTransaction, SceneStorage,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AnimationAuthoringFailure, AnimationAuthoringSemanticError,
@@ -48,7 +48,7 @@ use crate::canonical_scene::store::production::{
     SkinAuthoring, SkinLocalId, SpatialAuthoringBatch, TextureAuthoring, TextureLocalId,
 };
 use crate::deform::{MorphDeltaSemantic, SkinMatrixSpace, SkinMatrixSpaces};
-use crate::entity::{AuthoredTransform, AuthoredTransformKind, EntityName};
+use crate::entity::{AuthoredTransform, AuthoredTransformKind};
 use crate::extension::ExtensionMediaType;
 use crate::geometry::TopologyKind;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError, SceneGenerationId};
@@ -904,7 +904,7 @@ fn encode_gltf_source(
     encoder.tag(b'd');
     let deformation = input.deformation();
     encoder.list(deformation.skins(), |encoder, skin| {
-        encoder.presence(skin.name(), |encoder, name| encoder.utf8(name.as_str()));
+        encoder.presence(skin.name(), |encoder, name| encoder.utf8(name));
         encoder.list(skin.joints(), |encoder, joint| encoder.u32(joint.index()));
         encoder.list(skin.inverse_bind_matrices(), |encoder, matrix| {
             encode_matrix(encoder, *matrix);
@@ -919,7 +919,7 @@ fn encode_gltf_source(
         |encoder, definition| {
             encoder.u32(definition.identity().value());
             encoder.presence(definition.name(), |encoder, name| {
-                encoder.utf8(name.as_str());
+                encoder.utf8(name);
             });
         },
     );
@@ -1431,11 +1431,8 @@ fn with_gltf_capability_input<R>(
         &geometry_instances,
     );
 
-    let skin_name = EntityName::try_new("Armature").expect("skin name");
-    let morph_names = [
-        EntityName::try_new("Smile").expect("morph name"),
-        EntityName::try_new("Blink").expect("morph name"),
-    ];
+    let skin_name = "Armature";
+    let morph_names = ["Smile", "Blink"];
     let skin_joints = [NodeLocalId::new(1), NodeLocalId::new(2)];
     let mut inverse_bind_matrices = [
         Mat4::IDENTITY,
@@ -1458,7 +1455,7 @@ fn with_gltf_capability_input<R>(
             &inverse_bind_matrices
         };
     let skins = [SkinAuthoring::new(
-        Presence::Present(&skin_name),
+        Presence::Present(skin_name),
         &skin_joints,
         inverse_bind_matrices,
         Presence::Present(NodeLocalId::new(1)),
@@ -1467,11 +1464,11 @@ fn with_gltf_capability_input<R>(
     let morph_definitions = [
         MorphTargetDefinitionAuthoring::new(
             MorphTargetIdentity::new(0),
-            Presence::Present(&morph_names[0]),
+            Presence::Present(morph_names[0]),
         ),
         MorphTargetDefinitionAuthoring::new(
             MorphTargetIdentity::new(1),
-            Presence::Present(&morph_names[1]),
+            Presence::Present(morph_names[1]),
         ),
     ];
     let logical_morphs = [LogicalMorphAuthoring::new(
@@ -1939,7 +1936,7 @@ fn assert_deformation_f32(mut values: NodeSceneDeformationF32Cursor<'_>, expecte
 }
 
 pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_for_probe(
-    scene: &ValidatedNodeScene,
+    scene: &SceneStorage,
 ) -> GltfCapabilityCanonicalShapeObservation {
     inspect_gltf_capability_semantics_with_first_transform_for_probe(
         scene,
@@ -1948,7 +1945,7 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_for_p
 }
 
 pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_first_transform_for_probe(
-    scene: &ValidatedNodeScene,
+    scene: &SceneStorage,
     first_transform: AuthoredTransform,
 ) -> GltfCapabilityCanonicalShapeObservation {
     let view = scene
@@ -2616,7 +2613,7 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
 }
 
 fn observe_facade_typed_view(
-    scene: &ValidatedNodeScene,
+    scene: &SceneStorage,
 ) -> NodeSceneSemanticResult<(GltfCapabilityCanonicalShapeObservation, bool, [u8; 32], u64)> {
     fn mark_index(valid: &mut bool, value: usize, upper: usize) {
         *valid &= value < upper;
@@ -3274,7 +3271,7 @@ fn observe_facade_typed_view(
 }
 
 pub(in crate::canonical_scene::store) fn project_gltf_facade_observation_v1_for_probe(
-    scene: &ValidatedNodeScene,
+    scene: &SceneStorage,
 ) -> FacadeObservationOutcomeV1 {
     let (totals, reference_closure_verified, transcript_digest, transcript_bytes) =
         match observe_facade_typed_view(scene) {

@@ -78,7 +78,7 @@ where
 impl PendingNodeSceneEdit {
     pub(in crate::canonical_scene::store) fn prepare(
         self,
-        input: &super::super::ValidatedNodeScene,
+        input: &super::super::SceneStorage,
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
     ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
@@ -93,7 +93,7 @@ impl PendingNodeSceneEdit {
     #[cfg(test)]
     pub(in crate::canonical_scene::store) fn prepare_with_generation_source(
         self,
-        input: &super::super::ValidatedNodeScene,
+        input: &super::super::SceneStorage,
         limits: SceneConstructionLimits,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
     ) -> Result<PreparedNodeSceneEdit, NodeSceneEditPrepareError> {
@@ -107,7 +107,7 @@ impl PendingNodeSceneEdit {
 
     fn prepare_with_control_and_generation_source(
         self,
-        input: &super::super::ValidatedNodeScene,
+        input: &super::super::SceneStorage,
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
@@ -173,7 +173,7 @@ impl PendingNodeSceneEdit {
     #[cfg(test)]
     pub(super) fn prepare_with_control_and_generation_source_for_test(
         self,
-        input: &super::super::ValidatedNodeScene,
+        input: &super::super::SceneStorage,
         limits: SceneConstructionLimits,
         control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
         reserve_generation: impl FnOnce() -> Result<ReservedSceneGeneration, SceneGenerationError>,
@@ -347,7 +347,11 @@ fn edit_success_requirements(
         total,
         pending.counts.central_validation_plan.work(),
     )
-    .map(|requirements| requirements.with_request_identity(brand.activation_request_identity()))
+    .map(|requirements| {
+        requirements
+            .with_request_identity(brand.activation_request_identity())
+            .with_semantic_bytes(pending.input().read_nodes().names.len() as u64)
+    })
 }
 
 fn materialize_edit<'lane, 'scope, O, PP, U>(
@@ -381,6 +385,7 @@ where
         }
     };
     let output = NodeSceneActivationOutput {
+        tables: graph.tables,
         draft: NodeSceneDraft {
             brand,
             directory: graph.directory,

@@ -14,6 +14,8 @@ evidence:
   - docs/conformance/contracts.toml
   - crates/baozi-core/src/canonical_scene/store/api/construction.rs
   - crates/baozi-core/src/canonical_scene/store/api/scene.rs
+  - docs/plans/2026-10-29-001-refactor-library-delivery-plan.md
+  - crates/baozi-core/src/canonical_scene/store/typed_storage.rs
 related:
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
@@ -117,6 +119,54 @@ A published Scene is immutable. A mutation request compiles into one transaction
 source generation. Success publishes a new generation; failure leaves the source generation
 unchanged. Storage sharing may be used internally only when ADR 0044's lineage and final-owner rules
 hold. ADR 0032 owns operation-specific remaps, invalidation, and reports.
+
+### Private Typed Storage
+
+The private `SceneStorage` root owns the actual node and geometry tables. Node rows retain an
+explicit synthetic/Matrix/TRS transform, ordered child ranges, optional name ranges, and optional
+spatial attachments. Geometry rows retain typed logical indices and ranges into contiguous scalar
+pools. A row does not carry a publication-local concrete-store slot for another typed row or pool.
+Dense F32/F64/U32/I32 values, sparse indices and defaults, and Vertex/Corner/Face cardinalities remain
+explicit. Public borrowed views project these actual tables without allocating another model.
+
+Core defines the row layout and exact `CapacityPlan` values. Operation owns admission, the physical
+account, retained leases, shared ownership, and storage-first release. A core builder runs only inside
+that central admission. It verifies the observed Vec capacities before returning its complete owner.
+Core must not create an independent allocator, lease, or ledger protocol.
+
+Typed table owners use operation's final-owner-backed `SharedRetainedStorage<T>`, with one centrally
+admitted and charged shared header per table owner; inline evidence and path storage retain their
+existing `RetainedStorage<T>` owner without a separate header per path.
+
+Central validation borrows the actual immutable tables and scalar pools. It allocates only mutable
+marks, traversal state, and caches required by an algorithm; immutable node or geometry rows are not
+copied into a second validation projection. Reads and semantic validation remain cancellable and
+metered. Complete owner coverage, topology, payload shape, finite values, range bounds, sparse index
+order, and cross-domain references remain mandatory before generation reservation.
+
+A node-transform edit replaces its node table and shares the unchanged geometry owner. Geometry
+tables and their payload pools retain their original addresses and one physical charge across source
+and destination generations. No generic geometry-record rebuild or dynamic payload-slot scan is part
+of that edit. A Matrix/TRS width change does not change the node table layout.
+
+Typed owners follow the same rejection, publication, and ordinary host-unwind lifecycle as the
+directory-backed domains. Dropping either generation first leaves shared geometry available to the
+survivor; the final generation releases the storage before its charge. A refused build action drops
+partially initialized vectors before the central admission is released. Retained rows, scalar pools,
+and their charge never escape as independently movable parts.
+
+During the node/geometry cutover, appearance, deformation, animation, spatial, and profile storage may
+remain in the existing retained owner under the same Scene root. Their node/geometry dependency
+checks borrow the actual typed tables. This is a migration boundary between domains, not a second
+Scene representation or a permanent compatibility adapter. Each subsequent domain cutover deletes
+its replaced record schema and conversion/validation projection in the same change.
+
+The D1 behavior gates cover borrowed Vertex/Corner/Face data, dense F64 values, sparse defaults and
+ordered indices, malformed ranges and references, interruption before a validation or copy action,
+Matrix/TRS replacement, and sharing across generation drop order and host unwind. The delivery
+plan's ignored scale fixtures record deterministic work and allocator-request observations separately
+from process memory. These gates and the combined build must execute on the integrated source before
+the cutover is reported as accepted; the storage design and this ADR alone are not runtime evidence.
 
 ### Interface Ownership
 

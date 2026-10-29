@@ -1,21 +1,16 @@
-use baozi_operation::{CanonicalRecordView, SequenceView, StoredScalar};
+use baozi_operation::{CanonicalRecordView, StoredScalar};
 
-use crate::canonical_scene::store::node_scene::decode_authored_transform;
-use crate::canonical_scene::store::schema::{
-    NodeSceneNodeNameSchema, PRESENCE_ABSENT, PRESENCE_PRESENT, node_scene_child_reference_field,
-    node_scene_node_field,
-};
+use crate::canonical_scene::store::typed_storage::{NodeStorage, StoredNodeIndex};
 use crate::canonical_scene::store::validation::NodeSceneValidationProof;
-use crate::entity::{AuthoredTransform, validate_entity_name_str};
+use crate::entity::AuthoredTransform;
 
-use super::ValidatedNodeScene;
+use super::SceneStorage;
 
 pub(in crate::canonical_scene::store) mod animation;
 pub(in crate::canonical_scene::store) mod appearance;
 pub(in crate::canonical_scene::store) mod deformation;
 pub(in crate::canonical_scene::store) mod geometry;
 mod profile;
-mod read;
 pub(in crate::canonical_scene::store) mod spatial;
 
 pub(in crate::canonical_scene::store) use animation::{
@@ -81,10 +76,7 @@ impl NodeSceneSemanticError {
 /// read mechanically.
 #[must_use = "the semantic view must be traversed or deliberately discarded"]
 pub(in crate::canonical_scene::store) struct NodeSceneSemanticView<'scene> {
-    nodes: CanonicalRecordView<'scene>,
-    references: Option<CanonicalRecordView<'scene>>,
-    transforms: Option<SequenceView<'scene, f32>>,
-    node_names: Option<&'scene str>,
+    nodes: &'scene NodeStorage,
     spatial: spatial::NodeSceneSpatialTables<'scene>,
     appearance: appearance::NodeSceneAppearanceTables<'scene>,
     geometry: geometry::NodeSceneGeometryTables<'scene>,
@@ -100,25 +92,15 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticView<'scene> {
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneSemanticAuthoredTransform {
     authored_transform: AuthoredTransform,
-    transform_offset: usize,
-    sequence_scalar_count: usize,
 }
 
 impl NodeSceneSemanticAuthoredTransform {
     pub(in crate::canonical_scene::store) const fn authored_transform(self) -> AuthoredTransform {
         self.authored_transform
     }
-
-    pub(in crate::canonical_scene::store) const fn transform_offset(self) -> usize {
-        self.transform_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn sequence_scalar_count(self) -> usize {
-        self.sequence_scalar_count
-    }
 }
 
-impl ValidatedNodeScene {
+impl SceneStorage {
     /// Resolves fixed typed tables once; payload leaves remain row-demand driven.
     pub(in crate::canonical_scene::store) fn semantic_view(
         &self,
@@ -136,41 +118,20 @@ impl ValidatedNodeScene {
                 "source node index exceeds the validation proof while reading its transform",
             ));
         }
-        let expected_node_rows = self
-            .proof
-            .source_node_count()
-            .checked_add(1)
-            .ok_or_else(|| invariant("proof-qualified node table row count overflows"))?;
-        let nodes = self
-            .canonical
-            .records(self.proof.nodes().into_store())
-            .ok_or_else(|| invariant("validated node table is unavailable or mistyped"))?;
-        if nodes.rows() != expected_node_rows {
-            return Err(invariant(
-                "validated node table row count disagrees with validation proof",
-            ));
+        let row = self
+            .read_nodes()
+            .source_node(source_index)
+            .ok_or_else(|| invariant("validated typed node row is absent"))?;
+        #[cfg(test)]
+        if matches!(self.semantic_read_fault, Some(NodeSceneSemanticReadFault::AuthoredTransformNode(index)) if index == source_index)
+        {
+            return Err(invariant("injected authored-transform read failure"));
         }
-        let transforms_ref = self
-            .proof
-            .transforms()
-            .ok_or_else(|| invariant("validated authored-transform reference is absent"))?;
-        let transforms = self
-            .canonical
-            .sequence(transforms_ref.into_store())
-            .ok_or_else(|| {
-                invariant("validated authored-transform sequence is unavailable or mistyped")
-            })?;
-        let row = source_index
-            .checked_add(1)
-            .ok_or_else(|| invariant("canonical node row index overflows"))?;
-        read_node_authored_transform(
-            nodes,
-            Some(transforms),
-            source_index,
-            row,
-            #[cfg(test)]
-            self.semantic_read_fault,
-        )
+        let authored_transform = row
+            .transform
+            .authored()
+            .ok_or_else(|| invariant("validated authored transform is invalid"))?;
+        Ok(NodeSceneSemanticAuthoredTransform { authored_transform })
     }
 
     #[cfg(test)]
@@ -211,101 +172,31 @@ impl ValidatedNodeScene {
 }
 
 impl<'scene> NodeSceneSemanticView<'scene> {
-    fn try_new(scene: &'scene ValidatedNodeScene) -> NodeSceneSemanticResult<Self> {
+    fn try_new(scene: &'scene SceneStorage) -> NodeSceneSemanticResult<Self> {
         let proof = scene.proof;
-        let nodes = scene
-            .canonical
-            .records(proof.nodes().into_store())
-            .ok_or_else(|| invariant("validated node table is unavailable or mistyped"))?;
-        let references = match proof.references() {
-            Some(reference) => Some(scene.canonical.records(reference.into_store()).ok_or_else(
-                || invariant("validated child-reference table is unavailable or mistyped"),
-            )?),
-            None => None,
-        };
-        let transforms = match proof.transforms() {
-            Some(transform) => Some(
-                scene
-                    .canonical
-                    .sequence(transform.into_store())
-                    .ok_or_else(|| {
-                        invariant(
-                            "validated authored-transform sequence is unavailable or mistyped",
-                        )
-                    })?,
-            ),
-            None => None,
-        };
-        let node_names = match proof.node_names() {
-            Some(reference) => Some(scene.canonical.utf8(reference.into_store()).ok_or_else(
-                || invariant("validated node-name payload is unavailable or mistyped"),
-            )?),
-            None => None,
-        };
+        let nodes = scene.read_nodes();
+        if proof.directory().into_store() != scene.canonical.root_ref()
+            || nodes.nodes.len()
+                != proof
+                    .source_node_count()
+                    .checked_add(1)
+                    .ok_or_else(|| invariant("typed node count overflows"))?
+            || nodes.roots().map(|roots| roots.len()) != Some(proof.source_root_count())
+            || nodes.children.len() != proof.source_node_count()
+        {
+            return Err(invariant(
+                "typed node storage disagrees with central validation proof",
+            ));
+        }
         let spatial = spatial::NodeSceneSpatialTables::try_new(&scene.canonical, proof)?;
         let appearance = appearance::NodeSceneAppearanceTables::try_new(&scene.canonical, proof)?;
-        let geometry = geometry::NodeSceneGeometryTables::try_new(&scene.canonical, proof)?;
+        let geometry = geometry::NodeSceneGeometryTables::try_new(scene.read_geometry(), proof)?;
         let deformation =
             deformation::NodeSceneDeformationTables::try_new(&scene.canonical, proof)?;
         let animation = animation::NodeSceneAnimationTables::try_new(&scene.canonical, proof)?;
         let profile = profile::NodeSceneProfileTables::try_new(&scene.canonical, proof)?;
-
-        let expected_node_rows = proof
-            .source_node_count()
-            .checked_add(1)
-            .ok_or_else(|| invariant("proof-qualified node table row count overflows"))?;
-        if nodes.rows() != expected_node_rows {
-            return Err(invariant(
-                "validated node table row count disagrees with validation proof",
-            ));
-        }
-        let expected_reference_rows = proof
-            .source_root_count()
-            .checked_add(proof.source_edge_count())
-            .ok_or_else(|| invariant("proof-qualified reference table row count overflows"))?;
-        if expected_reference_rows != proof.source_node_count() {
-            return Err(invariant(
-                "validation proof contains an inconsistent root-edge partition",
-            ));
-        }
-        match (proof.source_node_count(), references) {
-            (0, None) => {}
-            (0, Some(_)) => {
-                return Err(invariant(
-                    "validated empty node scene retains a child-reference table",
-                ));
-            }
-            (_, Some(reference)) if reference.rows() == expected_reference_rows => {}
-            (_, Some(_)) => {
-                return Err(invariant(
-                    "validated child-reference table row count disagrees with validation proof",
-                ));
-            }
-            (_, None) => {
-                return Err(invariant(
-                    "validated populated node scene is missing its child-reference table",
-                ));
-            }
-        }
-        match (proof.source_node_count(), transforms) {
-            (0, None) => {}
-            (0, Some(_)) => {
-                return Err(invariant(
-                    "validated empty node scene retains an authored-transform sequence",
-                ));
-            }
-            (_, Some(_)) => {}
-            (_, None) => {
-                return Err(invariant(
-                    "validated populated node scene is missing its authored-transform sequence",
-                ));
-            }
-        }
         Ok(Self {
             nodes,
-            references,
-            transforms,
-            node_names,
             spatial,
             appearance,
             geometry,
@@ -453,7 +344,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         self,
     ) -> NodeSceneSemanticResult<NodeSceneSemanticCursor<'scene>> {
         let roots = NodeSceneChildCursor::try_new(
-            self.references,
+            &self.nodes.children,
             0,
             self.proof.source_root_count(),
             self.proof.source_root_count(),
@@ -462,9 +353,6 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         )?;
         Ok(NodeSceneSemanticCursor {
             nodes: self.nodes,
-            references: self.references,
-            transforms: self.transforms,
-            node_names: self.node_names,
             appearance: Some(self.appearance.into_cursor(self.proof)),
             geometry: Some(self.geometry.into_cursor(self.proof)),
             deformation: Some(self.deformation.into_cursor(self.proof)),
@@ -473,7 +361,6 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             proof: self.proof,
             roots: Some(roots),
             next_node_index: 0,
-            next_node_name_offset: 0,
             phase: NodeSceneCursorPhase::Nodes,
             #[cfg(test)]
             read_fault: self.read_fault,
@@ -484,10 +371,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
 /// Linear semantic traversal bounded by the immutable validation proof.
 #[must_use = "the semantic cursor must be consumed or deliberately discarded"]
 pub(in crate::canonical_scene::store) struct NodeSceneSemanticCursor<'scene> {
-    nodes: CanonicalRecordView<'scene>,
-    references: Option<CanonicalRecordView<'scene>>,
-    transforms: Option<SequenceView<'scene, f32>>,
-    node_names: Option<&'scene str>,
+    nodes: &'scene NodeStorage,
     appearance: Option<NodeSceneAppearanceCursor<'scene>>,
     geometry: Option<NodeSceneGeometryCursor<'scene>>,
     deformation: Option<NodeSceneDeformationCursor<'scene>>,
@@ -496,7 +380,6 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticCursor<'scene> {
     proof: NodeSceneValidationProof,
     roots: Option<NodeSceneChildCursor<'scene>>,
     next_node_index: usize,
-    next_node_name_offset: usize,
     phase: NodeSceneCursorPhase,
     #[cfg(test)]
     read_fault: Option<NodeSceneSemanticReadFault>,
@@ -543,71 +426,48 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
         let row = source_index
             .checked_add(1)
             .ok_or_else(|| invariant("canonical node row index overflows"))?;
-        let child_offset = read_u32_as_usize(
-            self.nodes,
-            row,
-            node_scene_node_field::CHILD_REFERENCE_OFFSET,
-            "validated source-node child offset is unreadable",
-        )?;
-        let child_count = read_u32_as_usize(
-            self.nodes,
-            row,
-            node_scene_node_field::CHILD_REFERENCE_COUNT,
-            "validated source-node child count is unreadable",
-        )?;
-        let child_end = child_offset
-            .checked_add(child_count)
-            .ok_or_else(|| invariant("validated source-node child range overflows"))?;
-
-        let authored_transform = read_node_authored_transform(
-            self.nodes,
-            self.transforms,
-            source_index,
-            row,
-            #[cfg(test)]
-            self.read_fault,
-        )?
-        .authored_transform();
-        let (name, next_node_name_offset) = read_node_name(
-            self.nodes,
-            self.node_names,
-            self.proof,
-            row,
-            self.next_node_name_offset,
-        )?;
-        let camera = read_node_spatial_attachment(
-            self.nodes,
-            row,
-            node_scene_node_field::CAMERA_PRESENCE,
-            node_scene_node_field::CAMERA,
-            "validated source-node camera attachment is unreadable",
-        )?;
-        let light = read_node_spatial_attachment(
-            self.nodes,
-            row,
-            node_scene_node_field::LIGHT_PRESENCE,
-            node_scene_node_field::LIGHT,
-            "validated source-node light attachment is unreadable",
-        )?;
-
+        let node = self
+            .nodes
+            .nodes
+            .get(row)
+            .ok_or_else(|| invariant("validated typed node row is unavailable"))?;
+        #[cfg(test)]
+        if matches!(self.read_fault, Some(NodeSceneSemanticReadFault::AuthoredTransformNode(index)) if index == source_index)
+        {
+            return Err(invariant("injected authored-transform read failure"));
+        }
+        let authored_transform = node
+            .transform
+            .authored()
+            .ok_or_else(|| invariant("validated authored transform is unreadable"))?;
+        let name = node
+            .name
+            .map(|range| {
+                range
+                    .get(&self.nodes.names)
+                    .ok_or_else(|| invariant("validated node name is unreadable"))
+            })
+            .transpose()?;
+        let child_end = node
+            .children
+            .start()
+            .checked_add(node.children.len())
+            .ok_or_else(|| invariant("validated child range overflows"))?;
         let children = NodeSceneChildCursor::try_new(
-            self.references,
-            child_offset,
+            &self.nodes.children,
+            node.children.start(),
             child_end,
-            child_count,
+            node.children.len(),
             #[cfg(test)]
             self.read_fault,
         )?;
-        self.next_node_index = source_index
-            .checked_add(1)
-            .ok_or_else(|| invariant("node cursor index overflows"))?;
-        self.next_node_name_offset = next_node_name_offset;
+        self.next_node_index += 1;
         Ok(Some(NodeSceneSemanticNode {
             source_index,
             name,
             authored_transform,
-            camera,
-            light,
+            camera: node.camera.map(|index| index as usize),
+            light: node.light.map(|index| index as usize),
             children,
         }))
     }
@@ -711,11 +571,6 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
                 "node cursor ended before its proof-qualified count",
             ));
         }
-        if self.next_node_name_offset != self.node_names.map_or(0, str::len) {
-            return Err(invariant(
-                "node cursor did not exhaust its proof-qualified name payload",
-            ));
-        }
         Ok(())
     }
 
@@ -780,126 +635,6 @@ impl<'scene> NodeSceneSemanticCursor<'scene> {
     }
 }
 
-fn read_node_authored_transform(
-    nodes: CanonicalRecordView<'_>,
-    transforms: Option<SequenceView<'_, f32>>,
-    _source_index: usize,
-    row: usize,
-    #[cfg(test)] read_fault: Option<NodeSceneSemanticReadFault>,
-) -> NodeSceneSemanticResult<NodeSceneSemanticAuthoredTransform> {
-    let transform_kind = read_scalar::<u8>(
-        nodes,
-        row,
-        node_scene_node_field::TRANSFORM_KIND,
-        "validated source-node transform kind is unreadable",
-    )?;
-    let transform_offset = read_u32_as_usize(
-        nodes,
-        row,
-        node_scene_node_field::TRANSFORM_OFFSET,
-        "validated source-node transform offset is unreadable",
-    )?;
-    let transform_length = read_u32_as_usize(
-        nodes,
-        row,
-        node_scene_node_field::TRANSFORM_LENGTH,
-        "validated source-node transform length is unreadable",
-    )?;
-    let transform_end = transform_offset
-        .checked_add(transform_length)
-        .ok_or_else(|| invariant("validated source-node transform range overflows"))?;
-    #[cfg(test)]
-    if matches!(
-        read_fault,
-        Some(NodeSceneSemanticReadFault::AuthoredTransformNode(index)) if index == _source_index
-    ) {
-        return Err(invariant("injected authored-transform read failure"));
-    }
-    let transforms =
-        transforms.ok_or_else(|| invariant("validated authored-transform view is absent"))?;
-    let values = transforms
-        .as_slice()
-        .get(transform_offset..transform_end)
-        .ok_or_else(|| invariant("validated authored-transform range is unreadable"))?;
-    let authored_transform = decode_authored_transform(transform_kind, values)
-        .ok_or_else(|| invariant("validated authored-transform payload is undecodable"))?;
-    Ok(NodeSceneSemanticAuthoredTransform {
-        authored_transform,
-        transform_offset,
-        sequence_scalar_count: transforms.len(),
-    })
-}
-
-fn read_node_name<'scene>(
-    nodes: CanonicalRecordView<'scene>,
-    names: Option<&'scene str>,
-    proof: NodeSceneValidationProof,
-    row: usize,
-    expected_offset: usize,
-) -> NodeSceneSemanticResult<(Option<&'scene str>, usize)> {
-    let presence = read_scalar::<u8>(
-        nodes,
-        row,
-        node_scene_node_field::NAME_PRESENCE,
-        "validated source-node name presence is unreadable",
-    )?;
-    let offset = read_u32_as_usize(
-        nodes,
-        row,
-        node_scene_node_field::NAME_OFFSET,
-        "validated source-node name offset is unreadable",
-    )?;
-    let count = read_u32_as_usize(
-        nodes,
-        row,
-        node_scene_node_field::NAME_COUNT,
-        "validated source-node name count is unreadable",
-    )?;
-    if offset != expected_offset {
-        return Err(invariant(
-            "validated source-node name ranges are not contiguous",
-        ));
-    }
-    match (presence, count) {
-        (PRESENCE_ABSENT, 0) => {
-            if nodes.scalar::<u8>(row, node_scene_node_field::NAMES) != Some(0) {
-                return Err(invariant(
-                    "validated absent source-node name has a nonzero sentinel",
-                ));
-            }
-            Ok((None, offset))
-        }
-        (PRESENCE_PRESENT, 0) => {
-            if nodes.scalar::<u8>(row, node_scene_node_field::NAMES) != Some(0) {
-                return Err(invariant(
-                    "validated empty source-node name has a nonzero sentinel",
-                ));
-            }
-            Ok((Some(""), offset))
-        }
-        (PRESENCE_PRESENT, _) => {
-            let reference = nodes
-                .utf8_ref::<NodeSceneNodeNameSchema>(row, node_scene_node_field::NAMES)
-                .ok_or_else(|| invariant("validated source-node name reference is unreadable"))?;
-            if Some(reference) != proof.node_names().map(|reference| reference.into_store()) {
-                return Err(invariant(
-                    "validated source-node name reference disagrees with validation proof",
-                ));
-            }
-            let end = offset
-                .checked_add(count)
-                .ok_or_else(|| invariant("validated source-node name range overflows"))?;
-            let name = names
-                .and_then(|names| names.get(offset..end))
-                .ok_or_else(|| invariant("validated source-node name range is unreadable"))?;
-            validate_entity_name_str(name)
-                .map_err(|_| invariant("validated source-node name is not canonical"))?;
-            Ok((Some(name), end))
-        }
-        _ => Err(invariant("validated source-node name presence is invalid")),
-    }
-}
-
 /// One decoded source node coupled to its mechanically readable child range.
 #[must_use = "the decoded node owns its exact child cursor"]
 pub(in crate::canonical_scene::store) struct NodeSceneSemanticNode<'scene> {
@@ -944,7 +679,7 @@ impl<'scene> NodeSceneSemanticNode<'scene> {
 /// Strict mechanical traversal of one proof-qualified reference range.
 #[must_use = "the child cursor must be consumed or deliberately discarded"]
 pub(in crate::canonical_scene::store) struct NodeSceneChildCursor<'scene> {
-    references: Option<CanonicalRecordView<'scene>>,
+    references: &'scene [StoredNodeIndex],
     next_row: usize,
     end_row: usize,
     declared_count: usize,
@@ -954,7 +689,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneChildCursor<'scene> {
 
 impl<'scene> NodeSceneChildCursor<'scene> {
     fn try_new(
-        references: Option<CanonicalRecordView<'scene>>,
+        references: &'scene [StoredNodeIndex],
         start: usize,
         end: usize,
         declared_count: usize,
@@ -963,15 +698,8 @@ impl<'scene> NodeSceneChildCursor<'scene> {
         if end.checked_sub(start) != Some(declared_count) {
             return Err(invariant("validated child-reference range is inconsistent"));
         }
-        match references {
-            Some(view) if end <= view.rows() => {}
-            Some(_) => {
-                return Err(invariant(
-                    "validated child-reference range exceeds its typed view",
-                ));
-            }
-            None if start == 0 && end == 0 => {}
-            None => return Err(invariant("validated child-reference view is absent")),
+        if end > references.len() {
+            return Err(invariant("validated child range exceeds typed storage"));
         }
         Ok(Self {
             references,
@@ -1005,17 +733,13 @@ impl<'scene> NodeSceneChildCursor<'scene> {
         ) {
             return Err(invariant("injected child-reference read failure"));
         }
-        let references = self
+        let child = (self
             .references
-            .ok_or_else(|| invariant("validated child-reference view is absent"))?;
-        let child = read_u32_as_usize(
-            references,
-            row,
-            node_scene_child_reference_field::CHILD,
-            "validated child reference is unreadable",
-        )?
-        .checked_sub(1)
-        .ok_or_else(|| invariant("validated child reference cannot address source space"))?;
+            .get(row)
+            .ok_or_else(|| invariant("validated child reference is unavailable"))?
+            .0 as usize)
+            .checked_sub(1)
+            .ok_or_else(|| invariant("synthetic root cannot be a child"))?;
         self.next_row = row
             .checked_add(1)
             .ok_or_else(|| invariant("child cursor row index overflows"))?;
@@ -1040,22 +764,6 @@ fn read_u32_as_usize(
     usize::try_from(value).map_err(|_| invariant(reason))
 }
 
-fn read_node_spatial_attachment(
-    nodes: CanonicalRecordView<'_>,
-    row: usize,
-    presence_field: usize,
-    local_field: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<Option<usize>> {
-    match read_scalar::<u8>(nodes, row, presence_field, reason)? {
-        crate::canonical_scene::store::schema::PRESENCE_ABSENT => Ok(None),
-        crate::canonical_scene::store::schema::PRESENCE_PRESENT => {
-            Ok(Some(read_u32_as_usize(nodes, row, local_field, reason)?))
-        }
-        _ => Err(invariant(reason)),
-    }
-}
-
 fn read_scalar<T: StoredScalar>(
     records: CanonicalRecordView<'_>,
     row: usize,
@@ -1069,4 +777,26 @@ fn read_scalar<T: StoredScalar>(
 
 const fn invariant(reason: &'static str) -> NodeSceneSemanticError {
     NodeSceneSemanticError::new(reason)
+}
+
+impl<'scene> NodeSceneSemanticView<'scene> {
+    pub(in crate::canonical_scene::store) fn node_at(
+        self,
+        source_index: usize,
+    ) -> NodeSceneSemanticResult<NodeSceneSemanticNode<'scene>> {
+        if source_index >= self.proof.source_node_count() {
+            return Err(invariant("node row is outside the validated Scene"));
+        }
+        let mut cursor = self.into_cursor()?;
+        cursor.roots = None;
+        cursor.next_node_index = source_index;
+        cursor
+            .next_node()?
+            .ok_or_else(|| invariant("node row is absent"))
+    }
+    pub(in crate::canonical_scene::store) fn roots(
+        self,
+    ) -> NodeSceneSemanticResult<NodeSceneChildCursor<'scene>> {
+        self.into_cursor()?.take_roots()
+    }
 }

@@ -13,7 +13,7 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
-    NodeSceneSuccessParts, NodeSceneTestTransaction, PreparedNodeSceneFailure, ValidatedNodeScene,
+    NodeSceneSuccessParts, NodeSceneTestTransaction, PreparedNodeSceneFailure, SceneStorage,
 };
 use crate::canonical_scene::store::construction::{STORE_DIMENSION, SceneConstructionError};
 use crate::canonical_scene::store::production::{
@@ -456,7 +456,7 @@ fn next_profile_item<T>(
 }
 
 pub(in crate::canonical_scene::store) fn inspect_profile_closure_semantics_for_probe(
-    scene: &ValidatedNodeScene,
+    scene: &SceneStorage,
 ) -> ProfileClosureCanonicalShapeObservation {
     let view = scene
         .semantic_view()

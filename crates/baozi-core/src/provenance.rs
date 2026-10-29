@@ -335,6 +335,11 @@ impl SourceLocatorValue {
         &self.0
     }
 
+    /// Returns the backing allocation capacity for caller-owned storage accounting.
+    pub const fn capacity_bytes(&self) -> usize {
+        self.0.capacity()
+    }
+
     /// Fallibly copies this heap-backed locator payload.
     pub fn try_clone(&self) -> Result<Self, SourceLocatorValueError> {
         Self::new(self.as_str())

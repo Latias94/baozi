@@ -93,7 +93,7 @@ fn imports_glb_static_mesh_from_bin_chunk() -> TestResult<()> {
 }
 
 #[test]
-fn selected_morph_targets_are_rejected_before_dependency_io() -> TestResult<()> {
+fn selected_morph_targets_are_imported_with_their_buffer() -> TestResult<()> {
     let document = String::from_utf8(triangle_gltf())
         .expect("fixture is valid utf-8")
         .replace(
@@ -101,33 +101,31 @@ fn selected_morph_targets_are_rejected_before_dependency_io() -> TestResult<()> 
             "      \"mode\": 4,\n      \"targets\": [{ \"POSITION\": 0 }]\n    }]",
         )
         .into_bytes();
-    let (result, diagnostics) = import_assets_result(
+    let (report, diagnostics) = import_assets(
         "models/scene.gltf",
-        [("models/scene.gltf", document)],
+        [
+            ("models/scene.gltf", document),
+            ("models/triangle.bin", triangle_bin()),
+            ("models/textures/base.png", triangle_png()),
+        ],
         sidecar_options(),
     )?;
-    let error = expected_error(result)?;
-
     assert!(diagnostics.is_empty());
-    assert_gltf_failure(
-        &error,
-        GltfFailureCode::UnsupportedFeature,
-        Some("morph targets are not implemented yet"),
-    )?;
-    assert!(error.source_scope_record().is_none());
-    assert_eq!(
-        error
-            .ledger()
-            .dimension(ImportDimension::DependencyReference)
-            .expect("dependency references are configured")
-            .attempted(),
-        0
-    );
+    let mesh = report.scene().meshes().next().unwrap();
+    assert_eq!(mesh.default_morph_weights(), &[0.0]);
+    let target = mesh
+        .primitives()
+        .next()
+        .unwrap()
+        .morph_targets()
+        .next()
+        .unwrap();
+    assert_eq!(target.delta_count(), 1);
     Ok(())
 }
 
 #[test]
-fn selected_morph_default_weights_are_rejected_before_dependency_io() -> TestResult<()> {
+fn morph_weights_without_targets_are_rejected_before_dependency_io() -> TestResult<()> {
     let fixtures = [
         (
             "mesh",
@@ -162,8 +160,8 @@ fn selected_morph_default_weights_are_rejected_before_dependency_io() -> TestRes
         assert!(diagnostics.is_empty(), "unexpected {subject} diagnostics");
         assert_gltf_failure(
             &error,
-            GltfFailureCode::UnsupportedFeature,
-            Some("morph weights are not implemented yet"),
+            GltfFailureCode::InvalidDocument,
+            Some("morph weight count must equal 0"),
         )?;
         assert!(error.source_scope_record().is_none());
         assert_eq!(

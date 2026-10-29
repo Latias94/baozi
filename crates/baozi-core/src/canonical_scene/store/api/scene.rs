@@ -2,19 +2,17 @@ use std::fmt;
 
 use crate::identity::SceneGenerationId;
 
-use super::super::construction::node_scene::ValidatedNodeScene;
+use super::super::construction::node_scene::SceneStorage;
 use super::super::construction::node_scene::snapshot::{
     NodeSceneSnapshot, NodeSceneSnapshotError, NodeSceneSnapshotLimits,
 };
 
 /// Opaque owner of one centrally validated canonical Scene.
 #[must_use = "the validated Scene owns retained canonical storage"]
-pub struct ValidatedScene(ValidatedNodeScene);
+pub struct ValidatedScene(SceneStorage);
 
 impl ValidatedScene {
-    pub(in crate::canonical_scene::store) const fn from_node_scene(
-        scene: ValidatedNodeScene,
-    ) -> Self {
+    pub(in crate::canonical_scene::store) const fn from_node_scene(scene: SceneStorage) -> Self {
         Self(scene)
     }
 
@@ -23,14 +21,16 @@ impl ValidatedScene {
         self.0.generation()
     }
 
-    /// Returns the number of retained canonical blocks owned by this Scene.
+    /// Returns the number of directory-backed retained blocks owned by this Scene.
+    ///
+    /// Private typed node and geometry owners are separate from this legacy block count.
     pub fn canonical_block_count(&self) -> usize {
         self.0.canonical_block_count()
     }
 
     /// Restricts access to the sealed retained rail so semantic views and SceneEdit can project
     /// domain data without exposing the raw canonical store.
-    pub(in crate::canonical_scene::store) const fn as_node_scene(&self) -> &ValidatedNodeScene {
+    pub(in crate::canonical_scene::store) const fn as_node_scene(&self) -> &SceneStorage {
         &self.0
     }
 
@@ -201,6 +201,21 @@ impl SceneSnapshot {
     /// Returns the total retained provenance-node count.
     pub const fn profile_provenance_node_count(&self) -> usize {
         self.0.totals.profile_provenance_node_count
+    }
+
+    /// Returns retained provenance operation nodes in this debug snapshot.
+    pub const fn profile_operation_count(&self) -> usize {
+        self.0.totals.profile_operation_count
+    }
+
+    /// Returns durable operation evidence summaries in this debug snapshot.
+    pub const fn profile_evidence_count(&self) -> usize {
+        self.0.totals.profile_evidence_count
+    }
+
+    /// Returns ordered operation parent references in this debug snapshot.
+    pub const fn profile_parent_reference_count(&self) -> u64 {
+        self.0.totals.profile_parent_reference_count
     }
 
     /// Returns the total canonical owner count carrying provenance.

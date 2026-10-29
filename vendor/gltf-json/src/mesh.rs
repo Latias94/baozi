@@ -193,6 +193,10 @@ pub struct MorphTarget {
     #[serde(rename = "TANGENT")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tangents: Option<Index<accessor::Accessor>>,
+
+    /// Other morph attributes retained for the adapter's explicit profile decision.
+    #[serde(flatten)]
+    pub other_attributes: BTreeMap<String, Index<accessor::Accessor>>,
 }
 
 /// Vertex attribute semantic name.

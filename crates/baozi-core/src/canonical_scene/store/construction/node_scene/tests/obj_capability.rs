@@ -14,7 +14,7 @@ use crate::canonical_scene::store::construction::node_scene::snapshot::{
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraftBuild,
-    NodeSceneSuccessParts, NodeSceneTestTransaction, ValidatedNodeScene,
+    NodeSceneSuccessParts, NodeSceneTestTransaction, SceneStorage,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
@@ -557,7 +557,7 @@ fn assert_u32_values(mut values: NodeSceneGeometryU32Cursor<'_>, expected: &[u32
 }
 
 pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_probe(
-    scene: &ValidatedNodeScene,
+    scene: &SceneStorage,
 ) -> ObjCapabilityCanonicalShapeObservation {
     let view = scene
         .semantic_view()

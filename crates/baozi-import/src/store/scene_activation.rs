@@ -512,7 +512,7 @@ impl<'session> ImportStoreActivationTransition<'session> {
             .map_err(|_| ImportStoreHostError::ReentrantBorrow)?;
         let previous = std::mem::replace(&mut *state, ImportStoreSessionState::Transitioning);
         let owner = match previous {
-            ImportStoreSessionState::Dormant(owner) => owner,
+            ImportStoreSessionState::Dormant(owner) => owner.into_activation_transition(),
             ImportStoreSessionState::Contained => {
                 *state = ImportStoreSessionState::Contained;
                 return Err(ImportStoreHostError::OperationContained);
@@ -991,8 +991,8 @@ impl ImportStoreSessionOwner {
         self,
         draft: Option<SceneDraft>,
     ) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
-        let unsubmitted_evidence = self.unsubmitted_evidence;
-        match self.state.into_inner() {
+        let (state, unsubmitted_evidence) = self.into_terminal_state();
+        match state {
             ImportStoreSessionState::Pending(ImportPendingScene::Candidate { owner, evidence }) => {
                 prepare_candidate(owner, evidence, draft)
             }

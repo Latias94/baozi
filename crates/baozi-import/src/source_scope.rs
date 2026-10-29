@@ -248,10 +248,11 @@ pub struct SourceScopeRecord {
     counts: [SourceScopeCounts; SourceScopeEntityKind::COUNT],
     digest: SourceScopeDigest,
     detail_state: SourceScopeDetailState,
-    detail_indexes: Vec<SourceScopeDetailIndex>,
-    detail_bytes: Vec<u8>,
+    detail_indexes: AccountedVec<SourceScopeDetailIndex>,
+    detail_bytes: AccountedVec<u8>,
     collapsed_detail_count: u64,
     collapsed_detail_bytes: u64,
+    _document_storage: crate::store::ImportStoreReservation,
 }
 
 impl SourceScopeRecord {
@@ -314,6 +315,7 @@ pub struct SourceScopeRecordBuilder<'scope, 'session> {
     detail_bytes: AccountedVec<u8>,
     observed_count: u64,
     observed_bytes: u64,
+    _document_storage: crate::store::ImportStoreReservation,
 }
 
 impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
@@ -321,6 +323,16 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
         scope: &'scope ParseScope<'session>,
         selection_outcome: SourceScopeSelectionOutcome,
     ) -> ParseResult<Self> {
+        // This argument transfers already-owned caller storage. Admit its actual backing capacity
+        // before adopting it into the library-owned builder and eventual output record.
+        let document_bytes = selection_outcome.document().asset_path().capacity_bytes() as u64;
+        let _document_storage = scope
+            .reserve_retained_storage_cause(
+                ImportStorageClass::FormatNormalization,
+                document_bytes,
+                u64::from(document_bytes != 0),
+            )
+            .map_err(|cause| scope.source_scope_abort(cause))?;
         let mut digest = Sha256::new();
         digest.update(SOURCE_SCOPE_DIGEST_DOMAIN);
         digest.update(SOURCE_SCOPE_SELECTION_FRAME_TAG.to_le_bytes());
@@ -345,6 +357,7 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
             detail_bytes: AccountedVec::new(),
             observed_count: 0,
             observed_bytes: 0,
+            _document_storage,
         })
     }
 
@@ -447,14 +460,20 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
 
         self.detail_indexes
             .try_reserve(1, "source-scope-detail-index", |bytes| {
-                self.scope
-                    .reserve_storage_cause(ImportStorageClass::FormatNormalization, bytes)
+                self.scope.reserve_retained_storage_cause(
+                    ImportStorageClass::FormatNormalization,
+                    bytes,
+                    u64::from(bytes != 0),
+                )
             })
             .map_err(|cause| self.scope.source_scope_abort(cause))?;
         self.detail_bytes
             .try_reserve(identity.len(), "source-scope-detail-bytes", |bytes| {
-                self.scope
-                    .reserve_storage_cause(ImportStorageClass::FormatNormalization, bytes)
+                self.scope.reserve_retained_storage_cause(
+                    ImportStorageClass::FormatNormalization,
+                    bytes,
+                    u64::from(bytes != 0),
+                )
             })
             .map_err(|cause| self.scope.source_scope_abort(cause))?;
 
@@ -505,6 +524,7 @@ impl<'scope, 'session> SourceScopeRecordBuilder<'scope, 'session> {
                 } else {
                     0
                 },
+                _document_storage: self._document_storage,
             },
         })
     }
@@ -536,6 +556,7 @@ pub(crate) struct LiveSourceScopeRecord {
     detail_bytes: AccountedVec<u8>,
     collapsed_detail_count: u64,
     collapsed_detail_bytes: u64,
+    _document_storage: crate::store::ImportStoreReservation,
 }
 
 impl LiveSourceScopeRecord {
@@ -552,8 +573,8 @@ impl LiveSourceScopeRecord {
     }
 
     pub(crate) fn into_terminal(self) -> SourceScopeRecord {
-        let detail_indexes = self.detail_indexes.into_terminal().into_values();
-        let detail_bytes = self.detail_bytes.into_terminal().into_values();
+        let detail_indexes = self.detail_indexes;
+        let detail_bytes = self.detail_bytes;
         SourceScopeRecord {
             selection_outcome: self.selection_outcome,
             counts: self.counts,
@@ -563,6 +584,7 @@ impl LiveSourceScopeRecord {
             detail_bytes,
             collapsed_detail_count: self.collapsed_detail_count,
             collapsed_detail_bytes: self.collapsed_detail_bytes,
+            _document_storage: self._document_storage,
         }
     }
 }

@@ -119,3 +119,73 @@ fn each_profile_segment_is_reserved_read_and_initialized_exactly_once() {
         Some(1)
     );
 }
+
+#[test]
+fn metadata_payload_size_changes_member_work_without_growing_validation_scratch() {
+    let counts = |elements| {
+        let mut counts = metered_counts(1);
+        counts.metadata_entry_count = 7;
+        counts.metadata_text_bytes = elements;
+        counts.metadata_payload_bytes = elements;
+        counts.metadata_bool_count = elements;
+        counts.metadata_i64_count = elements;
+        counts.metadata_u64_count = elements;
+        counts.metadata_f64_count = elements;
+        counts.metadata_f32_count = elements;
+        counts
+    };
+    let small = counts(1_048_576);
+    let large = counts(8_388_608);
+
+    assert_eq!(
+        small.scratch_bytes().unwrap(),
+        large.scratch_bytes().unwrap()
+    );
+    assert_eq!(
+        small.scratch_initialization_work().unwrap(),
+        large.scratch_initialization_work().unwrap()
+    );
+    assert_eq!(
+        small.semantic_work().unwrap(),
+        large.semantic_work().unwrap()
+    );
+    // Each of the seven immutable payload lanes is still visited once, without a
+    // payload-sized zero-initialization pass or a second allocation for validation.
+    let additional_member_work = 7 * (8_388_608_u64 - 1_048_576);
+    assert_eq!(
+        large.member_read_work().unwrap() - small.member_read_work().unwrap(),
+        additional_member_work
+    );
+    assert_eq!(
+        large.validation_work().unwrap() - small.validation_work().unwrap(),
+        additional_member_work
+    );
+}
+
+#[test]
+fn metadata_entry_descriptors_keep_their_scratch_and_semantic_work() {
+    let one = ProfileMeteredCounts {
+        metadata_entry_count: 1,
+        ..metered_counts(1)
+    };
+    let two = ProfileMeteredCounts {
+        metadata_entry_count: 2,
+        ..one
+    };
+    assert_eq!(
+        two.scratch_bytes().unwrap() - one.scratch_bytes().unwrap(),
+        13 * u64::try_from(std::mem::size_of::<u32>()).unwrap()
+    );
+    assert_eq!(
+        two.scratch_initialization_work().unwrap() - one.scratch_initialization_work().unwrap(),
+        13
+    );
+    assert_eq!(
+        two.member_read_work().unwrap() - one.member_read_work().unwrap(),
+        u64::try_from(PROFILE_METADATA_ENTRY_FIELD_COUNT).unwrap()
+    );
+    assert_eq!(
+        two.semantic_work().unwrap() - one.semantic_work().unwrap(),
+        1
+    );
+}

@@ -923,6 +923,83 @@ fn exact_canonical_limit_succeeds_and_one_over_is_rejected() {
 }
 
 #[test]
+fn provenance_uses_entity_and_lineage_limits_independently_of_scene_hierarchy() {
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [trs(Presence::Absent)];
+    let mut domain_control = TestControl::default();
+    let domains = validated_domains(&roots, &nodes, &mut domain_control);
+    let resources = resource_rows();
+    let sources = [source_row(RESOURCE_ID)];
+    let kind = OperationKind::Generated;
+    let parents = [SOURCE_PROVENANCE];
+    let provenance = [
+        ProvenanceNodeAuthoring::source(SOURCE_ID),
+        ProvenanceNodeAuthoring::operation(ProvenanceOperationAuthoring::new(
+            &kind,
+            OptionsDigest::sha256([9; 32]),
+            &parents,
+            &[],
+        )),
+    ];
+    let attachment = [GENERATED_PROVENANCE];
+    let owner_rows = mandatory_owner_rows(&attachment, &attachment, &attachment);
+    let lineage = LineageAuthoringBatch::new(&resources, &sources, &provenance, &owner_rows);
+    let mut control = TestControl::default();
+
+    let validated = validate_profile_batch_with_control(
+        lineage,
+        MetadataAuthoringBatch::empty(),
+        domains.owners(),
+        SceneValidationLimits::default()
+            .with_max_nodes(0)
+            .with_max_depth(0)
+            .with_max_provenance_depth(2),
+        &mut control,
+    )
+    .expect("profile declarations do not consume the Scene hierarchy node limit");
+    drop(validated);
+    assert_eq!(control.live.get(), 0);
+
+    let rejected = validate_profile_batch_with_control(
+        lineage,
+        MetadataAuthoringBatch::empty(),
+        domains.owners(),
+        SceneValidationLimits::default().with_max_entities(0),
+        &mut control,
+    );
+    assert!(matches!(
+        rejected,
+        Err(ProfileAuthoringFailure::Semantic(
+            ProfileAuthoringSemanticError::LimitExceeded {
+                limit: ProfileAuthoringLimit::Entities,
+                actual: 2,
+                maximum: 0,
+            }
+        ))
+    ));
+    assert_eq!(control.live.get(), 0);
+
+    let too_deep = validate_profile_batch_with_control(
+        lineage,
+        MetadataAuthoringBatch::empty(),
+        domains.owners(),
+        SceneValidationLimits::default().with_max_provenance_depth(1),
+        &mut control,
+    );
+    assert!(matches!(
+        too_deep,
+        Err(ProfileAuthoringFailure::Semantic(
+            ProfileAuthoringSemanticError::LimitExceeded {
+                limit: ProfileAuthoringLimit::Depth,
+                actual: 2,
+                maximum: 1,
+            }
+        ))
+    ));
+    assert_eq!(control.live.get(), 0);
+}
+
+#[test]
 fn profile_work_budget_is_preflighted_and_exact() {
     let roots = [NodeLocalId::new(0)];
     let nodes = [trs(Presence::Absent)];

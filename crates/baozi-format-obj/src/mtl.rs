@@ -234,6 +234,10 @@ pub(crate) struct ParsedMetadata<'scope> {
 
 struct ParsedString<'scope>(MeteredString<'scope>);
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "text metadata keeps its admitted session buffer and lease together without a second allocation"
+)]
 pub(crate) enum ParsedMetadataValue<'scope> {
     I64(i64),
     F64(f64),

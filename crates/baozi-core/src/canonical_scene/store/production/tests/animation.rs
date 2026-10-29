@@ -106,6 +106,7 @@ fn reject_translation(
 fn compiled_animation_facts_do_not_borrow_authored_storage() {
     let mut control = TestControl::default();
     let compiled = {
+        let name = String::from("步行");
         let times = vec![0.0_f64, 1.0];
         let values = vec![0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0];
         let channels = vec![AnimationChannelAuthoring::new(
@@ -119,12 +120,15 @@ fn compiled_animation_facts_do_not_borrow_authored_storage() {
             Presence::Absent,
             Presence::Absent,
         )];
-        let clips = vec![AnimationClipAuthoring::new(
-            0,
-            1.0,
-            AnimationTimeDomainAuthoring::Seconds,
-            AuthoringRange::new(0, 1),
-        )];
+        let clips = vec![
+            AnimationClipAuthoring::new(
+                0,
+                1.0,
+                AnimationTimeDomainAuthoring::Seconds,
+                AuthoringRange::new(0, 1),
+            )
+            .with_name(name.as_str()),
+        ];
 
         validate_translation(
             AnimationAuthoringBatch::new(&clips, &channels),
@@ -138,6 +142,96 @@ fn compiled_animation_facts_do_not_borrow_authored_storage() {
 
     drop(compiled);
     assert_eq!(control.live.get(), 0);
+}
+
+#[test]
+fn borrowed_clip_names_preserve_presence_utf8_and_metered_bytes_without_copying() {
+    let unicode = String::from("步行 α");
+    let maximum = "x".repeat(crate::entity::MAX_ENTITY_NAME_BYTES);
+    let mut absent_work = 0;
+    for name in [
+        None,
+        Some(""),
+        Some(unicode.as_str()),
+        Some(maximum.as_str()),
+    ] {
+        let mut clips = [AnimationClipAuthoring::new(
+            0,
+            0.0,
+            AnimationTimeDomainAuthoring::Seconds,
+            AuthoringRange::new(0, 0),
+        )];
+        let allocations = allocation_counter::measure(|| {
+            if let Some(name) = name {
+                clips[0] = clips[0].with_name(name);
+            }
+        });
+        assert_eq!(allocations.count_total, 0);
+
+        let mut control = TestControl::default();
+        let validated =
+            validate_translation(AnimationAuthoringBatch::new(&clips, &[]), &mut control);
+        let byte_count = name.map_or(0, str::len);
+        assert_eq!(validated.clip_name_byte_count() as usize, byte_count);
+        if name.is_none() {
+            absent_work = validated.validation_work();
+        }
+        assert_eq!(validated.validation_work() - absent_work, byte_count as u64);
+        let allocations = allocation_counter::measure(|| {
+            let clip = validated.clip(0).unwrap();
+            assert_eq!(clip.name_count() as usize, byte_count);
+            match (name, clip.name()) {
+                (None, Presence::Absent) => {}
+                (Some(expected), Presence::Present(actual)) => {
+                    assert_eq!(actual, expected);
+                    assert!(std::ptr::eq(actual, expected));
+                }
+                _ => panic!("a borrowed clip name must retain authored presence"),
+            }
+        });
+        assert_eq!(allocations.count_total, 0);
+        drop(validated);
+        assert_eq!(control.live.get(), 0);
+        assert_eq!(control.current_bytes.get(), 0);
+    }
+}
+
+#[test]
+fn borrowed_clip_names_reject_control_characters_and_oversize_with_exact_errors() {
+    use crate::entity::{EntityNameError, MAX_ENTITY_NAME_BYTES};
+
+    let oversized = "x".repeat(MAX_ENTITY_NAME_BYTES + 1);
+    for (name, expected) in [
+        ("步\n", EntityNameError::ControlCharacter { offset: 3 }),
+        (
+            oversized.as_str(),
+            EntityNameError::TooLong {
+                actual: MAX_ENTITY_NAME_BYTES + 1,
+                maximum: MAX_ENTITY_NAME_BYTES,
+            },
+        ),
+    ] {
+        let clips = [AnimationClipAuthoring::new(
+            0,
+            0.0,
+            AnimationTimeDomainAuthoring::Seconds,
+            AuthoringRange::new(0, 0),
+        )
+        .with_name(name)];
+        let mut control = TestControl::default();
+        match reject_translation(AnimationAuthoringBatch::new(&clips, &[]), &mut control) {
+            AnimationAuthoringSemanticError::InvalidClipName { clip: 0, source } => {
+                assert_eq!(source, expected);
+            }
+            error => panic!("expected the exact borrowed clip-name error, got {error:?}"),
+        }
+        assert_eq!(
+            control.last_work(),
+            Some(crate::SceneValidationWork::Entity)
+        );
+        assert_eq!(control.live.get(), 0);
+        assert_eq!(control.current_bytes.get(), 0);
+    }
 }
 
 #[test]

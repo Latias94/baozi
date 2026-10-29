@@ -1826,6 +1826,65 @@ where
     O: OperationOwner,
 {
     raw: LiveReservation<O, StorePhaseKey, StoreDimensionKey>,
+    physical: Option<crate::retained::RetainedStorageLease>,
+}
+
+impl<O: OperationOwner> RetainedStoreReservation<O> {
+    fn live(raw: LiveReservation<O, StorePhaseKey, StoreDimensionKey>) -> Self {
+        Self {
+            raw,
+            physical: None,
+        }
+    }
+
+    /// Registers actual retained output without ending either storage lifetime.
+    pub fn prepare_retained_output(&mut self) -> Result<(), StoreRuntimeError> {
+        if self.raw.bytes() != 0 && self.physical.is_none() {
+            return Err(StoreRuntimeError::ConstructionInvariantUnverified);
+        }
+        self.raw
+            .retain_for_output()
+            .map_err(StoreRuntimeError::Ledger)
+    }
+
+    /// Releases the payload before either physical or operation accounting.
+    pub fn release_storage<T>(mut self, value: T) {
+        if let Some(physical) = self.physical.take() {
+            if !crate::retained::release_owned_storage(physical, value) {
+                std::mem::forget(self);
+            }
+        } else {
+            drop(value);
+        }
+    }
+
+    /// Binds pre-admitted backing storage without allocating another owner header.
+    ///
+    /// Trusted adapters must consume the same qualified capacity plans used for this admission.
+    pub fn bind_storage<T>(
+        mut self,
+        value: T,
+    ) -> Result<crate::retained::RetainedStorage<T>, StoreRuntimeError> {
+        let physical = self
+            .physical
+            .take()
+            .ok_or(StoreRuntimeError::ConstructionInvariantUnverified)?;
+        let storage = physical.bind(value);
+        Ok(storage.with_attribution(self.raw.take_storage_owner()))
+    }
+}
+
+impl<O: OperationOwner> Drop for RetainedStoreReservation<O> {
+    fn drop(&mut self) {
+        // A bare pre-allocation capability is not proof that an allocated payload was destroyed.
+        // Adapters resolve it with `release_storage`, including a verified empty rollback.
+        if let Some(physical) = &self.physical {
+            // RetainedStorageLease conservatively retains an unresolved physical admission.
+            // Keep operation attribution as well rather than reporting an optimistic refund.
+            self.raw.retain_fail_closed_in_place();
+            physical.record_unresolved();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1980,7 +2039,7 @@ where
         let result = self
             .raw
             .reserve(phase, bytes)
-            .map(|raw| RetainedStoreReservation { raw })
+            .map(RetainedStoreReservation::live)
             .map_err(StoreWorkError::ledger);
         self.preserve(result)
     }
@@ -2332,7 +2391,7 @@ where
         self.validate_dimension(dimension)?;
         self.raw
             .reserve(phase, dimension, bytes)
-            .map(|raw| RetainedStoreReservation { raw })
+            .map(RetainedStoreReservation::live)
             .map_err(StoreRuntimeError::Ledger)
     }
 
@@ -2343,9 +2402,22 @@ where
         bytes: u64,
     ) -> Result<(), StoreRuntimeError> {
         self.ensure_mutable()?;
+        if reservation
+            .physical
+            .as_ref()
+            .is_some_and(|lease| bytes > lease.admitted_bytes())
+        {
+            return Err(StoreRuntimeError::ConstructionInvariantUnverified);
+        }
         self.raw
             .resize(&mut reservation.raw, bytes)
-            .map_err(StoreRuntimeError::Ledger)
+            .map_err(StoreRuntimeError::Ledger)?;
+        if let Some(physical) = &mut reservation.physical {
+            physical.shrink_to(bytes).map_err(|cause| {
+                map_writer_error(&crate::retained::RetainedWriterError::Physical(cause))
+            })?;
+        }
+        Ok(())
     }
 
     /// Atomically replaces a live token's phase, dimension, and byte capacity.
@@ -2398,6 +2470,31 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    /// Admits concrete backing allocations through the sole operation and physical account.
+    pub fn reserve_retained_storage(
+        &mut self,
+        phase: StorePhaseKey,
+        dimension: StoreDimensionKey,
+        bytes: u64,
+        allocations: u64,
+    ) -> Result<RetainedStoreReservation<O>, StoreRuntimeError> {
+        self.validate_phase_key(phase)?;
+        self.validate_dimension_key(dimension)?;
+        self.raw
+            .reserve_retained_storage(phase, dimension, bytes, allocations)
+            .and_then(|(mut raw, physical)| {
+                if let Err(cause) = raw.retain_for_output() {
+                    let _ = crate::retained::release_owned_storage(physical, ());
+                    return Err(crate::retained::RetainedWriterError::Ledger(cause));
+                }
+                Ok(RetainedStoreReservation {
+                    raw,
+                    physical: Some(physical),
+                })
+            })
+            .map_err(|cause| map_writer_error(&cause))
+    }
+
     fn activation_terminal_cause(&self) -> Option<PreparationFailureCode> {
         self.raw.sticky_terminal_cause()
     }

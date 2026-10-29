@@ -13,7 +13,7 @@ use crate::canonical_scene::store::production::{
     AnimationTimeDomainAuthoring, Presence,
 };
 
-pub(in super::super) const ANIMATION_SCHEMA_REVISION: u32 = 2;
+pub(in super::super) const ANIMATION_SCHEMA_REVISION: u32 = 3;
 pub(in super::super) const ANIMATION_DIRECTORY_FIELD_COUNT: usize = 22;
 pub(in super::super) const ANIMATION_CLIP_FIELD_COUNT: usize = 13;
 pub(in super::super) const ANIMATION_CHANNEL_FIELD_COUNT: usize = 23;
@@ -130,7 +130,7 @@ pub(in super::super) mod animation_channel_field {
     pub(crate) const CHANNEL: usize = 0;
     pub(crate) const TARGET_KIND: usize = 1;
     pub(crate) const TARGET_INDEX: usize = 2;
-    pub(crate) const TARGETS: usize = 3;
+    pub(crate) const TARGET_CONTEXT: usize = 3;
     pub(crate) const INTERPOLATION: usize = 4;
     pub(crate) const PRE_EXTRAPOLATION: usize = 5;
     pub(crate) const POST_EXTRAPOLATION: usize = 6;

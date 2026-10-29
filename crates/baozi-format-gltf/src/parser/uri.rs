@@ -149,6 +149,10 @@ impl fmt::Display for Resource {
     }
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "decoded paths retain their admitted buffer inline; literal paths need no allocation"
+)]
 pub(super) enum RelativePath<'scope, 'uri> {
     Literal(&'uri str),
     Decoded(MeteredVec<'scope, u8>),

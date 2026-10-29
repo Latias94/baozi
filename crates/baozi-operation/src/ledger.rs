@@ -21,7 +21,8 @@ use commitment::{
 pub use reservation::LiveReservation;
 pub(crate) use reservation::{
     AttributionBatchPlan, AttributionReservationBatch, FallbackBaselineRejection,
-    FallbackBatchBaseline, OperationAttributionReservation, StorageCoveringReservation,
+    FallbackBatchBaseline, OperationAttributionReservation, RetainedStorageOperation,
+    StorageCoveringReservation,
 };
 use reservation::{DetachedAttributionBatch, ReservationCore};
 
@@ -913,12 +914,14 @@ struct DimensionState {
     committed: u64,
     committed_canonical_output: u64,
     published_outcome_evidence: u64,
+    retained_output_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct PhaseState {
     current_live_bytes: u64,
     peak_live_bytes: u64,
+    retained_output_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -944,6 +947,8 @@ struct LedgerState<P, D> {
     current_live_bytes: u64,
     peak_live_bytes: u64,
     active_reservations: u64,
+    retained_output_bytes: u64,
+    retained_output_reservations: u64,
     active_linear_work_permits: u64,
     linear_work_faulted: bool,
     evidence_byte_limit: u64,
@@ -1403,6 +1408,8 @@ where
             current_live_bytes: 0,
             peak_live_bytes: 0,
             active_reservations: 0,
+            retained_output_bytes: 0,
+            retained_output_reservations: 0,
             active_linear_work_permits: 0,
             linear_work_faulted: false,
             evidence_byte_limit,
@@ -2259,6 +2266,27 @@ where
         }
 
         let phase_live = project(state.phase_states[phase_position].current_live_bytes)?;
+        let retained = if reservation.retained_output {
+            Some((
+                project(state.retained_output_bytes)?,
+                project(
+                    state.dimensions[dimension_position]
+                        .state
+                        .retained_output_bytes,
+                )?,
+                project(state.phase_states[phase_position].retained_output_bytes)?,
+            ))
+        } else {
+            None
+        };
+
+        if let Some((operation, dimension, phase)) = retained {
+            state.retained_output_bytes = operation;
+            state.dimensions[dimension_position]
+                .state
+                .retained_output_bytes = dimension;
+            state.phase_states[phase_position].retained_output_bytes = phase;
+        }
 
         let dimension_state = &mut state.dimensions[dimension_position].state;
         dimension_state.current_live_bytes = dimension_live;
@@ -2308,6 +2336,9 @@ where
         }
         for reservation in reservations.iter() {
             self.check_reservation(reservation)?;
+            if reservation.core.retained_output {
+                return Err(LedgerCause::OwnerMismatch);
+            }
         }
 
         let source_bytes = reservations.iter().try_fold(0_u64, |total, reservation| {
@@ -2440,6 +2471,9 @@ where
         bytes: u64,
     ) -> Result<LiveReservation<O, P, D>, LedgerCause<D>> {
         self.check_reservation(reservation)?;
+        if reservation.core.retained_output {
+            return Err(LedgerCause::OwnerMismatch);
+        }
         let mut state = lock(&self.state);
         Self::ensure_open(&state)?;
         if bytes > reservation.core.bytes {
@@ -2555,8 +2589,8 @@ where
     pub(crate) fn planning_state(&self) -> LedgerPlanningState {
         let state = lock(&self.state);
         LedgerPlanningState {
-            current_live_bytes: state.current_live_bytes,
-            active_reservations: state.active_reservations,
+            current_live_bytes: state.current_live_bytes - state.retained_output_bytes,
+            active_reservations: state.active_reservations - state.retained_output_reservations,
         }
     }
 
@@ -2787,12 +2821,20 @@ where
             .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?;
         Self::ensure_open(state)?;
         validate_final_snapshot_shape(state)?;
-        if state.active_reservations != expected_active {
+        if state.active_reservations
+            != expected_active
+                .checked_add(state.retained_output_reservations)
+                .ok_or(LedgerCause::ActiveReservationsRemain { count: u64::MAX })?
+        {
             return Err(LedgerCause::ActiveReservationsRemain {
                 count: state.active_reservations,
             });
         }
-        if state.current_live_bytes != expected_live {
+        if state.current_live_bytes
+            != expected_live
+                .checked_add(state.retained_output_bytes)
+                .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?
+        {
             return Err(LedgerCause::PublicationLiveMismatch {
                 transaction_bytes: expected_live,
                 ledger_bytes: state.current_live_bytes,
@@ -3112,7 +3154,11 @@ where
             .ok_or(LedgerCause::ActiveReservationsRemain {
                 count: state.active_reservations,
             })?;
-        if active_after_transition != projected_active {
+        if active_after_transition
+            != projected_active
+                .checked_add(state.retained_output_reservations)
+                .ok_or(LedgerCause::ActiveReservationsRemain { count: u64::MAX })?
+        {
             return Err(LedgerCause::ActiveReservationsRemain {
                 count: state.active_reservations,
             });
@@ -3122,7 +3168,11 @@ where
                 bytes: state.current_live_bytes,
             },
         )?;
-        if live_after_transition != projected_live {
+        if live_after_transition
+            != projected_live
+                .checked_add(state.retained_output_bytes)
+                .ok_or(LedgerCause::LiveReservationsRemain { bytes: u64::MAX })?
+        {
             return Err(LedgerCause::PublicationLiveMismatch {
                 transaction_bytes: projected_live,
                 ledger_bytes: live_after_transition,
@@ -3895,6 +3945,9 @@ where
                 )
             })
             .ok_or(TypedFreezeQualificationError::ArithmeticOverflow)?;
+        let expected_live = expected_live
+            .checked_add(state.retained_output_bytes)
+            .ok_or(TypedFreezeQualificationError::ArithmeticOverflow)?;
         if state.current_live_bytes != expected_live {
             return Err(TypedFreezeQualificationError::GlobalLiveMismatch {
                 expected: expected_live,
@@ -3941,6 +3994,9 @@ where
                         .map_or(Some(0), AttributionReservationBatch::active_count)?,
                 )
             })
+            .ok_or(TypedFreezeQualificationError::ArithmeticOverflow)?;
+        let expected_active = expected_active
+            .checked_add(state.retained_output_reservations)
             .ok_or(TypedFreezeQualificationError::ArithmeticOverflow)?;
         if state.active_reservations != expected_active {
             return Err(TypedFreezeQualificationError::ActiveReservationMismatch {
@@ -3991,6 +4047,9 @@ where
                             .map_or(Some(0), |batch| batch.positioned_dimension_bytes(index))?,
                     )
                 })
+                .ok_or(TypedFreezeQualificationError::ArithmeticOverflow)?;
+            let expected = expected
+                .checked_add(entry.state.retained_output_bytes)
                 .ok_or(TypedFreezeQualificationError::ArithmeticOverflow)?;
             if entry.state.current_live_bytes != expected {
                 return Err(TypedFreezeQualificationError::DimensionLiveMismatch {
@@ -4101,6 +4160,9 @@ where
                             .map_or(Some(0), |batch| batch.positioned_phase_bytes(index))?,
                     )
                 })
+                .ok_or(TypedFreezeQualificationError::ArithmeticOverflow)?;
+            let expected = expected
+                .checked_add(phase.retained_output_bytes)
                 .ok_or(TypedFreezeQualificationError::ArithmeticOverflow)?;
             if phase.current_live_bytes != expected {
                 return Err(TypedFreezeQualificationError::PhaseLiveMismatch {
@@ -4801,6 +4863,7 @@ where
     fn commit_account_bound(&mut self) {
         self.batches.apply_commitments(&mut self.state);
         self.batches.release_attributions(&mut self.state);
+        release_retained_output_attributions(&mut self.state);
         self.batches
             .destroy_storage_then_release_covers(&mut self.state);
     }
@@ -4889,8 +4952,16 @@ where
     #[cfg(test)]
     pub(crate) fn test_cover_matches_state(&self) -> bool {
         self.cover.as_ref().is_some_and(|cover| {
-            cover.batches.live_bytes() == cover.state.current_live_bytes
-                && cover.batches.active_count() == cover.state.active_reservations
+            cover
+                .batches
+                .live_bytes()
+                .checked_add(cover.state.retained_output_bytes)
+                == Some(cover.state.current_live_bytes)
+                && cover
+                    .batches
+                    .active_count()
+                    .checked_add(cover.state.retained_output_reservations)
+                    == Some(cover.state.active_reservations)
         })
     }
 
@@ -5937,6 +6008,24 @@ fn capacity_bytes<T>(values: &Vec<T>) -> Result<u64, CapacityPlanError> {
 
 fn release_evidence<P, D>(state: &mut LedgerState<P, D>, bytes: u64) {
     state.current_evidence_bytes = state.current_evidence_bytes.saturating_sub(bytes);
+}
+
+/// Retires operation attribution at joint publication; allocation-bound physical leases remain
+/// inside the actual output owners. Classification is accumulated in the existing catalog rows,
+/// so terminal storage grows with neither dependency count nor path count.
+fn release_retained_output_attributions<P, D>(state: &mut LedgerState<P, D>) {
+    state.current_live_bytes -= state.retained_output_bytes;
+    state.active_reservations -= state.retained_output_reservations;
+    for entry in &mut state.dimensions {
+        entry.state.current_live_bytes -= entry.state.retained_output_bytes;
+        entry.state.retained_output_bytes = 0;
+    }
+    for phase in &mut state.phase_states {
+        phase.current_live_bytes -= phase.retained_output_bytes;
+        phase.retained_output_bytes = 0;
+    }
+    state.retained_output_bytes = 0;
+    state.retained_output_reservations = 0;
 }
 
 #[cfg(test)]

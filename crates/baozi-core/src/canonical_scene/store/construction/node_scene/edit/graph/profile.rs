@@ -137,7 +137,7 @@ where
     let operation = lane
         .try_retain_sequence(plan.operation, ProfileLineageOperationSchema, |control| {
             control.extend_from_slice(&[
-                u32::from(pending.program.shape().profile_operation_code()),
+                u32::from(pending.program.profile_operation_code()),
                 0,
                 0,
                 u32::from(encode_digest_algorithm(

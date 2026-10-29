@@ -85,7 +85,7 @@ where
             dormant: ScopedDormantActivation {
                 operation: Some(self),
                 containment_anchor,
-                armed: true,
+                contain_if_abandoned: false,
             },
             policy,
             scoped_failure: failure,
@@ -100,6 +100,15 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    /// Marks a session owner extracted into a host's transient activation state.
+    ///
+    /// Ordinary session drop is healthy cleanup. Once the host has removed this owner from its
+    /// stable state slot, a scoped transaction must resolve it; abandonment is an ownership fault.
+    pub fn into_activation_transition(mut self) -> Self {
+        self.dormant.contain_if_abandoned = true;
+        self
+    }
+
     /// Borrows producer work and accounting before canonical activation begins.
     pub fn producer_host(&mut self) -> RetainedStoreProducerHost<'_, O, PP, U> {
         self.dormant.operation_mut().producer_host()
@@ -108,6 +117,18 @@ where
     /// Borrows the operation's control and reservation checkpoint before activation begins.
     pub fn control_checkpoint(&mut self) -> RetainedStoreControlCheckpoint<'_, O, PP, U> {
         self.dormant.operation_mut().control_checkpoint()
+    }
+
+    pub fn reserve_retained_storage(
+        &mut self,
+        phase: StorePhaseKey,
+        dimension: StoreDimensionKey,
+        bytes: u64,
+        allocations: u64,
+    ) -> Result<RetainedStoreReservation<O>, StoreRuntimeError> {
+        self.dormant
+            .operation_mut()
+            .reserve_retained_storage(phase, dimension, bytes, allocations)
     }
 
     /// Marks one qualified session phase complete without exposing the raw operation.
@@ -298,13 +319,13 @@ where
         }
         ScopedPendingActivation::NeverActivated(never) => {
             let NeverActivatedStoreSession {
-                cause,
+                owner,
                 failure_code: _,
                 outcome_evidence_plan: _,
                 failure_work: _,
                 outcome_evidence_destination_dimension: _,
-                authority,
             } = never;
+            let (cause, authority) = owner.into_parts();
             let _ = drop_scoped_value(cause);
             match authority {
                 NeverActivatedAuthority::Operation(operation)
@@ -970,6 +991,10 @@ where
     }
 
     fn contain(mut self) {
+        self.contain_in_place();
+    }
+
+    fn contain_in_place(&mut self) {
         let containment = match self.owner.take() {
             Some(ScopedTransitionOwner::Operation(operation)) => contain_operation(operation),
             Some(ScopedTransitionOwner::Assembly(assembly)) => StoreActivationContainment {
@@ -978,6 +1003,197 @@ where
             None => self.driver.contain_current(),
         };
         self.driver.state = ScopedActivationState::Contained(containment);
+    }
+    /// Opens tables while the transition continues to own every success and failure branch.
+    fn open_publication<P, M>(
+        &mut self,
+        request: &BoundScopedSuccessRequest,
+        failure: &BoundScopedFailureRequest,
+        inputs: &mut ScopedActivationInputs<P, M>,
+    ) -> bool {
+        let publication = RetainedStorePublicationPlan::success(
+            request.canonical_plan,
+            failure.outcome_evidence_plan,
+        );
+        let Some(operation) = self.take_operation() else {
+            let _ = inputs.drop_remaining();
+            return false;
+        };
+        match super::try_open_activation(operation, publication) {
+            Ok(assembly) => {
+                self.put_assembly(assembly);
+                true
+            }
+            Err(ActivationOpenFailure::DeferredContainment { operation }) => {
+                self.put_operation(operation);
+                let _ = inputs.drop_remaining();
+                self.contain_in_place();
+                false
+            }
+            Err(ActivationOpenFailure::Recoverable {
+                operation,
+                cause,
+                failure_code,
+                fallback_only,
+            }) => {
+                self.put_operation(operation);
+                if inputs.drop_remaining().is_err() || !self.operation_is_quiescent() {
+                    self.contain_in_place();
+                } else {
+                    let operation = self
+                        .take_operation()
+                        .expect("recoverable activation retains its operation owner");
+                    self.driver
+                        .install_pending(ScopedPendingActivation::NeverActivated(
+                            NeverActivatedStoreSession::runtime(
+                                operation,
+                                failure.outcome_evidence_plan,
+                                self.driver.failure_work,
+                                failure.outcome_evidence_destination_dimension,
+                                cause,
+                                failure_code,
+                                fallback_only,
+                            ),
+                        ));
+                }
+                false
+            }
+        }
+    }
+
+    /// Resolves the private materialization after its caller-owned inputs have been destroyed.
+    /// Keeping terminal-owner transitions here avoids retaining their large temporary slots
+    /// across the materializer and publication-table open calls on a normal host stack.
+    fn finish_materialization(
+        mut self,
+        request: BoundScopedSuccessRequest,
+        failure: BoundScopedFailureRequest,
+        materialized: CanonicalMaterializationState<T, E, CanonicalKind, CanonicalTag>,
+    ) {
+        let failure_work = self.driver.failure_work;
+        let outcome_evidence_destination_dimension = failure.outcome_evidence_destination_dimension;
+        let BoundScopedSuccessRequest {
+            validation_phase,
+            validation_work_dimension,
+            validation_scratch_dimension,
+            canonical_destination_dimension,
+            validation_work,
+            expected_materialized_blocks,
+            ..
+        } = request;
+        let planning_baseline = self.driver.planning_baseline;
+        let publication_storage_baseline = self
+            .assembly_mut()
+            .and_then(|assembly| assembly.raw.publication_storage_baseline(planning_baseline));
+        let Some(publication_storage_baseline) = publication_storage_baseline else {
+            let _ = drop_materialization(materialized);
+            self.contain();
+            return;
+        };
+
+        if !self.assembly_is_quiescent(publication_storage_baseline) {
+            let _ = drop_materialization(materialized);
+            self.contain();
+            return;
+        }
+
+        if self
+            .assembly_mut()
+            .expect("materialization retains its assembly")
+            .is_fallback_only()
+        {
+            let _ = drop_materialization(materialized);
+            self.contain();
+            return;
+        }
+
+        let first_fault = self.driver.first_fault.take();
+        match (first_fault, materialized) {
+            (Some(fault), CanonicalMaterializationState::Activated { root: _, output }) => {
+                let _ = drop_scoped_value(output);
+                let _fault = fault;
+                self.contain();
+            }
+            (Some(fault), CanonicalMaterializationState::Rejected(rejection)) => {
+                if fault.contract_seen {
+                    let _ = drop_verified_rejection(rejection);
+                    self.contain();
+                } else if let Some(failure_code) = fault.recoverable_code() {
+                    if drop_verified_rejection(rejection).is_err() {
+                        self.contain();
+                    } else {
+                        let assembly = self
+                            .take_assembly()
+                            .expect("runtime rejection retains its assembly");
+                        match finish_rejected_session(
+                            assembly,
+                            failure_work,
+                            outcome_evidence_destination_dimension,
+                            StoreCanonicalRejection::Runtime(fault.cause),
+                            failure_code,
+                        ) {
+                            Ok(rejected) => {
+                                self.install(ScopedPendingActivation::Rejected(rejected));
+                            }
+                            Err(containment) => {
+                                self.driver.state = ScopedActivationState::Contained(containment);
+                            }
+                        }
+                    }
+                } else {
+                    let _ = drop_verified_rejection(rejection);
+                    self.contain();
+                }
+            }
+            (None, CanonicalMaterializationState::Activated { root, output }) => {
+                if self
+                    .assembly_mut()
+                    .expect("activated materialization retains its assembly")
+                    .canonical_len()
+                    != expected_materialized_blocks
+                {
+                    let _ = drop_scoped_value(output);
+                    self.contain();
+                } else {
+                    let assembly = self
+                        .take_assembly()
+                        .expect("activated materialization consumes its assembly once");
+                    self.install(ScopedPendingActivation::Activated(
+                        ActivatedCanonicalStoreSession {
+                            canonical_root: root,
+                            output,
+                            failure_work,
+                            validation_phase,
+                            validation_work_dimension,
+                            validation_scratch_dimension,
+                            canonical_destination_dimension,
+                            outcome_evidence_destination_dimension,
+                            validation_work,
+                            assembly,
+                        },
+                    ));
+                }
+            }
+            (None, CanonicalMaterializationState::Rejected(rejection)) => {
+                let assembly = self
+                    .take_assembly()
+                    .expect("requested rejection consumes its assembly once");
+                match finish_rejected_session(
+                    assembly,
+                    failure_work,
+                    outcome_evidence_destination_dimension,
+                    StoreCanonicalRejection::Requested(rejection.cause),
+                    rejection.failure_code,
+                ) {
+                    Ok(rejected) => {
+                        self.install(ScopedPendingActivation::Rejected(rejected));
+                    }
+                    Err(containment) => {
+                        self.driver.state = ScopedActivationState::Contained(containment);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1097,91 +1313,14 @@ where
             >::receipt(receipt_brand);
         }
 
-        let BoundScopedSuccessRequest {
-            canonical_plan,
-            materialization_work_dimension,
-            materialization_scratch_dimension,
-            validation_phase,
-            validation_work_dimension,
-            validation_scratch_dimension,
-            canonical_destination_dimension,
-            validation_work,
-            expected_materialized_blocks,
-            semantic_bytes: _,
-            semantic_bytes_dimension: _,
-        } = request;
-        let (materialization_phase, _) = canonical_plan.keys_for_publication_validation();
-        let publication_plan =
-            RetainedStorePublicationPlan::success(canonical_plan, outcome_evidence_plan);
-        let Some(operation) = transition.take_operation() else {
-            let _ = inputs.drop_remaining();
-            return ScopedActivationDriver::<
-                O,
-                PP,
-                U,
-                T,
-                E,
-                CanonicalKind,
-                CanonicalTag,
-                L,
-            >::receipt(receipt_brand);
-        };
-        let opened = super::try_open_activation(operation, publication_plan);
-        let assembly = match opened {
-            Ok(assembly) => assembly,
-            Err(ActivationOpenFailure::DeferredContainment { operation }) => {
-                transition.put_operation(operation);
-                let _ = inputs.drop_remaining();
-                transition.contain();
-                return ScopedActivationDriver::<
-                    O,
-                    PP,
-                    U,
-                    T,
-                    E,
-                    CanonicalKind,
-                    CanonicalTag,
-                    L,
-                >::receipt(receipt_brand);
-            }
-            Err(ActivationOpenFailure::Recoverable {
-                operation,
-                cause,
-                failure_code,
-                fallback_only,
-            }) => {
-                transition.put_operation(operation);
-                if inputs.drop_remaining().is_err() || !transition.operation_is_quiescent() {
-                    transition.contain();
-                } else {
-                    let operation = transition
-                        .take_operation()
-                        .expect("recoverable activation retains its operation owner");
-                    transition.install(ScopedPendingActivation::NeverActivated(
-                        NeverActivatedStoreSession::runtime(
-                            operation,
-                            failure.outcome_evidence_plan,
-                            failure_work,
-                            outcome_evidence_destination_dimension,
-                            cause,
-                            failure_code,
-                            fallback_only,
-                        ),
-                    ));
-                }
-                return ScopedActivationDriver::<
-                    O,
-                    PP,
-                    U,
-                    T,
-                    E,
-                    CanonicalKind,
-                    CanonicalTag,
-                    L,
-                >::receipt(receipt_brand);
-            }
-        };
-        transition.put_assembly(assembly);
+        if !transition.open_publication(&request, &failure, &mut inputs) {
+            return ScopedActivationDriver::<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>::receipt(
+                receipt_brand,
+            );
+        }
+        let (materialization_phase, _) = request.canonical_plan.keys_for_publication_validation();
+        let materialization_work_dimension = request.materialization_work_dimension;
+        let materialization_scratch_dimension = request.materialization_scratch_dimension;
 
         let materialized = catch_unwind(AssertUnwindSafe(|| {
             let ScopedOwnerTransition { driver, owner } = &mut transition;
@@ -1232,147 +1371,7 @@ where
             }
         };
 
-        let planning_baseline = transition.driver.planning_baseline;
-        let publication_storage_baseline = transition
-            .assembly_mut()
-            .and_then(|assembly| assembly.raw.publication_storage_baseline(planning_baseline));
-        let Some(publication_storage_baseline) = publication_storage_baseline else {
-            let _ = drop_materialization(materialized);
-            transition.contain();
-            return ScopedActivationDriver::<
-                O,
-                PP,
-                U,
-                T,
-                E,
-                CanonicalKind,
-                CanonicalTag,
-                L,
-            >::receipt(receipt_brand);
-        };
-
-        if !transition.assembly_is_quiescent(publication_storage_baseline) {
-            let _ = drop_materialization(materialized);
-            transition.contain();
-            return ScopedActivationDriver::<
-                O,
-                PP,
-                U,
-                T,
-                E,
-                CanonicalKind,
-                CanonicalTag,
-                L,
-            >::receipt(receipt_brand);
-        }
-
-        if transition
-            .assembly_mut()
-            .expect("materialization retains its assembly")
-            .is_fallback_only()
-        {
-            let _ = drop_materialization(materialized);
-            transition.contain();
-            return ScopedActivationDriver::<
-                O,
-                PP,
-                U,
-                T,
-                E,
-                CanonicalKind,
-                CanonicalTag,
-                L,
-            >::receipt(receipt_brand);
-        }
-
-        let first_fault = transition.driver.first_fault.take();
-        match (first_fault, materialized) {
-            (Some(fault), CanonicalMaterializationState::Activated { root: _, output }) => {
-                let _ = drop_scoped_value(output);
-                let _fault = fault;
-                transition.contain();
-            }
-            (Some(fault), CanonicalMaterializationState::Rejected(rejection)) => {
-                if fault.contract_seen {
-                    let _ = drop_verified_rejection(rejection);
-                    transition.contain();
-                } else if let Some(failure_code) = fault.recoverable_code() {
-                    if drop_verified_rejection(rejection).is_err() {
-                        transition.contain();
-                    } else {
-                        let assembly = transition
-                            .take_assembly()
-                            .expect("runtime rejection retains its assembly");
-                        match finish_rejected_session(
-                            assembly,
-                            failure_work,
-                            outcome_evidence_destination_dimension,
-                            StoreCanonicalRejection::Runtime(fault.cause),
-                            failure_code,
-                        ) {
-                            Ok(rejected) => {
-                                transition.install(ScopedPendingActivation::Rejected(rejected));
-                            }
-                            Err(containment) => {
-                                transition.driver.state =
-                                    ScopedActivationState::Contained(containment);
-                            }
-                        }
-                    }
-                } else {
-                    let _ = drop_verified_rejection(rejection);
-                    transition.contain();
-                }
-            }
-            (None, CanonicalMaterializationState::Activated { root, output }) => {
-                if transition
-                    .assembly_mut()
-                    .expect("activated materialization retains its assembly")
-                    .canonical_len()
-                    != expected_materialized_blocks
-                {
-                    let _ = drop_scoped_value(output);
-                    transition.contain();
-                } else {
-                    let assembly = transition
-                        .take_assembly()
-                        .expect("activated materialization consumes its assembly once");
-                    transition.install(ScopedPendingActivation::Activated(
-                        ActivatedCanonicalStoreSession {
-                            canonical_root: root,
-                            output,
-                            failure_work,
-                            validation_phase,
-                            validation_work_dimension,
-                            validation_scratch_dimension,
-                            canonical_destination_dimension,
-                            outcome_evidence_destination_dimension,
-                            validation_work,
-                            assembly,
-                        },
-                    ));
-                }
-            }
-            (None, CanonicalMaterializationState::Rejected(rejection)) => {
-                let assembly = transition
-                    .take_assembly()
-                    .expect("requested rejection consumes its assembly once");
-                match finish_rejected_session(
-                    assembly,
-                    failure_work,
-                    outcome_evidence_destination_dimension,
-                    StoreCanonicalRejection::Requested(rejection.cause),
-                    rejection.failure_code,
-                ) {
-                    Ok(rejected) => {
-                        transition.install(ScopedPendingActivation::Rejected(rejected));
-                    }
-                    Err(containment) => {
-                        transition.driver.state = ScopedActivationState::Contained(containment);
-                    }
-                }
-            }
-        }
+        transition.finish_materialization(request, failure, materialized);
         ScopedActivationDriver::<O, PP, U, T, E, CanonicalKind, CanonicalTag, L>::receipt(
             receipt_brand,
         )

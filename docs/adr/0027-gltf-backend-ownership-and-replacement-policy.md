@@ -110,6 +110,19 @@ It stores Baozi-owned values or checked references to session-owned immutable sn
 store decoder-backend handles, backend indices without explicit source identity, hidden IO closures,
 or borrowed memory whose lifetime requires retaining the backend graph.
 
+The selected-scene model need not copy the complete unselected decoder graph. The admitted immutable
+primary snapshot and its typed raw-range inventory retain declarations outside the selected closure;
+the source-scope record retains their selected/omitted disposition. Canonical construction reads owned
+selected semantics and session snapshot references only. Source arrays keep their original ordinals,
+including parent-qualified primitive and animation-channel/sampler ordinals, independently of dense
+canonical table order. This permits dropping the backend without materializing unrelated resources.
+
+The same bounded JSON scanner that admits syntax builds this raw-range inventory. A second JSON
+document tree or backend-message parser is unnecessary. Selected unsupported `extras` or extension
+payloads must receive an explicit profile decision before dependency IO, even when the decoder would
+discard them. A supported extension at an unsupported owner/site is not silently accepted. Missing
+required entity ranges fail before canonical construction.
+
 Scene construction is a separately testable normalized-model consumer. Its module may import glTF
 format-owned model/types and borrow core's bounded authoring capability, but must not import, name, or
 accept a decoder-backend module/type. A hand-built normalized fixture must exercise it without
@@ -286,6 +299,19 @@ Negative:
 | Maturity truthfulness | Linux sanitizer and subprocess RSS/timeout gates execute before promotion; compile-only evidence cannot satisfy them. |
 
 ## Amendment History
+
+### 2026-10-29: Own selected meaning and retain admitted source ranges
+
+- Affected: `Normalized Model Contract` and the executed backend firewall.
+- New: the format-private model owns selected semantic tables, names, weights, payloads, and the
+  admission scanner's original source-range inventory. Unselected declarations may remain checked
+  ranges into the immutable primary snapshot. Backend handles and their opaque allowance end before
+  canonical authoring. Encoded resource bytes that are no longer needed are released at normalization.
+- Rationale: duplicating every unselected backend object creates cost without changing the selected
+  Scene. Reusing the syntax scanner preserves original identity and bytes without another parser.
+- Impact: a handwritten model fixture exercises canonical authoring without invoking the backend.
+  Source mapping, malformed payload, sanitizer, and independent consumer execution still establish
+  the implemented profile; this amendment alone does not admit the format.
 
 ### 2026-10-29: Maintain demonstrated validator corrections at the backend
 

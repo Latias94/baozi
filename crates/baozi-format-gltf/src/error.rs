@@ -193,6 +193,17 @@ impl GltfFailure {
         )
     }
 
+    pub(crate) fn unsupported_at(
+        subject: &'static str,
+        byte_offset: u64,
+        byte_length: u64,
+        reason: impl fmt::Display,
+    ) -> Self {
+        let mut failure = Self::unsupported(subject, reason);
+        failure.set_byte_range(byte_offset, byte_length);
+        failure
+    }
+
     pub(crate) fn internal(reason: impl fmt::Display) -> Self {
         Self::new(
             GltfFailureCode::InternalInvariant,

@@ -38,7 +38,7 @@ use super::{
     NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
     NodeSceneConstructionRejection, NodeSceneDraft, PendingNodeSceneFailure,
     PreparedNodeSceneFailure, PreparedNodeSceneFallback, PreparedNodeSceneRichFailure,
-    SceneEvidenceCounts, ValidatedNodeScene,
+    SceneEvidenceCounts, SceneStorage,
 };
 #[cfg(test)]
 use super::{
@@ -92,17 +92,19 @@ impl NodeSceneLaneGenerationRejection {
 
 /// Core-owned generation/proof half of a successful joint publication.
 ///
-/// The token owns no operation, canonical store, ledger, or joint-commit capability.
+/// The token carries the actual typed table owners, generation, and proof. It owns no operation,
+/// legacy canonical store, ledger, or joint-commit capability.
 #[must_use = "the Scene handoff token must consume the matching published canonical owner"]
 pub struct NodeSceneHandoffToken {
     generation: ReservedSceneGeneration,
     proof: super::NodeSceneValidationProof,
+    tables: crate::canonical_scene::store::typed_storage::NodeGeometryStorage,
 }
 
 /// Exact published owners returned only after the prepared canonical root matches core's proof.
 #[must_use = "the published Scene success must be transferred to the import terminal owner"]
 pub struct NodeScenePublishedSuccess {
-    scene: ValidatedNodeScene,
+    scene: SceneStorage,
     outcome_evidence: PublishedOutcomeEvidenceStore<RecordBlock, NodeSceneOutcomeEvidenceSchema>,
     ledger_evidence: StoreLedgerEvidence,
 }
@@ -111,7 +113,7 @@ impl NodeScenePublishedSuccess {
     pub(in crate::canonical_scene::store) fn into_parts(
         self,
     ) -> (
-        ValidatedNodeScene,
+        SceneStorage,
         PublishedOutcomeEvidenceStore<RecordBlock, NodeSceneOutcomeEvidenceSchema>,
         StoreLedgerEvidence,
     ) {
@@ -128,9 +130,10 @@ impl NodeSceneHandoffToken {
     fn into_scene(
         self,
         canonical: PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>,
-    ) -> ValidatedNodeScene {
-        ValidatedNodeScene {
+    ) -> SceneStorage {
+        SceneStorage {
             generation: self.generation.into_id(),
+            tables: self.tables,
             canonical,
             proof: self.proof,
             #[cfg(test)]
@@ -266,11 +269,12 @@ where
     };
 
     Ok(
-        permit.bind_joint_commit(|_actual_output, proof, joint, seal| {
+        permit.bind_joint_commit(|actual_output, proof, joint, seal| {
             prepare(
                 NodeSceneHandoffToken {
                     generation,
                     proof: proof.into_inner(),
+                    tables: actual_output.into_tables(),
                 },
                 joint,
                 seal,

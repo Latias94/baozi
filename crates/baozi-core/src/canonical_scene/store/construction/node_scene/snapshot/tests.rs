@@ -16,8 +16,7 @@ use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneProfileMetadataValue, NodeSceneProfileStep,
 };
 use crate::canonical_scene::store::construction::node_scene::{
-    NodeSceneConstructionTerminal, NodeSceneSuccessParts, NodeSceneTestTransaction,
-    ValidatedNodeScene,
+    NodeSceneConstructionTerminal, NodeSceneSuccessParts, NodeSceneTestTransaction, SceneStorage,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, CameraAuthoring,
@@ -224,7 +223,7 @@ fn snapshot_limits(bytes: usize, items: usize) -> NodeSceneSnapshotLimits {
 }
 
 fn capture_node_scene(
-    scene: &ValidatedNodeScene,
+    scene: &SceneStorage,
     limits: NodeSceneSnapshotLimits,
     cancellation: Option<&CancellationToken>,
 ) -> Result<NodeSceneSnapshot, NodeSceneSnapshotError> {
@@ -232,7 +231,7 @@ fn capture_node_scene(
 }
 
 fn inspect_single_node_profile(
-    scene: &ValidatedNodeScene,
+    scene: &SceneStorage,
     inspect: impl FnOnce(&mut NodeSceneProfileCursor<'_>),
 ) {
     let view = scene.semantic_view().expect("metadata semantic view");
@@ -1528,7 +1527,7 @@ fn fresh_segment_nonce_is_excluded_from_the_semantic_snapshot() {
     let account = account(&factory);
     let first = single_root_scene(&account, AuthoredTransform::identity_trs());
     let second = single_root_scene(&account, AuthoredTransform::identity_trs());
-    let segment_nonce = |scene: &ValidatedNodeScene| {
+    let segment_nonce = |scene: &SceneStorage| {
         scene
             .canonical
             .records(scene.proof.profile_segments().into_store())
@@ -3477,13 +3476,13 @@ fn proof_and_mid_traversal_read_failures_do_not_publish_partial_snapshots() {
     assert!(matches!(
         capture_node_scene(&layout_mismatch.scene, snapshot_limits(4_096, 64), None),
         Err(NodeSceneSnapshotError::InconsistentView {
-            reason: "validated node table row count disagrees with validation proof"
+            reason: "typed node storage disagrees with central validation proof"
         })
     ));
     assert!(matches!(
         capture_node_scene(&foreign_proof.scene, snapshot_limits(4_096, 64), None),
         Err(NodeSceneSnapshotError::InconsistentView {
-            reason: "validated node table is unavailable or mistyped"
+            reason: "typed node storage disagrees with central validation proof"
         })
     ));
     assert!(matches!(

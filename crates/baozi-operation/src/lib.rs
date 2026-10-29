@@ -81,9 +81,10 @@ pub use concrete_store::{
 /// }
 /// ```
 ///
-/// The successful joint-commit binder accepts only destructor-free descriptors:
+/// The successful joint-commit binder moves owned output into the paired handoff callback.
+/// Proof descriptors remain destructor-free; actual storage keeps its own central release owner:
 ///
-/// ```compile_fail
+/// ```no_run
 /// use baozi_operation::__retained_store_integration::activation::CanonicalFreezePermit;
 /// use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit};
 ///
@@ -104,10 +105,12 @@ pub use concrete_store::{
 /// }
 ///
 /// type Permit = CanonicalFreezePermit<Owner, Phase, Unit, String, (), (), (), (), ()>;
-/// fn bind_non_copy_output(permit: Permit) {
+/// fn bind_owned_output(permit: Permit) {
 ///     permit.bind_joint_commit(|_, _, _, _| ());
 /// }
 /// ```
+///
+/// A proof cannot introduce an independently destructible owner:
 ///
 /// ```compile_fail
 /// use baozi_operation::__retained_store_integration::activation::CanonicalFreezePermit;
@@ -261,6 +264,7 @@ pub mod __retained_store_integration {
             RetainedStorePublicationPlan, RetainedStoreReservation, RetainedStoreSharePlan,
             RetainedStoreStartError, RetainedStoreStartPlan, RetainedStoreWriterPlan,
         };
+        pub use crate::retained::{RetainedStorage, SharedRetainedStorage};
     }
 
     /// Consumer-facing canonical activation capabilities.
@@ -274,7 +278,8 @@ pub mod __retained_store_integration {
             CanonicalFreezeInterruptionClass, CanonicalFreezePermit, CanonicalFreezePermitIssue,
             CanonicalJointCommit, CanonicalJointSeal, CanonicalLane, CanonicalMaterialization,
             CanonicalMaterializationRole, CanonicalRecordBuildRow, CanonicalReservation,
-            CanonicalScopedDisposition, CanonicalSemanticCompletion, CanonicalSemanticWorkSession,
+            CanonicalRetainedStorageBuildControl, CanonicalScopedDisposition,
+            CanonicalSemanticCompletion, CanonicalSemanticWorkSession,
             CanonicalValidationCheckpoint, CanonicalValidationDecision, CanonicalValidationMember,
             CanonicalValidationPlanning, CanonicalValidationPreparationError,
             CanonicalValidationProgress, CanonicalValidationRole, CanonicalValidationSession,

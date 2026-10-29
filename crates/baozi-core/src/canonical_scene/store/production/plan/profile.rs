@@ -49,7 +49,6 @@ const LOGICAL_DIGEST_BYTES: u64 = 33;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) enum ProfileAuthoringLimit {
-    Nodes,
     Edges,
     Depth,
     Entities,
@@ -1482,9 +1481,9 @@ where
     })?;
     let metadata_entry_count = collection_count(metadata.entries().len(), "metadata entries")?;
     enforce_limit::<C::Error>(
-        ProfileAuthoringLimit::Nodes,
+        ProfileAuthoringLimit::Entities,
         u64::from(provenance_node_count),
-        limits.max_nodes(),
+        limits.max_entities(),
     )?;
     enforce_limit::<C::Error>(
         ProfileAuthoringLimit::MetadataEntries,
@@ -1745,7 +1744,7 @@ where
     let maximum_entities = context.limits.max_entities();
     let maximum_edges = context.limits.max_edges();
     let maximum_references = context.limits.max_references();
-    let maximum_depth = context.limits.max_depth();
+    let maximum_depth = context.limits.max_provenance_depth();
     for (node_index, node) in lineage.provenance_nodes().iter().copied().enumerate() {
         let node_id = u32::try_from(node_index).map_err(|_| {
             ProfileAuthoringSemanticError::CountDomainTooLarge {
@@ -1831,7 +1830,7 @@ where
     let mut previous = None;
     let maximum_edges = context.limits.max_edges();
     let maximum_references = context.limits.max_references();
-    let maximum_depth = context.limits.max_depth();
+    let maximum_depth = context.limits.max_provenance_depth();
     for parent in operation.parents().iter().copied() {
         let parent_edges = metrics.parent_edges;
         let updated_parent_edges =

@@ -223,9 +223,6 @@ impl ProfileMeteredCounts {
     pub(in crate::canonical_scene::store) fn scratch_bytes(self) -> Option<u64> {
         let u32_bytes = u64::try_from(std::mem::size_of::<u32>()).ok()?;
         let u64_bytes = u64::try_from(std::mem::size_of::<u64>()).ok()?;
-        let i64_bytes = u64::try_from(std::mem::size_of::<i64>()).ok()?;
-        let f64_bytes = u64::try_from(std::mem::size_of::<f64>()).ok()?;
-        let f32_bytes = u64::try_from(std::mem::size_of::<f32>()).ok()?;
         let address_scalars = u64::try_from(PROFILE_PROVENANCE_ADDRESS_SCALARS).ok()?;
         [
             u64::from(self.segment_count).checked_mul(
@@ -263,13 +260,6 @@ impl ProfileMeteredCounts {
             u64::from(self.metadata_entry_count)
                 .checked_mul(13)?
                 .checked_mul(u32_bytes)?,
-            u64::from(self.metadata_text_bytes),
-            u64::from(self.metadata_payload_bytes),
-            u64::from(self.metadata_bool_count),
-            u64::from(self.metadata_i64_count).checked_mul(i64_bytes)?,
-            u64::from(self.metadata_u64_count).checked_mul(u64_bytes)?,
-            u64::from(self.metadata_f64_count).checked_mul(f64_bytes)?,
-            u64::from(self.metadata_f32_count).checked_mul(f32_bytes)?,
         ]
         .into_iter()
         .try_fold(0_u64, u64::checked_add)
@@ -335,13 +325,6 @@ impl ProfileMeteredCounts {
             u64::from(self.owner_count).checked_mul(4)?,
             u64::from(self.attachment_count).checked_mul(address_scalars)?,
             u64::from(self.metadata_entry_count).checked_mul(13)?,
-            u64::from(self.metadata_text_bytes),
-            u64::from(self.metadata_payload_bytes),
-            u64::from(self.metadata_bool_count),
-            u64::from(self.metadata_i64_count),
-            u64::from(self.metadata_u64_count),
-            u64::from(self.metadata_f64_count),
-            u64::from(self.metadata_f32_count),
         ]
         .into_iter()
         .try_fold(0_u64, u64::checked_add)
@@ -387,13 +370,6 @@ pub(in crate::canonical_scene::store) struct ProfileMeteredScratch<'scratch, 'se
     pub(in crate::canonical_scene::store) owner_rows: &'scratch mut [u32],
     pub(in crate::canonical_scene::store) attachments: &'scratch mut [u64],
     pub(in crate::canonical_scene::store) metadata_rows: &'scratch mut [u32],
-    pub(in crate::canonical_scene::store) metadata_text: &'scratch mut [u8],
-    pub(in crate::canonical_scene::store) metadata_bytes: &'scratch mut [u8],
-    pub(in crate::canonical_scene::store) metadata_bools: &'scratch mut [u8],
-    pub(in crate::canonical_scene::store) metadata_i64s: &'scratch mut [i64],
-    pub(in crate::canonical_scene::store) metadata_u64s: &'scratch mut [u64],
-    pub(in crate::canonical_scene::store) metadata_f64s: &'scratch mut [f64],
-    pub(in crate::canonical_scene::store) metadata_f32s: &'scratch mut [f32],
 }
 
 pub(super) fn validate_profile_graph<R>(
@@ -616,20 +592,6 @@ fn metered_scratch_matches(
             == metered_physical_len(counts.attachment_count, address_stride).unwrap_or(usize::MAX)
         && scratch.metadata_rows.len()
             == metered_physical_len(counts.metadata_entry_count, 13).unwrap_or(usize::MAX)
-        && scratch.metadata_text.len()
-            == usize::try_from(counts.metadata_text_bytes).unwrap_or(usize::MAX)
-        && scratch.metadata_bytes.len()
-            == usize::try_from(counts.metadata_payload_bytes).unwrap_or(usize::MAX)
-        && scratch.metadata_bools.len()
-            == usize::try_from(counts.metadata_bool_count).unwrap_or(usize::MAX)
-        && scratch.metadata_i64s.len()
-            == usize::try_from(counts.metadata_i64_count).unwrap_or(usize::MAX)
-        && scratch.metadata_u64s.len()
-            == usize::try_from(counts.metadata_u64_count).unwrap_or(usize::MAX)
-        && scratch.metadata_f64s.len()
-            == usize::try_from(counts.metadata_f64_count).unwrap_or(usize::MAX)
-        && scratch.metadata_f32s.len()
-            == usize::try_from(counts.metadata_f32_count).unwrap_or(usize::MAX)
 }
 
 fn visit_sequence_into<'session, 'storage, 'control, 'operation, O, PP, U, T, Tag>(
@@ -659,10 +621,10 @@ where
     })
 }
 
-fn visit_sequence_into_validated<'session, 'storage, 'control, 'operation, O, PP, U, T, Tag>(
+fn validate_metadata_sequence<'session, 'storage, 'control, 'operation, O, PP, U, T, Tag>(
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     member: Option<CanonicalValidationMember<'session, ScalarSequence<T>, Tag>>,
-    output: &mut [T],
+    count: u32,
     mut validate: impl FnMut(T) -> bool,
 ) -> Result<bool, StoreWorkError>
 where
@@ -672,19 +634,18 @@ where
     T: StoredScalar,
     Tag: Copy + Send + Sync + 'static,
 {
-    if output.is_empty() {
+    let Ok(expected_len) = usize::try_from(count) else {
+        return Ok(false);
+    };
+    if expected_len == 0 {
         return Ok(member.is_none());
     }
     let Some(member) = member else {
         return Ok(false);
     };
-    session.visit_canonical_sequence(member, output.len(), |index, value| {
-        let Some(destination) = output.get_mut(index) else {
-            return false;
-        };
-        *destination = value;
-        validate(value)
-    })
+    session
+        .validate_canonical_sequence(member, expected_len, |_index, value| validate(value))
+        .map(|values| values.is_some())
 }
 
 fn visit_bytes_into<'session, 'storage, 'control, 'operation, O, PP, U, Tag>(
@@ -1674,34 +1635,80 @@ where
 
     if !visit_profile_segment_members(session, scratch)?
         || !visit_sequence_into(session, Some(attachments), scratch.attachments)?
-        || !visit_utf8_into(session, metadata_members.text, scratch.metadata_text)?
-        || !visit_bytes_into(session, metadata_members.bytes, scratch.metadata_bytes)?
-        || !visit_sequence_into_validated(
-            session,
-            metadata_members.bools,
-            scratch.metadata_bools,
-            |value| value <= 1,
-        )?
-        || !visit_sequence_into(session, metadata_members.i64s, scratch.metadata_i64s)?
-        || !visit_sequence_into(session, metadata_members.u64s, scratch.metadata_u64s)?
-        || !visit_sequence_into_validated(
-            session,
-            metadata_members.f64s,
-            scratch.metadata_f64s,
-            f64::is_finite,
-        )?
-        || !visit_sequence_into_validated(
-            session,
-            metadata_members.f32s,
-            scratch.metadata_f32s,
-            f32::is_finite,
-        )?
     {
+        return Ok(None);
+    }
+
+    // Metadata payloads stay in canonical storage. Their complete metered visits still
+    // validate values before any borrowed text or bytes are used by the semantic pass.
+    let metadata_text = if let Some(member) = metadata_members.text {
+        let Some(text) = session.validate_canonical_utf8_bytes(
+            member,
+            usize::try_from(counts.metadata_text_bytes).unwrap_or(usize::MAX),
+            |_index, _value| true,
+        )?
+        else {
+            return Ok(None);
+        };
+        text
+    } else {
+        ""
+    };
+    let metadata_bytes = if let Some(member) = metadata_members.bytes {
+        let Some(bytes) = session.validate_canonical_bytes(
+            member,
+            usize::try_from(counts.metadata_payload_bytes).unwrap_or(usize::MAX),
+            |_index, _value| true,
+        )?
+        else {
+            return Ok(None);
+        };
+        bytes
+    } else {
+        &[]
+    };
+    if !validate_metadata_sequence(
+        session,
+        metadata_members.bools,
+        counts.metadata_bool_count,
+        |value| value <= 1,
+    )? || !validate_metadata_sequence(
+        session,
+        metadata_members.i64s,
+        counts.metadata_i64_count,
+        |_value| true,
+    )? || !validate_metadata_sequence(
+        session,
+        metadata_members.u64s,
+        counts.metadata_u64_count,
+        |_value| true,
+    )? || !validate_metadata_sequence(
+        session,
+        metadata_members.f64s,
+        counts.metadata_f64_count,
+        f64::is_finite,
+    )? || !validate_metadata_sequence(
+        session,
+        metadata_members.f32s,
+        counts.metadata_f32_count,
+        f32::is_finite,
+    )? {
         return Ok(None);
     }
 
     let semantic = validate_metered_profile_semantics(session, counts, scratch)?;
     let Some((owner_classes, maximum_provenance_depth)) = semantic else {
+        return Ok(None);
+    };
+    let Some(()) = validate_metered_metadata_semantics(
+        session,
+        counts,
+        owner_classes,
+        scratch.metadata_rows,
+        metadata_text,
+        metadata_bytes,
+    )?
+    else {
         return Ok(None);
     };
 
@@ -1947,10 +1954,6 @@ where
     }
     let Some(owner_classes) =
         validate_metered_owner_semantics(session, counts, scratch.segments, scratch)?
-    else {
-        return Ok(None);
-    };
-    let Some(()) = validate_metered_metadata_semantics(session, counts, owner_classes, scratch)?
     else {
         return Ok(None);
     };
@@ -2253,20 +2256,19 @@ fn validate_metered_metadata_semantics<'session, 'storage, 'control, 'operation,
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     counts: ProfileMeteredCounts,
     owner_classes: ProfileOwnerClassCounts,
-    scratch: &ProfileMeteredScratch<'_, '_>,
+    rows: &[u32],
+    text: &str,
+    bytes: &[u8],
 ) -> Result<Option<()>, StoreWorkError>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let Some(text) = std::str::from_utf8(scratch.metadata_text).ok() else {
-        return Ok(None);
-    };
     let mut cursors = MetadataCursors::default();
     let mut previous_owner = None;
     let mut previous_key: Option<&str> = None;
-    for row in scratch.metadata_rows.chunks_exact(13) {
+    for row in rows.chunks_exact(13) {
         let Some((owner, key)) = run_profile_semantic_unit(session, || {
             let mut no_work = |_units| Some(());
             let owner = decode_owner(u8::try_from(row[0]).ok()?, row[1])?;
@@ -2309,7 +2311,7 @@ where
                 return None;
             }
             consume_bytes(
-                scratch.metadata_bytes,
+                bytes,
                 &mut cursors.bytes,
                 row[9],
                 row[10],

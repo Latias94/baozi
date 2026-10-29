@@ -473,14 +473,13 @@ impl<'scene> NodeSceneDeformationCursor<'scene> {
             self.proof.source_node_count(),
             "validated skeleton-root presence or index is inconsistent",
         )?;
-        require_optional_record_reference(
-            table,
-            row,
-            deformation_skin_field::NODES,
-            joint_count != 0 || skeleton_root.is_some(),
-            Some(self.proof.nodes()),
-            "validated skin node-table reference is inconsistent",
-        )?;
+        if table.scalar::<u32>(row, deformation_skin_field::NODE_COUNT)
+            != u32::try_from(self.proof.source_node_count() + 1).ok()
+        {
+            return Err(invariant(
+                "validated skin node domain count disagrees with central proof",
+            ));
+        }
 
         let matrix_spaces = self.read_skin_matrix_spaces(table, row)?;
 

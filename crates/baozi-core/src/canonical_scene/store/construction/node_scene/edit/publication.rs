@@ -20,7 +20,7 @@ use super::super::publication::{NodeSceneLaneJointCommit, validate_node_scene_fa
 use super::super::{
     ActivatedNodeSceneCandidate, NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneFallback,
     NodeSceneRichFailure, PendingNodeSceneFailure, PreparedNodeSceneFailure,
-    PreparedNodeSceneFallback, PreparedNodeSceneRichFailure, ValidatedNodeScene,
+    PreparedNodeSceneFallback, PreparedNodeSceneRichFailure, SceneStorage,
 };
 use super::report::{CanonicalInvalidations, CanonicalRemapSet};
 
@@ -34,6 +34,7 @@ type PreparedEditStoreFailure = PreparedStoreFailure<RecordBlock, NodeSceneOutco
 
 pub(super) struct PreparedNodeSceneEditSuccess {
     generation: ReservedSceneGeneration,
+    tables: crate::canonical_scene::store::typed_storage::NodeGeometryStorage,
     store: PreparedEditStoreSuccess,
     proof: crate::canonical_scene::store::validation::NodeSceneValidationProof,
     invalidations: CanonicalInvalidations,
@@ -71,7 +72,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneEditReport {
 }
 
 pub(in crate::canonical_scene::store) struct NodeSceneEditSuccessParts {
-    pub(in crate::canonical_scene::store) scene: ValidatedNodeScene,
+    pub(in crate::canonical_scene::store) scene: SceneStorage,
     pub(in crate::canonical_scene::store) report: NodeSceneEditReport,
 }
 
@@ -125,6 +126,7 @@ where
     U: ProgressUnit,
 {
     generation: ReservedSceneGeneration,
+    tables: crate::canonical_scene::store::typed_storage::NodeGeometryStorage,
     proof: crate::canonical_scene::store::validation::NodeSceneValidationProof,
     invalidations: CanonicalInvalidations,
     remaps: CanonicalRemapSet,
@@ -142,6 +144,7 @@ where
         let Self {
             generation,
             proof,
+            tables,
             invalidations,
             remaps,
             seal,
@@ -153,6 +156,7 @@ where
                     generation,
                     store,
                     proof,
+                    tables,
                     invalidations,
                     remaps,
                 },
@@ -210,10 +214,11 @@ where
                         return prepare_frozen_edit_failure!(rejected, evidence_counts);
                     }
                 };
-            permit.bind_joint_commit(|_output, proof, joint, seal| {
+            permit.bind_joint_commit(|output, proof, joint, seal| {
                 ScopedNodeSceneEditJointCommit {
                     generation,
                     proof: proof.into_inner(),
+                    tables: output.into_tables(),
                     invalidations,
                     remaps,
                     seal,
@@ -331,8 +336,9 @@ impl PreparedNodeSceneEdit {
                 let generation = prepared.generation.into_id();
                 let published = prepared.store.handoff();
                 NodeSceneEditTerminal::Success(NodeSceneEditSuccessParts {
-                    scene: ValidatedNodeScene {
+                    scene: SceneStorage {
                         generation,
+                        tables: prepared.tables,
                         canonical: published.canonical,
                         proof: prepared.proof,
                         #[cfg(test)]

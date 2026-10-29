@@ -712,6 +712,19 @@ pub(super) fn deformation_validation_error(
 ) -> Option<SceneValidationError> {
     use DeformationAuthoringSemanticError as Source;
     Some(match cause {
+        Source::InvalidSkinName { skin, source } => SceneValidationError::InvalidSkinName {
+            skin: *skin,
+            source: *source,
+        },
+        Source::InvalidMorphTargetName {
+            logical_mesh,
+            target,
+            source,
+        } => SceneValidationError::InvalidMorphTargetName {
+            logical_mesh: *logical_mesh,
+            target: *target,
+            source: *source,
+        },
         Source::GeometryTableCardinality {
             table,
             expected,
@@ -1502,7 +1515,6 @@ pub(super) fn profile_validation_error(
         } => SceneValidationError::LimitExceeded {
             domain: SceneValidationDomain::Profile,
             limit: match limit {
-                ProfileAuthoringLimit::Nodes => SceneValidationLimit::Nodes,
                 ProfileAuthoringLimit::Edges => SceneValidationLimit::Edges,
                 ProfileAuthoringLimit::Depth => SceneValidationLimit::Depth,
                 ProfileAuthoringLimit::Entities => SceneValidationLimit::Entities,

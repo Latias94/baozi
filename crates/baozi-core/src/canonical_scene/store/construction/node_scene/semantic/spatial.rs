@@ -18,17 +18,14 @@ use crate::canonical_scene::store::schema::spatial::{
     spatial_camera_field, spatial_directory_field, spatial_light_field,
 };
 use crate::canonical_scene::store::schema::{
-    PRESENCE_ABSENT, PRESENCE_PRESENT, SceneDirectorySchema, node_scene_node_field,
+    PRESENCE_ABSENT, PRESENCE_PRESENT, SceneDirectorySchema,
 };
 use crate::canonical_scene::store::validation::NodeSceneValidationProof;
 use crate::entity::{CameraProjection, LightKind};
 use crate::math::Vec3;
 use crate::scene_space::{Axis, FrontFaceWinding, Handedness, TransformConvention, UvOrigin};
 
-use super::{
-    NodeSceneSemanticResult, invariant, read_node_spatial_attachment, read_scalar,
-    read_u32_as_usize,
-};
+use super::{NodeSceneSemanticResult, invariant, read_scalar, read_u32_as_usize};
 
 type SceneCanonicalStore = PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>;
 
@@ -500,14 +497,14 @@ impl NodeSceneSpatialPlacement {
 /// A single linear scan over every proof-qualified node with a spatial attachment.
 #[must_use = "the spatial placements cursor must be consumed or deliberately discarded"]
 pub(in crate::canonical_scene::store) struct NodeSceneSpatialPlacementsCursor<'scene> {
-    nodes: CanonicalRecordView<'scene>,
+    nodes: &'scene crate::canonical_scene::store::typed_storage::NodeStorage,
     next_source_node: usize,
     source_node_count: usize,
 }
 
 impl<'scene> NodeSceneSpatialPlacementsCursor<'scene> {
     pub(super) const fn new(
-        nodes: CanonicalRecordView<'scene>,
+        nodes: &'scene crate::canonical_scene::store::typed_storage::NodeStorage,
         proof: NodeSceneValidationProof,
     ) -> Self {
         Self {
@@ -525,23 +522,12 @@ impl<'scene> NodeSceneSpatialPlacementsCursor<'scene> {
             self.next_source_node = source_node
                 .checked_add(1)
                 .ok_or_else(|| invariant("spatial placements cursor index overflows"))?;
-            let row = source_node
-                .checked_add(1)
-                .ok_or_else(|| invariant("spatial placement node row overflows"))?;
-            let camera = read_node_spatial_attachment(
-                self.nodes,
-                row,
-                node_scene_node_field::CAMERA_PRESENCE,
-                node_scene_node_field::CAMERA,
-                "validated camera attachment is unreadable",
-            )?;
-            let light = read_node_spatial_attachment(
-                self.nodes,
-                row,
-                node_scene_node_field::LIGHT_PRESENCE,
-                node_scene_node_field::LIGHT,
-                "validated light attachment is unreadable",
-            )?;
+            let node = self
+                .nodes
+                .source_node(source_node)
+                .ok_or_else(|| invariant("validated spatial placement node is absent"))?;
+            let camera = node.camera.map(|index| index as usize);
+            let light = node.light.map(|index| index as usize);
             if camera.is_some() || light.is_some() {
                 return Ok(Some(NodeSceneSpatialPlacement {
                     source_node,
@@ -576,7 +562,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSpatialPlacementCursor<'sc
 
 impl<'scene> NodeSceneSpatialPlacementCursor<'scene> {
     pub(super) fn camera(
-        nodes: CanonicalRecordView<'scene>,
+        nodes: &'scene crate::canonical_scene::store::typed_storage::NodeStorage,
         target_index: usize,
         proof: NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
@@ -593,7 +579,7 @@ impl<'scene> NodeSceneSpatialPlacementCursor<'scene> {
     }
 
     pub(super) fn light(
-        nodes: CanonicalRecordView<'scene>,
+        nodes: &'scene crate::canonical_scene::store::typed_storage::NodeStorage,
         target_index: usize,
         proof: NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {

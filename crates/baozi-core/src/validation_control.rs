@@ -20,6 +20,7 @@ pub struct SceneValidationLimits {
     max_nodes: u64,
     max_edges: u64,
     max_depth: u64,
+    max_provenance_depth: u64,
     max_entities: u64,
     max_references: u64,
     max_payload_cells: u64,
@@ -45,8 +46,15 @@ impl SceneValidationLimits {
         self
     }
 
+    /// Sets Scene hierarchy depth, including the synthetic root.
     pub const fn with_max_depth(mut self, value: u64) -> Self {
         self.max_depth = value;
+        self
+    }
+
+    /// Overrides lineage depth independently of the Scene hierarchy depth.
+    pub const fn with_max_provenance_depth(mut self, value: u64) -> Self {
+        self.max_provenance_depth = value;
         self
     }
 
@@ -122,6 +130,10 @@ impl SceneValidationLimits {
         self.max_depth
     }
 
+    pub const fn max_provenance_depth(self) -> u64 {
+        self.max_provenance_depth
+    }
+
     pub const fn max_entities(self) -> u64 {
         self.max_entities
     }
@@ -177,6 +189,7 @@ impl Default for SceneValidationLimits {
             max_nodes: 1_000_000,
             max_edges: 4_000_000,
             max_depth: 100_000,
+            max_provenance_depth: 100_000,
             max_entities: 2_000_000,
             max_references: 8_000_000,
             max_payload_cells: 100_000_000,

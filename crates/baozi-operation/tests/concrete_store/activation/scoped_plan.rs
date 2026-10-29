@@ -389,28 +389,32 @@ fn scoped_owner_rejects_success_facts_from_another_construction() {
 }
 
 #[test]
-fn dropping_dormant_session_outcome_owner_contains_the_operation() {
-    let factory = factory(1);
-    let account = account(&factory);
-    let (operation, keys) = operation(&account);
-    let owner = operation
-        .into_session_outcome_owner(
-            session_activation_policy(keys),
-            RetainedStoreBatchLimits::new(2, 2).unwrap(),
-            CanonicalFailureRequirements::new(CanonicalTableShape::new(1, 1).unwrap()),
-        )
-        .expect("session outcome owner");
-
-    drop(owner);
-
-    let snapshot = account.snapshot();
-    assert!(snapshot.poisoned());
-    assert_eq!(
-        snapshot
-            .first_poison_evidence()
-            .map(|evidence| evidence.reason()),
-        Some(AccountPoisonReason::OwnershipGraphUnverified)
-    );
+fn healthy_dormant_session_owner_releases_on_drop_and_unrelated_host_unwind() {
+    for unwind in [false, true] {
+        let factory = factory(1);
+        let account = account(&factory);
+        let (operation, keys) = operation(&account);
+        let owner = operation
+            .into_session_outcome_owner(
+                session_activation_policy(keys),
+                RetainedStoreBatchLimits::new(2, 2).unwrap(),
+                CanonicalFailureRequirements::new(CanonicalTableShape::new(1, 1).unwrap()),
+            )
+            .expect("session outcome owner");
+        assert!(account.snapshot().live_retained_bytes() > 0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _owner = owner;
+            if unwind {
+                std::panic::panic_any(19_u8);
+            }
+        }));
+        assert_eq!(result.is_err(), unwind);
+        drop(result);
+        let released = account.snapshot();
+        assert!(!released.poisoned());
+        assert_eq!(released.live_retained_bytes(), 0);
+        assert_eq!(released.live_retained_allocations(), 0);
+    }
 }
 
 fn derived_operation_for_scoped_activation(
@@ -1594,7 +1598,7 @@ fn scoped_activation_permit_and_semantic_completion_are_linear() {
 }
 
 #[test]
-fn dropping_an_unconsumed_scoped_outcome_owner_fails_closed() {
+fn dropping_an_unconsumed_activation_transfer_fails_closed() {
     let factory = factory(1);
     let account = account(&factory);
     let (operation, keys) = operation(&account);
@@ -1605,7 +1609,8 @@ fn dropping_an_unconsumed_scoped_outcome_owner_fails_closed() {
     } = scoped_activation_shape(keys, 1, 1);
     let owner = operation
         .into_test_session_outcome_owner(policy, failure)
-        .unwrap();
+        .unwrap()
+        .into_activation_transition();
 
     drop(owner);
 

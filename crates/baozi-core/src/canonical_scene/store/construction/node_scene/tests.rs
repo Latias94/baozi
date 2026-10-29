@@ -46,7 +46,6 @@ use super::{
     NodeSceneDraftBuild, NodeSceneRichFailure, NodeSceneTestTransaction, PendingNodeSceneDraft,
 };
 
-mod chunking;
 mod gltf_capability;
 mod obj_capability;
 mod profile_closure;
@@ -90,12 +89,18 @@ const SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK: u64 = 79;
 const SINGLE_TRS_FIRST_MATERIALIZATION_ENVELOPE_WORK: u64 = 23;
 const SINGLE_TRS_FIRST_MATERIALIZATION_ATTEMPTED_WORK: u64 =
     SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK + SINGLE_TRS_FIRST_MATERIALIZATION_ENVELOPE_WORK;
-const SINGLE_TRS_CENTRAL_VALIDATION_PREFIX_WORK: u64 = 449;
-const SINGLE_TRS_PRE_VALIDATION_COMPLETED_PREFIX_WORK: u64 = 448;
-const SINGLE_TRS_CENTRAL_VALIDATION_ENVELOPE_WORK: u64 = 425;
+// Typed nodes validate two rows and one child instead of 36 record cells, two reference cells,
+// and ten transform scalars. Removing the geometry directory, five Scene directory fields, and
+// four node-scratch cells reduces validation by 67 units. Materialization saves the same 67 units.
+const SINGLE_TRS_CENTRAL_VALIDATION_PREFIX_WORK: u64 = 382;
+const SINGLE_TRS_PRE_VALIDATION_COMPLETED_PREFIX_WORK: u64 = 381;
+const SINGLE_TRS_CENTRAL_VALIDATION_ENVELOPE_WORK: u64 = 358;
 const SINGLE_TRS_COMPLETE_WORK: u64 =
     SINGLE_TRS_CENTRAL_VALIDATION_PREFIX_WORK + SINGLE_TRS_CENTRAL_VALIDATION_ENVELOPE_WORK;
-const SINGLE_TRS_INVALID_TRANSFORM_COMPLETED_PREFIX: u64 = 617;
+// Invalid authored TRS stops after 77 scratch cells, 12 Scene directory fields, 23 spatial
+// directory fields, and the two typed node rows. The child sequence has not been inspected.
+const SINGLE_TRS_INVALID_TRANSFORM_COMPLETED_PREFIX: u64 =
+    SINGLE_TRS_PRE_VALIDATION_COMPLETED_PREFIX_WORK + 77 + 12 + 23 + 2;
 const SINGLE_TRS_ROOTS: [NodeLocalId; 1] = [NodeLocalId::new(0)];
 const SINGLE_TRS_NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
     Presence::Absent,
@@ -821,7 +826,7 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
         .into_id();
 
     let expected_canonical_block_count =
-        9 + usize::try_from(NODE_ONLY_PROFILE_CANONICAL_BLOCK_COUNT)
+        5 + usize::try_from(NODE_ONLY_PROFILE_CANONICAL_BLOCK_COUNT)
             .expect("node-only profile canonical block count");
     let semantic = parts
         .scene
@@ -936,7 +941,7 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
 }
 
 #[test]
-fn scene_input_admission_exceeds_the_legacy_fixed_slot_bound() {
+fn many_primitives_materialize_into_one_typed_geometry_owner() {
     const PRIMITIVE_COUNT: usize = 12;
     const PRIMITIVES_PER_MESH: usize = PRIMITIVE_COUNT / 2;
 
@@ -1021,8 +1026,24 @@ fn scene_input_admission_exceeds_the_legacy_fixed_slot_bound() {
     .expect("dynamic Scene attribution publication");
     let parts = successful_parts(terminal);
 
-    let expected_canonical_block_count = 36
-        + usize::try_from(SOURCE_BACKED_PROFILE_CANONICAL_BLOCK_COUNT)
+    assert_eq!(
+        parts.scene.read_geometry().primitives.len(),
+        PRIMITIVE_COUNT
+    );
+    assert_eq!(
+        parts.scene.read_geometry().attributes.len(),
+        PRIMITIVE_COUNT
+    );
+    assert_eq!(
+        parts.scene.read_geometry().f32_values.len(),
+        PRIMITIVE_COUNT * 3
+    );
+    assert_eq!(
+        parts.scene.read_geometry().u32_values.len(),
+        PRIMITIVE_COUNT
+    );
+    let expected_canonical_block_count =
+        7 + usize::try_from(SOURCE_BACKED_PROFILE_CANONICAL_BLOCK_COUNT)
             .expect("source-backed profile canonical block count");
     assert_eq!(
         parts.scene.canonical_block_count(),
@@ -1055,7 +1076,7 @@ fn present_empty_scene_publishes_every_domain_directory() {
 
     assert_eq!(semantic.node_count(), 0);
     assert_eq!(semantic.root_count(), 0);
-    assert_eq!(parts.scene.canonical_block_count(), 15);
+    assert_eq!(parts.scene.canonical_block_count(), 13);
     let mut cursor = semantic
         .into_cursor()
         .expect("present-empty Scene semantic cursor");
@@ -1253,6 +1274,10 @@ fn central_validation_work_budget_interruption_publishes_rich_failure() {
         .dimension_by_semantic(STORE_DIMENSION)
         .expect("node Scene work evidence");
     assert_eq!(
+        terminal_failure_class(failure.ledger_evidence()),
+        StorePreparationFailureClass::Ledger
+    );
+    assert_eq!(
         work.attempted(),
         SINGLE_TRS_CENTRAL_VALIDATION_PREFIX_WORK + SINGLE_TRS_CENTRAL_VALIDATION_ENVELOPE_WORK,
     );
@@ -1296,6 +1321,36 @@ fn generation_exhaustion_discards_canonical_storage_and_preserves_evidence() {
 #[test]
 fn generation_source_panic_after_reservation_burns_the_gap_and_fails_closed() {
     let factory = test_factory();
+    let control_account = test_account(&factory, 256);
+    let control_generation_source = AtomicU64::new(0);
+    let control = successful_parts(
+        finish_node_batch(
+            &control_account,
+            test_limits(),
+            single_trs_batch(),
+            SceneValidationLimits::default(),
+        )
+        .publish_with_generation_source_for_test(|| {
+            SceneGenerationId::reserve_from(&control_generation_source)
+        })
+        .expect("healthy typed-owner release control must publish"),
+    );
+    let control_before = control_account.snapshot();
+    drop(control.scene.tables);
+    let control_after = control_account.snapshot();
+    let typed_bytes = control_before.live_retained_bytes() - control_after.live_retained_bytes();
+    let typed_allocations =
+        control_before.live_retained_allocations() - control_after.live_retained_allocations();
+    assert!(typed_bytes > 0);
+    // Two shared headers, the nonempty node rows, and the nonempty child sequence.
+    assert_eq!(typed_allocations, 4);
+    drop(control.scene.canonical);
+    drop(control.report);
+    assert_eq!(control_account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(control_account.snapshot().live_retained_allocations(), 0);
+    assert!(!control_account.snapshot().poisoned());
+    drop(control_account);
+
     let account = test_account(&factory, 256);
     let generation_source = AtomicU64::new(0);
     let build = finish_node_batch(
@@ -1318,10 +1373,16 @@ fn generation_source_panic_after_reservation_burns_the_gap_and_fails_closed() {
     assert_eq!(generation_source.load(Ordering::Relaxed), 1);
     let after = account.snapshot();
     assert!(after.poisoned());
-    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+    // The operation remains contained, but its independently owned inert typed tables can prove
+    // their own healthy destruction. Do not require those owners to leak with the poisoned root.
+    assert!(after.live_retained_bytes() > 0);
+    assert_eq!(
+        after.live_retained_bytes(),
+        before.live_retained_bytes() - typed_bytes
+    );
     assert_eq!(
         after.live_retained_allocations(),
-        before.live_retained_allocations()
+        before.live_retained_allocations() - typed_allocations
     );
     assert_eq!(
         after.total_admitted_retained_bytes(),

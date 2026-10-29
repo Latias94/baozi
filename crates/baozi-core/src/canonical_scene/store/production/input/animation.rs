@@ -142,7 +142,9 @@ impl<'a> AnimationClipAuthoring<'a> {
         }
     }
 
-    /// Retains an authored name, including an explicitly authored empty string.
+    /// Borrows an authored name without copying, including an explicitly authored empty string.
+    ///
+    /// Submission validates the display text and meters its retained UTF-8 bytes.
     pub const fn with_name(mut self, name: &'a str) -> Self {
         self.name = Presence::Present(name);
         self

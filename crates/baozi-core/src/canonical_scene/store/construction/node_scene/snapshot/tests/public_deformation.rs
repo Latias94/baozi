@@ -11,7 +11,6 @@ use crate::canonical_scene::store::production::{
     MorphTargetDefinitionAuthoring, MorphTargetIdentity, PrimitiveMorphTargetAuthoring,
     SkinAuthoring, SkinLocalId,
 };
-use crate::entity::EntityName;
 use crate::identity::{LogicalMeshId, MorphTargetId, SceneEntityKind, SceneGenerationId, SkinId};
 use crate::{
     MorphDeltaData, MorphDeltaSemantic, SceneLookupError, SkinMatrixCorrection, SkinMatrixSpace,
@@ -194,8 +193,8 @@ fn deformation_scene(account: &PhysicalStorageAccount) -> NodeSceneSuccessParts 
         )
     });
     let geometry = GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &instances);
-    let first_name = EntityName::try_new("Palette α").unwrap();
-    let empty_name = EntityName::try_new("").unwrap();
+    let first_name = "Palette α";
+    let empty_name = "";
     let joints = [NodeLocalId::new(0), NodeLocalId::new(1)];
     let last_joints = [NodeLocalId::new(2)];
     let inverse_binds = [Mat4::IDENTITY, matrix(-1.0).authored_matrix().unwrap()];
@@ -212,7 +211,7 @@ fn deformation_scene(account: &PhysicalStorageAccount) -> NodeSceneSuccessParts 
     };
     let skins = [
         SkinAuthoring::new(
-            Presence::Present(&first_name),
+            Presence::Present(first_name),
             &joints,
             &inverse_binds,
             Presence::Present(NodeLocalId::new(0)),
@@ -226,7 +225,7 @@ fn deformation_scene(account: &PhysicalStorageAccount) -> NodeSceneSuccessParts 
             SkinMatrixSpaces::canonical(),
         ),
         SkinAuthoring::new(
-            Presence::Present(&empty_name),
+            Presence::Present(empty_name),
             &last_joints,
             &last_inverse_binds,
             Presence::Absent,
@@ -236,12 +235,12 @@ fn deformation_scene(account: &PhysicalStorageAccount) -> NodeSceneSuccessParts 
     let definitions = [
         MorphTargetDefinitionAuthoring::new(
             MorphTargetIdentity::new(1),
-            Presence::Present(&first_name),
+            Presence::Present(first_name),
         ),
         MorphTargetDefinitionAuthoring::new(MorphTargetIdentity::new(0), Presence::Absent),
         MorphTargetDefinitionAuthoring::new(
             MorphTargetIdentity::new(0),
-            Presence::Present(&empty_name),
+            Presence::Present(empty_name),
         ),
     ];
     let defaults = [0.2, -0.0];

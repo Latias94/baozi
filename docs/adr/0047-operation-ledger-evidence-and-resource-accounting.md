@@ -138,6 +138,26 @@ it semantically but cannot implement competing reserve/grow/shrink logic. Canoni
 uses ADR 0044's physical owner and account; the operation ledger records why new retained storage was
 created, not how long every shared allocation remains alive.
 
+The same retained mechanism applies to import evidence and resource manifests. Graph-owned paths,
+projected manifest paths, provisional quotient tables, and canonical hash scratch overlap until their
+actual owners are destroyed. Sealing a manifest freezes its semantics; it does not release arrays or
+path storage that remain in the provisional manifest during Scene construction.
+
+Allocation-bound output attribution keeps its original phase/dimension placement. The central ledger
+accumulates it in its existing fixed catalog rows while owners retain their physical leases. A weak
+edge to that existing ledger allocation permits exact pre-publication rollback without allocating a
+shared header per payload. No terminal reservation array grows with the maximum resource-relation
+count. The joint terminal transition validates these amounts with its existing batches, then retires
+operation attribution. The immutable terminal snapshot can therefore report zero operation-live
+bytes while retained data remains truthfully charged to its physical account. An early token drop
+without an allocation-bound physical owner is not a transfer.
+
+Import's retained admission registers output attribution before allocating its evidence storage.
+The containing owners keep the same reservations through terminal preparation, so this path does
+not require a second unmetered walk over every diagnostic or manifest relation at finalization.
+Transient graph/hash storage still uses ordinary reservations and is destroyed before the snapshot.
+An operation-live zero at terminal therefore does not assert that physical evidence has been freed.
+
 ### Terminal Accounting
 
 Each operation pre-admits a bounded protected terminal allowance inside the caller's hard total.

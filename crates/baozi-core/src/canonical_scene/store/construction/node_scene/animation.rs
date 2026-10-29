@@ -19,7 +19,7 @@ use crate::canonical_scene::store::schema::animation::{
 };
 use crate::canonical_scene::store::schema::deformation::DeformationMeshInstanceTableSchema;
 use crate::canonical_scene::store::schema::{
-    CanonicalBlockRef, CanonicalSchema, NodeSceneNodeTableSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
+    CanonicalBlockRef, CanonicalSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
 };
 use crate::canonical_scene::store::validation::AnimationMeteredCounts;
 
@@ -211,17 +211,17 @@ impl AnimationMaterializationPlans {
 
 #[derive(Clone, Copy)]
 pub(super) struct AnimationTargetTableRefs {
-    nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
+    node_count: u32,
     mesh_instances: Option<CanonicalBlockRef<DeformationMeshInstanceTableSchema>>,
 }
 
 impl AnimationTargetTableRefs {
     pub(super) const fn new(
-        nodes: CanonicalBlockRef<NodeSceneNodeTableSchema>,
+        node_count: u32,
         mesh_instances: Option<CanonicalBlockRef<DeformationMeshInstanceTableSchema>>,
     ) -> Self {
         Self {
-            nodes,
+            node_count,
             mesh_instances,
         }
     }
@@ -671,7 +671,7 @@ fn write_animation_target_ref(
     match target_kind {
         ANIMATION_TARGET_NODE_TRANSLATION
         | ANIMATION_TARGET_NODE_ROTATION
-        | ANIMATION_TARGET_NODE_SCALE => row.write_record_ref(targets.nodes.into_store()),
+        | ANIMATION_TARGET_NODE_SCALE => row.write_scalar(targets.node_count),
         ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS => {
             row.write_record_ref(targets.mesh_instances.ok_or(failure)?.into_store())
         }

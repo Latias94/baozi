@@ -4,10 +4,16 @@ use std::rc::Rc;
 use crate::deform::SkinMatrixSpaces;
 use crate::math::Mat4;
 
-use super::super::plan::deformation::validate_deformation_batch_with_control;
+use super::super::plan::deformation::{
+    DeformationAuthoringFailure, DeformationAuthoringSemanticError,
+    validate_deformation_batch_with_control,
+};
 use super::super::plan::geometry::validate_geometry_batch_with_control;
 use super::super::{
-    DeformationAuthoringBatch, GeometryAuthoringBatch, NodeLocalId, Presence, SkinAuthoring,
+    AuthoringRange, DeformationAuthoringBatch, GeometryAuthoringBatch,
+    GeometryLogicalMeshAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
+    LogicalMorphAuthoring, MorphTargetDefinitionAuthoring, MorphTargetIdentity, NodeLocalId,
+    Presence, PrimitiveDeformationAuthoring, PrimitiveMorphTargetAuthoring, SkinAuthoring,
 };
 use super::{SceneValidationLimits, TestControl, trs, validate};
 
@@ -90,4 +96,92 @@ fn compiled_deformation_storage_drops_before_its_reservation() {
 
     assert_eq!(stage.get(), 2);
     assert_eq!(control.live.get(), 0);
+}
+
+#[test]
+fn borrowed_deformation_names_preserve_empty_unicode_and_bounded_errors() {
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [trs(Presence::Absent)];
+    let mut setup = TestControl::default();
+    let validated_nodes = validate(
+        Presence::Present(&roots),
+        &nodes,
+        SceneValidationLimits::default(),
+        &mut setup,
+    )
+    .unwrap();
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 0),
+    )];
+    let geometry = validate_geometry_batch_with_control(
+        GeometryAuthoringBatch::new(&meshes, &primitives, &[], &[]),
+        nodes.len(),
+        0,
+        SceneValidationLimits::default(),
+        &mut setup,
+    )
+    .unwrap();
+    let logical = [LogicalMorphAuthoring::new(
+        AuthoringRange::new(0, 1),
+        &[0.0],
+    )];
+    let targets = [PrimitiveMorphTargetAuthoring::new(&[])];
+    let deformation = [PrimitiveDeformationAuthoring::new(
+        Presence::Absent,
+        &targets,
+    )];
+    let long = "x".repeat(crate::entity::MAX_ENTITY_NAME_BYTES + 1);
+    for name in ["", "骨架 α", "bad\nname", long.as_str()] {
+        for skin_name in [true, false] {
+            let skins = [SkinAuthoring::new(
+                if skin_name {
+                    Presence::Present(name)
+                } else {
+                    Presence::Absent
+                },
+                &[],
+                &[],
+                Presence::Absent,
+                SkinMatrixSpaces::canonical(),
+            )];
+            let definitions = [MorphTargetDefinitionAuthoring::new(
+                MorphTargetIdentity::new(0),
+                if skin_name {
+                    Presence::Absent
+                } else {
+                    Presence::Present(name)
+                },
+            )];
+            let mut control = TestControl::default();
+            let result = validate_deformation_batch_with_control(
+                DeformationAuthoringBatch::new(&skins, &definitions, &logical, &deformation, &[]),
+                &validated_nodes,
+                &geometry,
+                SceneValidationLimits::default(),
+                &mut control,
+            );
+            if let Err(expected) = crate::entity::validate_entity_name_str(name) {
+                match result {
+                    Err(DeformationAuthoringFailure::Semantic(
+                        DeformationAuthoringSemanticError::InvalidSkinName { skin: 0, source },
+                    )) if skin_name => assert_eq!(source, expected),
+                    Err(DeformationAuthoringFailure::Semantic(
+                        DeformationAuthoringSemanticError::InvalidMorphTargetName {
+                            logical_mesh: 0,
+                            target: 0,
+                            source,
+                        },
+                    )) if !skin_name => assert_eq!(source, expected),
+                    _ => panic!("borrowed name must retain its bounded domain error"),
+                }
+            } else {
+                drop(result.expect("empty and Unicode names must remain accepted"));
+            }
+            assert_eq!(control.live.get(), 0);
+        }
+    }
 }

@@ -1,5 +1,4 @@
 use crate::deform::{MorphDeltaSemantic, SkinMatrixSpaces};
-use crate::entity::EntityName;
 use crate::math::Mat4;
 
 use super::Presence;
@@ -186,11 +185,11 @@ impl<'a> PrimitiveDeformationAuthoring<'a> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MorphTargetDefinitionAuthoring<'a> {
     identity: MorphTargetIdentity,
-    name: Presence<&'a EntityName>,
+    name: Presence<&'a str>,
 }
 
 impl<'a> MorphTargetDefinitionAuthoring<'a> {
-    pub const fn new(identity: MorphTargetIdentity, name: Presence<&'a EntityName>) -> Self {
+    pub const fn new(identity: MorphTargetIdentity, name: Presence<&'a str>) -> Self {
         Self { identity, name }
     }
 
@@ -198,7 +197,7 @@ impl<'a> MorphTargetDefinitionAuthoring<'a> {
         self.identity
     }
 
-    pub(in crate::canonical_scene::store) const fn name(self) -> Presence<&'a EntityName> {
+    pub(in crate::canonical_scene::store) const fn name(self) -> Presence<&'a str> {
         self.name
     }
 }
@@ -258,7 +257,7 @@ impl<'a> MeshInstanceDeformationAuthoring<'a> {
 /// One ordered joint palette with explicit canonical matrix spaces.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkinAuthoring<'a> {
-    name: Presence<&'a EntityName>,
+    name: Presence<&'a str>,
     joints: &'a [super::NodeLocalId],
     inverse_bind_matrices: &'a [Mat4],
     skeleton_root: Presence<super::NodeLocalId>,
@@ -267,7 +266,7 @@ pub struct SkinAuthoring<'a> {
 
 impl<'a> SkinAuthoring<'a> {
     pub const fn new(
-        name: Presence<&'a EntityName>,
+        name: Presence<&'a str>,
         joints: &'a [super::NodeLocalId],
         inverse_bind_matrices: &'a [Mat4],
         skeleton_root: Presence<super::NodeLocalId>,
@@ -282,7 +281,7 @@ impl<'a> SkinAuthoring<'a> {
         }
     }
 
-    pub(in crate::canonical_scene::store) const fn name(self) -> Presence<&'a EntityName> {
+    pub(in crate::canonical_scene::store) const fn name(self) -> Presence<&'a str> {
         self.name
     }
 

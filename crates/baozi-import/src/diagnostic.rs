@@ -423,6 +423,19 @@ impl DiagnosticAdmission {
         self.payload_capacity_envelope
     }
 
+    pub(crate) fn payload_allocation_count(&self) -> u64 {
+        self.capacity_plans.map_or(0, |plans| {
+            u64::from(plans.source.desired_capacity() != 0)
+                + u64::from(plans.message.desired_capacity() != 0)
+                + u64::from(
+                    plans
+                        .object_path
+                        .is_some_and(|plan| plan.desired_capacity() != 0),
+                )
+                + MAX_DIAGNOSTIC_DETAILS as u64
+        })
+    }
+
     pub(crate) const fn structural_capacity_envelope(&self) -> u64 {
         self.structural_capacity_envelope
     }
@@ -946,24 +959,37 @@ impl DiagnosticSink {
             max_message_bytes: _,
             max_attempted_bytes: _,
         } = self;
-        let diagnostics = diagnostics.into_terminal();
-        let terminal = TerminalDiagnosticEvidence {
-            diagnostics: diagnostics.into_values(),
+        TerminalDiagnosticEvidence {
+            storage: RetainedDiagnostics {
+                diagnostics,
+                _reservations: reservations,
+            },
             summary,
-        };
-        drop(reservations);
-        terminal
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RetainedDiagnostics {
+    diagnostics: AccountedVec<ImportDiagnostic>,
+    _reservations: AccountedReservationVec,
+}
+
+impl std::ops::Deref for RetainedDiagnostics {
+    type Target = [ImportDiagnostic];
+    fn deref(&self) -> &Self::Target {
+        &self.diagnostics
     }
 }
 
 pub(crate) struct TerminalDiagnosticEvidence {
-    diagnostics: Vec<ImportDiagnostic>,
+    storage: RetainedDiagnostics,
     summary: DiagnosticSummary,
 }
 
 impl TerminalDiagnosticEvidence {
-    pub(crate) fn into_parts(self) -> (Vec<ImportDiagnostic>, DiagnosticSummary) {
-        (self.diagnostics, self.summary)
+    pub(crate) fn into_parts(self) -> (RetainedDiagnostics, DiagnosticSummary) {
+        (self.storage, self.summary)
     }
 }
 

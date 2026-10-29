@@ -6,7 +6,7 @@ use crate::attribute::AttributeDomain;
 use crate::entity::{AuthoredTransform, AuthoredTransformKind};
 use crate::geometry::TopologyKind;
 
-use super::ValidatedNodeScene;
+use super::SceneStorage;
 use super::semantic::{
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic, NodeSceneGeometryCursor,
     NodeSceneGeometryF32Cursor, NodeSceneGeometryI32Cursor, NodeSceneGeometryNormalization,
@@ -422,7 +422,7 @@ pub(in crate::canonical_scene::store) enum NodeSceneSnapshotError {
     SemanticTotalOverflow { total: &'static str },
 }
 
-impl ValidatedNodeScene {
+impl SceneStorage {
     /// Captures a complete private canonical Scene digest and bounded preview.
     pub(in crate::canonical_scene::store) fn capture_snapshot(
         &self,
@@ -436,7 +436,7 @@ impl ValidatedNodeScene {
 
 #[cfg(test)]
 fn capture_node_scene_with_test_transcript(
-    scene: &ValidatedNodeScene,
+    scene: &SceneStorage,
     limits: NodeSceneSnapshotLimits,
     cancellation: Option<&CancellationToken>,
 ) -> Result<(NodeSceneSnapshot, TestCanonicalTranscript), NodeSceneSnapshotError> {
@@ -453,7 +453,7 @@ fn capture_node_scene_with_test_transcript(
 }
 
 fn capture_node_scene_with_encoder(
-    scene: &ValidatedNodeScene,
+    scene: &SceneStorage,
     limits: NodeSceneSnapshotLimits,
     cancellation: Option<&CancellationToken>,
     mut transcript: CanonicalDigestEncoder,

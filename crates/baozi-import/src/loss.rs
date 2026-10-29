@@ -94,8 +94,4 @@ impl ImportLossEvidence {
     pub const fn disposition(&self) -> ImportLossDisposition {
         self.disposition
     }
-
-    pub(crate) fn release_reservation(&mut self) {
-        drop(self.reservation.take());
-    }
 }

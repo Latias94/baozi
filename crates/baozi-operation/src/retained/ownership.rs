@@ -942,10 +942,8 @@ where
         if self.fallback.is_none() && self.evidence.is_none() && self.batches.is_none() {
             return;
         }
-        if std::thread::panicking() {
-            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
-            return;
-        }
+        // An unrelated host unwind does not invalidate this exact storage graph. The ordinary
+        // discard path already catches payload failure and preserves uncertain charges.
         let _ = self.try_discard_all();
     }
 }

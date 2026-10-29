@@ -14,7 +14,7 @@ use crate::identity::{
 
 fn tables(scene: &ValidatedScene) -> NodeSceneGeometryTables<'_> {
     expect_validated(NodeSceneGeometryTables::try_new(
-        scene.as_node_scene().read_canonical(),
+        scene.as_node_scene().read_geometry(),
         scene.as_node_scene().read_proof(),
     ))
 }

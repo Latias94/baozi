@@ -1972,6 +1972,61 @@ where
         self.baseline.account()
     }
 
+    /// Admits backing storage before allocator entry without allocating a shared payload header.
+    pub(crate) fn reserve_retained_storage(
+        &mut self,
+        phase: P,
+        dimension: D,
+        bytes: u64,
+        allocations: u64,
+    ) -> Result<(LiveReservation<O, P, D>, super::RetainedStorageLease), RetainedWriterError<D>>
+    {
+        let result = (|| {
+            let account = self.account();
+            let preflight = account
+                .try_begin_account_preflight()
+                .map_err(RetainedWriterError::AccountPoisoned)?;
+            let ledger = self.coordinator.retained_ledger();
+            let raw = ledger
+                .reserve(phase, dimension, bytes)
+                .map_err(RetainedWriterError::Ledger)?;
+            let action = preflight
+                .admit_action()
+                .map_err(super::map_account_action_admission_error)?;
+            let share = super::try_admit_retained_share_work_before_physical(
+                ledger,
+                account,
+                self.terminal_account_share_work,
+            )?;
+            let mut admission = account
+                .try_admit_retained_after_action(
+                    action,
+                    super::AdmissionCharge::new(bytes, allocations),
+                    share,
+                )
+                .map_err(|cause| match cause {
+                    super::RetainedShareAdmissionError::Physical(cause) => {
+                        RetainedWriterError::Physical(cause)
+                    }
+                    super::RetainedShareAdmissionError::Ledger(cause) => {
+                        RetainedWriterError::Ledger(cause)
+                    }
+                })?;
+            Ok((
+                raw,
+                super::RetainedStorageLease::from_admission(&mut admission),
+            ))
+        })();
+        if let Err(cause) = &result {
+            let failure = match cause {
+                RetainedWriterError::Ledger(_) => PreparationFailureCode::ledger(),
+                _ => PreparationFailureCode::product_graph(0x5354_4f52),
+            };
+            self.record_terminal_cause(failure);
+        }
+        result
+    }
+
     pub(super) fn activate_failure_terminal_work(&mut self) -> Option<RetainedHandleSharePlan<D>> {
         self.failure_terminal_work
             .take()

@@ -717,6 +717,8 @@ mod failure;
 mod producer_host;
 #[path = "concrete_store/publication.rs"]
 mod publication;
+#[path = "concrete_store/retained_storage.rs"]
+mod retained_storage;
 #[path = "concrete_store/sharing.rs"]
 mod sharing;
 #[path = "concrete_store/transcript.rs"]

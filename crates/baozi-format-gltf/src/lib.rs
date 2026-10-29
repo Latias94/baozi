@@ -5,6 +5,7 @@ mod detect;
 mod error;
 mod json_syntax;
 mod parser;
+mod source_map;
 
 pub(crate) use error::GltfFailure;
 pub use error::GltfFailureCode;
@@ -45,10 +46,7 @@ pub fn format_descriptor_for_development() -> FormatDescriptor {
         (FormatCapability::CamerasLights, CapabilityStatus::Partial),
         (FormatCapability::Animation, CapabilityStatus::Partial),
         (FormatCapability::Skinning, CapabilityStatus::Partial),
-        (
-            FormatCapability::MorphTargets,
-            CapabilityStatus::Unsupported,
-        ),
+        (FormatCapability::MorphTargets, CapabilityStatus::Partial),
         (FormatCapability::Metadata, CapabilityStatus::Partial),
         (
             FormatCapability::CompressionContainers,

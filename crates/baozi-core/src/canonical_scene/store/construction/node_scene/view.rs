@@ -3,11 +3,11 @@ use baozi_operation::{PhysicalStorageAccount, StoreLedgerEvidence};
 
 use crate::identity::SceneGenerationId;
 
-use super::ValidatedNodeScene;
+use super::SceneStorage;
 #[cfg(test)]
 use super::{NodeSceneRichFailure, NodeSceneSuccessReport};
 
-impl ValidatedNodeScene {
+impl SceneStorage {
     pub(in crate::canonical_scene::store) const fn generation(&self) -> SceneGenerationId {
         self.generation
     }

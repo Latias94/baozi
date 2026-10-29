@@ -15,8 +15,10 @@ where
     ) -> Self {
         operation.latch_activation_terminal_cause(rejection.failure_code);
         Self {
-            authority: NeverActivatedAuthority::Operation(operation),
-            cause: StoreNeverActivatedCause::Requested(rejection.cause),
+            owner: NeverActivatedOwner {
+                cause: Some(StoreNeverActivatedCause::Requested(rejection.cause)),
+                authority: Some(NeverActivatedAuthority::Operation(operation)),
+            },
             failure_code: rejection.failure_code,
             outcome_evidence_plan,
             failure_work,
@@ -35,12 +37,14 @@ where
     ) -> Self {
         operation.latch_activation_terminal_cause(failure_code);
         Self {
-            authority: if fallback_only {
-                NeverActivatedAuthority::FallbackOnly(operation)
-            } else {
-                NeverActivatedAuthority::Operation(operation)
+            owner: NeverActivatedOwner {
+                cause: Some(StoreNeverActivatedCause::Runtime(cause)),
+                authority: Some(if fallback_only {
+                    NeverActivatedAuthority::FallbackOnly(operation)
+                } else {
+                    NeverActivatedAuthority::Operation(operation)
+                }),
             },
-            cause: StoreNeverActivatedCause::Runtime(cause),
             failure_code,
             outcome_evidence_plan,
             failure_work,
@@ -48,8 +52,11 @@ where
         }
     }
 
-    pub const fn cause(&self) -> &StoreNeverActivatedCause<E> {
-        &self.cause
+    pub fn cause(&self) -> &StoreNeverActivatedCause<E> {
+        self.owner
+            .cause
+            .as_ref()
+            .expect("a live session retains its cause")
     }
 
     #[allow(clippy::type_complexity, clippy::result_large_err)]
@@ -67,13 +74,13 @@ where
     {
         let build = ManuallyDrop::new(Some(build));
         let Self {
-            authority,
-            cause,
+            owner,
             failure_code,
             outcome_evidence_plan,
             failure_work,
             outcome_evidence_destination_dimension,
         } = self;
+        let (cause, authority) = owner.into_parts();
         match authority {
             NeverActivatedAuthority::FallbackOnly(operation) => {
                 if drop_optional_callback(build).is_err() {
@@ -157,13 +164,13 @@ where
         self,
     ) -> Result<VerifiedMinimalFallback<StoreNeverActivatedCause<E>>, StorePrepareError> {
         let Self {
-            authority,
-            cause,
+            owner,
             failure_code,
             outcome_evidence_plan: _,
             failure_work: _,
             outcome_evidence_destination_dimension: _,
         } = self;
+        let (cause, authority) = owner.into_parts();
         let operation = match authority {
             NeverActivatedAuthority::Operation(operation)
             | NeverActivatedAuthority::FallbackOnly(operation) => operation,

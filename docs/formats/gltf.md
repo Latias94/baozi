@@ -8,7 +8,7 @@
 - Declaration evidence: Unverified
 - Baozi maturity: None (no current `BaoziVerified` evidence record)
 - Public facade feature: none
-- Parser backend: `gltf-rs` 1.4.x as an internal bootstrap dependency
+- Parser backend: maintained `baozi-gltf` / `baozi-gltf-json` packages based on `gltf-rs` 1.4.1
 - Candidate extensions: `.gltf`, `.glb`
 - Candidate media types: `model/gltf+json`, `model/gltf-binary`
 - Encoding: JSON plus binary buffers, base64 buffer data URIs, or GLB container
@@ -32,11 +32,13 @@ The crate remains `publish = false`. A public facade feature may be reintroduced
 0027 baseline admission gates pass. A separate managed evidence inventory must verify an exact
 admitted subject before Baozi can assign it any maturity.
 
-The `gltf_import` development fuzz target currently compiles but is not accepted as parser evidence.
-Malformed input can trigger a `gltf-rs` validation panic in cargo-fuzz builds where panic aborts
-before Baozi's `catch_unwind` fallback can return an error. This known baseline failure is why the
-format is disabled at the facade rather than assigned a maturity. The blocker and replacement
-criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
+The `gltf_import` development fuzz target executed the six known malformed JSON/GLB reproducers and
+a bounded 256-run Linux ASan campaign on the immutable `04d6874` source state. The maintained
+validator corrections reject the demonstrated out-of-range POSITION reference and missing camera
+projection payload without a panic fallback. This evidence does not qualify later edits or complete
+the normalized-model, source-mapping, and consumer gates. Exact execution scope is recorded in
+the [delivery progress](../reviews/2026-10-29-delivery-progress.md); the remaining admission criteria
+are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
 
 ## Implemented Development Slice
 
@@ -48,6 +50,11 @@ criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.m
   declared, while multiple declared scenes without a default are rejected instead of silently
   selecting scene zero.
 - Skins with joint node references, optional skeleton root, and optional inverse bind matrices.
+- Dense F32 VEC3 POSITION/NORMAL/TANGENT morph deltas, with equal target width across morph-bearing
+  primitives, zero deltas for empty targets or primitives without targets, zero mesh defaults when
+  weights are absent, and complete node weight overrides. Delta streams require the corresponding
+  base semantic. Cardinality, finite values, ordered POSITION bounds, and morph-cell admission are
+  checked before canonical publication; unsupported morph semantics are rejected explicitly.
 - Perspective and orthographic camera projection data.
 - PBR metallic-roughness material factors.
 - Base color, metallic-roughness, normal, occlusion, and emissive texture URI references.
@@ -60,6 +67,11 @@ criteria are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.m
   domain, interpolation, retained channel order, and non-contiguous source indexes preserved through
   canonical storage. Whole clips outside the selected scene are scope omissions; mixed-target clips
   require explicit `SourceSemanticLoss` authority before outside channels may be filtered.
+- Morph-weight animation targets the mesh instance attached to the authored source node, even when
+  several nodes share a logical mesh. Step, Linear, and CubicSpline retain key-major weight vectors;
+  cubic input/value/output parts each contain a complete target-width vector. Output is SCALAR F32
+  or normalized I8/U8/I16/U16. Non-normalized integers, U32, invalid counts, non-finite weights,
+  duplicate targets, and weights on a node without morph targets are rejected.
 - A bounded development `SourceScopeRecord` covering declared scenes, selected/omitted nodes,
   meshes/primitives, materials, textures/images/samplers, skins, accessors/buffer views/buffers,
   animations, and animation channels. The selected core resource closure is compiled before
@@ -139,13 +151,14 @@ and import-contract tests.
 ## Admission Blockers And Missing Semantics
 
 - Embedded image buffer views and image data URIs are materialized as encoded image payloads without
-  pixel decoding. Unsupported morph/default-weight semantics, typed extension payloads beyond
+  pixel decoding. Sparse morph accessors, typed extension payloads beyond
   `KHR_texture_transform`, extras, and the remaining backend/admission gaps are still fail-closed or
   explicitly deferred.
 - Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
-- Morph-weight animation is unsupported retained-domain semantics. It is rejected by default and may
-  be omitted only under explicit `SourceSemanticLoss` authority with typed loss evidence and a stable
-  channel diagnostic until the morph animation slice is admitted.
+- Selected `extras` and unsupported extension payloads are explicitly rejected with original raw byte
+  ranges. A supported extension at an unsupported owner/site is rejected as well. Unselected entity
+  payloads remain scope omissions. Declaring an unsupported optional extension without a selected
+  payload retains the core fallback with `gltf.extension_ignored`.
 - The current `SourceScopeRecord` includes ADR 0039's typed selection outcome, camera rows, and
   animation-sampler rows. Entity-level extension rows, typed extension-reference closure for
   reference-bearing schemas, extras policy, and a sealed bridge for stable canonical dependency
@@ -153,9 +166,10 @@ and import-contract tests.
   input manifest are now compiled and tested, global extension declarations are gated, and GLB BIN
   data is isolated from the bootstrap backend, but those results remain development evidence until
   the independent admission matrix passes.
-- The current backend is useful for bootstrapping, not the long-term parser ownership boundary.
-- `gltf_import` is a non-admitted development target until known backend aborts are removed or
-  process-isolated and the complete baseline admission matrix passes.
+- The maintained backend remains private and replaceable. The complete normalized/source-mapping
+  boundary and the acceptance matrix are still under implementation.
+- `gltf_import` remains a development target until the updated source state and complete admission
+  matrix pass; the recorded baseline sanitizer run alone does not register the format.
 
 ## Exact Development Profile: Version Metadata and Resource URIs
 

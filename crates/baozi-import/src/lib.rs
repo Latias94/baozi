@@ -53,12 +53,12 @@ mod text_input;
 /// ```
 pub use baozi_core::scene::integration::SceneDraft;
 pub use baozi_core::{
-    AppearanceBehaviorKind, AppearanceBuildResource, AppearanceLimitDimension, EntityNameError,
-    MaterialFactorGroup, SceneAnimationRateKind, SceneAnimationSamplePart, SceneAnimationTarget,
-    SceneAppearanceRule, SceneAuthoredProfileOwner, SceneGenerationId, SceneInputCollection,
-    SceneLightEmissionRule, SceneProfileOwner, SceneSnapshot, SceneSnapshotError,
-    SceneSnapshotLimits, SceneValidationDomain, SceneValidationError, SceneValidationLimit,
-    TextureStrengthRequirement, ValidatedScene,
+    AnimationInterpolation, AnimationTarget, AppearanceBehaviorKind, AppearanceBuildResource,
+    AppearanceLimitDimension, EntityNameError, MaterialFactorGroup, SceneAnimationRateKind,
+    SceneAnimationSamplePart, SceneAnimationTarget, SceneAppearanceRule, SceneAuthoredProfileOwner,
+    SceneGenerationId, SceneInputCollection, SceneLightEmissionRule, SceneProfileOwner,
+    SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, SceneValidationDomain,
+    SceneValidationError, SceneValidationLimit, TextureStrengthRequirement, ValidatedScene,
 };
 
 pub use config::{
@@ -86,10 +86,10 @@ pub use diagnostic::{
     DiagnosticSummary, ImportDiagnostic, TextDiagnosticLocation,
 };
 pub use error::{
-    CauseOwner, DetectionFailure, FormatFailureDetail, FormatFailureDetailCause,
-    FormatFailureDetailSink, FormatFailureDetailValue, FormatFailureEnvelope,
-    FormatFailureEvidence, FormatFailureEvidenceProducer, ImportCause, ScopeAbort, ScopeAbortCause,
-    TrustedExtensionBoundary,
+    CauseOwner, DetectionCandidates, DetectionFailure, FormatFailureDetail,
+    FormatFailureDetailCause, FormatFailureDetailSink, FormatFailureDetailValue,
+    FormatFailureEnvelope, FormatFailureEvidence, FormatFailureEvidenceProducer, ImportCause,
+    ScopeAbort, ScopeAbortCause, TrustedExtensionBoundary,
 };
 pub use format::{
     BoundedFaultDetail, DetectionFault, DetectionFaultCode, DetectionInconclusive,

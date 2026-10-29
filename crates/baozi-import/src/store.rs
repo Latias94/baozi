@@ -37,6 +37,7 @@ use crate::ledger::{
     ImportProgressPhase, ImportProgressUnit, import_ledger_limits,
 };
 use crate::limits::ResourceLimits;
+use crate::metered_storage::AccountedVec;
 
 pub(crate) use scene_activation::ImportStoreSceneBoundary;
 
@@ -712,7 +713,7 @@ impl std::error::Error for ImportStoreTerminalProjectionError {}
 /// The raw operation token never crosses this adapter. Import code may observe only the exact
 /// byte envelope it asked the sole session owner to retain.
 pub(crate) struct ImportStoreReservation {
-    raw: RetainedStoreReservation<ImportOperationOwner>,
+    raw: Option<RetainedStoreReservation<ImportOperationOwner>>,
     bytes: u64,
 }
 
@@ -728,6 +729,24 @@ impl fmt::Debug for ImportStoreReservation {
 impl ImportStoreReservation {
     pub(crate) const fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    pub(crate) fn release_storage<T>(mut self, value: T) {
+        if let Some(raw) = self.raw.take() {
+            raw.release_storage(value);
+        } else {
+            drop(value);
+        }
+    }
+}
+
+impl Drop for ImportStoreReservation {
+    fn drop(&mut self) {
+        if let Some(raw) = self.raw.take() {
+            // The private adapters declare inert payload fields before their reservation. Owners
+            // with generic payload destructors call `release_storage` with that actual payload.
+            raw.release_storage(());
+        }
     }
 }
 
@@ -1095,15 +1114,30 @@ pub(crate) struct ImportStoreBootstrap {
 /// dormant Scene authority across producer work, then consumes that owner exactly once when the
 /// core-sealed Scene plan reaches activation.
 pub(crate) struct ImportStoreSessionOwner {
+    // One startup-admitted cell keeps the large linear state out of every import stack frame.
+    // AccountedVec destroys the actual cell before releasing its physical and ledger charge.
+    storage: AccountedVec<ImportStoreSessionData>,
+}
+
+pub(crate) struct ImportStoreSessionData {
     state: RefCell<ImportStoreSessionState>,
     vocabulary: ImportStoreVocabulary,
     unsubmitted_evidence: SceneEvidenceRecipe,
+}
+
+impl std::ops::Deref for ImportStoreSessionOwner {
+    type Target = ImportStoreSessionData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.storage[0]
+    }
 }
 
 #[derive(Debug)]
 pub(crate) enum ImportStoreSessionStartError {
     Start(RetainedStoreStartError),
     Containment(StoreActivationContainment),
+    Storage(ScopeAbortCause),
 }
 
 impl fmt::Display for ImportStoreSessionStartError {
@@ -1111,6 +1145,7 @@ impl fmt::Display for ImportStoreSessionStartError {
         match self {
             Self::Start(cause) => cause.fmt(formatter),
             Self::Containment(cause) => cause.fmt(formatter),
+            Self::Storage(cause) => cause.fmt(formatter),
         }
     }
 }
@@ -1120,6 +1155,7 @@ impl std::error::Error for ImportStoreSessionStartError {
         match self {
             Self::Start(cause) => Some(cause),
             Self::Containment(cause) => Some(cause),
+            Self::Storage(cause) => Some(cause),
         }
     }
 }
@@ -1171,11 +1207,39 @@ impl ImportStoreSessionOwner {
                 failure,
             )
             .map_err(ImportStoreSessionStartError::Containment)?;
-        Ok(Self {
+        let data = ImportStoreSessionData {
             state: RefCell::new(ImportStoreSessionState::Dormant(owner)),
             vocabulary,
             unsubmitted_evidence,
-        })
+        };
+        let host = ImportStoreHost {
+            state: &data.state,
+            vocabulary: &data.vocabulary,
+        };
+        let mut storage = AccountedVec::new();
+        storage
+            .try_reserve_capacity(1, "import-session-state", |bytes| {
+                host.reserve_retained(
+                    ImportLedgerPhase::PrimarySnapshot,
+                    ImportDimension::ScratchBytes,
+                    bytes,
+                    1,
+                )
+                .map_err(ImportStoreHostError::into_scope_abort_cause)
+            })
+            .map_err(ImportStoreSessionStartError::Storage)?;
+        storage.push_reserved_infallible(data);
+        Ok(Self { storage })
+    }
+
+    fn into_terminal_state(mut self) -> (ImportStoreSessionState, SceneEvidenceRecipe) {
+        let data = self
+            .storage
+            .pop()
+            .expect("the startup-admitted session has exactly one state cell");
+        // No state-cell reservation may reach the final ledger freeze.
+        drop(self);
+        (data.state.into_inner(), data.unsubmitted_evidence)
     }
 
     pub(crate) fn host(&self) -> ImportStoreHost<'_> {
@@ -1223,6 +1287,9 @@ pub(crate) fn scene_validation_limits(limits: &ResourceLimits) -> SceneValidatio
         .with_max_nodes(count(limits.max_graph_nodes))
         .with_max_edges(canonical_relations)
         .with_max_depth(count(limits.max_graph_depth))
+        // Provenance has a separate DAG: generated/default nodes do not deepen the hierarchy.
+        // Every retained provenance step consumes canonical bytes and entity/work admission.
+        .with_max_provenance_depth(limits.max_canonical_payload_bytes)
         .with_max_entities(limits.max_canonical_payload_bytes)
         .with_max_references(canonical_relations)
         .with_max_payload_cells(payload_cells)
@@ -1379,7 +1446,31 @@ impl ImportStoreHost<'_> {
         self.try_outcome_owner()?
             .control_checkpoint()
             .reserve(phase, dimension, bytes)
-            .map(|raw| ImportStoreReservation { raw, bytes })
+            .map(|raw| ImportStoreReservation {
+                raw: Some(raw),
+                bytes,
+            })
+            .map_err(|cause| self.runtime_error(cause))
+    }
+
+    pub(crate) fn reserve_retained(
+        &self,
+        phase: ImportLedgerPhase,
+        dimension: ImportDimension,
+        bytes: u64,
+        allocations: u64,
+    ) -> Result<ImportStoreReservation, ImportStoreHostError> {
+        self.try_outcome_owner()?
+            .reserve_retained_storage(
+                self.vocabulary.phase(phase),
+                self.vocabulary.dimension(dimension),
+                bytes,
+                allocations,
+            )
+            .map(|raw| ImportStoreReservation {
+                raw: Some(raw),
+                bytes,
+            })
             .map_err(|cause| self.runtime_error(cause))
     }
 
@@ -1390,7 +1481,7 @@ impl ImportStoreHost<'_> {
     ) -> Result<(), ImportStoreHostError> {
         self.try_outcome_owner()?
             .control_checkpoint()
-            .resize(&mut reservation.raw, bytes)
+            .resize(reservation.raw.as_mut().expect("live reservation"), bytes)
             .map_err(|cause| self.runtime_error(cause))?;
         reservation.bytes = bytes;
         Ok(())
@@ -1408,7 +1499,12 @@ impl ImportStoreHost<'_> {
         let dimension = self.vocabulary.dimension(dimension);
         self.try_outcome_owner()?
             .control_checkpoint()
-            .transition(&mut reservation.raw, phase, dimension, bytes)
+            .transition(
+                reservation.raw.as_mut().expect("live reservation"),
+                phase,
+                dimension,
+                bytes,
+            )
             .map_err(|cause| self.runtime_error(cause))?;
         reservation.bytes = bytes;
         Ok(())
@@ -1421,7 +1517,7 @@ impl ImportStoreHost<'_> {
     ) -> Result<(), ImportStoreHostError> {
         self.try_outcome_owner()?
             .control_checkpoint()
-            .validate_live_owner(&reservation.raw)
+            .validate_live_owner(reservation.raw.as_ref().expect("live reservation"))
             .map_err(|cause| self.runtime_error(cause))
     }
 
@@ -2055,13 +2151,14 @@ mod tests {
     #[test]
     fn retained_session_owner_has_a_bounded_inline_stack_footprint() {
         const MAX_INLINE_SESSION_OWNER_BYTES: usize = 64 * 1024;
+        const MAX_INLINE_SESSION_HANDLE_BYTES: usize = 512;
 
         assert!(size_of::<ImportStoreOperation>() <= MAX_INLINE_SESSION_OWNER_BYTES);
         assert!(size_of::<ImportStoreOutcomeOwner>() <= MAX_INLINE_SESSION_OWNER_BYTES);
         assert!(size_of::<ImportPendingScene>() <= MAX_INLINE_SESSION_OWNER_BYTES);
         assert!(size_of::<ImportStorePreparedScene>() <= MAX_INLINE_SESSION_OWNER_BYTES);
         assert!(size_of::<ImportStoreSessionState>() <= MAX_INLINE_SESSION_OWNER_BYTES);
-        assert!(size_of::<ImportStoreSessionOwner>() <= MAX_INLINE_SESSION_OWNER_BYTES);
+        assert!(size_of::<ImportStoreSessionOwner>() <= MAX_INLINE_SESSION_HANDLE_BYTES);
     }
 
     fn ordinary_work_limits(limits: &ResourceLimits) -> (u64, u64) {
@@ -2094,6 +2191,7 @@ mod tests {
         let limits = ResourceLimits {
             max_graph_edges: 3,
             max_graph_work: 7,
+            max_graph_depth: 1,
             max_canonical_payload_bytes: 1_024,
             ..ResourceLimits::default()
         };
@@ -2102,6 +2200,8 @@ mod tests {
 
         assert_eq!(scene.max_edges(), 1_024);
         assert_eq!(scene.max_references(), 1_024);
+        assert_eq!(scene.max_depth(), 1);
+        assert_eq!(scene.max_provenance_depth(), 1_024);
     }
 
     fn start_store_owner() -> ImportStoreSessionOwner {
@@ -2537,6 +2637,65 @@ mod tests {
         assert_eq!(released.live_retained_bytes(), 0);
         assert_eq!(released.live_retained_allocations(), 0);
         assert!(!released.poisoned());
+    }
+
+    #[test]
+    fn minimal_fallback_keeps_import_error_storage_live_until_the_actual_owner_drops() {
+        use crate::outcome::AccountedErrorContext;
+        use baozi_operation::__retained_store_integration::activation::CanonicalActivationOutcome;
+
+        let (owner, account) = start_store_owner_with_account();
+        let source = baozi_io::AssetPath::new("models/fallback.asset").unwrap();
+        let (context, storage) = crate::DependencyFailureContext::try_capture(
+            owner.host(),
+            &baozi_io::AuthorityDomain::new(),
+            &source,
+            &crate::DependencyRoleId::new("test.fallback").unwrap(),
+            "missing.bin",
+            None,
+            None,
+        )
+        .unwrap();
+        let context_bytes = storage.bytes();
+        let context = AccountedErrorContext::new(
+            crate::ImportCause::Scope(crate::ScopeAbort::with_dependency_context(
+                ScopeAbortCause::DescriptorContract {
+                    code: "test-fallback",
+                },
+                context,
+            )),
+            Some(storage),
+        );
+        let ImportStoreSessionState::Dormant(owner) = owner.into_terminal_state().0 else {
+            panic!("the fallback fixture must begin before Scene activation");
+        };
+        let rejected = owner
+            .reject_without_activation::<(), (), RecordBlock, SceneOutcomeEvidenceTag>(
+                (),
+                IMPORT_STORE_FALLBACK_CODE,
+            )
+            .unwrap();
+        let CanonicalActivationOutcome::NeverActivated(rejected) = rejected else {
+            panic!("the explicit rejection must not activate a Scene");
+        };
+        let fallback = rejected
+            .prepare_minimal_fallback()
+            .expect("the never-activated rejection must prepare its admitted minimal fallback");
+        let (fallback, _) = fallback.into_parts();
+        let published = fallback.handoff();
+        let ledger =
+            ImportStoreTerminalEvidence::try_from_ledger(published.ledger_evidence).unwrap();
+        assert_eq!(ledger.current_live_bytes(), 0);
+        assert_eq!(ledger.active_reservations(), 0);
+        assert!(account.snapshot().live_retained_bytes() >= context_bytes);
+        assert!(context.cause().dependency_context().is_some());
+        drop(ledger);
+        drop(published.fallback);
+        assert_eq!(account.snapshot().live_retained_bytes(), context_bytes);
+        drop(context);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        assert!(!account.snapshot().poisoned());
     }
 
     #[test]
@@ -2998,8 +3157,12 @@ mod tests {
 
     #[test]
     fn split_parser_accounting_releases_the_session_borrow_between_actions() {
-        let owner = start_store_owner();
+        let (owner, account) = start_store_owner_with_account();
         let host = owner.host();
+        let baseline = host
+            .dimension_state(ImportDimension::ScratchBytes)
+            .expect("startup scratch storage remains observable")
+            .live_bytes();
 
         host.charge_attempted(ImportDimension::DecodeWork, 2)
             .expect("the parser admits its exact decode envelope");
@@ -3024,7 +3187,7 @@ mod tests {
             host.dimension_state(ImportDimension::ScratchBytes)
                 .expect("scratch storage remains on the same operation")
                 .live_bytes(),
-            8
+            baseline + reservation.bytes()
         );
 
         drop(reservation);
@@ -3032,8 +3195,13 @@ mod tests {
             host.dimension_state(ImportDimension::ScratchBytes)
                 .expect("dropping the reservation updates the same operation")
                 .live_bytes(),
-            0
+            baseline
         );
+        drop(owner);
+        let released = account.snapshot();
+        assert_eq!(released.live_retained_bytes(), 0);
+        assert_eq!(released.live_retained_allocations(), 0);
+        assert!(!released.poisoned());
     }
 
     #[test]

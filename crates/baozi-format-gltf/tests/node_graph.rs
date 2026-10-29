@@ -505,6 +505,29 @@ fn builds_a_wide_fanout_without_duplicate_nodes() -> TestResult<()> {
 }
 
 #[test]
+fn empty_projection_accepts_its_exact_hierarchy_depth_with_generated_provenance() -> TestResult<()>
+{
+    let mut options = GltfTestOptions::memory();
+    options.limits.max_graph_nodes = 1;
+    options.limits.max_graph_edges = 0;
+    options.limits.max_graph_depth = 1;
+    let report = import_graph_result(graph_document("", ""), options)??;
+    assert_eq!(report.scene().node_count(), 0);
+    assert_eq!(report.scene().root_count(), 0);
+    let snapshot = report
+        .scene()
+        .capture_snapshot(baozi_import::SceneSnapshotLimits::try_new(
+            32 * 1024,
+            256,
+            1_000_000,
+        )?)?;
+    assert_eq!(snapshot.profile_source_count(), 1);
+    assert_eq!(snapshot.profile_operation_count(), 1);
+    assert_eq!(snapshot.profile_provenance_node_count(), 2);
+    Ok(())
+}
+
+#[test]
 fn accepts_exact_graph_limits_within_canonical_import_stack_budget() -> TestResult<()> {
     std::thread::Builder::new()
         .name("gltf-canonical-import-stack-budget".into())

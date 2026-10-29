@@ -352,13 +352,14 @@ pub enum ManifestRelationOutcome {
 }
 
 /// One quotient relation emitted by a semantic node class.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug)]
 pub struct ManifestRelation {
     role: DependencyRoleId,
     requirement: DependencyRequirement,
     reference: ManifestReference,
     outcome: ManifestRelationOutcome,
     multiplicity: u64,
+    _path_reservations: [Option<crate::store::ImportStoreReservation>; 2],
 }
 
 impl ManifestRelation {
@@ -375,6 +376,7 @@ impl ManifestRelation {
             reference,
             outcome,
             multiplicity,
+            _path_reservations: [None, None],
         }
     }
 
@@ -402,16 +404,36 @@ impl ManifestRelation {
         self.multiplicity = multiplicity;
         self
     }
+
+    pub(super) fn with_path_reservations(
+        mut self,
+        reservations: [Option<crate::store::ImportStoreReservation>; 2],
+    ) -> Self {
+        self._path_reservations = reservations;
+        self
+    }
 }
 
+impl PartialEq for ManifestRelation {
+    fn eq(&self, other: &Self) -> bool {
+        self.role == other.role
+            && self.requirement == other.requirement
+            && self.reference == other.reference
+            && self.outcome == other.outcome
+            && self.multiplicity == other.multiplicity
+    }
+}
+impl Eq for ManifestRelation {}
+
 /// One semantic node class in a successful input manifest.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ManifestNodeClass {
     digest: ManifestDigest,
     identity: ManifestResourceIdentity,
     byte_length: u64,
     content_digest: ManifestDigest,
     outgoing_relations: AccountedVec<ManifestRelation>,
+    _path_reservation: Option<crate::store::ImportStoreReservation>,
 }
 
 impl ManifestNodeClass {
@@ -428,6 +450,7 @@ impl ManifestNodeClass {
             byte_length,
             content_digest,
             outgoing_relations,
+            _path_reservation: None,
         }
     }
 
@@ -451,10 +474,25 @@ impl ManifestNodeClass {
         &self.outgoing_relations
     }
 
-    fn release_live_reservation(&mut self) {
-        self.outgoing_relations.release_capacity_reservation();
+    pub(super) fn with_path_reservation(
+        mut self,
+        reservation: crate::store::ImportStoreReservation,
+    ) -> Self {
+        self._path_reservation = Some(reservation);
+        self
     }
 }
+
+impl PartialEq for ManifestNodeClass {
+    fn eq(&self, other: &Self) -> bool {
+        self.digest == other.digest
+            && self.identity == other.identity
+            && self.byte_length == other.byte_length
+            && self.content_digest == other.content_digest
+            && self.outgoing_relations == other.outgoing_relations
+    }
+}
+impl Eq for ManifestNodeClass {}
 
 /// Exact semantic quotient counts emitted by the manifest finalizer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -666,12 +704,5 @@ impl SuccessfulInputManifest {
     pub(super) fn with_digest(mut self, digest: ManifestDigest) -> Self {
         self.digest = digest;
         self
-    }
-
-    pub(super) fn release_live_reservations(&mut self) {
-        for node_class in self.node_classes.iter_mut() {
-            node_class.release_live_reservation();
-        }
-        self.node_classes.release_capacity_reservation();
     }
 }

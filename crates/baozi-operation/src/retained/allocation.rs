@@ -23,6 +23,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use triomphe::UniqueArc;
 
+mod storage;
+pub(crate) use storage::RetainedStorageLease;
+pub use storage::{RetainedStorage, SharedRetainedStorage};
+
 #[cfg(test)]
 std::thread_local! {
     static RETAINED_FINAL_OWNER_ALLOCATOR_ENTRIES: std::cell::Cell<usize> = const {
