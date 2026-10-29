@@ -858,6 +858,7 @@ fn check_baozi_io_production_dependency_set(dependencies: &[Value], violations: 
         "cap-fs-ext".to_owned(),
         "cap-std".to_owned(),
         "rustix".to_owned(),
+        "sha2".to_owned(),
         "thiserror".to_owned(),
     ]);
     let mut actual = BTreeSet::new();

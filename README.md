@@ -7,6 +7,8 @@ Current status: experimental parser foundation. STL, OBJ/MTL, and PLY have owned
 fixture and fuzz coverage. The glTF/GLB crate is an internal, non-admitted backend candidate: it has
 no facade feature, built-in registration, or first-party support entry until its baseline sanitizer
 and resource-admission gates pass.
+Typed Scene readers and geometry postprocessing are still in development. The current API offers
+bounded snapshots for test and debug observation.
 
 ## Goals
 
@@ -44,14 +46,18 @@ promotion evidence.
 Import bytes from memory:
 
 ```rust
-use baozi::{Importer, Result};
+use baozi::{Importer, Result, SceneSnapshotLimits};
 
 fn main() -> Result<()> {
     let report = Importer::new()?.read_bytes(
         "triangle.obj",
         b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
     )?;
-    println!("meshes={}", report.scene().meshes().len());
+    let limits = SceneSnapshotLimits::try_new(16_384, 64, 1_000_000)
+        .expect("valid snapshot limits");
+    let snapshot = report.scene().capture_snapshot(limits)
+        .expect("the triangle fits the snapshot limits");
+    println!("meshes={}", snapshot.logical_mesh_count());
     Ok(())
 }
 ```
@@ -59,11 +65,10 @@ fn main() -> Result<()> {
 Run the facade examples:
 
 ```powershell
-cargo run -p baozi --example import_bytes
-cargo run -p baozi --example import_memory_sidecars
-cargo run -p baozi --example diagnostics
-cargo run -p baozi --example postprocess
-cargo run -p baozi --example wasm_memory
+cargo run --locked -p baozi --example import_bytes
+cargo run --locked -p baozi --example import_memory_sidecars
+cargo run --locked -p baozi --example diagnostics
+cargo run --locked -p baozi --example wasm_memory
 ```
 
 Run the import benchmark harness without collecting measurements:

@@ -2280,6 +2280,17 @@ fn manifest_metadata() -> Value {
                 },
                 "dependencies": [
                     {
+                        "name": "sha2",
+                        "source": SOURCE,
+                        "req": "^0.10",
+                        "kind": null,
+                        "rename": null,
+                        "optional": false,
+                        "uses_default_features": true,
+                        "features": [],
+                        "target": null
+                    },
+                    {
                         "name": "thiserror",
                         "source": SOURCE,
                         "req": "^2",
