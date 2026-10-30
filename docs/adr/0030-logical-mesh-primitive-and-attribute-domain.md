@@ -169,6 +169,11 @@ Within one owner, the normalized `(semantic, domain)` key is unique; UV/color se
 part of the semantic key. Dense payload length equals the domain cardinality, and a sparse payload's
 logical count equals it even when no explicit values are stored.
 
+Typed lookup takes the complete `(semantic, domain)` key. Vertex and Corner fields with the same
+semantic may coexist and must remain independently selectable. Convenience normal and UV lookups
+therefore require a domain; Position has the single fixed Vertex domain. Borrowed reads neither
+merge fields nor allocate a projection to resolve an ambiguous semantic.
+
 Skin influences are a dedicated primitive-owned `InfluenceRows` deformer stream, not a generic
 fixed-width `Attribute`. It declares vertex-domain cardinality and uses ADR 0031's checked offsets
 plus flat influence payload. Source `JOINTS_n`/`WEIGHTS_n` sets are representation-mapped into that

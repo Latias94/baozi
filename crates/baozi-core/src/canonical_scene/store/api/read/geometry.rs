@@ -331,19 +331,26 @@ impl<'s> PrimitiveRef<'s> {
             ))
         })
     }
-    /// Looks up one semantic in O(attribute count), without copying its values.
-    pub fn attribute(self, semantic: AttributeSemanticRef<'_>) -> Option<AttributeRef<'s>> {
+    /// Looks up an exact semantic/domain pair in O(attribute count), without copying its values.
+    pub fn attribute(
+        self,
+        semantic: AttributeSemanticRef<'_>,
+        domain: AttributeDomain,
+    ) -> Option<AttributeRef<'s>> {
         self.attributes()
-            .find(|attribute| attribute.semantic() == semantic)
+            .find(|attribute| attribute.semantic() == semantic && attribute.domain() == domain)
     }
+    /// Returns the Vertex-domain position attribute.
     pub fn positions(self) -> Option<AttributeRef<'s>> {
-        self.attribute(AttributeSemanticRef::Position)
+        self.attribute(AttributeSemanticRef::Position, AttributeDomain::Vertex)
     }
-    pub fn normals(self) -> Option<AttributeRef<'s>> {
-        self.attribute(AttributeSemanticRef::Normal)
+    /// Returns the normal attribute in the requested domain.
+    pub fn normals(self, domain: AttributeDomain) -> Option<AttributeRef<'s>> {
+        self.attribute(AttributeSemanticRef::Normal, domain)
     }
-    pub fn texcoords(self, set: u32) -> Option<AttributeRef<'s>> {
-        self.attribute(AttributeSemanticRef::Texcoord(set))
+    /// Returns the texture-coordinate set in the requested domain.
+    pub fn texcoords(self, set: u32, domain: AttributeDomain) -> Option<AttributeRef<'s>> {
+        self.attribute(AttributeSemanticRef::Texcoord(set), domain)
     }
 }
 

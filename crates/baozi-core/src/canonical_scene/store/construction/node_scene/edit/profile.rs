@@ -1,5 +1,9 @@
 //! Concrete profile edits against the final owner layout.
 
+#[cfg(test)]
+#[path = "normals_tests.rs"]
+mod normals_tests;
+
 use baozi_operation::__retained_store_integration::activation::CanonicalLane;
 use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::{
@@ -15,7 +19,11 @@ use crate::canonical_scene::store::typed_storage::build::{
     BuildResult, TypedStorageBuildControl, TypedStorageBuildError, allocate, capacity, count_work,
     finish, push,
 };
+use crate::canonical_scene::store::typed_storage::edit::normals::NormalAttributeMapping;
 use crate::canonical_scene::store::typed_storage::profile::build::ProfileStatePlan;
+use crate::canonical_scene::store::typed_storage::profile::edit_metadata::{
+    MetadataEditCursor, MetadataEditPlan,
+};
 use crate::canonical_scene::store::typed_storage::profile::{
     LineageCounts, LineageSegment, ProfileState, ProfileStorage, StoredOperation,
     StoredOperationKind, StoredProfileOwner, StoredProfileSegment, StoredProvenance,
@@ -33,7 +41,14 @@ use super::plan::{CheckedCount, NodeSceneEditPlanError};
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ProfileEditTargets {
     Node(u32),
-    Triangulation { primitive: usize },
+    Triangulation {
+        primitive: usize,
+    },
+    Normals {
+        primitive: u32,
+        attributes: NormalAttributeMapping,
+        smooth: bool,
+    },
 }
 
 impl ProfileEditTargets {
@@ -61,9 +76,151 @@ impl ProfileEditTargets {
                                 })
                     })
             }
+            (Self::Normals { primitive, .. }, CanonicalProfileOwner::Primitive(index)) => {
+                primitive == index
+            }
+            (Self::Normals { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
+                index == attributes.normal_attribute()
+            }
             _ => false,
         }
     }
+
+    fn source_owner(self, output: CanonicalProfileOwner) -> Option<CanonicalProfileOwner> {
+        match (self, output) {
+            (Self::Normals { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
+                attributes
+                    .source_attribute(index)
+                    .map(CanonicalProfileOwner::Attribute)
+            }
+            _ => Some(output),
+        }
+    }
+
+    fn output_owner(self, source: CanonicalProfileOwner) -> Option<CanonicalProfileOwner> {
+        match (self, source) {
+            (Self::Normals { attributes, .. }, CanonicalProfileOwner::Attribute(index)) => {
+                attributes
+                    .output_attribute(index)
+                    .map(CanonicalProfileOwner::Attribute)
+            }
+            _ => Some(source),
+        }
+    }
+
+    fn deleted_owner(self) -> Option<CanonicalProfileOwner> {
+        match self {
+            Self::Normals { attributes, .. } => attributes
+                .source_tangent()
+                .filter(|&index| attributes.output_attribute(index).is_none())
+                .map(CanonicalProfileOwner::Attribute),
+            _ => None,
+        }
+    }
+}
+
+struct ProfilePlanningControl<'a, F>(&'a mut F);
+
+impl<F: FnMut() -> Result<(), NodeSceneEditPlanError>> TypedStorageBuildControl
+    for ProfilePlanningControl<'_, F>
+{
+    type Error = NodeSceneEditPlanError;
+
+    fn run_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error> {
+        (self.0)()?;
+        Ok(action())
+    }
+
+    fn run_string_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error> {
+        self.run_unit(action)
+    }
+}
+
+fn profile_owner(
+    source: &ProfileState,
+    layout: ProfileOwnerLayout,
+    owner: CanonicalProfileOwner,
+) -> Option<&StoredProfileOwner> {
+    source
+        .owners
+        .get(usize::try_from(layout.ordinal(owner)?).ok()?)
+        .filter(|row| row.owner == owner)
+}
+
+/// A bounded merge of at most four proven source-owner attachment lists.
+struct OwnerParents<'a> {
+    lists: [&'a [ProfileProvenanceRef]; 4],
+    maximum_depth: u32,
+}
+
+impl OwnerParents<'_> {
+    fn iter(&self) -> impl Iterator<Item = ProfileProvenanceRef> + '_ {
+        let mut next = [0_usize; 4];
+        std::iter::from_fn(move || {
+            let candidate = self
+                .lists
+                .iter()
+                .zip(next)
+                .filter_map(|(list, next)| list.get(next))
+                .min_by_key(|reference| (reference.segment(), reference.local()))
+                .copied()?;
+            for (list, next) in self.lists.iter().zip(&mut next) {
+                if list.get(*next) == Some(&candidate) {
+                    *next += 1;
+                }
+            }
+            Some(candidate)
+        })
+    }
+}
+
+fn owner_parents(
+    input: &SceneStorage,
+    layout: ProfileOwnerLayout,
+    targets: ProfileEditTargets,
+    output_owner: CanonicalProfileOwner,
+) -> Option<OwnerParents<'_>> {
+    let source = input.tables.profile.state.as_ref();
+    let mut owners = [None; 4];
+    if let (
+        ProfileEditTargets::Normals {
+            primitive,
+            attributes,
+            smooth,
+        },
+        CanonicalProfileOwner::Attribute(index),
+    ) = (targets, output_owner)
+        && index == attributes.normal_attribute()
+    {
+        owners[0] = Some(CanonicalProfileOwner::Primitive(primitive));
+        owners[1] = Some(CanonicalProfileOwner::Attribute(
+            attributes.source_position(),
+        ));
+        owners[2] = attributes
+            .source_normal()
+            .map(CanonicalProfileOwner::Attribute);
+        owners[3] = if smooth {
+            attributes
+                .source_smoothing_group()
+                .map(CanonicalProfileOwner::Attribute)
+        } else {
+            None
+        };
+    } else {
+        owners[0] = Some(targets.source_owner(output_owner)?);
+    }
+    let mut parents = OwnerParents {
+        lists: [&[]; 4],
+        maximum_depth: 0,
+    };
+    for (index, owner) in owners.into_iter().enumerate() {
+        if let Some(owner) = owner {
+            let row = profile_owner(source, layout, owner)?;
+            parents.lists[index] = row.attachments.get(&source.attachments)?;
+            parents.maximum_depth = parents.maximum_depth.max(row.maximum_depth);
+        }
+    }
+    (parents.maximum_depth != 0).then_some(parents)
 }
 
 #[derive(Clone, Copy)]
@@ -73,6 +230,7 @@ pub(super) struct NodeSceneEditProfilePlan {
     targets: ProfileEditTargets,
     lineage: [CapacityPlan; 3],
     state: ProfileStatePlan,
+    metadata: MetadataEditPlan,
     pub(super) source_segment_count: CheckedCount,
     pub(super) target_count: CheckedCount,
     pub(super) target_attachment_count: CheckedCount,
@@ -98,6 +256,15 @@ impl NodeSceneEditProfilePlan {
             .ok_or_else(invalid)?;
         let output_layout = output.profile_owner_layout().ok_or_else(invalid)?;
         let source = input.tables.profile.state.as_ref();
+        let metadata = MetadataEditPlan::try_new(
+            &input.tables.profile,
+            targets.deleted_owner(),
+            &mut ProfilePlanningControl(poll),
+        )
+        .map_err(|error| match error {
+            TypedStorageBuildError::Control(cause) => cause,
+            _ => invalid(),
+        })?;
         let mut targets_count = 0_u32;
         let mut parents = 0_u32;
         let mut attachments = 0_u32;
@@ -105,31 +272,35 @@ impl NodeSceneEditProfilePlan {
         for ordinal in 0..output_layout.owner_count() {
             poll()?;
             let owner = output_layout.owner_at(ordinal).ok_or_else(invalid)?;
-            let source_ordinal = source_layout.ordinal(owner).ok_or_else(invalid)?;
-            let source_owner = source
-                .owners
-                .get(source_ordinal as usize)
-                .ok_or_else(invalid)?;
-            if source_owner.owner != owner {
-                return Err(invalid());
-            }
-            let source_count = u32::try_from(source_owner.attachments.len())
-                .map_err(|_| StorePlanError::SizeOverflow)?;
             let count = if targets.selects(owner, input.read_geometry()) {
+                let sources =
+                    owner_parents(input, source_layout, targets, owner).ok_or_else(invalid)?;
+                let mut source_count = 0_u32;
+                for _ in sources.iter() {
+                    poll()?;
+                    source_count = source_count
+                        .checked_add(1)
+                        .ok_or(StorePlanError::SizeOverflow)?;
+                }
                 targets_count = targets_count
                     .checked_add(1)
                     .ok_or(StorePlanError::SizeOverflow)?;
                 parents = parents
                     .checked_add(source_count)
                     .ok_or(StorePlanError::SizeOverflow)?;
-                let depth = source_owner
+                let depth = sources
                     .maximum_depth
                     .checked_add(1)
                     .ok_or(StorePlanError::SizeOverflow)?;
                 maximum_depth = maximum_depth.max(depth);
                 1
             } else {
-                source_count
+                let source_owner = targets
+                    .source_owner(owner)
+                    .and_then(|owner| profile_owner(source, source_layout, owner))
+                    .ok_or_else(invalid)?;
+                u32::try_from(source_owner.attachments.len())
+                    .map_err(|_| StorePlanError::SizeOverflow)?
             };
             attachments = attachments
                 .checked_add(count)
@@ -166,10 +337,12 @@ impl NodeSceneEditProfilePlan {
         counts.owner_count =
             u32::try_from(output_layout.owner_count()).map_err(|_| StorePlanError::SizeOverflow)?;
         counts.attachment_count = attachments;
+        counts = metadata.output_counts(counts);
         Ok(Self {
             source_layout,
             output_layout,
             targets,
+            metadata,
             lineage: [
                 capacity::<StoredProvenance>(u64::from(targets_count))?,
                 capacity::<StoredOperation>(u64::from(targets_count))?,
@@ -214,6 +387,13 @@ impl NodeSceneEditProfilePlan {
             .ok_or(StorePlanError::SizeOverflow)
     }
 
+    fn state_work(self, input: &SceneStorage) -> Result<u64, StorePlanError> {
+        self.state
+            .work()?
+            .checked_add(input.tables.profile.state.as_ref().metadata_entries.len() as u64)
+            .ok_or(StorePlanError::SizeOverflow)
+    }
+
     fn build_lineage<C: TypedStorageBuildControl>(
         self,
         input: &SceneStorage,
@@ -224,10 +404,10 @@ impl NodeSceneEditProfilePlan {
         let mut provenance = allocate(self.lineage[0])?;
         let mut operations = allocate(self.lineage[1])?;
         let mut parents = allocate(self.lineage[2])?;
-        let source = input.tables.profile.state.as_ref();
         let kind = match operation.kind() {
             OperationKind::Transform => StoredOperationKind::Transform,
             OperationKind::Split => StoredOperationKind::Split,
+            OperationKind::Generated => StoredOperationKind::Generated,
             _ => return Err(TypedStorageBuildError::Invariant),
         };
         for ordinal in 0..self.output_layout.owner_count() {
@@ -238,15 +418,10 @@ impl NodeSceneEditProfilePlan {
             if !self.targets.selects(owner, input.read_geometry()) {
                 continue;
             }
-            let row = self
-                .source_owner(source, owner)
-                .ok_or(TypedStorageBuildError::Invariant)?;
-            let values = row
-                .attachments
-                .get(&source.attachments)
+            let sources = owner_parents(input, self.source_layout, self.targets, owner)
                 .ok_or(TypedStorageBuildError::Invariant)?;
             let start = parents.len();
-            for &parent in values {
+            for parent in sources.iter() {
                 #[allow(unused_mut)]
                 let mut parent = parent;
                 #[cfg(test)]
@@ -270,7 +445,7 @@ impl NodeSceneEditProfilePlan {
                 self.lineage[0],
                 StoredProvenance {
                     kind: StoredProvenanceKind::Operation(local),
-                    depth: row
+                    depth: sources
                         .maximum_depth
                         .checked_add(1)
                         .ok_or(TypedStorageBuildError::Invariant)?,
@@ -326,9 +501,6 @@ impl NodeSceneEditProfilePlan {
                 .output_layout
                 .owner_at(ordinal)
                 .ok_or(TypedStorageBuildError::Invariant)?;
-            let row = self
-                .source_owner(source, owner)
-                .ok_or(TypedStorageBuildError::Invariant)?;
             let start = attachments.len();
             let maximum_depth = if self.targets.selects(owner, input.read_geometry()) {
                 let reference = domain
@@ -338,10 +510,17 @@ impl NodeSceneEditProfilePlan {
                     .checked_add(1)
                     .ok_or(TypedStorageBuildError::Invariant)?;
                 push(&mut attachments, p[2], reference, control)?;
-                row.maximum_depth
+                owner_parents(input, self.source_layout, self.targets, owner)
+                    .ok_or(TypedStorageBuildError::Invariant)?
+                    .maximum_depth
                     .checked_add(1)
                     .ok_or(TypedStorageBuildError::Invariant)?
             } else {
+                let row = self
+                    .targets
+                    .source_owner(owner)
+                    .and_then(|owner| self.source_owner(source, owner))
+                    .ok_or(TypedStorageBuildError::Invariant)?;
                 for &reference in row
                     .attachments
                     .get(&source.attachments)
@@ -365,11 +544,30 @@ impl NodeSceneEditProfilePlan {
         if local != self.target_count.as_u32() {
             return Err(TypedStorageBuildError::Invariant);
         }
+        let mut cursor = MetadataEditCursor::new();
         for &entry in &source.metadata_entries {
-            if !self.output_layout.contains(entry.owner) {
-                return Err(TypedStorageBuildError::Invariant);
+            let entry = control
+                .run_unit(|| {
+                    let Some(owner) = self.targets.output_owner(entry.owner) else {
+                        return Ok(None);
+                    };
+                    if !self.output_layout.contains(owner) {
+                        return Err(TypedStorageBuildError::Invariant);
+                    }
+                    let mut entry = if self.metadata.rewrites_payloads() {
+                        cursor
+                            .remap(entry)
+                            .ok_or(TypedStorageBuildError::Invariant)?
+                    } else {
+                        entry
+                    };
+                    entry.owner = owner;
+                    Ok(Some(entry))
+                })
+                .map_err(TypedStorageBuildError::Control)??;
+            if let Some(entry) = entry {
+                push(&mut metadata_entries, p[3], entry, control)?;
             }
-            push(&mut metadata_entries, p[3], entry, control)?;
         }
         finish(&owners, p[1])?;
         finish(&attachments, p[2])?;
@@ -406,10 +604,23 @@ where
                 .map_err(map_build)
         },
     )?;
-    let metadata = lane.try_share_storage(&input.tables.profile.metadata)?;
+    let metadata = if plan.metadata.rewrites_payloads() {
+        lane.try_retain_storage(
+            plan.metadata.capacities(),
+            plan.metadata.work().map_err(StoreRuntimeError::Plan)?,
+            plan.metadata.text_bytes() as u64,
+            |control| {
+                plan.metadata
+                    .build_payloads(&input.tables.profile, control)
+                    .map_err(map_build)
+            },
+        )?
+    } else {
+        lane.try_share_storage(&input.tables.profile.metadata)?
+    };
     let state = lane.try_retain_storage_prepared(
         plan.state.capacities(),
-        plan.state.work().map_err(StoreRuntimeError::Plan)?,
+        plan.state_work(input).map_err(StoreRuntimeError::Plan)?,
         0,
         |lane| {
             let mut segments = plan.state.allocate_segments().map_err(map_build)?;

@@ -6,6 +6,13 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Added direct flat/smooth `generate_normals` operations with area-weighted smoothing by vertex
+  identity and Face smoothing groups. Authored normals are preserved unless replacement is explicit;
+  invalidated tangents and their owner-local metadata require explicit removal. Changed reports own
+  validated operation-specific evidence independently of either Scene.
+- Made typed attribute lookup require the complete `(semantic, domain)` key. `normals(domain)` and
+  `texcoords(set, domain)` distinguish simultaneously authored Vertex and Corner streams without
+  selecting one implicitly.
 - Replaced generic profile/provenance records with retained typed tables. Edits share immutable
   lineage segments and metadata payloads; central validation borrows their actual storage and
   keeps only provenance depth scratch. Segment-local references derive their global coordinates

@@ -5,7 +5,9 @@ handwritten fixtures assert actual geometry, hierarchy, F64 precision, and check
 The glTF feature checks GLB/external equivalence, PBR sharing, skins, morphs, interpolation,
 and malformed-document failures against handwritten expectations.
 The `postprocess` feature with OBJ imports a textured polygon, triangulates it through the facade,
-checks winding, area and authored UV/normal origins, and reads retained remaps after Scene teardown.
+checks winding, area and authored UV/normal origins, preserves existing normals by default, and
+explicitly replaces them through `generate_normals`. UVs survive both operations and each report's
+retained evidence remains readable after Scene teardown.
 `verify` takes the expected format set from its caller; it never infers expectations from registration.
 
 Run from the repository root, reusing its target directory:

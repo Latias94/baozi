@@ -347,6 +347,70 @@ Logs are `target/review/d2-workspace-nextest.log`, `d2-storage-scale.log`,
 and `d2-packaged-consumers.log`. This increment does not provide normal generation, target-space
 conversion, application vertex unification, or a new sanitizer campaign.
 
+## Direct Normal Generation and Exact Attribute Keys (2026-10-30)
+
+`generate_normals` now provides direct Flat and area-weighted Smooth operations on TriangleList
+primitives. Smooth buckets use Vertex identity and optional U32 Face smoothing groups; zero is
+hard per face, and UV seams do not split a shared Vertex. The operation borrows dense F32
+positions, produces dense F32 Corner normals, and preserves topology and unrelated attribute
+encodings, defaults, sparse forms, and scalar bits. Authored normals remain unchanged by default;
+replacement and invalidated Tangent deletion require explicit options. Multiple authored Normal
+or Tangent domains that would require a field-selection policy return typed capability errors.
+
+Each face determinant uses six exact products of original F32 coordinates in F64 and a fixed
+six-entry TwoSum expansion. This fixes the concrete `2^-60` coordinate-cancellation case where
+widened edge subtraction still lost the normal's Z component and changed direction under a cyclic
+vertex permutation. Tests also cover reverse winding, exact collinearity, and the smallest F32
+subnormal. The contract remains `(b - a) × (c - a)` in the stored numeric basis; it does not infer
+a front-facing direction from Scene declarations. Scaled normalization and compensated Smooth
+accumulation retain the existing finite-extreme and opposing-area behavior.
+An independent numerical review also found a one-ulp estimate difference between opposite
+permutations of one face. The determinant now fixes its product order by Vertex ID and restores
+winding by an exact sign change. Its concrete regression checks identical cyclic estimate bits,
+opposite signs, and an exact Smooth cancellation error with or without the face cache.
+
+The source-bound geometry plan owns the concrete added/replaced/deleted attribute mapping. Profile
+owners derive from the final layout, lineage uses the deduplicated Primitive/Position/replaced
+Normal/consulted SmoothingGroup parents, and metadata follows the same mapping. Reindexing shares
+immutable payload pools; actual Tangent metadata deletion compacts surviving payloads under its own
+admission. Published evidence is a closed operation-specific enum. Triangulation owns its real
+remap; a normal report owns its actual root and effects independently of either Scene, without
+duplicate cached effect fields or inapplicable remap accessors. Both operations use one concrete
+geometry publication transaction.
+
+Typed attribute lookup now requires the complete `(semantic, domain)` key. `normals(domain)` and
+`texcoords(set, domain)` read distinct Vertex and Corner streams without an implicit selection.
+A real Scene regression uses unequal cardinalities and different values and verifies allocation-free
+lookup. All maintained callers, including the separate source/package consumer, use explicit domains.
+
+Recoverable central evidence or controlled-validation failures now return `PendingMinimalFallback`.
+Callers end their borrows and release scratch before terminal preparation. Import retains that
+continuation through parser cleanup, and geometry edits release generated values before freezing.
+The regression injects a real final-owner allocation failure with both ordinary and retained-output
+reservations and checks unfrozen evidence during the borrow, preserved cause, and zero live bytes,
+reservations, and canonical commits afterward. The pre-fix all-poll cancellation test already passed;
+these changes do not claim to have reproduced a cancellation-containment failure.
+
+The final all-feature workspace suite passed **2,168/2,168 tests**, with three manual scale tests
+skipped in that invocation. Strict all-target/all-feature Clippy, workspace doctests, rustdoc with
+`-D warnings`, and workspace/consumer formatting passed. The numerical review's two concrete
+counterexamples have executed Rust regressions; the final read-only review found no outstanding
+concrete P0-P2 issue in its reviewed scope and does not replace runtime evidence.
+
+The normal-stack Windows release all-feature consumer passed the glTF/OBJ/PLY/STL workflows.
+Freshly unpacked `.crate` dependencies built and executed the postprocess and selected glTF cases
+without checkout-path substitution. The postprocess case verifies preserved authored normals,
+explicit replacement, exact UVs, and reports that remain readable after Scene destruction. The
+release `wasm32-wasip1` all-feature consumer passed the same format workflows under the previously
+checksum-qualified Wasmtime 50.0.0 runner. The `wasm32-unknown-unknown` all-feature consumer passed
+compilation only; no browser runtime result is claimed.
+
+Logs are `target/review/f-normals-workspace-final.log`, `f-normals-numerical-final.log`,
+`f-normals-clippy-final.log`, `f-normals-doctests.log`, `f-normals-rustdoc.log`,
+`f-normals-native-consumer.log`, `f-normals-packaged-consumers.log`,
+`f-normals-wasi-consumer.log`, and `f-normals-browser-wasm-check.log`. This increment provides no
+new sanitizer/fuzz campaign, target-space conversion, or application vertex lowering.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
@@ -355,10 +419,10 @@ conversion, application vertex unification, or a new sanitizer campaign.
   remaining storage and postprocessing cutovers.
 - Preserve C's verified typed reads and required-dependency context through the storage cutover; retain the single Scene owner.
 - Continue D2 through appearance, deformation/animation, and spatial storage. Preserve the completed
-  node/geometry/profile ownership cutovers, and implement concrete added/deleted/reindexed owner
-  mappings with the normal-generation operation. Delete each replaced record/projection path.
+  node/geometry/profile ownership cutovers and normal generation's concrete attribute-owner mapping.
+  Delete each replaced record/projection path.
 - Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
-- Preserve F's verified triangulation while delivering normals, target-space conversion, and
+- Preserve F's triangulation and normal generation while delivering target-space conversion and
   application vertex lowering.
 - Finish G's behavioral governance cleanup and H's dependency, package, and executed-target proof.
 

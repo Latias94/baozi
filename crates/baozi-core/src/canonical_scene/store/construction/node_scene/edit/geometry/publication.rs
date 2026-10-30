@@ -84,28 +84,49 @@ pub struct SceneGeometryEditHandoffToken {
     tables: crate::canonical_scene::store::typed_storage::SceneTables,
 }
 
-/// Published remap evidence retained beside the edited Scene.
-#[must_use = "published geometry evidence owns the rooted remap storage"]
-pub struct SceneGeometryEditEvidence {
+/// Published effects for exactly one concrete geometry operation.
+#[must_use = "published geometry evidence owns its rooted storage"]
+pub enum SceneGeometryEditEvidence {
+    Triangulation(SceneTriangulationEvidence),
+    Normals(SceneNormalGenerationEvidence),
+}
+
+struct GeometryEvidenceOwner {
     input_target: PrimitiveId,
     output_target: PrimitiveId,
-    corner_origins: baozi_operation::OutcomeEvidenceSequenceRef<u32, SceneGeometryCornerOriginsTag>,
-    face_offsets: baozi_operation::OutcomeEvidenceSequenceRef<u32, SceneGeometryFaceOffsetsTag>,
     store: PublishedOutcomeEvidenceStore<RecordBlock, SceneGeometryEditEvidenceTag>,
 }
 
-impl SceneGeometryEditEvidence {
+/// Triangulation evidence with both centrally validated origin relations present.
+pub struct SceneTriangulationEvidence {
+    owner: GeometryEvidenceOwner,
+    corner_origins: baozi_operation::OutcomeEvidenceSequenceRef<u32, SceneGeometryCornerOriginsTag>,
+    face_offsets: baozi_operation::OutcomeEvidenceSequenceRef<u32, SceneGeometryFaceOffsetsTag>,
+    source_corners: u32,
+    vertices: u32,
+}
+
+impl SceneTriangulationEvidence {
     pub const fn input_target(&self) -> PrimitiveId {
-        self.input_target
+        self.owner.input_target
     }
 
     pub const fn output_target(&self) -> PrimitiveId {
-        self.output_target
+        self.owner.output_target
+    }
+
+    pub const fn source_corner_count(&self) -> u32 {
+        self.source_corners
+    }
+
+    pub const fn vertex_count(&self) -> u32 {
+        self.vertices
     }
 
     /// Returns the published flattened source-corner relation without copying it.
     pub fn source_corner_origins(&self) -> &[u32] {
-        self.store
+        self.owner
+            .store
             .sequence(self.corner_origins)
             .map(|view| view.as_slice())
             .unwrap_or_else(|| panic!("published geometry corner-origin evidence is missing"))
@@ -113,10 +134,50 @@ impl SceneGeometryEditEvidence {
 
     /// Returns the published source-face triangle-prefix relation without copying it.
     pub fn source_face_triangle_offsets(&self) -> &[u32] {
-        self.store
+        self.owner
+            .store
             .sequence(self.face_offsets)
             .map(|view| view.as_slice())
             .unwrap_or_else(|| panic!("published geometry face-offset evidence is missing"))
+    }
+}
+
+/// Normal-generation effects decoded once from the centrally validated root.
+/// The retained root owner remains alive independently of the Scene.
+pub struct SceneNormalGenerationEvidence {
+    owner: GeometryEvidenceOwner,
+    effects: u32,
+    removed_metadata: u32,
+    normal_attribute: u32,
+}
+
+impl SceneNormalGenerationEvidence {
+    pub const fn input_target(&self) -> PrimitiveId {
+        self.owner.input_target
+    }
+
+    pub const fn output_target(&self) -> PrimitiveId {
+        self.owner.output_target
+    }
+
+    pub const fn replaced_normal(&self) -> bool {
+        self.effects & super::schema::normal_field::REPLACED_NORMAL != 0
+    }
+
+    pub const fn removed_tangent(&self) -> bool {
+        self.effects & super::schema::normal_field::REMOVED_TANGENT != 0
+    }
+
+    pub const fn smooth(&self) -> bool {
+        self.effects & super::schema::normal_field::SMOOTH != 0
+    }
+
+    pub const fn removed_metadata_entries(&self) -> u32 {
+        self.removed_metadata
+    }
+
+    pub const fn normal_attribute_index(&self) -> u32 {
+        self.normal_attribute
     }
 }
 
@@ -169,24 +230,78 @@ impl SceneGeometryEditHandoffToken {
 
         let input_target = self.proof.input_target;
         let output_target = input_target.rebind(self.generation.id());
-        let (corner_origins, face_offsets) = {
+        let evidence = {
             let root = published.outcome_evidence.root();
             if root.rows() != 1 || root.fields() != super::schema::ROOT_FIELDS {
                 return Err(SceneGeometryEditHandoffPairingError);
             }
-            let Some(corners) = root.sequence_ref::<u32, SceneGeometryCornerOriginsTag>(
-                0,
-                super::schema::field::CORNER_ORIGINS,
-            ) else {
-                return Err(SceneGeometryEditHandoffPairingError);
-            };
-            let Some(faces) = root.sequence_ref::<u32, SceneGeometryFaceOffsetsTag>(
-                0,
-                super::schema::field::FACE_OFFSETS,
-            ) else {
-                return Err(SceneGeometryEditHandoffPairingError);
-            };
-            (corners, faces)
+            let invalid = SceneGeometryEditHandoffPairingError;
+            match root.scalar::<u32>(0, super::schema::field::OPERATION_KIND) {
+                Some(super::schema::OPERATION_NORMALS) => {
+                    if root.scalar::<u8>(0, super::schema::field::CORNER_ORIGINS) != Some(0)
+                        || root.scalar::<u8>(0, super::schema::field::FACE_OFFSETS) != Some(0)
+                    {
+                        return Err(SceneGeometryEditHandoffPairingError);
+                    }
+                    let effects = root
+                        .scalar::<u32>(0, super::schema::normal_field::EFFECTS)
+                        .ok_or(invalid)?;
+                    let removed_metadata = root
+                        .scalar::<u32>(0, super::schema::normal_field::REMOVED_METADATA)
+                        .ok_or(invalid)?;
+                    let normal_attribute = root
+                        .scalar::<u32>(0, super::schema::normal_field::OUTPUT_NORMAL_ATTRIBUTE)
+                        .ok_or(invalid)?;
+                    let attributes = root
+                        .scalar::<u32>(0, super::schema::normal_field::OUTPUT_ATTRIBUTE_COUNT)
+                        .ok_or(invalid)?;
+                    if normal_attribute >= attributes {
+                        return Err(invalid);
+                    }
+                    SceneGeometryEditEvidence::Normals(SceneNormalGenerationEvidence {
+                        owner: GeometryEvidenceOwner {
+                            input_target,
+                            output_target,
+                            store: published.outcome_evidence,
+                        },
+                        effects,
+                        removed_metadata,
+                        normal_attribute,
+                    })
+                }
+                Some(super::schema::OPERATION_TRIANGULATE) => {
+                    let corner_origins = root
+                        .sequence_ref::<u32, SceneGeometryCornerOriginsTag>(
+                            0,
+                            super::schema::field::CORNER_ORIGINS,
+                        )
+                        .ok_or(invalid)?;
+                    let face_offsets = root
+                        .sequence_ref::<u32, SceneGeometryFaceOffsetsTag>(
+                            0,
+                            super::schema::field::FACE_OFFSETS,
+                        )
+                        .ok_or(invalid)?;
+                    let source_corners = root
+                        .scalar::<u32>(0, super::schema::field::SOURCE_CORNER_COUNT)
+                        .ok_or(invalid)?;
+                    let vertices = root
+                        .scalar::<u32>(0, super::schema::field::VERTEX_COUNT)
+                        .ok_or(invalid)?;
+                    SceneGeometryEditEvidence::Triangulation(SceneTriangulationEvidence {
+                        owner: GeometryEvidenceOwner {
+                            input_target,
+                            output_target,
+                            store: published.outcome_evidence,
+                        },
+                        corner_origins,
+                        face_offsets,
+                        source_corners,
+                        vertices,
+                    })
+                }
+                _ => return Err(invalid),
+            }
         };
 
         Ok(SceneGeometryEditPublishedSuccess {
@@ -198,13 +313,7 @@ impl SceneGeometryEditHandoffToken {
                 #[cfg(test)]
                 semantic_read_fault: None,
             },
-            evidence: SceneGeometryEditEvidence {
-                input_target,
-                output_target,
-                corner_origins,
-                face_offsets,
-                store: published.outcome_evidence,
-            },
+            evidence,
             ledger_evidence: published.ledger_evidence,
         })
     }

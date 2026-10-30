@@ -256,10 +256,16 @@ Authored normals and tangents are source fields. Vertex values retain their iden
 Corner/Face fields follow the explicit origins without recomputation. Preserving those values
 does not claim that geometric normals or tangents were generated for the new triangles.
 
-As of 2026-10-30, this direct triangulation path is under integration validation. General scheduling,
-cross-invocation replay, flat/smooth normal generation, coordinate/unit conversion, and unification
-of corner attributes into application vertex tuples are not implemented by this increment.
+The direct triangulation increment does not implement general scheduling, cross-invocation replay,
+coordinate/unit conversion, or unification of corner attributes into application vertex tuples.
 Triangulation alone does not complete plan F or promise a GPU-ready vertex/index layout.
+
+`generate_normals` provides typed Flat/Smooth, authored-normal preservation/replacement, and
+tangent rejection/removal policies. It shares the same geometry
+publication transaction rather than introducing a scheduler or a second Scene representation.
+ADR 0032 defines its attribute-owner mapping, metadata deletion, provenance parents, and retained
+operation-specific report evidence. Normal generation remains an explicit caller operation after
+triangulation; importers do not perform it silently.
 
 ### Triangulation Contract
 
@@ -489,6 +495,18 @@ Cancellation, deadlines, original-input failure ownership, generation binding, r
 lifetime, thread transfer, and tracing equivalence are tested through actual direct operations.
 
 ## Amendment History
+
+### 2026-10-30: Add direct normal generation and typed geometry evidence
+
+- Previous rule: triangulation was the only concrete geometry edit, and all changed evidence
+  exposed triangulation origin accessors.
+- New rule: `generate_normals` derives one Corner Normal field with explicit source-field policy.
+  The two concrete operations share transaction mechanics and return distinct evidence owners.
+- Compatibility impact: the hidden geometry integration evidence becomes a closed enum with
+  operation-specific payloads; no compatibility adapter preserves invalid cross-operation access.
+- Required review: numeric stability, smoothing identities, canonical attribute insertion,
+  tangent/metadata deletion, provenance parent sets, cancellation, and retained report lifetime.
+- Rationale: the type of an owned result should determine which facts and references are valid.
 
 ### 2026-10-30: Remove the empty pipeline facade
 

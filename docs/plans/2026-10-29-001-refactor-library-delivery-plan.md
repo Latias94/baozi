@@ -212,7 +212,9 @@ This is the prerequisite for normals' owner changes, not a new generic patch or 
 This storage cutover is implemented for fresh construction, node-transform edits, and triangulation.
 Its behavior and allocation evidence are recorded in the
 [delivery progress](../reviews/2026-10-29-delivery-progress.md#typed-profile-and-provenance-cutover-2026-10-30).
-Attribute-producing operations still need their concrete added/deleted/reindexed owner mappings.
+Normal generation now supplies its concrete added/deleted/reindexed attribute-owner mapping,
+including lineage unions and Tangent metadata removal. Other structural edits must supply their
+own concrete mappings from the final layout.
 Appearance, deformation/animation, and spatial storage remain subsequent D2 domain cutovers.
 
 The private root becomes `SceneTables`, retaining node, geometry, and profile owners through the
@@ -277,6 +279,14 @@ Each operation declares the data it needs and the derived data it changes. Start
 operation implementations; add shared plan compilation only for demonstrated dependency/conflict
 requirements. Keep distinct unchanged/changed results, useful diagnostics, and failure access to the
 original immutable scene.
+
+Triangulation and direct Flat/Smooth normal generation are implemented. Normal generation borrows
+dense F32 positions, preserves topology and unrelated scalar bits, and owns operation-specific
+published evidence. Its complete attribute key and owner mapping replace implicit semantic-only
+selection; multi-domain field edits outside the supported policy return explicit capability errors.
+The [delivery progress](../reviews/2026-10-29-delivery-progress.md) records numerical, ownership,
+cancellation, package, and target verification. Coordinate/unit conversion and application vertex
+unification remain required to complete F.
 
 Add an explicit helper or operation for unifying corner attributes into application vertex tuples.
 Do not assume triangles alone form a GPU-ready vertex/index layout. Lossy influence truncation and

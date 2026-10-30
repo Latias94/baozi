@@ -1,4 +1,4 @@
-//! Concrete rooted outcome evidence for the one triangulation edit.
+//! Concrete rooted evidence for the closed set of geometry edits.
 
 use baozi_operation::RecordBlock;
 
@@ -20,9 +20,10 @@ impl CanonicalSchema for SceneGeometryEditEvidenceTag {
     type StoreKind = RecordBlock;
 }
 
-pub(super) const REVISION: u32 = 2;
+pub(super) const REVISION: u32 = 3;
 pub(super) const OPERATION_TRIANGULATE: u32 = 1;
-pub(super) const TRIANGULATION_SEMANTIC_VERSION: u32 = 1;
+pub(super) const OPERATION_NORMALS: u32 = 2;
+pub(super) const OPERATION_SEMANTIC_VERSION: u32 = 1;
 pub(super) const OUTCOME_CHANGED: u32 = 1;
 pub(super) const OUTCOME_FAILED: u32 = 2;
 
@@ -53,6 +54,18 @@ pub(super) mod field {
     pub(crate) const SCENE_COUNTS: usize = 20;
     pub(crate) const CORNER_ORIGINS: usize = 21;
     pub(crate) const FACE_OFFSETS: usize = 22;
+}
+
+/// Operation-specific cells in a normal-generation root. Other cells retain the common prefix.
+pub(super) mod normal_field {
+    pub(crate) const REMOVED_METADATA: usize = 7;
+    pub(crate) const OUTPUT_NORMAL_ATTRIBUTE: usize = 12;
+    pub(crate) const EFFECTS: usize = 13;
+    pub(crate) const OUTPUT_ATTRIBUTE_COUNT: usize = 14;
+
+    pub(crate) const REPLACED_NORMAL: u32 = 1;
+    pub(crate) const REMOVED_TANGENT: u32 = 2;
+    pub(crate) const SMOOTH: u32 = 4;
 }
 
 pub(super) const ROOT_FIELDS: usize = 23;

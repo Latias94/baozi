@@ -7,8 +7,8 @@ Current status: experimental parser foundation. STL, OBJ/MTL, and PLY have owned
 fixture and fuzz coverage. The glTF/GLB selected-scene PBR, skin, morph, and TRS animation profile
 is available through `format-gltf`; its [exact restrictions](docs/formats/gltf.md) apply.
 Scene nodes, geometry, materials, images, skins, morphs, and animation have borrowed typed readers.
-The optional `postprocess` feature provides explicit single-primitive triangulation. Normal
-generation, target-space conversion, and application vertex unification remain in development.
+The optional `postprocess` feature provides explicit single-primitive triangulation and flat/smooth
+normal generation. Target-space conversion and application vertex unification remain in development.
 Bounded snapshots are available separately for test and debug evidence.
 
 ## Goals
@@ -90,10 +90,11 @@ benchmarks require `format-obj`.
 that registry before freezing it; `Importer::builder()` starts an empty registry. Format authoring
 remains in the `baozi_import` extension API.
 
-With `format-obj` and `postprocess` enabled, explicitly triangulate a polygon primitive:
+With `format-obj` and `postprocess` enabled, triangulate a polygon and generate smooth Corner normals:
 
 ```rust
-use baozi::{Importer, postprocess::{PostProcessControl, triangulate_primitive}};
+use baozi::{AttributeDomain, Importer};
+use baozi::postprocess::{NormalOptions, PostProcessControl, generate_normals, triangulate_primitive};
 
 let import = Importer::new()?.read_bytes(
     "quad.obj",
@@ -104,6 +105,12 @@ let target = scene.meshes().next().unwrap().primitives().next().unwrap().id();
 let outcome = triangulate_primitive(scene, target, PostProcessControl::default())?;
 let (triangles, report) = outcome.into_parts();
 assert!(report.matches_scene(&triangles));
+let target = report.triangulation_remap().unwrap().output_target();
+let (scene, normals_report) = generate_normals(
+    triangles, target, NormalOptions::default(), PostProcessControl::default(),
+)?.into_parts();
+let target = normals_report.normal_generation().unwrap().output_target();
+assert!(scene.primitive(target)?.normals(AttributeDomain::Corner).is_some());
 ```
 
 Import evidence retains its original generation; the postprocess report identifies the output.
@@ -112,6 +119,13 @@ Triangulation preserves authored attributes through explicit origins and rejects
 numerically unresolved polygons. Its report owns the actual Corner/Face relation independently of
 either Scene. Triangles still retain separate attribute domains; this operation does not produce a
 unified application vertex buffer.
+
+Normal generation preserves authored normals by default. `ExistingNormals::Replace` explicitly
+replaces them, and `TangentHandling::Remove` authorizes deleting invalidated tangents and their
+owner-local metadata. Smooth mode shares area-weighted normals by Vertex identity and Face
+smoothing groups; group zero is hard per face, and UV seams do not split a shared Vertex.
+Attribute lookup requires both semantic and domain, so `normals(AttributeDomain::Corner)` and
+`texcoords(set, AttributeDomain::Vertex)` select the intended stream explicitly.
 
 Run the import benchmark harness without collecting measurements:
 

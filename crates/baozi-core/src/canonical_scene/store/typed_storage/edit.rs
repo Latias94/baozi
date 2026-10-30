@@ -13,6 +13,8 @@ use super::{
     StoredMeshInstance, StoredPrimitive, TableRange,
 };
 
+pub(in crate::canonical_scene::store) mod normals;
+
 type EditResult<T, E> = Result<T, TypedStorageBuildError<E>>;
 
 /// Primitive-local source corners, grouped into triangles in source-face order.

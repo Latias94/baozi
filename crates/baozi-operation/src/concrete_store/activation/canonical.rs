@@ -309,8 +309,9 @@ where
         Some(CanonicalValidationFirstFault::Runtime(cause)) => cause.into_runtime(),
         None => activation_product_graph_cause(),
     };
-    prepare_canonical_validation_fallback(fallback, cause)
-        .map(CanonicalCentralValidationOutcome::Fallback)
+    Ok(CanonicalCentralValidationOutcome::Fallback(
+        PendingMinimalFallback::new(fallback, cause),
+    ))
 }
 
 #[inline(never)]
@@ -691,7 +692,8 @@ where
     /// The caller never receives the writable assembly. Work and destination roles come from the
     /// session owner while exact materialized shape comes from its matching keyless request.
     /// Evidence is built in a one-shot lane, then the controlled validator produces either an
-    /// opaque zero-commit candidate or an eager-cleaned failure owner.
+    /// opaque zero-commit candidate or a failure owner. Recoverable fallback-only failures remain
+    /// unprepared so callers can end borrowed input lifetimes and release charged scratch first.
     /// Any invalid root, ignored control fault, panic, or uncertain cleanup is quarantined instead
     /// of becoming a fallback result.
     #[allow(clippy::type_complexity, clippy::result_large_err)]
@@ -807,7 +809,7 @@ where
                         cause: assembly.contain_activation_fault(),
                     });
                 };
-                return prepare_assembly_minimal(assembly, fault.cause, failure_code)
+                return defer_assembly_minimal(assembly, fault.cause, failure_code)
                     .map(CanonicalCentralValidationOutcome::Fallback);
             }
             (Some(_), _) | (None, OutcomeEvidenceDecision::Abort) => {
@@ -878,19 +880,6 @@ where
             outcome_evidence_destination_dimension,
         )
     }
-}
-
-fn prepare_canonical_validation_fallback<O, PP, U>(
-    fallback: StoreFallbackOnly<O, PP, U>,
-    cause: StoreRuntimeError,
-) -> Result<VerifiedMinimalFallback<StoreRuntimeError>, StoreActivationContainment>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let (prepared, _product_graph_cause) = prepare_product_graph_fallback(fallback)?.into_parts();
-    Ok(VerifiedMinimalFallback::new(prepared, cause))
 }
 
 impl<Proof, E> CanonicalValidationDecision<Proof, E> {

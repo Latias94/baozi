@@ -1,5 +1,43 @@
 use super::*;
 
+impl<O, PP, U> PendingMinimalFallback<O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    pub(super) fn new(fallback: StoreFallbackOnly<O, PP, U>, cause: StoreRuntimeError) -> Self {
+        Self { cause, fallback }
+    }
+
+    /// The original evidence-construction or validation failure, before terminal preparation.
+    pub const fn cause(&self) -> &StoreRuntimeError {
+        &self.cause
+    }
+
+    /// Discards candidate storage and freezes the pre-admitted fallback after caller cleanup.
+    ///
+    /// Caller-owned ordinary scratch reservations must be released first. Valid retained-output
+    /// reservations may remain live under their existing protocol. Preparation uses the existing
+    /// fallback owner without a cleanup callback, payload copy, allocation, or control poll.
+    pub fn prepare_minimal_fallback(
+        self,
+    ) -> Result<VerifiedMinimalFallback<StoreRuntimeError>, StorePrepareError> {
+        let Self { cause, fallback } = self;
+        let cause = ManuallyDrop::new(cause);
+        match fallback.prepare_minimal_fallback() {
+            Ok(prepared) => Ok(VerifiedMinimalFallback::new(
+                prepared,
+                ManuallyDrop::into_inner(cause),
+            )),
+            Err(error) => {
+                let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
+                Err(error)
+            }
+        }
+    }
+}
+
 impl<O, PP, U, E, L> NeverActivatedStoreSession<O, PP, U, E, L>
 where
     O: OperationOwner,

@@ -2736,7 +2736,9 @@ pub enum CanonicalCentralValidationOutcome<
         >,
     ),
     Rejected(CentrallyRejectedCanonicalStoreSession<O, PP, U, E, EvidenceKind, EvidenceTag>),
-    Fallback(VerifiedMinimalFallback<StoreRuntimeError>),
+    /// No terminal preparation has occurred. Release ordinary scratch reservations before
+    /// calling `prepare_minimal_fallback` on this owner.
+    Fallback(PendingMinimalFallback<O, PP, U>),
     Interrupted(InterruptedCanonicalStoreSession<O, PP, U, EvidenceKind, EvidenceTag>),
 }
 
@@ -2951,6 +2953,23 @@ pub struct VerifiedMinimalFallback<Cause> {
     prepared: Option<PreparedStoreFallback>,
 }
 
+/// A recoverable central-validation failure that retains fallback authority without freezing it.
+///
+/// Evidence construction and validation may borrow caller-owned, charged storage. Returning this
+/// owner lets those borrows end before the caller releases ordinary scratch reservations and
+/// prepares terminal evidence. Valid retained-output reservations may outlive preparation under
+/// their existing protocol. Dropping this owner uses the fallback-only owner's cleanup protocol.
+#[must_use = "the pending fallback must be prepared after caller cleanup or deliberately dropped"]
+pub struct PendingMinimalFallback<O, PP, U>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+{
+    cause: StoreRuntimeError,
+    fallback: StoreFallbackOnly<O, PP, U>,
+}
+
 // Both variants are linear terminal owners. Boxing the larger owner would bypass the store ledger.
 #[allow(clippy::large_enum_variant)]
 #[must_use = "the rooted evidence or minimal fallback owner must be consumed"]
@@ -3092,11 +3111,11 @@ where
     }
 }
 
-fn prepare_assembly_minimal<O, PP, U, L>(
+fn defer_assembly_minimal<O, PP, U, L>(
     mut assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
     cause: StoreRuntimeError,
     failure_code: PreparationFailureCode,
-) -> Result<VerifiedMinimalFallback<StoreRuntimeError>, StoreActivationContainment>
+) -> Result<PendingMinimalFallback<O, PP, U>, StoreActivationContainment>
 where
     O: OperationOwner,
     PP: ProgressPhase,
@@ -3119,21 +3138,16 @@ where
             cause: raw.contain_activation_fault(),
         });
     }
-    match raw
-        .prepare_minimal_fallback_with(failure_code)
-        .map(|prepared| classify_prepared_fallback(prepared, domain))
-    {
-        Ok(prepared) => Ok(VerifiedMinimalFallback::new(
-            prepared,
-            ManuallyDrop::into_inner(cause),
-        )),
-        Err(error) => {
-            let _ = drop_scoped_value(ManuallyDrop::into_inner(cause));
-            Err(StoreActivationContainment {
-                cause: map_raw_prepare_error(error),
-            })
-        }
-    }
+    Ok(PendingMinimalFallback::new(
+        StoreFallbackOnly {
+            state: super::StoreFallbackState::Assembly {
+                raw,
+                cause: failure_code,
+            },
+            domain,
+        },
+        ManuallyDrop::into_inner(cause),
+    ))
 }
 
 const fn map_raw_prepare_error(
@@ -3217,24 +3231,28 @@ mod scoped_transition_tests {
     impl OperationOwner for TestOwner {}
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    enum TestProgress {}
+    enum TestProgress {
+        Build,
+    }
 
     impl ProgressPhase for TestProgress {
         fn order(self) -> u32 {
-            match self {}
+            0
         }
 
         fn stable_id(self) -> &'static str {
-            match self {}
+            "build"
         }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    enum TestUnit {}
+    enum TestUnit {
+        Items,
+    }
 
     impl ProgressUnit for TestUnit {
         fn stable_id(self) -> &'static str {
-            match self {}
+            "items"
         }
     }
 
@@ -3766,5 +3784,144 @@ mod scoped_transition_tests {
         assert_owner_consuming_transition_panic_is_contained(
             ScopedTransitionPanicPoint::FinishRejectedSession,
         );
+    }
+
+    #[test]
+    fn evidence_allocation_failure_defers_freeze_until_borrowed_scratch_is_released() {
+        enum ScratchCharge {
+            Ordinary,
+            RetainedOutput,
+        }
+
+        for charge in [ScratchCharge::Ordinary, ScratchCharge::RetainedOutput] {
+            let account = account();
+            let (mut operation, keys) = operation(&account);
+            let plan = crate::CapacityPlan::for_type::<u8>(0, 0, 4).unwrap();
+            let bytes = plan.envelope_delta_bytes().unwrap();
+            let reservation = match charge {
+                ScratchCharge::Ordinary => operation
+                    .control_checkpoint()
+                    .reserve(keys.phase, keys.dimension, bytes)
+                    .unwrap(),
+                ScratchCharge::RetainedOutput => operation
+                    .reserve_retained_storage(keys.phase, keys.dimension, bytes, 1)
+                    .unwrap(),
+            };
+            let mut scratch = Vec::new();
+            scratch
+                .try_reserve_exact(plan.allocator_additional())
+                .unwrap();
+            plan.finish(scratch.len(), scratch.capacity()).unwrap();
+            scratch.extend_from_slice(&[7_u8, 9, 10, 11]);
+
+            let (policy, evidence_limits, failure, success) = scoped_shape(keys);
+            let owner = operation
+                .into_session_outcome_owner(policy, evidence_limits, failure)
+                .unwrap();
+            let mut description = Some(TestActivationDescription::new(success, ()));
+            let outcome: TestOutcome = owner
+                .plan_and_activate_scoped(|mut planning| {
+                    let mut semantic = planning.begin_semantic_work().unwrap();
+                    semantic.run_unit(|| scratch[0]).unwrap();
+                    let completion = semantic.finish_exact().unwrap();
+                    let permit =
+                        match planning.seal_activation(description.take().unwrap(), completion) {
+                            CanonicalActivationSeal::Sealed(permit) => permit,
+                            CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
+                        };
+                    permit.activate(|mut lane, _plan| {
+                        let root = lane
+                            .try_retain_sequence(
+                                SequencePlan::<u8>::new(1).unwrap(),
+                                CanonicalTag,
+                                |writer| writer.push(scratch[0]),
+                            )
+                            .unwrap();
+                        lane.complete(root, ())
+                    })
+                })
+                .unwrap();
+            let activated = match outcome {
+                CanonicalActivationOutcome::Activated(activated) => activated,
+                _ => panic!("borrowed scratch must allow activation"),
+            };
+            let probe = activated.assembly.raw.test_ledger_probe();
+            let builder_called = Cell::new(false);
+            let outcome = activated
+                .validate_centrally(
+                    CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
+                    |lane, _output| {
+                        crate::retained::fail_next_final_owner_allocation();
+                        let cause = lane
+                            .try_retain_sequence(
+                                SequencePlan::<u8>::new(1).unwrap(),
+                                CanonicalTag,
+                                |writer| {
+                                    builder_called.set(true);
+                                    writer.push(scratch[1])
+                                },
+                            )
+                            .unwrap_err();
+                        assert!(matches!(cause, StoreRuntimeError::AllocationFailed));
+                        lane.abort::<ScalarSequence<u8>, CanonicalTag>()
+                    },
+                    |planning, _output| {
+                        planning.validate_with(
+                            |_| Ok(()),
+                            |_session,
+                             _canonical,
+                             _evidence,
+                             &mut ()|
+                             -> Result<
+                                CanonicalValidationDecision<(), TestRejection>,
+                                StoreWorkError,
+                            > {
+                                unreachable!("failed evidence allocation must skip validation")
+                            },
+                        )
+                    },
+                )
+                .unwrap();
+            let fallback = match outcome {
+                CanonicalCentralValidationOutcome::Fallback(fallback) => fallback,
+                _ => panic!("verified allocation failure must return pending fallback authority"),
+            };
+            assert!(matches!(
+                fallback.cause(),
+                StoreRuntimeError::AllocationFailed
+            ));
+            assert!(!builder_called.get());
+            assert!(!account.snapshot().poisoned());
+            assert!(probe.is_available());
+            assert!(!probe.is_terminal_qualified());
+            assert_eq!(scratch.as_slice(), &[7, 9, 10, 11]);
+
+            let live_before_release = probe.current_live_bytes();
+            let active_before_release = probe.active_reservations();
+            reservation.release_storage(scratch);
+            assert_eq!(probe.current_live_bytes(), live_before_release - bytes);
+            assert_eq!(probe.active_reservations(), active_before_release - 1);
+            let (prepared, cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
+            assert!(matches!(cause, StoreRuntimeError::AllocationFailed));
+            let published = prepared.handoff();
+            assert_eq!(published.ledger_evidence.header().current_live_bytes(), 0);
+            assert_eq!(published.ledger_evidence.header().active_reservations(), 0);
+            assert_eq!(
+                published
+                    .ledger_evidence
+                    .dimension(keys.dimension)
+                    .unwrap()
+                    .committed_canonical_output(),
+                0
+            );
+            assert!(matches!(
+                published.ledger_evidence.header().terminal_cause(),
+                crate::StoreTerminalCause::Failure(cause)
+                    if cause.class() == crate::StorePreparationFailureClass::ProductGraph
+            ));
+            drop(published);
+            assert_eq!(account.snapshot().live_retained_allocations(), 0);
+            assert!(!account.snapshot().poisoned());
+        }
     }
 }

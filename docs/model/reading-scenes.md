@@ -15,9 +15,12 @@ strips, or fans. `polygon_face_sizes()` gives each polygon's number of corners. 
 `Option<&[u32]>`: absence denotes the validated implicit stream, and `Some(&[])` preserves an
 authored empty stream. Vertex, Corner, and Face attribute domains remain distinct.
 
-Use `positions()`, `normals()`, `texcoords(set)`, or `attribute(AttributeSemanticRef)` to find a
-primitive attribute. Lookup is linear in that primitive's attribute count. Iteration retains borrowed
-namespaced custom semantics instead of allocating a name for each read.
+Use `positions()`, `normals(domain)`, `texcoords(set, domain)`, or
+`attribute(AttributeSemanticRef, domain)` to find a primitive attribute. Position uses the Vertex
+domain; other lookups require the complete semantic/domain key because one primitive may retain
+distinct Vertex and Corner streams for the same semantic. Lookup is linear in that primitive's
+attribute count. Iteration retains borrowed namespaced custom semantics instead of allocating a
+name for each read.
 
 `AttributeData` distinguishes dense F32/F64/U32/I32 and sparse F32/U32/I32 payloads. Dense `values`
 are tightly packed scalars with an explicit lane count. Sparse payloads expose sorted logical element

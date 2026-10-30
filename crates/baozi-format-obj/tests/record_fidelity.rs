@@ -102,7 +102,7 @@ g volume\nf 1/-3 2/-2 3/-1\nf 1/1 3/-1 2/-2\n",
     assert_eq!(scene.attribute_count(), 4);
     let flat = scene.meshes().next().unwrap().primitives().next().unwrap();
     assert_eq!(flat.vertex_count(), 3);
-    let flat_uv = flat.texcoords(0).unwrap();
+    let flat_uv = flat.texcoords(0, AttributeDomain::Corner).unwrap();
     assert_eq!(flat_uv.domain(), AttributeDomain::Corner);
     assert_f32(flat_uv, 2, &[0.25, 0.5, 1.0, 0.5, 0.25, 1.0]);
     let volume = scene
@@ -116,7 +116,7 @@ g volume\nf 1/-3 2/-2 3/-1\nf 1/1 3/-1 2/-2\n",
     assert_eq!(volume.corner_count(), 6);
     assert_eq!(volume.face_count(), 2);
     assert_eq!(volume.indices(), Some(&[0, 1, 2, 0, 2, 1][..]));
-    let volume_uv = volume.texcoords(0).unwrap();
+    let volume_uv = volume.texcoords(0, AttributeDomain::Corner).unwrap();
     assert_eq!(volume_uv.domain(), AttributeDomain::Corner);
     assert_f32(
         volume_uv,
@@ -139,7 +139,7 @@ fn an_authored_zero_third_uv_component_still_has_three_lanes() -> TestResult<()>
     let primitive = primitive(&report);
     assert_eq!(primitive.vertex_count(), 3);
     assert_f32(
-        primitive.texcoords(0).unwrap(),
+        primitive.texcoords(0, AttributeDomain::Corner).unwrap(),
         3,
         &[0.25, 0.5, 0.0, 0.25, 0.5, 0.0, 0.25, 0.5, 0.0],
     );
@@ -201,7 +201,7 @@ fn authorized_color_omission_preserves_xyz_and_records_each_source_record() -> T
     assert_eq!(primitive.attributes().len(), 1);
     assert!(
         primitive
-            .attribute(AttributeSemanticRef::Color(0))
+            .attribute(AttributeSemanticRef::Color(0), AttributeDomain::Vertex)
             .is_none()
     );
     assert_f32(

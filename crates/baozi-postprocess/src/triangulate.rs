@@ -1,32 +1,24 @@
 //! Direct triangulation; postprocess owns the runtime, core owns the Scene edit and publication.
 
-mod input;
+pub(crate) mod input;
 
 use baozi_core::{
-    PrimitiveId, SceneValidationLimits, ValidatedScene,
+    PrimitiveId, ValidatedScene,
     scene::authoring::OptionsDigest,
     scene::integration::{
-        SceneGeometryEditAdmission, SceneGeometryEditBootstrap, SceneGeometryEditRejection,
-        SceneTriangulationReplacement, consume_scene_edit_freeze_permit,
-        try_start_scene_edit_operation,
+        SceneGeometryEditBootstrap, SceneGeometryEditEvidence, try_start_scene_edit_operation,
     },
 };
-use baozi_operation::__retained_store_integration::activation::{
-    CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
-    CanonicalFreezePermitIssue, CanonicalValidationProgress, StoreCanonicalRejection,
-    StoreNeverActivatedCause,
-};
 use baozi_operation::__retained_store_integration::authority::{
-    PreparedStoreEvidenceOnlyOutcome, PreparedStoreFailure, PreparedStoreFallback,
-    PreparedStoreSuccessOutcome,
+    PreparedStoreEvidenceOnlyOutcome, PreparedStoreFallback,
 };
 use baozi_operation::{
-    PublishedStoreFallbackParts, RecordBlock, StorePreparationFailureClass, StoreTerminalCause,
+    PublishedStoreFallbackParts, StorePreparationFailureClass, StoreTerminalCause,
 };
 
 use crate::direct_error::FailureOwner;
+use crate::operation::PostProcessOwner;
 use crate::operation::runtime::{EditOperation, REJECTION_CODE, final_progress, plan_runtime};
-use crate::operation::{PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit};
 use crate::{
     PostProcessControl, PostProcessReport, PostProcessResourceEvidence, PostProcessRunError,
     PostProcessRunFailure, PostProcessRunOutcome, TriangulationCause, TriangulationFailure,
@@ -35,7 +27,7 @@ use crate::{
 
 // SHA-256 of the UTF-8 bytes `baozi.triangulate_primitive/v1;source-fields=preserve`.
 // The operation has no caller parameters; this fixed value identifies its explicit preservation rule.
-const OPTIONS: OptionsDigest = OptionsDigest::sha256([
+pub(crate) const OPTIONS: OptionsDigest = OptionsDigest::sha256([
     0x82, 0x4c, 0xac, 0x97, 0x28, 0x91, 0xba, 0xe3, 0x59, 0x64, 0x5b, 0x14, 0x26, 0x6d, 0x48, 0x55,
     0x74, 0xfb, 0x24, 0xd1, 0x7a, 0xf1, 0x1d, 0x1f, 0x28, 0x58, 0x7e, 0x12, 0x2c, 0x89, 0x6f, 0xa0,
 ]);
@@ -133,197 +125,26 @@ pub fn triangulate_primitive(
             ));
         }
     };
-    match execute_changed(&input, target, owner, admission, origins) {
-        Ok((scene, report)) => Ok(PostProcessRunOutcome::new(scene, report)),
-        Err(cause) => Err(failure(input, cause)),
-    }
-}
-
-#[allow(
-    clippy::result_large_err,
-    reason = "all exact terminal owners remain inline"
-)]
-fn execute_changed(
-    input: &ValidatedScene,
-    target: PrimitiveId,
-    owner: baozi_operation::__retained_store_integration::activation::RetainedStoreSessionOutcomeOwner<
-        PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit,
-        baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource,
-    >,
-    admission: SceneGeometryEditAdmission,
-    origins: input::Origins,
-) -> Result<(ValidatedScene, PostProcessReport), TriangulationFailure> {
-    let replacement = SceneTriangulationReplacement::new(
-        target,
-        origins.triangles.values(),
-        origins.face_offsets.values(),
-        OPTIONS,
-    );
-    let mut transaction =
-        admission.into_transaction(input, replacement, SceneValidationLimits::default());
-    let activated = owner
-        .plan_and_activate_scoped(|mut planning| {
-            let ready = match planning.begin_semantic_work() {
-                Ok(mut semantic) => match transaction.preflight(&mut semantic) {
-                    Ok(plan) => match semantic.finish_exact() {
-                        Ok(completion) => Ok((plan, completion)),
-                        Err(cause) => {
-                            drop(plan);
-                            Err(SceneGeometryEditRejection::Runtime(cause))
-                        }
-                    },
-                    Err(cause) => {
-                        let _ = semantic.finish_rejected();
-                        Err(cause)
-                    }
-                },
-                Err(cause) => Err(SceneGeometryEditRejection::Runtime(cause)),
-            };
-            let (plan, completion) = match ready {
-                Ok(ready) => ready,
-                Err(cause) => return planning.reject(cause, REJECTION_CODE),
-            };
-            match planning.seal_activation(plan, completion) {
-                CanonicalActivationSeal::Sealed(permit) => {
-                    permit.activate(|lane, plan| plan.materialize(lane))
-                }
-                CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
-            }
-        })
-        .map_err(|source| TriangulationFailure::new(TriangulationCause::Containment { source }))?;
-    let postflight = transaction.finish();
-    let activated = match activated {
-        CanonicalActivationOutcome::Activated(activated) => activated,
-        CanonicalActivationOutcome::Rejected(rejected) => {
-            let cause = core_rejection(rejected.cause());
-            drop(origins);
-            return Err(resolve_fallback(rejected.prepare_minimal_fallback(), cause));
-        }
-        CanonicalActivationOutcome::NeverActivated(rejected) => {
-            let cause = match rejected.cause() {
-                StoreNeverActivatedCause::Runtime(cause) => cause.clone().into(),
-                StoreNeverActivatedCause::Requested(cause) => core_requested(cause),
-            };
-            drop(origins);
-            return Err(resolve_fallback(rejected.prepare_minimal_fallback(), cause));
-        }
-        CanonicalActivationOutcome::Fallback(fallback) => {
-            let cause = fallback.cause().clone().into();
-            let (prepared, _) = fallback.into_parts();
-            drop(origins);
-            return Err(publish_fallback(prepared, cause));
-        }
-    };
-    let central = activated
-        .validate_centrally(
-            CanonicalValidationProgress::new(
-                PostProcessProgressPhase::Validation,
-                PostProcessProgressUnit::WorkItems,
-            ),
-            |lane, output| postflight.build_evidence(lane, output),
-            |planning, output| postflight.validate_candidate(planning, output),
-        )
-        .map_err(|source| TriangulationFailure::new(TriangulationCause::Containment { source }))?;
-    let source_corners = origins.source_corners;
-    let vertices = origins.vertices;
-    // Retained origins in central evidence now own the complete remap. Temporary leases end here.
-    drop(origins);
-    let candidate = match central {
-        CanonicalCentralValidationOutcome::Candidate(candidate) => candidate,
-        CanonicalCentralValidationOutcome::Rejected(rejected) => {
-            let cause = core_rejection(rejected.cause());
-            return Err(resolve_fallback(rejected.prepare_minimal_fallback(), cause));
-        }
-        CanonicalCentralValidationOutcome::Interrupted(interrupted) => {
-            let cause = interrupted.cause().control_cause().cloned().map_or(
-                TriangulationCause::CentralValidation,
-                TriangulationCause::control,
+    match crate::geometry_edit::execute_changed(
+        &input,
+        owner,
+        admission,
+        crate::geometry_edit::PreparedGeometry::Triangulation { target, origins },
+    ) {
+        Ok((scene, SceneGeometryEditEvidence::Triangulation(evidence), resources)) => {
+            let report = PostProcessReport::triangulation(
+                target,
+                scene.generation(),
+                resources,
+                Some(TriangulationRemap::new(evidence)),
             );
-            return Err(resolve_fallback(
-                interrupted.prepare_minimal_fallback(),
-                cause,
-            ));
+            Ok(PostProcessRunOutcome::new(scene, report))
         }
-        CanonicalCentralValidationOutcome::Fallback(fallback) => {
-            let cause = fallback.cause().clone().into();
-            let (prepared, _) = fallback.into_parts();
-            return Err(publish_fallback(prepared, cause));
-        }
-    };
-    let freeze = candidate
-        .try_issue_freeze_permit(final_progress())
-        .map_err(|source| TriangulationFailure::new(TriangulationCause::Containment { source }))?;
-    let permit = match freeze {
-        CanonicalFreezePermitIssue::Ready(permit) => permit,
-        CanonicalFreezePermitIssue::Interrupted(rooted) => {
-            let cause = rooted
-                .cause()
-                .control_cause()
-                .cloned()
-                .map_or(TriangulationCause::Publication, TriangulationCause::control);
-            return Err(resolve_fallback(rooted.prepare_minimal_fallback(), cause));
-        }
-        CanonicalFreezePermitIssue::DestinationRejected(rooted) => {
-            let cause = rooted
-                .cause()
-                .control_cause()
-                .cloned()
-                .map_or(TriangulationCause::Publication, TriangulationCause::control);
-            return Err(resolve_fallback(rooted.prepare_minimal_fallback(), cause));
-        }
-    };
-    consume_scene_edit_freeze_permit(
-        permit,
-        |rejected| {
-            Err(resolve_fallback(
-                rejected.prepare_minimal_fallback(),
-                TriangulationCause::Publication,
-            ))
-        },
-        |token, joint, seal| match joint.prepare(seal).map_err(|source| {
-            TriangulationFailure::new(TriangulationCause::Containment { source })
-        })? {
-            PreparedStoreSuccessOutcome::Success(store) => {
-                let published = token
-                    .handoff(store)
-                    .map_err(|_| TriangulationFailure::new(TriangulationCause::Publication))?;
-                let (scene, evidence, ledger) = published.into_parts();
-                let resources = PostProcessResourceEvidence::from_store(ledger);
-                let remap = TriangulationRemap::new(evidence, source_corners, vertices);
-                let report = PostProcessReport::triangulation(
-                    target,
-                    scene.generation(),
-                    resources,
-                    Some(remap),
-                );
-                Ok((scene, report))
-            }
-            PreparedStoreSuccessOutcome::RichFailure(store) => {
-                drop(token);
-                Err(publish_rich_failure(store, TriangulationCause::Publication))
-            }
-            PreparedStoreSuccessOutcome::MinimalFallback(store) => {
-                drop(token);
-                Err(publish_fallback(store, TriangulationCause::Publication))
-            }
-        },
-    )
-    .map_err(|source| TriangulationFailure::new(TriangulationCause::Containment { source }))?
-}
-
-fn core_requested(cause: &SceneGeometryEditRejection) -> TriangulationCause {
-    match cause {
-        SceneGeometryEditRejection::Runtime(cause) => cause.clone().into(),
-        _ => TriangulationCause::CoreRejected,
-    }
-}
-
-fn core_rejection(
-    cause: &StoreCanonicalRejection<SceneGeometryEditRejection>,
-) -> TriangulationCause {
-    match cause {
-        StoreCanonicalRejection::Runtime(cause) => cause.clone().into(),
-        StoreCanonicalRejection::Requested(cause) => core_requested(cause),
+        Ok(_) => Err(failure(
+            input,
+            TriangulationFailure::new(TriangulationCause::Publication),
+        )),
+        Err(cause) => Err(failure(input, cause.into())),
     }
 }
 
@@ -334,22 +155,6 @@ fn failure(input: ValidatedScene, failure: TriangulationFailure) -> PostProcessR
 fn reject_operation(operation: EditOperation, cause: TriangulationCause) -> TriangulationFailure {
     match operation.prepare_minimal_fallback(REJECTION_CODE) {
         Ok(prepared) => publish_fallback(prepared, cause),
-        Err(source) => TriangulationFailure::new(TriangulationCause::Preparation { source }),
-    }
-}
-
-fn resolve_fallback<C>(
-    result: Result<
-        baozi_operation::__retained_store_integration::activation::VerifiedMinimalFallback<C>,
-        baozi_operation::StorePrepareError,
-    >,
-    cause: TriangulationCause,
-) -> TriangulationFailure {
-    match result {
-        Ok(fallback) => {
-            let (prepared, _) = fallback.into_parts();
-            publish_fallback(prepared, cause)
-        }
         Err(source) => TriangulationFailure::new(TriangulationCause::Preparation { source }),
     }
 }
@@ -381,24 +186,6 @@ fn publish_fallback(
         cause,
         PostProcessResourceEvidence::from_store(ledger_evidence),
         FailureOwner::Fallback { _owner: fallback },
-    )
-}
-
-fn publish_rich_failure(
-    prepared: PreparedStoreFailure<
-        RecordBlock,
-        baozi_core::scene::integration::SceneGeometryEditEvidenceTag,
-    >,
-    cause: TriangulationCause,
-) -> TriangulationFailure {
-    let published = prepared.handoff();
-    let cause = terminal_cause(cause, published.ledger_evidence.header().terminal_cause());
-    TriangulationFailure::terminal(
-        cause,
-        PostProcessResourceEvidence::from_store(published.ledger_evidence),
-        FailureOwner::Rich {
-            _owner: published.outcome_evidence,
-        },
     )
 }
 

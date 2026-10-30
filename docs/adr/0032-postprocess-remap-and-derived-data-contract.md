@@ -194,6 +194,55 @@ record counts. Each commitment uses the dimension with its own declared unit. Fr
 counters describe the terminal operation boundary; they are not dynamic measurements of later
 Scene or report teardown.
 
+### Direct Normal Generation
+
+`generate_normals` targets one `TriangleList` primitive and produces a dense F32, three-lane
+Corner `Normal` attribute. It borrows dense F32 Vertex positions directly. Its oriented face cross
+is `(b - a) × (c - a)` in the stored numeric basis; it does not infer a front-facing direction from
+unknown Scene conventions. Smooth mode shares area-weighted normals by Vertex identity and
+optional dense U32 Face smoothing groups; group zero keeps each face hard. Coincident positions
+are not welded, and Corner UV seams do not split shared Vertex identities. Degenerate faces,
+non-finite results, and cancelling smoothing sums reject the operation rather than inventing a
+fallback normal. Unsupported position or smoothing-group encodings return a typed error.
+Face crosses expand each determinant into six products of original F32 coordinates. Those
+products are exact in F64 throughout the finite F32 exponent range; a fixed six-entry TwoSum
+expansion retains cancellation residuals before estimating each component. This avoids losing
+direction when rounded edge differences erase a small coordinate. Normalization scales before
+computing length, and smoothing uses compensated sums of unnormalized face crosses. Determinant
+products use a fixed Vertex-ID order, restoring the input winding by an exact sign change, so
+cyclic permutations have identical estimates and opposite faces cancel bit-for-bit.
+Canonical `(semantic, domain)` keys may legally provide multiple authored Normal or Tangent fields.
+When generation would need to select, merge, or remove multiple such fields, this increment returns
+an explicit capability error before replacement. It does not silently select a domain or merge
+owner-local metadata. Typed attribute reads require both semantic and domain.
+
+`NormalOptions` makes source-field changes explicit. The default `ExistingNormals::Preserve`
+returns the exact input unchanged when a Normal exists. `Replace` authorizes replacement. If a
+Tangent would be invalidated, the default rejects; `TangentHandling::Remove` authorizes deleting
+that attribute and only its owner-local metadata. No tangent generation is implied. Vertex,
+Corner, and Face identities, indices, other attributes, and unrelated primitive values remain
+unchanged, including dense/sparse encoding and scalar bits.
+
+The concrete attribute mapping inserts a new Normal in canonical semantic order, maps a replacement
+to the old Normal, removes a deleted Tangent, and reindexes all later Scene-wide attribute owners.
+Profile owners come from the final typed Scene layout. The generated Normal's lineage parents are
+the deduplicated union of the target Primitive, Position, replaced Normal, and, for Smooth, consulted
+SmoothingGroup attachments. Other owners retain their own parents. Metadata descriptors follow the
+same mapping. Pure reindexing shares immutable payload pools; actual deletion compacts surviving
+pools under separately admitted storage and work. Removed metadata entry counts describe real
+deleted descriptors.
+
+Postprocess retains generated values in charged scratch until core compares every candidate value
+with that exact borrowed replacement and centrally validates the candidate. It then drops scratch
+before final preparation. The operation reuses triangulation's existing geometry transaction,
+generation reservation, and publication protocol. Its evidence graph has only the edit root and
+Scene-count child; no empty remap sequences are constructed. The core handoff returns a closed enum
+of `SceneTriangulationEvidence` or `SceneNormalGenerationEvidence`. Each variant owns its actual
+rooted store and exposes only the applicable facts; a Normal result cannot be used as a remap.
+Public `NormalGenerationReport` owns the latter directly, without duplicating decoded effects.
+
+Coordinate/unit conversion and application vertex unification remain subsequent F increments.
+
 ### Remap Contract
 
 Every successful structural operation records private remaps for each affected entity and
@@ -233,7 +282,7 @@ numeric index without the applicable report step state or public generation and 
 owner chain is not a remap endpoint.
 
 For direct triangulation, the changed report owns `TriangulationRemap`, backed by core's published
-`SceneGeometryEditEvidence`. The retained root owns the actual origin leaves, independently of both
+`SceneTriangulationEvidence`. The retained root owns the actual origin leaves, independently of both
 input and output Scene lifetimes. Borrowed relation views borrow that evidence owner, not either
 Scene or temporary kernel scratch. Dropping either Scene, or both Scenes, must leave the retained
 relation queryable; dropping the report/evidence releases its physical ownership through ADR 0044.

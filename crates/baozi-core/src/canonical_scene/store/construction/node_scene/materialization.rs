@@ -1685,7 +1685,7 @@ where
         }
         CanonicalCentralValidationOutcome::Fallback(fallback) => {
             prepare_node_scene_test_failure::<O, PP, U, L>(
-                PendingNodeSceneFailure::PreparedFallback(fallback),
+                PendingNodeSceneFailure::DeferredFallback(fallback),
             )
         }
     }

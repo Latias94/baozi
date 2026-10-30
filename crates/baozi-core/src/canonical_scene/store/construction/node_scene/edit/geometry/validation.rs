@@ -13,11 +13,11 @@ use crate::canonical_scene::store::validation::{
 };
 use crate::identity::{PrimitiveId, SceneGenerationId};
 
-use super::evidence::GeometryEditFacts;
+use super::evidence::SceneGeometryEditEvidenceRecipe;
 use super::{
-    SceneGeometryCornerOriginsTag, SceneGeometryEditEvidenceRecipe, SceneGeometryEditEvidenceTag,
-    SceneGeometryEditFailureEvidence, SceneGeometryEditOutput, SceneGeometryEditPostflight,
-    SceneGeometryEditRejection, SceneGeometryFaceOffsetsTag, schema,
+    SceneGeometryCornerOriginsTag, SceneGeometryEditEvidenceTag, SceneGeometryEditFailureEvidence,
+    SceneGeometryEditOutput, SceneGeometryEditPostflight, SceneGeometryEditRejection,
+    SceneGeometryFaceOffsetsTag, schema,
 };
 
 /// Proof of the actual canonical graph, scalar correspondence, and rooted edit evidence.
@@ -68,12 +68,12 @@ impl SceneGeometryEditPostflight<'_> {
                     && output.source_generation == self.input.generation()
                 {
                     if let Some(geometry) = self.geometry {
-                        let expected = GeometryEditFacts::new(
+                        let expected = geometry.facts(
                             self.input.as_node_scene(),
                             self.replacement,
-                            &geometry,
+                            scene.evidence_counts,
                         );
-                        if output.facts == expected {
+                        if Some(output.facts) == expected {
                             if let Some(counts) = validate_changed_root(session, evidence, &recipe)?
                             {
                                 if geometry.validate_correspondence(
@@ -144,7 +144,7 @@ where
             for (field, expected) in [
                 schema::REVISION,
                 schema::OUTCOME_CHANGED,
-                schema::TRIANGULATION_SEMANTIC_VERSION,
+                schema::OPERATION_SEMANTIC_VERSION,
             ]
             .into_iter()
             .chain(recipe.facts.words)
@@ -161,16 +161,24 @@ where
                 schema::field::SCENE_COUNTS,
                 |member| member,
             )?;
-            corners = row.sequence_ref::<u32, SceneGeometryCornerOriginsTag, _>(
-                schema::field::CORNER_ORIGINS,
-                |member| member,
-            )?;
-            faces = row.sequence_ref::<u32, SceneGeometryFaceOffsetsTag, _>(
-                schema::field::FACE_OFFSETS,
-                |member| member,
-            )?;
+            if recipe.facts.words[0] == schema::OPERATION_NORMALS {
+                valid &= row.scalar(schema::field::CORNER_ORIGINS, |value: u8| value)? == Some(0);
+                valid &= row.scalar(schema::field::FACE_OFFSETS, |value: u8| value)? == Some(0);
+            } else {
+                corners = row.sequence_ref::<u32, SceneGeometryCornerOriginsTag, _>(
+                    schema::field::CORNER_ORIGINS,
+                    |member| member,
+                )?;
+                faces = row.sequence_ref::<u32, SceneGeometryFaceOffsetsTag, _>(
+                    schema::field::FACE_OFFSETS,
+                    |member| member,
+                )?;
+            }
             Ok(valid)
         })?;
+    if recipe.facts.words[0] == schema::OPERATION_NORMALS {
+        return Ok(if complete { counts } else { None });
+    }
     let (Some(counts), Some(corners), Some(faces)) = (counts, corners, faces) else {
         return Ok(None);
     };
@@ -218,7 +226,7 @@ impl SceneGeometryEditFailureEvidence {
                 for (field, expected) in [
                     schema::REVISION,
                     schema::OUTCOME_FAILED,
-                    schema::TRIANGULATION_SEMANTIC_VERSION,
+                    schema::OPERATION_SEMANTIC_VERSION,
                 ]
                 .into_iter()
                 .chain([0; 13])
@@ -249,83 +257,5 @@ impl SceneGeometryEditFailureEvidence {
             })
             .unwrap_or(false);
         valid && counts.is_some_and(|counts| self.scene_counts().validate_failure(session, counts))
-    }
-}
-
-impl SceneGeometryEditEvidenceRecipe<'_> {
-    /// Central rejection keeps the already-rooted changed evidence; visit all four members on
-    /// rich failure too, without losing its retained remap owners or claiming a published Scene.
-    pub fn validate_failure<'session, 'storage, 'control, O, PP, U>(
-        &self,
-        session: &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
-        root: FailureEvidenceMember<'session, RecordBlock, SceneGeometryEditEvidenceTag>,
-    ) -> bool
-    where
-        O: OperationOwner,
-        PP: ProgressPhase,
-        U: ProgressUnit,
-    {
-        let (mut counts, mut corners, mut faces) = (None, None, None);
-        let valid = session
-            .visit_records(root, |index, row| {
-                let mut valid = index == 0 && row.fields() == schema::ROOT_FIELDS;
-                for (field, expected) in [
-                    schema::REVISION,
-                    schema::OUTCOME_CHANGED,
-                    schema::TRIANGULATION_SEMANTIC_VERSION,
-                ]
-                .into_iter()
-                .chain(self.facts.words)
-                .enumerate()
-                {
-                    valid &= row
-                        .scalar::<u32, _>(field, |value| value == expected)
-                        .unwrap_or(false);
-                }
-                for (word, expected) in self.facts.digest.into_iter().enumerate() {
-                    valid &= row
-                        .scalar::<u64, _>(schema::field::OPTIONS_DIGEST_FIRST + word, |value| {
-                            value == expected
-                        })
-                        .unwrap_or(false);
-                }
-                counts = row
-                    .record_ref::<NodeSceneOutcomeEvidenceSchema, _>(
-                        schema::field::SCENE_COUNTS,
-                        |member| member,
-                    )
-                    .ok();
-                corners = row
-                    .sequence_ref::<u32, SceneGeometryCornerOriginsTag, _>(
-                        schema::field::CORNER_ORIGINS,
-                        |member| member,
-                    )
-                    .ok();
-                faces = row
-                    .sequence_ref::<u32, SceneGeometryFaceOffsetsTag, _>(
-                        schema::field::FACE_OFFSETS,
-                        |member| member,
-                    )
-                    .ok();
-                valid
-            })
-            .unwrap_or(false);
-        let (Some(counts), Some(corners), Some(faces)) = (counts, corners, faces) else {
-            return false;
-        };
-        valid
-            && session
-                .visit_sequence(corners, |index, actual| {
-                    self.source_corner_triangles()
-                        .get(index / 3)
-                        .is_some_and(|triangle| triangle[index % 3] == actual)
-                })
-                .unwrap_or(false)
-            && session
-                .visit_sequence(faces, |index, actual| {
-                    self.source_face_triangle_offsets().get(index).copied() == Some(actual)
-                })
-                .unwrap_or(false)
-            && self.scene_counts().validate_failure(session, counts)
     }
 }

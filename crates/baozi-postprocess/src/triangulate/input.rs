@@ -4,8 +4,7 @@
 )]
 
 use baozi_core::{
-    AttributeData, AttributeDomain, AttributeSemanticRef, PrimitiveId, PrimitiveRef, TopologyKind,
-    ValidatedScene,
+    AttributeData, AttributeDomain, AttributeSemanticRef, PrimitiveId, TopologyKind, ValidatedScene,
 };
 
 use crate::TriangulationCause;
@@ -15,7 +14,6 @@ use crate::triangulation::{
 };
 
 pub(super) struct PolygonInput<'a> {
-    primitive: PrimitiveRef<'a>,
     positions: &'a [f32],
     face_sizes: &'a [u32],
     indices: Option<&'a [u32]>,
@@ -23,11 +21,9 @@ pub(super) struct PolygonInput<'a> {
     max_corners: usize,
 }
 
-pub(super) struct Origins {
-    pub(super) triangles: ScratchVec<[u32; 3]>,
-    pub(super) face_offsets: ScratchVec<u32>,
-    pub(super) source_corners: u32,
-    pub(super) vertices: u32,
+pub(crate) struct Origins {
+    pub(crate) triangles: ScratchVec<[u32; 3]>,
+    pub(crate) face_offsets: ScratchVec<u32>,
 }
 
 pub(super) fn inspect<'a>(
@@ -105,7 +101,6 @@ pub(super) fn inspect<'a>(
         });
     }
     Ok(Some(PolygonInput {
-        primitive,
         positions,
         face_sizes,
         indices,
@@ -225,8 +220,6 @@ pub(super) fn build_origins(
     Ok(Origins {
         triangles,
         face_offsets,
-        source_corners: source.primitive.corner_count(),
-        vertices: source.primitive.vertex_count(),
     })
 }
 

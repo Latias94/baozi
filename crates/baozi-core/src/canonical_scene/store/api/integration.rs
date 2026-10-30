@@ -8,13 +8,14 @@ use baozi_operation::{
 
 pub use super::super::construction::node_scene::edit::geometry::{
     SceneGeometryCornerOriginsTag, SceneGeometryEditAdmission, SceneGeometryEditBootstrap,
-    SceneGeometryEditBootstrapError, SceneGeometryEditEvidence, SceneGeometryEditEvidenceRecipe,
-    SceneGeometryEditEvidenceTag, SceneGeometryEditFailureEvidence, SceneGeometryEditFreezePermit,
+    SceneGeometryEditBootstrapError, SceneGeometryEditEvidence, SceneGeometryEditEvidenceTag,
+    SceneGeometryEditFailureEvidence, SceneGeometryEditFreezePermit,
     SceneGeometryEditFrozenGenerationRejection, SceneGeometryEditGenerationRejection,
     SceneGeometryEditHandoffPairingError, SceneGeometryEditHandoffToken,
     SceneGeometryEditJointCommit, SceneGeometryEditOutput, SceneGeometryEditPlan,
     SceneGeometryEditPostflight, SceneGeometryEditPublishedSuccess, SceneGeometryEditRejection,
     SceneGeometryEditTransaction, SceneGeometryEditValidationProof, SceneGeometryFaceOffsetsTag,
+    SceneNormalGenerationEvidence, SceneNormalReplacement, SceneTriangulationEvidence,
     SceneTriangulationReplacement, consume_scene_edit_freeze_permit,
     try_start_scene_edit_operation,
 };

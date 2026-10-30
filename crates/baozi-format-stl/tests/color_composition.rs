@@ -55,7 +55,7 @@ fn assert_composition(
     );
     assert_rgba(base_color, expected_material);
 
-    let colors = primitive.attribute(AttributeSemanticRef::Color(0));
+    let colors = primitive.attribute(AttributeSemanticRef::Color(0), AttributeDomain::Vertex);
     assert_eq!(colors.is_some(), has_vertex_colors);
     let colors = colors.map(|attribute| {
         assert_eq!(attribute.domain(), AttributeDomain::Vertex);

@@ -1,7 +1,7 @@
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalCandidateStoreSession, CentrallyRejectedCanonicalStoreSession,
-    InterruptedCanonicalStoreSession, NeverActivatedStoreSession, RejectedCanonicalStoreSession,
-    VerifiedMinimalFallback,
+    InterruptedCanonicalStoreSession, NeverActivatedStoreSession, PendingMinimalFallback,
+    RejectedCanonicalStoreSession, VerifiedMinimalFallback,
 };
 #[cfg(test)]
 use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccess;
@@ -380,6 +380,7 @@ where
         final_progress: FinalProgress<PP, U>,
     },
     PreparedFallback(VerifiedMinimalFallback<StoreRuntimeError>),
+    DeferredFallback(PendingMinimalFallback<O, PP, U>),
 }
 
 #[derive(Clone, Copy)]

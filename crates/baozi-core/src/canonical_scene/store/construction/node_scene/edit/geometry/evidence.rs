@@ -17,9 +17,9 @@ use crate::canonical_scene::store::typed_storage::edit::GeometryTriangulationPla
 use crate::provenance::{DigestAlgorithm, OptionsDigest};
 
 use super::{
-    SceneGeometryCornerOriginsTag, SceneGeometryEditEvidenceTag, SceneGeometryEditOutput,
-    SceneGeometryEditPostflight, SceneGeometryFaceOffsetsTag, SceneTriangulationReplacement,
-    schema,
+    GeometryReplacement, SceneGeometryCornerOriginsTag, SceneGeometryEditEvidenceTag,
+    SceneGeometryEditOutput, SceneGeometryEditPostflight, SceneGeometryFaceOffsetsTag,
+    SceneNormalReplacement, SceneTriangulationReplacement, schema,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -66,13 +66,57 @@ impl GeometryEditFacts {
         }
     }
 
+    pub(super) fn normals(
+        input: &SceneStorage,
+        replacement: SceneNormalReplacement<'_>,
+        geometry: &crate::canonical_scene::store::typed_storage::edit::normals::GeometryNormalsPlan<
+            '_,
+        >,
+        counts: crate::canonical_scene::store::construction::node_scene::SceneEvidenceCounts,
+    ) -> Option<Self> {
+        let source = &input.read_geometry().primitives[geometry.target_row()];
+        let mapping = geometry.attribute_mapping();
+        Some(Self {
+            words: [
+                schema::OPERATION_NORMALS,
+                replacement.target.logical_mesh().index(),
+                replacement.target.local(),
+                geometry.target_row() as u32,
+                input
+                    .proof
+                    .counts()
+                    .profile_metadata_entry_count
+                    .checked_sub(counts.profile_metadata_entry_count)?,
+                source.corner_count,
+                source.face_count,
+                0,
+                0,
+                mapping.normal_attribute(),
+                (u32::from(mapping.source_normal().is_some())
+                    * schema::normal_field::REPLACED_NORMAL)
+                    | (u32::from(
+                        mapping
+                            .source_tangent()
+                            .is_some_and(|index| mapping.output_attribute(index).is_none()),
+                    ) * schema::normal_field::REMOVED_TANGENT)
+                    | (u32::from(replacement.smooth) * schema::normal_field::SMOOTH),
+                geometry.output_attribute_count(),
+                match replacement.options_digest.algorithm() {
+                    DigestAlgorithm::Sha256 => 0,
+                    DigestAlgorithm::Blake3 => 1,
+                },
+            ],
+            digest: digest_words(replacement.options_digest),
+        })
+    }
+
     pub(super) fn write_prefix(
         self,
         row: &mut OutcomeEvidenceRecordRowWriter<'_>,
     ) -> Result<(), StoreBuildError> {
         row.write_scalar(schema::REVISION)?;
         row.write_scalar(schema::OUTCOME_CHANGED)?;
-        row.write_scalar(schema::TRIANGULATION_SEMANTIC_VERSION)?;
+        row.write_scalar(schema::OPERATION_SEMANTIC_VERSION)?;
         for word in self.words {
             row.write_scalar(word)?;
         }
@@ -91,18 +135,18 @@ fn digest_words(options: OptionsDigest) -> [u64; 4] {
     })
 }
 
-/// Four-member changed evidence recipe, bound to the original borrowed origin relation.
+/// Concrete evidence recipe; only triangulation carries the borrowed origin relation.
 #[derive(Clone, Copy)]
-pub struct SceneGeometryEditEvidenceRecipe<'a> {
+pub(super) struct SceneGeometryEditEvidenceRecipe<'a> {
     pub(super) facts: GeometryEditFacts,
     pub(super) counts: NodeSceneEvidenceRecipe,
-    pub(super) replacement: SceneTriangulationReplacement<'a>,
+    pub(super) replacement: GeometryReplacement<'a>,
     root: RecordPlan,
 }
 
 impl<'a> SceneGeometryEditPostflight<'a> {
     /// Returns only core-derived counts and edit facts from the actual candidate output.
-    pub fn candidate_evidence(
+    pub(super) fn candidate_evidence(
         &self,
         output: &SceneGeometryEditOutput,
     ) -> SceneGeometryEditEvidenceRecipe<'a> {
@@ -119,49 +163,58 @@ impl<'a> SceneGeometryEditPostflight<'a> {
 }
 
 impl<'a> SceneGeometryEditEvidenceRecipe<'a> {
-    pub const fn root_record_plan(&self) -> RecordPlan {
+    const fn root_record_plan(&self) -> RecordPlan {
         self.root
     }
 
-    pub const fn scene_counts(&self) -> &NodeSceneEvidenceRecipe {
+    pub(super) const fn scene_counts(&self) -> &NodeSceneEvidenceRecipe {
         &self.counts
     }
 
-    pub fn corner_origins_plan(&self) -> Result<SequencePlan<u32>, StorePlanError> {
+    fn corner_origins_plan(&self) -> Result<SequencePlan<u32>, StorePlanError> {
         SequencePlan::new(self.facts.words[7] as usize)
     }
 
-    pub fn face_offsets_plan(&self) -> Result<SequencePlan<u32>, StorePlanError> {
-        SequencePlan::new(self.replacement.source_face_triangle_offsets().len())
+    fn face_offsets_plan(&self) -> Result<SequencePlan<u32>, StorePlanError> {
+        SequencePlan::new(self.replacement.face_offsets().len())
     }
 
-    pub const fn source_corner_triangles(&self) -> &'a [[u32; 3]] {
-        self.replacement.source_corner_triangles()
+    pub(super) const fn source_corner_triangles(&self) -> &'a [[u32; 3]] {
+        self.replacement.triangles()
     }
 
-    pub const fn source_face_triangle_offsets(&self) -> &'a [u32] {
-        self.replacement.source_face_triangle_offsets()
+    pub(super) const fn source_face_triangle_offsets(&self) -> &'a [u32] {
+        self.replacement.face_offsets()
     }
 
-    /// Retain the count child and both origin leaves before writing the root with these exact
-    /// three references. Central validation follows all edges and compares every origin scalar.
-    pub fn write_root_row(
+    /// The origin pair is present only for triangulation. Central validation follows every edge.
+    fn write_root_row(
         &self,
         row: &mut OutcomeEvidenceRecordRowWriter<'_>,
         counts: OutcomeEvidenceRecordRef<NodeSceneOutcomeEvidenceSchema>,
-        corners: OutcomeEvidenceSequenceRef<u32, SceneGeometryCornerOriginsTag>,
-        faces: OutcomeEvidenceSequenceRef<u32, SceneGeometryFaceOffsetsTag>,
+        origins: Option<(
+            OutcomeEvidenceSequenceRef<u32, SceneGeometryCornerOriginsTag>,
+            OutcomeEvidenceSequenceRef<u32, SceneGeometryFaceOffsetsTag>,
+        )>,
     ) -> Result<(), StoreBuildError> {
         self.facts.write_prefix(row)?;
         row.write_record_ref(counts)?;
-        row.write_sequence_ref(corners)?;
-        row.write_sequence_ref(faces)
+        match origins {
+            Some((corners, faces)) => {
+                row.write_sequence_ref(corners)?;
+                row.write_sequence_ref(faces)
+            }
+            None => {
+                row.write_scalar(0_u8)?;
+                row.write_scalar(0_u8)
+            }
+        }
     }
 }
 
 impl SceneGeometryEditPostflight<'_> {
-    /// Retains the exact changed Scene counts and borrowed origin relation under one rooted
-    /// four-member outcome-evidence graph. Any member failure aborts the whole success graph.
+    /// Retains a two-member normal graph or four-member triangulation graph. Any member failure
+    /// aborts the whole success graph.
     pub fn build_evidence<O, PP, U>(
         &self,
         lane: &mut CanonicalOutcomeEvidenceLane<'_, O, PP, U, CanonicalInheritanceSource>,
@@ -181,37 +234,45 @@ impl SceneGeometryEditPostflight<'_> {
             Ok(reference) => reference,
             Err(_) => return lane.abort(),
         };
-        let corners = match recipe.corner_origins_plan() {
-            Ok(plan) => {
-                match lane.try_retain_sequence(plan, SceneGeometryCornerOriginsTag, |writer| {
-                    for triangle in recipe.source_corner_triangles() {
-                        for &corner in triangle {
-                            writer.push(corner)?;
+        let corners = if matches!(self.replacement, GeometryReplacement::Normals(_)) {
+            None
+        } else {
+            Some(match recipe.corner_origins_plan() {
+                Ok(plan) => {
+                    match lane.try_retain_sequence(plan, SceneGeometryCornerOriginsTag, |writer| {
+                        for triangle in recipe.source_corner_triangles() {
+                            for &corner in triangle {
+                                writer.push(corner)?;
+                            }
                         }
+                        Ok(())
+                    }) {
+                        Ok(reference) => reference,
+                        Err(_) => return lane.abort(),
                     }
-                    Ok(())
-                }) {
-                    Ok(reference) => reference,
-                    Err(_) => return lane.abort(),
                 }
-            }
-            Err(_) => return lane.abort(),
+                Err(_) => return lane.abort(),
+            })
         };
-        let faces = match recipe.face_offsets_plan() {
-            Ok(plan) => {
-                match lane.try_retain_sequence(plan, SceneGeometryFaceOffsetsTag, |writer| {
-                    writer.extend_from_slice(recipe.source_face_triangle_offsets())
-                }) {
-                    Ok(reference) => reference,
-                    Err(_) => return lane.abort(),
+        let faces = if matches!(self.replacement, GeometryReplacement::Normals(_)) {
+            None
+        } else {
+            Some(match recipe.face_offsets_plan() {
+                Ok(plan) => {
+                    match lane.try_retain_sequence(plan, SceneGeometryFaceOffsetsTag, |writer| {
+                        writer.extend_from_slice(recipe.source_face_triangle_offsets())
+                    }) {
+                        Ok(reference) => reference,
+                        Err(_) => return lane.abort(),
+                    }
                 }
-            }
-            Err(_) => return lane.abort(),
+                Err(_) => return lane.abort(),
+            })
         };
         let root = match lane.try_retain_records(
             recipe.root_record_plan(),
             SceneGeometryEditEvidenceTag,
-            |writer| writer.write_row(|row| recipe.write_root_row(row, counts, corners, faces)),
+            |writer| writer.write_row(|row| recipe.write_root_row(row, counts, corners.zip(faces))),
         ) {
             Ok(reference) => reference,
             Err(_) => return lane.abort(),

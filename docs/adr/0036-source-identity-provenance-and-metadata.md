@@ -218,6 +218,13 @@ require copying unchanged payloads. A concrete operation must remap descriptors 
 owner additions, deletions, or reindexing. Central validation requires canonical descriptor order,
 valid owner membership, and contiguous complete coverage of each payload pool.
 
+Normal generation provides the first concrete attribute addition/deletion mapping. A newly added
+Normal has no fictitious source attribute; its generated lineage merges the Primitive, Position,
+replaced Normal when present, and consulted SmoothingGroup parents. Deleting an explicitly
+invalidated Tangent removes its owner and metadata, while surviving attribute descriptors follow
+the final canonical indices. Payload sharing applies to pure reindexing; deletion rebuilds only
+the compact surviving pools so central validation retains complete contiguous coverage.
+
 Metadata, locator strings, provenance previews, and lineage arrays are all charged before allocation
 and traversed by central validation. Validation borrows the retained typed data; only provenance
 depths require mutable profile scratch. Cached owner depths are checked against the actual attachment

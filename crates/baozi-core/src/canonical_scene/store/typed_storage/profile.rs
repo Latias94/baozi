@@ -16,6 +16,7 @@ use crate::provenance::{ContentDigest, EvidenceDigest, OptionsDigest, SourceObje
 use super::{TableRange, TextRange};
 
 pub(in crate::canonical_scene::store) mod build;
+pub(in crate::canonical_scene::store) mod edit_metadata;
 pub(in crate::canonical_scene::store) mod validation;
 
 pub(in crate::canonical_scene::store) struct ProfileStorage {

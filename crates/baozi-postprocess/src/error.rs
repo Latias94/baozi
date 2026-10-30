@@ -64,6 +64,12 @@ pub enum PostProcessRunError {
         #[source]
         failure: crate::TriangulationFailure,
     },
+    /// Normal generation failed without replacing the input Scene.
+    #[error("normal generation failed: {failure}")]
+    Normals {
+        #[source]
+        failure: crate::NormalFailure,
+    },
 }
 
 /// A direct-operation failure that returns the original immutable input Scene.
@@ -96,7 +102,7 @@ impl PostProcessRunFailure {
         &self.input
     }
 
-    /// Returns the typed resource-policy or triangulation error.
+    /// Returns the typed resource-policy or concrete geometry-operation error.
     pub const fn error(&self) -> &PostProcessRunError {
         &self.error
     }

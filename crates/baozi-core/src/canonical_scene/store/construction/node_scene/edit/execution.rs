@@ -330,7 +330,7 @@ where
             })
         }
         CanonicalCentralValidationOutcome::Fallback(fallback) => {
-            prepare_pending_edit_failure::<O, PP, U>(PendingNodeSceneFailure::PreparedFallback(
+            prepare_pending_edit_failure::<O, PP, U>(PendingNodeSceneFailure::DeferredFallback(
                 fallback,
             ))
         }

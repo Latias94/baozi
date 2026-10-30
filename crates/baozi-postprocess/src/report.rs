@@ -2,13 +2,20 @@ use std::fmt;
 
 use baozi_core::{PrimitiveId, SceneGenerationId, ValidatedScene};
 
-use crate::{PostProcessResourceEvidence, TriangulationRemap};
+use crate::{
+    NormalGenerationReport, NormalOptions, PostProcessResourceEvidence, TriangulationRemap,
+};
 
 /// The concrete operation evaluated against an input Scene.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostProcessOperation {
     /// Triangulate one generation-qualified input primitive.
     Triangulate { target: PrimitiveId },
+    /// Generate a normal field with explicit authored-field treatment.
+    GenerateNormals {
+        target: PrimitiveId,
+        options: NormalOptions,
+    },
 }
 
 /// The successful disposition of one direct post-process invocation.
@@ -17,7 +24,7 @@ pub enum PostProcessOperation {
 pub enum PostProcessRunDisposition {
     /// The operation required no canonical write and returned the original Scene.
     Unchanged,
-    /// A centrally validated replacement and its actual remap were published together.
+    /// A centrally validated replacement and its operation evidence were published together.
     Changed,
 }
 
@@ -27,11 +34,18 @@ pub struct PostProcessReport {
     operation: PostProcessOperation,
     output_generation: SceneGenerationId,
     resources: PostProcessResourceEvidence,
-    remap: Option<TriangulationRemap>,
+    result: OperationResult,
+}
+
+#[derive(Debug)]
+enum OperationResult {
+    Unchanged,
+    Triangulation(TriangulationRemap),
+    Normals(NormalGenerationReport),
 }
 
 impl PostProcessReport {
-    pub(crate) const fn triangulation(
+    pub(crate) fn triangulation(
         target: PrimitiveId,
         output_generation: SceneGenerationId,
         resources: PostProcessResourceEvidence,
@@ -41,16 +55,44 @@ impl PostProcessReport {
             operation: PostProcessOperation::Triangulate { target },
             output_generation,
             resources,
-            remap,
+            result: match remap {
+                Some(remap) => OperationResult::Triangulation(remap),
+                None => OperationResult::Unchanged,
+            },
+        }
+    }
+
+    pub(crate) fn normals(
+        target: PrimitiveId,
+        options: NormalOptions,
+        output_generation: SceneGenerationId,
+        resources: PostProcessResourceEvidence,
+        normal: Option<NormalGenerationReport>,
+    ) -> Self {
+        Self {
+            operation: PostProcessOperation::GenerateNormals { target, options },
+            output_generation,
+            resources,
+            result: match normal {
+                Some(report) => OperationResult::Normals(report),
+                None => OperationResult::Unchanged,
+            },
+        }
+    }
+
+    /// Returns the published normal-field and explicit source-loss evidence for a changed operation.
+    pub const fn normal_generation(&self) -> Option<&NormalGenerationReport> {
+        match &self.result {
+            OperationResult::Normals(report) => Some(report),
+            _ => None,
         }
     }
 
     /// Returns whether the operation preserved the input or published a replacement.
     pub const fn disposition(&self) -> PostProcessRunDisposition {
-        if self.remap.is_some() {
-            PostProcessRunDisposition::Changed
-        } else {
-            PostProcessRunDisposition::Unchanged
+        match self.result {
+            OperationResult::Unchanged => PostProcessRunDisposition::Unchanged,
+            _ => PostProcessRunDisposition::Changed,
         }
     }
 
@@ -62,7 +104,8 @@ impl PostProcessReport {
     /// Returns the generation of the input target evaluated by this invocation.
     pub const fn input_generation(&self) -> SceneGenerationId {
         match self.operation {
-            PostProcessOperation::Triangulate { target } => target.generation(),
+            PostProcessOperation::Triangulate { target }
+            | PostProcessOperation::GenerateNormals { target, .. } => target.generation(),
         }
     }
 
@@ -73,7 +116,10 @@ impl PostProcessReport {
 
     /// Returns the actual retained Corner/Face relation for a changed triangulation.
     pub const fn triangulation_remap(&self) -> Option<&TriangulationRemap> {
-        self.remap.as_ref()
+        match &self.result {
+            OperationResult::Triangulation(remap) => Some(remap),
+            _ => None,
+        }
     }
 
     /// Returns whether the report is generation-bound to the provided Scene.

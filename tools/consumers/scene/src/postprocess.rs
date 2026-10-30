@@ -1,8 +1,8 @@
 use baozi::{
-    AttributeData, Importer, TopologyKind,
+    AttributeData, AttributeDomain, Importer, TopologyKind,
     postprocess::{
-        PostProcessControl, PostProcessOperation, PostProcessRunDisposition, PrimitiveCorner,
-        triangulate_primitive,
+        ExistingNormals, NormalOptions, PostProcessControl, PostProcessOperation,
+        PostProcessRunDisposition, PrimitiveCorner, generate_normals, triangulate_primitive,
     },
 };
 
@@ -10,7 +10,7 @@ pub fn verify(importer: &Importer) -> baozi::Result<()> {
     let import = importer.read_bytes(
         "textured-quad.obj",
         b"v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n\
-          vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\n\
+          vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 1 0 0\n\
           s 7\nf 1/1/1 2/2/1 3/3/1 4/4/1\n",
     )?;
     let (scene, import_evidence) = import.into_parts();
@@ -57,14 +57,14 @@ pub fn verify(importer: &Importer) -> baozi::Result<()> {
     let AttributeData::DenseF32 {
         values: texcoords,
         lanes: 2,
-    } = output.texcoords(0).unwrap().data()
+    } = output.texcoords(0, AttributeDomain::Corner).unwrap().data()
     else {
         panic!("triangulation must preserve corner UVs");
     };
     let AttributeData::DenseF32 {
         values: normals,
         lanes: 3,
-    } = output.normals().unwrap().data()
+    } = output.normals(AttributeDomain::Corner).unwrap().data()
     else {
         panic!("triangulation must preserve authored normals");
     };
@@ -74,7 +74,7 @@ pub fn verify(importer: &Importer) -> baozi::Result<()> {
             &texcoords[index * 2..index * 2 + 2],
             &source_uvs[origin as usize]
         );
-        assert_eq!(&normals[index * 3..index * 3 + 3], &[0.0, 0.0, 1.0]);
+        assert_eq!(&normals[index * 3..index * 3 + 3], &[1.0, 0.0, 0.0]);
         assert_eq!(
             remap
                 .corner_origin(PrimitiveCorner {
@@ -100,8 +100,62 @@ pub fn verify(importer: &Importer) -> baozi::Result<()> {
         twice_area += area;
     }
     assert_eq!(twice_area, 2.0);
+    let expected_uvs = texcoords.to_vec();
+    let normal_target = remap.output_target();
+    let (scene, preserved) = generate_normals(
+        scene,
+        normal_target,
+        NormalOptions::default(),
+        PostProcessControl::default(),
+    )
+    .expect("authored normals are preserved by default")
+    .into_parts();
+    assert_eq!(
+        preserved.disposition(),
+        PostProcessRunDisposition::Unchanged
+    );
+    assert_eq!(scene.generation(), normal_target.generation());
+    let options = NormalOptions {
+        existing: ExistingNormals::Replace,
+        ..NormalOptions::default()
+    };
+    let (scene, generated) =
+        generate_normals(scene, normal_target, options, PostProcessControl::default())
+            .expect("explicit normal replacement must publish")
+            .into_parts();
+    assert_eq!(generated.disposition(), PostProcessRunDisposition::Changed);
+    assert!(generated.matches_scene(&scene));
+    assert_eq!(generated.resources().current_live_bytes(), 0);
+    assert_eq!(generated.resources().active_reservations(), 0);
+    let normal_evidence = generated.normal_generation().unwrap();
+    assert_eq!(normal_evidence.input_target(), normal_target);
+    assert!(normal_evidence.replaced_authored_normals());
+    assert!(!normal_evidence.removed_tangents());
+    assert_eq!(normal_evidence.removed_metadata_entries(), 0);
+    let output = scene.primitive(normal_evidence.output_target()).unwrap();
+    assert_eq!(
+        output.normals(AttributeDomain::Corner).unwrap().domain(),
+        AttributeDomain::Corner
+    );
+    let AttributeData::DenseF32 { values, lanes: 3 } =
+        output.normals(AttributeDomain::Corner).unwrap().data()
+    else {
+        panic!("generated corner normals must be dense F32");
+    };
+    assert!(
+        values
+            .chunks_exact(3)
+            .all(|normal| normal == [0.0, 0.0, 1.0])
+    );
+    let AttributeData::DenseF32 { values, lanes: 2 } =
+        output.texcoords(0, AttributeDomain::Corner).unwrap().data()
+    else {
+        panic!("normal generation must preserve corner UVs");
+    };
+    assert_eq!(values, expected_uvs);
     drop(scene);
     drop(import_evidence);
     assert_eq!(remap.source_face_triangle_offsets(), &[0, 2]);
+    assert_eq!(normal_evidence.input_target(), normal_target);
     Ok(())
 }

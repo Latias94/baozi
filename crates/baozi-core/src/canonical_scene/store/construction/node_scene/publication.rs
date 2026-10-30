@@ -589,6 +589,18 @@ where
                     None,
                 )
             }
+            Self::DeferredFallback(fallback) => {
+                let control_cause = match fallback.cause() {
+                    StoreRuntimeError::Control(cause) => Some(cause.clone()),
+                    _ => None,
+                };
+                let (store, _cause) = fallback.prepare_minimal_fallback()?.into_parts();
+                return Ok((
+                    PreparedNodeSceneFailure::MinimalFallback(PreparedNodeSceneFallback { store }),
+                    None,
+                    control_cause,
+                ));
+            }
             Self::PreparedFallback(fallback) => {
                 let (store, _cause) = fallback.into_parts();
                 return Ok((

@@ -5,8 +5,7 @@ use std::sync::{
 
 use super::*;
 
-#[path = "../../tests/common/mod.rs"]
-mod common;
+use crate::test_fixtures as common;
 
 #[derive(Clone)]
 struct CancelAtPoll {

@@ -1,6 +1,6 @@
 mod common;
 
-use baozi_core::TopologyKind;
+use baozi_core::{AttributeDomain, TopologyKind};
 use baozi_postprocess::{
     PostProcessCancellationOrigin, PostProcessCancellationToken, PostProcessControl,
     PostProcessControlCause, PostProcessOperation, PostProcessRunDisposition, PostProcessRunError,
@@ -299,13 +299,22 @@ fn triangulation_preserves_corner_attributes_and_face_smoothing() {
     let remap = result.report().triangulation_remap().unwrap();
     let primitive = result.scene().primitive(remap.output_target()).unwrap();
     let baozi_core::AttributeData::DenseU32 { lanes: 1, values } = primitive
-        .attribute(baozi_core::AttributeSemanticRef::SmoothingGroup)
+        .attribute(
+            baozi_core::AttributeSemanticRef::SmoothingGroup,
+            AttributeDomain::Face,
+        )
         .unwrap()
         .data()
     else {
         panic!("Face smoothing groups must remain dense U32");
     };
     assert_eq!(values, &[7, 7]);
-    assert_eq!(primitive.texcoords(0).unwrap().len(), 6);
-    assert_eq!(primitive.normals().unwrap().len(), 6);
+    assert_eq!(
+        primitive
+            .texcoords(0, AttributeDomain::Corner)
+            .unwrap()
+            .len(),
+        6
+    );
+    assert_eq!(primitive.normals(AttributeDomain::Corner).unwrap().len(), 6);
 }

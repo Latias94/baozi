@@ -1224,7 +1224,7 @@ fn control_interruption_before_validator_panic_preserves_one_terminal_cause() {
         }
     };
     assert!(matches!(fallback.cause(), StoreRuntimeError::Control(_)));
-    let (prepared, _cause) = fallback.into_parts();
+    let (prepared, _cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
     let published = prepared.handoff();
     assert_eq!(
         store_failure_cause(&published.ledger_evidence).class(),
@@ -1306,7 +1306,12 @@ fn ledger_interruption_before_validator_panic_preserves_one_terminal_cause() {
     let published = match outcome {
         CanonicalCentralValidationOutcome::Fallback(fallback) => {
             assert!(matches!(fallback.cause(), StoreRuntimeError::Ledger(_)));
-            fallback.into_parts().0.handoff()
+            fallback
+                .prepare_minimal_fallback()
+                .unwrap()
+                .into_parts()
+                .0
+                .handoff()
         }
         CanonicalCentralValidationOutcome::Interrupted(interrupted) => {
             assert!(interrupted.cause().ledger_cause().is_some());
@@ -1583,7 +1588,7 @@ fn central_outcome_evidence_cancellation_preserves_the_completed_prefix() {
         }
     };
     assert!(matches!(fallback.cause(), StoreRuntimeError::Control(_)));
-    let (prepared, _cause) = fallback.into_parts();
+    let (prepared, _cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
     let published = prepared.handoff();
     let ordinary = published
         .ledger_evidence
@@ -1661,7 +1666,7 @@ fn central_outcome_evidence_underwrite_preserves_the_completed_prefix() {
             panic!("incomplete evidence must select minimal fallback")
         }
     };
-    let (prepared, _cause) = fallback.into_parts();
+    let (prepared, _cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
     let published = prepared.handoff();
     let ordinary = published
         .ledger_evidence
@@ -1838,7 +1843,7 @@ fn sealed_activation_rejects_an_incomplete_exact_shape() {
 }
 
 #[test]
-fn clean_central_validation_panic_prepares_minimal_fallback_without_poisoning() {
+fn clean_central_validation_panic_defers_fallback_until_borrowed_scratch_is_released() {
     struct PanicOnDropScratch;
 
     impl Drop for PanicOnDropScratch {
@@ -1849,7 +1854,12 @@ fn clean_central_validation_panic_prepares_minimal_fallback_without_poisoning() 
 
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let (mut operation, keys) = operation(&account);
+    let scratch_reservation = operation
+        .control_checkpoint()
+        .reserve(keys.phase, keys.dimension, 1)
+        .unwrap();
+    let scratch = vec![7_u8];
     let outcome = plan_scoped_activation!(
         operation,
         scoped_activation_shape(keys, 1, 1),
@@ -1894,7 +1904,10 @@ fn clean_central_validation_panic_prepares_minimal_fallback_without_poisoning() 
                      -> Result<
                         CanonicalValidationDecision<(), ValidationRejection>,
                         StoreWorkError,
-                    > { panic!("recoverable central validator panic") },
+                    > {
+                        assert_eq!(scratch.as_slice(), &[7]);
+                        panic!("recoverable central validator panic")
+                    },
                 )
             },
         )
@@ -1908,9 +1921,13 @@ fn clean_central_validation_panic_prepares_minimal_fallback_without_poisoning() 
         }
     };
     assert!(!account.snapshot().poisoned());
-    let (prepared, cause) = fallback.into_parts();
+    assert_eq!(scratch.as_slice(), &[7]);
+    scratch_reservation.release_storage(scratch);
+    let (prepared, cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
     assert!(matches!(cause, StoreRuntimeError::Build(_)));
     let published = prepared.handoff();
+    assert_eq!(published.ledger_evidence.header().current_live_bytes(), 0);
+    assert_eq!(published.ledger_evidence.header().active_reservations(), 0);
     assert_eq!(
         store_failure_cause(&published.ledger_evidence).class(),
         StorePreparationFailureClass::ProductGraph
@@ -1999,7 +2016,7 @@ fn scratch_drop_panic_still_drops_the_validation_proof_before_fallback() {
     };
     assert!(proof_dropped.get());
     assert!(!account.snapshot().poisoned());
-    let (prepared, cause) = fallback.into_parts();
+    let (prepared, cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
     assert!(matches!(cause, StoreRuntimeError::Build(_)));
     drop(prepared.handoff());
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
@@ -2105,7 +2122,7 @@ fn canonical_validation_panic_flushes_the_nonzero_completed_prefix() {
     };
     assert_eq!(inspected.get(), COMPLETED_PREFIX);
     assert!(!account.snapshot().poisoned());
-    let (prepared, cause) = fallback.into_parts();
+    let (prepared, cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
     assert!(matches!(cause, StoreRuntimeError::Build(_)));
     let published = prepared.handoff();
     let validation = published
@@ -2595,7 +2612,7 @@ fn trusted_evidence_slot_limit_returns_product_graph_fallback_without_poisoning(
             destination: StoreDestination::OutcomeEvidence
         }
     ));
-    let (prepared, _cause) = fallback.into_parts();
+    let (prepared, _cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
     let published = prepared.handoff();
     assert_eq!(
         store_failure_cause(&published.ledger_evidence).class(),
@@ -2858,7 +2875,7 @@ fn central_evidence_validation_envelope_rejects_before_the_overflowing_builder()
         }
     };
     assert!(matches!(fallback.cause(), StoreRuntimeError::Build(_)));
-    let (prepared, _cause) = fallback.into_parts();
+    let (prepared, _cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
     let published = prepared.handoff();
     let protected = published
         .ledger_evidence
@@ -3154,7 +3171,7 @@ fn outcome_evidence_abort_uses_the_first_fault_without_caller_echo() {
             destination: StoreDestination::OutcomeEvidence
         }
     ));
-    let (prepared, _cause) = fallback.into_parts();
+    let (prepared, _cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
     let published = prepared.handoff();
     assert_eq!(
         store_failure_cause(&published.ledger_evidence).class(),

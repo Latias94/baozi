@@ -159,3 +159,24 @@ impl std::error::Error for TriangulationFailure {
         Some(&self.cause)
     }
 }
+
+impl From<crate::geometry_edit::EditFailure> for TriangulationFailure {
+    fn from(failure: crate::geometry_edit::EditFailure) -> Self {
+        use crate::geometry_edit::EditCause;
+        let cause = match failure.cause {
+            EditCause::Runtime { source } => TriangulationCause::Runtime { source },
+            EditCause::Control { cause } => TriangulationCause::Control { cause },
+            EditCause::FinalControl => TriangulationCause::FinalControl,
+            EditCause::CoreRejected => TriangulationCause::CoreRejected,
+            EditCause::CentralValidation => TriangulationCause::CentralValidation,
+            EditCause::Publication => TriangulationCause::Publication,
+            EditCause::Containment { source } => TriangulationCause::Containment { source },
+            EditCause::Preparation { source } => TriangulationCause::Preparation { source },
+        };
+        Self {
+            cause,
+            resources: failure.resources,
+            _owner: failure.owner,
+        }
+    }
+}

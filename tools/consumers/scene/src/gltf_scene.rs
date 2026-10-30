@@ -369,14 +369,17 @@ fn assert_scene(scene: &ValidatedScene) {
             }
         );
         assert_eq!(
-            primitive.normals().unwrap().data(),
+            primitive.normals(AttributeDomain::Vertex).unwrap().data(),
             AttributeData::DenseF32 {
                 lanes: 3,
                 values: &[0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0]
             }
         );
         assert_eq!(
-            primitive.texcoords(0).unwrap().data(),
+            primitive
+                .texcoords(0, AttributeDomain::Vertex)
+                .unwrap()
+                .data(),
             AttributeData::DenseF32 {
                 lanes: 2,
                 values: &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]

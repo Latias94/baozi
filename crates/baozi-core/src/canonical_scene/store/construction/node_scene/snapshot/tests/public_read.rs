@@ -32,7 +32,7 @@ fn borrowed_readers_preserve_dense_sparse_and_presence_without_allocation() {
             );
             assert_eq!(
                 first
-                    .attribute(AttributeSemanticRef::SmoothingGroup)
+                    .attribute(AttributeSemanticRef::SmoothingGroup, AttributeDomain::Face)
                     .unwrap()
                     .data(),
                 AttributeData::SparseU32 {
@@ -45,7 +45,7 @@ fn borrowed_readers_preserve_dense_sparse_and_presence_without_allocation() {
             );
             assert_eq!(
                 second
-                    .attribute(AttributeSemanticRef::Color(0))
+                    .attribute(AttributeSemanticRef::Color(0), AttributeDomain::Face)
                     .unwrap()
                     .data(),
                 AttributeData::SparseF32 {
@@ -58,7 +58,7 @@ fn borrowed_readers_preserve_dense_sparse_and_presence_without_allocation() {
             );
             assert_eq!(
                 third
-                    .attribute(AttributeSemanticRef::SmoothingGroup)
+                    .attribute(AttributeSemanticRef::SmoothingGroup, AttributeDomain::Face)
                     .unwrap()
                     .data(),
                 AttributeData::DenseU32 {
@@ -68,7 +68,10 @@ fn borrowed_readers_preserve_dense_sparse_and_presence_without_allocation() {
             );
             assert_eq!(
                 third
-                    .attribute(AttributeSemanticRef::Custom("ply:dense_signed"))
+                    .attribute(
+                        AttributeSemanticRef::Custom("ply:dense_signed"),
+                        AttributeDomain::Vertex
+                    )
                     .unwrap()
                     .data(),
                 AttributeData::DenseI32 {
@@ -77,7 +80,10 @@ fn borrowed_readers_preserve_dense_sparse_and_presence_without_allocation() {
                 }
             );
             let sparse = third
-                .attribute(AttributeSemanticRef::Custom("ply:sparse_signed"))
+                .attribute(
+                    AttributeSemanticRef::Custom("ply:sparse_signed"),
+                    AttributeDomain::Vertex,
+                )
                 .unwrap();
             assert_eq!(sparse.len(), 3);
             assert_eq!(
@@ -98,6 +104,150 @@ fn borrowed_readers_preserve_dense_sparse_and_presence_without_allocation() {
             assert_eq!(root.authored_transform(), AuthoredTransform::identity_trs());
             assert_eq!(scene.node(root.id()).unwrap().id(), root.id());
         }
+    });
+    assert_eq!(allocations.count_total, 0);
+    assert_eq!(allocations.bytes_total, 0);
+    drop(scene);
+    drop(parts.report);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn attribute_lookup_matches_semantic_and_domain_without_allocation() {
+    let factory = factory();
+    let account = account(&factory);
+    let positions = [
+        [0.0_f32, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ];
+    let vertex_normals = [[0.0_f32, 0.0, 1.0]; 4];
+    let corner_normals = [[0.0_f32, 1.0, 0.0]; 6];
+    let vertex_texcoords = [[0.0_f32, 0.0]; 4];
+    let corner_texcoords = [[1.0_f32, 1.0]; 6];
+    let attributes = [
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Position,
+            AttributeDomain::Vertex,
+            3,
+            positions.as_flattened(),
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Normal,
+            AttributeDomain::Vertex,
+            3,
+            vertex_normals.as_flattened(),
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Normal,
+            AttributeDomain::Corner,
+            3,
+            corner_normals.as_flattened(),
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Texcoord(0),
+            AttributeDomain::Vertex,
+            2,
+            vertex_texcoords.as_flattened(),
+            Presence::Absent,
+        ),
+        GeometryAttributeAuthoring::f32(
+            AttributeSemantic::Texcoord(0),
+            AttributeDomain::Corner,
+            2,
+            corner_texcoords.as_flattened(),
+            Presence::Absent,
+        ),
+    ];
+    let indices = [0, 1, 2, 0, 2, 3];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::TriangleList,
+        Presence::Present(&indices),
+        Presence::Absent,
+        AuthoringRange::new(0, 5),
+    )];
+    let meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let parts = build_scene_with_geometry(
+        &account,
+        &[],
+        &[],
+        GeometryAuthoringBatch::new(&meshes, &primitives, &attributes, &[]),
+    );
+    let scene = ValidatedScene::from_node_scene(parts.scene);
+
+    let allocations = allocation_counter::measure(|| {
+        let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
+        assert_eq!(primitive.vertex_count(), 4);
+        assert_eq!(primitive.corner_count(), 6);
+        assert_eq!(primitive.attributes().len(), 5);
+        assert_eq!(
+            primitive.positions().unwrap().domain(),
+            AttributeDomain::Vertex
+        );
+        assert_eq!(
+            primitive.positions().unwrap().data(),
+            AttributeData::DenseF32 {
+                lanes: 3,
+                values: positions.as_flattened(),
+            }
+        );
+        for (domain, normal_values, texcoord_values) in [
+            (
+                AttributeDomain::Vertex,
+                vertex_normals.as_flattened(),
+                vertex_texcoords.as_flattened(),
+            ),
+            (
+                AttributeDomain::Corner,
+                corner_normals.as_flattened(),
+                corner_texcoords.as_flattened(),
+            ),
+        ] {
+            let normals = primitive.normals(domain).unwrap();
+            assert_eq!(normals.domain(), domain);
+            assert_eq!(normals.len(), normal_values.len() / 3);
+            assert_eq!(
+                normals.data(),
+                AttributeData::DenseF32 {
+                    lanes: 3,
+                    values: normal_values,
+                }
+            );
+            assert_eq!(
+                primitive
+                    .attribute(AttributeSemanticRef::Normal, domain)
+                    .unwrap()
+                    .data(),
+                normals.data()
+            );
+            let texcoords = primitive.texcoords(0, domain).unwrap();
+            assert_eq!(texcoords.domain(), domain);
+            assert_eq!(texcoords.len(), texcoord_values.len() / 2);
+            assert_eq!(
+                texcoords.data(),
+                AttributeData::DenseF32 {
+                    lanes: 2,
+                    values: texcoord_values,
+                }
+            );
+            assert!(primitive.texcoords(1, domain).is_none());
+        }
+        assert!(
+            primitive
+                .attribute(AttributeSemanticRef::Position, AttributeDomain::Corner)
+                .is_none()
+        );
+        assert!(
+            primitive
+                .attribute(AttributeSemanticRef::Normal, AttributeDomain::Face)
+                .is_none()
+        );
+        assert!(primitive.normals(AttributeDomain::Face).is_none());
+        assert!(primitive.texcoords(0, AttributeDomain::Face).is_none());
     });
     assert_eq!(allocations.count_total, 0);
     assert_eq!(allocations.bytes_total, 0);

@@ -164,7 +164,7 @@ pub(super) fn verify() -> baozi::Result<()> {
         indices,
         values,
         default,
-    } = first.normals().unwrap().data()
+    } = first.normals(AttributeDomain::Vertex).unwrap().data()
     else {
         panic!("sparse normals must remain sparse")
     };

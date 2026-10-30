@@ -36,7 +36,7 @@ fn obj_geometry_and_hierarchy_are_directly_readable() {
         panic!("expected dense positions")
     };
     assert_eq!(values, &[0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0, 0.0]);
-    let texcoords = primitive.texcoords(0).unwrap();
+    let texcoords = primitive.texcoords(0, AttributeDomain::Corner).unwrap();
     assert_eq!(texcoords.domain(), AttributeDomain::Corner);
     let AttributeData::DenseF32 {
         lanes: 2,
@@ -46,7 +46,7 @@ fn obj_geometry_and_hierarchy_are_directly_readable() {
         panic!("expected dense UVs")
     };
     assert_eq!(uv, &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
-    assert!(primitive.normals().is_none());
+    assert!(primitive.normals(AttributeDomain::Corner).is_none());
     assert!(primitive.material().is_none());
     let instance = scene.mesh_instances().next().unwrap();
     assert_eq!(instance.mesh().id(), mesh.id());
@@ -136,7 +136,10 @@ fn ply_custom_precision_is_visible_without_a_snapshot() {
         .unwrap();
     assert_eq!(primitive.topology(), TopologyKind::Points);
     let custom = primitive
-        .attribute(AttributeSemanticRef::Custom("ply:temperature"))
+        .attribute(
+            AttributeSemanticRef::Custom("ply:temperature"),
+            AttributeDomain::Vertex,
+        )
         .unwrap();
     let AttributeData::DenseF64 { lanes: 1, values } = custom.data() else {
         panic!("expected retained F64")

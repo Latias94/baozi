@@ -131,6 +131,11 @@ fn public_direct_operation_types_preserve_thread_transfer_contracts() {
     assert_send_sync::<TriangulationCause>();
     assert_send_sync::<TriangulationFailure>();
     assert_send_sync::<TriangulationRemap>();
+    assert_send_sync::<baozi_postprocess::NormalMode>();
+    assert_send_sync::<baozi_postprocess::NormalOptions>();
+    assert_send_sync::<baozi_postprocess::NormalCause>();
+    assert_send_sync::<baozi_postprocess::NormalFailure>();
+    assert_send_sync::<baozi_postprocess::NormalGenerationReport>();
     assert_send::<PostProcessControl>();
     assert_send::<PostProcessRunFailure>();
     assert_send::<PostProcessRunOutcome>();

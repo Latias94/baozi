@@ -99,6 +99,12 @@ pub(super) enum NodeSceneEditProgram<'scene> {
     TriangulatePrimitive(
         crate::canonical_scene::store::typed_storage::edit::GeometryTriangulationPlan<'scene>,
     ),
+    GenerateNormals {
+        geometry: crate::canonical_scene::store::typed_storage::edit::normals::GeometryNormalsPlan<
+            'scene,
+        >,
+        smooth: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -139,6 +145,7 @@ impl NodeSceneEditProgram<'_> {
         match self {
             Self::NodeTransform(_) => OperationKind::Transform,
             Self::TriangulatePrimitive(_) => OperationKind::Split,
+            Self::GenerateNormals { .. } => OperationKind::Generated,
         }
     }
 }
@@ -217,10 +224,21 @@ impl NodeSceneEditFixedCounts {
                     primitive: geometry.target_row(),
                 }
             }
+            NodeSceneEditProgram::GenerateNormals { geometry, smooth } => {
+                ProfileEditTargets::Normals {
+                    primitive: u32::try_from(geometry.target_row())
+                        .map_err(|_| StorePlanError::SizeOverflow)?,
+                    attributes: geometry.attribute_mapping(),
+                    smooth: *smooth,
+                }
+            }
         };
         let source_evidence = input.proof.counts();
         // The concrete operation supplies the final domain counts before profile planning.
         let mut evidence = source_evidence;
+        if let NodeSceneEditProgram::GenerateNormals { geometry, .. } = program {
+            evidence.attribute_count = geometry.output_attribute_count();
+        }
         let profile = NodeSceneEditProfilePlan::try_new(input, targets, evidence, poll)?;
         let counts = profile.output_counts;
         evidence.profile_segment_count = counts.segment_count;
@@ -229,19 +247,29 @@ impl NodeSceneEditFixedCounts {
         evidence.profile_parent_count = counts.parent_count;
         evidence.profile_owner_count = counts.owner_count;
         evidence.profile_attachment_count = counts.attachment_count;
+        evidence.profile_metadata_entry_count = counts.metadata_entry_count;
         let source_central_validation = input.proof.central_validation_plan();
         let mut central_validation_plan = source_central_validation.try_rebind_profile_edit(
             evidence,
             counts,
             profile.maximum_depth,
         )?;
-        if let NodeSceneEditProgram::TriangulatePrimitive(geometry) = program {
+        let geometry_work = match program {
+            NodeSceneEditProgram::NodeTransform(_) => None,
+            NodeSceneEditProgram::TriangulatePrimitive(geometry) => {
+                Some(geometry.validation_work())
+            }
+            NodeSceneEditProgram::GenerateNormals { geometry, .. } => {
+                Some(geometry.validation_work())
+            }
+        };
+        if let Some(work) = geometry_work {
             central_validation_plan = central_validation_plan.try_rebind_geometry(
                 input
                     .read_geometry()
                     .validation_work()
                     .ok_or(StorePlanError::SizeOverflow)?,
-                geometry.validation_work(),
+                work,
             )?;
         }
 
@@ -491,6 +519,37 @@ impl PendingNodeSceneEdit {
             operation: self.operation,
             counts: self.counts,
             invalidations: self.invalidations,
+        })
+    }
+}
+
+impl<'scene> BoundPendingNodeSceneEdit<'scene> {
+    pub(super) fn try_normals(
+        input: &'scene SceneStorage,
+        geometry: crate::canonical_scene::store::typed_storage::edit::normals::GeometryNormalsPlan<
+            'scene,
+        >,
+        smooth: bool,
+        options: crate::provenance::OptionsDigest,
+        poll: &mut impl FnMut() -> Result<(), NodeSceneEditPlanError>,
+    ) -> Result<Self, NodeSceneEditPlanError> {
+        let program = NodeSceneEditProgram::GenerateNormals { geometry, smooth };
+        let proof = input.proof;
+        let counts = NodeSceneEditFixedCounts::try_new_for_program(
+            input,
+            &program,
+            proof.source_node_count(),
+            proof.source_root_count(),
+            proof.source_edge_count(),
+            poll,
+        )?;
+        Ok(Self {
+            _seal: BoundSourceSeal,
+            input,
+            program,
+            operation: OperationIdentity::new(OperationKind::Generated, options),
+            counts,
+            invalidations: CanonicalInvalidations::scene_bounds_invalidated(),
         })
     }
 }

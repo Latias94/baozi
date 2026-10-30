@@ -86,7 +86,10 @@ pub fn verify(expected: &[&str]) -> baozi::Result<()> {
         );
         if name == "ply" {
             let custom = primitive
-                .attribute(AttributeSemanticRef::Custom("ply:temperature"))
+                .attribute(
+                    AttributeSemanticRef::Custom("ply:temperature"),
+                    AttributeDomain::Vertex,
+                )
                 .unwrap();
             let AttributeData::DenseF64 { lanes: 1, values } = custom.data() else {
                 panic!("F64 expected")

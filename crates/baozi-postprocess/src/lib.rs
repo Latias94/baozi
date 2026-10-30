@@ -4,11 +4,17 @@
 
 mod direct_error;
 mod error;
+mod geometry_edit;
+mod normals;
 mod operation;
 mod remap;
 mod report;
 mod triangulate;
 mod triangulation;
+
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_fixtures;
 
 pub use baozi_core::SceneGenerationId;
 
@@ -26,3 +32,8 @@ pub use report::{
 };
 pub use triangulate::triangulate_primitive;
 pub use triangulation::PolygonError as TriangulationIssue;
+
+pub use normals::{
+    ExistingNormals, NormalCause, NormalFailure, NormalGenerationReport, NormalIssue, NormalMode,
+    NormalOptions, TangentHandling, generate_normals,
+};

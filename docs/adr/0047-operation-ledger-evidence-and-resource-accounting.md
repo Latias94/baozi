@@ -165,6 +165,13 @@ Ordinary work cannot spend that authority. Terminal preparation consumes it to p
 evidence or the minimal fail-closed fallback. Handoff exposes already prepared owners and performs no
 new accounting mutation.
 
+Recoverable central evidence-construction or validation failures return an unprepared linear
+fallback owner when the call may still borrow caller-owned charged scratch. The caller ends those
+borrows, destroys scratch, and only then prepares the protected terminal evidence. Deferring that
+freeze preserves the original failure and cleanup protocol; it does not refund work, relax terminal
+eligibility, or turn uncertain cleanup into an ordinary failure. Import retains this continuation
+until parser storage is released, and geometry edits release their generated values before using it.
+
 Terminal cause is sticky and monotonic. A later contract, control, product-graph, or ledger failure
 cannot be hidden by an earlier requested rejection. Public snapshots expose domain-owned semantic
 views, not raw mutable ledger keys or control internals.

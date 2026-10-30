@@ -1,6 +1,6 @@
 use std::{fmt, ops::Range};
 
-use baozi_core::{PrimitiveId, scene::integration::SceneGeometryEditEvidence};
+use baozi_core::{PrimitiveId, scene::integration::SceneTriangulationEvidence};
 use thiserror::Error;
 
 /// A generation- and mesh-qualified corner endpoint.
@@ -30,22 +30,12 @@ pub enum TriangulationRemapError {
 /// The actual rooted evidence store is owned here, independently of either Scene. Borrowing this
 /// value borrows the operation's retained origins; no intermediate Scene generation is invented.
 pub struct TriangulationRemap {
-    evidence: SceneGeometryEditEvidence,
-    source_corners: u32,
-    vertices: u32,
+    evidence: SceneTriangulationEvidence,
 }
 
 impl TriangulationRemap {
-    pub(crate) const fn new(
-        evidence: SceneGeometryEditEvidence,
-        source_corners: u32,
-        vertices: u32,
-    ) -> Self {
-        Self {
-            evidence,
-            source_corners,
-            vertices,
-        }
+    pub(crate) const fn new(evidence: SceneTriangulationEvidence) -> Self {
+        Self { evidence }
     }
 
     pub fn input_target(&self) -> PrimitiveId {
@@ -66,10 +56,10 @@ impl TriangulationRemap {
     }
 
     pub const fn source_corner_count(&self) -> u32 {
-        self.source_corners
+        self.evidence.source_corner_count()
     }
     pub const fn vertex_count(&self) -> u32 {
-        self.vertices
+        self.evidence.vertex_count()
     }
 
     /// Triangulation preserves all vertex values and their order; no vertex is added or removed.
@@ -112,7 +102,7 @@ impl TriangulationRemap {
         if endpoint.primitive != self.input_target() {
             return Err(TriangulationRemapError::ForeignOwner);
         }
-        if endpoint.index >= self.source_corners {
+        if endpoint.index >= self.source_corner_count() {
             return Err(TriangulationRemapError::OutOfRange);
         }
         Ok(self
@@ -168,7 +158,7 @@ impl fmt::Debug for TriangulationRemap {
             .debug_struct("TriangulationRemap")
             .field("input", &self.input_target())
             .field("output", &self.output_target())
-            .field("source_corners", &self.source_corners)
+            .field("source_corners", &self.source_corner_count())
             .field("output_corners", &self.source_corner_origins().len())
             .finish_non_exhaustive()
     }

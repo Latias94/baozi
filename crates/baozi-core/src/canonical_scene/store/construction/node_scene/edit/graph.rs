@@ -101,6 +101,16 @@ where
             )?;
             (nodes, geometry)
         }
+        NodeSceneEditProgram::GenerateNormals { geometry: plan, .. } => {
+            let nodes = lane.try_share_storage(&pending.input.tables.nodes)?;
+            let geometry = lane.try_retain_storage(
+                plan.capacities(),
+                plan.work(),
+                plan.name_bytes() as u64,
+                |control| plan.materialize(control).map_err(map_build),
+            )?;
+            (nodes, geometry)
+        }
     };
     let profile = retain_edited_profile(
         lane,

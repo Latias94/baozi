@@ -806,7 +806,12 @@ fn central_evidence_builder_error_preserves_domain_cause_before_partial_resoluti
 
     let factory = factory(1);
     let account = account(&factory);
-    let (operation, keys) = operation(&account);
+    let (mut operation, keys) = operation(&account);
+    let scratch_reservation = operation
+        .control_checkpoint()
+        .reserve(keys.phase, keys.dimension, 1)
+        .unwrap();
+    let scratch = vec![7_u8];
     let outcome = plan_scoped_activation!(
         operation,
         scoped_activation_shape(keys, 1, 1),
@@ -835,7 +840,10 @@ fn central_evidence_builder_error_preserves_domain_cause_before_partial_resoluti
                     .try_retain_sequence(
                         SequencePlan::<u8>::new(PLANNED_WORK).unwrap(),
                         EvidenceLeafTag,
-                        |_writer| Err(expected),
+                        |_writer| {
+                            assert_eq!(scratch.as_slice(), &[7]);
+                            Err(expected)
+                        },
                     )
                     .unwrap_err();
                 assert_eq!(cause, StoreRuntimeError::Build(expected));
@@ -867,8 +875,13 @@ fn central_evidence_builder_error_preserves_domain_cause_before_partial_resoluti
         }
     };
     assert_eq!(fallback.cause(), &StoreRuntimeError::Build(expected));
-    let (prepared, _cause) = fallback.into_parts();
+    assert!(!account.snapshot().poisoned());
+    assert_eq!(scratch.as_slice(), &[7]);
+    scratch_reservation.release_storage(scratch);
+    let (prepared, _cause) = fallback.prepare_minimal_fallback().unwrap().into_parts();
     let published = prepared.handoff();
+    assert_eq!(published.ledger_evidence.header().current_live_bytes(), 0);
+    assert_eq!(published.ledger_evidence.header().active_reservations(), 0);
     let ordinary = published
         .ledger_evidence
         .dimension(keys.dimension)

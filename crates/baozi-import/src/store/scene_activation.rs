@@ -11,8 +11,8 @@ use baozi_operation::__retained_store_integration::activation::{
     CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome, CanonicalFreezePermitIssue,
     CanonicalValidationProgress, CentrallyRejectedCanonicalStoreSession, FailureEvidenceOutcome,
     FrozenFailureState, InterruptedCanonicalStoreSession, NeverActivatedStoreSession,
-    RejectedCanonicalStoreSession, RootedFailureValidation, StoreCanonicalRejection,
-    StoreNeverActivatedCause, VerifiedMinimalFallback,
+    PendingMinimalFallback, RejectedCanonicalStoreSession, RootedFailureValidation,
+    StoreCanonicalRejection, StoreNeverActivatedCause, VerifiedMinimalFallback,
 };
 use baozi_operation::__retained_store_integration::authority::{
     PreparedStoreFailure, PreparedStoreFailureOutcome, PreparedStoreFallback, PreparedStoreSuccess,
@@ -134,6 +134,11 @@ pub(super) enum ImportPendingScene {
     },
     PreparedFallback {
         owner: VerifiedMinimalFallback<StoreRuntimeError>,
+        completed_boundary: Option<ImportStoreSceneBoundary>,
+    },
+    DeferredFallback {
+        owner:
+            PendingMinimalFallback<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>,
         completed_boundary: Option<ImportStoreSceneBoundary>,
     },
 }
@@ -887,7 +892,7 @@ fn install_central_scene(
         }
         CanonicalCentralValidationOutcome::Fallback(owner) => {
             let control_cause = runtime_control(owner.cause());
-            transition.install(ImportPendingScene::PreparedFallback {
+            transition.install(ImportPendingScene::DeferredFallback {
                 owner,
                 completed_boundary: Some(ImportStoreSceneBoundary::DraftBuilt),
             });
@@ -957,10 +962,14 @@ impl ImportStoreSessionOwner {
                 ImportPendingScene::CentralRejected { .. }
                 | ImportPendingScene::CentralInterrupted { .. },
             ) => Some(ImportStoreSceneBoundary::DraftBuilt),
-            ImportStoreSessionState::Pending(ImportPendingScene::PreparedFallback {
-                completed_boundary,
-                ..
-            }) => *completed_boundary,
+            ImportStoreSessionState::Pending(
+                ImportPendingScene::PreparedFallback {
+                    completed_boundary, ..
+                }
+                | ImportPendingScene::DeferredFallback {
+                    completed_boundary, ..
+                },
+            ) => *completed_boundary,
             ImportStoreSessionState::Dormant(_)
             | ImportStoreSessionState::Transitioning
             | ImportStoreSessionState::Pending(
@@ -1035,6 +1044,21 @@ impl ImportStoreSessionOwner {
                     control_cause,
                     ImportStoreFailureCauseAuthority::OperationTerminal,
                 )
+            }
+            ImportStoreSessionState::Pending(ImportPendingScene::DeferredFallback {
+                owner,
+                completed_boundary: _,
+            }) => {
+                let control_cause = runtime_control(owner.cause());
+                let (store, _cause) = owner
+                    .prepare_minimal_fallback()
+                    .map_err(ImportStoreActivationError::Preparation)?
+                    .into_parts();
+                Ok(ImportStorePreparedScene::MinimalFallback {
+                    store,
+                    control_cause,
+                    cause_authority: ImportStoreFailureCauseAuthority::OperationTerminal,
+                })
             }
             ImportStoreSessionState::Pending(ImportPendingScene::PreparedFallback {
                 owner,

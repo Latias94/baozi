@@ -286,7 +286,7 @@ pub mod __retained_store_integration {
             CentrallyRejectedCanonicalStoreSession, FailureEvidenceDecision, FailureEvidenceMember,
             FailureEvidenceOutcome, FailureEvidenceValidationSession, FrozenFailureState,
             InterruptedCanonicalStoreSession, NeverActivatedStoreSession, OutcomeEvidenceDecision,
-            OutcomeEvidenceValidationMember, PreparedFailureEvidence,
+            OutcomeEvidenceValidationMember, PendingMinimalFallback, PreparedFailureEvidence,
             RejectedCanonicalStoreSession, RetainedStoreSessionOutcomeOwner,
             RootedFailureValidation, StoreActivationContainment, StoreCanonicalRejection,
             StoreNeverActivatedCause, VerifiedMinimalFallback,

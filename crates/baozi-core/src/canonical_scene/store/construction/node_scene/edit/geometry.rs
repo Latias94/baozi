@@ -19,7 +19,6 @@ use baozi_operation::__retained_store_integration::producer::{
     CanonicalSuccessRequirements,
 };
 use baozi_operation::RecordBlock;
-pub use evidence::SceneGeometryEditEvidenceRecipe;
 pub use publication::*;
 pub use validation::SceneGeometryEditValidationProof;
 
@@ -55,6 +54,9 @@ use crate::canonical_scene::store::schema::{
     NODE_SCENE_EVIDENCE_FIELD_COUNT, NodeSceneOutcomeEvidenceSchema,
 };
 use crate::canonical_scene::store::typed_storage::build::TypedStorageBuildControl;
+use crate::canonical_scene::store::typed_storage::edit::normals::{
+    GeometryNormalsPlan, NormalWritePolicy, TangentPolicy,
+};
 use crate::canonical_scene::store::typed_storage::edit::{
     GeometryTriangulationPlan, TriangulationOrigins,
 };
@@ -203,6 +205,28 @@ impl SceneGeometryEditAdmission {
         replacement: SceneTriangulationReplacement<'a>,
         limits: SceneValidationLimits,
     ) -> SceneGeometryEditTransaction<'a> {
+        self.transaction(
+            input,
+            GeometryReplacement::Triangulation(replacement),
+            limits,
+        )
+    }
+
+    pub fn into_normal_transaction<'a>(
+        self,
+        input: &'a ValidatedScene,
+        replacement: SceneNormalReplacement<'a>,
+        limits: SceneValidationLimits,
+    ) -> SceneGeometryEditTransaction<'a> {
+        self.transaction(input, GeometryReplacement::Normals(replacement), limits)
+    }
+
+    fn transaction<'a>(
+        self,
+        input: &'a ValidatedScene,
+        replacement: GeometryReplacement<'a>,
+        limits: SceneValidationLimits,
+    ) -> SceneGeometryEditTransaction<'a> {
         SceneGeometryEditTransaction {
             input,
             replacement,
@@ -239,7 +263,7 @@ impl SceneGeometryEditFailureEvidence {
     ) -> Result<(), StoreBuildError> {
         row.write_scalar(schema::REVISION)?;
         row.write_scalar(schema::OUTCOME_FAILED)?;
-        row.write_scalar(schema::TRIANGULATION_SEMANTIC_VERSION)?;
+        row.write_scalar(schema::OPERATION_SEMANTIC_VERSION)?;
         // No successful edit or options claim is made for a failed invocation.
         for _ in schema::field::OPERATION_KIND..schema::field::OPTIONS_DIGEST_FIRST {
             row.write_scalar(0_u32)?;
@@ -273,6 +297,119 @@ where
     )
 }
 
+/// Source-bound corner normals and the explicit authored-field treatment.
+#[derive(Clone, Copy)]
+pub struct SceneNormalReplacement<'a> {
+    target: PrimitiveId,
+    normals: &'a [[f32; 3]],
+    replace_existing: bool,
+    remove_tangents: bool,
+    smooth: bool,
+    options_digest: OptionsDigest,
+}
+
+impl<'a> SceneNormalReplacement<'a> {
+    pub const fn new(
+        target: PrimitiveId,
+        normals: &'a [[f32; 3]],
+        replace_existing: bool,
+        remove_tangents: bool,
+        smooth: bool,
+        options_digest: OptionsDigest,
+    ) -> Self {
+        Self {
+            target,
+            normals,
+            replace_existing,
+            remove_tangents,
+            smooth,
+            options_digest,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GeometryReplacement<'a> {
+    Triangulation(SceneTriangulationReplacement<'a>),
+    Normals(SceneNormalReplacement<'a>),
+}
+
+impl<'a> GeometryReplacement<'a> {
+    const fn target(self) -> PrimitiveId {
+        match self {
+            Self::Triangulation(v) => v.target,
+            Self::Normals(v) => v.target,
+        }
+    }
+    const fn triangles(self) -> &'a [[u32; 3]] {
+        match self {
+            Self::Triangulation(v) => v.triangles,
+            Self::Normals(_) => &[],
+        }
+    }
+    const fn face_offsets(self) -> &'a [u32] {
+        match self {
+            Self::Triangulation(v) => v.face_offsets,
+            Self::Normals(_) => &[],
+        }
+    }
+    const fn options(self) -> OptionsDigest {
+        match self {
+            Self::Triangulation(v) => v.options_digest,
+            Self::Normals(v) => v.options_digest,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GeometryEditPlan<'a> {
+    Triangulation(GeometryTriangulationPlan<'a>),
+    Normals(GeometryNormalsPlan<'a>),
+}
+
+impl GeometryEditPlan<'_> {
+    fn correspondence_work(self) -> u64 {
+        match self {
+            Self::Triangulation(v) => v.correspondence_work(),
+            Self::Normals(v) => v.correspondence_work(),
+        }
+    }
+    fn name_bytes(self) -> usize {
+        match self {
+            Self::Triangulation(v) => v.name_bytes(),
+            Self::Normals(v) => v.name_bytes(),
+        }
+    }
+    fn facts(
+        self,
+        input: &super::super::SceneStorage,
+        replacement: GeometryReplacement<'_>,
+        counts: super::super::SceneEvidenceCounts,
+    ) -> Option<evidence::GeometryEditFacts> {
+        match (self, replacement) {
+            (Self::Triangulation(plan), GeometryReplacement::Triangulation(replacement)) => {
+                Some(evidence::GeometryEditFacts::new(input, replacement, &plan))
+            }
+            (Self::Normals(plan), GeometryReplacement::Normals(replacement)) => {
+                evidence::GeometryEditFacts::normals(input, replacement, &plan, counts)
+            }
+            _ => None,
+        }
+    }
+    fn validate_correspondence<
+        C: crate::canonical_scene::store::typed_storage::validation::TypedStorageValidationControl,
+    >(
+        self,
+        actual: &crate::canonical_scene::store::typed_storage::GeometryStorage,
+        control: &mut C,
+    ) -> Result<bool, C::Error> {
+        match self {
+            Self::Triangulation(plan) => plan.validate_correspondence(actual, control),
+            Self::Normals(plan) => plan.validate_correspondence(actual, control),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum SceneGeometryEditRejection {
     #[error("the geometry-edit target or origin relation is invalid")]
@@ -290,12 +427,12 @@ pub enum SceneGeometryEditRejection {
 /// Single-use authority-free description; the host owns and resolves every semantic lane.
 pub struct SceneGeometryEditTransaction<'a> {
     input: &'a ValidatedScene,
-    replacement: SceneTriangulationReplacement<'a>,
+    replacement: GeometryReplacement<'a>,
     limits: SceneValidationLimits,
     evidence: SceneGeometryEditFailureEvidence,
     execution: Option<SceneGeometryEditAdmission>,
     brand: ConstructionBrand,
-    geometry: Option<GeometryTriangulationPlan<'a>>,
+    geometry: Option<GeometryEditPlan<'a>>,
 }
 
 /// Borrowed postflight description, independent of the operation and its scoped scratch owner.
@@ -304,11 +441,11 @@ pub struct SceneGeometryEditTransaction<'a> {
 /// correspondence. Failure evidence remains available even when preflight rejected the request.
 pub struct SceneGeometryEditPostflight<'a> {
     input: &'a ValidatedScene,
-    replacement: SceneTriangulationReplacement<'a>,
+    replacement: GeometryReplacement<'a>,
     limits: SceneValidationLimits,
     evidence: SceneGeometryEditFailureEvidence,
     brand: ConstructionBrand,
-    geometry: Option<GeometryTriangulationPlan<'a>>,
+    geometry: Option<GeometryEditPlan<'a>>,
 }
 
 impl SceneGeometryEditPostflight<'_> {
@@ -317,7 +454,7 @@ impl SceneGeometryEditPostflight<'_> {
     }
 
     pub const fn target(&self) -> PrimitiveId {
-        self.replacement.target
+        self.replacement.target()
     }
 
     pub const fn validation_limits(&self) -> SceneValidationLimits {
@@ -329,7 +466,7 @@ impl SceneGeometryEditPostflight<'_> {
 pub struct SceneGeometryEditPlan<'a, 'scope, O: OperationOwner> {
     admission: SceneGeometryEditAdmission,
     source_generation: SceneGenerationId,
-    replacement: SceneTriangulationReplacement<'a>,
+    replacement: GeometryReplacement<'a>,
     sealed: Vec<BoundPendingNodeSceneEdit<'a>>,
     success_requirements: CanonicalSuccessRequirements,
     reservation: CanonicalReservation<'scope, O>,
@@ -389,7 +526,7 @@ impl<'a> SceneGeometryEditTransaction<'a> {
             .finish(sealed.len(), sealed.capacity())
             .map_err(|cause| StoreRuntimeError::Plan(cause.into()))?;
         semantic.resize(&mut reservation, bytes)?;
-        let target = self.replacement.target;
+        let target = self.replacement.target();
         let input = self.input;
         let target_row = semantic.run_unit(|| {
             // Public lookup validates generation, logical-mesh ownership, and the local index.
@@ -413,32 +550,75 @@ impl<'a> SceneGeometryEditTransaction<'a> {
                 .primitives
                 .get(row)
                 .ok_or(SceneEditCompileError::InvalidTarget)?;
-            if primitive.topology != TopologyKind::Polygons || primitive.face_count == 0 {
+            let valid_topology = match self.replacement {
+                GeometryReplacement::Triangulation(_) => {
+                    primitive.topology == TopologyKind::Polygons
+                }
+                GeometryReplacement::Normals(_) => primitive.topology == TopologyKind::TriangleList,
+            };
+            if !valid_topology || primitive.face_count == 0 {
                 return Err(SceneEditCompileError::InvalidSource);
             }
             Ok(row)
         })??;
-        let plan = GeometryTriangulationPlan::try_new(
-            input.as_node_scene().read_geometry(),
-            target_row,
-            TriangulationOrigins {
-                triangles: self.replacement.triangles,
-                face_offsets: self.replacement.face_offsets,
-            },
-            semantic,
-        )
-        .map_err(map_build)?;
-        let pending = BoundPendingNodeSceneEdit::try_triangulation(
-            input.as_node_scene(),
-            plan,
-            self.replacement.options_digest,
-            &mut || {
-                semantic
-                    .run_unit(|| ())
-                    .map_err(NodeSceneEditPlanError::from)
-            },
-        )
-        .map_err(map_plan)?;
+        let (plan, pending) = match self.replacement {
+            GeometryReplacement::Triangulation(replacement) => {
+                let plan = GeometryTriangulationPlan::try_new(
+                    input.as_node_scene().read_geometry(),
+                    target_row,
+                    TriangulationOrigins {
+                        triangles: replacement.triangles,
+                        face_offsets: replacement.face_offsets,
+                    },
+                    semantic,
+                )
+                .map_err(map_build)?;
+                let pending = BoundPendingNodeSceneEdit::try_triangulation(
+                    input.as_node_scene(),
+                    plan,
+                    replacement.options_digest,
+                    &mut || {
+                        semantic
+                            .run_unit(|| ())
+                            .map_err(NodeSceneEditPlanError::from)
+                    },
+                )
+                .map_err(map_plan)?;
+                (GeometryEditPlan::Triangulation(plan), pending)
+            }
+            GeometryReplacement::Normals(replacement) => {
+                let plan = GeometryNormalsPlan::try_new(
+                    input.as_node_scene().read_geometry(),
+                    target_row,
+                    replacement.normals,
+                    if replacement.replace_existing {
+                        NormalWritePolicy::Replace
+                    } else {
+                        NormalWritePolicy::Add
+                    },
+                    if replacement.remove_tangents {
+                        TangentPolicy::Remove
+                    } else {
+                        TangentPolicy::Reject
+                    },
+                    semantic,
+                )
+                .map_err(map_build)?;
+                let pending = BoundPendingNodeSceneEdit::try_normals(
+                    input.as_node_scene(),
+                    plan,
+                    replacement.smooth,
+                    replacement.options_digest,
+                    &mut || {
+                        semantic
+                            .run_unit(|| ())
+                            .map_err(NodeSceneEditPlanError::from)
+                    },
+                )
+                .map_err(map_plan)?;
+                (GeometryEditPlan::Normals(plan), pending)
+            }
+        };
         if u64::from(pending.counts.profile.maximum_depth) > self.limits.max_provenance_depth() {
             return Err(SceneGeometryEditRejection::Limit {
                 resource: "provenance depth",
@@ -449,8 +629,8 @@ impl<'a> SceneGeometryEditTransaction<'a> {
         let total = pending.counts.canonical_blocks.as_usize();
         let extra_work = (schema::ROOT_FIELDS as u64)
             // The rebound Scene plan already includes its Scene-count evidence record.
-            .checked_add(plan.output_corner_count() as u64)
-            .and_then(|n| n.checked_add(self.replacement.face_offsets.len() as u64))
+            .checked_add(self.replacement.triangles().len() as u64 * 3)
+            .and_then(|n| n.checked_add(self.replacement.face_offsets().len() as u64))
             .and_then(|n| n.checked_add(plan.correspondence_work()))
             .and_then(|n| n.checked_add(pending.counts.central_validation_plan.work().get()))
             .and_then(std::num::NonZeroU64::new)
@@ -508,7 +688,7 @@ where
 
 impl<O: OperationOwner> SceneGeometryEditPlan<'_, '_, O> {
     pub const fn target(&self) -> PrimitiveId {
-        self.replacement.target
+        self.replacement.target()
     }
     pub const fn input_generation(&self) -> SceneGenerationId {
         self.source_generation
@@ -518,7 +698,7 @@ impl<O: OperationOwner> SceneGeometryEditPlan<'_, '_, O> {
 /// Execution bound to the exact admitted request and its private source-derived plans.
 pub struct SceneGeometryEditExecutionPlan<'a, 'scope, O: OperationOwner> {
     brand: ConstructionBrand,
-    replacement: SceneTriangulationReplacement<'a>,
+    replacement: GeometryReplacement<'a>,
     sealed: Vec<BoundPendingNodeSceneEdit<'a>>,
     _reservation: CanonicalReservation<'scope, O>,
 }
@@ -571,7 +751,21 @@ impl<O: OperationOwner> SceneGeometryEditExecutionPlan<'_, '_, O> {
         SceneDirectorySchema,
     > {
         let pending = &self.sealed[0];
-        let NodeSceneEditProgram::TriangulatePrimitive(geometry) = &pending.program else {
+        let plan = match &pending.program {
+            NodeSceneEditProgram::TriangulatePrimitive(geometry) => {
+                GeometryEditPlan::Triangulation(*geometry)
+            }
+            NodeSceneEditProgram::GenerateNormals { geometry, .. } => {
+                GeometryEditPlan::Normals(*geometry)
+            }
+            _ => {
+                let rejection = SceneGeometryEditRejection::construction_invariant();
+                let code = rejection.stable_code();
+                return lane.reject(rejection, code);
+            }
+        };
+        let Some(facts) = plan.facts(pending.input, self.replacement, pending.counts.evidence)
+        else {
             let rejection = SceneGeometryEditRejection::construction_invariant();
             let code = rejection.stable_code();
             return lane.reject(rejection, code);
@@ -584,7 +778,6 @@ impl<O: OperationOwner> SceneGeometryEditExecutionPlan<'_, '_, O> {
                 return lane.reject(rejection, code);
             }
         };
-        let facts = evidence::GeometryEditFacts::new(pending.input, self.replacement, geometry);
         let directory = graph.directory;
         let output = SceneGeometryEditOutput {
             scene: NodeSceneLaneOutput::from_inner(NodeSceneActivationOutput {
