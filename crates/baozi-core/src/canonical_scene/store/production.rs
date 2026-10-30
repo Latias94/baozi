@@ -85,8 +85,7 @@ pub(super) use plan::appearance::{
 };
 pub(super) use plan::appearance::{AppearanceAuthoringLimit, AppearanceAuthoringSemanticError};
 pub(super) use plan::deformation::{
-    DeformationAuthoringFailure, DeformationMorphPayloadKind, ValidatedDeformationBatch,
-    validate_deformation_batch_with_control,
+    DeformationAuthoringFailure, ValidatedDeformationBatch, validate_deformation_batch_with_control,
 };
 pub(super) use plan::deformation::{DeformationAuthoringLimit, DeformationAuthoringSemanticError};
 pub(super) use plan::geometry::{

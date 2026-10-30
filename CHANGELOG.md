@@ -6,6 +6,14 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Replaced deformation records with one retained typed owner for skins, variable influences,
+  morph definitions/deltas, and instance overrides. Unchanged edits share that owner, public reads
+  borrow its payloads directly, and validation retains only algorithm scratch. Removed redundant
+  animation target-context references and proof copies from semantic cursors. Semantic snapshot
+  encoding remains revision 4.
+- Made the public skin-correction constructor enforce the same finite affine contract as central
+  validation. glTF inverse-bind normalization reports malformed matrices at the format boundary;
+  affine shear, reflection, singular linear parts, and signed-zero bits remain preserved.
 - Added whole-Scene static `convert_scene_space` with validated complete target facts and explicit
   source assumptions. Nodes retain authored Matrix/TRS form; dense/sparse spatial attributes and
   triangle Corner data convert together through the shared Scene-edit transaction. Unsupported

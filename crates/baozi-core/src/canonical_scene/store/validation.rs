@@ -1,17 +1,16 @@
 mod node_scene;
 
+pub(in crate::canonical_scene::store) use super::typed_storage::deformation::validation::{
+    DeformationMeteredCounts, DeformationValidationScratch,
+    DeformationValidationScratchRequirements,
+};
 pub(in crate::canonical_scene::store) use node_scene::{
     AnimationChannelValidationDescriptor, AnimationClipValidationDescriptor,
     AnimationMeteredCounts, AnimationValidationScratch, AnimationValidationScratchRequirements,
     AppearanceBindingValidationScratch, AppearanceCanonicalCounts,
     AppearanceMaterialValidationScratch, AppearanceValidationScratch,
-    AppearanceValidationScratchRequirements, DeformationLogicalMorphValidationProjection,
-    DeformationMeshInstanceValidationProjection, DeformationMorphDefinitionValidationProjection,
-    DeformationMorphDeltaValidationProjection, DeformationMorphTargetValidationProjection,
-    DeformationPrimitiveValidationProjection, DeformationSkinValidationProjection,
-    DeformationValidationScratch, DeformationValidationScratchRequirements,
-    NodeSceneValidationProof, NodeSceneValidationScratch, ProfileMeteredCounts,
-    ProfileMeteredScratch, validate_node_scene_canonical_graph_metered,
+    AppearanceValidationScratchRequirements, NodeSceneValidationProof, NodeSceneValidationScratch,
+    ProfileMeteredCounts, ProfileMeteredScratch, validate_node_scene_canonical_graph_metered,
 };
 
 fn require_scalar<T: Copy + Eq>(actual: Option<T>, expected: T) -> Option<()> {

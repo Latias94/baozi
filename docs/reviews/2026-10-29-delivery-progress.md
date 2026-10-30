@@ -28,6 +28,74 @@ Its expected format set is supplied independently of registration.
 default, single-format, admitted-all-format, tracing, and mint cases serially. It does not generate
 Rust, resolve Rust names, or inspect source shape. A target check is compile evidence only.
 
+## Typed deformation owner cutover — 2026-10-30
+
+Deformation now uses one retained owner containing seven typed row tables and ten payload buffers.
+Skin joints, whole inverse-bind matrices, CSR influence columns, morph weights/deltas, sparse
+indices, and names retain their source bits and presence. Logical owner/range coordinates do not
+depend on the published Scene generation. Unchanged edits share the complete owner. Fresh builds,
+central validation, public readers, and semantic snapshot traversal use the same actual tables;
+the old deformation record schema, writer, decoder, edit rewrite, and seven descriptor scratch
+tables are deleted. Central validation retains palette maxima and bounded uniqueness marks only.
+
+The remaining animation records no longer encode a redundant target-context cell or a deformation
+record reference. Target kind and logical index resolve against borrowed node/geometry/deformation
+owners. The private Scene root is revision 6 with nine fields; the transitional animation codec is
+revision 4 with 22 channel fields. The semantic snapshot remains revision 4, and existing golden
+vectors passed unchanged in the 204-test focused run. Appearance and animation storage cutovers
+remain open; this increment does not complete D2 or the A–H plan.
+
+Authoring canonical-byte limits count the real initialized header, used rows, and payloads. Inline
+skin corrections add no separate allocation or footprint. Initial scratch admission reads only
+top-level lengths; nested morph plans and uniqueness buffers grow through the existing admitted
+capacity mechanism during controlled validation. Reader cursors borrow proof authority when
+needed; typed geometry/deformation lengths come from actual proof-qualified tables.
+
+Finite affine matrix constraints are consistent across public correction construction, authoring,
+typed central validation, and glTF normalization. Shear, reflection, singular linear parts, and
+signed zero remain source-preserving values; projective rows and nonfinite values are rejected.
+The focused 204/204 run includes these cases, exact work, per-action interruption/unwind,
+presence/identity, sparse values, random-row reads, and zero-allocation reading/validation.
+Independent read-only reviews found no concrete defects in materialization/edit/count integration
+or authoring scratch/builder paths. Integrated workspace, manual scale, consumer, and package
+results are recorded after execution below.
+
+The workspace run passed 2,254/2,254 tests with the three manual pilots skipped. A subsequent
+serial core run passed all three manual pilots, their normal admission/cancellation fixture, and
+the added eight-class post-construction corruption test (5/5). Strict workspace all-target,
+all-feature Clippy and workspace/standalone-consumer formatting passed. No source mutation was
+made to update the existing semantic snapshot vectors.
+
+Compared with the immediately preceding static-conversion source state (`4832101`), the same
+100,000-vertex, four-influence, 8 MiB metadata fixture measures:
+
+| Observation | Before deformation cutover | Typed deformation |
+| --- | ---: | ---: |
+| Build peak requested allocation bytes | 15,220,047 | 15,210,563 |
+| Edit peak requested allocation bytes | 19,732 | 12,320 |
+| Edit allocation requests | 72 | 58 |
+| Build consumed work | 40,055,804 | 38,355,474 |
+| Edit consumed work | 10,889,338 | 9,289,056 |
+
+All four 10k/100k-vertex and 1/8 MiB metadata combinations retain the same 12,320-byte edit peak.
+The fixture checks complete owner identity and borrowed influence-column addresses, including
+survival after source release. With 4,096 independent indexed primitive buffers, build requested
+peak falls from 4,053,838 to 2,083,618 bytes and consumed work from 442,991 to 324,111; 256/1,024
+cases remain linear. These are requested allocator bytes and deterministic work, not process RSS.
+Logs are `target/review/d2-deformation-workspace-nextest.log`,
+`d2-deformation-scale-and-central.log`, and `d2-deformation-clippy.log` in the same directory.
+
+The standalone all-feature consumer executed all four formats and the complete postprocess chain
+on the ordinary Windows main stack in debug and release. Fresh `.crate` archives unpacked under
+`target/package-check-nlicuk4y` built and executed the postprocess and glTF consumers; Cargo source
+verification rejected checkout substitution. The release `wasm32-wasip1` all-feature consumer
+executed through Wasmtime 50.0.0 with the same four-format expectations. Browser
+`wasm32-unknown-unknown` passed an all-feature compile check only. Workspace doctests and rustdoc
+with `-D warnings` passed. Logs use the `target/review/d2-deformation-` prefix with suffixes
+`native-debug.log`, `native-release.log`, `packaged-consumers.log`, `wasi-consumer.log`,
+`browser-wasm-check.log`, `doctests.log`, and `rustdoc.log`. No new sanitizer execution or sustained
+fuzz campaign is claimed for this source state.
+
 ## Recovery integration and storage pilot
 
 The continuation after source session `01a1834e-5379-76b0-b412-01aa80c80fc6` reverified operation

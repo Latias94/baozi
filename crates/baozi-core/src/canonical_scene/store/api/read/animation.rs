@@ -13,6 +13,8 @@ use crate::identity::{
 fn tables(scene: &ValidatedScene) -> NodeSceneAnimationTables<'_> {
     expect_validated(NodeSceneAnimationTables::try_new(
         scene.as_node_scene().read_canonical(),
+        scene.as_node_scene().read_geometry(),
+        scene.as_node_scene().read_deformation(),
         scene.as_node_scene().read_proof(),
     ))
 }

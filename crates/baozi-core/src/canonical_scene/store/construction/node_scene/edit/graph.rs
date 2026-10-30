@@ -9,9 +9,6 @@ use super::super::animation::{AnimationPayloadRefs, RetainedAnimationRefs};
 use super::super::appearance::{
     AppearancePayloadRefs, AppearanceTableRefs, RetainedAppearanceRefs,
 };
-use super::super::deformation::{
-    DeformationPayloadRefs, DeformationTableRefs, RetainedDeformationRefs,
-};
 use super::super::geometry::map_build;
 use super::super::{NodeSceneMaterializedRefs, SceneStorage};
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditProgram};
@@ -23,12 +20,6 @@ use crate::canonical_scene::store::schema::animation::{
 use crate::canonical_scene::store::schema::appearance::{
     AppearanceBindingTableSchema, AppearanceDirectorySchema, AppearanceImageTableSchema,
     AppearanceMaterialTableSchema, AppearanceSamplerTableSchema, AppearanceTextureTableSchema,
-};
-use crate::canonical_scene::store::schema::deformation::{
-    DeformationDirectorySchema, DeformationLogicalMorphTableSchema,
-    DeformationMeshInstanceTableSchema, DeformationMorphDefinitionTableSchema,
-    DeformationMorphDeltaTableSchema, DeformationMorphTargetTableSchema,
-    DeformationPrimitiveTableSchema, DeformationSkinTableSchema,
 };
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
@@ -45,7 +36,6 @@ pub(super) struct RewrittenNodeSceneGraph {
 #[derive(Clone, Copy)]
 struct InheritedNodeSceneLeafRefs {
     appearance: AppearancePayloadRefs,
-    deformation: DeformationPayloadRefs,
     animation: AnimationPayloadRefs,
 }
 
@@ -156,14 +146,13 @@ where
         lane.try_share_storage(&pending.input.tables.spatial)?
     };
     let appearance = rewrite_appearance(lane, pending, inherited.appearance)?;
-    let deformation = rewrite_deformation(lane, pending, inherited.deformation)?;
+    let deformation = lane.try_share_storage(&pending.input.tables.deformation)?;
     let animation = rewrite_animation(lane, pending, inherited.animation)?;
     let directory = rewrite_directory_with_shape(
         lane,
         pending,
         NodeSceneDirectoryRefs {
             appearance: appearance.directory,
-            deformation: deformation.directory,
             animation: animation.directory,
         },
     )?;
@@ -174,12 +163,12 @@ where
             nodes,
             spatial,
             geometry,
+            deformation,
             profile,
         },
         refs: NodeSceneMaterializedRefs {
             directory,
             appearance,
-            deformation,
             animation,
         },
     })
@@ -188,7 +177,6 @@ where
 #[derive(Clone, Copy)]
 struct NodeSceneDirectoryRefs {
     appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
-    deformation: CanonicalBlockRef<DeformationDirectorySchema>,
     animation: CanonicalBlockRef<AnimationDirectorySchema>,
 }
 
@@ -223,7 +211,6 @@ where
                 row.write_scalar(pending.counts.attributes.as_u32())?;
                 row.write_scalar(pending.counts.mesh_instances.as_u32())?;
                 row.write_record_ref(refs.appearance.into_store())?;
-                row.write_record_ref(refs.deformation.into_store())?;
                 row.write_record_ref(refs.animation.into_store())
             })
         },
@@ -282,87 +269,6 @@ where
         )?,
     };
 
-    let deformation = DeformationPayloadRefs {
-        joint_nodes: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_joint_nodes(),
-            &mut inherited,
-        )?,
-        inverse_bind_matrices: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_inverse_bind_matrices(),
-            &mut inherited,
-        )?,
-        skin_correction_matrices: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_skin_correction_matrices(),
-            &mut inherited,
-        )?,
-        skin_names: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_skin_names(),
-            &mut inherited,
-        )?,
-        influence_row_offsets: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_influence_row_offsets(),
-            &mut inherited,
-        )?,
-        influence_joints: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_influence_joints(),
-            &mut inherited,
-        )?,
-        influence_weights: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_influence_weights(),
-            &mut inherited,
-        )?,
-        influence_source_orders: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_influence_source_orders(),
-            &mut inherited,
-        )?,
-        morph_defaults: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_morph_defaults(),
-            &mut inherited,
-        )?,
-        morph_names: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_morph_names(),
-            &mut inherited,
-        )?,
-        morph_values: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_morph_values(),
-            &mut inherited,
-        )?,
-        morph_sparse_indices: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_morph_sparse_indices(),
-            &mut inherited,
-        )?,
-        instance_morph_weights: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.deformation_instance_morph_weights(),
-            &mut inherited,
-        )?,
-    };
-
     let animation = AnimationPayloadRefs {
         clip_names: inherit_optional_leaf(
             lane,
@@ -396,7 +302,6 @@ where
     }
     Ok(InheritedNodeSceneLeafRefs {
         appearance,
-        deformation,
         animation,
     })
 }
@@ -463,89 +368,6 @@ where
             textures,
             bindings,
             materials,
-        },
-        payloads,
-    })
-}
-
-fn rewrite_deformation<'lane, O, PP, U>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-    pending: &BoundPendingNodeSceneEdit<'_>,
-    payloads: DeformationPayloadRefs,
-) -> Result<RetainedDeformationRefs, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let input = pending.input;
-    let proof = input.proof;
-    let skins = rewrite_optional_record(
-        lane,
-        input,
-        proof.deformation_skins(),
-        pending.counts.skins.as_usize(),
-        DeformationSkinTableSchema,
-    )?;
-    let morph_definitions = rewrite_optional_record(
-        lane,
-        input,
-        proof.deformation_morph_definitions(),
-        pending.counts.morph_definitions.as_usize(),
-        DeformationMorphDefinitionTableSchema,
-    )?;
-    let morph_deltas = rewrite_optional_record(
-        lane,
-        input,
-        proof.deformation_morph_deltas(),
-        pending.counts.morph_deltas.as_usize(),
-        DeformationMorphDeltaTableSchema,
-    )?;
-    let morph_targets = rewrite_optional_record(
-        lane,
-        input,
-        proof.deformation_morph_targets(),
-        pending.counts.morph_targets.as_usize(),
-        DeformationMorphTargetTableSchema,
-    )?;
-    let primitives = rewrite_optional_record(
-        lane,
-        input,
-        proof.deformation_primitives(),
-        pending.counts.primitive_deformations.as_usize(),
-        DeformationPrimitiveTableSchema,
-    )?;
-    let logical_morphs = rewrite_optional_record(
-        lane,
-        input,
-        proof.deformation_logical_morphs(),
-        pending.counts.logical_morphs.as_usize(),
-        DeformationLogicalMorphTableSchema,
-    )?;
-    let mesh_instances = rewrite_optional_record(
-        lane,
-        input,
-        proof.deformation_mesh_instances(),
-        pending.counts.mesh_instances.as_usize(),
-        DeformationMeshInstanceTableSchema,
-    )?;
-    let directory = rewrite_required_record(
-        lane,
-        input,
-        proof.deformation_directory(),
-        1,
-        DeformationDirectorySchema,
-    )?;
-    Ok(RetainedDeformationRefs {
-        directory,
-        tables: DeformationTableRefs {
-            skins,
-            logical_morphs,
-            morph_definitions,
-            primitives,
-            morph_targets,
-            morph_deltas,
-            mesh_instances,
         },
         payloads,
     })

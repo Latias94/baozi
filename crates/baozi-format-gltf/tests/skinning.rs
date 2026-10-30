@@ -320,6 +320,68 @@ fn inverse_bind_matrix_type_mismatch_is_parse_error_before_reader() -> TestResul
 }
 
 #[test]
+fn inverse_bind_matrices_reject_projective_rows_and_nonfinite_values() -> TestResult<()> {
+    // The MAT4 accessor starts at byte 116; glTF stores its columns consecutively.
+    for (column, row, value) in [
+        (0, 3, 0.125_f32),
+        (1, 3, -0.25),
+        (2, 3, 0.5),
+        (3, 3, 2.0),
+        (1, 0, f32::NAN),
+    ] {
+        let mut bytes = skinned_triangle_bin();
+        let offset = 116 + (column * 4 + row) * 4;
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        let (result, diagnostics) = import_assets_result(
+            "models/skin.gltf",
+            [
+                ("models/skin.gltf", skinned_triangle_gltf()),
+                ("models/skin.bin", bytes),
+            ],
+            sidecar_options(),
+        )?;
+        let error = expected_error(result)?;
+        assert!(diagnostics.is_empty());
+        assert_gltf_failure(
+            &error,
+            GltfFailureCode::InvalidDocument,
+            Some("inverse bind matrix 0 must be finite and affine"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn inverse_bind_matrices_preserve_affine_shear_reflection_and_signed_zero() -> TestResult<()> {
+    let mut bytes = skinned_triangle_bin();
+    for (column, row, value) in [(0, 0, -2.0_f32), (0, 1, 0.25), (1, 3, -0.0)] {
+        let offset = 116 + (column * 4 + row) * 4;
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let (report, diagnostics) = import_assets(
+        "models/skin.gltf",
+        [
+            ("models/skin.gltf", skinned_triangle_gltf()),
+            ("models/skin.bin", bytes),
+        ],
+        sidecar_options(),
+    )?;
+    assert!(diagnostics.is_empty());
+    let matrix = report
+        .scene()
+        .skins()
+        .next()
+        .expect("authored skin")
+        .inverse_bind_matrices()
+        .next()
+        .expect("first inverse bind");
+    assert_eq!(matrix.cols[0][0], -2.0);
+    assert_eq!(matrix.cols[0][1], 0.25);
+    assert_eq!(matrix.cols[1][3].to_bits(), (-0.0_f32).to_bits());
+    Ok(())
+}
+
+#[test]
 fn joint_and_weight_attributes_must_be_paired() -> TestResult<()> {
     let gltf = String::from_utf8(skinned_triangle_gltf())
         .expect("fixture is valid utf-8")

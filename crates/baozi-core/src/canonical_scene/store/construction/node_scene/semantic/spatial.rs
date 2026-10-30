@@ -18,7 +18,7 @@ pub(super) struct NodeSceneSpatialTables<'scene> {
 impl<'scene> NodeSceneSpatialTables<'scene> {
     pub(super) fn try_new(
         storage: &'scene SpatialStorage,
-        proof: NodeSceneValidationProof,
+        proof: &NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
         if storage.cameras.len() != proof.camera_count()
             || storage.lights.len() != proof.light_count()
@@ -245,7 +245,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSpatialPlacementsCursor<'s
 impl<'scene> NodeSceneSpatialPlacementsCursor<'scene> {
     pub(super) const fn new(
         nodes: &'scene crate::canonical_scene::store::typed_storage::NodeStorage,
-        proof: NodeSceneValidationProof,
+        proof: &NodeSceneValidationProof,
     ) -> Self {
         Self {
             nodes,
@@ -304,7 +304,7 @@ impl<'scene> NodeSceneSpatialPlacementCursor<'scene> {
     pub(super) fn camera(
         nodes: &'scene crate::canonical_scene::store::typed_storage::NodeStorage,
         target_index: usize,
-        proof: NodeSceneValidationProof,
+        proof: &NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
         if target_index >= proof.camera_count() {
             return Err(invariant(
@@ -321,7 +321,7 @@ impl<'scene> NodeSceneSpatialPlacementCursor<'scene> {
     pub(super) fn light(
         nodes: &'scene crate::canonical_scene::store::typed_storage::NodeStorage,
         target_index: usize,
-        proof: NodeSceneValidationProof,
+        proof: &NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
         if target_index >= proof.light_count() {
             return Err(invariant("light placement target exceeds validation proof"));

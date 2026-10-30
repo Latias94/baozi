@@ -19,7 +19,7 @@ use super::{
 fn tables(scene: &ValidatedScene) -> NodeSceneDeformationTables<'_> {
     let owner = scene.as_node_scene();
     expect_validated(NodeSceneDeformationTables::try_new(
-        owner.read_canonical(),
+        owner.read_deformation(),
         owner.read_proof(),
     ))
 }
@@ -71,7 +71,7 @@ impl<'s> SkinRef<'s> {
             .expect("validated skin has a joint palette")
             .into_slice()
             .iter()
-            .map(move |canonical| NodeId::new(self.scene.generation(), *canonical - 1))
+            .map(move |canonical| NodeId::new(self.scene.generation(), canonical.0 - 1))
     }
 
     /// Iterates column-major inverse-bind matrices in joint palette order.
@@ -93,9 +93,7 @@ impl<'s> SkinRef<'s> {
     }
 
     fn read(self) -> NodeSceneDeformationSkin<'s> {
-        expect_validated(
-            tables(self.scene).skin_at(self.scene.as_node_scene().read_proof(), self.index),
-        )
+        expect_validated(tables(self.scene).skin_at(self.index))
     }
 }
 
@@ -272,10 +270,7 @@ impl<'s> MorphTargetDefinitionRef<'s> {
     }
 
     fn read(self) -> NodeSceneDeformationMorphDefinition<'s> {
-        expect_validated(
-            tables(self.scene)
-                .morph_definition_at(self.scene.as_node_scene().read_proof(), self.row),
-        )
+        expect_validated(tables(self.scene).morph_definition_at(self.row))
     }
 }
 
@@ -311,10 +306,7 @@ impl<'s> MorphTargetRef<'s> {
     pub fn definition(self) -> MorphTargetDefinitionRef<'s> {
         let mesh = self.primitive.mesh();
         let scene = mesh.scene();
-        let logical = expect_validated(tables(scene).logical_morph_at(
-            scene.as_node_scene().read_proof(),
-            mesh.id().index() as usize,
-        ));
+        let logical = expect_validated(tables(scene).logical_morph_at(mesh.id().index() as usize));
         MorphTargetDefinitionRef::at(
             scene,
             logical.definition_offset() + self.read().target_ordinal(),
@@ -333,9 +325,7 @@ impl<'s> MorphTargetRef<'s> {
         let scene = self.primitive.scene();
         let start = target.delta_offset();
         (start..start + target.delta_count()).map(move |row| {
-            MorphDeltaRef::from_semantic(expect_validated(
-                tables(scene).morph_delta_at(scene.as_node_scene().read_proof(), row),
-            ))
+            MorphDeltaRef::from_semantic(expect_validated(tables(scene).morph_delta_at(row)))
         })
     }
 
@@ -346,9 +336,7 @@ impl<'s> MorphTargetRef<'s> {
 
     fn read(self) -> NodeSceneDeformationMorphTarget {
         let scene = self.primitive.scene();
-        expect_validated(
-            tables(scene).morph_target_at(scene.as_node_scene().read_proof(), self.row),
-        )
+        expect_validated(tables(scene).morph_target_at(self.row))
     }
 }
 
@@ -464,11 +452,8 @@ impl<'s> MorphDeltaRef<'s> {
 impl<'s> LogicalMeshRef<'s> {
     pub fn morph_target_count(self) -> usize {
         let scene = self.scene();
-        expect_validated(tables(scene).logical_morph_at(
-            scene.as_node_scene().read_proof(),
-            self.id().index() as usize,
-        ))
-        .definition_count()
+        expect_validated(tables(scene).logical_morph_at(self.id().index() as usize))
+            .definition_count()
     }
 
     pub fn morph_target_definitions(
@@ -476,10 +461,7 @@ impl<'s> LogicalMeshRef<'s> {
     ) -> impl ExactSizeIterator<Item = MorphTargetDefinitionRef<'s>> + DoubleEndedIterator + Clone + 's
     {
         let scene = self.scene();
-        let logical = expect_validated(tables(scene).logical_morph_at(
-            scene.as_node_scene().read_proof(),
-            self.id().index() as usize,
-        ));
+        let logical = expect_validated(tables(scene).logical_morph_at(self.id().index() as usize));
         let start = logical.definition_offset();
         (start..start + logical.definition_count())
             .map(move |row| MorphTargetDefinitionRef::at(scene, row))
@@ -490,10 +472,7 @@ impl<'s> LogicalMeshRef<'s> {
         id: MorphTargetId,
     ) -> Result<MorphTargetDefinitionRef<'s>, SceneLookupError> {
         let scene = self.scene();
-        let logical = expect_validated(tables(scene).logical_morph_at(
-            scene.as_node_scene().read_proof(),
-            self.id().index() as usize,
-        ));
+        let logical = expect_validated(tables(scene).logical_morph_at(self.id().index() as usize));
         let local = checked_morph_ordinal(self, id, logical.definition_count())?;
         Ok(MorphTargetDefinitionRef::at(
             scene,
@@ -504,13 +483,10 @@ impl<'s> LogicalMeshRef<'s> {
     /// Borrows defaults in logical target order, including an authored empty vector.
     pub fn default_morph_weights(self) -> &'s [f32] {
         let scene = self.scene();
-        expect_validated(tables(scene).logical_morph_at(
-            scene.as_node_scene().read_proof(),
-            self.id().index() as usize,
-        ))
-        .take_default_weights()
-        .expect("validated mesh has default morph weights")
-        .into_slice()
+        expect_validated(tables(scene).logical_morph_at(self.id().index() as usize))
+            .take_default_weights()
+            .expect("validated mesh has default morph weights")
+            .into_slice()
     }
 }
 
@@ -518,11 +494,10 @@ impl<'s> PrimitiveRef<'s> {
     /// Returns absent influence data distinctly from present rows with no influences.
     pub fn influences(self) -> Option<InfluenceRows<'s>> {
         let scene = self.scene();
-        let (offsets, joints, weights, source_orders) = expect_validated(
-            tables(scene).primitive_at(scene.as_node_scene().read_proof(), self.row()),
-        )
-        .take_influences()?
-        .into_slices();
+        let (offsets, joints, weights, source_orders) =
+            expect_validated(tables(scene).primitive_at(self.row()))
+                .take_influences()?
+                .into_slices();
         Some(InfluenceRows {
             offsets,
             joints,
@@ -533,17 +508,14 @@ impl<'s> PrimitiveRef<'s> {
 
     pub fn morph_target_count(self) -> usize {
         let scene = self.scene();
-        expect_validated(tables(scene).primitive_at(scene.as_node_scene().read_proof(), self.row()))
-            .morph_target_count()
+        expect_validated(tables(scene).primitive_at(self.row())).morph_target_count()
     }
 
     pub fn morph_targets(
         self,
     ) -> impl ExactSizeIterator<Item = MorphTargetRef<'s>> + DoubleEndedIterator + Clone + 's {
         let scene = self.scene();
-        let primitive = expect_validated(
-            tables(scene).primitive_at(scene.as_node_scene().read_proof(), self.row()),
-        );
+        let primitive = expect_validated(tables(scene).primitive_at(self.row()));
         let start = primitive.morph_target_offset();
         (start..start + primitive.morph_target_count()).map(move |row| MorphTargetRef {
             primitive: self,
@@ -554,9 +526,7 @@ impl<'s> PrimitiveRef<'s> {
     /// Finds this primitive's projection after checking the logical target's generation and owner.
     pub fn morph_target(self, id: MorphTargetId) -> Result<MorphTargetRef<'s>, SceneLookupError> {
         let scene = self.scene();
-        let primitive = expect_validated(
-            tables(scene).primitive_at(scene.as_node_scene().read_proof(), self.row()),
-        );
+        let primitive = expect_validated(tables(scene).primitive_at(self.row()));
         let local = checked_morph_ordinal(self.mesh(), id, primitive.morph_target_count())?;
         Ok(MorphTargetRef {
             primitive: self,
@@ -584,10 +554,7 @@ impl<'s> MeshInstanceRef<'s> {
 
     fn read_deformation(self) -> NodeSceneDeformationMeshInstance<'s> {
         let scene = self.scene();
-        expect_validated(tables(scene).mesh_instance_at(
-            scene.as_node_scene().read_proof(),
-            self.id().index() as usize,
-        ))
+        expect_validated(tables(scene).mesh_instance_at(self.id().index() as usize))
     }
 }
 

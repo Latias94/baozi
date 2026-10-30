@@ -20,17 +20,11 @@ use crate::canonical_scene::store::schema::animation::{
     AnimationValuesSchema, animation_channel_field, animation_clip_field,
     animation_directory_field,
 };
-use crate::canonical_scene::store::schema::deformation::{
-    DeformationLogicalMorphTableSchema, DeformationMeshInstanceTableSchema,
-};
 use crate::canonical_scene::store::schema::{CanonicalBlockRef, PRESENCE_ABSENT, PRESENCE_PRESENT};
-use crate::canonical_scene::store::typed_storage::{
-    NodeStorage, StoredMeshInstance, StoredTransform,
-};
+use crate::canonical_scene::store::typed_storage::deformation::DeformationStorage;
+use crate::canonical_scene::store::typed_storage::{GeometryStorage, NodeStorage, StoredTransform};
 use crate::entity::{MAX_ENTITY_NAME_BYTES, validate_entity_name_str};
 use crate::math::Quat;
-
-use super::deformation::DeformationLogicalMorphValidationProjection;
 
 #[derive(Clone, Copy)]
 pub(super) struct AnimationValidatedRefs {
@@ -220,55 +214,28 @@ impl<'scratch> AnimationValidationScratch<'scratch> {
     }
 }
 
-/// Already-validated members and semantic counts used by animation target checks.
-///
-/// These members are never reopened through a raw view. Animation only verifies that its target
-/// references point at the exact validation-scoped members and that their sealed semantic counts
-/// admit the requested target.
+/// Actual typed owners already checked by their central validators in the same Scene.
+/// Animation target indices resolve directly against these borrowed tables.
 #[derive(Clone, Copy)]
-pub(super) struct AnimationMeteredDependencies<'session, 'projection> {
-    nodes: &'projection NodeStorage,
+pub(super) struct AnimationMeteredDependencies<'scene> {
+    nodes: &'scene NodeStorage,
     node_count: u32,
-    deformation_mesh_instances: Option<
-        CanonicalValidationMember<'session, RecordBlock, DeformationMeshInstanceTableSchema>,
-    >,
-    deformation_mesh_instance_count: u32,
-    geometry_mesh_instance_count: u32,
-    logical_morphs: Option<
-        CanonicalValidationMember<'session, RecordBlock, DeformationLogicalMorphTableSchema>,
-    >,
-    logical_morph_count: u32,
-    geometry_mesh_instance_projections: &'projection [StoredMeshInstance],
-    logical_morph_projections: &'projection [DeformationLogicalMorphValidationProjection],
+    geometry: &'scene GeometryStorage,
+    deformation: &'scene DeformationStorage,
 }
 
-impl<'session, 'projection> AnimationMeteredDependencies<'session, 'projection> {
-    #[allow(clippy::too_many_arguments)]
+impl<'scene> AnimationMeteredDependencies<'scene> {
     pub(super) const fn new(
-        nodes: &'projection NodeStorage,
+        nodes: &'scene NodeStorage,
         node_count: u32,
-        deformation_mesh_instances: Option<
-            CanonicalValidationMember<'session, RecordBlock, DeformationMeshInstanceTableSchema>,
-        >,
-        deformation_mesh_instance_count: u32,
-        geometry_mesh_instance_count: u32,
-        logical_morphs: Option<
-            CanonicalValidationMember<'session, RecordBlock, DeformationLogicalMorphTableSchema>,
-        >,
-        logical_morph_count: u32,
-        geometry_mesh_instance_projections: &'projection [StoredMeshInstance],
-        logical_morph_projections: &'projection [DeformationLogicalMorphValidationProjection],
+        geometry: &'scene GeometryStorage,
+        deformation: &'scene DeformationStorage,
     ) -> Self {
         Self {
             nodes,
             node_count,
-            deformation_mesh_instances,
-            deformation_mesh_instance_count,
-            geometry_mesh_instance_count,
-            logical_morphs,
-            logical_morph_count,
-            geometry_mesh_instance_projections,
-            logical_morph_projections,
+            geometry,
+            deformation,
         }
     }
 }
@@ -303,7 +270,7 @@ pub(super) fn validate_animation_graph_metered<
 >(
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     animation: CanonicalValidationMember<'session, RecordBlock, AnimationDirectorySchema>,
-    dependencies: AnimationMeteredDependencies<'session, 'projection>,
+    dependencies: AnimationMeteredDependencies<'projection>,
     counts: AnimationMeteredCounts,
     scratch: &mut AnimationValidationScratch<'scratch>,
 ) -> Result<Option<AnimationMeteredShape<'session>>, StoreWorkError>
@@ -332,7 +299,10 @@ where
     let Some(requirements) = AnimationValidationScratchRequirements::try_new(
         counts,
         dependencies.node_count,
-        dependencies.deformation_mesh_instance_count,
+        match u32::try_from(dependencies.deformation.mesh_instances.len()) {
+            Ok(count) => count,
+            Err(_) => return Ok(None),
+        },
     ) else {
         return Ok(None);
     };
@@ -433,19 +403,16 @@ where
 }
 
 fn metered_animation_dependencies_are_coherent(
-    dependencies: AnimationMeteredDependencies<'_, '_>,
+    dependencies: AnimationMeteredDependencies<'_>,
 ) -> bool {
     dependencies.node_count != 0
         && usize::try_from(dependencies.node_count)
             .is_ok_and(|count| dependencies.nodes.nodes.len() == count)
-        && dependencies.deformation_mesh_instances.is_some()
-            == (dependencies.deformation_mesh_instance_count != 0)
-        && dependencies.logical_morphs.is_some() == (dependencies.logical_morph_count != 0)
-        && dependencies.deformation_mesh_instance_count == dependencies.geometry_mesh_instance_count
-        && usize::try_from(dependencies.geometry_mesh_instance_count)
-            .is_ok_and(|count| dependencies.geometry_mesh_instance_projections.len() == count)
-        && usize::try_from(dependencies.logical_morph_count)
-            .is_ok_and(|count| dependencies.logical_morph_projections.len() == count)
+        && dependencies.deformation.mesh_instances.len()
+            == dependencies.geometry.mesh_instances.len()
+        && dependencies.deformation.logical_morphs.len()
+            == dependencies.geometry.logical_meshes.len()
+        && dependencies.deformation.primitives.len() == dependencies.geometry.primitives.len()
 }
 
 fn validate_animation_directory_metered<'session, 'storage, 'control, 'operation, O, PP, U>(
@@ -688,7 +655,7 @@ fn validate_animation_channels_metered<
 >(
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     members: AnimationValidatedMembers<'session>,
-    dependencies: AnimationMeteredDependencies<'session, 'projection>,
+    dependencies: AnimationMeteredDependencies<'projection>,
     counts: AnimationMeteredCounts,
     clip_descriptors: &[AnimationClipValidationDescriptor],
     channel_descriptors: &mut [AnimationChannelValidationDescriptor],
@@ -727,28 +694,6 @@ where
                 row.scalar(animation_channel_field::TARGET_KIND, |value: u8| value)?;
             let target_index =
                 row.scalar(animation_channel_field::TARGET_INDEX, |value: u32| value)?;
-            let target_reference_matches = match target_kind {
-                Some(
-                    ANIMATION_TARGET_NODE_TRANSLATION
-                    | ANIMATION_TARGET_NODE_ROTATION
-                    | ANIMATION_TARGET_NODE_SCALE,
-                ) => {
-                    row.scalar(animation_channel_field::TARGET_CONTEXT, |value: u32| {
-                        value as usize == dependencies.nodes.nodes.len()
-                    })? == Some(true)
-                }
-                Some(ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS) => {
-                    row.record_ref::<DeformationMeshInstanceTableSchema, _>(
-                        animation_channel_field::TARGET_CONTEXT,
-                        |value| Some(value) == dependencies.deformation_mesh_instances,
-                    )? == Some(true)
-                }
-                _ => {
-                    row.scalar(animation_channel_field::TARGET_CONTEXT, |value: u8| {
-                        value == 0
-                    })? == Some(true)
-                }
-            };
             let interpolation =
                 row.scalar(animation_channel_field::INTERPOLATION, |value: u8| value)?;
             let pre_extrapolation = row
@@ -923,8 +868,7 @@ where
                 return Ok(false);
             }
 
-            let valid = target_reference_matches
-                && value_width == expected_value_width
+            let valid = value_width == expected_value_width
                 && valid_interpolation(interpolation)
                 && valid_extrapolation(pre_extrapolation)
                 && valid_extrapolation(post_extrapolation)
@@ -967,7 +911,7 @@ where
 }
 
 fn metered_animation_target_width(
-    dependencies: AnimationMeteredDependencies<'_, '_>,
+    dependencies: AnimationMeteredDependencies<'_>,
     target_kind: u8,
     target_index: u32,
 ) -> Option<u32> {
@@ -998,23 +942,22 @@ fn metered_animation_target_width(
             Some(4)
         }
         ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS => {
-            if dependencies.deformation_mesh_instances.is_none()
-                || dependencies.logical_morphs.is_none()
-                || target_index
-                    >= usize::try_from(dependencies.deformation_mesh_instance_count).ok()?
-            {
-                return None;
-            }
+            dependencies.deformation.mesh_instances.get(target_index)?;
             let logical_mesh = usize::try_from(
                 dependencies
-                    .geometry_mesh_instance_projections
+                    .geometry
+                    .mesh_instances
                     .get(target_index)?
                     .logical_mesh
                     .0,
             )
             .ok()?;
-            let width = dependencies.logical_morph_projections.get(logical_mesh)?;
-            let width = width.definition_count();
+            dependencies.geometry.logical_meshes.get(logical_mesh)?;
+            let logical = dependencies.deformation.logical_morphs.get(logical_mesh)?;
+            let definitions = logical
+                .definitions
+                .get(&dependencies.deformation.morph_definitions)?;
+            let width = u32::try_from(definitions.len()).ok()?;
             (width != 0).then_some(width)
         }
         _ => None,
@@ -1440,4 +1383,192 @@ fn checked_range(offset: u32, count: u32, len: usize) -> Option<std::ops::Range<
     let count = usize::try_from(count).ok()?;
     let end = start.checked_add(count)?;
     (end <= len).then_some(start..end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canonical_scene::store::production::input::deformation::MorphTargetIdentity;
+    use crate::canonical_scene::store::typed_storage::deformation::{
+        StoredLogicalMorph, StoredMeshInstanceDeformation, StoredMorphDefinition,
+    };
+    use crate::canonical_scene::store::typed_storage::{
+        StoredLogicalMesh, StoredLogicalMeshIndex, StoredMeshInstance, StoredNode, StoredNodeIndex,
+        TableRange,
+    };
+    use crate::math::{Mat4, Vec3};
+
+    fn typed_targets() -> (NodeStorage, GeometryStorage, DeformationStorage) {
+        let node = |transform, children| StoredNode {
+            children,
+            transform,
+            name: None,
+            camera: None,
+            light: None,
+        };
+        let nodes = NodeStorage {
+            transform_scalar_count: 26,
+            nodes: vec![
+                node(StoredTransform::Synthetic, TableRange::new(0, 2)),
+                node(
+                    StoredTransform::Trs {
+                        translation: Vec3::ZERO,
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(1.0, 1.0, 1.0),
+                    },
+                    TableRange::new(2, 0),
+                ),
+                node(
+                    StoredTransform::Matrix(Mat4::IDENTITY),
+                    TableRange::new(2, 0),
+                ),
+            ],
+            children: vec![StoredNodeIndex(1), StoredNodeIndex(2)],
+            names: Vec::new(),
+        };
+        let geometry = GeometryStorage {
+            logical_meshes: vec![
+                StoredLogicalMesh {
+                    primitives: TableRange::new(0, 0),
+                    name: None,
+                },
+                StoredLogicalMesh {
+                    primitives: TableRange::new(0, 0),
+                    name: None,
+                },
+            ],
+            primitives: Vec::new(),
+            attributes: Vec::new(),
+            mesh_instances: vec![
+                StoredMeshInstance {
+                    owner_node: StoredNodeIndex(1),
+                    logical_mesh: StoredLogicalMeshIndex(1),
+                },
+                StoredMeshInstance {
+                    owner_node: StoredNodeIndex(2),
+                    logical_mesh: StoredLogicalMeshIndex(0),
+                },
+            ],
+            names: Vec::new(),
+            f32_values: Vec::new(),
+            f64_values: Vec::new(),
+            u32_values: Vec::new(),
+            i32_values: Vec::new(),
+        };
+        let instance = StoredMeshInstanceDeformation {
+            skin: None,
+            morph_weights: None,
+        };
+        let deformation = DeformationStorage {
+            skins: Vec::new(),
+            logical_morphs: vec![
+                StoredLogicalMorph {
+                    definitions: TableRange::new(0, 2),
+                    default_weights: TableRange::new(0, 2),
+                },
+                StoredLogicalMorph {
+                    definitions: TableRange::new(2, 0),
+                    default_weights: TableRange::new(2, 0),
+                },
+            ],
+            morph_definitions: vec![
+                StoredMorphDefinition {
+                    logical_mesh: StoredLogicalMeshIndex(0),
+                    target_ordinal: 0,
+                    stable_identity: MorphTargetIdentity::new(1),
+                    name: None,
+                },
+                StoredMorphDefinition {
+                    logical_mesh: StoredLogicalMeshIndex(0),
+                    target_ordinal: 1,
+                    stable_identity: MorphTargetIdentity::new(0),
+                    name: None,
+                },
+            ],
+            primitives: Vec::new(),
+            morph_targets: Vec::new(),
+            morph_deltas: Vec::new(),
+            mesh_instances: vec![instance, instance],
+            joints: Vec::new(),
+            inverse_bind_matrices: Vec::new(),
+            names: Vec::new(),
+            influence_vertex_offsets: Vec::new(),
+            influence_joints: Vec::new(),
+            influence_weights: Vec::new(),
+            influence_source_orders: Vec::new(),
+            morph_weights: vec![0.0, 0.0],
+            morph_values: Vec::new(),
+            morph_sparse_indices: Vec::new(),
+        };
+        (nodes, geometry, deformation)
+    }
+
+    #[test]
+    fn target_kinds_and_indices_resolve_actual_typed_rows_without_allocation() {
+        let (nodes, geometry, deformation) = typed_targets();
+        let dependencies = AnimationMeteredDependencies::new(&nodes, 3, &geometry, &deformation);
+        assert!(metered_animation_dependencies_are_coherent(dependencies));
+        let allocations = allocation_counter::measure(|| {
+            for (kind, index, expected) in [
+                (ANIMATION_TARGET_NODE_TRANSLATION, 1, Some(3)),
+                (ANIMATION_TARGET_NODE_ROTATION, 1, Some(4)),
+                (ANIMATION_TARGET_NODE_SCALE, 1, Some(3)),
+                (ANIMATION_TARGET_NODE_TRANSLATION, 0, None),
+                (ANIMATION_TARGET_NODE_TRANSLATION, 2, None),
+                (ANIMATION_TARGET_NODE_TRANSLATION, 3, None),
+                (ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS, 0, None),
+                (ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS, 1, Some(2)),
+                (ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS, 2, None),
+                (u8::MAX, 1, None),
+            ] {
+                assert_eq!(
+                    metered_animation_target_width(dependencies, kind, index),
+                    expected
+                );
+            }
+        });
+        assert_eq!(allocations.count_total, 0);
+        assert_eq!(allocations.bytes_total, 0);
+    }
+
+    #[test]
+    fn morph_target_resolution_requires_actual_instance_mesh_and_definition_range() {
+        let (nodes, mut geometry, mut deformation) = typed_targets();
+        deformation.mesh_instances.pop();
+        let dependencies = AnimationMeteredDependencies::new(&nodes, 3, &geometry, &deformation);
+        assert!(!metered_animation_dependencies_are_coherent(dependencies));
+        assert_eq!(
+            metered_animation_target_width(
+                dependencies,
+                ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS,
+                1
+            ),
+            None
+        );
+        deformation
+            .mesh_instances
+            .push(StoredMeshInstanceDeformation {
+                skin: None,
+                morph_weights: None,
+            });
+        geometry.mesh_instances[1].logical_mesh = StoredLogicalMeshIndex(2);
+        assert_eq!(
+            metered_animation_target_width(
+                AnimationMeteredDependencies::new(&nodes, 3, &geometry, &deformation),
+                ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS,
+                1
+            ),
+            None
+        );
+        geometry.mesh_instances[1].logical_mesh = StoredLogicalMeshIndex(0);
+        deformation.logical_morphs[0].definitions = TableRange::new(usize::MAX, 2);
+        assert_eq!(
+            metered_animation_target_width(
+                AnimationMeteredDependencies::new(&nodes, 3, &geometry, &deformation),
+                ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS,
+                1
+            ),
+            None
+        );
+    }
 }

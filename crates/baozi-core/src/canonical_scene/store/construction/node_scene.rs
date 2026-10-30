@@ -55,7 +55,6 @@ impl ConstructionBrand {
 
 mod animation;
 mod appearance;
-mod deformation;
 pub(crate) mod edit;
 mod geometry;
 mod materialization;
@@ -158,6 +157,7 @@ struct NodeSceneBuildFaults {
     alter_first_authored_transform: bool,
     alter_first_geometry_f32: bool,
     spatial: Option<test_support::SpatialBuildFault>,
+    deformation: Option<test_support::DeformationBuildFault>,
     profile: profile::ProfileBuildFault,
     planning: Option<materialization::NodeScenePlanningFault>,
     panic_central_validator: bool,
@@ -170,6 +170,7 @@ impl NodeSceneBuildFaults {
             alter_first_authored_transform: false,
             alter_first_geometry_f32: false,
             spatial: None,
+            deformation: None,
             profile: profile::ProfileBuildFault::none(),
             planning: None,
             panic_central_validator: false,
@@ -200,6 +201,13 @@ impl NodeSceneBuildFaults {
     const fn altered_spatial(fault: test_support::SpatialBuildFault) -> Self {
         Self {
             spatial: Some(fault),
+            ..Self::none()
+        }
+    }
+
+    const fn altered_deformation(fault: test_support::DeformationBuildFault) -> Self {
+        Self {
+            deformation: Some(fault),
             ..Self::none()
         }
     }
@@ -573,8 +581,14 @@ impl SceneStorage {
     ) -> &super::super::typed_storage::GeometryStorage {
         self.tables.geometry.as_ref()
     }
-    pub(in crate::canonical_scene::store) const fn read_proof(&self) -> NodeSceneValidationProof {
-        self.proof
+
+    pub(in crate::canonical_scene::store) fn read_deformation(
+        &self,
+    ) -> &super::super::typed_storage::deformation::DeformationStorage {
+        self.tables.deformation.as_ref()
+    }
+    pub(in crate::canonical_scene::store) const fn read_proof(&self) -> &NodeSceneValidationProof {
+        &self.proof
     }
 
     pub(in crate::canonical_scene::store) const fn read_canonical(

@@ -47,7 +47,6 @@ use crate::canonical_scene::store::production::{
 };
 use crate::canonical_scene::store::schema::animation::AnimationDirectorySchema;
 use crate::canonical_scene::store::schema::appearance::AppearanceDirectorySchema;
-use crate::canonical_scene::store::schema::deformation::DeformationDirectorySchema;
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
     NodeSceneOutcomeEvidenceSchema, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
@@ -61,11 +60,8 @@ use crate::scene_space::SceneSpace;
 #[cfg(test)]
 use super::super::SceneConstructionError;
 use super::super::{SceneConstructionStartError, SceneStoreKeys};
-use super::animation::{AnimationMaterializationPlans, AnimationTargetTableRefs, retain_animation};
+use super::animation::{AnimationMaterializationPlans, retain_animation};
 use super::appearance::{AppearanceMaterializationPlans, retain_appearance};
-use super::deformation::{
-    DeformationDependencyTableRefs, DeformationMaterializationPlans, retain_deformation,
-};
 use super::geometry::{retain_geometry, retain_nodes};
 use super::profile::{ProfileMaterializationPlans, retain_profile};
 use super::scratch::{
@@ -85,6 +81,9 @@ use super::{
 };
 #[cfg(test)]
 use super::{NodeSceneDraftBuild, PendingNodeSceneDraft, PendingNodeSceneFailure};
+use crate::canonical_scene::store::typed_storage::deformation::{
+    build::DeformationStoragePlan, validation::DeformationMeteredCounts,
+};
 use crate::canonical_scene::store::typed_storage::spatial::build::SpatialStoragePlan;
 
 use crate::canonical_scene::store::validation::validate_node_scene_canonical_graph_metered;
@@ -1014,7 +1013,6 @@ where
 #[derive(Clone, Copy)]
 struct SceneDomainDirectoryRefs {
     appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
-    deformation: CanonicalBlockRef<DeformationDirectorySchema>,
     animation: CanonicalBlockRef<AnimationDirectorySchema>,
 }
 
@@ -1097,7 +1095,6 @@ pub(in crate::canonical_scene::store) fn maximum_node_scene_structural_work(
 pub(in crate::canonical_scene::store) struct NodeSceneMaterializedRefs {
     pub(in crate::canonical_scene::store) directory: CanonicalBlockRef<SceneDirectorySchema>,
     pub(in crate::canonical_scene::store) appearance: super::appearance::RetainedAppearanceRefs,
-    pub(in crate::canonical_scene::store) deformation: super::deformation::RetainedDeformationRefs,
     pub(in crate::canonical_scene::store) animation: super::animation::RetainedAnimationRefs,
 }
 
@@ -1115,7 +1112,7 @@ struct NodeSceneMaterializationPlans {
     spatial: SpatialStoragePlan,
     appearance: AppearanceMaterializationPlans,
     geometry: GeometryStoragePlan,
-    deformation: DeformationMaterializationPlans,
+    deformation: DeformationStoragePlan,
     animation: AnimationMaterializationPlans,
     profile: ProfileMaterializationPlans,
     directory: RecordPlan,
@@ -1137,9 +1134,12 @@ impl<'input, R> NodeSceneSealedPlan<'input, R> {
         let materialization = NodeSceneMaterializationPlans::new(&batches)?;
         let validation_scratch = NodeSceneValidationScratchPlan::try_new(
             materialization.evidence_counts(),
+            DeformationMeteredCounts::try_new(
+                materialization.deformation.row_counts(),
+                materialization.deformation.payload_counts(),
+            )
+            .ok_or(StorePlanError::SizeOverflow)?,
             batches.deformation.maximum_uniqueness_capacity(),
-            materialization.deformation.influence_row_offset_count(),
-            materialization.deformation.influence_count(),
             materialization.animation.metered_counts(),
             materialization.profile.metered_counts(),
             materialization.profile.maximum_provenance_depth(),
@@ -1194,7 +1194,6 @@ impl NodeSceneMaterializationPlans {
             self.spatial.validation_work()?,
             self.appearance.validation_work_units()?,
             self.geometry.validation_work()?,
-            self.deformation.validation_work_units()?,
             self.animation.validation_work_units()?,
             self.profile.validation_work_units()?,
             record_validation_work(self.directory)?,
@@ -1225,12 +1224,12 @@ impl NodeSceneMaterializationPlans {
             primitive_count: self.geometry.primitive_count(),
             attribute_count: self.geometry.attribute_count(),
             mesh_instance_count: self.geometry.mesh_instance_count(),
-            skin_count: self.deformation.skin_count(),
-            logical_morph_count: self.deformation.logical_morph_count(),
-            morph_definition_count: self.deformation.morph_definition_count(),
-            primitive_deformation_count: self.deformation.primitive_count(),
-            morph_target_count: self.deformation.morph_target_count(),
-            morph_delta_count: self.deformation.morph_delta_count(),
+            skin_count: self.deformation.row_counts()[0] as u32,
+            logical_morph_count: self.deformation.row_counts()[1] as u32,
+            morph_definition_count: self.deformation.row_counts()[2] as u32,
+            primitive_deformation_count: self.deformation.row_counts()[3] as u32,
+            morph_target_count: self.deformation.row_counts()[4] as u32,
+            morph_delta_count: self.deformation.row_counts()[5] as u32,
             animation_clip_count: self.animation.clip_count(),
             animation_channel_count: self.animation.channel_count(),
             payload_block_count: self.payload_block_count,
@@ -1282,21 +1281,19 @@ impl NodeSceneMaterializationPlans {
         let spatial = SpatialStoragePlan::new(spatial_batch)?;
         let appearance = AppearanceMaterializationPlans::new(appearance_batch)?;
         let geometry = GeometryStoragePlan::new(geometry_batch)?;
-        let deformation = DeformationMaterializationPlans::new(deformation_batch)?;
+        let deformation = DeformationStoragePlan::new(deformation_batch)?;
         let animation = AnimationMaterializationPlans::new(animation_batch)?;
         let profile = ProfileMaterializationPlans::new(profile_batch)?;
         let directory = RecordPlan::new(1, SCENE_DIRECTORY_FIELD_COUNT)?;
         let canonical_block_count_usize = 1_usize
             .checked_add(appearance.canonical_block_count())
-            .and_then(|count| count.checked_add(deformation.canonical_block_count()))
             .and_then(|count| count.checked_add(animation.canonical_block_count()))
             .ok_or(StorePlanError::SizeOverflow)?;
         let canonical_block_count =
             u32::try_from(canonical_block_count_usize).map_err(|_| StorePlanError::SizeOverflow)?;
         let domain_payload_block_count = appearance
             .payload_block_count()
-            .checked_add(deformation.payload_block_count())
-            .and_then(|count| count.checked_add(animation.payload_block_count()))
+            .checked_add(animation.payload_block_count())
             .ok_or(StorePlanError::SizeOverflow)?;
         let payload_block_count = domain_payload_block_count;
         let shareable_leaf_block_count = domain_payload_block_count;
@@ -1468,22 +1465,37 @@ where
         #[cfg(test)]
         &mut faults,
     ));
-    let deformation = materialize!(retain_deformation(
-        &mut lane,
-        &plans.deformation,
-        &batches.deformation,
-        &batches.nodes,
-        materialize!(DeformationDependencyTableRefs::new(
-            nodes.as_ref(),
-            geometry.as_ref()
-        )),
-        failure,
+    let deformation_capacities = materialize!(
+        plans
+            .deformation
+            .capacities()
+            .map_err(StoreRuntimeError::Plan)
+    );
+    let deformation_work = materialize!(plans.deformation.work().map_err(StoreRuntimeError::Plan));
+    let deformation = materialize!(lane.try_retain_storage(
+        deformation_capacities,
+        deformation_work,
+        plans.deformation.name_bytes() as u64,
+        |control| {
+            #[allow(
+                unused_mut,
+                reason = "tests corrupt actual values before central validation"
+            )]
+            let mut storage = plans
+                .deformation
+                .build(&batches.deformation, &batches.nodes, control)
+                .map_err(super::geometry::map_build)?;
+            #[cfg(test)]
+            if let Some(fault) = faults.deformation {
+                fault.corrupt(&mut storage);
+            }
+            Ok(storage)
+        },
     ));
     let animation = materialize!(retain_animation(
         &mut lane,
         &plans.animation,
         &batches.animations,
-        AnimationTargetTableRefs::new(plans.node_count, deformation.mesh_instances()),
         failure,
     ));
     let profile = materialize!(retain_profile(
@@ -1498,7 +1510,6 @@ where
         plans.directory,
         SceneDomainDirectoryRefs {
             appearance: appearance.directory(),
-            deformation: deformation.directory(),
             animation: animation.directory(),
         },
         plans,
@@ -1509,13 +1520,13 @@ where
             nodes,
             spatial,
             geometry,
+            deformation,
             profile,
         },
         draft,
         refs: NodeSceneMaterializedRefs {
             directory,
             appearance,
-            deformation,
             animation,
         },
         evidence_counts: plans.evidence_counts(),
@@ -1776,7 +1787,6 @@ where
             row.write_scalar(plans.geometry.attribute_count())?;
             row.write_scalar(plans.geometry.mesh_instance_count())?;
             row.write_record_ref(domains.appearance.into_store())?;
-            row.write_record_ref(domains.deformation.into_store())?;
             row.write_record_ref(domains.animation.into_store())
         })
     })

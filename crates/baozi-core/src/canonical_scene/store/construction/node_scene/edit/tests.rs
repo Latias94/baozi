@@ -523,6 +523,10 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         ),
         "a transform edit must share the actual spatial owner",
     );
+    assert!(
+        std::ptr::eq(source.read_deformation(), output.scene.read_deformation()),
+        "a transform edit must share the complete deformation owner and its payloads",
+    );
     let first_geometry_scalar = source.read_geometry().f32_values.first().copied();
     let source_central_validation = source.proof.central_validation_plan();
     let output_central_validation = output.scene.proof.central_validation_plan();
@@ -637,7 +641,7 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
 }
 
 #[test]
-fn host_unwind_releases_edited_tables_and_preserves_shared_source_geometry_and_spatial() {
+fn host_unwind_releases_edited_tables_and_preserves_shared_source_domains() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
@@ -673,6 +677,10 @@ fn host_unwind_releases_edited_tables_and_preserves_shared_source_geometry_and_s
         assert!(std::ptr::eq(
             original.scene.tables.spatial.as_ref(),
             edited.scene.tables.spatial.as_ref(),
+        ));
+        assert!(std::ptr::eq(
+            original.scene.read_deformation(),
+            edited.scene.read_deformation(),
         ));
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let _edited = edited;

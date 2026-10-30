@@ -6,19 +6,14 @@
 use std::error::Error;
 use std::fmt;
 
-use baozi_operation::{CapacityPlan, CapacityPlanError};
+use baozi_operation::{CapacityPlan, CapacityPlanError, GrowableCapacityPlan};
 use thiserror::Error;
 
 use crate::deform::{MorphDeltaSemantic, SkinMatrixSpace, SkinMatrixSpaces};
 use crate::entity::{EntityNameError, validate_entity_name_str};
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
-use super::super::super::schema::deformation::{
-    DEFORMATION_DIRECTORY_FIXED_BYTES, DEFORMATION_LOGICAL_MORPH_FIXED_BYTES,
-    DEFORMATION_MESH_INSTANCE_FIXED_BYTES, DEFORMATION_MORPH_DEFINITION_FIXED_BYTES,
-    DEFORMATION_MORPH_DELTA_FIXED_BYTES, DEFORMATION_MORPH_TARGET_FIXED_BYTES,
-    DEFORMATION_PRIMITIVE_FIXED_BYTES, DEFORMATION_SKIN_FIXED_BYTES,
-};
+use super::super::super::typed_storage::deformation::build::DeformationStoragePlan;
 use super::super::control::CanonicalAuthoringControl;
 use super::super::input::Presence;
 use super::super::input::deformation::{
@@ -31,10 +26,6 @@ use super::super::input::geometry::AuthoringRange;
 use super::ValidatedNodeBatch;
 use super::geometry::ValidatedGeometryBatch;
 
-const LOGICAL_U8_BYTES: u64 = 1;
-const LOGICAL_U32_BYTES: u64 = 4;
-const LOGICAL_F32_BYTES: u64 = 4;
-const LOGICAL_REFERENCE_BYTES: u64 = 4;
 const MORPH_DELTA_LANES: u32 = 3;
 const INVERSE_BIND_SCALARS: u32 = 16;
 const INVERSE_BIND_SCALAR_COUNT: usize = 16;
@@ -355,12 +346,6 @@ where
     Control(#[source] E),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) enum DeformationMorphPayloadKind {
-    Dense,
-    Sparse,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct PaletteJointLocation {
     primitive: u32,
@@ -370,19 +355,12 @@ struct PaletteJointLocation {
 
 #[derive(Debug, Clone, Copy)]
 struct ValidatedSkinPlan {
-    name_byte_offset: u32,
-    name_byte_count: u32,
-    joint_offset: u32,
     joint_count: u32,
-    inverse_bind_scalar_offset: u32,
-    correction_matrix_scalar_offset: u32,
-    correction_matrix_scalar_count: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ValidatedLogicalMorphPlan {
     definitions: AuthoringRange,
-    default_weight_offset: u32,
     target_count: u32,
     maximum_palette_joint: Option<PaletteJointLocation>,
 }
@@ -391,16 +369,10 @@ struct ValidatedLogicalMorphPlan {
 struct ValidatedMorphTargetDefinitionPlan {
     logical_mesh: u32,
     target_ordinal: u32,
-    name_byte_offset: u32,
-    name_byte_count: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ValidatedPrimitiveDeformationPlan {
-    influence_row_offset_offset: u32,
-    influence_row_offset_count: u32,
-    influence_offset: u32,
-    influence_count: u32,
     morph_targets: AuthoringRange,
 }
 
@@ -414,59 +386,21 @@ struct ValidatedMorphTargetPlan {
 #[derive(Debug, Clone, Copy)]
 struct ValidatedMorphDeltaPlan {
     semantic: MorphDeltaSemantic,
-    payload_kind: DeformationMorphPayloadKind,
-    logical_count: u32,
-    explicit_count: u32,
-    value_offset: u32,
-    value_count: u32,
-    sparse_index_offset: u32,
-    sparse_index_count: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ValidatedMeshInstanceDeformationPlan {
     logical_mesh: u32,
     skin: Option<SkinLocalId>,
-    morph_weight_offset: u32,
-    morph_weight_count: u32,
 }
 
-pub(in crate::canonical_scene::store) struct ValidatedSkin<'view, 'input> {
+pub(in crate::canonical_scene::store) struct ValidatedSkin<'input> {
     input: SkinAuthoring<'input>,
-    plan: &'view ValidatedSkinPlan,
 }
 
-impl<'input> ValidatedSkin<'_, 'input> {
+impl<'input> ValidatedSkin<'input> {
     pub(in crate::canonical_scene::store) const fn authored(&self) -> SkinAuthoring<'input> {
         self.input
-    }
-
-    pub(in crate::canonical_scene::store) const fn name_byte_offset(&self) -> u32 {
-        self.plan.name_byte_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn name_byte_count(&self) -> u32 {
-        self.plan.name_byte_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn joint_offset(&self) -> u32 {
-        self.plan.joint_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn joint_count(&self) -> u32 {
-        self.plan.joint_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn inverse_bind_scalar_offset(&self) -> u32 {
-        self.plan.inverse_bind_scalar_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn correction_matrix_scalar_offset(&self) -> u32 {
-        self.plan.correction_matrix_scalar_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn correction_matrix_scalar_count(&self) -> u32 {
-        self.plan.correction_matrix_scalar_count
     }
 }
 
@@ -480,10 +414,6 @@ impl<'input> ValidatedLogicalMorph<'_, 'input> {
         &self,
     ) -> LogicalMorphAuthoring<'input> {
         self.input
-    }
-
-    pub(in crate::canonical_scene::store) const fn default_weight_offset(&self) -> u32 {
-        self.plan.default_weight_offset
     }
 
     pub(in crate::canonical_scene::store) const fn definitions(&self) -> AuthoringRange {
@@ -514,19 +444,10 @@ impl<'input> ValidatedMorphTargetDefinition<'_, 'input> {
     pub(in crate::canonical_scene::store) const fn target_ordinal(&self) -> u32 {
         self.plan.target_ordinal
     }
-
-    pub(in crate::canonical_scene::store) const fn name_byte_offset(&self) -> u32 {
-        self.plan.name_byte_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn name_byte_count(&self) -> u32 {
-        self.plan.name_byte_count
-    }
 }
 
 pub(in crate::canonical_scene::store) struct ValidatedPrimitiveDeformation<'view, 'input> {
     input: PrimitiveDeformationAuthoring<'input>,
-    plan: &'view ValidatedPrimitiveDeformationPlan,
     targets: &'view [ValidatedMorphTargetPlan],
     deltas: &'view [ValidatedMorphDeltaPlan],
 }
@@ -536,22 +457,6 @@ impl<'view, 'input> ValidatedPrimitiveDeformation<'view, 'input> {
         &self,
     ) -> PrimitiveDeformationAuthoring<'input> {
         self.input
-    }
-
-    pub(in crate::canonical_scene::store) const fn influence_row_offset_offset(&self) -> u32 {
-        self.plan.influence_row_offset_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn influence_row_offset_count(&self) -> u32 {
-        self.plan.influence_row_offset_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn influence_offset(&self) -> u32 {
-        self.plan.influence_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn influence_count(&self) -> u32 {
-        self.plan.influence_count
     }
 
     pub(in crate::canonical_scene::store) const fn morph_target_count(&self) -> usize {
@@ -609,10 +514,6 @@ pub(in crate::canonical_scene::store) struct ValidatedMorphDelta<'view, 'input> 
 }
 
 impl<'input> ValidatedMorphDelta<'_, 'input> {
-    pub(in crate::canonical_scene::store) const fn authored(&self) -> MorphDeltaAuthoring<'input> {
-        self.input
-    }
-
     pub(in crate::canonical_scene::store) const fn authored_payload(
         &self,
     ) -> MorphDeltaPayloadAuthoring<'input> {
@@ -621,36 +522,6 @@ impl<'input> ValidatedMorphDelta<'_, 'input> {
 
     pub(in crate::canonical_scene::store) const fn semantic(&self) -> MorphDeltaSemantic {
         self.plan.semantic
-    }
-
-    pub(in crate::canonical_scene::store) const fn payload_kind(
-        &self,
-    ) -> DeformationMorphPayloadKind {
-        self.plan.payload_kind
-    }
-
-    pub(in crate::canonical_scene::store) const fn logical_count(&self) -> u32 {
-        self.plan.logical_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn explicit_count(&self) -> u32 {
-        self.plan.explicit_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn value_offset(&self) -> u32 {
-        self.plan.value_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn value_count(&self) -> u32 {
-        self.plan.value_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn sparse_index_offset(&self) -> u32 {
-        self.plan.sparse_index_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn sparse_index_count(&self) -> u32 {
-        self.plan.sparse_index_count
     }
 }
 
@@ -672,14 +543,6 @@ impl<'input> ValidatedMeshInstanceDeformation<'_, 'input> {
 
     pub(in crate::canonical_scene::store) const fn skin(&self) -> Option<SkinLocalId> {
         self.plan.skin
-    }
-
-    pub(in crate::canonical_scene::store) const fn morph_weight_offset(&self) -> u32 {
-        self.plan.morph_weight_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn morph_weight_count(&self) -> u32 {
-        self.plan.morph_weight_count
     }
 }
 
@@ -710,7 +573,6 @@ struct DeformationValidationStorage<R> {
     instance_morph_weight_count: u32,
     f32_scalar_count: u64,
     u32_scalar_count: u64,
-    payload_block_count: u32,
     entity_count: u64,
     edge_count: u64,
     reference_count: u64,
@@ -826,10 +688,6 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
         self.compiled.u32_scalar_count
     }
 
-    pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
-        self.compiled.payload_block_count
-    }
-
     pub(in crate::canonical_scene::store) const fn entity_count(&self) -> u64 {
         self.compiled.entity_count
     }
@@ -865,10 +723,9 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
     pub(in crate::canonical_scene::store) fn skin(
         &self,
         index: usize,
-    ) -> Option<ValidatedSkin<'_, 'input>> {
+    ) -> Option<ValidatedSkin<'input>> {
         Some(ValidatedSkin {
             input: *self.input.skins().get(index)?,
-            plan: self.compiled.skin_plans.get(index)?,
         })
     }
 
@@ -892,17 +749,6 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
         })
     }
 
-    pub(in crate::canonical_scene::store) fn morph_definitions(
-        &self,
-    ) -> impl ExactSizeIterator<Item = ValidatedMorphTargetDefinition<'_, 'input>> + '_ {
-        self.input
-            .morph_target_definitions()
-            .iter()
-            .copied()
-            .zip(&self.compiled.morph_definition_plans)
-            .map(|(input, plan)| ValidatedMorphTargetDefinition { input, plan })
-    }
-
     pub(in crate::canonical_scene::store) fn primitive(
         &self,
         index: usize,
@@ -912,7 +758,6 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
             checked_range(plan.morph_targets, self.compiled.morph_target_plans.len()).ok()?;
         Some(ValidatedPrimitiveDeformation {
             input: *self.input.primitives().get(index)?,
-            plan,
             targets: self.compiled.morph_target_plans.get(target_range)?,
             deltas: &self.compiled.morph_delta_plans,
         })
@@ -1009,53 +854,12 @@ impl<R> fmt::Debug for ValidatedDeformationBatch<'_, R> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct DeformationScratchShape {
-    morph_definition_count: usize,
-    morph_target_count: usize,
-    morph_delta_count: usize,
-    maximum_uniqueness_count: usize,
-    joint_node_count: u64,
-    inverse_bind_scalar_count: u64,
-    skin_correction_scalar_count: u64,
-    skin_name_byte_count: u64,
-    influence_row_offset_count: u64,
-    influence_count: u64,
-    morph_default_weight_count: u64,
-    morph_name_byte_count: u64,
-    morph_value_count: u64,
-    morph_sparse_index_count: u64,
-    instance_morph_weight_count: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct DeformationShapeScratchEnvelope {
-    peak_bytes: u64,
-    retained_bytes: u64,
-}
-
-impl DeformationShapeScratchEnvelope {
-    pub(in crate::canonical_scene::store) const fn peak_bytes(self) -> u64 {
-        self.peak_bytes
-    }
-
-    pub(in crate::canonical_scene::store) const fn retained_bytes(self) -> u64 {
-        self.retained_bytes
-    }
-}
-
-pub(in crate::canonical_scene::store) fn deformation_shape_scratch_envelope(
-    input: DeformationAuthoringBatch<'_>,
-) -> Result<DeformationShapeScratchEnvelope, DeformationAuthoringSemanticError> {
-    let shape = deformation_scratch_shape(input)?;
-    let plans = deformation_capacity_plans(input, shape)?;
-    deformation_shape_scratch_envelope_from_plans(plans)
-}
-
-fn deformation_shape_scratch_envelope_from_plans(
+/// Initial scratch is derived only from top-level lengths. Nested descriptors and
+/// uniqueness scratch grow after the owning semantic action has been admitted.
+fn deformation_scratch_envelope(
     plans: DeformationCapacityPlans,
-) -> Result<DeformationShapeScratchEnvelope, DeformationAuthoringSemanticError> {
-    let retained_bytes = checked_sum_bytes(
+) -> Result<u64, DeformationAuthoringSemanticError> {
+    checked_sum_bytes(
         [
             scratch_envelope(plans.skins, "validated skin plans")?,
             scratch_envelope(plans.logical_morphs, "validated logical morph plans")?,
@@ -1064,21 +868,10 @@ fn deformation_shape_scratch_envelope_from_plans(
             scratch_envelope(plans.morph_targets, "validated morph target plans")?,
             scratch_envelope(plans.morph_deltas, "validated morph delta plans")?,
             scratch_envelope(plans.mesh_instances, "validated mesh instance plans")?,
+            scratch_envelope(plans.uniqueness, "deformation uniqueness scratch")?,
         ],
-        "retained deformation shape scratch envelope",
-    )?;
-    let peak_bytes = retained_bytes
-        .checked_add(scratch_envelope(
-            plans.uniqueness,
-            "deformation uniqueness scratch",
-        )?)
-        .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-            dimension: "deformation shape scratch envelope",
-        })?;
-    Ok(DeformationShapeScratchEnvelope {
-        peak_bytes,
-        retained_bytes,
-    })
+        "initial deformation scratch envelope",
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1102,6 +895,8 @@ struct DeformationValidationScratch<R> {
     morph_delta_plans: Vec<ValidatedMorphDeltaPlan>,
     mesh_instance_plans: Vec<ValidatedMeshInstanceDeformationPlan>,
     uniqueness: Vec<u8>,
+    scratch_bytes: u64,
+    maximum_uniqueness_capacity: usize,
     // Every allocation above must drop before its accounting token.
     reservation: R,
 }
@@ -1128,6 +923,8 @@ struct DeformationValidationContext<'control, C: CanonicalAuthoringControl> {
     f32_scalars: u64,
     u32_scalars: u64,
     canonical_bytes: u64,
+    storage_rows: [u64; 7],
+    storage_payloads: [u64; 10],
 }
 
 impl<'control, C: CanonicalAuthoringControl> DeformationValidationContext<'control, C> {
@@ -1143,6 +940,8 @@ impl<'control, C: CanonicalAuthoringControl> DeformationValidationContext<'contr
             f32_scalars: 0,
             u32_scalars: 0,
             canonical_bytes: 0,
+            storage_rows: [0; 7],
+            storage_payloads: [0; 10],
         }
     }
 
@@ -1252,32 +1051,14 @@ impl<'control, C: CanonicalAuthoringControl> DeformationValidationContext<'contr
                 dimension: "u32 scalar count",
             },
         )?;
-        let added_bytes = checked_sum_bytes(
-            [
-                checked_bytes(f32_scalars, LOGICAL_F32_BYTES, "canonical f32 payload")?,
-                checked_bytes(u32_scalars, LOGICAL_U32_BYTES, "canonical u32 payload")?,
-            ],
-            "canonical deformation payload",
-        )?;
-        let canonical_bytes = self.canonical_bytes.checked_add(added_bytes).ok_or(
-            DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical deformation logical footprint",
-            },
-        )?;
         enforce_limit::<C::Error>(
             DeformationAuthoringLimit::SemanticCells,
             semantic_cells,
             self.limits.max_payload_cells(),
         )?;
-        enforce_limit::<C::Error>(
-            DeformationAuthoringLimit::CanonicalBytes,
-            canonical_bytes,
-            self.limits.max_canonical_bytes(),
-        )?;
         self.semantic_cells = semantic_cells;
         self.f32_scalars = f32_total;
         self.u32_scalars = u32_total;
-        self.canonical_bytes = canonical_bytes;
         Ok(())
     }
 
@@ -1287,32 +1068,58 @@ impl<'control, C: CanonicalAuthoringControl> DeformationValidationContext<'contr
                 dimension: "semantic cells",
             },
         )?;
-        let canonical_bytes = self.canonical_bytes.checked_add(amount).ok_or(
-            DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical deformation logical footprint",
-            },
-        )?;
         enforce_limit::<C::Error>(
             DeformationAuthoringLimit::SemanticCells,
             semantic_cells,
             self.limits.max_payload_cells(),
         )?;
-        enforce_limit::<C::Error>(
-            DeformationAuthoringLimit::CanonicalBytes,
-            canonical_bytes,
-            self.limits.max_canonical_bytes(),
-        )?;
+        self.add_storage([0; 7], [0, 0, amount, 0, 0, 0, 0, 0, 0, 0])?;
         self.semantic_cells = semantic_cells;
-        self.canonical_bytes = canonical_bytes;
         Ok(())
     }
 
-    fn set_structural_bytes(&mut self, bytes: u64) -> DeformationValidationResult<(), C> {
+    fn add_storage(
+        &mut self,
+        rows: [u64; 7],
+        payloads: [u64; 10],
+    ) -> DeformationValidationResult<(), C> {
+        let mut final_rows = self.storage_rows;
+        let mut final_payloads = self.storage_payloads;
+        for (total, added) in final_rows.iter_mut().zip(rows) {
+            *total = total
+                .checked_add(added)
+                .filter(|count| u32::try_from(*count).is_ok())
+                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "typed deformation row counts",
+                })?;
+        }
+        for (total, added) in final_payloads.iter_mut().zip(payloads) {
+            *total = total.checked_add(added).ok_or(
+                DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "typed deformation payload counts",
+                },
+            )?;
+        }
+        let entities = checked_sum(
+            [final_rows[0], final_rows[2], final_rows[4], final_rows[5]],
+            "deformation entities",
+        )?;
+        enforce_limit::<C::Error>(
+            DeformationAuthoringLimit::Entities,
+            entities,
+            self.limits.max_entities(),
+        )?;
+        let bytes = DeformationStoragePlan::canonical_bytes_for_shape(final_rows, final_payloads)
+            .map_err(|_| DeformationAuthoringSemanticError::AccountingOverflow {
+            dimension: "typed deformation initialized footprint",
+        })?;
         enforce_limit::<C::Error>(
             DeformationAuthoringLimit::CanonicalBytes,
             bytes,
             self.limits.max_canonical_bytes(),
         )?;
+        self.storage_rows = final_rows;
+        self.storage_payloads = final_payloads;
         self.canonical_bytes = bytes;
         Ok(())
     }
@@ -1346,6 +1153,59 @@ impl<'control, C: CanonicalAuthoringControl> DeformationValidationContext<'contr
         self.control
             .resize_scratch(reservation, bytes)
             .map_err(DeformationAuthoringFailure::Control)
+    }
+
+    fn grow_scratch<T>(
+        &mut self,
+        values: &mut Vec<T>,
+        reservation: &mut C::Reservation,
+        scratch_bytes: &mut u64,
+        desired_capacity: usize,
+        resource: &'static str,
+    ) -> DeformationValidationResult<(), C> {
+        if desired_capacity <= values.capacity() {
+            return Ok(());
+        }
+        let plan =
+            GrowableCapacityPlan::for_type::<T>(values.len(), values.capacity(), desired_capacity)
+                .map_err(|cause| DeformationAuthoringSemanticError::ScratchCapacity {
+                    resource,
+                    cause,
+                })?;
+        plan.verify_source(values.len(), values.capacity())
+            .map_err(|cause| DeformationAuthoringSemanticError::ScratchCapacity {
+                resource,
+                cause,
+            })?;
+        let growth = plan
+            .envelope_capacity()
+            .checked_sub(values.capacity())
+            .and_then(|count| count.checked_mul(std::mem::size_of::<T>()))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                dimension: "deformation scratch growth envelope",
+            })?;
+        let envelope = scratch_bytes.checked_add(growth).ok_or(
+            DeformationAuthoringSemanticError::AccountingOverflow {
+                dimension: "deformation scratch growth envelope",
+            },
+        )?;
+        self.resize_scratch(reservation, envelope)?;
+        values
+            .try_reserve_exact(plan.allocator_additional())
+            .map_err(|_| DeformationAuthoringSemanticError::ScratchAllocation { resource })?;
+        let actual_growth = plan
+            .finish(values.len(), values.capacity())
+            .map_err(|cause| DeformationAuthoringSemanticError::ScratchCapacity {
+                resource,
+                cause,
+            })?;
+        *scratch_bytes = scratch_bytes.checked_add(actual_growth).ok_or(
+            DeformationAuthoringSemanticError::AccountingOverflow {
+                dimension: "deformation scratch allocation",
+            },
+        )?;
+        self.resize_scratch(reservation, *scratch_bytes)
     }
 
     fn allocate_scratch<T>(
@@ -1426,29 +1286,20 @@ where
     let primitive_count = collection_count(input.primitives().len(), "primitive deformation")?;
     let mesh_instance_count =
         collection_count(input.mesh_instances().len(), "mesh instance deformation")?;
-    let (structural_bytes, scratch_shape) = deformation_structural_bytes(input, &mut context)?;
-    let morph_target_count = collection_count(scratch_shape.morph_target_count, "morph targets")?;
-    let morph_delta_count = collection_count(scratch_shape.morph_delta_count, "morph deltas")?;
-    let entity_count = checked_sum(
+    context.add_storage(
         [
             u64::from(skin_count),
+            u64::from(logical_morph_count),
             u64::from(morph_definition_count),
-            u64::from(morph_target_count),
-            u64::from(morph_delta_count),
+            u64::from(primitive_count),
+            0,
+            0,
+            u64::from(mesh_instance_count),
         ],
-        "deformation entities",
+        [0; 10],
     )?;
-    enforce_limit::<C::Error>(
-        DeformationAuthoringLimit::Entities,
-        entity_count,
-        limits.max_entities(),
-    )?;
-
-    context.set_structural_bytes(structural_bytes)?;
-
-    let capacity_plans = deformation_capacity_plans(input, scratch_shape)?;
-    let scratch_envelope = deformation_shape_scratch_envelope_from_plans(capacity_plans)?;
-    let reservation = context.reserve_scratch(scratch_envelope.peak_bytes())?;
+    let capacity_plans = deformation_capacity_plans(input)?;
+    let reservation = context.reserve_scratch(deformation_scratch_envelope(capacity_plans)?)?;
     let (skin_plans, skin_bytes) =
         context.allocate_scratch(capacity_plans.skins, "validated skin plans")?;
     let (logical_morph_plans, logical_morph_bytes) = context.allocate_scratch(
@@ -1499,6 +1350,8 @@ where
         morph_delta_plans,
         mesh_instance_plans,
         uniqueness,
+        scratch_bytes: scratch_actual,
+        maximum_uniqueness_capacity: 0,
         reservation,
     };
     context.resize_scratch(&mut storage.reservation, scratch_actual)?;
@@ -1553,56 +1406,16 @@ where
         &mut context,
     )?;
 
-    require_compiled_count(
-        "skin joint nodes",
-        joint_node_count,
-        scratch_shape.joint_node_count,
-    )?;
-    require_compiled_count(
-        "inverse-bind scalars",
-        inverse_bind_scalar_count,
-        scratch_shape.inverse_bind_scalar_count,
-    )?;
-    require_compiled_count(
-        "skin correction scalars",
-        skin_correction_scalar_count,
-        scratch_shape.skin_correction_scalar_count,
-    )?;
-    require_compiled_count(
-        "skin name bytes",
-        skin_name_byte_count,
-        scratch_shape.skin_name_byte_count,
-    )?;
-    require_compiled_count(
-        "influence row offsets",
-        influence_row_offset_count,
-        scratch_shape.influence_row_offset_count,
-    )?;
-    require_compiled_count("influences", influence_count, scratch_shape.influence_count)?;
-    require_compiled_count(
-        "logical morph default weights",
-        morph_default_weight_count,
-        scratch_shape.morph_default_weight_count,
-    )?;
-    require_compiled_count(
-        "morph target name bytes",
-        morph_name_byte_count,
-        scratch_shape.morph_name_byte_count,
-    )?;
-    require_compiled_count(
-        "morph delta values",
-        morph_value_count,
-        scratch_shape.morph_value_count,
-    )?;
-    require_compiled_count(
-        "morph sparse indices",
-        morph_sparse_index_count,
-        scratch_shape.morph_sparse_index_count,
-    )?;
-    require_compiled_count(
-        "instance morph weights",
-        instance_morph_weight_count,
-        scratch_shape.instance_morph_weight_count,
+    let morph_target_count = collection_count(storage.morph_target_plans.len(), "morph targets")?;
+    let morph_delta_count = collection_count(storage.morph_delta_plans.len(), "morph deltas")?;
+    let entity_count = checked_sum(
+        [
+            u64::from(skin_count),
+            u64::from(morph_definition_count),
+            u64::from(morph_target_count),
+            u64::from(morph_delta_count),
+        ],
+        "deformation entities",
     )?;
     require_compiled_table_count("skin plans", storage.skin_plans.len(), input.skins().len())?;
     require_compiled_table_count(
@@ -1621,43 +1434,51 @@ where
         input.primitives().len(),
     )?;
     require_compiled_table_count(
-        "morph target plans",
-        storage.morph_target_plans.len(),
-        scratch_shape.morph_target_count,
-    )?;
-    require_compiled_table_count(
-        "morph delta plans",
-        storage.morph_delta_plans.len(),
-        scratch_shape.morph_delta_count,
-    )?;
-    require_compiled_table_count(
         "mesh instance deformation plans",
         storage.mesh_instance_plans.len(),
         input.mesh_instances().len(),
     )?;
 
-    let payload_block_count = [
-        joint_node_count,
-        inverse_bind_scalar_count,
-        skin_correction_scalar_count,
-        skin_name_byte_count,
-        influence_row_offset_count,
-        influence_count,
-        influence_count,
-        influence_count,
-        morph_default_weight_count,
-        morph_name_byte_count,
-        morph_value_count,
-        morph_sparse_index_count,
-        instance_morph_weight_count,
-    ]
-    .into_iter()
-    .try_fold(0_u32, |count, cells| {
-        count.checked_add(u32::from(cells != 0))
-    })
-    .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-        dimension: "deformation payload block count",
-    })?;
+    // Names and morph weights have one shared physical pool each. Corrections are
+    // inline in StoredSkin; their sixteen cells still count as semantic payload.
+    let final_rows = [
+        u64::from(skin_count),
+        u64::from(logical_morph_count),
+        u64::from(morph_definition_count),
+        u64::from(primitive_count),
+        u64::from(morph_target_count),
+        u64::from(morph_delta_count),
+        u64::from(mesh_instance_count),
+    ];
+    let final_payloads = [
+        u64::from(joint_node_count),
+        u64::from(inverse_bind_scalar_count / INVERSE_BIND_SCALARS),
+        u64::from(skin_name_byte_count) + u64::from(morph_name_byte_count),
+        u64::from(influence_row_offset_count),
+        u64::from(influence_count),
+        u64::from(influence_count),
+        u64::from(influence_count),
+        u64::from(morph_default_weight_count) + u64::from(instance_morph_weight_count),
+        u64::from(morph_value_count),
+        u64::from(morph_sparse_index_count),
+    ];
+    if final_rows != context.storage_rows || final_payloads != context.storage_payloads {
+        return Err(DeformationAuthoringSemanticError::AccountingOverflow {
+            dimension: "compiled typed deformation shape",
+        }
+        .into());
+    }
+    let final_bytes = DeformationStoragePlan::for_shape(final_rows, final_payloads)
+        .and_then(DeformationStoragePlan::canonical_bytes)
+        .map_err(|_| DeformationAuthoringSemanticError::AccountingOverflow {
+            dimension: "typed deformation capacity shape",
+        })?;
+    if final_bytes != context.canonical_bytes {
+        return Err(DeformationAuthoringSemanticError::AccountingOverflow {
+            dimension: "typed deformation initialized footprint",
+        }
+        .into());
+    }
 
     let canonical_bytes = context.canonical_bytes;
     let validation_work = context.work;
@@ -1666,6 +1487,15 @@ where
     let semantic_cell_count = context.semantic_cells;
     let f32_scalar_count = context.f32_scalars;
     let u32_scalar_count = context.u32_scalars;
+    let uniqueness_bytes = usize_to_u64(
+        storage.uniqueness.capacity(),
+        "deformation uniqueness allocation",
+    )?;
+    let retained_scratch_bytes = storage.scratch_bytes.checked_sub(uniqueness_bytes).ok_or(
+        DeformationAuthoringSemanticError::AccountingOverflow {
+            dimension: "retained deformation scratch allocation",
+        },
+    )?;
     let DeformationValidationScratch {
         skin_plans,
         logical_morph_plans,
@@ -1675,6 +1505,8 @@ where
         morph_delta_plans,
         mesh_instance_plans,
         uniqueness,
+        scratch_bytes: _,
+        maximum_uniqueness_capacity,
         reservation,
     } = storage;
     drop(uniqueness);
@@ -1699,7 +1531,6 @@ where
         instance_morph_weight_count,
         f32_scalar_count,
         u32_scalar_count,
-        payload_block_count,
         entity_count,
         edge_count,
         reference_count,
@@ -1707,7 +1538,7 @@ where
         canonical_bytes,
         validation_work,
         scratch_bytes: retained_scratch_bytes,
-        maximum_uniqueness_capacity: scratch_shape.maximum_uniqueness_count,
+        maximum_uniqueness_capacity,
         skin_plans,
         logical_morph_plans,
         morph_definition_plans,
@@ -1725,11 +1556,11 @@ where
     Ok(validated)
 }
 
-fn validate_skins<C, R>(
+fn validate_skins<C>(
     input: DeformationAuthoringBatch<'_>,
     authored_node_count: usize,
     cursors: &mut SkinValidationCursors,
-    storage: &mut DeformationValidationScratch<R>,
+    storage: &mut DeformationValidationScratch<C::Reservation>,
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
@@ -1779,30 +1610,40 @@ where
             Ok::<(), DeformationAuthoringSemanticError>(())
         })??;
         let joint_count = collection_count(skin.joints().len(), "skin joints")?;
-        let joint_offset =
-            advance_cursor(&mut cursors.joint_nodes, joint_count, "skin joint nodes")?;
+        context.add_storage(
+            [0; 7],
+            [
+                u64::from(joint_count),
+                u64::from(joint_count),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+        )?;
+        advance_cursor(&mut cursors.joint_nodes, joint_count, "skin joint nodes")?;
         let inverse_scalar_count = joint_count.checked_mul(INVERSE_BIND_SCALARS).ok_or(
             DeformationAuthoringSemanticError::AccountingOverflow {
                 dimension: "inverse-bind scalar count",
             },
         )?;
-        let inverse_bind_scalar_offset = advance_cursor(
+        advance_cursor(
             &mut cursors.inverse_bind_scalars,
             inverse_scalar_count,
             "inverse-bind scalars",
         )?;
-        let (name_byte_offset, skin_name_byte_count) = match skin.name() {
-            Presence::Absent => (0, 0),
-            Presence::Present(name) => {
-                let count = collection_count(name.len(), "skin name bytes")?;
-                let offset = advance_cursor(&mut cursors.name_bytes, count, "skin name bytes")?;
-                for byte in name.as_bytes() {
-                    context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
-                }
-                context.add_payload_bytes(u64::from(count))?;
-                (offset, count)
+        if let Presence::Present(name) = skin.name() {
+            let count = collection_count(name.len(), "skin name bytes")?;
+            advance_cursor(&mut cursors.name_bytes, count, "skin name bytes")?;
+            context.add_payload_bytes(u64::from(count))?;
+            for byte in name.as_bytes() {
+                context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
             }
-        };
+        }
 
         for (joint_index, joint) in skin.joints().iter().copied().enumerate() {
             context.run_unit(SceneValidationWork::Traversal, || {
@@ -1854,58 +1695,49 @@ where
                 })??;
             }
         }
-        let (correction_matrix_scalar_offset, correction_matrix_scalar_count) =
-            match matrix_spaces.correction() {
-                None => (0, 0),
-                Some(correction) => {
-                    let matrix = correction.matrix();
-                    for (scalar, value) in matrix.cols.into_iter().flatten().enumerate() {
-                        context.run_unit(SceneValidationWork::PayloadCell, || {
-                            if !value.is_finite() {
-                                return Err(
-                                    DeformationAuthoringSemanticError::NonFiniteSkinCorrection {
-                                        skin: skin_index,
-                                    },
-                                );
-                            }
-                            if scalar + 1 == INVERSE_BIND_SCALAR_COUNT && !matrix.is_affine() {
-                                return Err(
-                                    DeformationAuthoringSemanticError::NonAffineSkinCorrection {
-                                        skin: skin_index,
-                                    },
-                                );
-                            }
-                            Ok::<(), DeformationAuthoringSemanticError>(())
-                        })??;
-                    }
-                    let offset = advance_cursor(
-                        &mut cursors.correction_scalars,
-                        INVERSE_BIND_SCALARS,
-                        "skin correction scalars",
-                    )?;
-                    (offset, INVERSE_BIND_SCALARS)
+        let correction_matrix_scalar_count = match matrix_spaces.correction() {
+            None => 0,
+            Some(correction) => {
+                let matrix = correction.matrix();
+                for (scalar, value) in matrix.cols.into_iter().flatten().enumerate() {
+                    context.run_unit(SceneValidationWork::PayloadCell, || {
+                        if !value.is_finite() {
+                            return Err(
+                                DeformationAuthoringSemanticError::NonFiniteSkinCorrection {
+                                    skin: skin_index,
+                                },
+                            );
+                        }
+                        if scalar + 1 == INVERSE_BIND_SCALAR_COUNT && !matrix.is_affine() {
+                            return Err(
+                                DeformationAuthoringSemanticError::NonAffineSkinCorrection {
+                                    skin: skin_index,
+                                },
+                            );
+                        }
+                        Ok::<(), DeformationAuthoringSemanticError>(())
+                    })??;
                 }
-            };
+                advance_cursor(
+                    &mut cursors.correction_scalars,
+                    INVERSE_BIND_SCALARS,
+                    "skin correction scalars",
+                )?;
+                INVERSE_BIND_SCALARS
+            }
+        };
         context.add_payload(u64::from(inverse_scalar_count), u64::from(joint_count))?;
         context.add_payload(u64::from(correction_matrix_scalar_count), 0)?;
-        storage.skin_plans.push(ValidatedSkinPlan {
-            name_byte_offset,
-            name_byte_count: skin_name_byte_count,
-            joint_offset,
-            joint_count,
-            inverse_bind_scalar_offset,
-            correction_matrix_scalar_offset,
-            correction_matrix_scalar_count,
-        });
+        storage.skin_plans.push(ValidatedSkinPlan { joint_count });
     }
     Ok(())
 }
 
-fn validate_logical_morphs<C, R>(
+fn validate_logical_morphs<C>(
     input: DeformationAuthoringBatch<'_>,
     default_weight_count: &mut u32,
     name_byte_count: &mut u32,
-    storage: &mut DeformationValidationScratch<R>,
+    storage: &mut DeformationValidationScratch<C::Reservation>,
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
@@ -1954,6 +1786,7 @@ where
             Ok::<(), DeformationAuthoringSemanticError>(())
         })??;
         let target_count = definitions.count();
+        context.add_storage([0; 7], [0, 0, 0, 0, 0, 0, 0, u64::from(target_count), 0, 0])?;
         let definition_range = checked_range(definitions, input.morph_target_definitions().len())?;
         let authored_definitions = input
             .morph_target_definitions()
@@ -1966,12 +1799,14 @@ where
                 dimension: "logical morph target width",
             }
         })?;
-        if storage.uniqueness.capacity() < target_width {
-            return Err(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "morph identity uniqueness capacity",
-            }
-            .into());
-        }
+        context.grow_scratch(
+            &mut storage.uniqueness,
+            &mut storage.reservation,
+            &mut storage.scratch_bytes,
+            target_width,
+            "deformation uniqueness scratch",
+        )?;
+        storage.maximum_uniqueness_capacity = storage.maximum_uniqueness_capacity.max(target_width);
         storage.uniqueness.clear();
         for _ in 0..target_width {
             context.run_unit(SceneValidationWork::Traversal, || {
@@ -2023,29 +1858,23 @@ where
                 Ok::<(), DeformationAuthoringSemanticError>(())
             })??;
 
-            let (name_byte_offset, definition_name_byte_count) = match definition.name() {
-                Presence::Absent => (0, 0),
-                Presence::Present(name) => {
-                    let count = collection_count(name.len(), "morph target name bytes")?;
-                    let offset = advance_cursor(name_byte_count, count, "morph target name bytes")?;
-                    for byte in name.as_bytes() {
-                        context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
-                    }
-                    context.add_payload_bytes(u64::from(count))?;
-                    (offset, count)
+            if let Presence::Present(name) = definition.name() {
+                let count = collection_count(name.len(), "morph target name bytes")?;
+                advance_cursor(name_byte_count, count, "morph target name bytes")?;
+                context.add_payload_bytes(u64::from(count))?;
+                for byte in name.as_bytes() {
+                    context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
                 }
-            };
+            }
             storage
                 .morph_definition_plans
                 .push(ValidatedMorphTargetDefinitionPlan {
                     logical_mesh: usize_to_u32(logical_mesh, "morph definition logical mesh")?,
                     target_ordinal: usize_to_u32(target, "morph definition target ordinal")?,
-                    name_byte_offset,
-                    name_byte_count: definition_name_byte_count,
                 });
         }
         context.add_relations(u64::from(target_count))?;
-        let default_weight_offset = advance_cursor(
+        advance_cursor(
             default_weight_count,
             target_count,
             "logical morph default weights",
@@ -2066,7 +1895,6 @@ where
         context.add_payload(u64::from(target_count), 0)?;
         storage.logical_morph_plans.push(ValidatedLogicalMorphPlan {
             definitions,
-            default_weight_offset,
             target_count,
             maximum_palette_joint: None,
         });
@@ -2089,14 +1917,14 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_primitives<C, R, GR>(
+fn validate_primitives<C, GR>(
     input: DeformationAuthoringBatch<'_>,
     geometry: &ValidatedGeometryBatch<'_, GR>,
     influence_row_offset_count: &mut u32,
     influence_count: &mut u32,
     morph_value_count: &mut u32,
     morph_sparse_index_count: &mut u32,
-    storage: &mut DeformationValidationScratch<R>,
+    storage: &mut DeformationValidationScratch<C::Reservation>,
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
@@ -2109,21 +1937,25 @@ where
         .copied()
         .enumerate()
     {
-        let logical_plan = storage
-            .logical_morph_plans
-            .get(logical_mesh_index)
-            .copied()
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "logical morph plan",
-            })?;
-        let primitive_range = checked_range(
-            geometry_mesh.primitives(),
-            usize::try_from(geometry.primitive_count()).map_err(|_| {
-                DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "geometry primitive count",
-                }
-            })?,
-        )?;
+        let (logical_plan, primitive_range) =
+            context.run_unit(SceneValidationWork::Traversal, || {
+                let logical_plan = storage
+                    .logical_morph_plans
+                    .get(logical_mesh_index)
+                    .copied()
+                    .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+                        dimension: "logical morph plan",
+                    })?;
+                let primitive_range = checked_range(
+                    geometry_mesh.primitives(),
+                    usize::try_from(geometry.primitive_count()).map_err(|_| {
+                        DeformationAuthoringSemanticError::AccountingOverflow {
+                            dimension: "geometry primitive count",
+                        }
+                    })?,
+                )?;
+                Ok::<_, DeformationAuthoringSemanticError>((logical_plan, primitive_range))
+            })??;
         let mut maximum = None;
         for primitive_index in primitive_range {
             let authored = *input.primitives().get(primitive_index).ok_or(
@@ -2168,7 +2000,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_primitive<C, R>(
+fn validate_primitive<C>(
     primitive_index: usize,
     authored: PrimitiveDeformationAuthoring<'_>,
     vertex_count: u32,
@@ -2177,7 +2009,7 @@ fn validate_primitive<C, R>(
     influence_count: &mut u32,
     morph_value_count: &mut u32,
     morph_sparse_index_count: &mut u32,
-    storage: &mut DeformationValidationScratch<R>,
+    storage: &mut DeformationValidationScratch<C::Reservation>,
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<Option<PaletteJointLocation>, C>
 where
@@ -2214,18 +2046,32 @@ where
         }
         Ok::<_, DeformationAuthoringSemanticError>(influences)
     })??;
-    let (row_offset_offset, row_offset_count, influence_offset, primitive_influence_count, maximum) =
-        match influences {
-            Presence::Absent => (0, 0, 0, 0, None),
-            Presence::Present(rows) => validate_influence_rows(
-                primitive_index,
-                rows,
-                influence_row_offset_count,
-                influence_count,
-                &mut storage.uniqueness,
-                context,
-            )?,
-        };
+    context.add_storage([0, 0, 0, 0, u64::from(target_count), 0, 0], [0; 10])?;
+    let desired_targets = storage
+        .morph_target_plans
+        .len()
+        .checked_add(target_count as usize)
+        .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+            dimension: "morph target plan count",
+        })?;
+    context.grow_scratch(
+        &mut storage.morph_target_plans,
+        &mut storage.reservation,
+        &mut storage.scratch_bytes,
+        desired_targets,
+        "validated morph target plans",
+    )?;
+    let maximum = match influences {
+        Presence::Absent => None,
+        Presence::Present(rows) => validate_influence_rows(
+            primitive_index,
+            rows,
+            influence_row_offset_count,
+            influence_count,
+            storage,
+            context,
+        )?,
+    };
 
     let target_offset = collection_count(storage.morph_target_plans.len(), "morph target offset")?;
     for (target_index, target) in authored.morph_targets().iter().copied().enumerate() {
@@ -2256,11 +2102,23 @@ where
                 Ok::<u8, DeformationAuthoringSemanticError>(ordinal)
             })??;
             previous_semantic = Some(ordinal);
+            context.add_storage([0, 0, 0, 0, 0, 1, 0], [0; 10])?;
+            let desired_deltas = storage.morph_delta_plans.len().checked_add(1).ok_or(
+                DeformationAuthoringSemanticError::AccountingOverflow {
+                    dimension: "morph delta plan count",
+                },
+            )?;
+            context.grow_scratch(
+                &mut storage.morph_delta_plans,
+                &mut storage.reservation,
+                &mut storage.scratch_bytes,
+                desired_deltas,
+                "validated morph delta plans",
+            )?;
             let plan = validate_morph_delta(
                 primitive_index,
                 target_index,
                 delta,
-                vertex_count,
                 morph_value_count,
                 morph_sparse_index_count,
                 context,
@@ -2279,10 +2137,6 @@ where
     storage
         .primitive_plans
         .push(ValidatedPrimitiveDeformationPlan {
-            influence_row_offset_offset: row_offset_offset,
-            influence_row_offset_count: row_offset_count,
-            influence_offset,
-            influence_count: primitive_influence_count,
             morph_targets: AuthoringRange::new(target_offset, target_count),
         });
     Ok(maximum)
@@ -2293,17 +2147,31 @@ fn validate_influence_rows<C>(
     rows: InfluenceRowsAuthoring<'_>,
     row_offset_cursor: &mut u32,
     influence_cursor: &mut u32,
-    uniqueness: &mut Vec<u8>,
+    storage: &mut DeformationValidationScratch<C::Reservation>,
     context: &mut DeformationValidationContext<'_, C>,
-) -> DeformationValidationResult<(u32, u32, u32, u32, Option<PaletteJointLocation>), C>
+) -> DeformationValidationResult<Option<PaletteJointLocation>, C>
 where
     C: CanonicalAuthoringControl,
 {
     let row_offset_count = collection_count(rows.vertex_offsets().len(), "influence row offsets")?;
     let influence_count = collection_count(rows.influences().len(), "influences")?;
-    let row_offset_offset =
-        advance_cursor(row_offset_cursor, row_offset_count, "influence row offsets")?;
-    let influence_offset = advance_cursor(influence_cursor, influence_count, "influence cells")?;
+    context.add_storage(
+        [0; 7],
+        [
+            0,
+            0,
+            0,
+            u64::from(row_offset_count),
+            u64::from(influence_count),
+            u64::from(influence_count),
+            u64::from(influence_count),
+            0,
+            0,
+            0,
+        ],
+    )?;
+    advance_cursor(row_offset_cursor, row_offset_count, "influence row offsets")?;
+    advance_cursor(influence_cursor, influence_count, "influence cells")?;
     let offset_len = rows.vertex_offsets().len();
     for (position, offset) in rows.vertex_offsets().iter().copied().enumerate() {
         context.run_unit(SceneValidationWork::PayloadCell, || {
@@ -2362,16 +2230,21 @@ where
                     },
                 )?;
                 let row_width = collection_count(row.len(), "influence row width")?;
-                if uniqueness.capacity() < row.len() {
-                    return Err(DeformationAuthoringSemanticError::AccountingOverflow {
-                        dimension: "influence source-order uniqueness capacity",
-                    });
-                }
                 Ok::<_, DeformationAuthoringSemanticError>((start, row, row_width))
             })??;
-        uniqueness.clear();
+        context.grow_scratch(
+            &mut storage.uniqueness,
+            &mut storage.reservation,
+            &mut storage.scratch_bytes,
+            row.len(),
+            "deformation uniqueness scratch",
+        )?;
+        storage.maximum_uniqueness_capacity = storage.maximum_uniqueness_capacity.max(row.len());
+        storage.uniqueness.clear();
         for _ in 0..row.len() {
-            context.run_unit(SceneValidationWork::Traversal, || uniqueness.push(0))?;
+            context.run_unit(SceneValidationWork::Traversal, || {
+                storage.uniqueness.push(0)
+            })?;
         }
         for (relative, influence) in row.iter().copied().enumerate() {
             let influence_index = start.checked_add(relative).ok_or(
@@ -2415,7 +2288,7 @@ where
                         dimension: "influence source order",
                     }
                 })?;
-                let seen = uniqueness.get_mut(source_order).ok_or(
+                let seen = storage.uniqueness.get_mut(source_order).ok_or(
                     DeformationAuthoringSemanticError::AccountingOverflow {
                         dimension: "influence source-order uniqueness slot",
                     },
@@ -2457,13 +2330,7 @@ where
                 dimension: "influence u32 payload",
             })?,
     )?;
-    Ok((
-        row_offset_offset,
-        row_offset_count,
-        influence_offset,
-        influence_count,
-        maximum,
-    ))
+    Ok(maximum)
 }
 
 fn validate_morph_delta_shape(
@@ -2529,7 +2396,6 @@ fn validate_morph_delta<C>(
     primitive: usize,
     target: usize,
     delta: MorphDeltaAuthoring<'_>,
-    vertex_count: u32,
     value_cursor: &mut u32,
     sparse_index_cursor: &mut u32,
     context: &mut DeformationValidationContext<'_, C>,
@@ -2537,60 +2403,68 @@ fn validate_morph_delta<C>(
 where
     C: CanonicalAuthoringControl,
 {
+    let (values_len, indices_len) = match delta.payload() {
+        MorphDeltaPayloadAuthoring::Dense { values } => (values.len(), 0),
+        MorphDeltaPayloadAuthoring::Sparse {
+            indices, values, ..
+        } => (values.len(), indices.len()),
+    };
+    context.add_storage(
+        [0; 7],
+        [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            u64::from(collection_count(values_len, "morph delta values")?),
+            u64::from(collection_count(indices_len, "morph sparse indices")?),
+        ],
+    )?;
     let semantic = delta.semantic();
-    let (payload_kind, logical_count, explicit_count, values, sparse_indices) =
-        match delta.payload() {
-            MorphDeltaPayloadAuthoring::Dense { values } => (
-                DeformationMorphPayloadKind::Dense,
-                vertex_count,
-                vertex_count,
-                values,
-                &[][..],
-            ),
-            MorphDeltaPayloadAuthoring::Sparse {
-                logical_count,
-                indices,
-                values,
-            } => {
-                for (element, index) in indices.iter().copied().enumerate() {
-                    context.run_unit(SceneValidationWork::PayloadCell, || {
-                        if index >= logical_count {
-                            return Err(
-                                DeformationAuthoringSemanticError::SparseMorphIndexOutOfRange {
-                                    primitive,
-                                    target,
-                                    semantic,
-                                    element,
-                                    index,
-                                    logical_count,
-                                },
-                            );
-                        }
-                        Ok::<(), DeformationAuthoringSemanticError>(())
-                    })??;
-                }
-                for (element, pair) in indices.windows(2).enumerate() {
-                    context.run_unit(SceneValidationWork::Traversal, || {
-                        if pair[0] >= pair[1] {
-                            return Err(DeformationAuthoringSemanticError::SparseMorphIndexOrder {
+    let (values, sparse_indices) = match delta.payload() {
+        MorphDeltaPayloadAuthoring::Dense { values } => (values, &[][..]),
+        MorphDeltaPayloadAuthoring::Sparse {
+            logical_count,
+            indices,
+            values,
+        } => {
+            for (element, index) in indices.iter().copied().enumerate() {
+                context.run_unit(SceneValidationWork::PayloadCell, || {
+                    if index >= logical_count {
+                        return Err(
+                            DeformationAuthoringSemanticError::SparseMorphIndexOutOfRange {
                                 primitive,
                                 target,
                                 semantic,
-                                element: element + 1,
-                            });
-                        }
-                        Ok::<(), DeformationAuthoringSemanticError>(())
-                    })??;
-                }
-                (
-                    DeformationMorphPayloadKind::Sparse,
-                    logical_count,
-                    collection_count(indices.len(), "sparse morph indices")?,
-                    values,
-                    indices,
-                )
+                                element,
+                                index,
+                                logical_count,
+                            },
+                        );
+                    }
+                    Ok::<(), DeformationAuthoringSemanticError>(())
+                })??;
             }
-        };
+            for (element, pair) in indices.windows(2).enumerate() {
+                context.run_unit(SceneValidationWork::Traversal, || {
+                    if pair[0] >= pair[1] {
+                        return Err(DeformationAuthoringSemanticError::SparseMorphIndexOrder {
+                            primitive,
+                            target,
+                            semantic,
+                            element: element + 1,
+                        });
+                    }
+                    Ok::<(), DeformationAuthoringSemanticError>(())
+                })??;
+            }
+            (values, indices)
+        }
+    };
 
     for (scalar, value) in values.iter().copied().enumerate() {
         context.run_unit(SceneValidationWork::PayloadCell, || {
@@ -2607,30 +2481,21 @@ where
     }
     let value_count = collection_count(values.len(), "morph delta values")?;
     let sparse_index_count = collection_count(sparse_indices.len(), "morph sparse indices")?;
-    let value_offset = advance_cursor(value_cursor, value_count, "morph delta values")?;
-    let sparse_index_offset = advance_cursor(
+    advance_cursor(value_cursor, value_count, "morph delta values")?;
+    advance_cursor(
         sparse_index_cursor,
         sparse_index_count,
         "morph sparse indices",
     )?;
     context.add_payload(u64::from(value_count), u64::from(sparse_index_count))?;
-    Ok(ValidatedMorphDeltaPlan {
-        semantic,
-        payload_kind,
-        logical_count,
-        explicit_count,
-        value_offset,
-        value_count,
-        sparse_index_offset,
-        sparse_index_count,
-    })
+    Ok(ValidatedMorphDeltaPlan { semantic })
 }
 
-fn validate_mesh_instances<C, R, GR>(
+fn validate_mesh_instances<C, GR>(
     input: DeformationAuthoringBatch<'_>,
     geometry: &ValidatedGeometryBatch<'_, GR>,
     morph_weight_cursor: &mut u32,
-    storage: &mut DeformationValidationScratch<R>,
+    storage: &mut DeformationValidationScratch<C::Reservation>,
     context: &mut DeformationValidationContext<'_, C>,
 ) -> DeformationValidationResult<(), C>
 where
@@ -2715,183 +2580,48 @@ where
             context.add_relations(1)?;
         }
 
-        let (morph_weight_offset, morph_weight_count) = match authored.morph_weights() {
-            Presence::Absent => (0, 0),
-            Presence::Present(weights) => {
-                for (target, weight) in weights.iter().copied().enumerate() {
-                    context.run_unit(SceneValidationWork::PayloadCell, || {
-                        if !weight.is_finite() {
-                            return Err(
-                                DeformationAuthoringSemanticError::NonFiniteInstanceMorphWeight {
-                                    instance: instance_index,
-                                    target,
-                                },
-                            );
-                        }
-                        Ok::<(), DeformationAuthoringSemanticError>(())
-                    })??;
-                }
-                let count = collection_count(weights.len(), "instance morph weights")?;
-                let offset = advance_cursor(morph_weight_cursor, count, "instance morph weights")?;
-                context.add_payload(u64::from(count), 0)?;
-                (offset, count)
+        if let Presence::Present(weights) = authored.morph_weights() {
+            context.add_storage(
+                [0; 7],
+                [
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    u64::from(collection_count(weights.len(), "instance morph weights")?),
+                    0,
+                    0,
+                ],
+            )?;
+            for (target, weight) in weights.iter().copied().enumerate() {
+                context.run_unit(SceneValidationWork::PayloadCell, || {
+                    if !weight.is_finite() {
+                        return Err(
+                            DeformationAuthoringSemanticError::NonFiniteInstanceMorphWeight {
+                                instance: instance_index,
+                                target,
+                            },
+                        );
+                    }
+                    Ok::<(), DeformationAuthoringSemanticError>(())
+                })??;
             }
-        };
+            let count = collection_count(weights.len(), "instance morph weights")?;
+            advance_cursor(morph_weight_cursor, count, "instance morph weights")?;
+            context.add_payload(u64::from(count), 0)?;
+        }
         storage
             .mesh_instance_plans
-            .push(ValidatedMeshInstanceDeformationPlan {
-                logical_mesh,
-                skin,
-                morph_weight_offset,
-                morph_weight_count,
-            });
+            .push(ValidatedMeshInstanceDeformationPlan { logical_mesh, skin });
     }
     Ok(())
 }
 
-fn deformation_scratch_shape(
-    input: DeformationAuthoringBatch<'_>,
-) -> Result<DeformationScratchShape, DeformationAuthoringSemanticError> {
-    let morph_definition_count = input.morph_target_definitions().len();
-    let mut morph_target_count = 0_usize;
-    let mut morph_delta_count = 0_usize;
-    let mut joint_node_count = 0_u64;
-    let mut inverse_bind_scalar_count = 0_u64;
-    let mut skin_correction_scalar_count = 0_u64;
-    let mut skin_name_byte_count = 0_u64;
-    let mut influence_row_offset_count = 0_u64;
-    let mut influence_count = 0_u64;
-    let mut morph_default_weight_count = 0_u64;
-    let mut morph_name_byte_count = 0_u64;
-    let mut morph_value_count = 0_u64;
-    let mut morph_sparse_index_count = 0_u64;
-    let mut instance_morph_weight_count = 0_u64;
-    let mut maximum_uniqueness_count = 0_usize;
-
-    collection_count(input.skins().len(), "skins")?;
-    collection_count(morph_definition_count, "morph target definitions")?;
-    collection_count(input.logical_meshes().len(), "logical morphs")?;
-    collection_count(input.primitives().len(), "primitive deformation")?;
-    collection_count(input.mesh_instances().len(), "mesh instance deformation")?;
-    for skin in input.skins() {
-        if let Presence::Present(name) = skin.name() {
-            skin_name_byte_count =
-                checked_add_len(skin_name_byte_count, name.len(), "skin name bytes")?;
-        }
-        joint_node_count = checked_add_len(joint_node_count, skin.joints().len(), "skin joints")?;
-        inverse_bind_scalar_count = inverse_bind_scalar_count
-            .checked_add(
-                usize_to_u64(skin.inverse_bind_matrices().len(), "inverse-bind matrices")?
-                    .checked_mul(u64::from(INVERSE_BIND_SCALARS))
-                    .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                        dimension: "inverse-bind scalars",
-                    })?,
-            )
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "inverse-bind scalars",
-            })?;
-        if skin.matrix_spaces().correction().is_some() {
-            skin_correction_scalar_count = skin_correction_scalar_count
-                .checked_add(u64::from(INVERSE_BIND_SCALARS))
-                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "skin correction scalars",
-                })?;
-        }
-    }
-    for definition in input.morph_target_definitions() {
-        if let Presence::Present(name) = definition.name() {
-            morph_name_byte_count =
-                checked_add_len(morph_name_byte_count, name.len(), "morph target name bytes")?;
-        }
-    }
-    for logical in input.logical_meshes() {
-        maximum_uniqueness_count = maximum_uniqueness_count.max(valid_morph_definition_width(
-            logical.definitions(),
-            morph_definition_count,
-        ));
-        morph_default_weight_count = checked_add_len(
-            morph_default_weight_count,
-            logical.default_weights().len(),
-            "logical morph default weights",
-        )?;
-    }
-    for primitive in input.primitives() {
-        if let Presence::Present(rows) = primitive.influences() {
-            maximum_uniqueness_count =
-                maximum_uniqueness_count.max(maximum_valid_influence_row_width(rows));
-            influence_row_offset_count = checked_add_len(
-                influence_row_offset_count,
-                rows.vertex_offsets().len(),
-                "influence row offsets",
-            )?;
-            influence_count =
-                checked_add_len(influence_count, rows.influences().len(), "influences")?;
-        }
-        morph_target_count = morph_target_count
-            .checked_add(primitive.morph_targets().len())
-            .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                dimension: "morph target count",
-            })?;
-        for target in primitive.morph_targets() {
-            morph_delta_count = morph_delta_count.checked_add(target.deltas().len()).ok_or(
-                DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "morph delta count",
-                },
-            )?;
-            for delta in target.deltas() {
-                match delta.payload() {
-                    MorphDeltaPayloadAuthoring::Dense { values } => {
-                        morph_value_count =
-                            checked_add_len(morph_value_count, values.len(), "morph delta values")?;
-                    }
-                    MorphDeltaPayloadAuthoring::Sparse {
-                        indices, values, ..
-                    } => {
-                        morph_value_count =
-                            checked_add_len(morph_value_count, values.len(), "morph delta values")?;
-                        morph_sparse_index_count = checked_add_len(
-                            morph_sparse_index_count,
-                            indices.len(),
-                            "morph sparse indices",
-                        )?;
-                    }
-                }
-            }
-        }
-    }
-    for instance in input.mesh_instances() {
-        if let Presence::Present(weights) = instance.morph_weights() {
-            instance_morph_weight_count = checked_add_len(
-                instance_morph_weight_count,
-                weights.len(),
-                "instance morph weights",
-            )?;
-        }
-    }
-    let shape = DeformationScratchShape {
-        morph_definition_count,
-        morph_target_count,
-        morph_delta_count,
-        maximum_uniqueness_count,
-        joint_node_count,
-        inverse_bind_scalar_count,
-        skin_correction_scalar_count,
-        skin_name_byte_count,
-        influence_row_offset_count,
-        influence_count,
-        morph_default_weight_count,
-        morph_name_byte_count,
-        morph_value_count,
-        morph_sparse_index_count,
-        instance_morph_weight_count,
-    };
-    validate_deformation_shape_counts(shape)?;
-    Ok(shape)
-}
-
 fn deformation_capacity_plans(
     input: DeformationAuthoringBatch<'_>,
-    shape: DeformationScratchShape,
 ) -> Result<DeformationCapacityPlans, DeformationAuthoringSemanticError> {
     Ok(DeformationCapacityPlans {
         skins: scratch_plan::<ValidatedSkinPlan>(input.skins().len(), "validated skin plans")?,
@@ -2900,367 +2630,21 @@ fn deformation_capacity_plans(
             "validated logical morph plans",
         )?,
         morph_definitions: scratch_plan::<ValidatedMorphTargetDefinitionPlan>(
-            shape.morph_definition_count,
+            input.morph_target_definitions().len(),
             "validated morph definition plans",
         )?,
         primitives: scratch_plan::<ValidatedPrimitiveDeformationPlan>(
             input.primitives().len(),
             "validated primitive deformation plans",
         )?,
-        morph_targets: scratch_plan::<ValidatedMorphTargetPlan>(
-            shape.morph_target_count,
-            "validated morph target plans",
-        )?,
-        morph_deltas: scratch_plan::<ValidatedMorphDeltaPlan>(
-            shape.morph_delta_count,
-            "validated morph delta plans",
-        )?,
+        morph_targets: scratch_plan::<ValidatedMorphTargetPlan>(0, "validated morph target plans")?,
+        morph_deltas: scratch_plan::<ValidatedMorphDeltaPlan>(0, "validated morph delta plans")?,
         mesh_instances: scratch_plan::<ValidatedMeshInstanceDeformationPlan>(
             input.mesh_instances().len(),
             "validated mesh instance plans",
         )?,
-        uniqueness: scratch_plan::<u8>(
-            shape.maximum_uniqueness_count,
-            "deformation uniqueness scratch",
-        )?,
+        uniqueness: scratch_plan::<u8>(0, "deformation uniqueness scratch")?,
     })
-}
-
-fn deformation_structural_bytes<C>(
-    input: DeformationAuthoringBatch<'_>,
-    context: &mut DeformationValidationContext<'_, C>,
-) -> DeformationValidationResult<(u64, DeformationScratchShape), C>
-where
-    C: CanonicalAuthoringControl,
-{
-    let skin_count = collection_count(input.skins().len(), "skins")?;
-    let morph_definition_count = collection_count(
-        input.morph_target_definitions().len(),
-        "morph target definitions",
-    )?;
-    let logical_count = collection_count(input.logical_meshes().len(), "logical morphs")?;
-    let primitive_count = collection_count(input.primitives().len(), "primitive deformation")?;
-    let instance_count = collection_count(input.mesh_instances().len(), "mesh instances")?;
-
-    let mut maximum_uniqueness_count = 0;
-    let mut joint_nodes = 0_u64;
-    let mut inverse_bind_scalars = 0_u64;
-    let mut skin_correction_scalars = 0_u64;
-    let mut skin_name_bytes = 0_u64;
-    let mut influence_row_offsets = 0_u64;
-    let mut influences = 0_u64;
-    let mut morph_defaults = 0_u64;
-    let mut morph_name_bytes = 0_u64;
-    let mut morph_values = 0_u64;
-    let mut morph_sparse_indices = 0_u64;
-    let mut instance_weights = 0_u64;
-    let mut skin_bytes = 0_u64;
-    for skin in input.skins() {
-        context.run_unit(SceneValidationWork::Traversal, || {
-            let name_bytes = match skin.name() {
-                Presence::Absent => 0,
-                Presence::Present(name) => name.len(),
-            };
-            skin_name_bytes = checked_add_len(skin_name_bytes, name_bytes, "skin name bytes")?;
-            joint_nodes = checked_add_len(joint_nodes, skin.joints().len(), "skin joint nodes")?;
-            inverse_bind_scalars = inverse_bind_scalars
-                .checked_add(
-                    usize_to_u64(skin.inverse_bind_matrices().len(), "inverse-bind matrices")?
-                        .checked_mul(u64::from(INVERSE_BIND_SCALARS))
-                        .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                            dimension: "inverse-bind scalars",
-                        })?,
-                )
-                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "inverse-bind scalars",
-                })?;
-            let has_correction = skin.matrix_spaces().correction().is_some();
-            if has_correction {
-                skin_correction_scalars = skin_correction_scalars
-                    .checked_add(u64::from(INVERSE_BIND_SCALARS))
-                    .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                        dimension: "skin correction scalars",
-                    })?;
-            }
-            skin_bytes = skin_bytes
-                .checked_add(DEFORMATION_SKIN_FIXED_BYTES)
-                .and_then(|bytes| {
-                    bytes.checked_add(checked_reference_slots([
-                        !skin.joints().is_empty(),
-                        !skin.inverse_bind_matrices().is_empty(),
-                        !skin.joints().is_empty()
-                            || matches!(skin.skeleton_root(), Presence::Present(_)),
-                        has_correction,
-                        name_bytes != 0,
-                    ]))
-                })
-                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "deformation skin records",
-                })?;
-            Ok::<(), DeformationAuthoringSemanticError>(())
-        })??;
-    }
-
-    let mut morph_definition_bytes = 0_u64;
-    for definition in input.morph_target_definitions() {
-        context.run_unit(SceneValidationWork::Traversal, || {
-            let name_bytes = match definition.name() {
-                Presence::Absent => 0,
-                Presence::Present(name) => name.len(),
-            };
-            morph_name_bytes =
-                checked_add_len(morph_name_bytes, name_bytes, "morph target name bytes")?;
-            morph_definition_bytes = morph_definition_bytes
-                .checked_add(DEFORMATION_MORPH_DEFINITION_FIXED_BYTES)
-                .and_then(|bytes| bytes.checked_add(reference_slot_bytes(name_bytes != 0)))
-                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "morph definition records",
-                })?;
-            Ok::<(), DeformationAuthoringSemanticError>(())
-        })??;
-    }
-
-    let mut logical_bytes = 0_u64;
-    for logical in input.logical_meshes() {
-        context.run_unit(SceneValidationWork::Traversal, || {
-            maximum_uniqueness_count = maximum_uniqueness_count.max(valid_morph_definition_width(
-                logical.definitions(),
-                input.morph_target_definitions().len(),
-            ));
-            morph_defaults = checked_add_len(
-                morph_defaults,
-                logical.default_weights().len(),
-                "morph default weights",
-            )?;
-            logical_bytes = logical_bytes
-                .checked_add(DEFORMATION_LOGICAL_MORPH_FIXED_BYTES)
-                .and_then(|bytes| {
-                    bytes.checked_add(checked_reference_slots([
-                        logical.definitions().count() != 0,
-                        !logical.default_weights().is_empty(),
-                    ]))
-                })
-                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "logical morph records",
-                })?;
-            Ok::<(), DeformationAuthoringSemanticError>(())
-        })??;
-    }
-
-    let mut primitive_bytes = 0_u64;
-    let mut target_bytes = 0_u64;
-    let mut delta_bytes = 0_u64;
-    let mut morph_target_count = 0_usize;
-    let mut morph_delta_count = 0_usize;
-    for primitive in input.primitives() {
-        let rows = context.run_unit(SceneValidationWork::Traversal, || {
-            morph_target_count = morph_target_count
-                .checked_add(primitive.morph_targets().len())
-                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "morph target count",
-                })?;
-            let (has_rows, rows, row_count, influence_count) = match primitive.influences() {
-                Presence::Absent => (false, None, 0, 0),
-                Presence::Present(rows) => {
-                    let influence_count = u32::try_from(rows.influences().len()).map_err(|_| {
-                        DeformationAuthoringSemanticError::CountDomainTooLarge {
-                            collection: "influences",
-                        }
-                    })?;
-                    (
-                        true,
-                        Some((rows, influence_count)),
-                        rows.vertex_offsets().len(),
-                        rows.influences().len(),
-                    )
-                }
-            };
-            influence_row_offsets =
-                checked_add_len(influence_row_offsets, row_count, "influence row offsets")?;
-            influences = checked_add_len(influences, influence_count, "influences")?;
-            primitive_bytes = primitive_bytes
-                .checked_add(DEFORMATION_PRIMITIVE_FIXED_BYTES)
-                .and_then(|bytes| {
-                    bytes.checked_add(checked_reference_slots([
-                        has_rows && row_count != 0,
-                        has_rows && influence_count != 0,
-                        has_rows && influence_count != 0,
-                        has_rows && influence_count != 0,
-                        !primitive.morph_targets().is_empty(),
-                    ]))
-                })
-                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "primitive deformation records",
-                })?;
-            Ok::<_, DeformationAuthoringSemanticError>(rows)
-        })??;
-        if let Some((rows, influence_count)) = rows {
-            for pair in rows.vertex_offsets().windows(2) {
-                context.run_unit(SceneValidationWork::Traversal, || {
-                    if pair[0] <= pair[1]
-                        && pair[1] <= influence_count
-                        && let Ok(width) = usize::try_from(pair[1] - pair[0])
-                    {
-                        maximum_uniqueness_count = maximum_uniqueness_count.max(width);
-                    }
-                })?;
-            }
-        }
-        for target in primitive.morph_targets() {
-            let deltas = context.run_unit(SceneValidationWork::Traversal, || {
-                morph_delta_count = morph_delta_count.checked_add(target.deltas().len()).ok_or(
-                    DeformationAuthoringSemanticError::AccountingOverflow {
-                        dimension: "morph delta count",
-                    },
-                )?;
-                target_bytes = target_bytes
-                    .checked_add(DEFORMATION_MORPH_TARGET_FIXED_BYTES)
-                    .and_then(|bytes| {
-                        bytes.checked_add(reference_slot_bytes(!target.deltas().is_empty()))
-                    })
-                    .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                        dimension: "morph target records",
-                    })?;
-                Ok::<_, DeformationAuthoringSemanticError>(target.deltas())
-            })??;
-            for delta in deltas {
-                context.run_unit(SceneValidationWork::Traversal, || {
-                    let (values, sparse) = match delta.payload() {
-                        MorphDeltaPayloadAuthoring::Dense { values } => (values.len(), 0),
-                        MorphDeltaPayloadAuthoring::Sparse {
-                            indices, values, ..
-                        } => (values.len(), indices.len()),
-                    };
-                    morph_values = checked_add_len(morph_values, values, "morph values")?;
-                    morph_sparse_indices =
-                        checked_add_len(morph_sparse_indices, sparse, "morph sparse indices")?;
-                    delta_bytes = delta_bytes
-                        .checked_add(DEFORMATION_MORPH_DELTA_FIXED_BYTES)
-                        .and_then(|bytes| {
-                            bytes.checked_add(checked_reference_slots([values != 0, sparse != 0]))
-                        })
-                        .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                            dimension: "morph delta records",
-                        })?;
-                    Ok::<(), DeformationAuthoringSemanticError>(())
-                })??;
-            }
-        }
-    }
-
-    let target_count = collection_count(morph_target_count, "morph targets")?;
-    let delta_count = collection_count(morph_delta_count, "morph deltas")?;
-
-    let mut instance_bytes = 0_u64;
-    for instance in input.mesh_instances() {
-        context.run_unit(SceneValidationWork::Traversal, || {
-            let weights = match instance.morph_weights() {
-                Presence::Absent => 0,
-                Presence::Present(weights) => weights.len(),
-            };
-            instance_weights =
-                checked_add_len(instance_weights, weights, "instance morph weights")?;
-            instance_bytes = instance_bytes
-                .checked_add(DEFORMATION_MESH_INSTANCE_FIXED_BYTES)
-                .and_then(|bytes| {
-                    bytes.checked_add(checked_reference_slots([
-                        matches!(instance.skin(), Presence::Present(_)),
-                        weights != 0,
-                    ]))
-                })
-                .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
-                    dimension: "mesh instance deformation records",
-                })?;
-            Ok::<(), DeformationAuthoringSemanticError>(())
-        })??;
-    }
-
-    let directory_reference_bytes = checked_reference_slots([
-        skin_count != 0,
-        joint_nodes != 0,
-        inverse_bind_scalars != 0,
-        logical_count != 0,
-        primitive_count != 0,
-        influence_row_offsets != 0,
-        influences != 0,
-        influences != 0,
-        influences != 0,
-        target_count != 0,
-        delta_count != 0,
-        morph_defaults != 0,
-        morph_values != 0,
-        morph_sparse_indices != 0,
-        instance_count != 0,
-        instance_weights != 0,
-        skin_correction_scalars != 0,
-        morph_definition_count != 0,
-        morph_name_bytes != 0,
-        skin_name_bytes != 0,
-    ]);
-    let bytes = checked_sum_bytes(
-        [
-            DEFORMATION_DIRECTORY_FIXED_BYTES,
-            directory_reference_bytes,
-            skin_bytes,
-            logical_bytes,
-            morph_definition_bytes,
-            primitive_bytes,
-            target_bytes,
-            delta_bytes,
-            instance_bytes,
-        ],
-        "canonical deformation structural footprint",
-    )?;
-    let shape = DeformationScratchShape {
-        morph_definition_count: input.morph_target_definitions().len(),
-        morph_target_count,
-        morph_delta_count,
-        maximum_uniqueness_count,
-        joint_node_count: joint_nodes,
-        inverse_bind_scalar_count: inverse_bind_scalars,
-        skin_correction_scalar_count: skin_correction_scalars,
-        skin_name_byte_count: skin_name_bytes,
-        influence_row_offset_count: influence_row_offsets,
-        influence_count: influences,
-        morph_default_weight_count: morph_defaults,
-        morph_name_byte_count: morph_name_bytes,
-        morph_value_count: morph_values,
-        morph_sparse_index_count: morph_sparse_indices,
-        instance_morph_weight_count: instance_weights,
-    };
-    validate_deformation_shape_counts(shape)?;
-    Ok((bytes, shape))
-}
-
-fn validate_deformation_shape_counts(
-    shape: DeformationScratchShape,
-) -> Result<(), DeformationAuthoringSemanticError> {
-    collection_count(shape.morph_definition_count, "morph target definitions")?;
-    collection_count(shape.morph_target_count, "morph targets")?;
-    collection_count(shape.morph_delta_count, "morph deltas")?;
-    for (collection, count) in [
-        ("skin joint nodes", shape.joint_node_count),
-        ("inverse-bind scalars", shape.inverse_bind_scalar_count),
-        (
-            "skin correction scalars",
-            shape.skin_correction_scalar_count,
-        ),
-        ("skin name bytes", shape.skin_name_byte_count),
-        ("influence row offsets", shape.influence_row_offset_count),
-        ("influences", shape.influence_count),
-        (
-            "logical morph default weights",
-            shape.morph_default_weight_count,
-        ),
-        ("morph target name bytes", shape.morph_name_byte_count),
-        ("morph delta values", shape.morph_value_count),
-        ("morph sparse indices", shape.morph_sparse_index_count),
-        ("instance morph weights", shape.instance_morph_weight_count),
-    ] {
-        u32::try_from(count)
-            .map_err(|_| DeformationAuthoringSemanticError::CountDomainTooLarge { collection })?;
-    }
-    Ok(())
 }
 
 fn require_geometry_cardinality(
@@ -3278,18 +2662,6 @@ fn require_geometry_cardinality(
                 actual,
             },
         )
-    }
-}
-
-fn require_compiled_count(
-    dimension: &'static str,
-    actual: u32,
-    expected: u64,
-) -> Result<(), DeformationAuthoringSemanticError> {
-    if u64::from(actual) == expected {
-        Ok(())
-    } else {
-        Err(DeformationAuthoringSemanticError::AccountingOverflow { dimension })
     }
 }
 
@@ -3313,33 +2685,6 @@ fn has_canonical_skin_base_spaces(spaces: SkinMatrixSpaces) -> bool {
         && spaces.current_joint_from() == canonical.current_joint_from()
         && spaces.current_joint_to() == canonical.current_joint_to()
         && spaces.output_position() == canonical.output_position()
-}
-
-fn maximum_valid_influence_row_width(rows: InfluenceRowsAuthoring<'_>) -> usize {
-    let Ok(influence_count) = u32::try_from(rows.influences().len()) else {
-        return 0;
-    };
-    rows.vertex_offsets()
-        .windows(2)
-        .filter_map(|pair| {
-            (pair[0] <= pair[1] && pair[1] <= influence_count)
-                .then(|| usize::try_from(pair[1] - pair[0]).ok())
-                .flatten()
-        })
-        .max()
-        .map_or(0, |width| width)
-}
-
-fn valid_morph_definition_width(range: AuthoringRange, definition_count: usize) -> usize {
-    let Ok(definition_count) = u64::try_from(definition_count) else {
-        return 0;
-    };
-    let end = u64::from(range.offset()) + u64::from(range.count());
-    if end <= definition_count {
-        usize::try_from(range.count()).map_or(0, |width| width)
-    } else {
-        0
-    }
 }
 
 const fn morph_semantic_ordinal(semantic: MorphDeltaSemantic) -> u8 {
@@ -3430,26 +2775,6 @@ fn usize_to_u64(
         .map_err(|_| DeformationAuthoringSemanticError::AccountingOverflow { dimension })
 }
 
-fn checked_add_len(
-    total: u64,
-    len: usize,
-    dimension: &'static str,
-) -> Result<u64, DeformationAuthoringSemanticError> {
-    total
-        .checked_add(usize_to_u64(len, dimension)?)
-        .ok_or(DeformationAuthoringSemanticError::AccountingOverflow { dimension })
-}
-
-fn checked_bytes(
-    count: u64,
-    width: u64,
-    dimension: &'static str,
-) -> Result<u64, DeformationAuthoringSemanticError> {
-    count
-        .checked_mul(width)
-        .ok_or(DeformationAuthoringSemanticError::AccountingOverflow { dimension })
-}
-
 fn checked_sum<const N: usize>(
     values: [u64; N],
     dimension: &'static str,
@@ -3466,18 +2791,6 @@ fn checked_sum_bytes<const N: usize>(
     dimension: &'static str,
 ) -> Result<u64, DeformationAuthoringSemanticError> {
     checked_sum(values, dimension)
-}
-
-const fn reference_slot_bytes(has_reference: bool) -> u64 {
-    if has_reference {
-        LOGICAL_REFERENCE_BYTES
-    } else {
-        LOGICAL_U8_BYTES
-    }
-}
-
-fn checked_reference_slots<const N: usize>(references: [bool; N]) -> u64 {
-    references.into_iter().map(reference_slot_bytes).sum()
 }
 
 fn enforce_limit<E>(

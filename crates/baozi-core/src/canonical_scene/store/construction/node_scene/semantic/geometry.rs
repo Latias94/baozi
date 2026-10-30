@@ -18,7 +18,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneGeometryTables<'scene> {
 impl<'scene> NodeSceneGeometryTables<'scene> {
     pub(in crate::canonical_scene::store) fn try_new(
         storage: &'scene GeometryStorage,
-        proof: NodeSceneValidationProof,
+        proof: &NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
         if [
             storage.logical_meshes.len(),
@@ -38,13 +38,9 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
         Ok(Self { storage })
     }
 
-    pub(super) const fn into_cursor(
-        self,
-        proof: NodeSceneValidationProof,
-    ) -> NodeSceneGeometryCursor<'scene> {
+    pub(super) const fn into_cursor(self) -> NodeSceneGeometryCursor<'scene> {
         NodeSceneGeometryCursor {
             tables: self,
-            proof,
             phase: GeometryCursorPhase::LogicalMeshes,
             next_logical_mesh: 0,
             next_primitive: 0,
@@ -55,7 +51,6 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
 
     pub(in crate::canonical_scene::store) fn logical_mesh_at(
         self,
-        _proof: NodeSceneValidationProof,
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneGeometryLogicalMesh<'scene>> {
         let mesh = self
@@ -81,7 +76,6 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
 
     pub(in crate::canonical_scene::store) fn primitive_at(
         self,
-        _proof: NodeSceneValidationProof,
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneGeometryPrimitive<'scene>> {
         let primitive = self
@@ -119,7 +113,6 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
 
     pub(in crate::canonical_scene::store) fn attribute_at(
         self,
-        _proof: NodeSceneValidationProof,
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneGeometryAttribute<'scene>> {
         let attribute = self
@@ -261,7 +254,6 @@ impl<'scene> NodeSceneGeometryTables<'scene> {
 
     pub(in crate::canonical_scene::store) fn mesh_instance_at(
         self,
-        _proof: NodeSceneValidationProof,
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneGeometryMeshInstance> {
         let instance = self
@@ -299,7 +291,6 @@ enum GeometryCursorPhase {
 
 pub(in crate::canonical_scene::store) struct NodeSceneGeometryCursor<'scene> {
     tables: NodeSceneGeometryTables<'scene>,
-    proof: NodeSceneValidationProof,
     phase: GeometryCursorPhase,
     next_logical_mesh: usize,
     next_primitive: usize,
@@ -309,16 +300,16 @@ pub(in crate::canonical_scene::store) struct NodeSceneGeometryCursor<'scene> {
 
 impl<'scene> NodeSceneGeometryCursor<'scene> {
     pub(in crate::canonical_scene::store) fn logical_mesh_count(&self) -> usize {
-        self.proof.logical_mesh_count()
+        self.tables.storage.logical_meshes.len()
     }
     pub(in crate::canonical_scene::store) fn primitive_count(&self) -> usize {
-        self.proof.primitive_count()
+        self.tables.storage.primitives.len()
     }
     pub(in crate::canonical_scene::store) fn attribute_count(&self) -> usize {
-        self.proof.attribute_count()
+        self.tables.storage.attributes.len()
     }
     pub(in crate::canonical_scene::store) fn mesh_instance_count(&self) -> usize {
-        self.proof.mesh_instance_count()
+        self.tables.storage.mesh_instances.len()
     }
     pub(in crate::canonical_scene::store) fn next_logical_mesh(
         &mut self,
@@ -327,9 +318,7 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
         if self.next_logical_mesh == self.logical_mesh_count() {
             return Ok(None);
         }
-        let row = self
-            .tables
-            .logical_mesh_at(self.proof, self.next_logical_mesh)?;
+        let row = self.tables.logical_mesh_at(self.next_logical_mesh)?;
         self.next_logical_mesh += 1;
         Ok(Some(row))
     }
@@ -340,7 +329,7 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
         if self.next_primitive == self.primitive_count() {
             return Ok(None);
         }
-        let row = self.tables.primitive_at(self.proof, self.next_primitive)?;
+        let row = self.tables.primitive_at(self.next_primitive)?;
         self.next_primitive += 1;
         Ok(Some(row))
     }
@@ -351,7 +340,7 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
         if self.next_attribute == self.attribute_count() {
             return Ok(None);
         }
-        let row = self.tables.attribute_at(self.proof, self.next_attribute)?;
+        let row = self.tables.attribute_at(self.next_attribute)?;
         self.next_attribute += 1;
         Ok(Some(row))
     }
@@ -362,9 +351,7 @@ impl<'scene> NodeSceneGeometryCursor<'scene> {
         if self.next_mesh_instance == self.mesh_instance_count() {
             return Ok(None);
         }
-        let row = self
-            .tables
-            .mesh_instance_at(self.proof, self.next_mesh_instance)?;
+        let row = self.tables.mesh_instance_at(self.next_mesh_instance)?;
         self.next_mesh_instance += 1;
         Ok(Some(row))
     }

@@ -1734,6 +1734,61 @@ fn with_gltf_scene_input<R>(
     with_gltf_capability_input(scope, mutation, |input, _| use_input(input))
 }
 
+#[test]
+fn central_validation_rejects_corrupted_typed_deformation_before_generation() {
+    use super::super::NodeSceneBuildFaults;
+    use super::super::test_support::DeformationBuildFault;
+
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    for fault in DeformationBuildFault::ALL {
+        with_gltf_scene_input(
+            GltfCapabilityScope::All,
+            GltfCapabilityMutation::Baseline,
+            |input| {
+                let terminal = NodeSceneTestTransaction::with_account(
+                    &account,
+                    test_limits(),
+                    input,
+                    SceneValidationLimits::default(),
+                )
+                .expect("typed deformation corruption fixture admission")
+                .finish_draft_with_faults(NodeSceneBuildFaults::altered_deformation(fault))
+                .expect("central deformation rejection must prepare cleanly")
+                .publish_with_generation_source_for_test(|| {
+                    SceneGenerationId::reserve_from(&generation_source)
+                })
+                .expect("central deformation rejection must publish bounded evidence");
+                let failure = rich_failure(terminal);
+                assert_eq!(
+                    generation_source.load(std::sync::atomic::Ordering::Relaxed),
+                    0,
+                    "{fault:?}"
+                );
+                assert_eq!(
+                    terminal_failure_code(failure.ledger_evidence()),
+                    super::super::NODE_SCENE_BUILD_INVARIANT_CODE,
+                    "{fault:?}",
+                );
+                let ledger = failure.ledger_evidence();
+                assert_eq!(ledger.header().current_live_bytes(), 0, "{fault:?}");
+                assert_eq!(ledger.header().active_reservations(), 0, "{fault:?}");
+                assert_eq!(
+                    ledger
+                        .dimension_by_semantic(STORE_DIMENSION)
+                        .unwrap()
+                        .committed_canonical_output(),
+                    0,
+                    "{fault:?}",
+                );
+                assert_released(failure, &account);
+                assert!(!account.snapshot().poisoned(), "{fault:?}");
+            },
+        );
+    }
+}
+
 fn build_gltf_scene_with_generation_source(
     account: &PhysicalStorageAccount,
     scope: GltfCapabilityScope,

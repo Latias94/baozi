@@ -10,14 +10,12 @@ use baozi_operation::{
 use crate::canonical_scene::store::production::{Presence, ValidatedAnimationBatch};
 use crate::canonical_scene::store::schema::animation::{
     ANIMATION_CHANNEL_FIELD_COUNT, ANIMATION_CLIP_FIELD_COUNT, ANIMATION_DIRECTORY_FIELD_COUNT,
-    ANIMATION_SCHEMA_REVISION, ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS,
-    ANIMATION_TARGET_NODE_ROTATION, ANIMATION_TARGET_NODE_SCALE, ANIMATION_TARGET_NODE_TRANSLATION,
-    AnimationChannelTableSchema, AnimationClipNameSchema, AnimationClipTableSchema,
-    AnimationDirectorySchema, AnimationInTangentsSchema, AnimationOutTangentsSchema,
-    AnimationTimesSchema, AnimationValuesSchema, encode_animation_extrapolation,
-    encode_animation_interpolation, encode_animation_target_kind, encode_animation_time_domain,
+    ANIMATION_SCHEMA_REVISION, AnimationChannelTableSchema, AnimationClipNameSchema,
+    AnimationClipTableSchema, AnimationDirectorySchema, AnimationInTangentsSchema,
+    AnimationOutTangentsSchema, AnimationTimesSchema, AnimationValuesSchema,
+    encode_animation_extrapolation, encode_animation_interpolation, encode_animation_target_kind,
+    encode_animation_time_domain,
 };
-use crate::canonical_scene::store::schema::deformation::DeformationMeshInstanceTableSchema;
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, PRESENCE_ABSENT, PRESENCE_PRESENT,
 };
@@ -210,24 +208,6 @@ impl AnimationMaterializationPlans {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct AnimationTargetTableRefs {
-    node_count: u32,
-    mesh_instances: Option<CanonicalBlockRef<DeformationMeshInstanceTableSchema>>,
-}
-
-impl AnimationTargetTableRefs {
-    pub(super) const fn new(
-        node_count: u32,
-        mesh_instances: Option<CanonicalBlockRef<DeformationMeshInstanceTableSchema>>,
-    ) -> Self {
-        Self {
-            node_count,
-            mesh_instances,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct RetainedAnimationRefs {
     pub(in crate::canonical_scene::store) directory: CanonicalBlockRef<AnimationDirectorySchema>,
     pub(in crate::canonical_scene::store) clips:
@@ -266,7 +246,6 @@ pub(super) fn retain_animation<'lane, O, PP, U, L, R>(
     lane: &mut CanonicalLane<'lane, O, PP, U, L>,
     plans: &AnimationMaterializationPlans,
     batch: &ValidatedAnimationBatch<'_, R>,
-    targets: AnimationTargetTableRefs,
     failure: StoreBuildError,
 ) -> Result<RetainedAnimationRefs, StoreRuntimeError>
 where
@@ -352,7 +331,7 @@ where
 
     let channels = match plans.channels {
         Some(plan) => Some(retain_animation_channels(
-            lane, plan, plans, batch, payloads, targets, failure,
+            lane, plan, plans, batch, payloads, failure,
         )?),
         None => None,
     };
@@ -485,7 +464,6 @@ fn retain_animation_channels<'lane, O, PP, U, L, R>(
     plans: &AnimationMaterializationPlans,
     batch: &ValidatedAnimationBatch<'_, R>,
     payloads: AnimationPayloadRefs,
-    targets: AnimationTargetTableRefs,
     failure: StoreBuildError,
 ) -> Result<CanonicalBlockRef<AnimationChannelTableSchema>, StoreRuntimeError>
 where
@@ -514,7 +492,6 @@ where
                 row.write_scalar(channel.source_index())?;
                 row.write_scalar(target_kind)?;
                 row.write_scalar(channel.canonical_target_index())?;
-                write_animation_target_ref(row, target_kind, targets, failure)?;
                 row.write_scalar(encode_animation_interpolation(channel.interpolation()))?;
                 row.write_scalar(encode_animation_extrapolation(channel.pre_extrapolation()))?;
                 row.write_scalar(encode_animation_extrapolation(channel.post_extrapolation()))?;
@@ -660,23 +637,6 @@ where
         })
     })
     .map(CanonicalBlockRef::from_store)
-}
-
-fn write_animation_target_ref(
-    row: &mut CanonicalRecordBuildRow<'_, '_>,
-    target_kind: u8,
-    targets: AnimationTargetTableRefs,
-    failure: StoreBuildError,
-) -> Result<(), StoreControlledError> {
-    match target_kind {
-        ANIMATION_TARGET_NODE_TRANSLATION
-        | ANIMATION_TARGET_NODE_ROTATION
-        | ANIMATION_TARGET_NODE_SCALE => row.write_scalar(targets.node_count),
-        ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS => {
-            row.write_record_ref(targets.mesh_instances.ok_or(failure)?.into_store())
-        }
-        _ => Err(failure.into()),
-    }
 }
 
 fn write_optional_rate(

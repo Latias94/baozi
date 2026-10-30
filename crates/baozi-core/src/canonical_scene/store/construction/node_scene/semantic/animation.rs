@@ -14,10 +14,11 @@ use crate::canonical_scene::store::schema::animation::{
     AnimationInTangentsSchema, AnimationOutTangentsSchema, AnimationTimesSchema,
     AnimationValuesSchema, animation_channel_field, animation_clip_field,
 };
-use crate::canonical_scene::store::schema::deformation::DEFORMATION_MESH_INSTANCE_FIELD_COUNT;
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, PRESENCE_ABSENT, PRESENCE_PRESENT, SceneDirectorySchema,
 };
+use crate::canonical_scene::store::typed_storage::GeometryStorage;
+use crate::canonical_scene::store::typed_storage::deformation::DeformationStorage;
 use crate::canonical_scene::store::validation::NodeSceneValidationProof;
 
 use super::{NodeSceneSemanticResult, invariant, read_scalar, read_u32_as_usize};
@@ -32,7 +33,8 @@ pub(in crate::canonical_scene::store) struct NodeSceneAnimationTables<'scene> {
     clip_names: Option<&'scene str>,
     clips: Option<CanonicalRecordView<'scene>>,
     channels: Option<CanonicalRecordView<'scene>>,
-    deformation_mesh_instances: Option<CanonicalRecordView<'scene>>,
+    geometry: &'scene GeometryStorage,
+    deformation: &'scene DeformationStorage,
     times: Option<&'scene [f64]>,
     values: Option<&'scene [f32]>,
     in_tangents: Option<&'scene [f32]>,
@@ -42,8 +44,20 @@ pub(in crate::canonical_scene::store) struct NodeSceneAnimationTables<'scene> {
 impl<'scene> NodeSceneAnimationTables<'scene> {
     pub(in crate::canonical_scene::store) fn try_new(
         canonical: &'scene SceneCanonicalStore,
-        proof: NodeSceneValidationProof,
+        geometry: &'scene GeometryStorage,
+        deformation: &'scene DeformationStorage,
+        proof: &NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
+        if geometry.mesh_instances.len() != proof.mesh_instance_count()
+            || deformation.mesh_instances.len() != geometry.mesh_instances.len()
+            || geometry.logical_meshes.len() != proof.logical_mesh_count()
+            || deformation.logical_morphs.len() != proof.logical_morph_count()
+            || deformation.logical_morphs.len() != geometry.logical_meshes.len()
+        {
+            return Err(invariant(
+                "typed animation target domains disagree with central validation proof",
+            ));
+        }
         let clip_names = proof
             .animation_clip_names()
             .map(|reference| {
@@ -72,13 +86,6 @@ impl<'scene> NodeSceneAnimationTables<'scene> {
             "validated animation-channel table is unavailable or mistyped",
             "validated animation-channel table presence disagrees with validation proof",
             "validated animation-channel table layout disagrees with validation proof",
-        )?;
-        let deformation_mesh_instances = resolve_optional_dependency_table(
-            canonical,
-            proof.deformation_mesh_instances(),
-            DEFORMATION_MESH_INSTANCE_FIELD_COUNT,
-            "validated deformation mesh-instance target table is unavailable or mistyped",
-            "validated deformation mesh-instance target table has an invalid layout",
         )?;
         let times = resolve_sequence(
             canonical,
@@ -126,7 +133,8 @@ impl<'scene> NodeSceneAnimationTables<'scene> {
             clip_names,
             clips,
             channels,
-            deformation_mesh_instances,
+            geometry,
+            deformation,
             times,
             values,
             in_tangents,
@@ -136,7 +144,7 @@ impl<'scene> NodeSceneAnimationTables<'scene> {
 
     pub(super) const fn into_cursor(
         self,
-        proof: NodeSceneValidationProof,
+        proof: &'scene NodeSceneValidationProof,
     ) -> NodeSceneAnimationCursor<'scene> {
         NodeSceneAnimationCursor {
             tables: self,
@@ -181,29 +189,6 @@ where
     }
 }
 
-fn resolve_optional_dependency_table<'scene, Tag>(
-    canonical: &'scene SceneCanonicalStore,
-    reference: Option<CanonicalBlockRef<Tag>>,
-    expected_fields: usize,
-    unavailable_reason: &'static str,
-    layout_reason: &'static str,
-) -> NodeSceneSemanticResult<Option<CanonicalRecordView<'scene>>>
-where
-    Tag: CanonicalSchema<StoreKind = RecordBlock>,
-{
-    reference
-        .map(|reference| {
-            let table = canonical
-                .records(reference.into_store())
-                .ok_or_else(|| invariant(unavailable_reason))?;
-            if table.rows() == 0 || table.fields() != expected_fields {
-                return Err(invariant(layout_reason));
-            }
-            Ok(table)
-        })
-        .transpose()
-}
-
 fn resolve_sequence<'scene, T, Tag>(
     canonical: &'scene SceneCanonicalStore,
     reference: Option<CanonicalBlockRef<Tag>>,
@@ -238,7 +223,7 @@ enum AnimationCursorPhase {
 #[must_use = "the animation cursor must be consumed or deliberately discarded"]
 pub(in crate::canonical_scene::store) struct NodeSceneAnimationCursor<'scene> {
     tables: NodeSceneAnimationTables<'scene>,
-    proof: NodeSceneValidationProof,
+    proof: &'scene NodeSceneValidationProof,
     phase: AnimationCursorPhase,
     next_clip: usize,
     next_channel: usize,
@@ -621,41 +606,58 @@ impl<'scene> NodeSceneAnimationCursor<'scene> {
         )?;
         match kind {
             ANIMATION_TARGET_NODE_TRANSLATION => {
-                require_node_target(table, row, index, self.proof)?;
+                require_node_target(index, self.proof)?;
                 Ok(NodeSceneAnimationTarget::NodeTranslation(index))
             }
             ANIMATION_TARGET_NODE_ROTATION => {
-                require_node_target(table, row, index, self.proof)?;
+                require_node_target(index, self.proof)?;
                 Ok(NodeSceneAnimationTarget::NodeRotation(index))
             }
             ANIMATION_TARGET_NODE_SCALE => {
-                require_node_target(table, row, index, self.proof)?;
+                require_node_target(index, self.proof)?;
                 Ok(NodeSceneAnimationTarget::NodeScale(index))
             }
             ANIMATION_TARGET_MESH_INSTANCE_MORPH_WEIGHTS => {
-                let mesh_instances = self.tables.deformation_mesh_instances.ok_or_else(|| {
-                    invariant(
-                        "validated morph-weight target is missing its deformation mesh-instance table",
-                    )
-                })?;
-                if index >= mesh_instances.rows() {
+                let instance = self
+                    .tables
+                    .geometry
+                    .mesh_instances
+                    .get(index)
+                    .ok_or_else(|| {
+                        invariant(
+                            "validated morph-weight target is outside geometry mesh-instance space",
+                        )
+                    })?;
+                if self.tables.deformation.mesh_instances.get(index).is_none() {
                     return Err(invariant(
                         "validated morph-weight target is outside deformation mesh-instance space",
                     ));
                 }
-                let reference = self.proof.deformation_mesh_instances().ok_or_else(|| {
-                    invariant(
-                        "validated morph-weight target has no deformation mesh-instance proof",
-                    )
-                })?;
-                require_exact_record_reference(
+                let logical = self
+                    .tables
+                    .deformation
+                    .logical_morphs
+                    .get(instance.logical_mesh.0 as usize)
+                    .ok_or_else(|| {
+                        invariant("validated morph-weight target has no logical morph domain")
+                    })?;
+                let definitions = logical
+                    .definitions
+                    .get(&self.tables.deformation.morph_definitions)
+                    .ok_or_else(|| {
+                        invariant("validated morph-weight target definition range is unavailable")
+                    })?;
+                let value_width = read_u32_as_usize(
                     table,
                     row,
-                    animation_channel_field::TARGET_CONTEXT,
-                    reference,
-                    "validated morph-weight target reference is unreadable",
-                    "validated morph-weight target reference disagrees with validation proof",
+                    animation_channel_field::VALUE_WIDTH,
+                    "validated animation-channel value width is unreadable",
                 )?;
+                if definitions.is_empty() || definitions.len() != value_width {
+                    return Err(invariant(
+                        "validated morph-weight target width disagrees with its logical definitions",
+                    ));
+                }
                 Ok(NodeSceneAnimationTarget::MeshInstanceMorphWeights(index))
             }
             _ => Err(invariant(
@@ -666,21 +668,12 @@ impl<'scene> NodeSceneAnimationCursor<'scene> {
 }
 
 fn require_node_target(
-    table: CanonicalRecordView<'_>,
-    row: usize,
     index: usize,
-    proof: NodeSceneValidationProof,
+    proof: &NodeSceneValidationProof,
 ) -> NodeSceneSemanticResult<()> {
     if index == 0 || index > proof.source_node_count() {
         return Err(invariant(
             "validated animation-channel node target is outside canonical node space",
-        ));
-    }
-    if table.scalar::<u32>(row, animation_channel_field::TARGET_CONTEXT)
-        != u32::try_from(proof.source_node_count() + 1).ok()
-    {
-        return Err(invariant(
-            "validated animation node domain count disagrees with central proof",
         ));
     }
     Ok(())

@@ -13,10 +13,10 @@ use crate::canonical_scene::store::production::{
     AnimationTimeDomainAuthoring, Presence,
 };
 
-pub(in super::super) const ANIMATION_SCHEMA_REVISION: u32 = 3;
+pub(in super::super) const ANIMATION_SCHEMA_REVISION: u32 = 4;
 pub(in super::super) const ANIMATION_DIRECTORY_FIELD_COUNT: usize = 22;
 pub(in super::super) const ANIMATION_CLIP_FIELD_COUNT: usize = 13;
-pub(in super::super) const ANIMATION_CHANNEL_FIELD_COUNT: usize = 23;
+pub(in super::super) const ANIMATION_CHANNEL_FIELD_COUNT: usize = 22;
 
 pub(in super::super) const ANIMATION_TIME_DOMAIN_SECONDS: u8 = 0;
 pub(in super::super) const ANIMATION_TIME_DOMAIN_FRAMES: u8 = 1;
@@ -130,26 +130,25 @@ pub(in super::super) mod animation_channel_field {
     pub(crate) const CHANNEL: usize = 0;
     pub(crate) const TARGET_KIND: usize = 1;
     pub(crate) const TARGET_INDEX: usize = 2;
-    pub(crate) const TARGET_CONTEXT: usize = 3;
-    pub(crate) const INTERPOLATION: usize = 4;
-    pub(crate) const PRE_EXTRAPOLATION: usize = 5;
-    pub(crate) const POST_EXTRAPOLATION: usize = 6;
-    pub(crate) const KEY_COUNT: usize = 7;
-    pub(crate) const VALUE_WIDTH: usize = 8;
-    pub(crate) const TIME_OFFSET: usize = 9;
-    pub(crate) const TIME_COUNT: usize = 10;
-    pub(crate) const TIMES: usize = 11;
-    pub(crate) const VALUE_OFFSET: usize = 12;
-    pub(crate) const VALUE_COUNT: usize = 13;
-    pub(crate) const VALUES: usize = 14;
-    pub(crate) const IN_TANGENTS_PRESENCE: usize = 15;
-    pub(crate) const IN_TANGENT_OFFSET: usize = 16;
-    pub(crate) const IN_TANGENT_COUNT: usize = 17;
-    pub(crate) const IN_TANGENTS: usize = 18;
-    pub(crate) const OUT_TANGENTS_PRESENCE: usize = 19;
-    pub(crate) const OUT_TANGENT_OFFSET: usize = 20;
-    pub(crate) const OUT_TANGENT_COUNT: usize = 21;
-    pub(crate) const OUT_TANGENTS: usize = 22;
+    pub(crate) const INTERPOLATION: usize = 3;
+    pub(crate) const PRE_EXTRAPOLATION: usize = 4;
+    pub(crate) const POST_EXTRAPOLATION: usize = 5;
+    pub(crate) const KEY_COUNT: usize = 6;
+    pub(crate) const VALUE_WIDTH: usize = 7;
+    pub(crate) const TIME_OFFSET: usize = 8;
+    pub(crate) const TIME_COUNT: usize = 9;
+    pub(crate) const TIMES: usize = 10;
+    pub(crate) const VALUE_OFFSET: usize = 11;
+    pub(crate) const VALUE_COUNT: usize = 12;
+    pub(crate) const VALUES: usize = 13;
+    pub(crate) const IN_TANGENTS_PRESENCE: usize = 14;
+    pub(crate) const IN_TANGENT_OFFSET: usize = 15;
+    pub(crate) const IN_TANGENT_COUNT: usize = 16;
+    pub(crate) const IN_TANGENTS: usize = 17;
+    pub(crate) const OUT_TANGENTS_PRESENCE: usize = 18;
+    pub(crate) const OUT_TANGENT_OFFSET: usize = 19;
+    pub(crate) const OUT_TANGENT_COUNT: usize = 20;
+    pub(crate) const OUT_TANGENTS: usize = 21;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

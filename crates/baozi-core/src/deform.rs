@@ -11,7 +11,10 @@ pub enum SkinMatrixSpace {
     MeshInstanceLocal,
 }
 
-/// A source-declared correction matrix with explicit input and output spaces.
+/// A finite affine source correction with explicit input and output spaces.
+///
+/// The matrix may contain shear, reflection, or a singular linear part. Construction
+/// preserves all scalar bits and does not decompose the matrix into TRS components.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkinMatrixCorrection {
     from: SkinMatrixSpace,
@@ -28,6 +31,9 @@ impl SkinMatrixCorrection {
         if !matrix.is_finite() {
             return Err(SkinMatrixCorrectionError::NonFiniteMatrix);
         }
+        if !matrix.is_affine() {
+            return Err(SkinMatrixCorrectionError::NonAffineMatrix);
+        }
 
         Ok(Self { from, to, matrix })
     }
@@ -43,12 +49,19 @@ impl SkinMatrixCorrection {
     pub const fn matrix(self) -> Mat4 {
         self.matrix
     }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_matrix_for_test(&mut self, matrix: Mat4) {
+        self.matrix = matrix;
+    }
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum SkinMatrixCorrectionError {
     #[error("skin correction matrix contains a non-finite value")]
     NonFiniteMatrix,
+    #[error("skin correction matrix is not exactly affine")]
+    NonAffineMatrix,
 }
 
 /// The explicit canonical matrix-space contract for skin evaluation.
@@ -129,7 +142,49 @@ pub enum MorphDeltaSemantic {
 
 #[cfg(test)]
 mod tests {
-    use super::{SkinMatrixSpace, SkinMatrixSpaces};
+    use super::{
+        SkinMatrixCorrection, SkinMatrixCorrectionError, SkinMatrixSpace, SkinMatrixSpaces,
+    };
+    use crate::math::Mat4;
+
+    #[test]
+    fn corrections_require_finite_affine_matrices_without_rewriting_bits() {
+        let make = |matrix| {
+            SkinMatrixCorrection::new(
+                SkinMatrixSpace::LogicalMeshLocalBind,
+                SkinMatrixSpace::MeshInstanceLocal,
+                matrix,
+            )
+        };
+        let mut matrix = Mat4::IDENTITY;
+        matrix.cols[0][0] = -2.0;
+        matrix.cols[1][0] = 0.25;
+        matrix.cols[2][2] = 0.0;
+        matrix.cols[1][3] = -0.0;
+        matrix.cols[3][0] = f32::from_bits(1);
+        let actual = make(matrix).unwrap().matrix();
+        for (actual, expected) in actual
+            .cols
+            .into_iter()
+            .flatten()
+            .zip(matrix.cols.into_iter().flatten())
+        {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        for (column, row, value) in [(0, 3, 0.5), (3, 3, 2.0)] {
+            let mut invalid = matrix;
+            invalid.cols[column][row] = value;
+            assert_eq!(
+                make(invalid),
+                Err(SkinMatrixCorrectionError::NonAffineMatrix)
+            );
+        }
+        matrix.cols[0][0] = f32::NAN;
+        assert_eq!(
+            make(matrix),
+            Err(SkinMatrixCorrectionError::NonFiniteMatrix)
+        );
+    }
 
     #[test]
     fn canonical_skin_matrix_spaces_are_explicit() {

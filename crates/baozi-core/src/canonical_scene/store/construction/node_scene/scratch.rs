@@ -14,10 +14,7 @@ use crate::canonical_scene::store::validation::{
     AnimationMeteredCounts, AnimationValidationScratch, AnimationValidationScratchRequirements,
     AppearanceBindingValidationScratch, AppearanceCanonicalCounts,
     AppearanceMaterialValidationScratch, AppearanceValidationScratch,
-    AppearanceValidationScratchRequirements, DeformationLogicalMorphValidationProjection,
-    DeformationMeshInstanceValidationProjection, DeformationMorphDefinitionValidationProjection,
-    DeformationMorphDeltaValidationProjection, DeformationMorphTargetValidationProjection,
-    DeformationPrimitiveValidationProjection, DeformationSkinValidationProjection,
+    AppearanceValidationScratchRequirements, DeformationMeteredCounts,
     DeformationValidationScratch, DeformationValidationScratchRequirements,
     NodeSceneValidationScratch, ProfileMeteredCounts, ProfileMeteredScratch,
 };
@@ -114,13 +111,6 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
     appearance_image_media_counts: ScratchCapacityPlan,
     appearance_bindings: ScratchCapacityPlan,
     appearance_materials: ScratchCapacityPlan,
-    deformation_skins: ScratchCapacityPlan,
-    deformation_morph_definitions: ScratchCapacityPlan,
-    deformation_logical_morphs: ScratchCapacityPlan,
-    deformation_morph_deltas: ScratchCapacityPlan,
-    deformation_morph_targets: ScratchCapacityPlan,
-    deformation_primitives: ScratchCapacityPlan,
-    deformation_mesh_instances: ScratchCapacityPlan,
     deformation_palette_maxima: ScratchCapacityPlan,
     deformation_uniqueness_marks: ScratchCapacityPlan,
     animation_clip_descriptors: ScratchCapacityPlan,
@@ -128,6 +118,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
     animation_target_marks: ScratchCapacityPlan,
     profile_provenance_depths: ScratchCapacityPlan,
     appearance_requirements: AppearanceValidationScratchRequirements,
+    deformation_counts: DeformationMeteredCounts,
     deformation_requirements: DeformationValidationScratchRequirements,
     animation_counts: AnimationMeteredCounts,
     animation_requirements: AnimationValidationScratchRequirements,
@@ -141,9 +132,8 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
 impl NodeSceneValidationScratchPlan {
     pub(super) fn try_new(
         counts: SceneEvidenceCounts,
+        deformation_counts: DeformationMeteredCounts,
         deformation_uniqueness_capacity: usize,
-        deformation_influence_row_offset_count: u32,
-        deformation_influence_count: u32,
         animation_counts: AnimationMeteredCounts,
         profile_counts: ProfileMeteredCounts,
         profile_maximum_depth: u32,
@@ -151,8 +141,6 @@ impl NodeSceneValidationScratchPlan {
         let camera_count = NodeSceneValidationScratch::required_camera_placement_counts(counts)
             .ok_or(StorePlanError::SizeOverflow)?;
         let light_count = NodeSceneValidationScratch::required_light_placement_counts(counts)
-            .ok_or(StorePlanError::SizeOverflow)?;
-        let palette_count = NodeSceneValidationScratch::required_deformation_palette_marks(counts)
             .ok_or(StorePlanError::SizeOverflow)?;
         let appearance_requirements =
             AppearanceValidationScratchRequirements::from_counts(AppearanceCanonicalCounts::new(
@@ -164,17 +152,47 @@ impl NodeSceneValidationScratchPlan {
             ))
             .ok_or(StorePlanError::SizeOverflow)?;
         let deformation_requirements = DeformationValidationScratchRequirements::try_new(
-            counts.skin_count,
-            counts.morph_definition_count,
-            counts.logical_morph_count,
-            counts.morph_delta_count,
-            counts.morph_target_count,
-            counts.primitive_deformation_count,
-            counts.mesh_instance_count,
-            deformation_influence_row_offset_count,
-            deformation_influence_count,
+            deformation_counts,
+            deformation_uniqueness_capacity,
         )
         .ok_or(StorePlanError::SizeOverflow)?;
+        if [
+            (deformation_counts.skin_count, counts.skin_count),
+            (
+                deformation_counts.logical_morph_count,
+                counts.logical_morph_count,
+            ),
+            (
+                deformation_counts.logical_morph_count,
+                counts.logical_mesh_count,
+            ),
+            (
+                deformation_counts.morph_definition_count,
+                counts.morph_definition_count,
+            ),
+            (
+                deformation_counts.primitive_count,
+                counts.primitive_deformation_count,
+            ),
+            (deformation_counts.primitive_count, counts.primitive_count),
+            (
+                deformation_counts.morph_target_count,
+                counts.morph_target_count,
+            ),
+            (
+                deformation_counts.morph_delta_count,
+                counts.morph_delta_count,
+            ),
+            (
+                deformation_counts.mesh_instance_count,
+                counts.mesh_instance_count,
+            ),
+        ]
+        .into_iter()
+        .any(|(actual, expected)| actual != expected)
+        {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
         let animation_requirements = AnimationValidationScratchRequirements::try_new(
             animation_counts,
             counts.node_count,
@@ -191,30 +209,10 @@ impl NodeSceneValidationScratchPlan {
         let appearance_materials = scratch_capacity_plan::<AppearanceMaterialValidationScratch>(
             appearance_requirements.materials(),
         )?;
-        let deformation_skins = scratch_capacity_plan::<DeformationSkinValidationProjection>(
-            deformation_requirements.skins,
-        )?;
-        let deformation_morph_definitions = scratch_capacity_plan::<
-            DeformationMorphDefinitionValidationProjection,
-        >(deformation_requirements.morph_definitions)?;
-        let deformation_logical_morphs = scratch_capacity_plan::<
-            DeformationLogicalMorphValidationProjection,
-        >(deformation_requirements.logical_morphs)?;
-        let deformation_morph_deltas = scratch_capacity_plan::<
-            DeformationMorphDeltaValidationProjection,
-        >(deformation_requirements.morph_deltas)?;
-        let deformation_morph_targets = scratch_capacity_plan::<
-            DeformationMorphTargetValidationProjection,
-        >(deformation_requirements.morph_targets)?;
-        let deformation_primitives = scratch_capacity_plan::<
-            DeformationPrimitiveValidationProjection,
-        >(deformation_requirements.primitives)?;
-        let deformation_mesh_instances = scratch_capacity_plan::<
-            DeformationMeshInstanceValidationProjection,
-        >(deformation_requirements.mesh_instances)?;
-        let deformation_palette_maxima = scratch_capacity_plan::<Option<u32>>(palette_count)?;
+        let deformation_palette_maxima =
+            scratch_capacity_plan::<Option<u32>>(deformation_requirements.palette_maxima)?;
         let deformation_uniqueness_marks =
-            scratch_capacity_plan::<u64>(deformation_uniqueness_capacity)?;
+            scratch_capacity_plan::<u64>(deformation_requirements.uniqueness_marks)?;
         let animation_clip_descriptors = scratch_capacity_plan::<AnimationClipValidationDescriptor>(
             animation_requirements.clip_descriptors,
         )?;
@@ -233,13 +231,6 @@ impl NodeSceneValidationScratchPlan {
             appearance_image_media_counts,
             appearance_bindings,
             appearance_materials,
-            deformation_skins,
-            deformation_morph_definitions,
-            deformation_logical_morphs,
-            deformation_morph_deltas,
-            deformation_morph_targets,
-            deformation_primitives,
-            deformation_mesh_instances,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_clip_descriptors,
@@ -253,17 +244,13 @@ impl NodeSceneValidationScratchPlan {
                 .checked_add(plan.envelope_bytes)
                 .ok_or(StorePlanError::SizeOverflow)
         })?;
-        let base_initialization_work = [
-            camera_count,
-            light_count,
-            palette_count,
-            deformation_uniqueness_capacity,
-        ]
-        .into_iter()
-        .try_fold(0_u64, |total, count| {
-            let count = u64::try_from(count).map_err(|_| StorePlanError::SizeOverflow)?;
-            total.checked_add(count).ok_or(StorePlanError::SizeOverflow)
-        })?;
+        let base_initialization_work =
+            [camera_count, light_count]
+                .into_iter()
+                .try_fold(0_u64, |total, count| {
+                    let count = u64::try_from(count).map_err(|_| StorePlanError::SizeOverflow)?;
+                    total.checked_add(count).ok_or(StorePlanError::SizeOverflow)
+                })?;
         let initialization_work = base_initialization_work
             .checked_add(
                 appearance_requirements
@@ -288,6 +275,11 @@ impl NodeSceneValidationScratchPlan {
             .ok_or(StorePlanError::SizeOverflow)?;
         let semantic_projection_work = appearance_requirements
             .semantic_projection_work_units()
+            .and_then(|work| {
+                deformation_counts
+                    .validation_work()
+                    .and_then(|deformation| work.checked_add(deformation))
+            })
             .ok_or(StorePlanError::SizeOverflow)?;
 
         Ok(Self {
@@ -296,13 +288,6 @@ impl NodeSceneValidationScratchPlan {
             appearance_image_media_counts,
             appearance_bindings,
             appearance_materials,
-            deformation_skins,
-            deformation_morph_definitions,
-            deformation_logical_morphs,
-            deformation_morph_deltas,
-            deformation_morph_targets,
-            deformation_primitives,
-            deformation_mesh_instances,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_clip_descriptors,
@@ -310,6 +295,7 @@ impl NodeSceneValidationScratchPlan {
             animation_target_marks,
             profile_provenance_depths,
             appearance_requirements,
+            deformation_counts,
             deformation_requirements,
             animation_counts,
             animation_requirements,
@@ -327,16 +313,10 @@ impl NodeSceneValidationScratchPlan {
         profile_counts: ProfileMeteredCounts,
         maximum_depth: u32,
     ) -> Result<Self, StorePlanError> {
-        let influence_row_offset_count =
-            u32::try_from(self.deformation_requirements.influence_row_offset_count)
-                .map_err(|_| StorePlanError::SizeOverflow)?;
-        let influence_count = u32::try_from(self.deformation_requirements.influence_count)
-            .map_err(|_| StorePlanError::SizeOverflow)?;
         Self::try_new(
             counts,
+            self.deformation_counts,
             self.deformation_uniqueness_marks.desired_capacity(),
-            influence_row_offset_count,
-            influence_count,
             self.animation_counts,
             profile_counts,
             maximum_depth,
@@ -367,6 +347,12 @@ impl NodeSceneValidationScratchPlan {
         self.deformation_requirements
     }
 
+    pub(in crate::canonical_scene::store) const fn deformation_counts(
+        &self,
+    ) -> DeformationMeteredCounts {
+        self.deformation_counts
+    }
+
     pub(in crate::canonical_scene::store) const fn animation_counts(
         &self,
     ) -> AnimationMeteredCounts {
@@ -393,13 +379,6 @@ where
     appearance_image_media_counts: Vec<u32>,
     appearance_bindings: Vec<AppearanceBindingValidationScratch>,
     appearance_materials: Vec<AppearanceMaterialValidationScratch>,
-    deformation_skins: Vec<DeformationSkinValidationProjection>,
-    deformation_morph_definitions: Vec<DeformationMorphDefinitionValidationProjection>,
-    deformation_logical_morphs: Vec<DeformationLogicalMorphValidationProjection>,
-    deformation_morph_deltas: Vec<DeformationMorphDeltaValidationProjection>,
-    deformation_morph_targets: Vec<DeformationMorphTargetValidationProjection>,
-    deformation_primitives: Vec<DeformationPrimitiveValidationProjection>,
-    deformation_mesh_instances: Vec<DeformationMeshInstanceValidationProjection>,
     deformation_palette_maxima: Vec<Option<u32>>,
     deformation_uniqueness_marks: Vec<u64>,
     animation_clip_descriptors: Vec<AnimationClipValidationDescriptor>,
@@ -453,13 +432,6 @@ where
         let appearance_image_media_counts = allocate!(appearance_image_media_counts);
         let appearance_bindings = allocate!(appearance_bindings);
         let appearance_materials = allocate!(appearance_materials);
-        let deformation_skins = allocate!(deformation_skins);
-        let deformation_morph_definitions = allocate!(deformation_morph_definitions);
-        let deformation_logical_morphs = allocate!(deformation_logical_morphs);
-        let deformation_morph_deltas = allocate!(deformation_morph_deltas);
-        let deformation_morph_targets = allocate!(deformation_morph_targets);
-        let deformation_primitives = allocate!(deformation_primitives);
-        let deformation_mesh_instances = allocate!(deformation_mesh_instances);
         let deformation_palette_maxima = allocate!(deformation_palette_maxima);
         let deformation_uniqueness_marks = allocate!(deformation_uniqueness_marks);
         let animation_clip_descriptors = allocate!(animation_clip_descriptors);
@@ -474,13 +446,6 @@ where
             appearance_image_media_counts,
             appearance_bindings,
             appearance_materials,
-            deformation_skins,
-            deformation_morph_definitions,
-            deformation_logical_morphs,
-            deformation_morph_deltas,
-            deformation_morph_targets,
-            deformation_primitives,
-            deformation_mesh_instances,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_clip_descriptors,
@@ -518,34 +483,6 @@ where
             appearance_materials,
             AppearanceMaterialValidationScratch::EMPTY
         );
-        initialize!(
-            deformation_skins,
-            DeformationSkinValidationProjection::EMPTY
-        );
-        initialize!(
-            deformation_morph_definitions,
-            DeformationMorphDefinitionValidationProjection::EMPTY
-        );
-        initialize!(
-            deformation_logical_morphs,
-            DeformationLogicalMorphValidationProjection::EMPTY
-        );
-        initialize!(
-            deformation_morph_deltas,
-            DeformationMorphDeltaValidationProjection::EMPTY
-        );
-        initialize!(
-            deformation_morph_targets,
-            DeformationMorphTargetValidationProjection::EMPTY
-        );
-        initialize!(
-            deformation_primitives,
-            DeformationPrimitiveValidationProjection::EMPTY
-        );
-        initialize!(
-            deformation_mesh_instances,
-            DeformationMeshInstanceValidationProjection::EMPTY
-        );
         initialize!(deformation_palette_maxima, None);
         initialize!(deformation_uniqueness_marks, 0);
         initialize!(
@@ -573,13 +510,6 @@ where
                 &mut self.appearance_materials,
             ),
             deformation: DeformationValidationScratch::new(
-                &mut self.deformation_skins,
-                &mut self.deformation_morph_definitions,
-                &mut self.deformation_logical_morphs,
-                &mut self.deformation_morph_deltas,
-                &mut self.deformation_morph_targets,
-                &mut self.deformation_primitives,
-                &mut self.deformation_mesh_instances,
                 &mut self.deformation_palette_maxima,
                 &mut self.deformation_uniqueness_marks,
             ),

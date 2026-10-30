@@ -5519,13 +5519,32 @@ fn build_skins<'scope>(
                 reader
                     .read_inverse_bind_matrices()
                     .map(|matrices| {
-                        collect_exact(
-                            ctx,
+                        let mut collected = ctx.metered_vec(
                             ImportStorageClass::SceneConstruction,
-                            mapped_joints.len(),
                             "gltf-inverse-bind-matrices",
-                            matrices.map(|cols| Mat4 { cols }),
-                        )
+                        );
+                        collected.try_reserve(mapped_joints.len())?;
+                        for (joint, cols) in matrices.enumerate() {
+                            poll_parser_loop(ctx, joint)?;
+                            if joint >= mapped_joints.len() {
+                                return Err(gltf_parse_error(
+                                    ctx,
+                                    "glTF inverse bind matrix reader exceeded the joint count",
+                                ));
+                            }
+                            let matrix = Mat4 { cols };
+                            if !matrix.is_finite() || !matrix.is_affine() {
+                                return Err(gltf_parse_error(
+                                    ctx,
+                                    format!(
+                                        "glTF skin {} inverse bind matrix {joint} must be finite and affine",
+                                        skin.index(),
+                                    ),
+                                ));
+                            }
+                            collected.try_push_reserved(matrix)?;
+                        }
+                        Ok(collected)
                     })
                     .transpose()
             })??

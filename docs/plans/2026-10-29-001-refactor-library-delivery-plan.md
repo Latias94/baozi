@@ -219,9 +219,14 @@ The spatial increment stores the existing inline `SceneSpace` and typed camera/l
 under one retained owner. Its bounded extension identities need no extra name pool or scalar codec.
 Fresh construction and central validation use the actual storage; unchanged edits share its owner.
 Delete the replaced spatial directory, row schemas, decoder, writer, and edit-rewrite path before
-adding coordinate conversion. Appearance and deformation/animation remain subsequent D2 cutovers.
+adding coordinate conversion. The deformation increment retains its seven typed row tables and
+ten payload buffers in one owner, cuts fresh construction, unchanged edits, central validation,
+public reads, and snapshot traversal over together, and removes its record schema and seven
+descriptor scratch tables. Animation target validation borrows actual deformation/geometry rows;
+channel records carry only target kind and logical index. Appearance and animation storage remain
+subsequent D2 cutovers.
 
-The private root becomes `SceneTables`, retaining node, geometry, profile, and spatial owners through the
+The private root becomes `SceneTables`, retaining node, geometry, profile, spatial, and deformation owners through the
 existing storage-first release mechanism. Profile state owns typed owner/attachment and metadata
 descriptors; immutable lineage segments and metadata payloads have independent retained owners.
 Store operation digests as typed values, not offset/length rows. A provenance link identifies

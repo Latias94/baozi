@@ -5,7 +5,6 @@ use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, 
 
 mod animation;
 mod appearance;
-mod deformation;
 mod profile;
 
 use super::super::construction::node_scene::SceneEvidenceCounts;
@@ -24,18 +23,6 @@ use super::super::schema::appearance::{
     AppearanceMaterialFactorScalarSchema, AppearanceMaterialNameSchema,
     AppearanceMaterialTableSchema, AppearanceMediaTypeSchema, AppearanceSamplerTableSchema,
     AppearanceSourceKeySchema, AppearanceTextureTableSchema,
-};
-use super::super::schema::deformation::{
-    DeformationDirectorySchema, DeformationInfluenceJointSchema,
-    DeformationInfluenceRowOffsetSchema, DeformationInfluenceSourceOrderSchema,
-    DeformationInfluenceWeightSchema, DeformationInstanceMorphWeightSchema,
-    DeformationInverseBindMatrixSchema, DeformationLogicalMorphTableSchema,
-    DeformationMeshInstanceTableSchema, DeformationMorphDefaultWeightSchema,
-    DeformationMorphDefinitionTableSchema, DeformationMorphDeltaTableSchema,
-    DeformationMorphNameSchema, DeformationMorphSparseIndexSchema,
-    DeformationMorphTargetTableSchema, DeformationMorphValueSchema,
-    DeformationPrimitiveTableSchema, DeformationSkinCorrectionMatrixSchema,
-    DeformationSkinJointNodeSchema, DeformationSkinNameSchema, DeformationSkinTableSchema,
 };
 use super::super::schema::{
     CanonicalBlockRef, CanonicalSchema, NODE_SCENE_EVIDENCE_FIELD_COUNT,
@@ -58,26 +45,10 @@ pub(in crate::canonical_scene::store) use appearance::{
     AppearanceValidationScratchRequirements,
 };
 use appearance::{AppearanceValidatedRefs, validate_appearance_canonical_structure_metered};
-use deformation::{
-    DeformationGeometryDependencies, DeformationValidatedRefs,
-    DeformationValidationDependenciesMetered, validate_deformation_graph_canonical_metered,
-};
-pub(in crate::canonical_scene::store) use deformation::{
-    DeformationLogicalMorphValidationProjection, DeformationMeshInstanceValidationProjection,
-    DeformationMorphDefinitionValidationProjection, DeformationMorphDeltaValidationProjection,
-    DeformationMorphTargetValidationProjection, DeformationPrimitiveValidationProjection,
-    DeformationSkinValidationProjection, DeformationValidationScratch,
-    DeformationValidationScratchRequirements,
-};
 use profile::validate_profile_graph_metered;
 pub(in crate::canonical_scene::store) use profile::{ProfileMeteredCounts, ProfileMeteredScratch};
 pub(in crate::canonical_scene::store) struct NodeSceneValidationScratch;
 impl NodeSceneValidationScratch {
-    pub(in crate::canonical_scene::store) fn required_deformation_palette_marks(
-        counts: SceneEvidenceCounts,
-    ) -> Option<usize> {
-        usize::try_from(counts.logical_mesh_count).ok()
-    }
     pub(in crate::canonical_scene::store) fn required_camera_placement_counts(
         counts: SceneEvidenceCounts,
     ) -> Option<usize> {
@@ -103,17 +74,14 @@ impl NodeSceneValidationScratch {
 pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
     directory: CanonicalBlockRef<SceneDirectorySchema>,
     appearance_directory: CanonicalBlockRef<AppearanceDirectorySchema>,
-    deformation_directory: CanonicalBlockRef<DeformationDirectorySchema>,
     animation_directory: CanonicalBlockRef<AnimationDirectorySchema>,
     appearance: AppearanceValidatedRefs,
-    deformation: DeformationValidatedRefs,
     animation: AnimationValidatedRefs,
     profile: ProfileMeteredCounts,
     maximum_provenance_depth: u32,
     source_node_count: usize,
     source_root_count: usize,
     source_edge_count: usize,
-    deformation_uniqueness_mark_count: usize,
     central_validation_plan: NodeSceneCentralValidationPlan,
     counts: SceneEvidenceCounts,
 }
@@ -133,12 +101,6 @@ impl NodeSceneValidationProof {
         &self,
     ) -> CanonicalBlockRef<AppearanceDirectorySchema> {
         self.appearance_directory
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_directory(
-        &self,
-    ) -> CanonicalBlockRef<DeformationDirectorySchema> {
-        self.deformation_directory
     }
 
     pub(in crate::canonical_scene::store) const fn animation_directory(
@@ -211,126 +173,6 @@ impl NodeSceneValidationProof {
         &self,
     ) -> Option<CanonicalBlockRef<AppearanceMaterialNameSchema>> {
         self.appearance.material_names
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_skins(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationSkinTableSchema>> {
-        self.deformation.skins
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_logical_morphs(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationLogicalMorphTableSchema>> {
-        self.deformation.logical_morphs
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_morph_definitions(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationMorphDefinitionTableSchema>> {
-        self.deformation.morph_definitions
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_primitives(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationPrimitiveTableSchema>> {
-        self.deformation.primitives
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_morph_targets(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationMorphTargetTableSchema>> {
-        self.deformation.morph_targets
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_morph_deltas(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationMorphDeltaTableSchema>> {
-        self.deformation.morph_deltas
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_mesh_instances(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationMeshInstanceTableSchema>> {
-        self.deformation.mesh_instances
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_joint_nodes(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationSkinJointNodeSchema>> {
-        self.deformation.joint_nodes
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_inverse_bind_matrices(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationInverseBindMatrixSchema>> {
-        self.deformation.inverse_bind_matrices
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_skin_correction_matrices(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationSkinCorrectionMatrixSchema>> {
-        self.deformation.skin_correction_matrices
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_skin_names(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationSkinNameSchema>> {
-        self.deformation.skin_names
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_influence_row_offsets(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationInfluenceRowOffsetSchema>> {
-        self.deformation.influence_row_offsets
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_influence_joints(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationInfluenceJointSchema>> {
-        self.deformation.influence_joints
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_influence_weights(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationInfluenceWeightSchema>> {
-        self.deformation.influence_weights
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_influence_source_orders(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationInfluenceSourceOrderSchema>> {
-        self.deformation.influence_source_orders
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_morph_defaults(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationMorphDefaultWeightSchema>> {
-        self.deformation.morph_defaults
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_morph_names(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationMorphNameSchema>> {
-        self.deformation.morph_names
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_morph_values(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationMorphValueSchema>> {
-        self.deformation.morph_values
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_morph_sparse_indices(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationMorphSparseIndexSchema>> {
-        self.deformation.morph_sparse_indices
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_instance_morph_weights(
-        &self,
-    ) -> Option<CanonicalBlockRef<DeformationInstanceMorphWeightSchema>> {
-        self.deformation.instance_morph_weights
     }
 
     pub(in crate::canonical_scene::store) const fn animation_clips(
@@ -437,12 +279,6 @@ impl NodeSceneValidationProof {
 
     pub(in crate::canonical_scene::store) const fn counts(&self) -> SceneEvidenceCounts {
         self.counts
-    }
-
-    pub(in crate::canonical_scene::store) const fn deformation_uniqueness_mark_count(
-        &self,
-    ) -> usize {
-        self.deformation_uniqueness_mark_count
     }
 
     pub(in crate::canonical_scene::store) const fn validation_scratch_plan(
@@ -553,8 +389,6 @@ struct NodeMeteredStructure<'session> {
     directory: CanonicalValidationMember<'session, RecordBlock, SceneDirectorySchema>,
     appearance_directory:
         CanonicalValidationMember<'session, RecordBlock, AppearanceDirectorySchema>,
-    deformation_directory:
-        CanonicalValidationMember<'session, RecordBlock, DeformationDirectorySchema>,
     animation_directory: CanonicalValidationMember<'session, RecordBlock, AnimationDirectorySchema>,
     source_node_count: usize,
     source_root_count: usize,
@@ -579,7 +413,6 @@ where
         return Ok(None);
     }
     let mut appearance = None;
-    let mut deformation = None;
     let mut animation = None;
     let mut root_count = None;
     let complete = session.visit_canonical_records(
@@ -594,10 +427,6 @@ where
                 row.scalar(scene_directory_field::SOURCE_ROOT_COUNT, |value: u32| value)?;
             appearance = row.record_ref::<AppearanceDirectorySchema, _>(
                 scene_directory_field::APPEARANCE,
-                |value| value,
-            )?;
-            deformation = row.record_ref::<DeformationDirectorySchema, _>(
-                scene_directory_field::DEFORMATION,
                 |value| value,
             )?;
             animation = row.record_ref::<AnimationDirectorySchema, _>(
@@ -629,12 +458,8 @@ where
             Ok(valid)
         },
     )?;
-    let (
-        Some(root_count),
-        Some(appearance_directory),
-        Some(deformation_directory),
-        Some(animation_directory),
-    ) = (root_count, appearance, deformation, animation)
+    let (Some(root_count), Some(appearance_directory), Some(animation_directory)) =
+        (root_count, appearance, animation)
     else {
         return Ok(None);
     };
@@ -661,7 +486,6 @@ where
     Ok(Some(NodeMeteredStructure {
         directory,
         appearance_directory,
-        deformation_directory,
         animation_directory,
         source_node_count,
         source_root_count: root_count as usize,
@@ -840,34 +664,22 @@ where
     )? {
         return Ok(None);
     }
-    let geometry_logical_meshes = geometry.logical_meshes.as_slice();
-    let geometry_primitives = geometry.primitives.as_slice();
-    let geometry_mesh_instances = geometry.mesh_instances.as_slice();
-
-    let deformation_requirements = scratch_plan.deformation_requirements();
-    let Some(deformation) = validate_deformation_graph_canonical_metered(
+    let deformation_counts = scratch_plan.deformation_counts();
+    let Some(deformation) = tables.deformation.as_ref().validate(
         session,
-        node.deformation_directory,
-        DeformationValidationDependenciesMetered {
-            nodes: tables.nodes.as_ref(),
-            node_count: expected_counts.node_count,
-            geometry: DeformationGeometryDependencies {
-                logical_meshes: geometry_logical_meshes,
-                primitives: geometry_primitives,
-                mesh_instances: geometry_mesh_instances,
-            },
-        },
+        deformation_counts,
+        tables.nodes.as_ref(),
+        geometry,
         &mut scratch.deformation,
     )?
     else {
         return Ok(None);
     };
-    let Some(logical_morph_projections) = scratch
-        .deformation
-        .logical_morph_projections(deformation_requirements)
-    else {
+    if deformation.maximum_uniqueness_count
+        > scratch_plan.deformation_requirements().uniqueness_marks
+    {
         return Ok(None);
-    };
+    }
 
     let animation_counts = scratch_plan.animation_counts();
     let Some(animation) = validate_animation_graph_metered(
@@ -876,13 +688,8 @@ where
         AnimationMeteredDependencies::new(
             tables.nodes.as_ref(),
             expected_counts.node_count,
-            deformation.members.mesh_instances,
-            deformation.mesh_instance_count,
-            expected_counts.mesh_instance_count,
-            deformation.members.logical_morphs,
-            deformation.logical_morph_count,
-            geometry_mesh_instances,
-            logical_morph_projections,
+            geometry,
+            tables.deformation.as_ref(),
         ),
         animation_counts,
         &mut scratch.animation,
@@ -911,29 +718,29 @@ where
     }
 
     for (actual, expected) in [
-        (deformation.skin_count, expected_counts.skin_count),
+        (deformation_counts.skin_count, expected_counts.skin_count),
         (
-            deformation.logical_morph_count,
+            deformation_counts.logical_morph_count,
             expected_counts.logical_morph_count,
         ),
         (
-            deformation.morph_definition_count,
+            deformation_counts.morph_definition_count,
             expected_counts.morph_definition_count,
         ),
         (
-            deformation.primitive_count,
+            deformation_counts.primitive_count,
             expected_counts.primitive_deformation_count,
         ),
         (
-            deformation.morph_target_count,
+            deformation_counts.morph_target_count,
             expected_counts.morph_target_count,
         ),
         (
-            deformation.morph_delta_count,
+            deformation_counts.morph_delta_count,
             expected_counts.morph_delta_count,
         ),
         (
-            deformation.mesh_instance_count,
+            deformation_counts.mesh_instance_count,
             expected_counts.mesh_instance_count,
         ),
         (animation.clip_count, expected_counts.animation_clip_count),
@@ -993,9 +800,7 @@ where
     .into_iter()
     .map(u32::from)
     .sum::<u32>();
-    let domain_payload_count = appearance_payload_count
-        .checked_add(deformation.payload_block_count)
-        .and_then(|count| count.checked_add(animation.payload_block_count));
+    let domain_payload_count = appearance_payload_count.checked_add(animation.payload_block_count);
     let Some(domain_payload_count) = domain_payload_count else {
         return Ok(None);
     };
@@ -1023,23 +828,6 @@ where
                 .into_iter()
                 .map(u32::from)
                 .sum::<u32>(),
-            )
-        })
-        .and_then(|count| {
-            count.checked_add(
-                1 + [
-                    deformation.members.skins.is_some(),
-                    deformation.members.logical_morphs.is_some(),
-                    deformation.members.morph_definitions.is_some(),
-                    deformation.members.primitives.is_some(),
-                    deformation.members.morph_targets.is_some(),
-                    deformation.members.morph_deltas.is_some(),
-                    deformation.members.mesh_instances.is_some(),
-                ]
-                .into_iter()
-                .map(u32::from)
-                .sum::<u32>()
-                    + deformation.payload_block_count,
             )
         })
         .and_then(|count| {
@@ -1103,89 +891,6 @@ where
             expected_refs.appearance.payloads.material_names,
         )
         && node
-            .deformation_directory
-            .identifies(expected_refs.deformation.directory.into_store())
-        && optional_member_identifies(
-            deformation.members.skins,
-            expected_refs.deformation.tables.skins,
-        )
-        && optional_member_identifies(
-            deformation.members.logical_morphs,
-            expected_refs.deformation.tables.logical_morphs,
-        )
-        && optional_member_identifies(
-            deformation.members.morph_definitions,
-            expected_refs.deformation.tables.morph_definitions,
-        )
-        && optional_member_identifies(
-            deformation.members.primitives,
-            expected_refs.deformation.tables.primitives,
-        )
-        && optional_member_identifies(
-            deformation.members.morph_targets,
-            expected_refs.deformation.tables.morph_targets,
-        )
-        && optional_member_identifies(
-            deformation.members.morph_deltas,
-            expected_refs.deformation.tables.morph_deltas,
-        )
-        && optional_member_identifies(
-            deformation.members.mesh_instances,
-            expected_refs.deformation.tables.mesh_instances,
-        )
-        && optional_member_identifies(
-            deformation.members.joint_nodes,
-            expected_refs.deformation.payloads.joint_nodes,
-        )
-        && optional_member_identifies(
-            deformation.members.inverse_bind_matrices,
-            expected_refs.deformation.payloads.inverse_bind_matrices,
-        )
-        && optional_member_identifies(
-            deformation.members.skin_correction_matrices,
-            expected_refs.deformation.payloads.skin_correction_matrices,
-        )
-        && optional_member_identifies(
-            deformation.members.skin_names,
-            expected_refs.deformation.payloads.skin_names,
-        )
-        && optional_member_identifies(
-            deformation.members.influence_row_offsets,
-            expected_refs.deformation.payloads.influence_row_offsets,
-        )
-        && optional_member_identifies(
-            deformation.members.influence_joints,
-            expected_refs.deformation.payloads.influence_joints,
-        )
-        && optional_member_identifies(
-            deformation.members.influence_weights,
-            expected_refs.deformation.payloads.influence_weights,
-        )
-        && optional_member_identifies(
-            deformation.members.influence_source_orders,
-            expected_refs.deformation.payloads.influence_source_orders,
-        )
-        && optional_member_identifies(
-            deformation.members.morph_defaults,
-            expected_refs.deformation.payloads.morph_defaults,
-        )
-        && optional_member_identifies(
-            deformation.members.morph_names,
-            expected_refs.deformation.payloads.morph_names,
-        )
-        && optional_member_identifies(
-            deformation.members.morph_values,
-            expected_refs.deformation.payloads.morph_values,
-        )
-        && optional_member_identifies(
-            deformation.members.morph_sparse_indices,
-            expected_refs.deformation.payloads.morph_sparse_indices,
-        )
-        && optional_member_identifies(
-            deformation.members.instance_morph_weights,
-            expected_refs.deformation.payloads.instance_morph_weights,
-        )
-        && node
             .animation_directory
             .identifies(expected_refs.animation.directory.into_store())
         && optional_member_identifies(animation.members.clips, expected_refs.animation.clips)
@@ -1212,7 +917,6 @@ where
     Ok(Some(NodeSceneValidationProof {
         directory: expected_refs.directory,
         appearance_directory: expected_refs.appearance.directory,
-        deformation_directory: expected_refs.deformation.directory,
         animation_directory: expected_refs.animation.directory,
         appearance: AppearanceValidatedRefs {
             images: expected_refs.appearance.tables.images,
@@ -1226,28 +930,6 @@ where
             binding_semantic_scalars: expected_refs.appearance.payloads.binding_semantic_scalars,
             material_factor_scalars: expected_refs.appearance.payloads.material_factor_scalars,
             material_names: expected_refs.appearance.payloads.material_names,
-        },
-        deformation: DeformationValidatedRefs {
-            skins: expected_refs.deformation.tables.skins,
-            logical_morphs: expected_refs.deformation.tables.logical_morphs,
-            morph_definitions: expected_refs.deformation.tables.morph_definitions,
-            primitives: expected_refs.deformation.tables.primitives,
-            morph_targets: expected_refs.deformation.tables.morph_targets,
-            morph_deltas: expected_refs.deformation.tables.morph_deltas,
-            mesh_instances: expected_refs.deformation.tables.mesh_instances,
-            joint_nodes: expected_refs.deformation.payloads.joint_nodes,
-            inverse_bind_matrices: expected_refs.deformation.payloads.inverse_bind_matrices,
-            skin_correction_matrices: expected_refs.deformation.payloads.skin_correction_matrices,
-            skin_names: expected_refs.deformation.payloads.skin_names,
-            influence_row_offsets: expected_refs.deformation.payloads.influence_row_offsets,
-            influence_joints: expected_refs.deformation.payloads.influence_joints,
-            influence_weights: expected_refs.deformation.payloads.influence_weights,
-            influence_source_orders: expected_refs.deformation.payloads.influence_source_orders,
-            morph_defaults: expected_refs.deformation.payloads.morph_defaults,
-            morph_names: expected_refs.deformation.payloads.morph_names,
-            morph_values: expected_refs.deformation.payloads.morph_values,
-            morph_sparse_indices: expected_refs.deformation.payloads.morph_sparse_indices,
-            instance_morph_weights: expected_refs.deformation.payloads.instance_morph_weights,
         },
         animation: AnimationValidatedRefs {
             clip_names: expected_refs.animation.payloads.clip_names,
@@ -1263,7 +945,6 @@ where
         source_node_count: node.source_node_count,
         source_root_count: node.source_root_count,
         source_edge_count: node.source_edge_count,
-        deformation_uniqueness_mark_count: deformation.maximum_uniqueness_count,
         central_validation_plan: validation_plan,
         counts: expected_counts,
     }))

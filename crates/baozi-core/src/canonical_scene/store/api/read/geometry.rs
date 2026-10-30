@@ -198,9 +198,7 @@ impl<'s> LogicalMeshRef<'s> {
     }
 
     fn read(self) -> NodeSceneGeometryLogicalMesh<'s> {
-        expect_validated(
-            tables(self.scene).logical_mesh_at(self.scene.as_node_scene().read_proof(), self.index),
-        )
+        expect_validated(tables(self.scene).logical_mesh_at(self.index))
     }
     pub fn id(self) -> LogicalMeshId {
         LogicalMeshId::new(self.scene.generation(), self.index as u32)
@@ -280,9 +278,7 @@ impl<'s> PrimitiveRef<'s> {
     }
 
     fn read(self) -> NodeSceneGeometryPrimitive<'s> {
-        expect_validated(
-            tables(self.scene).primitive_at(self.scene.as_node_scene().read_proof(), self.row),
-        )
+        expect_validated(tables(self.scene).primitive_at(self.row))
     }
     pub fn id(self) -> PrimitiveId {
         PrimitiveId::new(
@@ -326,9 +322,7 @@ impl<'s> PrimitiveRef<'s> {
         let primitive = self.read();
         let offset = primitive.attribute_offset();
         (offset..offset + primitive.attribute_count()).map(move |row| {
-            AttributeRef::from_semantic(expect_validated(
-                tables(self.scene).attribute_at(self.scene.as_node_scene().read_proof(), row),
-            ))
+            AttributeRef::from_semantic(expect_validated(tables(self.scene).attribute_at(row)))
         })
     }
     /// Looks up an exact semantic/domain pair in O(attribute count), without copying its values.
@@ -367,10 +361,7 @@ impl<'s> MeshInstanceRef<'s> {
     }
 
     fn read(self) -> NodeSceneGeometryMeshInstance {
-        expect_validated(
-            tables(self.scene)
-                .mesh_instance_at(self.scene.as_node_scene().read_proof(), self.index),
-        )
+        expect_validated(tables(self.scene).mesh_instance_at(self.index))
     }
     pub fn id(self) -> MeshInstanceId {
         MeshInstanceId::new(self.scene.generation(), self.index as u32)

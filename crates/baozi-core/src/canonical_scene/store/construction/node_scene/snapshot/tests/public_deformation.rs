@@ -549,37 +549,26 @@ fn public_deformation_random_reads_decode_only_the_selected_row() {
     let parts = deformation_scene(&account);
     let scene = ValidatedScene::from_node_scene(parts.scene);
     let owner = scene.as_node_scene();
-    let proof = owner.read_proof();
-    let tables = || NodeSceneDeformationTables::try_new(owner.read_canonical(), proof).unwrap();
+    let tables = || {
+        NodeSceneDeformationTables::try_new(owner.read_deformation(), owner.read_proof()).unwrap()
+    };
     take_row_read_count_for_test();
     assert_eq!(scene.skin_count(), 3);
     assert_eq!(scene.morph_target_definition_count(), 3);
     assert_eq!(scene.skins().len(), 3);
     assert_eq!(take_row_read_count_for_test(), 0);
 
-    assert_eq!(
-        tables().skin_at(proof, 0).unwrap().name(),
-        Some("Palette α")
-    );
+    assert_eq!(tables().skin_at(0).unwrap().name(), Some("Palette α"));
     assert_eq!(take_row_read_count_for_test(), 1);
-    assert_eq!(tables().skin_at(proof, 2).unwrap().name(), Some(""));
+    assert_eq!(tables().skin_at(2).unwrap().name(), Some(""));
     assert_eq!(take_row_read_count_for_test(), 1);
-    assert_eq!(
-        tables()
-            .logical_morph_at(proof, 2)
-            .unwrap()
-            .definition_count(),
-        0
-    );
+    assert_eq!(tables().logical_morph_at(2).unwrap().definition_count(), 0);
     assert_eq!(take_row_read_count_for_test(), 1);
-    assert_eq!(
-        tables().morph_definition_at(proof, 2).unwrap().name(),
-        Some("")
-    );
+    assert_eq!(tables().morph_definition_at(2).unwrap().name(), Some(""));
     assert_eq!(take_row_read_count_for_test(), 1);
     assert_eq!(
         tables()
-            .primitive_at(proof, 2)
+            .primitive_at(2)
             .unwrap()
             .take_influences()
             .unwrap()
@@ -587,16 +576,16 @@ fn public_deformation_random_reads_decode_only_the_selected_row() {
         3
     );
     assert_eq!(take_row_read_count_for_test(), 1);
-    assert_eq!(tables().morph_target_at(proof, 2).unwrap().delta_count(), 1);
+    assert_eq!(tables().morph_target_at(2).unwrap().delta_count(), 1);
     assert_eq!(take_row_read_count_for_test(), 1);
     assert_eq!(
-        tables().morph_delta_at(proof, 4).unwrap().semantic(),
+        tables().morph_delta_at(4).unwrap().semantic(),
         MorphDeltaSemantic::Position
     );
     assert_eq!(take_row_read_count_for_test(), 1);
     assert_eq!(
         tables()
-            .mesh_instance_at(proof, 2)
+            .mesh_instance_at(2)
             .unwrap()
             .take_morph_weights()
             .unwrap()
@@ -604,8 +593,8 @@ fn public_deformation_random_reads_decode_only_the_selected_row() {
         0
     );
     assert_eq!(take_row_read_count_for_test(), 1);
-    assert!(tables().skin_at(proof, 3).is_err());
-    assert!(tables().morph_delta_at(proof, usize::MAX).is_err());
+    assert!(tables().skin_at(3).is_err());
+    assert!(tables().morph_delta_at(usize::MAX).is_err());
     assert_eq!(take_row_read_count_for_test(), 0);
     drop(scene);
     drop(parts.report);

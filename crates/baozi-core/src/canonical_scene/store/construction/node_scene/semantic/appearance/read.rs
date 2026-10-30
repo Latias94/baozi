@@ -11,7 +11,7 @@ use super::{
 impl<'scene> NodeSceneAppearanceTables<'scene> {
     pub(in crate::canonical_scene::store) fn image_at(
         self,
-        proof: NodeSceneValidationProof,
+        proof: &'scene NodeSceneValidationProof,
         index: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAppearanceImage<'scene>> {
         let table = require_row(self.images, index, proof.image_count())?;
@@ -36,7 +36,7 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
 
     pub(in crate::canonical_scene::store) fn sampler_at(
         self,
-        proof: NodeSceneValidationProof,
+        proof: &'scene NodeSceneValidationProof,
         index: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAppearanceSampler> {
         let mut cursor = self.into_row_cursor(proof);
@@ -48,7 +48,7 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
 
     pub(in crate::canonical_scene::store) fn texture_at(
         self,
-        proof: NodeSceneValidationProof,
+        proof: &'scene NodeSceneValidationProof,
         index: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAppearanceTexture> {
         let mut cursor = self.into_row_cursor(proof);
@@ -60,7 +60,7 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
 
     pub(in crate::canonical_scene::store) fn material_at(
         self,
-        proof: NodeSceneValidationProof,
+        proof: &'scene NodeSceneValidationProof,
         index: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAppearanceMaterial<'scene>> {
         let table = require_row(self.materials, index, proof.material_count())?;
@@ -91,7 +91,7 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
 
     pub(in crate::canonical_scene::store) fn binding_at(
         self,
-        proof: NodeSceneValidationProof,
+        proof: &'scene NodeSceneValidationProof,
         index: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAppearanceBinding<'scene>> {
         let table = require_row(self.bindings, index, proof.material_binding_count())?;
@@ -114,7 +114,10 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
             .ok_or_else(|| invariant("validated material-binding row is absent"))
     }
 
-    fn into_row_cursor(self, proof: NodeSceneValidationProof) -> NodeSceneAppearanceCursor<'scene> {
+    fn into_row_cursor(
+        self,
+        proof: &'scene NodeSceneValidationProof,
+    ) -> NodeSceneAppearanceCursor<'scene> {
         // The Scene proof already establishes table order and contiguous ranges. Mark the
         // unrelated phases complete without traversing them; each caller selects exactly one
         // row and seeds its recorded offsets before invoking the shared single-row decoder.

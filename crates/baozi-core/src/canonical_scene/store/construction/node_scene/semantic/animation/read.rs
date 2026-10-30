@@ -5,7 +5,7 @@ use super::*;
 impl<'scene> NodeSceneAnimationTables<'scene> {
     pub(in crate::canonical_scene::store) fn clip_at(
         self,
-        proof: NodeSceneValidationProof,
+        proof: &'scene NodeSceneValidationProof,
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAnimationClip<'scene>> {
         let table = self
@@ -34,7 +34,7 @@ impl<'scene> NodeSceneAnimationTables<'scene> {
 
     pub(in crate::canonical_scene::store) fn channel_at(
         self,
-        proof: NodeSceneValidationProof,
+        proof: &'scene NodeSceneValidationProof,
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAnimationChannel<'scene>> {
         let table = self

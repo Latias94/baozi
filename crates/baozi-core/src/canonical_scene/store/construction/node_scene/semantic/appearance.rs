@@ -58,7 +58,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneAppearanceTables<'scene> {
 impl<'scene> NodeSceneAppearanceTables<'scene> {
     pub(in crate::canonical_scene::store) fn try_new(
         canonical: &'scene SceneCanonicalStore,
-        proof: NodeSceneValidationProof,
+        proof: &'scene NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
         let binding_semantic_scalars = resolve_sequence(
             canonical,
@@ -163,7 +163,7 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
 
     pub(super) const fn into_cursor(
         self,
-        proof: NodeSceneValidationProof,
+        proof: &'scene NodeSceneValidationProof,
     ) -> NodeSceneAppearanceCursor<'scene> {
         NodeSceneAppearanceCursor {
             tables: self,
@@ -292,7 +292,7 @@ enum AppearanceCursorPhase {
 #[must_use = "the appearance cursor must be consumed or deliberately discarded"]
 pub(in crate::canonical_scene::store) struct NodeSceneAppearanceCursor<'scene> {
     tables: NodeSceneAppearanceTables<'scene>,
-    proof: NodeSceneValidationProof,
+    proof: &'scene NodeSceneValidationProof,
     phase: AppearanceCursorPhase,
     next_image: usize,
     next_image_payload_offset: usize,

@@ -15,6 +15,7 @@ use crate::geometry::TopologyKind;
 use crate::math::{Mat4, Quat, Vec3};
 
 pub(super) mod build;
+pub(super) mod deformation;
 pub(super) mod edit;
 pub(super) mod profile;
 pub(super) mod spatial;
@@ -27,6 +28,7 @@ pub(super) struct SceneTables {
     pub(super) nodes: RetainedStorage<NodeStorage>,
     pub(super) spatial: RetainedStorage<spatial::SpatialStorage>,
     pub(super) geometry: RetainedStorage<GeometryStorage>,
+    pub(super) deformation: RetainedStorage<deformation::DeformationStorage>,
     pub(super) profile: profile::ProfileStorage,
 }
 

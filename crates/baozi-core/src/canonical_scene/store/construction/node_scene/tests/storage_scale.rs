@@ -590,6 +590,7 @@ fn shared_eight_mib_points_payload_node_edit_scale() {
 #[test]
 #[ignore = "manual 10k/100k four-influence and 1/8 MiB metadata allocation pilot"]
 fn influence_and_metadata_validation_scale() {
+    let mut first_edit_peak = None;
     for vertices in [10_000_usize, 100_000] {
         for metadata_size in [MIB, 8 * MIB] {
             let factory = test_factory();
@@ -702,13 +703,21 @@ fn influence_and_metadata_validation_scale() {
             let NodeSceneEditTerminal::Success(edited) = terminal else {
                 panic!("influence/metadata node edit must publish");
             };
-            // This edit shares the large immutable payloads. Its validation marks and
-            // descriptors are small, so its peak cannot include a metadata-sized copy.
+            // This edit shares both retained owners. Validation borrows the actual
+            // deformation rows and initializes only the required algorithm marks.
             assert!(
                 allocations.bytes_max < u64::try_from(metadata_size).unwrap(),
                 "shared metadata validation allocated a payload-sized temporary: peak={}, payload={metadata_size}",
                 allocations.bytes_max
             );
+            if let Some(expected) = first_edit_peak {
+                assert_eq!(
+                    allocations.bytes_max, expected,
+                    "node-edit allocation peak must not grow with influence or metadata payloads",
+                );
+            } else {
+                first_edit_peak = Some(allocations.bytes_max);
+            }
             record_measurement(
                 &format!("influences/{vertices}/metadata/{metadata_size}/edit"),
                 edited.report.ledger_evidence(),
@@ -716,6 +725,10 @@ fn influence_and_metadata_validation_scale() {
                 &account,
             );
             let destination = ValidatedScene::from_node_scene(edited.scene);
+            assert!(std::ptr::eq(
+                source.as_node_scene().read_deformation(),
+                destination.as_node_scene().read_deformation(),
+            ));
             for scene in [&source, &destination] {
                 let primitive = scene.meshes().next().unwrap().primitives().next().unwrap();
                 assert_eq!(primitive.vertex_count(), u32::try_from(vertices).unwrap());

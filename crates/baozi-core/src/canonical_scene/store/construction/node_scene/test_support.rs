@@ -18,6 +18,56 @@ use super::materialization::{
 };
 use super::{NodeSceneBuildFaults, NodeSceneDraftBuild};
 
+/// Corrupts real deformation rows and payloads before the central validator observes them.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum DeformationBuildFault {
+    SkinCount,
+    SyntheticJoint,
+    ProjectiveInverseBind,
+    DefinitionRange,
+    InfluenceSourceOrder,
+    NonFiniteWeight,
+    SparseIndex,
+    InstanceSkin,
+}
+
+impl DeformationBuildFault {
+    pub(super) const ALL: [Self; 8] = [
+        Self::SkinCount,
+        Self::SyntheticJoint,
+        Self::ProjectiveInverseBind,
+        Self::DefinitionRange,
+        Self::InfluenceSourceOrder,
+        Self::NonFiniteWeight,
+        Self::SparseIndex,
+        Self::InstanceSkin,
+    ];
+
+    pub(super) fn corrupt(
+        self,
+        storage: &mut crate::canonical_scene::store::typed_storage::deformation::DeformationStorage,
+    ) {
+        use crate::canonical_scene::store::typed_storage::TableRange;
+        use crate::canonical_scene::store::typed_storage::deformation::StoredSkinIndex;
+
+        match self {
+            Self::SkinCount => storage.skins.clear(),
+            Self::SyntheticJoint => storage.joints[0].0 = 0,
+            Self::ProjectiveInverseBind => storage.inverse_bind_matrices[0].cols[0][3] = 0.5,
+            Self::DefinitionRange => {
+                let logical = &mut storage.logical_morphs[0];
+                logical.definitions = TableRange::new(1, logical.definitions.len());
+            }
+            Self::InfluenceSourceOrder => storage.influence_source_orders[0] = u32::MAX,
+            Self::NonFiniteWeight => storage.influence_weights[0] = f32::NAN,
+            Self::SparseIndex => storage.morph_sparse_indices[0] = u32::MAX,
+            Self::InstanceSkin => {
+                storage.mesh_instances[0].skin = Some(StoredSkinIndex(storage.skins.len() as u32));
+            }
+        }
+    }
+}
+
 /// Mutates actual admitted values after trusted construction and before central validation.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum SpatialBuildFault {

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-07-12
+updated: 2026-10-30
 authors:
   - Codex
 decision_type: architecture
@@ -62,6 +62,15 @@ does not introduce a second transform. Evaluation helpers fail on a singular `M`
 A source with a bind-shape or other correction matrix stores that typed correction and its declared
 from/to spaces; it is not folded silently into vertices. Unknown or contradictory spaces are a
 validation/import error unless a format-specific recovery policy records the exact repair.
+
+Inverse-bind and correction matrices are finite affine maps between the declared affine spaces.
+Their fourth row is exactly `[0, 0, 0, 1]` under numeric equality; signed zero is admitted and all
+authored scalar bits are preserved. Shear, reflection, and singular linear parts are valid source
+data. Validation does not require a TRS decomposition or invertibility. Projective matrices are
+rejected: the canonical skin equation does not define a projective divide. This is also consistent
+with the [glTF 2.0 skin contract](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#skins-overview),
+which requires finite inverse-bind matrices with that fourth row. Format-specific restrictions
+remain checked at the admitted import boundary in addition to canonical validation.
 
 Vertex influences are variable-length compressed rows: `vertex_offsets` has `vertex_count + 1`
 entries and a flat influence array stores palette-local joint index, finite non-negative `f32`

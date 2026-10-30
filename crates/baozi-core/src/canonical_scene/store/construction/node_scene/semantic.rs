@@ -83,7 +83,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticView<'scene> {
     deformation: deformation::NodeSceneDeformationTables<'scene>,
     animation: animation::NodeSceneAnimationTables<'scene>,
     profile: profile::NodeSceneProfileTables<'scene>,
-    proof: NodeSceneValidationProof,
+    proof: &'scene NodeSceneValidationProof,
     #[cfg(test)]
     read_fault: Option<NodeSceneSemanticReadFault>,
 }
@@ -173,7 +173,7 @@ impl SceneStorage {
 
 impl<'scene> NodeSceneSemanticView<'scene> {
     fn try_new(scene: &'scene SceneStorage) -> NodeSceneSemanticResult<Self> {
-        let proof = scene.proof;
+        let proof = scene.read_proof();
         let nodes = scene.read_nodes();
         if proof.directory().into_store() != scene.canonical.root_ref()
             || nodes.nodes.len()
@@ -192,8 +192,13 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         let appearance = appearance::NodeSceneAppearanceTables::try_new(&scene.canonical, proof)?;
         let geometry = geometry::NodeSceneGeometryTables::try_new(scene.read_geometry(), proof)?;
         let deformation =
-            deformation::NodeSceneDeformationTables::try_new(&scene.canonical, proof)?;
-        let animation = animation::NodeSceneAnimationTables::try_new(&scene.canonical, proof)?;
+            deformation::NodeSceneDeformationTables::try_new(scene.read_deformation(), proof)?;
+        let animation = animation::NodeSceneAnimationTables::try_new(
+            &scene.canonical,
+            scene.read_geometry(),
+            scene.read_deformation(),
+            proof,
+        )?;
         let profile = profile::NodeSceneProfileTables::try_new(&scene.tables.profile)?;
         Ok(Self {
             nodes,
@@ -354,8 +359,8 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         Ok(NodeSceneSemanticCursor {
             nodes: self.nodes,
             appearance: Some(self.appearance.into_cursor(self.proof)),
-            geometry: Some(self.geometry.into_cursor(self.proof)),
-            deformation: Some(self.deformation.into_cursor(self.proof)),
+            geometry: Some(self.geometry.into_cursor()),
+            deformation: Some(self.deformation.into_cursor()),
             animation: Some(self.animation.into_cursor(self.proof)),
             profile: Some(self.profile.into_cursor()),
             proof: self.proof,
@@ -377,7 +382,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticCursor<'scene> {
     deformation: Option<NodeSceneDeformationCursor<'scene>>,
     animation: Option<NodeSceneAnimationCursor<'scene>>,
     profile: Option<NodeSceneProfileCursor<'scene>>,
-    proof: NodeSceneValidationProof,
+    proof: &'scene NodeSceneValidationProof,
     roots: Option<NodeSceneChildCursor<'scene>>,
     next_node_index: usize,
     phase: NodeSceneCursorPhase,

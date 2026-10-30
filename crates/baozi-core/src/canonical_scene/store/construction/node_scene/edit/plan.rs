@@ -186,12 +186,6 @@ pub(super) struct NodeSceneEditFixedCounts {
     pub(super) primitives: CheckedCount,
     pub(super) attributes: CheckedCount,
     pub(super) mesh_instances: CheckedCount,
-    pub(super) skins: CheckedCount,
-    pub(super) logical_morphs: CheckedCount,
-    pub(super) morph_definitions: CheckedCount,
-    pub(super) primitive_deformations: CheckedCount,
-    pub(super) morph_targets: CheckedCount,
-    pub(super) morph_deltas: CheckedCount,
     pub(super) animation_clips: CheckedCount,
     pub(super) animation_channels: CheckedCount,
     pub(super) profile: NodeSceneEditProfilePlan,
@@ -397,27 +391,6 @@ impl NodeSceneEditFixedCounts {
             mesh_instances: CheckedCount::try_from_u32(
                 evidence.mesh_instance_count,
                 "mesh instance row count",
-            )?,
-            skins: CheckedCount::try_from_u32(evidence.skin_count, "skin row count")?,
-            logical_morphs: CheckedCount::try_from_u32(
-                evidence.logical_morph_count,
-                "logical morph row count",
-            )?,
-            morph_definitions: CheckedCount::try_from_u32(
-                evidence.morph_definition_count,
-                "morph definition row count",
-            )?,
-            primitive_deformations: CheckedCount::try_from_u32(
-                evidence.primitive_deformation_count,
-                "primitive deformation row count",
-            )?,
-            morph_targets: CheckedCount::try_from_u32(
-                evidence.morph_target_count,
-                "morph target row count",
-            )?,
-            morph_deltas: CheckedCount::try_from_u32(
-                evidence.morph_delta_count,
-                "morph delta row count",
             )?,
             animation_clips: CheckedCount::try_from_u32(
                 evidence.animation_clip_count,
