@@ -872,9 +872,8 @@ impl ImportStoreBootstrapRequirements {
         let terminal_attribution_slots = scene_failure_evidence_member_count()
             .checked_add(1)
             .ok_or(StorePlanError::SizeOverflow)?;
-        let canonical_retained_member_limit =
-            u64::try_from(maximum_scene_canonical_blocks().ok_or(StorePlanError::SizeOverflow)?)
-                .map_err(|_| StorePlanError::SizeOverflow)?;
+        let canonical_retained_member_limit = u64::try_from(maximum_scene_canonical_blocks())
+            .map_err(|_| StorePlanError::SizeOverflow)?;
         let canonical_structural_work_limit =
             maximum_scene_structural_work().ok_or(StorePlanError::SizeOverflow)?;
         let import_limits =

@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::appearance::{
     AlphaMode, ColorInterpretation, MaterialFactors, ShadingModel, TextureBlendOperation,
-    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
+    TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
 };
 use crate::canonical_scene::store::construction::node_scene::semantic::appearance::{
     NodeSceneAppearanceBinding, NodeSceneAppearanceImage, NodeSceneAppearanceMaterial,
@@ -221,9 +221,9 @@ impl<'s> MaterialBindingRef<'s> {
         self.read().role()
     }
 
-    /// Returns the source of texture coordinates and any UV set selection.
-    pub fn coordinate_source(self) -> TextureCoordinateSource {
-        *self.read().coordinate_source()
+    /// Returns the authored UV set index.
+    pub fn uv_set(self) -> u16 {
+        self.read().uv_set()
     }
 
     /// Returns the retained source-channel mapping.
@@ -399,7 +399,8 @@ impl fmt::Debug for TextureRef<'_> {
 fn tables(scene: &ValidatedScene) -> NodeSceneAppearanceTables<'_> {
     let owner = scene.as_node_scene();
     expect_validated(NodeSceneAppearanceTables::try_new(
-        owner.read_appearance(),
+        owner.read_appearance().rows.as_ref(),
+        owner.read_appearance().payloads.as_ref(),
         owner.read_proof(),
     ))
 }

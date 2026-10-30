@@ -104,8 +104,9 @@ pub(super) use plan::spatial::{SpatialAuthoringLimit, SpatialAuthoringSemanticEr
 pub(super) use plan::{NodeAuthoringFailure, ValidatedNodeBatch, validate_node_batch_with_control};
 pub(super) use plan::{NodeAuthoringLimit, NodeAuthoringSemanticError};
 pub(super) use scene::{
-    SceneAuthoringAggregateError, SceneAuthoringAggregateLimit, SceneInputEnvelope,
-    SceneInputEnvelopeError, animation_limits_after_deformation, appearance_limits_after_nodes,
+    SceneAuthoringAggregateError, SceneAuthoringAggregateLimit, SceneInputEnvelopeError,
+    animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
-    profile_limits_after_animation, validate_scene_aggregate,
+    profile_limits_after_animation, scene_input_terminal_attribution_slots,
+    validate_scene_aggregate,
 };

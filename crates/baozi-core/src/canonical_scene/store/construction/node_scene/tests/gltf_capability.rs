@@ -11,8 +11,7 @@ use crate::appearance::{
     AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemantics,
     PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel,
     SupplementalPbrFactors, TextureBindingSemantics, TextureBlendOperation, TextureChannel,
-    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength,
-    TextureTransform,
+    TextureChannelSwizzle, TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
 };
 use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::canonical_scene::store::construction::STORE_DIMENSION;
@@ -479,16 +478,9 @@ fn encode_gltf_source(
         }
     }
 
-    fn encode_coordinate_source(encoder: &mut GltfSourceEncoder, source: TextureCoordinateSource) {
-        match source {
-            TextureCoordinateSource::UvSet(set) => {
-                encoder.u8(0);
-                encoder.u32(u32::from(set));
-            }
-            TextureCoordinateSource::ObjectPosition => encoder.u8(1),
-            TextureCoordinateSource::ObjectNormal => encoder.u8(2),
-            TextureCoordinateSource::ReflectionVector => encoder.u8(3),
-        }
+    fn encode_uv_set(encoder: &mut GltfSourceEncoder, set: u16) {
+        encoder.u8(0);
+        encoder.u32(u32::from(set));
     }
 
     fn encode_channel(encoder: &mut GltfSourceEncoder, channel: TextureChannel) {
@@ -739,7 +731,7 @@ fn encode_gltf_source(
         encoder.u32(binding.texture().index());
         let semantics = binding.semantics();
         encode_texture_role(encoder, semantics.role());
-        encode_coordinate_source(encoder, semantics.coordinate_source());
+        encode_uv_set(encoder, semantics.uv_set());
         encode_channel_mapping(encoder, semantics.channel_mapping());
         encode_color_interpretation(encoder, semantics.color_interpretation());
         encode_texture_transform(encoder, semantics.transform());
@@ -1172,11 +1164,7 @@ fn with_gltf_capability_input<R>(
         TextureRole::MetallicRoughness,
         TextureRole::Normal,
     ];
-    let mut coordinate_sources = [
-        TextureCoordinateSource::uv_set(0).expect("glTF UV set zero must be canonical"),
-        TextureCoordinateSource::uv_set(0).expect("glTF UV set zero must be canonical"),
-        TextureCoordinateSource::uv_set(0).expect("glTF UV set zero must be canonical"),
-    ];
+    let mut uv_sets = [0; 3];
     let mut channel_mappings = [
         TextureChannelSwizzle::RGBA,
         TextureChannelSwizzle::try_new(&[TextureChannel::Blue, TextureChannel::Green])
@@ -1192,8 +1180,7 @@ fn with_gltf_capability_input<R>(
     let mut strengths = [TextureStrength::ONE; 3];
     let mut source_keys = [None, None, None];
     if mutation == GltfCapabilityMutation::MaterialBindingSemantics {
-        coordinate_sources[0] =
-            TextureCoordinateSource::uv_set(1).expect("glTF UV set one must be canonical");
+        uv_sets[0] = 1;
         channel_mappings[0] = TextureChannelSwizzle::RGB;
         color_interpretations[0] = ColorInterpretation::LinearColor;
         transforms[0] =
@@ -1213,7 +1200,7 @@ fn with_gltf_capability_input<R>(
     let binding_semantics = [
         TextureBindingSemantics::new(
             roles[0],
-            coordinate_sources[0],
+            uv_sets[0],
             channel_mappings[0],
             color_interpretations[0],
             transforms[0],
@@ -1223,7 +1210,7 @@ fn with_gltf_capability_input<R>(
         ),
         TextureBindingSemantics::new(
             roles[1],
-            coordinate_sources[1],
+            uv_sets[1],
             channel_mappings[1],
             color_interpretations[1],
             transforms[1],
@@ -1233,7 +1220,7 @@ fn with_gltf_capability_input<R>(
         ),
         TextureBindingSemantics::new(
             roles[2],
-            coordinate_sources[2],
+            uv_sets[2],
             channel_mappings[2],
             color_interpretations[2],
             transforms[2],
@@ -2263,14 +2250,14 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
             (
                 0,
                 TextureRole::BaseColor,
-                TextureCoordinateSource::uv_set(0).expect("glTF UV set zero"),
+                0,
                 TextureChannelSwizzle::RGBA,
                 ColorInterpretation::SrgbColor,
             ),
             (
                 2,
                 TextureRole::MetallicRoughness,
-                TextureCoordinateSource::uv_set(0).expect("glTF UV set zero"),
+                0,
                 TextureChannelSwizzle::try_new(&[TextureChannel::Blue, TextureChannel::Green])
                     .expect("glTF metallic-roughness mapping"),
                 ColorInterpretation::Data,
@@ -2278,12 +2265,12 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
             (
                 1,
                 TextureRole::Normal,
-                TextureCoordinateSource::uv_set(0).expect("glTF UV set zero"),
+                0,
                 TextureChannelSwizzle::RGB,
                 ColorInterpretation::Data,
             ),
         ];
-        for (source_index, (texture, role, coordinate_source, channel_mapping, interpretation)) in
+        for (source_index, (texture, role, uv_set, channel_mapping, interpretation)) in
             expected_bindings.into_iter().enumerate()
         {
             let binding = appearance
@@ -2293,7 +2280,7 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
             assert_eq!(binding.source_index(), source_index);
             assert_eq!(binding.texture(), texture);
             assert_eq!(binding.role_semantics(), &role);
-            assert_eq!(binding.coordinate_source(), &coordinate_source);
+            assert_eq!(binding.uv_set(), uv_set);
             assert_eq!(binding.channel_mapping(), channel_mapping);
             assert_eq!(binding.color_interpretation(), &interpretation);
             assert_eq!(binding.transform(), TextureTransform::IDENTITY);
@@ -2957,7 +2944,7 @@ fn observe_facade_typed_view(
                     binding.source_index(),
                     binding.texture(),
                     binding.role_semantics(),
-                    binding.coordinate_source(),
+                    binding.uv_set(),
                     binding.channel_mapping(),
                     binding.color_interpretation(),
                     binding.transform(),
@@ -3808,4 +3795,112 @@ fn gltf_shape_digest_is_generation_independent_and_field_complete() {
         mutation_digests.push(mutation.snapshot_digest);
         mutation_vectors.push(mutation.source_vector);
     }
+}
+
+#[test]
+fn full_gltf_physical_quotas_release_every_reachable_failure_until_first_success() {
+    let factory = test_factory();
+    let mut first_success = None;
+    let mut started_rejections = 0;
+
+    with_gltf_scene_input(
+        GltfCapabilityScope::All,
+        GltfCapabilityMutation::Baseline,
+        |input| {
+            for max_live_allocations in 1..=128 {
+                let account = test_account(&factory, max_live_allocations);
+                let generation_source = AtomicU64::new(0);
+                let terminal = match NodeSceneTestTransaction::with_account(
+                    &account,
+                    test_limits(),
+                    input,
+                    SceneValidationLimits::default(),
+                ) {
+                    Ok(operation) => Some(
+                        operation
+                            .finish_draft()
+                            .expect("physical quota rejection must retain a clean scoped outcome")
+                            .publish_with_generation_source_for_test(|| {
+                                SceneGenerationId::reserve_from(&generation_source)
+                            })
+                            .expect("physical quota rejection must publish an exact terminal"),
+                    ),
+                    Err(_) => None,
+                };
+                let published = match terminal {
+                    Some(NodeSceneConstructionTerminal::Success(parts)) => {
+                        let shape = inspect_gltf_capability_semantics_for_probe(&parts.scene);
+                        assert_eq!((shape.image_count, shape.material_count), (2, 2));
+                        assert_eq!(shape.material_binding_count, 3);
+                        drop(parts);
+                        true
+                    }
+                    Some(NodeSceneConstructionTerminal::RichFailure(failure)) => {
+                        started_rejections += 1;
+                        assert_eq!(
+                            failure
+                                .ledger_evidence()
+                                .dimension_by_semantic(STORE_DIMENSION)
+                                .expect("physical quota failure retains the Scene dimension")
+                                .committed_canonical_output(),
+                            0,
+                            "quota {max_live_allocations}",
+                        );
+                        drop(failure);
+                        false
+                    }
+                    Some(NodeSceneConstructionTerminal::MinimalFallback(fallback)) => {
+                        started_rejections += 1;
+                        assert_eq!(
+                            fallback
+                                .ledger_evidence()
+                                .dimension_by_semantic(STORE_DIMENSION)
+                                .expect("physical quota fallback retains the Scene dimension")
+                                .committed_canonical_output(),
+                            0,
+                            "quota {max_live_allocations}",
+                        );
+                        drop(fallback);
+                        false
+                    }
+                    None => false,
+                };
+                assert_eq!(
+                    generation_source.load(std::sync::atomic::Ordering::Relaxed),
+                    u64::from(published),
+                    "only a successful quota may reserve a generation: {max_live_allocations}",
+                );
+                let physical = account.snapshot();
+                assert_eq!(
+                    physical.live_retained_bytes(),
+                    0,
+                    "quota {max_live_allocations}"
+                );
+                assert_eq!(
+                    physical.live_retained_allocations(),
+                    0,
+                    "quota {max_live_allocations}"
+                );
+                assert!(!physical.poisoned(), "quota {max_live_allocations}");
+                drop(account);
+                assert_eq!(factory.snapshot().live_accounts(), 0);
+
+                if published {
+                    first_success = Some(max_live_allocations);
+                    break;
+                }
+            }
+        },
+    );
+    assert!(
+        started_rejections > 0,
+        "the sweep must reach post-start quota rejections"
+    );
+    assert!(
+        first_success.is_some(),
+        "the complete glTF fixture must fit a quota at most 128"
+    );
+    // A quota sweep covers reachable admission failures in this construction order. It does not
+    // identify a particular rejected shared-header admission without additional phase evidence.
+    assert_eq!(factory.snapshot().live_accounts(), 0);
 }

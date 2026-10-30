@@ -966,6 +966,79 @@ Logs are `target/review/f-camera-workspace-final.log`, `f-camera-clippy-final.lo
 `f-camera-native-debug-final.log`, `f-camera-native-release-final.log`,
 `f-camera-packaged-final.log`, `f-camera-wasi-final.log`, and `f-camera-browser-wasm-final.log`.
 
+## Material Lengths and Independent Appearance Ownership (2026-10-31)
+
+The appearance root now contains two independently retained children. `AppearanceRows` owns the
+five image/sampler/texture/binding/material tables. `AppearancePayloads` owns the encoded-image
+and UTF-8 pools. `AppearanceStorage` is inline in `SceneTables`, without another retained header.
+Fresh construction admits and builds the two children separately. Central validation and semantic
+reads borrow those actual rows and pools. The initialized canonical footprint counts the inline
+root, both data headers, and the seven used buffers; operation separately admits the physical
+shared headers, backing capacities, and infrastructure. Shared payloads keep one physical charge
+until their own final handle is destroyed.
+
+`AppearanceSpacePlan` is part of the same exact-source `SceneSpacePlan`. It scales supplemental
+material thickness and signed Displacement strength by the positive unit ratio, with a binary64
+intermediate and one checked binary32 rounding. Reflection does not change displacement sign.
+Signed zeros and representable subnormals survive; overflow and nonzero underflow to zero return
+typed material/binding locations before retained output admission. Other factors, independent
+optional groups, alpha, UV transforms, binding strengths, names, source keys, and order keep their
+bits and presence. Unknown custom-attribute spatial meaning remains an explicit capability error.
+
+When converted appearance bits change, execution retains only new rows and shares the exact
+original payload owner. It copies no image/text bytes and adds zero rebuilt-name bytes. If no bits
+change, both owners remain shared. Correspondence checks payload-owner identity in constant work
+and exhausts the expected rows, rejecting an equal-byte pool from a different owner. Material and
+TextureBinding provenance changes only for rows whose own converted bits differ, with the union of
+their own and Scene parents; copying unchanged descriptors does not change their lineage.
+
+The undefined generated-coordinate variants and their enum/error/wrapper paths are removed.
+Authoring, storage, and public reads directly use `uv_set: u16`. glTF checks its effective base or
+transform-override index before narrowing; OBJ uses zero. UV 0, ordinary sets, and 65535 remain
+explicit, independently of whether a particular primitive has that stream. Existing UV snapshot
+framing remains kind zero plus a `u32` index, so revision 5 and its UV transcript bytes do not change.
+ADRs 0012, 0032, and 0045 and the model/read documentation describe these boundaries.
+
+Read-only review also found a stale bootstrap estimate for deleted appearance/deformation/animation
+record layouts. The former maximum of 41 record blocks and presence-based formulas are removed.
+Fresh startup and materialization now use the one remaining directory-record shape; core terminal
+attribution needs its directory plus one terminal record. Typed-owner retention remains separately
+admitted. Top-level input checks still reject count/limit overflow without walking nested payloads;
+large invalid nested fixtures and zero-allocation checks cover that distinction.
+
+The final all-feature workspace suite passed **2,406/2,406 tests**, including xtask, with four
+manual scale pilots skipped. Strict all-target/all-feature Clippy, workspace doctests, rustdoc
+with `-D warnings`, formatting, and diff checks passed. The retained appearance regressions verify
+changed/unchanged owner identity, exact correspondence work, distinct own+Scene parent markers,
+source-before-output destruction, and every cancellable retention checkpoint. The full glTF
+physical-allocation quota sweep continues through every reachable rejection until first success;
+each failed quota commits no canonical output, reserves no generation, and leaves the released
+account healthy. This sweep does not identify a particular rejected shared header by phase.
+
+All six public appearance conversion tests passed as part of the **109/109** postprocess suite.
+They check factor-group presence and bits, signed displacement under reflection, zero/subnormal
+boundaries, typed original-input numeric failures, repeated inverse conversion, and ordinary host
+unwind with zero remaining counted allocations. The 1/8 MiB image test requires identical payload
+and text addresses plus equal requested allocations/bytes/peak, operation resource peaks, committed
+canonical bytes, and attempted/consumed work. The separate manual shared-image node-edit pilot also
+passed: both sizes used a requested-allocation peak of **8,444 bytes**, ledger peak **9,124 bytes**,
+and **226** attempted/consumed work items. These are measured allocation/accounting values, not RSS.
+
+The independent all-format consumer executed on the ordinary Windows main stack in debug and
+release. Its static plugin authors material lengths, direct UV indices, and encoded image bytes,
+then checks reflected conversion, inverse values, optional group/zero bits, and image/name/key
+address sharing through public APIs. The same consumer built and executed from fresh archives in
+`target/package-check-6l3x5ff_`, with normalized metadata, README/licenses, and extracted-only local
+dependency closure checks. The release WASI consumer executed under the existing checksum-qualified
+Wasmtime 50.0.0 installation; browser WASM passed compilation only. No new sustained fuzz/sanitizer
+or current-stable publication qualification is inferred from this increment.
+
+Logs are `target/review/f-material-workspace-final.log`, `f-material-retention-final.log`,
+`f-material-clippy-final.log`, `f-material-doctests-final.log`, `f-material-rustdoc-final.log`,
+`f-material-image-pilot-final.log`, `f-material-native-debug-final.log`,
+`f-material-native-release-final.log`, `f-material-packaged-final.log`,
+`f-material-wasi-final.log`, and `f-material-browser-wasm-final.log`.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
@@ -979,7 +1052,8 @@ Logs are `target/review/f-camera-workspace-final.log`, `f-camera-clippy-final.lo
 - Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
 - Preserve F's triangulation, normal generation, and target-space conversion for geometry,
   authored nodes, skin matrices, morph deltas, animation curves, and camera/light definitions
-  while closing material spatial semantics and application vertex lowering.
+  and material lengths while closing application vertex lowering. Generated texture coordinates
+  without a sampling contract are removed, rather than treated as a pending conversion capability.
 - Finish G's remaining behavioral growth checks and H's current-stable/release package matrix,
   CI execution wiring, and native candidate acceptance. Dependency upgrades, package-content fixes,
   and the recorded fixed artifact matrix already have their distinct implementation/evidence above.

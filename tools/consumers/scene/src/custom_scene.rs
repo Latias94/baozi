@@ -1,12 +1,16 @@
 //! A downstream plugin using only parser authoring contracts and public Scene views.
 
-use baozi::{AttributeData, AuthoredTransformKind, Importer, Mat4, SceneValidationError};
+use baozi::{AttributeData, AuthoredTransformKind, Importer, Mat4, SceneValidationError, Vec3};
 use baozi_import::authoring::{
-    AttributeDomain, AttributeSemantic, AuthoredTransform, AuthoringRange, CameraLocalId,
-    CameraProjection, Color, GeometryAttributeAuthoring, GeometryLogicalMeshAuthoring,
-    GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
-    LightDefinition, LightKind, LightLocalId, LocalAxes, LogicalMeshLocalId, NodeAuthoringNode,
-    NodeLocalId, NodeParent, Presence, StaticSceneBuilder,
+    AlphaMode, AttributeDomain, AttributeSemantic, AuthoredTransform, AuthoringRange,
+    CameraLocalId, CameraProjection, Color, ColorInterpretation, GeometryAttributeAuthoring,
+    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
+    GeometryTopologyAuthoring, ImageAuthoring, ImageLocalId, LightDefinition, LightKind,
+    LightLocalId, LocalAxes, LogicalMeshLocalId, MaterialAuthoring, MaterialBindingAuthoring,
+    MaterialFactors, NodeAuthoringNode, NodeLocalId, NodeParent, Presence, SamplerAuthoring,
+    SamplerLocalId, SamplerState, ShadingModel, StaticSceneBuilder, SupplementalPbrFactors,
+    TextureAuthoring, TextureBlendOperation, TextureChannelSwizzle, TextureLocalId, TextureRole,
+    TextureSourceKey, TextureStrength, TextureTransform,
 };
 use baozi_import::{
     CapabilityStatus, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
@@ -115,10 +119,58 @@ impl FormatImporter for CustomScene {
             7.0,
         )
         .unwrap()];
+        let images = [ImageAuthoring::encoded(
+            &[0xde, 0xad, 0xbe, 0xef],
+            Presence::Absent,
+        )];
+        let samplers = [SamplerAuthoring::new(SamplerState::CANONICAL_DEFAULT)];
+        let textures = [TextureAuthoring::new(
+            ImageLocalId::new(0),
+            SamplerLocalId::new(0),
+        )];
+        let key = TextureSourceKey::try_new("custom:displacement").unwrap();
+        let bindings = [MaterialBindingAuthoring::try_from_parts(
+            TextureLocalId::new(0),
+            TextureRole::Displacement,
+            u16::MAX,
+            TextureChannelSwizzle::RED,
+            ColorInterpretation::Data,
+            TextureTransform::IDENTITY,
+            TextureStrength::try_new(-0.75).unwrap(),
+            TextureBlendOperation::Replace,
+            Some(&key),
+        )
+        .unwrap()];
+        let factors = MaterialFactors::try_new_with_supplemental_pbr(
+            Vec3::new(-0.0, 0.25, 0.5),
+            None,
+            None,
+            None,
+            SupplementalPbrFactors::try_new(
+                0.125,
+                -0.0,
+                0.25,
+                1.5,
+                Vec3::new(0.25, 0.5, 0.75),
+                0.5,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let materials = [MaterialAuthoring::try_from_parts(
+            AuthoringRange::new(0, 1),
+            ShadingModel::Unlit,
+            AlphaMode::mask(-0.0).unwrap(),
+            true,
+            factors,
+        )
+        .unwrap()
+        .with_name("lengths")];
         scope.submit_static_scene(
             StaticSceneBuilder::new(Presence::Present(&roots), &nodes)
                 .with_scene_space(&baozi::SceneSpace::STANDARD_TARGET)
                 .with_spatial_definitions(&cameras, &lights)
+                .with_appearance(&images, &samplers, &textures, &bindings, &materials)
                 .with_geometry(&meshes, &primitives, &attributes, &instances),
         )
     }
@@ -189,6 +241,7 @@ pub(super) fn verify() -> baozi::Result<()> {
         child.light().unwrap().definition().kind().range(),
         Some(5.0)
     );
+    assert_appearance(scene, 1.5, -0.75);
 
     #[cfg(feature = "postprocess")]
     verify_spatial_conversion(
@@ -234,6 +287,18 @@ fn verify_spatial_conversion(scene: baozi::ValidatedScene) {
         postprocess::{PostProcessControl, SpaceConversionOptions, convert_scene_space},
     };
     let count = scene.node_count();
+    let image_ptr = scene.images().next().unwrap().encoded_bytes().as_ptr();
+    let name_ptr = scene.materials().next().unwrap().name().unwrap().as_ptr();
+    let key_ptr = scene
+        .materials()
+        .next()
+        .unwrap()
+        .bindings()
+        .next()
+        .unwrap()
+        .source_key()
+        .unwrap()
+        .as_ptr();
     // Q(x,y,z)=(-x,-z,y), s=2; the optical reference frame changes, hierarchy does not.
     let target = TargetSpace::try_new(
         Handedness::Left,
@@ -271,6 +336,28 @@ fn verify_spatial_conversion(scene: baozi::ValidatedScene) {
     assert_eq!(light.kind().inner_cone_radians(), Some(0.25));
     assert_eq!(light.kind().outer_cone_radians(), Some(0.5));
     assert_eq!(light.intensity(), 7.0);
+    assert_appearance(&scene, 3.0, -1.5);
+    assert_eq!(
+        scene.images().next().unwrap().encoded_bytes().as_ptr(),
+        image_ptr
+    );
+    assert_eq!(
+        scene.materials().next().unwrap().name().unwrap().as_ptr(),
+        name_ptr
+    );
+    assert_eq!(
+        scene
+            .materials()
+            .next()
+            .unwrap()
+            .bindings()
+            .next()
+            .unwrap()
+            .source_key()
+            .unwrap()
+            .as_ptr(),
+        key_ptr
+    );
     let (scene, inverse) = convert_scene_space(
         scene,
         SpaceConversionOptions::default(),
@@ -288,4 +375,36 @@ fn verify_spatial_conversion(scene: baozi::ValidatedScene) {
         scene.lights().next().unwrap().definition().axes(),
         LocalAxes::STANDARD
     );
+    assert_appearance(&scene, 1.5, -0.75);
+}
+
+fn assert_appearance(scene: &baozi::ValidatedScene, thickness: f32, displacement: f32) {
+    assert_eq!(
+        scene.images().next().unwrap().encoded_bytes(),
+        &[0xde, 0xad, 0xbe, 0xef]
+    );
+    let material = scene.materials().next().unwrap();
+    assert_eq!(material.name(), Some("lengths"));
+    assert_eq!(
+        material.alpha_mode().mask_cutoff().unwrap().to_bits(),
+        (-0.0_f32).to_bits()
+    );
+    assert!(material.double_sided());
+    let factors = material.factors();
+    assert!(factors.pbr_metallic_roughness().is_none());
+    assert!(factors.pbr_specular_glossiness().is_none());
+    assert!(factors.legacy().is_none());
+    assert_eq!(factors.emissive().x.to_bits(), (-0.0_f32).to_bits());
+    let supplemental = factors.supplemental_pbr();
+    assert_eq!(supplemental.thickness().to_bits(), thickness.to_bits());
+    assert_eq!(supplemental.clearcoat(), 0.125);
+    assert_eq!(
+        supplemental.clearcoat_roughness().to_bits(),
+        (-0.0_f32).to_bits()
+    );
+    let binding = material.bindings().next().unwrap();
+    assert_eq!(binding.role(), TextureRole::Displacement);
+    assert_eq!(binding.uv_set(), u16::MAX);
+    assert_eq!(binding.strength().get().to_bits(), displacement.to_bits());
+    assert_eq!(binding.source_key(), Some("custom:displacement"));
 }

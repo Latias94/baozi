@@ -65,6 +65,7 @@ use crate::canonical_scene::store::typed_storage::edit::space::{
     SceneSpacePlan, SceneSpacePlanError,
 };
 use crate::canonical_scene::store::typed_storage::edit::space_animation::AnimationSpacePlanError;
+use crate::canonical_scene::store::typed_storage::edit::space_appearance::AppearanceSpacePlanError;
 use crate::canonical_scene::store::typed_storage::edit::space_deformation::{
     DeformationSpaceNumericLocation, DeformationSpacePlanError,
 };
@@ -454,7 +455,22 @@ fn map_space(error: SceneSpacePlanError<StoreRuntimeError>) -> SceneEditRejectio
         SceneSpacePlanError::Deformation(error) => map_deformation_space(error),
         SceneSpacePlanError::Animation(error) => map_animation_space(error),
         SceneSpacePlanError::Spatial(error) => map_spatial_space(error),
+        SceneSpacePlanError::Appearance(error) => map_appearance_space(error),
         SceneSpacePlanError::Plan(error) => StoreRuntimeError::Plan(error).into(),
+    }
+}
+
+fn map_appearance_space(error: AppearanceSpacePlanError<StoreRuntimeError>) -> SceneEditRejection {
+    match error {
+        AppearanceSpacePlanError::Control(error) => error.into(),
+        AppearanceSpacePlanError::NumericMaterial { material, source } => {
+            SceneSpaceConversionIssue::NumericMaterial { material, source }.into()
+        }
+        AppearanceSpacePlanError::NumericDisplacement { binding, source } => {
+            SceneSpaceConversionIssue::NumericDisplacement { binding, source }.into()
+        }
+        AppearanceSpacePlanError::Plan(error) => StoreRuntimeError::Plan(error).into(),
+        AppearanceSpacePlanError::Invariant => SceneEditRejection::construction_invariant(),
     }
 }
 

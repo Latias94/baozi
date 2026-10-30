@@ -67,7 +67,7 @@ edge:
 Reciprocal storage is not canonical. Derived indexes may accelerate reverse queries, but validation
 can rebuild them from the owner edge and they do not become a second source of truth.
 
-Node and geometry storage use private typed tables in one `SceneStorage` root. Node transforms are
+All semantic domains use private typed tables in one `SceneStorage` root. Node transforms are
 explicit Matrix/TRS values, children are ordered logical indices, and optional names preserve absent
 versus present empty text. Geometry descriptors use typed ranges into contiguous scalar pools;
 Vertex/Corner/Face domains, sparse defaults, and F64 custom values remain directly borrowable.
@@ -78,8 +78,9 @@ Construction derives each Vec capacity before entering operation's retained admi
 central mechanism binds physical charges to the actual table owner and releases storage before its
 lease. Central validation reads those actual tables, without allocating complete immutable row
 projections. A node-transform edit shares the unchanged geometry table owner and all its scalar
-pools. The remaining domains retain their existing representation under that same root until their
-own cutover; their node/geometry dependencies already use the actual typed rows.
+pools, together with the other unchanged domain owners. Appearance has an inline root with
+independent shared row and payload owners, so a material length conversion can replace rows while
+preserving the exact encoded-image and text allocations.
 
 The local matrix exposed by a node view is derived from its preserved authored transform form. TRS
 animation overlays only TRS-authored base-pose components; it does not implicitly decompose a
@@ -172,13 +173,77 @@ Resource identity, sampling, and material usage are separate:
 - `Image` owns one immutable bounded encoded payload and media/encoding evidence.
 - `Sampler` owns filter and address behavior; an explicit default exists when the source omits one.
 - `Texture` pairs one `ImageId` with one `SamplerId` and carries no material role.
-- A material `TextureBinding` owns role, coordinate source, transform, channel mapping, color
-  interpretation, scale/strength, and other representable usage semantics.
+- A material `TextureBinding` owns role, a direct zero-based `uv_set: u16`, transform, channel
+  mapping, color interpretation, scale/strength, and other representable usage semantics.
 
 One image can therefore be sampled in multiple ways or used once as color and once as data without
 duplicating or mislabeling it. Typed material fields preserve stable cross-format concepts; uncommon
 properties use validated bounded extensions. Metadata never substitutes for behavior that needs a
 typed field and validator.
+
+The binding model supports UV sets only, including index 65535 independently of a primitive's
+available UV streams. `MaterialBindingRef::uv_set()` returns the index by value. An absent stream
+remains absent; no object-position, object-normal, or reflection-vector coordinate generator is
+implied. The two-dimensional transform acts on the selected UV coordinates under ADR 0012. Wider
+source indices are checked before authoring. Snapshot encoding retains the existing coordinate
+kind zero and the index as `u32`, so this API shrink changes no UV transcript bytes or revision.
+
+Supplemental material thickness is a nonnegative Scene-unit length. A Displacement binding's
+strength is a signed Scene-unit length. Whole-Scene space conversion applies the positive unit
+ratio `s` to both, with a binary64 intermediate and one checked binary32 rounding. Handedness does
+not add a displacement sign. Signed zeros survive; overflow and nonzero underflow to zero fail at
+the material or binding. All other fields, factor bits, optional factor groups, names, source keys,
+and order remain unchanged. Thickness binding strength stays one, and normal strengths are
+dimensionless.
+
+### Appearance storage and accounting
+
+The private ownership layout is:
+
+```text
+SceneTables
+  appearance: AppearanceStorage                 (inline root)
+    rows: SharedRetainedStorage<AppearanceRows>
+      images, samplers, textures, bindings, materials  (five Vec tables)
+    payloads: SharedRetainedStorage<AppearancePayloads>
+      image_bytes, text                             (two Vec<u8> pools)
+```
+
+Rows contain checked ranges into the pools. Text concatenates image media types, binding source
+keys, then material names, in source order within each section. It is not interned. Equal image
+content does not merge source identities, and a present empty material name differs from absence.
+Both retained children use operation's existing admission and storage-first release; neither
+exposes its lease or owned buffers to callers.
+
+| Edit behavior | Row owner | Payload owner |
+| --- | --- | --- |
+| Appearance is unaffected | Shared | Shared |
+| Thickness or displacement changes bits | Newly admitted five-table replacement | The exact original owner is shared |
+| Converted appearance values retain their bits | Shared | Shared |
+
+One `SceneSpacePlan` derives all domain conversions from the same immutable `SceneTables` root.
+Another root cannot be substituted even if its generation matches. Appearance preflight covers all
+bindings and materials. Correspondence requires payload-owner pointer identity and complete row
+agreement with that same source plan; a new pool with equal bytes is rejected. Building or checking
+the row replacement copies no payload bytes and contributes zero rebuilt name bytes. Image/text
+addresses remain stable across the conversion. Central validation still checks actual row/range
+and text semantics; explicit snapshot capture separately meters the bytes it hashes.
+
+The initialized canonical footprint includes `size_of::<AppearanceStorage>()`,
+`size_of::<AppearanceRows>()`, and `size_of::<AppearancePayloads>()`, then the five initialized row
+tables and used image/text bytes. Empty appearance still has all three data headers. Shared pools
+remain part of each candidate's logical footprint. The complete checked formula is in
+[ADR 0045](../adr/0045-canonical-scene-ownership-construction-and-generation.md#private-typed-storage).
+
+Physical retention uses two independent owners, each with one shared-header allocation and its
+qualified Vec backing allocations. The root's inline handles belong to the containing Scene
+allocation; there is no third appearance shared header. Each physical shared header already contains
+its rows or payloads data header, along with private ownership/account infrastructure. Spare
+capacity and this separately allocated infrastructure are excluded from canonical bytes but included
+in physical admission; the complete inline handles remain included in the canonical root header.
+An unchanged payload owner keeps one physical charge until its own last shared handle
+drops, independently of the row owner's lifetime. Neither accounting measure is process RSS or
+allocator-private overhead.
 
 ## Skinning, Morphing, and Animation
 

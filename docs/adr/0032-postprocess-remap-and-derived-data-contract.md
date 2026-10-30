@@ -271,14 +271,18 @@ Node conversion preserves authored Matrix/TRS form, hierarchy, names, and attach
 spatial owner changes the target's five facts and converts complete camera/light definitions;
 UV origin and tangent basis/encoding remain preserved. Declaration-only and winding-only edits share
 unaffected typed tables. Scene provenance records the resolved conversion. Changed Node,
-Primitive, Attribute, Skin, MorphDelta, AnimationChannel, Camera, and Light owners retain their own attachments
-together with the input Scene's attachments as operation parents. Metadata descriptors and immutable payloads retain their owners
-and values. Central validation compares the actual replacement tables with the exact borrowed
-source plan, including preserved values, and validates all published conversion facts.
+Primitive, Attribute, Skin, MorphDelta, AnimationChannel, Camera, Light, Material, and TextureBinding
+owners retain their own attachments together with the input Scene's attachments as operation
+parents. An appearance owner is selected only when its own converted value changes bits; copying
+an unchanged row into a rebuilt table does not change that row's provenance. Metadata descriptors
+and immutable payloads retain their owners and values. Central validation compares the actual
+replacement tables with the exact borrowed source plan, including preserved values, and validates
+all published conversion facts.
 
-One closed `SceneSpacePlan` constructs node, geometry, deformation, animation, and spatial plans against the same immutable `SceneTables`
-and conversion. Its private fields prevent replacement of an individual domain plan; binding it
-to another Scene root fails before profile planning even when both Scenes have the same generation.
+One closed `SceneSpacePlan` constructs node, geometry, deformation, animation, spatial, and
+appearance plans against the same immutable `SceneTables` and conversion. Its private fields
+prevent replacement of an individual domain plan; binding it to another Scene root fails by
+pointer identity before profile planning even when both Scenes have the same generation.
 Preflight covers every numeric payload before retained output admission. Its fixed correspondence
 and rebuilt-name costs are reused by execution and validation rather than reconstructed later.
 Inverse binds and skin corrections use matrix conjugation, morph deltas follow their semantic
@@ -300,10 +304,29 @@ their bits. Rounded camera planes must still satisfy their strict ordering. The 
 spatial plan preflights and checks actual correspondence; no separate declaration-only validator
 can approve an unconverted definition.
 
-The remaining capability boundary concerns material and unknown spatial semantics.
-Scene-unit thickness and displacement must be zero when units change; non-UV coordinate sources
-reject coordinate changes. Custom attributes reject numeric conversion because their spatial
-meaning is unknown; a winding-only conversion can retain and permute opaque Corner tuples.
+Supplemental material thickness and signed Displacement binding strength are Scene-unit lengths.
+For positive unit ratio `s`, each becomes `f32(f64(value) * s)` through the checked length map.
+Displacement does not acquire a handedness sign. The conversion preserves signed zero and rejects
+overflow or nonzero underflow to zero with the affected material/binding location. All other factor
+bits and optional groups, alpha cutoffs, non-Displacement binding strengths, UV indices and
+transforms, names, source keys, ordering, and identity links remain unchanged. Thickness binding strength stays one;
+normal-map strengths remain dimensionless. The canonical binding model admits only a direct
+`uv_set: u16`; it contains no spatial coordinate-generation enum or implied evaluation contract.
+
+Appearance preflight visits every binding and material, including unchanged values, before any
+retained replacement. Changed bits require a new `AppearanceRows` owner with the same five row
+counts; unchanged bits share that owner. Both paths share the exact `AppearancePayloads` owner for
+the two byte pools. Correspondence first checks payload-owner pointer identity, then compares every
+row with its expected converted or preserved value. Byte equality in a newly copied payload owner
+does not satisfy the plan. Row construction and correspondence each admit one action per row in
+the five tables, with no image/text copy or byte scan. The appearance contribution to rebuilt
+name-byte admission is zero. This does not remove the pools from the candidate's canonical-byte
+footprint or bypass central semantic validation. Fixed-size Material/TextureBinding provenance
+selection fits its existing profile-row action and adds no payload traversal or selection cache.
+
+The remaining capability boundary concerns unknown spatial semantics. Custom attributes reject
+numeric conversion because their spatial meaning is unknown; a winding-only conversion can retain
+and permute opaque Corner tuples.
 Reflection with a present Tangent requires `SignInW`. Each rejection retains its object location
 and typed reason. No rejected domain is silently inherited under a new target declaration.
 
@@ -598,6 +621,22 @@ tools. Chosen.
   generation reservation, preparation freeze, and handoff.
 
 ## Amendment History
+
+### 2026-10-31: Convert appearance lengths with independently shared payloads
+
+- Previous rule: unit changes rejected nonzero thickness or displacement, and a complete appearance
+  owner coupled numeric row replacement to encoded-image and text ownership. Non-UV coordinate
+  variants had no defined generation/evaluation contract.
+- New rule: the same source-bound `SceneSpacePlan` converts thickness and signed displacement,
+  rebuilds only changed appearance rows, and requires exact payload-owner sharing. Material and
+  TextureBinding lineage follows actual changed bits. Bindings use direct bounded UV indices.
+- Compatibility impact: the coordinate-source enum and its error/getter are removed without
+  aliases. The UV snapshot framing is unchanged. Public authoring/read callers use `u16` directly.
+- Required review: checked length arithmetic and preserved bits/groups, exact source binding,
+  payload-owner identity, independently admitted row/pool lifetimes, and canonical versus physical
+  accounting. This amendment records the contract, not execution or release qualification.
+- Rationale: changing a material length does not change image or text payloads and must not copy or
+  charge those immutable allocations again.
 
 ### 2026-10-30: Remove empty pipeline and synthetic report steps
 

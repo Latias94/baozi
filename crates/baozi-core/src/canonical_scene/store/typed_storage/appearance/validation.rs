@@ -57,7 +57,8 @@ impl AppearanceMeteredCounts {
 
     /// O(1): observes only five row lengths and two pool lengths, without reading a descriptor.
     pub(in crate::canonical_scene::store) fn for_storage(
-        storage: &AppearanceStorage,
+        storage: &AppearanceRows,
+        payloads: &AppearancePayloads,
     ) -> Option<Self> {
         Self::try_new(
             [
@@ -67,7 +68,10 @@ impl AppearanceMeteredCounts {
                 storage.bindings.len() as u64,
                 storage.materials.len() as u64,
             ],
-            [storage.image_bytes.len() as u64, storage.text.len() as u64],
+            [
+                payloads.image_bytes.len() as u64,
+                payloads.text.len() as u64,
+            ],
         )
     }
 
@@ -90,13 +94,15 @@ impl AppearanceMeteredCounts {
     }
 }
 
-impl AppearanceStorage {
+impl AppearanceRows {
     pub(in crate::canonical_scene::store) fn validate<C: TypedStorageValidationControl>(
         &self,
+        payloads: &AppearancePayloads,
         control: &mut C,
         counts: AppearanceMeteredCounts,
     ) -> Result<bool, C::Error> {
-        if control.run_unit(|| AppearanceMeteredCounts::for_storage(self) == Some(counts))?
+        if control
+            .run_unit(|| AppearanceMeteredCounts::for_storage(self, payloads) == Some(counts))?
             != Some(true)
         {
             return Ok(false);
@@ -107,12 +113,12 @@ impl AppearanceStorage {
             let Some(media) = run(control, || {
                 (!image.payload.is_empty() && image.payload.len() <= MAX_ENCODED_IMAGE_BYTES)
                     .then_some(())?;
-                consume(image.payload, &self.image_bytes, &mut image_cursor)?;
+                consume(image.payload, &payloads.image_bytes, &mut image_cursor)?;
                 let media = match image.media_type {
                     None => &[][..],
                     Some(range) => {
                         (range.0.len() <= MAX_EXTENSION_MEDIA_TYPE_BYTES).then_some(())?;
-                        let bytes = consume(range.0, &self.text, &mut text_cursor)?;
+                        let bytes = consume(range.0, &payloads.text, &mut text_cursor)?;
                         validate_media_type(std::str::from_utf8(bytes).ok()?).ok()?;
                         bytes
                     }
@@ -167,7 +173,7 @@ impl AppearanceStorage {
                             name_start = Some(range.0.start());
                             name_cursor = range.0.start();
                         }
-                        let bytes = consume(range.0, &self.text, &mut name_cursor)?;
+                        let bytes = consume(range.0, &payloads.text, &mut name_cursor)?;
                         validate_entity_name_str(std::str::from_utf8(bytes).ok()?).ok()?;
                         bytes
                     }
@@ -195,7 +201,7 @@ impl AppearanceStorage {
                         Some(range) => {
                             (range.0.len() <= crate::appearance::MAX_TEXTURE_SOURCE_KEY_BYTES)
                                 .then_some(())?;
-                            let bytes = consume(range.0, &self.text, &mut text_cursor)?;
+                            let bytes = consume(range.0, &payloads.text, &mut text_cursor)?;
                             validate_texture_source_key(std::str::from_utf8(bytes).ok()?).ok()?;
                             bytes
                         }
@@ -217,11 +223,11 @@ impl AppearanceStorage {
             }
         }
         Ok(control.run_unit(|| {
-            image_cursor == self.image_bytes.len()
+            image_cursor == payloads.image_bytes.len()
                 && binding_cursor == self.bindings.len()
                 && match name_start {
-                    None => text_cursor == self.text.len(),
-                    Some(start) => text_cursor == start && name_cursor == self.text.len(),
+                    None => text_cursor == payloads.text.len(),
+                    Some(start) => text_cursor == start && name_cursor == payloads.text.len(),
                 }
         })? == Some(true))
     }

@@ -16,6 +16,7 @@ use super::{
 pub(in crate::canonical_scene::store) mod normals;
 pub(in crate::canonical_scene::store) mod space;
 pub(in crate::canonical_scene::store) mod space_animation;
+pub(in crate::canonical_scene::store) mod space_appearance;
 pub(in crate::canonical_scene::store) mod space_deformation;
 pub(in crate::canonical_scene::store) mod space_geometry;
 pub(in crate::canonical_scene::store) mod space_nodes;

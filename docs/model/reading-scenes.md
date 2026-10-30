@@ -60,10 +60,30 @@ Coordinate conversion composes this intrinsic basis without adding nodes or chan
 model, alpha behavior, factor groups, and ordered bindings. Legacy diffuse factors retain their own
 meaning; they are not reinterpreted as PBR base color by a getter.
 
-A binding describes a material use: texture role, coordinate source, source-channel mapping, color
-interpretation, transform, strength, blend operation, and optional source property key. Follow
-`binding.texture().image()` to encoded bytes and `texture.sampler()` to sampling state. Binding,
-texture, sampler, and image identities remain distinct. Image decoding belongs to the application.
+A binding describes a material use: texture role, UV set, source-channel mapping, color
+interpretation, transform, strength, blend operation, and optional source property key.
+`binding.uv_set()` returns a direct `u16` in `0..=65535`; there is no coordinate-source enum or
+generated spatial mapping. The index is independent of a primitive's UV stream count. Resolve it
+with `primitive.texcoords(u32::from(binding.uv_set()), domain)`, choosing Vertex or Corner explicitly
+and handling an absent stream. Reads do not generate coordinates or select another set implicitly.
+
+Follow `binding.texture().image()` to encoded bytes and `texture.sampler()` to sampling state.
+Binding, texture, sampler, and image identities remain distinct. Image decoding belongs to the
+application. Factor groups and closed binding values are returned by value; names, optional source
+keys, and encoded bytes borrow the Scene's actual storage. No getter allocates a replacement model.
+
+Public authoring takes the same direct UV index as the third argument to
+`MaterialBindingAuthoring::try_from_parts`. Convert a wider source index with a checked narrowing
+conversion before calling it. Only the optional descriptive source key gives binding authoring its
+borrowed lifetime; numeric and closed behavior values are owned.
+
+Whole-Scene space conversion scales supplemental thickness and signed displacement strength by the
+positive unit ratio. Other factors and optional groups, normal-map strengths, and UV indices and
+transforms keep their exact bits. A changed appearance rebuilds its row tables while sharing the
+encoded-image and text pools; destination byte slices and text borrow that same retained payload
+owner and remain usable when the source Scene is dropped. If no appearance bits change, the row
+owner is shared as well. See [appearance ownership and accounting](scene-ir.md#appearance-storage-and-accounting)
+for the private storage boundary and its resource limits.
 
 ## Identities and iteration
 

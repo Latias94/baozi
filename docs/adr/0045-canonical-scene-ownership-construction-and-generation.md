@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-19
-updated: 2026-10-30
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
@@ -157,13 +157,26 @@ time/interpolation/extrapolation types are shared by authoring, storage, and bor
 Finite negative pre-roll remains a canonical source value; format-specific time restrictions stay
 at the format boundary.
 
-Appearance uses one retained owner for image, sampler, texture, binding, and material rows, encoded
-image bytes, and combined text. Actual shared domain values replace scalar tags, duplicate Kind
-enums, and channel-mapping wrappers. Text is concatenated in image-media, binding-source-key, then
-material-name order without interning; optional absent and explicitly empty names remain distinct.
-Images retain independent logical identity even for equal payloads. The domain has no record schema,
-writer, decoder, edit rewrite, or immutable validation descriptors. Its closed behavior types do not
-retain unsupported `Namespaced` variants or an unused schema pool.
+Appearance has an inline `AppearanceStorage` root in `SceneTables`, containing two independently
+retained `SharedRetainedStorage` handles. `AppearanceRows` owns exactly five Vec tables: images,
+samplers, textures, bindings, and materials. `AppearancePayloads` owns two byte pools: encoded images
+and combined UTF-8 text. The inline root has no separate retained allocation. Rows refer to these
+pools through checked logical ranges; they do not own nested byte buffers. Actual shared domain
+values replace scalar tags, duplicate Kind enums, and channel-mapping wrappers. Binding coordinates
+are a direct `uv_set: u16`, with no coordinate-source enum or unimplemented spatial generation
+behavior. Text is concatenated in image-media, binding-source-key, then material-name order without
+interning; optional absent and explicitly empty names remain distinct. Images retain independent
+logical identity even for equal payloads. The domain has no record schema, writer, decoder, edit
+rewrite, or immutable validation descriptors. Its closed behavior types do not retain unsupported
+`Namespaced` variants or an unused schema pool.
+
+Initial appearance construction admits the row owner with five capacities and the payload owner
+with two capacities independently. Row construction performs one action per row; payload
+construction performs one descriptor action per image, binding, and material, plus the copied image
+and text bytes. A material length conversion rebuilds only the rows and shares the original payload
+owner. If the converted row bits are unchanged, both owners are shared. The appearance replacement
+has zero payload-copy work and zero rebuilt name-byte charge; full central validation and an
+explicit semantic snapshot retain their own metered observation work.
 
 Core defines the row layout and exact `CapacityPlan` values. Operation owns admission, the physical
 account, retained leases, shared ownership, and storage-first release. A core builder runs only inside
@@ -176,8 +189,40 @@ row width; sparse payloads count their retained indices, explicit values, and de
 extension names and digests are included once. The remaining Scene record directory contributes
 its current encoding once, independently of node and geometry. Retired record/reference/transform
 leaf formulas and an empty-geometry-directory placeholder have no role in typed domain limits.
-Unused capacity and retained-owner infrastructure remain in operation's separate physical admission.
+Unused backing capacity and additional physical shared-header infrastructure remain in operation's
+separate physical admission. Inline retained handles included in a domain's header formula retain
+their full target-ABI size in canonical bytes.
 These canonical-byte counters do not describe allocator overhead or process RSS.
+
+For appearance, the initialized canonical contribution is exactly the checked target-ABI sum:
+
+```text
+size_of::<AppearanceStorage>()
++ size_of::<AppearanceRows>()
++ size_of::<AppearancePayloads>()
++ image_count * size_of::<StoredImage>()
++ sampler_count * size_of::<SamplerState>()
++ texture_count * size_of::<StoredTexture>()
++ binding_count * size_of::<StoredBinding>()
++ material_count * size_of::<StoredMaterial>()
++ used_image_bytes + used_text_bytes
+```
+
+The first term counts the two complete inline handles; the next two count the five and two Vec descriptors.
+Even an empty appearance domain includes these three data headers. A candidate still counts the
+used pools in its canonical footprint when it shares them with an ancestor. This is a logical
+initialized-data limit, not the incremental physical allocation cost of that edit.
+
+Physical retention instead admits two independent owners, each with one shared-header allocation
+and its qualified Vec backing allocations. Each shared header contains the corresponding data
+header and private ownership/account infrastructure. The inline root belongs to the containing
+Scene allocation and does not create a third shared-header allocation. The physical owner headers
+already contain `AppearanceRows` or `AppearancePayloads`; their sizes must not be added a second
+time. Spare capacity and the separately allocated ownership infrastructure count only toward physical admission. Each
+shared owner keeps one live physical charge until its own final handle drops; sharing the existing
+payload owner creates neither a duplicate payload charge nor a new name-byte charge. These physical
+counters still do not measure allocator-private overhead or RSS. ADR 0044 remains the authority for
+admission, account lineage, and storage-first release.
 
 Typed table owners use operation's final-owner-backed `SharedRetainedStorage<T>`, with one centrally
 admitted and charged shared header per table owner; inline evidence and path storage retain their
@@ -190,7 +235,7 @@ cancellable and metered. Complete owner coverage, topology, payload shape, finit
 bounds, sparse index order, and cross-domain references remain mandatory before generation reservation.
 
 A node-transform edit replaces its node table and shares the unchanged geometry, spatial,
-appearance, deformation, and animation owners.
+deformation, and animation owners and both appearance children.
 Geometry tables and their payload pools retain their original addresses and one physical charge
 across source and destination generations. No generic geometry-record rebuild or dynamic payload-slot scan is part
 of that edit. Spatial declarations and camera/light definitions retain their original owner while
@@ -210,15 +255,18 @@ the entire payload; actual copying and semantic hashing meter the bytes they pro
 
 Typed owners follow the same rejection, publication, and ordinary host-unwind lifecycle as the
 other domains. Dropping either generation first leaves shared geometry, spatial, appearance,
-deformation, and animation data available to the survivor; the final generation releases the storage before its charge. A refused
-build action drops partially initialized vectors before the central admission is released. Retained
-rows, scalar pools, and their charge never escape as independently movable parts.
+deformation, and animation data available to the survivor. Each appearance child has its own final
+handle and releases its storage before its charge; an old row owner can end while its payload owner
+remains shared by another generation. A refused build action drops partially initialized vectors
+before the central admission is released. Each retained owner keeps its buffers and physical lease
+inseparable; public code cannot detach rows, pools, or accounting authority.
 
 All semantic domains use these typed owners under the same Scene root. The private revision-8
 record directory contains seven scalar revision/count fields and no domain-store references. It is
 the sole canonical record block; there are no record-store payload or shareable-leaf blocks. Each
 completed cutover deletes its replaced record schema and conversion/validation projection in the
-same change. Semantic snapshot revision 4 retains its independent, source-faithful encoding.
+same change. Semantic snapshot revision 5 retains its independent, source-faithful encoding. The
+direct UV index keeps the existing kind-zero/set-value encoding without another revision.
 
 Profile state owns the current typed owner/attachment table, immutable lineage segment handles,
 and owner-bearing metadata descriptors. Each lineage segment and the metadata payload pools have

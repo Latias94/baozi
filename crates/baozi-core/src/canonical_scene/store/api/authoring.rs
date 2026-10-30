@@ -40,7 +40,7 @@ pub use crate::appearance::{
     AlphaMode, AppearanceBuildError, ColorInterpretation, LegacyMaterialFactors, MaterialFactors,
     PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel,
     SupplementalPbrFactors, TextureBlendOperation, TextureChannel, TextureChannelSwizzle,
-    TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
+    TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
 };
 pub use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemantic};
 pub use crate::deform::{MorphDeltaSemantic, SkinMatrixSpaces};

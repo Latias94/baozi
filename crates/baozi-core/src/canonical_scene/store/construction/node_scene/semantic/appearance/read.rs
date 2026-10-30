@@ -8,7 +8,7 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAppearanceImage<'scene>> {
         let image = self
-            .storage
+            .rows
             .images
             .get(row)
             .ok_or_else(|| invariant("image row is outside its proof-qualified table"))?;
@@ -16,11 +16,12 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
         if image.payload.is_empty() || image.payload.len() > MAX_ENCODED_IMAGE_BYTES {
             return Err(invariant("validated image payload size is invalid"));
         }
-        let encoded_payload = borrow_range(image.payload, &self.storage.image_bytes)?;
+        let encoded_payload = borrow_range(image.payload, &self.payloads.image_bytes)?;
         let media_type = image
             .media_type
             .map(|range| -> NodeSceneSemanticResult<&'scene str> {
-                let value = borrow_text(range, &self.storage.text, MAX_EXTENSION_MEDIA_TYPE_BYTES)?;
+                let value =
+                    borrow_text(range, &self.payloads.text, MAX_EXTENSION_MEDIA_TYPE_BYTES)?;
                 validate_media_type(value)
                     .map_err(|_| invariant("validated image media type is invalid"))?;
                 Ok(value)
@@ -38,7 +39,7 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAppearanceSampler> {
         let &state = self
-            .storage
+            .rows
             .samplers
             .get(row)
             .ok_or_else(|| invariant("sampler row is outside its proof-qualified table"))?;
@@ -54,14 +55,14 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAppearanceTexture> {
         let texture = self
-            .storage
+            .rows
             .textures
             .get(row)
             .ok_or_else(|| invariant("texture row is outside its proof-qualified table"))?;
         record_row_read();
         let image = texture.image.0 as usize;
         let sampler = texture.sampler.0 as usize;
-        if image >= self.storage.images.len() || sampler >= self.storage.samplers.len() {
+        if image >= self.rows.images.len() || sampler >= self.rows.samplers.len() {
             return Err(invariant(
                 "validated texture target is outside image or sampler space",
             ));
@@ -78,12 +79,12 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAppearanceMaterial<'scene>> {
         let stored = self
-            .storage
+            .rows
             .materials
             .get(row)
             .ok_or_else(|| invariant("material row is outside its proof-qualified table"))?;
         record_row_read();
-        borrow_range(stored.bindings, &self.storage.bindings)?;
+        borrow_range(stored.bindings, &self.rows.bindings)?;
         stored
             .alpha
             .validate()
@@ -95,7 +96,7 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
         let name = stored
             .name
             .map(|range| -> NodeSceneSemanticResult<&'scene str> {
-                let value = borrow_text(range, &self.storage.text, MAX_ENTITY_NAME_BYTES)?;
+                let value = borrow_text(range, &self.payloads.text, MAX_ENTITY_NAME_BYTES)?;
                 validate_entity_name_str(value)
                     .map_err(|_| invariant("validated material name is invalid"))?;
                 Ok(value)
@@ -114,12 +115,12 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAppearanceBinding<'scene>> {
         let stored = self
-            .storage
+            .rows
             .bindings
             .get(row)
             .ok_or_else(|| invariant("binding row is outside its proof-qualified table"))?;
         record_row_read();
-        if stored.texture.0 as usize >= self.storage.textures.len() || !stored.channels.is_valid() {
+        if stored.texture.0 as usize >= self.rows.textures.len() || !stored.channels.is_valid() {
             return Err(invariant(
                 "validated binding target or channel swizzle is invalid",
             ));
@@ -137,7 +138,7 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
             .map(|range| -> NodeSceneSemanticResult<&'scene str> {
                 let value = borrow_text(
                     range,
-                    &self.storage.text,
+                    &self.payloads.text,
                     crate::appearance::MAX_TEXTURE_SOURCE_KEY_BYTES,
                 )?;
                 validate_texture_source_key(value)

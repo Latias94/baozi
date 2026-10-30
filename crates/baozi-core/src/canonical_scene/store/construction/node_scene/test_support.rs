@@ -5,7 +5,9 @@ use baozi_operation::{OperationControl, PhysicalStorageAccount};
 
 use crate::SceneValidationLimits;
 
-use super::super::super::production::{SceneAuthoringBatch, SceneInputEnvelope};
+use super::super::super::production::{
+    SceneAuthoringBatch, scene_input_terminal_attribution_slots,
+};
 use super::super::super::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT;
 use super::super::{
     SceneConstructionLimits, SceneConstructionPhase, SceneConstructionStartError,
@@ -57,7 +59,7 @@ impl AppearanceBuildFault {
 
     pub(super) fn corrupt(
         self,
-        storage: &mut crate::canonical_scene::store::typed_storage::appearance::AppearanceStorage,
+        storage: &mut crate::canonical_scene::store::typed_storage::appearance::AppearanceRows,
     ) {
         use crate::appearance::{
             ColorInterpretation, ShadingModel, TextureChannelSwizzle, TextureStrength,
@@ -74,7 +76,7 @@ impl AppearanceBuildFault {
                 let range = storage.images[0].payload;
                 storage.images[0].payload = TableRange::new(1, range.len());
             }
-            Self::InvalidMediaType => storage.text[0] = 0xff,
+            Self::InvalidMediaType => {}
             Self::TextureImage => {
                 storage.textures[0].image = StoredImageIndex(storage.images.len() as u32);
             }
@@ -95,6 +97,14 @@ impl AppearanceBuildFault {
                 storage.materials[0].shading = ShadingModel::PbrSpecularGlossiness
             }
             Self::SourceKeyOverlap => storage.bindings[0].source_key = storage.images[0].media_type,
+        }
+    }
+    pub(super) fn corrupt_payloads(
+        self,
+        payloads: &mut crate::canonical_scene::store::typed_storage::appearance::AppearancePayloads,
+    ) {
+        if matches!(self, Self::InvalidMediaType) {
+            payloads.text[0] = 0xff;
         }
     }
 }
@@ -322,13 +332,14 @@ impl<'input> NodeSceneTestTransaction<'input> {
         input: SceneAuthoringBatch<'input>,
         validation_limits: SceneValidationLimits,
     ) -> Result<Self, SceneConstructionStartError> {
-        let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
+        let terminal_attribution_slots =
+            scene_input_terminal_attribution_slots(input, validation_limits)?;
         let request = NodeSceneActivationRequest::try_new(input, validation_limits)?;
         let bootstrap = NodeSceneSessionActivationBootstrap::try_new()?;
         let start = try_plan_scene_operation(
             limits,
             control,
-            envelope.terminal_attribution_slots(),
+            terminal_attribution_slots,
             SceneFailureEvidenceWork::exact_single_record(NODE_SCENE_EVIDENCE_FIELD_COUNT),
         )?;
         let raw = SceneStoreOperation::try_start(

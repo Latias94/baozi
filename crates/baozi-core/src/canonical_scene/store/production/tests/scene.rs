@@ -1,8 +1,8 @@
 use crate::SceneValidationLimits;
 use crate::appearance::{
     AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemantics, ShadingModel,
-    TextureBindingSemantics, TextureBlendOperation, TextureChannelSwizzle, TextureCoordinateSource,
-    TextureRole, TextureStrength, TextureTransform,
+    TextureBindingSemantics, TextureBlendOperation, TextureChannelSwizzle, TextureRole,
+    TextureStrength, TextureTransform,
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionRejection, validate_node_scene_batches_for_test,
@@ -17,21 +17,25 @@ use super::super::plan::geometry::validate_geometry_batch_with_control;
 use super::super::plan::profile::{ProfileOwnerCatalog, validate_profile_batch_with_control};
 use super::super::plan::spatial::validate_spatial_batch_with_control;
 use super::super::scene::{
-    SceneAuthoringAggregateError, SceneAuthoringAggregateLimit, SceneInputEnvelope,
-    SceneInputEnvelopeError, animation_limits_after_deformation, appearance_limits_after_nodes,
+    SceneAuthoringAggregateError, SceneAuthoringAggregateLimit, SceneInputEnvelopeError,
+    animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
-    profile_limits_after_animation, validate_scene_aggregate,
+    profile_limits_after_animation, scene_input_terminal_attribution_slots,
+    validate_scene_aggregate,
 };
 use super::super::{
-    AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationExtrapolation,
-    AnimationInterpolation, AnimationTargetAuthoring, AppearanceAuthoringBatch, AuthoringRange,
-    DeformationAuthoringBatch, GeometryAuthoringBatch, MaterialAuthoring, MaterialBindingAuthoring,
-    NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence, ProfileAuthoringBatch,
-    SceneAuthoringBatch, SpatialAuthoringBatch, TextureLocalId,
+    AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
+    AnimationExtrapolation, AnimationInterpolation, AnimationTargetAuthoring,
+    AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch, GeometryAuthoringBatch,
+    ImageAuthoring, ImageLocalId, MaterialAuthoring, MaterialBindingAuthoring, NodeAuthoringBatch,
+    NodeAuthoringNode, NodeLocalId, Presence, ProfileAuthoringBatch, SamplerAuthoring,
+    SamplerLocalId, SceneAuthoringBatch, SpatialAuthoringBatch, TextureAuthoring, TextureLocalId,
 };
 use super::{
     LineageAuthoringBatch, MetadataAuthoringBatch, TestControl, profile_fixture, trs, validate,
 };
+use crate::animation::AnimationTimeDomain;
+use crate::image::SamplerState;
 use crate::scene_space::SceneSpace;
 
 struct EmptySceneInput<'input> {
@@ -133,26 +137,33 @@ fn generic_scene_preflight_releases_prior_domains_after_profile_rejection() {
 }
 
 #[test]
-fn scene_envelope_accounts_for_the_complete_scene_shape() {
+fn scene_terminal_slots_cover_only_the_directory_and_terminal_for_empty_and_populated_inputs() {
     let empty_roots = [];
     let empty_nodes = [];
     let empty_input = empty_scene_input(Presence::Present(&empty_roots), &empty_nodes);
-    let empty = SceneInputEnvelope::try_new(empty_input.batch(), SceneValidationLimits::default())
-        .expect("the empty Scene shape is representable");
-    // Node, geometry, profile, and spatial use typed owners outside the record-store table.
-    // The remaining Scene/appearance/deformation/animation roots and terminal slot need five.
-    assert_eq!(empty.terminal_attribution_slots(), 5);
+    let empty = scene_input_terminal_attribution_slots(
+        empty_input.batch(),
+        SceneValidationLimits::default(),
+    )
+    .expect("the empty Scene shape is representable");
+    // The directory and terminal each occupy one attribution slot. Every typed owner has its
+    // own physical admission and contributes no record-store member.
+    assert_eq!(empty, 2);
+    #[cfg(feature = "_scene-integration")]
+    assert_eq!(
+        crate::scene::integration::maximum_scene_canonical_blocks(),
+        1
+    );
 
     let roots = [NodeLocalId::new(0)];
     let nodes = [trs(Presence::Absent)];
     let populated_input = empty_scene_input(Presence::Present(&roots), &nodes);
-    let populated_nodes =
-        SceneInputEnvelope::try_new(populated_input.batch(), SceneValidationLimits::default())
-            .expect("the populated node shape is representable");
-    assert_eq!(
-        populated_nodes.terminal_attribution_slots(),
-        empty.terminal_attribution_slots()
-    );
+    let populated_nodes = scene_input_terminal_attribution_slots(
+        populated_input.batch(),
+        SceneValidationLimits::default(),
+    )
+    .expect("the populated node shape is representable");
+    assert_eq!(populated_nodes, empty);
 }
 
 #[test]
@@ -162,7 +173,7 @@ fn scene_envelope_rejects_top_level_input_limit_overflow() {
     let node_limit_input = empty_scene_input(Presence::Present(&roots), &nodes);
 
     assert!(matches!(
-        SceneInputEnvelope::try_new(
+        scene_input_terminal_attribution_slots(
             node_limit_input.batch(),
             SceneValidationLimits::default().with_max_nodes(1),
         ),
@@ -174,7 +185,7 @@ fn scene_envelope_rejects_top_level_input_limit_overflow() {
     ));
     let entity_limit_input = empty_scene_input(Presence::Present(&roots), &nodes);
     assert!(matches!(
-        SceneInputEnvelope::try_new(
+        scene_input_terminal_attribution_slots(
             entity_limit_input.batch(),
             SceneValidationLimits::default().with_max_entities(1),
         ),
@@ -187,7 +198,7 @@ fn scene_envelope_rejects_top_level_input_limit_overflow() {
 }
 
 #[test]
-fn scene_envelope_reserves_nested_worst_case_without_deep_validation() {
+fn scene_envelope_does_not_inspect_invalid_nested_animation() {
     let channels = [AnimationChannelAuthoring::new(
         0,
         AnimationTargetAuthoring::NodeTranslation(NodeLocalId::new(99)),
@@ -229,24 +240,21 @@ fn scene_envelope_reserves_nested_worst_case_without_deep_validation() {
         .with_max_work(0)
         .with_max_scratch_bytes(0);
 
-    let envelope = SceneInputEnvelope::try_new(input, limits)
+    let slots = scene_input_terminal_attribution_slots(input, limits)
         .expect("the envelope must not inspect invalid nested animation semantics");
 
-    // One channel conservatively admits its table and all four possible payload blocks.
-    assert_eq!(envelope.terminal_attribution_slots(), 10);
+    assert_eq!(slots, 2);
 }
 
 #[test]
-fn scene_envelope_reserves_complete_appearance_payload_envelope() {
+fn scene_envelope_does_not_inspect_invalid_nested_appearance() {
     let role = TextureRole::BaseColor;
-    let coordinate_source =
-        TextureCoordinateSource::uv_set(0).expect("test UV set should be valid");
     let channel_mapping = TextureChannelSwizzle::RGBA;
     let color_interpretation = ColorInterpretation::SrgbColor;
     let blend = TextureBlendOperation::Replace;
     let binding_semantics = TextureBindingSemantics::new(
         role,
-        coordinate_source,
+        0,
         channel_mapping,
         color_interpretation,
         TextureTransform::IDENTITY,
@@ -290,12 +298,117 @@ fn scene_envelope_reserves_complete_appearance_payload_envelope() {
         profile.batch(),
     );
 
-    let envelope = SceneInputEnvelope::try_new(input, SceneValidationLimits::default())
+    let limits = SceneValidationLimits::default()
+        .with_max_payload_cells(0)
+        .with_max_work(0)
+        .with_max_canonical_bytes(0)
+        .with_max_scratch_bytes(0);
+    let slots = scene_input_terminal_attribution_slots(input, limits)
         .expect("appearance envelope should be representable without deep validation");
 
-    // Binding semantics, optional source keys, material factors, and material names each own an
-    // independently attributable aggregate payload block.
-    assert_eq!(envelope.terminal_attribution_slots(), 11);
+    // The binding targets an absent texture. Controlled semantic validation owns that error;
+    // top-level planning cannot traverse it or reserve retired appearance payload blocks.
+    assert_eq!(slots, 2);
+}
+
+#[test]
+fn large_typed_tables_keep_exact_terminal_slots_without_traversal_or_allocation() {
+    const ROWS: usize = 4_096;
+    let nodes = vec![trs(Presence::Absent); ROWS];
+    let images = vec![ImageAuthoring::encoded(&[], Presence::Absent); ROWS];
+    let samplers = vec![SamplerAuthoring::new(SamplerState::CANONICAL_DEFAULT); ROWS];
+    let textures =
+        vec![
+            TextureAuthoring::new(ImageLocalId::new(u32::MAX), SamplerLocalId::new(u32::MAX));
+            ROWS
+        ];
+    let bindings = vec![
+        MaterialBindingAuthoring::new(
+            TextureLocalId::new(u32::MAX),
+            TextureBindingSemantics::new(
+                TextureRole::BaseColor,
+                u16::MAX,
+                TextureChannelSwizzle::RGBA,
+                ColorInterpretation::SrgbColor,
+                TextureTransform::IDENTITY,
+                TextureStrength::ONE,
+                TextureBlendOperation::Replace,
+                None,
+            ),
+        );
+        ROWS
+    ];
+    let materials = vec![
+        MaterialAuthoring::new(
+            AuthoringRange::new(u32::MAX, u32::MAX),
+            MaterialSemantics::new(
+                ShadingModel::Unlit,
+                AlphaMode::Opaque,
+                false,
+                MaterialFactors::empty()
+            ),
+        );
+        ROWS
+    ];
+    let times = [f64::NAN];
+    let values = [f32::NAN];
+    let channels = vec![
+        AnimationChannelAuthoring::new(
+            u32::MAX,
+            AnimationTargetAuthoring::NodeTranslation(NodeLocalId::new(u32::MAX)),
+            AnimationInterpolation::CubicSpline,
+            AnimationExtrapolation::SourceDefault,
+            AnimationExtrapolation::SourceDefault,
+            &times,
+            &values,
+            Presence::Absent,
+            Presence::Absent,
+        );
+        ROWS
+    ];
+    let clips = vec![
+        AnimationClipAuthoring::new(
+            u32::MAX,
+            f64::NAN,
+            AnimationTimeDomain::Seconds,
+            AuthoringRange::new(u32::MAX, u32::MAX),
+        );
+        ROWS
+    ];
+    // No complete profile or valid nested payload is supplied: this seam may inspect only lengths.
+    let input = SceneAuthoringBatch::new(
+        SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]),
+        NodeAuthoringBatch::new(Presence::Absent, &nodes),
+        AppearanceAuthoringBatch::new(&images, &samplers, &textures, &bindings, &materials),
+        GeometryAuthoringBatch::empty(),
+        DeformationAuthoringBatch::empty(),
+        AnimationAuthoringBatch::new(&clips, &channels),
+        ProfileAuthoringBatch::new(
+            LineageAuthoringBatch::new(&[], &[], &[], &[]),
+            MetadataAuthoringBatch::empty(),
+        ),
+    );
+    let entities = (8 * ROWS + 1) as u64;
+    let limits = SceneValidationLimits::default()
+        .with_max_nodes(ROWS as u64 + 1)
+        .with_max_entities(entities)
+        .with_max_payload_cells(0)
+        .with_max_work(0)
+        .with_max_canonical_bytes(0)
+        .with_max_scratch_bytes(0);
+    let allocations = allocation_counter::measure(|| {
+        assert_eq!(
+            scene_input_terminal_attribution_slots(input, limits).unwrap(),
+            2
+        );
+        assert!(matches!(
+            scene_input_terminal_attribution_slots(input, limits.with_max_entities(entities - 1)),
+            Err(SceneInputEnvelopeError::LimitExceeded { limit: "entity lower bound", actual, maximum })
+                if actual == entities && maximum == entities - 1
+        ));
+    });
+    assert_eq!(allocations.count_total, 0);
+    assert_eq!(allocations.bytes_total, 0);
 }
 
 #[test]

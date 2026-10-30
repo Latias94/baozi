@@ -572,7 +572,7 @@ impl SceneStorage {
     pub(in crate::canonical_scene::store) fn read_appearance(
         &self,
     ) -> &super::super::typed_storage::appearance::AppearanceStorage {
-        self.tables.appearance.as_ref()
+        &self.tables.appearance
     }
     pub(in crate::canonical_scene::store) const fn read_proof(&self) -> &NodeSceneValidationProof {
         &self.proof

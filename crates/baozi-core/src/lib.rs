@@ -82,8 +82,7 @@ pub use appearance::{
     AlphaCutoff, AlphaMode, ColorInterpretation, LegacyMaterialFactors, MaterialFactorError,
     MaterialFactorField, MaterialFactors, PbrMetallicRoughnessFactors,
     PbrSpecularGlossinessFactors, ShadingModel, SupplementalPbrFactors, TextureBlendOperation,
-    TextureChannel, TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength,
-    TextureTransform,
+    TextureChannel, TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
 };
 pub use attribute::{
     AttributeDomain, AttributeSemantic, AttributeSemanticKind, CustomAttributeSemantic,

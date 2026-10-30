@@ -1,5 +1,8 @@
 //! Regression coverage for typed edits against an actual retained, centrally validated source.
 
+#[path = "appearance_tests.rs"]
+mod appearance_tests;
+
 use std::convert::Infallible;
 use std::sync::atomic::AtomicU64;
 
@@ -361,13 +364,14 @@ impl<'scene> CanonicalActivationDescription for EditActivation<'scene> {
 /// Uses the production graph/profile retention adapters and the existing same-account lane.
 /// Publication and postprocess orchestration are covered by their own transaction tests.
 fn retain_edit(pending: BoundPendingNodeSceneEdit<'_>) -> RetainedEdit {
-    retain_controlled_edit(pending, OperationControl::default())
+    retain_controlled_edit(pending, OperationControl::default(), || {})
         .expect("valid profile must reach a retained candidate")
 }
 
 fn retain_controlled_edit(
     pending: BoundPendingNodeSceneEdit<'_>,
     control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
+    before_retention: impl Fn(),
 ) -> Option<RetainedEdit> {
     let counts = pending.counts;
     let start = try_plan_scene_operation(
@@ -440,12 +444,13 @@ fn retain_controlled_edit(
                 CanonicalActivationSeal::Sealed(permit) => permit,
                 CanonicalActivationSeal::Unsealed(failure) => return failure.finish(),
             };
-            permit.activate(
-                |mut lane, pending| match try_rewrite_node_scene(&mut lane, pending) {
+            permit.activate(|mut lane, pending| {
+                before_retention();
+                match try_rewrite_node_scene(&mut lane, pending) {
                     Ok(graph) => lane.complete(graph.directory.into_store(), graph.tables),
                     Err(cause) => lane.reject(cause, 0x4e4f_5201),
-                },
-            )
+                }
+            })
         })
         .ok()?;
     match outcome {
@@ -1120,8 +1125,12 @@ fn space_conversion_rebinds_changed_deformation_and_curve_owners_with_exact_sele
     assert!(space.validate_correspondence(tables, &mut control).unwrap());
     assert_eq!(control.0, space.correspondence_work());
     assert!(std::ptr::eq(
-        tables.appearance.as_ref(),
-        source.scene.tables.appearance.as_ref()
+        tables.appearance.rows.as_ref(),
+        source.scene.tables.appearance.rows.as_ref()
+    ));
+    assert!(std::ptr::eq(
+        tables.appearance.payloads.as_ref(),
+        source.scene.tables.appearance.payloads.as_ref()
     ));
     drop(source);
     assert_valid_profile(&output.output().profile, plan);
@@ -1292,6 +1301,7 @@ fn interrupted_space_graph_releases_rebuilt_owners_and_preserves_the_source_acco
                 polls: polls.clone(),
                 at,
             }),
+            || {},
         );
         if at == usize::MAX {
             let output = result.expect("the complete retained graph must fit its exact work");

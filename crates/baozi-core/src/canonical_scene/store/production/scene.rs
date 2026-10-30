@@ -1,7 +1,9 @@
 use thiserror::Error;
 
 use crate::SceneValidationLimits;
-use crate::canonical_scene::store::schema::SCENE_DIRECTORY_CANONICAL_BYTES;
+use crate::canonical_scene::store::schema::{
+    SCENE_DIRECTORY_BLOCK_COUNT, SCENE_DIRECTORY_CANONICAL_BYTES,
+};
 
 use super::input::{Presence, SceneAuthoringBatch};
 use super::{
@@ -9,58 +11,33 @@ use super::{
     ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch, ValidatedSpatialBatch,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) struct SceneInputEnvelope {
-    terminal_attribution_slots: usize,
-}
+/// Checks top-level count domains and limits, then returns the terminal attribution capacity.
+///
+/// A fresh Scene has only its directory record plus one terminal evidence record in the store.
+/// Typed domain owners use independent retention admission and never add record-store slots.
+/// Nested shape, scratch, references, and semantics remain the responsibility of the controlled
+/// domain validators. Only top-level lengths are read here, with no input-sized traversal.
+pub(in crate::canonical_scene::store) fn scene_input_terminal_attribution_slots(
+    input: SceneAuthoringBatch<'_>,
+    limits: SceneValidationLimits,
+) -> Result<usize, SceneInputEnvelopeError> {
+    let shape = SceneTopLevelShape::from_input(input);
+    shape.require_top_level_count_domains()?;
 
-impl SceneInputEnvelope {
-    /// Derives only the bounded admission envelope available from top-level slice lengths.
-    ///
-    /// Nested shape, scratch, references, and semantics remain the responsibility of the
-    /// operation-bound domain validators. This boundary must stay O(1) in input size so no
-    /// unmetered producer data is traversed before cancellation and work accounting exist.
-    pub(in crate::canonical_scene::store) fn try_new(
-        input: SceneAuthoringBatch<'_>,
-        limits: SceneValidationLimits,
-    ) -> Result<Self, SceneInputEnvelopeError> {
-        let shape = SceneTopLevelShape::from_input(input);
-        shape.require_top_level_count_domains()?;
+    let canonical_nodes = shape.canonical_node_count()?;
+    require_envelope_limit("nodes", canonical_nodes, limits.max_nodes())?;
+    require_envelope_limit(
+        "entity lower bound",
+        shape.entity_lower_bound(canonical_nodes)?,
+        limits.max_entities(),
+    )?;
+    require_envelope_limit(
+        "metadata entries",
+        usize_to_u64(shape.metadata_entries, "metadata entry count")?,
+        limits.max_metadata_entries(),
+    )?;
 
-        let canonical_nodes = shape.canonical_node_count()?;
-        require_envelope_limit("nodes", canonical_nodes, limits.max_nodes())?;
-        require_envelope_limit(
-            "entity lower bound",
-            shape.entity_lower_bound(canonical_nodes)?,
-            limits.max_entities(),
-        )?;
-        require_envelope_limit(
-            "metadata entries",
-            usize_to_u64(shape.metadata_entries, "metadata entry count")?,
-            limits.max_metadata_entries(),
-        )?;
-
-        let terminal_attribution_slots = shape
-            .canonical_block_upper_bound()?
-            .checked_add(1)
-            .ok_or(SceneInputEnvelopeError::AccountingOverflow {
-                dimension: "terminal attribution slots",
-            })?;
-
-        Ok(Self {
-            terminal_attribution_slots,
-        })
-    }
-
-    pub(in crate::canonical_scene::store) const fn terminal_attribution_slots(self) -> usize {
-        self.terminal_attribution_slots
-    }
-
-    pub(in crate::canonical_scene::store) fn maximum_canonical_blocks() -> Option<usize> {
-        SceneTopLevelShape::all_present()
-            .canonical_block_upper_bound()
-            .ok()
-    }
+    Ok(SCENE_DIRECTORY_BLOCK_COUNT as usize + 1)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -93,36 +70,6 @@ struct SceneTopLevelShape {
 }
 
 impl SceneTopLevelShape {
-    const fn all_present() -> Self {
-        Self {
-            cameras: 1,
-            lights: 1,
-            roots: 1,
-            nodes: 1,
-            images: 1,
-            samplers: 1,
-            textures: 1,
-            material_bindings: 1,
-            materials: 1,
-            logical_meshes: 1,
-            primitives: 1,
-            attributes: 1,
-            mesh_instances: 1,
-            skins: 1,
-            morph_target_definitions: 1,
-            logical_morphs: 1,
-            primitive_deformations: 1,
-            mesh_instance_deformations: 1,
-            animation_clips: 1,
-            animation_channels: 1,
-            resources: 1,
-            source_identities: 1,
-            provenance_nodes: 1,
-            owner_provenance: 1,
-            metadata_entries: 1,
-        }
-    }
-
     fn from_input(input: SceneAuthoringBatch<'_>) -> Self {
         let spatial = input.spatial();
         let nodes = input.nodes();
@@ -237,85 +184,6 @@ impl SceneTopLevelShape {
             dimension: "entity lower bound",
         })
     }
-
-    fn canonical_block_upper_bound(self) -> Result<usize, SceneInputEnvelopeError> {
-        let appearance = checked_block_sum(
-            [
-                1,
-                presence(self.images),
-                presence(self.samplers),
-                presence(self.textures),
-                presence(self.material_bindings),
-                presence(self.materials),
-                // A nonempty image table may require both aggregate payload blocks.
-                scaled_presence(self.images, 2)?,
-                // Bindings always retain semantic scalars and may retain source keys.
-                scaled_presence(self.material_bindings, 2)?,
-                // Every material retains one fixed-width factor payload.
-                presence(self.materials),
-                // A material table may also retain one aggregate display-name payload.
-                presence(self.materials),
-            ],
-            "appearance block upper bound",
-        )?;
-        let deformation = checked_block_sum(
-            [
-                1,
-                presence(self.skins),
-                presence(self.logical_morphs),
-                presence(self.morph_target_definitions),
-                // A primitive slice may produce primitive, morph-target, and morph-delta tables.
-                scaled_presence(self.primitive_deformations, 3)?,
-                presence(self.mesh_instance_deformations),
-                // Skin payloads: joints, inverse binds, correction matrices, and names.
-                scaled_presence(self.skins, 4)?,
-                presence(self.logical_morphs),
-                presence(self.morph_target_definitions),
-                // Primitive payloads: influence rows and three columns, values, sparse indices.
-                scaled_presence(self.primitive_deformations, 6)?,
-                presence(self.mesh_instance_deformations),
-            ],
-            "deformation block upper bound",
-        )?;
-        let animation = checked_block_sum(
-            [
-                1,
-                presence(self.animation_clips),
-                presence(self.animation_channels),
-                // A nonempty channel table may require all four aggregate payload blocks.
-                scaled_presence(self.animation_channels, 4)?,
-            ],
-            "animation block upper bound",
-        )?;
-
-        checked_block_sum(
-            [1, appearance, deformation, animation],
-            "canonical block upper bound",
-        )
-    }
-}
-
-#[cfg(test)]
-mod maximum_tests {
-    use super::*;
-
-    #[test]
-    fn canonical_block_ceiling_is_independent_of_typed_domain_counts() {
-        let maximum = SceneInputEnvelope::maximum_canonical_blocks()
-            .expect("the bounded maximum must be representable");
-        let mut admitted_shape = SceneTopLevelShape::all_present();
-        admitted_shape.nodes = 8;
-        admitted_shape.cameras = 8;
-        admitted_shape.lights = 8;
-        admitted_shape.primitives = 8;
-        admitted_shape.attributes = 8;
-        admitted_shape.provenance_nodes = 8;
-        let admitted = admitted_shape
-            .canonical_block_upper_bound()
-            .expect("the admitted shape must be representable");
-
-        assert_eq!(maximum, admitted);
-    }
 }
 
 #[derive(Debug, Error)]
@@ -336,34 +204,6 @@ pub(crate) enum SceneInputEnvelopeError {
         actual: u64,
         maximum: u64,
     },
-}
-
-const fn presence(count: usize) -> usize {
-    if count == 0 { 0 } else { 1 }
-}
-
-fn scaled_presence(count: usize, blocks: usize) -> Result<usize, SceneInputEnvelopeError> {
-    checked_block_mul(presence(count), blocks, "conditional block upper bound")
-}
-
-fn checked_block_mul(
-    count: usize,
-    blocks: usize,
-    dimension: &'static str,
-) -> Result<usize, SceneInputEnvelopeError> {
-    count
-        .checked_mul(blocks)
-        .ok_or(SceneInputEnvelopeError::AccountingOverflow { dimension })
-}
-
-fn checked_block_sum<const N: usize>(
-    blocks: [usize; N],
-    dimension: &'static str,
-) -> Result<usize, SceneInputEnvelopeError> {
-    blocks
-        .into_iter()
-        .try_fold(0_usize, usize::checked_add)
-        .ok_or(SceneInputEnvelopeError::AccountingOverflow { dimension })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -12,9 +12,6 @@ use thiserror::Error;
 /// Maximum UTF-8 bytes in one format-owned texture source key.
 pub const MAX_TEXTURE_SOURCE_KEY_BYTES: usize = 128;
 
-/// Maximum zero-based UV set address admitted by the canonical binding model.
-pub const MAX_TEXTURE_COORDINATE_SET: u32 = u16::MAX as u32;
-
 /// The primary rendering model selected for one material.
 ///
 /// Factor groups are retained independently, so selecting a PBR model never
@@ -609,40 +606,6 @@ enum TextureUsageClass {
     Data,
 }
 
-/// A coordinate source used to evaluate one texture binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TextureCoordinateSource {
-    /// A zero-based UV set independent from any one primitive cardinality.
-    UvSet(u16),
-    ObjectPosition,
-    ObjectNormal,
-    ReflectionVector,
-}
-
-impl TextureCoordinateSource {
-    pub fn uv_set(set: u32) -> Result<Self, TextureCoordinateSourceError> {
-        let set = u16::try_from(set).map_err(|_| TextureCoordinateSourceError::SetTooLarge {
-            actual: set,
-            maximum: MAX_TEXTURE_COORDINATE_SET,
-        })?;
-        Ok(Self::UvSet(set))
-    }
-
-    pub const fn uv_set_index(self) -> Option<u32> {
-        match self {
-            Self::UvSet(set) => Some(set as u32),
-            Self::ObjectPosition | Self::ObjectNormal | Self::ReflectionVector => None,
-        }
-    }
-}
-
-/// Why a coordinate-set address was rejected.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum TextureCoordinateSourceError {
-    #[error("texture coordinate set {actual} exceeds canonical maximum {maximum}")]
-    SetTooLarge { actual: u32, maximum: u32 },
-}
-
 /// One sampled source component or a canonical constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextureChannel {
@@ -969,7 +932,7 @@ pub(crate) fn validate_texture_source_key(value: &str) -> Result<(), TextureSour
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct TextureBindingSemantics<'a> {
     role: TextureRole,
-    coordinate_source: TextureCoordinateSource,
+    uv_set: u16,
     channel_mapping: TextureChannelSwizzle,
     color_interpretation: ColorInterpretation,
     transform: TextureTransform,
@@ -982,7 +945,7 @@ impl<'a> TextureBindingSemantics<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) const fn new(
         role: TextureRole,
-        coordinate_source: TextureCoordinateSource,
+        uv_set: u16,
         channel_mapping: TextureChannelSwizzle,
         color_interpretation: ColorInterpretation,
         transform: TextureTransform,
@@ -992,7 +955,7 @@ impl<'a> TextureBindingSemantics<'a> {
     ) -> Self {
         Self {
             role,
-            coordinate_source,
+            uv_set,
             channel_mapping,
             color_interpretation,
             transform,
@@ -1006,8 +969,9 @@ impl<'a> TextureBindingSemantics<'a> {
         self.role
     }
 
-    pub(crate) const fn coordinate_source(self) -> TextureCoordinateSource {
-        self.coordinate_source
+    /// Returns the zero-based UV set, independent of any primitive's UV stream count.
+    pub(crate) const fn uv_set(self) -> u16 {
+        self.uv_set
     }
 
     pub(crate) const fn channel_mapping(self) -> TextureChannelSwizzle {
@@ -1379,7 +1343,7 @@ pub(crate) fn validate_material_texture_binding_semantics<'a>(
 mod tests {
     use super::*;
 
-    const UV_ZERO: TextureCoordinateSource = TextureCoordinateSource::UvSet(0);
+    const UV_ZERO: u16 = 0;
     const REPLACE: TextureBlendOperation = TextureBlendOperation::Replace;
 
     fn binding_semantics<'a>(
@@ -1467,13 +1431,13 @@ mod tests {
         let source_key = TextureSourceKey::try_new("source:normal").unwrap();
         let binding = {
             let role = TextureRole::Normal;
-            let coordinate_source = TextureCoordinateSource::UvSet(3);
+            let uv_set = 3;
             let channel_mapping = TextureChannelSwizzle::RGB;
             let color_interpretation = ColorInterpretation::Data;
             let blend = TextureBlendOperation::Replace;
             TextureBindingSemantics::new(
                 role,
-                coordinate_source,
+                uv_set,
                 channel_mapping,
                 color_interpretation,
                 TextureTransform::IDENTITY,
@@ -1484,7 +1448,7 @@ mod tests {
         };
         validate_texture_binding_semantics(binding).unwrap();
         assert_eq!(binding.role(), TextureRole::Normal);
-        assert_eq!(binding.coordinate_source().uv_set_index(), Some(3));
+        assert_eq!(binding.uv_set(), 3);
         assert_eq!(binding.channel_mapping(), TextureChannelSwizzle::RGB);
         assert_eq!(binding.color_interpretation(), ColorInterpretation::Data);
         assert_eq!(binding.blend(), TextureBlendOperation::Replace);
@@ -1520,7 +1484,7 @@ mod tests {
             MaterialBindingAuthoring::try_from_parts(
                 TextureLocalId::new(0),
                 TextureRole::Normal,
-                TextureCoordinateSource::uv_set(3).unwrap(),
+                3,
                 TextureChannelSwizzle::RGB,
                 ColorInterpretation::Data,
                 TextureTransform::IDENTITY,
@@ -1556,14 +1520,6 @@ mod tests {
             TextureStrength::try_new(f32::INFINITY),
             Err(TextureStrengthError::NonFinite)
         );
-        assert_eq!(
-            TextureCoordinateSource::uv_set(MAX_TEXTURE_COORDINATE_SET + 1),
-            Err(TextureCoordinateSourceError::SetTooLarge {
-                actual: MAX_TEXTURE_COORDINATE_SET + 1,
-                maximum: MAX_TEXTURE_COORDINATE_SET,
-            })
-        );
-
         let hostile = "private-path\ncredential";
         let error = TextureSourceKey::try_new(hostile).expect_err("control text must fail");
         assert_eq!(
@@ -1772,7 +1728,6 @@ mod tests {
         require_copy(ShadingModel::Unspecified);
         require_copy(AlphaMode::Opaque);
         require_copy(TextureRole::Normal);
-        require_copy(TextureCoordinateSource::ReflectionVector);
         require_copy(ColorInterpretation::Data);
         require_copy(TextureBlendOperation::Replace);
     }

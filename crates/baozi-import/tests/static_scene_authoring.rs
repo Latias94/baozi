@@ -20,8 +20,8 @@ use baozi_import::authoring::{
     ResourceIdentityLocalId, SamplerAuthoring, SamplerLocalId, SamplerState, SceneAuthoringBatch,
     SceneSpace, SessionOpaqueReason, ShadingModel, SourceIdentityAuthoring, SourceIdentityLocalId,
     SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch, StaticSceneBuilder,
-    TextureAuthoring, TextureBlendOperation, TextureChannelSwizzle, TextureCoordinateSource,
-    TextureLocalId, TextureRole, TextureStrength, TextureTransform,
+    TextureAuthoring, TextureBlendOperation, TextureChannelSwizzle, TextureLocalId, TextureRole,
+    TextureStrength, TextureTransform,
 };
 use baozi_import::{
     CapabilityStatus, CauseOwner, DetectionOutcome, DetectionResult, DetectionScope,
@@ -218,14 +218,13 @@ impl FormatImporter for CustomImporter {
             SamplerLocalId::new(0),
         )];
         let role = TextureRole::BaseColor;
-        let coordinates = TextureCoordinateSource::ObjectPosition;
         let channels = TextureChannelSwizzle::RGBA;
         let interpretation = ColorInterpretation::SrgbColor;
         let blend = TextureBlendOperation::Replace;
         let bindings = [MaterialBindingAuthoring::try_from_parts(
             TextureLocalId::new(0),
             role,
-            coordinates,
+            u16::MAX,
             channels,
             interpretation,
             TextureTransform::IDENTITY,
@@ -432,6 +431,7 @@ fn appearance_owners_receive_the_same_document_source() {
         .material()
         .unwrap();
     assert_eq!(material.name(), Some("paint"));
+    assert_eq!(material.bindings().next().unwrap().uv_set(), u16::MAX);
     assert_eq!(
         material
             .bindings()

@@ -442,11 +442,11 @@ where
     };
     let scratch_plan = validation_plan.scratch_plan();
     let appearance_counts = scratch_plan.appearance_counts();
-    if !tables
-        .appearance
-        .as_ref()
-        .validate(session, appearance_counts)?
-    {
+    if !tables.appearance.rows.as_ref().validate(
+        tables.appearance.payloads.as_ref(),
+        session,
+        appearance_counts,
+    )? {
         return Ok(None);
     }
 

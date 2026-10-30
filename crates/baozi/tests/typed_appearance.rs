@@ -5,9 +5,8 @@ use std::sync::Arc;
 use baozi::{
     AlphaMode, AssetPath, ColorInterpretation, ImageRef, ImportReport, Importer,
     MaterialBindingRef, MaterialRef, MemoryAssetIo, SamplerRef, SamplerState, SceneEntityKind,
-    SceneLookupError, ShadingModel, TextureBlendOperation, TextureChannelSwizzle,
-    TextureCoordinateSource, TextureRef, TextureRole, TextureStrength, TextureTransform,
-    ValidatedScene, Vec3,
+    SceneLookupError, ShadingModel, TextureBlendOperation, TextureChannelSwizzle, TextureRef,
+    TextureRole, TextureStrength, TextureTransform, ValidatedScene, Vec3,
 };
 
 const OBJ: &[u8] = b"mtllib materials/paint.mtl\n\
@@ -126,10 +125,7 @@ fn facade_reads_material_factors_bindings_and_encoded_images() {
 
     let binding = red.bindings().next().unwrap();
     assert_eq!(binding.role(), TextureRole::Diffuse);
-    assert_eq!(
-        binding.coordinate_source(),
-        TextureCoordinateSource::UvSet(0)
-    );
+    assert_eq!(binding.uv_set(), 0);
     assert_eq!(binding.channel_mapping(), TextureChannelSwizzle::RGBA);
     assert_eq!(
         binding.color_interpretation(),

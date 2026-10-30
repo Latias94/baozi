@@ -117,7 +117,23 @@ where
     } else {
         lane.try_share_storage(&pending.input.tables.spatial)?
     };
-    let appearance = lane.try_share_storage(&pending.input.tables.appearance)?;
+    let appearance_rows = if let NodeSceneEditProgram::ConvertSpace(plan) = &pending.program
+        && plan.appearance().changes_storage()
+    {
+        let appearance = plan.appearance();
+        lane.try_retain_storage(
+            appearance.capacities().map_err(StoreRuntimeError::Plan)?,
+            appearance.work(),
+            appearance.name_bytes() as u64,
+            |control| appearance.materialize(control).map_err(map_build),
+        )?
+    } else {
+        lane.try_share_storage(&pending.input.tables.appearance.rows)?
+    };
+    let appearance = crate::canonical_scene::store::typed_storage::appearance::AppearanceStorage {
+        rows: appearance_rows,
+        payloads: lane.try_share_storage(&pending.input.tables.appearance.payloads)?,
+    };
     let deformation = if let NodeSceneEditProgram::ConvertSpace(plan) = &pending.program
         && plan.deformation().changes_storage()
     {

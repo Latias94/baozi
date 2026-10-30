@@ -32,7 +32,7 @@ pub(super) struct SceneTables {
     pub(super) geometry: RetainedStorage<GeometryStorage>,
     pub(super) deformation: RetainedStorage<deformation::DeformationStorage>,
     pub(super) animation: RetainedStorage<animation::AnimationStorage>,
-    pub(super) appearance: RetainedStorage<appearance::AppearanceStorage>,
+    pub(super) appearance: appearance::AppearanceStorage,
     pub(super) profile: profile::ProfileStorage,
 }
 

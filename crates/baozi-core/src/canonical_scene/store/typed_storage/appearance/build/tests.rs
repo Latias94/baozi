@@ -92,6 +92,11 @@ impl TypedStorageBuildControl for Control {
     }
 }
 
+struct BuiltAppearance {
+    rows: AppearanceRows,
+    payloads: AppearancePayloads,
+}
+
 fn full_factors() -> MaterialFactors {
     let tiny = f32::from_bits(1);
     let metallic =
@@ -160,12 +165,7 @@ fn with_fixture<T>(action: impl FnOnce(&ValidatedAppearanceBatch<'_, u64>) -> T)
         TextureRole::Specular,
         TextureRole::Displacement,
     ];
-    let coordinates = [
-        TextureCoordinateSource::UvSet(u16::MAX),
-        TextureCoordinateSource::ObjectNormal,
-        TextureCoordinateSource::ReflectionVector,
-        TextureCoordinateSource::ObjectPosition,
-    ];
+    let uv_sets = [u16::MAX, 0, 3, 17];
     let channels = [
         TextureChannelSwizzle::try_new(&[
             TextureChannel::One,
@@ -199,7 +199,7 @@ fn with_fixture<T>(action: impl FnOnce(&ValidatedAppearanceBatch<'_, u64>) -> T)
             TextureLocalId::new([0, 1, 2, 0][index]),
             TextureBindingSemantics::new(
                 roles[index],
-                coordinates[index],
+                uv_sets[index],
                 channels[index],
                 colors[index],
                 if index == 0 {
@@ -344,69 +344,119 @@ fn assert_factor_bits(actual: MaterialFactors, expected: MaterialFactors) {
 
 #[test]
 fn build_owns_resolved_images_and_compact_text_in_source_order_with_exact_work() {
-    let (storage, plan, control) = with_fixture(|batch| {
+    let (storage, plan, rows_control, payload_control) = with_fixture(|batch| {
         let plan = AppearanceStoragePlan::new(batch).unwrap();
         assert_eq!(plan.row_counts(), [3, 2, 3, 4, 5]);
         assert_eq!(plan.payload_counts(), [9, 45]);
-        assert_eq!(plan.work().unwrap(), 71);
-        let mut control = Control::default();
-        let storage = plan.build(batch, &mut control).unwrap();
-        (storage, plan, control)
+        assert_eq!(plan.rows_work().unwrap(), 17);
+        assert_eq!(plan.payload_work().unwrap(), 66);
+        assert_eq!(plan.work().unwrap(), 83);
+        assert_eq!(
+            plan.rows_capacities()
+                .unwrap()
+                .map(|capacity| capacity.desired_capacity()),
+            [3, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            plan.payload_capacities()
+                .unwrap()
+                .map(|capacity| capacity.desired_capacity()),
+            [9, 45]
+        );
+        let mut rows_control = Control::default();
+        let mut payload_control = Control::default();
+        let rows = plan.build_rows(batch, &mut rows_control).unwrap();
+        let payloads = plan.build_payloads(batch, &mut payload_control).unwrap();
+        (
+            BuiltAppearance { rows, payloads },
+            plan,
+            rows_control,
+            payload_control,
+        )
     });
     // Every authoring buffer, session-resource snapshot, and bounded text value
     // has left scope. The following slices borrow only the new retained value.
-    assert_eq!(control.completed, 71);
-    assert_eq!(control.string_completed, plan.name_bytes());
-    assert_eq!(storage.image_bytes, [0, 255, 7, 42, 128, 0, 99, 3, 1]);
-    assert_eq!(storage.images[0].payload, TableRange::new(0, 3));
-    assert_eq!(storage.images[1].payload, TableRange::new(3, 4));
-    assert_eq!(storage.images[2].payload, TableRange::new(7, 2));
+    assert_eq!(rows_control.completed, 17);
+    assert_eq!(rows_control.string_completed, 0);
+    assert_eq!(payload_control.completed, 66);
+    assert_eq!(payload_control.string_completed, 45);
+    assert_eq!(payload_control.string_completed, plan.name_bytes());
     assert_eq!(
-        storage.images[1].payload.get(&storage.image_bytes).unwrap(),
+        (rows_control.completed + payload_control.completed) as u64,
+        plan.work().unwrap()
+    );
+    assert_eq!(
+        AppearanceStoragePlan::for_storage(&storage.rows, &storage.payloads).unwrap(),
+        plan
+    );
+    assert_eq!(
+        storage.payloads.image_bytes,
+        [0, 255, 7, 42, 128, 0, 99, 3, 1]
+    );
+    assert_eq!(storage.rows.images[0].payload, TableRange::new(0, 3));
+    assert_eq!(storage.rows.images[1].payload, TableRange::new(3, 4));
+    assert_eq!(storage.rows.images[2].payload, TableRange::new(7, 2));
+    assert_eq!(
+        storage.rows.images[1]
+            .payload
+            .get(&storage.payloads.image_bytes)
+            .unwrap(),
         [42, 128, 0, 99]
     );
     assert_eq!(
-        storage.text,
+        storage.payloads.text,
         "image/pngimage/jpegbase:αspecbase:α材質α".as_bytes()
     );
     assert_eq!(
-        storage.images[0].media_type.unwrap().get(&storage.text),
+        storage.rows.images[0]
+            .media_type
+            .unwrap()
+            .get(&storage.payloads.text),
         Some("image/png")
     );
-    assert!(storage.images[1].media_type.is_none());
+    assert!(storage.rows.images[1].media_type.is_none());
     assert_eq!(
-        storage.images[2].media_type.unwrap().get(&storage.text),
+        storage.rows.images[2]
+            .media_type
+            .unwrap()
+            .get(&storage.payloads.text),
         Some("image/jpeg")
     );
     assert_eq!(
-        storage.bindings[0].source_key,
+        storage.rows.bindings[0].source_key,
         Some(TextRange(TableRange::new(19, 7)))
     );
-    assert!(storage.bindings[1].source_key.is_none());
+    assert!(storage.rows.bindings[1].source_key.is_none());
     assert_eq!(
-        storage.bindings[2].source_key,
+        storage.rows.bindings[2].source_key,
         Some(TextRange(TableRange::new(26, 4)))
     );
     assert_eq!(
-        storage.bindings[3].source_key,
+        storage.rows.bindings[3].source_key,
         Some(TextRange(TableRange::new(30, 7)))
     );
     assert_eq!(
-        storage.materials[0].name.unwrap().get(&storage.text),
+        storage.rows.materials[0]
+            .name
+            .unwrap()
+            .get(&storage.payloads.text),
         Some("材質")
     );
     assert_eq!(
-        storage.materials[1].name,
+        storage.rows.materials[1].name,
         Some(TextRange(TableRange::new(43, 0)))
     );
-    assert!(storage.materials[2].name.is_none());
+    assert!(storage.rows.materials[2].name.is_none());
     assert_eq!(
-        storage.materials[3].name.unwrap().get(&storage.text),
+        storage.rows.materials[3]
+            .name
+            .unwrap()
+            .get(&storage.payloads.text),
         Some("α")
     );
-    assert!(storage.materials[4].name.is_none());
+    assert!(storage.rows.materials[4].name.is_none());
     assert_eq!(
-        storage.samplers[0],
+        storage.rows.samplers[0],
         SamplerState::new(
             TexelFilter::Nearest,
             TexelFilter::Linear,
@@ -416,50 +466,44 @@ fn build_owns_resolved_images_and_compact_text_in_source_order_with_exact_work()
             TextureAddressMode::MirroredRepeat,
         )
     );
-    assert_eq!(storage.samplers[1], SamplerState::CANONICAL_DEFAULT);
-    for (row, (image, sampler)) in storage.textures.iter().zip([(2, 1), (0, 0), (1, 0)]) {
+    assert_eq!(storage.rows.samplers[1], SamplerState::CANONICAL_DEFAULT);
+    for (row, (image, sampler)) in storage.rows.textures.iter().zip([(2, 1), (0, 0), (1, 0)]) {
         assert_eq!(row.image, StoredImageIndex(image));
         assert_eq!(row.sampler, StoredSamplerIndex(sampler));
     }
-    for (row, (texture, role, coordinate, strength, color)) in storage.bindings.iter().zip([
+    for (row, (texture, role, uv_set, strength, color)) in storage.rows.bindings.iter().zip([
         (
             0,
             TextureRole::BaseColor,
-            TextureCoordinateSource::UvSet(u16::MAX),
+            u16::MAX,
             0.75_f32,
             ColorInterpretation::SrgbColor,
         ),
-        (
-            1,
-            TextureRole::Normal,
-            TextureCoordinateSource::ObjectNormal,
-            -2.0,
-            ColorInterpretation::Data,
-        ),
+        (1, TextureRole::Normal, 0, -2.0, ColorInterpretation::Data),
         (
             2,
             TextureRole::Specular,
-            TextureCoordinateSource::ReflectionVector,
+            3,
             -0.0,
             ColorInterpretation::LinearColor,
         ),
         (
             0,
             TextureRole::Displacement,
-            TextureCoordinateSource::ObjectPosition,
+            17,
             -0.0,
             ColorInterpretation::Data,
         ),
     ]) {
         assert_eq!(row.texture, StoredTextureIndex(texture));
         assert_eq!(row.role, role);
-        assert_eq!(row.coordinate_source, coordinate);
+        assert_eq!(row.uv_set, uv_set);
         assert_eq!(row.strength.get().to_bits(), strength.to_bits());
         assert_eq!(row.color, color);
         assert_eq!(row.blend, TextureBlendOperation::Replace);
     }
     assert_eq!(
-        storage.bindings[0].channels.as_slice(),
+        storage.rows.bindings[0].channels.as_slice(),
         [
             TextureChannel::One,
             TextureChannel::Blue,
@@ -468,10 +512,10 @@ fn build_owns_resolved_images_and_compact_text_in_source_order_with_exact_work()
         ]
     );
     assert_eq!(
-        storage.bindings[3].channels.as_slice(),
+        storage.rows.bindings[3].channels.as_slice(),
         [TextureChannel::Zero]
     );
-    let transform = storage.bindings[0].transform;
+    let transform = storage.rows.bindings[0].transform;
     assert_eq!(
         [
             transform.offset().x,
@@ -489,7 +533,7 @@ fn build_owns_resolved_images_and_compact_text_in_source_order_with_exact_work()
             0
         ]
     );
-    for (row, (range, shading)) in storage.materials.iter().zip([
+    for (row, (range, shading)) in storage.rows.materials.iter().zip([
         (TableRange::new(0, 2), ShadingModel::PbrMetallicRoughness),
         (TableRange::new(2, 0), ShadingModel::Unlit),
         (TableRange::new(2, 2), ShadingModel::Lambert),
@@ -500,22 +544,26 @@ fn build_owns_resolved_images_and_compact_text_in_source_order_with_exact_work()
         assert_eq!(row.shading, shading);
         assert!(validate_material_semantics(row.semantics()).is_ok());
     }
-    assert!(storage.materials[0].double_sided);
-    assert!(!storage.materials[1].double_sided);
+    assert!(storage.rows.materials[0].double_sided);
+    assert!(!storage.rows.materials[1].double_sided);
     assert_eq!(
-        storage.materials[0].alpha.mask_cutoff().unwrap().to_bits(),
+        storage.rows.materials[0]
+            .alpha
+            .mask_cutoff()
+            .unwrap()
+            .to_bits(),
         (-0.0_f32).to_bits()
     );
-    assert_eq!(storage.materials[1].alpha, AlphaMode::Blend);
-    assert_eq!(storage.materials[2].alpha, AlphaMode::Opaque);
-    assert_factor_bits(storage.materials[0].factors, full_factors());
-    assert_factor_bits(storage.materials[1].factors, MaterialFactors::empty());
+    assert_eq!(storage.rows.materials[1].alpha, AlphaMode::Blend);
+    assert_eq!(storage.rows.materials[2].alpha, AlphaMode::Opaque);
+    assert_factor_bits(storage.rows.materials[0].factors, full_factors());
+    assert_factor_bits(storage.rows.materials[1].factors, MaterialFactors::empty());
     assert_factor_bits(
-        storage.materials[2].factors,
+        storage.rows.materials[2].factors,
         MaterialFactors::try_new(Vec3::ZERO, None, None, full_factors().legacy()).unwrap(),
     );
     assert_factor_bits(
-        storage.materials[3].factors,
+        storage.rows.materials[3].factors,
         MaterialFactors::try_new(
             Vec3::ZERO,
             None,
@@ -524,26 +572,63 @@ fn build_owns_resolved_images_and_compact_text_in_source_order_with_exact_work()
         )
         .unwrap(),
     );
-    for row in &storage.bindings {
-        let key = row
-            .source_key
-            .map(|range| TextureSourceKey::try_new(range.get(&storage.text).unwrap()).unwrap());
+    for row in &storage.rows.bindings {
+        let key = row.source_key.map(|range| {
+            TextureSourceKey::try_new(range.get(&storage.payloads.text).unwrap()).unwrap()
+        });
         assert!(validate_texture_binding_semantics(row.semantics(key.as_ref())).is_ok());
     }
 }
 
 #[test]
-fn each_row_byte_and_string_action_releases_partial_buffers_on_error_and_unwind() {
+fn each_row_action_releases_partial_rows_on_error_and_unwind() {
     with_fixture(|batch| {
         let plan = AppearanceStoragePlan::new(batch).unwrap();
-        for before in 0..usize::try_from(plan.work().unwrap()).unwrap() {
+        for before in 0..usize::try_from(plan.rows_work().unwrap()).unwrap() {
             let mut control = Control {
                 reject_before: Some(before),
                 ..Control::default()
             };
             let allocations = allocation_counter::measure(|| {
-                assert!(matches!(plan.build(batch, &mut control),
+                assert!(matches!(plan.build_rows(batch, &mut control),
                     Err(TypedStorageBuildError::Control(Interrupted(completed))) if completed == before));
+            });
+            assert_eq!(control.completed, before);
+            assert_eq!(control.string_completed, 0);
+            assert_eq!(allocations.count_current, 0);
+            assert_eq!(allocations.bytes_current, 0);
+            let mut control = Control {
+                panic_before: Some(before),
+                ..Control::default()
+            };
+            let allocations = allocation_counter::measure(|| {
+                let result =
+                    catch_unwind(AssertUnwindSafe(|| plan.build_rows(batch, &mut control)));
+                assert!(result.is_err());
+                drop(result);
+            });
+            assert_eq!(control.completed, before);
+            assert_eq!(control.string_completed, 0);
+            assert_eq!(allocations.count_current, 0);
+            assert_eq!(allocations.bytes_current, 0);
+        }
+    });
+}
+
+#[test]
+fn each_payload_descriptor_byte_and_string_action_releases_buffers_on_error_and_unwind() {
+    with_fixture(|batch| {
+        let plan = AppearanceStoragePlan::new(batch).unwrap();
+        for before in 0..usize::try_from(plan.payload_work().unwrap()).unwrap() {
+            let mut control = Control {
+                reject_before: Some(before),
+                ..Control::default()
+            };
+            let allocations = allocation_counter::measure(|| {
+                let rows = plan.build_rows(batch, Control::default()).unwrap();
+                assert!(matches!(plan.build_payloads(batch, &mut control),
+                    Err(TypedStorageBuildError::Control(Interrupted(completed))) if completed == before));
+                drop(rows);
             });
             assert_eq!(control.completed, before);
             assert_eq!(allocations.count_current, 0);
@@ -553,7 +638,11 @@ fn each_row_byte_and_string_action_releases_partial_buffers_on_error_and_unwind(
                 ..Control::default()
             };
             let allocations = allocation_counter::measure(|| {
-                let result = catch_unwind(AssertUnwindSafe(|| plan.build(batch, &mut control)));
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    let rows = plan.build_rows(batch, Control::default()).unwrap();
+                    let payloads = plan.build_payloads(batch, &mut control).unwrap();
+                    BuiltAppearance { rows, payloads }
+                }));
                 assert!(result.is_err());
                 drop(result);
             });
@@ -569,6 +658,8 @@ fn initialized_footprint_counts_inline_fields_once_and_excludes_spare_capacity()
     with_fixture(|batch| {
         let plan = AppearanceStoragePlan::new(batch).unwrap();
         let expected = (std::mem::size_of::<AppearanceStorage>()
+            + std::mem::size_of::<AppearanceRows>()
+            + std::mem::size_of::<AppearancePayloads>()
             + 3 * std::mem::size_of::<StoredImage>()
             + 2 * std::mem::size_of::<SamplerState>()
             + 3 * std::mem::size_of::<StoredTexture>()
@@ -577,30 +668,30 @@ fn initialized_footprint_counts_inline_fields_once_and_excludes_spare_capacity()
             + 9
             + 45) as u64;
         assert_eq!(plan.canonical_bytes().unwrap(), expected);
-        let mut storage = plan.build(batch, Control::default()).unwrap();
-        storage.images.reserve(100);
-        storage.materials.reserve(20);
-        storage.image_bytes.reserve(200);
-        storage.text.reserve(400);
+        let mut storage = BuiltAppearance {
+            rows: plan.build_rows(batch, Control::default()).unwrap(),
+            payloads: plan.build_payloads(batch, Control::default()).unwrap(),
+        };
+        storage.rows.images.reserve(100);
+        storage.rows.materials.reserve(20);
+        storage.payloads.image_bytes.reserve(200);
+        storage.payloads.text.reserve(400);
         assert_eq!(
-            AppearanceStoragePlan::canonical_bytes_for_shape(
-                [
-                    storage.images.len() as u64,
-                    storage.samplers.len() as u64,
-                    storage.textures.len() as u64,
-                    storage.bindings.len() as u64,
-                    storage.materials.len() as u64
-                ],
-                [storage.image_bytes.len() as u64, storage.text.len() as u64],
-            )
-            .unwrap(),
-            expected
+            AppearanceStoragePlan::for_storage(&storage.rows, &storage.payloads).unwrap(),
+            plan
+        );
+        assert_eq!(
+            AppearanceStoragePlan::for_storage(&storage.rows, &storage.payloads)
+                .unwrap()
+                .canonical_bytes()
+                .unwrap(),
+            expected,
         );
     });
 }
 
 #[test]
-fn empty_owner_has_seven_empty_capacities_and_zero_materialization_allocations_or_work() {
+fn empty_owners_have_separate_empty_capacities_and_zero_allocations_or_work() {
     let mut authoring = AuthoringControl;
     let batch = validate_appearance_batch_with_control(
         AppearanceAuthoringBatch::empty(),
@@ -613,28 +704,108 @@ fn empty_owner_has_seven_empty_capacities_and_zero_materialization_allocations_o
     assert_eq!(plan.row_counts(), [0; 5]);
     assert_eq!(plan.payload_counts(), [0; 2]);
     assert_eq!(
-        plan.capacities()
+        plan.rows_capacities()
             .unwrap()
             .map(|capacity| capacity.desired_capacity()),
-        [0; 7]
+        [0; 5]
+    );
+    assert_eq!(
+        plan.payload_capacities()
+            .unwrap()
+            .map(|capacity| capacity.desired_capacity()),
+        [0; 2]
     );
     assert_eq!(plan.name_bytes(), 0);
+    assert_eq!(plan.rows_work().unwrap(), 0);
+    assert_eq!(plan.payload_work().unwrap(), 0);
     assert_eq!(plan.work().unwrap(), 0);
     assert_eq!(
         plan.canonical_bytes().unwrap(),
-        std::mem::size_of::<AppearanceStorage>() as u64
+        (std::mem::size_of::<AppearanceStorage>()
+            + std::mem::size_of::<AppearanceRows>()
+            + std::mem::size_of::<AppearancePayloads>()) as u64
     );
     let mut control = Control::default();
     let allocations = allocation_counter::measure(|| {
-        let storage = plan.build(&batch, &mut control).unwrap();
+        let storage = BuiltAppearance {
+            rows: plan.build_rows(&batch, &mut control).unwrap(),
+            payloads: plan.build_payloads(&batch, &mut control).unwrap(),
+        };
         assert!(
-            storage.images.is_empty() && storage.samplers.is_empty() && storage.textures.is_empty()
+            storage.rows.images.is_empty()
+                && storage.rows.samplers.is_empty()
+                && storage.rows.textures.is_empty()
         );
-        assert!(storage.bindings.is_empty() && storage.materials.is_empty());
-        assert!(storage.image_bytes.is_empty() && storage.text.is_empty());
+        assert!(storage.rows.bindings.is_empty() && storage.rows.materials.is_empty());
+        assert!(storage.payloads.image_bytes.is_empty() && storage.payloads.text.is_empty());
     });
     assert_eq!(control.completed, 0);
+    assert_eq!(control.string_completed, 0);
     assert_eq!(allocations.count_total, 0);
+}
+
+#[test]
+fn absent_and_empty_names_still_require_payload_descriptor_actions_without_allocating() {
+    let material = MaterialAuthoring::new(
+        AuthoringRange::new(0, 0),
+        MaterialSemantics::new(
+            ShadingModel::Unspecified,
+            AlphaMode::Opaque,
+            false,
+            MaterialFactors::empty(),
+        ),
+    );
+    let materials = [material, material.with_name(""), material];
+    let batch = validate_appearance_batch_with_control(
+        AppearanceAuthoringBatch::new(&[], &[], &[], &[], &materials),
+        ResourceSnapshotAuthoringTable::empty(),
+        SceneValidationLimits::default(),
+        &mut AuthoringControl,
+    )
+    .unwrap();
+    let plan = AppearanceStoragePlan::new(&batch).unwrap();
+    assert_eq!(plan.rows_work().unwrap(), 3);
+    assert_eq!(plan.payload_work().unwrap(), 3);
+    assert_eq!(plan.work().unwrap(), 6);
+    assert_eq!(plan.name_bytes(), 0);
+    let mut rows_control = Control::default();
+    let rows = plan.build_rows(&batch, &mut rows_control).unwrap();
+    assert_eq!(rows.materials[0].name, None);
+    assert_eq!(
+        rows.materials[1].name,
+        Some(TextRange(TableRange::new(0, 0)))
+    );
+    assert_eq!(rows.materials[2].name, None);
+    assert_eq!(rows_control.completed, 3);
+    assert_eq!(rows_control.string_completed, 0);
+
+    let mut payload_control = Control::default();
+    let allocations = allocation_counter::measure(|| {
+        let payloads = plan.build_payloads(&batch, &mut payload_control).unwrap();
+        assert!(payloads.image_bytes.is_empty());
+        assert!(payloads.text.is_empty());
+        assert_eq!(
+            AppearanceStoragePlan::for_storage(&rows, &payloads).unwrap(),
+            plan
+        );
+    });
+    assert_eq!(payload_control.completed, 3);
+    assert_eq!(payload_control.string_completed, 0);
+    assert_eq!(allocations.count_total, 0);
+
+    for before in 0..3 {
+        let mut control = Control {
+            reject_before: Some(before),
+            ..Control::default()
+        };
+        let allocations = allocation_counter::measure(|| {
+            assert!(matches!(plan.build_payloads(&batch, &mut control),
+                Err(TypedStorageBuildError::Control(Interrupted(completed))) if completed == before));
+        });
+        assert_eq!(control.completed, before);
+        assert_eq!(control.string_completed, 0);
+        assert_eq!(allocations.count_total, 0);
+    }
 }
 
 #[test]
@@ -653,16 +824,24 @@ fn checked_shape_is_lean_and_stale_plan_fails_before_allocation() {
     ));
     with_fixture(|batch| {
         let original = AppearanceStoragePlan::new(batch).unwrap();
-        let incorrect =
-            AppearanceStoragePlan::for_shape([3, 2, 3, 3, 5], original.payload_counts()).unwrap();
-        let mut control = Control::default();
-        let allocations = allocation_counter::measure(|| {
-            assert!(matches!(
-                incorrect.build(batch, &mut control),
-                Err(TypedStorageBuildError::Invariant)
-            ));
-        });
-        assert_eq!(control.completed, 0);
-        assert_eq!(allocations.count_total, 0);
+        for incorrect in [
+            AppearanceStoragePlan::for_shape([3, 2, 3, 3, 5], original.payload_counts()).unwrap(),
+            AppearanceStoragePlan::for_shape(original.row_counts(), [9, 44]).unwrap(),
+        ] {
+            let mut control = Control::default();
+            let allocations = allocation_counter::measure(|| {
+                assert!(matches!(
+                    incorrect.build_rows(batch, &mut control),
+                    Err(TypedStorageBuildError::Invariant)
+                ));
+                assert!(matches!(
+                    incorrect.build_payloads(batch, &mut control),
+                    Err(TypedStorageBuildError::Invariant)
+                ));
+            });
+            assert_eq!(control.completed, 0);
+            assert_eq!(control.string_completed, 0);
+            assert_eq!(allocations.count_total, 0);
+        }
     });
 }

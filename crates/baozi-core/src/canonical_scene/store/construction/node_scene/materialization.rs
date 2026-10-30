@@ -34,20 +34,20 @@ use crate::canonical_scene::store::production::{
 };
 use crate::canonical_scene::store::production::{
     AnimationTargetCatalog, CanonicalAuthoringControl, ProfileOwnerCatalog, SceneAuthoringBatch,
-    SceneInputEnvelope, ScopedAuthoringControl, ValidatedAnimationBatch, ValidatedAppearanceBatch,
+    ScopedAuthoringControl, ValidatedAnimationBatch, ValidatedAppearanceBatch,
     ValidatedDeformationBatch, ValidatedGeometryBatch, ValidatedNodeBatch, ValidatedProfileBatch,
     ValidatedSpatialBatch, animation_limits_after_deformation, appearance_limits_after_nodes,
     deformation_limits_after_geometry, geometry_limits_after_appearance, node_limits_after_spatial,
-    profile_limits_after_animation, validate_animation_batch_with_control,
-    validate_appearance_batch_with_control, validate_deformation_batch_with_control,
-    validate_geometry_batch_with_control, validate_node_batch_with_control,
-    validate_profile_batch_with_control, validate_scene_aggregate,
-    validate_spatial_batch_with_control,
+    profile_limits_after_animation, scene_input_terminal_attribution_slots,
+    validate_animation_batch_with_control, validate_appearance_batch_with_control,
+    validate_deformation_batch_with_control, validate_geometry_batch_with_control,
+    validate_node_batch_with_control, validate_profile_batch_with_control,
+    validate_scene_aggregate, validate_spatial_batch_with_control,
 };
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
-    NodeSceneOutcomeEvidenceSchema, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
-    SceneDirectorySchema,
+    NodeSceneOutcomeEvidenceSchema, SCENE_DIRECTORY_BLOCK_COUNT, SCENE_DIRECTORY_FIELD_COUNT,
+    SCENE_SCHEMA_REVISION, SceneDirectorySchema,
 };
 #[cfg(test)]
 use crate::provenance::{OperationKind, OptionsDigest};
@@ -462,8 +462,7 @@ impl<'input> NodeSceneActivationRequest<'input> {
         input: SceneAuthoringBatch<'input>,
         validation_limits: SceneValidationLimits,
     ) -> Result<Self, SceneConstructionStartError> {
-        let envelope = SceneInputEnvelope::try_new(input, validation_limits)?;
-        let _ = envelope;
+        scene_input_terminal_attribution_slots(input, validation_limits)?;
         let failure_evidence = NodeSceneFailureEvidencePlan::try_new()?;
         let (brand, activation_request) =
             super::super::ConstructionBrand::reserve_with_activation_request()?;
@@ -1282,7 +1281,7 @@ impl NodeSceneMaterializationPlans {
         let animation = AnimationStoragePlan::new(animation_batch)?;
         let profile = ProfileMaterializationPlans::new(profile_batch)?;
         let directory = RecordPlan::new(1, SCENE_DIRECTORY_FIELD_COUNT)?;
-        let canonical_block_count = 1;
+        let canonical_block_count = SCENE_DIRECTORY_BLOCK_COUNT;
         let payload_block_count = 0;
         let shareable_leaf_block_count = 0;
 
@@ -1416,33 +1415,74 @@ where
         #[cfg(test)]
         &mut faults,
     ));
-    let appearance_capacities = materialize!(
+    let appearance_rows_capacities = materialize!(
         plans
             .appearance
-            .capacities()
+            .rows_capacities()
             .map_err(StoreRuntimeError::Plan)
     );
-    let appearance_work = materialize!(plans.appearance.work().map_err(StoreRuntimeError::Plan));
-    let appearance = materialize!(lane.try_retain_storage(
-        appearance_capacities,
-        appearance_work,
+    let appearance_rows_work = materialize!(
+        plans
+            .appearance
+            .rows_work()
+            .map_err(StoreRuntimeError::Plan)
+    );
+    let appearance_rows = materialize!(lane.try_retain_storage(
+        appearance_rows_capacities,
+        appearance_rows_work,
+        0,
+        |control| {
+            #[allow(
+                unused_mut,
+                reason = "tests corrupt actual rows before central validation"
+            )]
+            let mut rows = plans
+                .appearance
+                .build_rows(&batches.appearance, control)
+                .map_err(super::geometry::map_build)?;
+            #[cfg(test)]
+            if let Some(fault) = faults.appearance {
+                fault.corrupt(&mut rows);
+            }
+            Ok(rows)
+        },
+    ));
+    let appearance_payloads_capacities = materialize!(
+        plans
+            .appearance
+            .payload_capacities()
+            .map_err(StoreRuntimeError::Plan)
+    );
+    let appearance_payloads_work = materialize!(
+        plans
+            .appearance
+            .payload_work()
+            .map_err(StoreRuntimeError::Plan)
+    );
+    let appearance_payloads = materialize!(lane.try_retain_storage(
+        appearance_payloads_capacities,
+        appearance_payloads_work,
         plans.appearance.name_bytes() as u64,
         |control| {
             #[allow(
                 unused_mut,
-                reason = "tests corrupt actual values before central validation"
+                reason = "tests corrupt actual payloads before central validation"
             )]
-            let mut storage = plans
+            let mut payloads = plans
                 .appearance
-                .build(&batches.appearance, control)
+                .build_payloads(&batches.appearance, control)
                 .map_err(super::geometry::map_build)?;
             #[cfg(test)]
             if let Some(fault) = faults.appearance {
-                fault.corrupt(&mut storage);
+                fault.corrupt_payloads(&mut payloads);
             }
-            Ok(storage)
+            Ok(payloads)
         },
     ));
+    let appearance = crate::canonical_scene::store::typed_storage::appearance::AppearanceStorage {
+        rows: appearance_rows,
+        payloads: appearance_payloads,
+    };
     let geometry = materialize!(retain_geometry(
         &mut lane,
         plans.geometry,

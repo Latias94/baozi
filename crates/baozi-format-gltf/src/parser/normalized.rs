@@ -91,7 +91,7 @@ pub(super) fn submit_parts(
         let authored = MaterialBindingAuthoring::try_from_parts(
             binding.texture,
             binding.role,
-            binding.coordinate_source,
+            binding.uv_set,
             binding.channel_mapping,
             binding.color_interpretation,
             binding.transform,

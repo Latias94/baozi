@@ -27,7 +27,7 @@ pub use baozi_core::{
     LegacyMaterialFactors, MaterialFactorError, MaterialFactorField, MaterialFactors,
     NamespacedName, NamespacedNameError, PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors,
     ShadingModel, SupplementalPbrFactors, TextureBlendOperation, TextureChannel,
-    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
+    TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
 };
 pub use baozi_core::{
     AnimationChannelRef, AnimationClipId, AnimationClipRef, AnimationExtrapolation,

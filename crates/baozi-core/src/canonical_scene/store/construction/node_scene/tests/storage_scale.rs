@@ -656,11 +656,19 @@ fn shared_encoded_image_payload_node_edit_scale() {
         assert_ne!(source.generation(), destination.generation());
         assert!(
             std::ptr::eq(
-                source.as_node_scene().read_appearance(),
-                destination.as_node_scene().read_appearance(),
+                source.as_node_scene().read_appearance().rows.as_ref(),
+                destination.as_node_scene().read_appearance().rows.as_ref(),
             ),
-            "a node edit must share the full appearance owner",
+            "a node edit must share the appearance rows",
         );
+        assert!(std::ptr::eq(
+            source.as_node_scene().read_appearance().payloads.as_ref(),
+            destination
+                .as_node_scene()
+                .read_appearance()
+                .payloads
+                .as_ref(),
+        ));
         for (scene, transform) in [
             (&source, AuthoredTransform::identity_trs()),
             (&destination, trs_transform(42.0)),

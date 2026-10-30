@@ -12,6 +12,7 @@ use super::super::SceneTables;
 use super::super::build::TypedStorageBuildControl;
 use super::super::validation::TypedStorageValidationControl;
 use super::space_animation::{AnimationSpacePlan, AnimationSpacePlanError};
+use super::space_appearance::{AppearanceSpacePlan, AppearanceSpacePlanError};
 use super::space_deformation::{DeformationSpacePlan, DeformationSpacePlanError};
 use super::space_geometry::{GeometrySpacePlan, GeometrySpacePlanError};
 use super::space_nodes::{NodeSpacePlan, NodeSpacePlanError};
@@ -24,6 +25,7 @@ pub(in crate::canonical_scene::store) enum SceneSpacePlanError<E> {
     Deformation(DeformationSpacePlanError<E>),
     Animation(AnimationSpacePlanError<E>),
     Spatial(SpatialSpacePlanError<E>),
+    Appearance(AppearanceSpacePlanError<E>),
     Plan(StorePlanError),
 }
 
@@ -36,6 +38,7 @@ pub(in crate::canonical_scene::store) struct SceneSpacePlan<'a> {
     deformation: DeformationSpacePlan<'a>,
     animation: AnimationSpacePlan<'a>,
     spatial: SpatialSpacePlan<'a>,
+    appearance: AppearanceSpacePlan<'a>,
     correspondence: u64,
     name_bytes: usize,
 }
@@ -57,6 +60,8 @@ impl<'a> SceneSpacePlan<'a> {
             .map_err(SceneSpacePlanError::Animation)?;
         let spatial = SpatialSpacePlan::try_new(source.spatial.as_ref(), conversion, control)
             .map_err(SceneSpacePlanError::Spatial)?;
+        let appearance = AppearanceSpacePlan::try_new(&source.appearance, conversion, control)
+            .map_err(SceneSpacePlanError::Appearance)?;
         let overflow = || SceneSpacePlanError::Plan(StorePlanError::SizeOverflow);
         let correspondence = nodes
             .correspondence_work()
@@ -64,6 +69,7 @@ impl<'a> SceneSpacePlan<'a> {
             .and_then(|work| work.checked_add(deformation.correspondence_work()))
             .and_then(|work| work.checked_add(animation.correspondence_work()))
             .and_then(|work| work.checked_add(spatial.correspondence_work()))
+            .and_then(|work| work.checked_add(appearance.correspondence_work()))
             .ok_or_else(overflow)?;
         let name_bytes = spatial
             .name_bytes()
@@ -102,6 +108,7 @@ impl<'a> SceneSpacePlan<'a> {
             deformation,
             animation,
             spatial,
+            appearance,
             correspondence,
             name_bytes,
         })
@@ -135,6 +142,10 @@ impl<'a> SceneSpacePlan<'a> {
         self.spatial
     }
 
+    pub(in crate::canonical_scene::store) const fn appearance(self) -> AppearanceSpacePlan<'a> {
+        self.appearance
+    }
+
     pub(in crate::canonical_scene::store) const fn correspondence_work(self) -> u64 {
         self.correspondence
     }
@@ -165,6 +176,9 @@ impl<'a> SceneSpacePlan<'a> {
                 .validate_correspondence(actual.animation.as_ref(), control)?
             && self
                 .spatial
-                .validate_correspondence(actual.spatial.as_ref(), control)?)
+                .validate_correspondence(actual.spatial.as_ref(), control)?
+            && self
+                .appearance
+                .validate_correspondence(&actual.appearance, control)?)
     }
 }

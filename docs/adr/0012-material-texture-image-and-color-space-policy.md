@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-10-30
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
@@ -28,18 +28,29 @@ reuse when one image is sampled in multiple ways or used once as color and once 
 
 The canonical scene has three separate dense identities:
 
-- `Image` identifies one immutable owned encoded-image payload. `ImagePayload::Encoded` is a bounded
-  shared byte buffer plus media/encoding hints and an optional content digest. Dimensions or encoded
-  metadata may be present when known. Decoded pixels are not required for model import success and,
-  if introduced as a cache, use ADR 0032's derived-data contract.
+- `Image` identifies one immutable encoded-image range in the Scene-owned byte pool, with an
+  optional media type. Source identity and digest evidence belong to the owning profile. Decoded
+  pixels are not required for model import success and, if introduced as a cache, use ADR 0032's
+  derived-data contract.
 - `Sampler` identifies minification, magnification, mip filtering, and address modes. An explicit
   canonical default sampler exists when the source omits one.
 - `Texture` pairs exactly one `ImageId` with one `SamplerId`. It has no material role or color-space
   interpretation.
 
-A material `TextureBinding` references `TextureId` and owns usage semantics: role, UV or other
-mapping source, coordinate set, transform, channel mapping, color interpretation, scale/strength,
-blend operation when representable, and bounded source key.
+A material `TextureBinding` references `TextureId` and owns usage semantics: role, zero-based
+`uv_set: u16`, transform, channel mapping, color interpretation, scale/strength, blend operation
+when representable, and bounded source key. Coordinates come only from that UV set. There is no
+coordinate-source enum, generated object-position/normal mapping, reflection-vector mapping, or
+replacement wrapper. The UV index admits the complete `0..=65535` range independently of any one
+primitive's UV stream count; it does not imply that a primitive has that stream. Public
+`MaterialBindingAuthoring::try_from_parts` takes the index directly, and `MaterialBindingRef::uv_set`
+returns `u16`.
+
+An adapter with a wider source index must check narrowing before authoring. glTF checks the
+effective `u32` `texCoord`, including a `KHR_texture_transform` override, with `u16::try_from` and
+retains its material/slot-qualified out-of-range failure. OBJ diffuse bindings select UV set zero.
+An unrepresented generated-coordinate behavior requires explicit unsupported/loss evidence; its
+name or descriptive metadata does not define a sampling contract.
 
 Texture bindings are an ordered, material-owned semantic sequence. Stored order preserves source
 order; a source key identifies a source slot but never determines order or authority. Every canonical
@@ -87,7 +98,7 @@ erDiagram
     TEXTURE_BINDING {
       TextureRole role
       ColorInterpretation color
-      AttributeSemantic coordinates
+      u16 uv_set
       ChannelMapping channels
     }
 ```
@@ -119,6 +130,14 @@ not claim that encoded samples were decoded or validated.
 | Displacement | one finite data lane | signed Scene-unit offset is `sample * strength`; nonzero bias or unknown units require an admitted schema or explicit loss/failure |
 | Thickness | one data lane in `[0, 1]` | nonnegative Scene-unit material thickness multiplied by the sample; canonical binding strength is one |
 
+For a positive Scene-unit conversion ratio `s`, supplemental material thickness and Displacement
+binding strength each become `f32(f64(value) * s)`, using ADR 0008's checked single-rounding length
+conversion. Displacement remains signed; handedness does not add a `det(Q)` factor. Signed zero is
+preserved, and overflow or nonzero underflow to zero rejects the conversion at the material or
+binding location. Every other factor, optional factor-group presence, alpha cutoff, and binding
+field retains its exact bits. In particular, Thickness binding strength remains one, normal-map
+strengths remain dimensionless, and UV indices/transforms do not change with Scene units or axes.
+
 `MetallicRoughness` is mutually exclusive with either separate `Metallic` or `Roughness` authority in
 the same material workflow. The declared `ShadingModel` selects the active base-color or diffuse
 factor family. `Opacity` is an explicit multiplier under the formula above, not a competing override
@@ -143,19 +162,36 @@ Producerless `Namespaced` variants and empty schema-snapshot placeholders are no
 appearance API. Metadata alone never pretends to preserve rendering behavior and no unknown role is
 mislabeled as known. ADR 0023 defines the admission requirements for a future typed descriptor.
 
-One retained appearance owner holds five typed row tables and two contiguous pools: encoded image
-bytes and UTF-8 text. Shared domain values serve authoring, central validation, and public reads
-directly; duplicate `*Kind` enums and channel-mapping wrappers are unnecessary. Images preserve source
-identity independently of equal content. Text is ordered by image media declarations, binding source
-keys, then material names; optional empty names remain distinct from absence. Unchanged edits share
-the complete owner, and readers borrow its actual payloads without a record decoder or projection.
+`AppearanceStorage` is an inline root in `SceneTables` with two independently retained shared
+children. `AppearanceRows` owns exactly five Vec tables: images, samplers, textures, bindings, and
+materials. `AppearancePayloads` owns exactly two contiguous byte pools: encoded image bytes and
+UTF-8 text. Neither child is duplicated in another appearance model. Shared domain values serve
+authoring, central validation, and public reads directly; duplicate `*Kind` enums and
+channel-mapping wrappers are unnecessary. Images preserve source identity independently of equal
+content. Text is ordered by image media declarations, binding source keys, then material names;
+optional empty names remain distinct from absence. Readers borrow the actual pools without a
+record decoder or projection.
+
+An edit with unchanged appearance shares both children. A unit conversion that changes a thickness
+or displacement value rebuilds only `AppearanceRows`; it shares the exact `AppearancePayloads`
+owner, preserving image and text addresses. The appearance replacement allocates no payload pools,
+copies no image/text bytes, and contributes zero rebuilt name bytes. Correspondence requires
+payload-owner pointer identity as well as the complete expected row values; equal bytes in a new
+owner are insufficient. ADR 0045 distinguishes the initialized canonical footprint, which still
+includes both pools, from the separately admitted physical retention of those shared allocations.
+
 Closed material and binding behavior values are owned by their semantic values; only names and
 descriptive source keys borrow producer text. This keeps authoring lifetimes tied to actual text
 ownership and permits temporary validated behavior values without reference scaffolding.
 
+Semantic snapshots keep the existing UV framing: coordinate-source kind zero followed by the UV
+index encoded as `u32`. Replacing the enum with a direct `u16` index changes no UV transcript bytes
+and requires no snapshot revision change. Removed generated-coordinate variants have no canonical
+snapshot encoding.
+
 Embedded and external images use the same owned payload shape. External resolution occurs through
 the import session, which authorizes and snapshots the exact encoded bytes before transferring them
-to the scene. An optional sanitized `ReloadHint` and source identity remain provenance only: they are
+to the scene. A sanitized source locator and source identity remain provenance only: they are
 not a resolver capability, do not promise equal future content, and are not required for result
 availability. The canonical scene does not require PNG, JPEG, WebP, KTX, DDS, or EXR decoding.
 

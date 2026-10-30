@@ -540,7 +540,13 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         "a transform edit must share the complete animation owner and its payloads",
     );
     assert!(
-        std::ptr::eq(source.read_appearance(), output.scene.read_appearance()),
+        std::ptr::eq(
+            source.read_appearance().rows.as_ref(),
+            output.scene.read_appearance().rows.as_ref()
+        ) && std::ptr::eq(
+            source.read_appearance().payloads.as_ref(),
+            output.scene.read_appearance().payloads.as_ref()
+        ),
         "a transform edit must share the complete appearance owner and its payloads",
     );
     let first_geometry_scalar = source.read_geometry().f32_values.first().copied();
@@ -703,8 +709,12 @@ fn host_unwind_releases_edited_tables_and_preserves_shared_source_domains() {
             edited.scene.read_animation(),
         ));
         assert!(std::ptr::eq(
-            original.scene.read_appearance(),
-            edited.scene.read_appearance(),
+            original.scene.read_appearance().rows.as_ref(),
+            edited.scene.read_appearance().rows.as_ref()
+        ));
+        assert!(std::ptr::eq(
+            original.scene.read_appearance().payloads.as_ref(),
+            edited.scene.read_appearance().payloads.as_ref()
         ));
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let _edited = edited;

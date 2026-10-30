@@ -1,8 +1,8 @@
 use crate::appearance::{
     AlphaMode, AppearanceBuildError, ColorInterpretation, MaterialFactors, MaterialSemantics,
     ShadingModel, TextureBindingSemantics, TextureBlendOperation, TextureChannelSwizzle,
-    TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
-    validate_material_semantics, validate_texture_binding_semantics,
+    TextureRole, TextureSourceKey, TextureStrength, TextureTransform, validate_material_semantics,
+    validate_texture_binding_semantics,
 };
 use crate::extension::ExtensionMediaType;
 use crate::image::SamplerState;
@@ -128,11 +128,13 @@ pub struct MaterialBindingAuthoring<'a> {
 
 impl<'a> MaterialBindingAuthoring<'a> {
     /// Creates one binding from public semantic values after checking their cross-field contract.
+    ///
+    /// `uv_set` is a zero-based UV set independent of any primitive's UV stream count.
     #[allow(clippy::too_many_arguments)]
     pub fn try_from_parts(
         texture: TextureLocalId,
         role: TextureRole,
-        coordinate_source: TextureCoordinateSource,
+        uv_set: u16,
         channel_mapping: TextureChannelSwizzle,
         color_interpretation: ColorInterpretation,
         transform: TextureTransform,
@@ -142,7 +144,7 @@ impl<'a> MaterialBindingAuthoring<'a> {
     ) -> Result<Self, AppearanceBuildError> {
         let semantics = TextureBindingSemantics::new(
             role,
-            coordinate_source,
+            uv_set,
             channel_mapping,
             color_interpretation,
             transform,

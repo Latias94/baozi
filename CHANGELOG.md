@@ -6,6 +6,15 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Extended whole-Scene unit conversion to material thickness and signed displacement strength,
+  preserving all other factor bits, optional groups, and binding values. Appearance now has
+  independently retained rows and immutable image/text pools, so changing material lengths copies
+  no encoded images or text. Unchanged values share both owners. Replaced the undefined generated
+  coordinate-source variants with a direct `uv_set: u16` across authoring, typed reads, and format
+  adapters; existing UV snapshot bytes remain unchanged at revision 5.
+- Removed bootstrap record-block estimates for retired typed-domain layouts. Fresh Scene startup
+  and materialization now use the same single-directory shape; typed owners keep independent
+  physical admission instead of inflating record-store limits.
 - Added complete intrinsic `LocalAxes` to camera projections and light definitions. Camera/light
   space conversion composes the discrete reference frame, scales distances/ranges, and preserves
   hierarchy, attachments, and photometric emission. Replaced frame-free camera kind/tuple APIs

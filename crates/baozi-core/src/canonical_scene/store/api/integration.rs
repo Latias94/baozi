@@ -42,8 +42,7 @@ use super::super::construction::node_scene::{
 use super::super::construction::{
     FAILURE_TERMINAL_EVIDENCE_MEMBERS, failure_terminal_work_requirement,
 };
-use super::super::production::SceneInputEnvelope;
-use super::super::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT;
+use super::super::schema::{NODE_SCENE_EVIDENCE_FIELD_COUNT, SCENE_DIRECTORY_BLOCK_COUNT};
 pub use super::super::schema::{
     NodeSceneOutcomeEvidenceSchema as SceneOutcomeEvidenceTag,
     SceneDirectorySchema as SceneCanonicalRootTag,
@@ -54,13 +53,13 @@ use super::scene::ValidatedScene;
 pub use super::SceneDraft;
 
 /// Returns the maximum number of remaining record-store blocks in a fresh Scene.
-pub fn maximum_scene_canonical_blocks() -> Option<usize> {
-    SceneInputEnvelope::maximum_canonical_blocks()
+pub const fn maximum_scene_canonical_blocks() -> usize {
+    SCENE_DIRECTORY_BLOCK_COUNT as usize
 }
 
 /// Returns the protected structural-work ceiling for the remaining record-store domains.
 pub fn maximum_scene_structural_work() -> Option<u64> {
-    let canonical_blocks = maximum_scene_canonical_blocks()?;
+    let canonical_blocks = maximum_scene_canonical_blocks();
     maximum_node_scene_structural_work(canonical_blocks)
 }
 

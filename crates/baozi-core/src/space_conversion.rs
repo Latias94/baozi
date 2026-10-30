@@ -301,10 +301,6 @@ impl SpaceConversion {
         self.assumed_fields
     }
 
-    pub(crate) const fn unit_ratio(&self) -> f64 {
-        self.unit_ratio
-    }
-
     pub(crate) fn determinant_sign(&self) -> i8 {
         if self.source.handedness == self.target.handedness {
             1

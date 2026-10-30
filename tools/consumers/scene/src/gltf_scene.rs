@@ -533,7 +533,7 @@ fn assert_appearance(scene: &ValidatedScene) {
         assert_eq!(material.binding_count(), 1);
         let binding = material.bindings().next().unwrap();
         assert_eq!(binding.role(), TextureRole::BaseColor);
-        assert_eq!(binding.coordinate_source().uv_set_index(), Some(0));
+        assert_eq!(binding.uv_set(), 0);
         assert_eq!(binding.channel_mapping(), TextureChannelSwizzle::RGBA);
         assert_eq!(
             binding.color_interpretation(),

@@ -134,12 +134,16 @@ pub enum SceneSpaceConversionIssue {
         light: usize,
         source: NumericConversionError,
     },
-    #[error("material {material} has a nonzero scene-unit thickness")]
-    MaterialThickness { material: u32 },
-    #[error("material {material} binding {binding} has a nonzero scene-unit displacement strength")]
-    DisplacementStrength { material: u32, binding: u32 },
-    #[error("material {material} binding {binding} uses spatial texture coordinates")]
-    TextureCoordinates { material: u32, binding: u32 },
+    #[error("material {material} thickness cannot be converted: {source}")]
+    NumericMaterial {
+        material: usize,
+        source: NumericConversionError,
+    },
+    #[error("displacement binding {binding} cannot be converted: {source}")]
+    NumericDisplacement {
+        binding: usize,
+        source: NumericConversionError,
+    },
     #[error("tangent attribute {attribute} has no supported reflection encoding")]
     TangentEncoding { attribute: usize },
 }
@@ -181,58 +185,8 @@ pub(super) fn check_capabilities<
     resolved: ResolvedSceneSpaceConversion<'_>,
     control: &mut C,
 ) -> Result<(), super::SceneEditRejection> {
-    use super::{SceneEditCompileError, SceneEditRejection};
-    use crate::appearance::{TextureCoordinateSource, TextureRole};
     let input = resolved.input;
     let conversion = resolved.conversion;
-    if conversion.changes_coordinates() {
-        let counts = control.run_unit(|| input.as_node_scene().proof.counts())?;
-        for material_index in 0..counts.material_count {
-            let material = control
-                .run_unit(|| {
-                    input.material(crate::identity::MaterialId::new(
-                        input.generation(),
-                        material_index,
-                    ))
-                })?
-                .map_err(|_| SceneEditCompileError::SemanticRead)?;
-            if conversion.unit_ratio() != 1.0
-                && control.run_unit(|| material.factors().supplemental_pbr().thickness() != 0.0)?
-            {
-                return Err(SceneSpaceConversionIssue::MaterialThickness {
-                    material: material_index,
-                }
-                .into());
-            }
-            let bindings = control.run_unit(|| material.bindings())?;
-            for (binding_index, binding) in bindings.enumerate() {
-                let issue = control.run_unit(|| {
-                    if !matches!(
-                        binding.coordinate_source(),
-                        TextureCoordinateSource::UvSet(_)
-                    ) {
-                        Some(SceneSpaceConversionIssue::TextureCoordinates {
-                            material: material_index,
-                            binding: binding_index as u32,
-                        })
-                    } else if conversion.unit_ratio() != 1.0
-                        && matches!(binding.role(), TextureRole::Displacement)
-                        && binding.strength().get() != 0.0
-                    {
-                        Some(SceneSpaceConversionIssue::DisplacementStrength {
-                            material: material_index,
-                            binding: binding_index as u32,
-                        })
-                    } else {
-                        None
-                    }
-                })?;
-                if let Some(issue) = issue {
-                    return Err(SceneEditRejection::Space(issue));
-                }
-            }
-        }
-    }
     if conversion.determinant_sign() < 0 {
         let count = control.run_unit(|| input.as_node_scene().read_geometry().attributes.len())?;
         for attribute in 0..count {

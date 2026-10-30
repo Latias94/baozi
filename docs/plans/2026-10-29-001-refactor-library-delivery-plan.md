@@ -227,9 +227,10 @@ channel targets use logical coordinates. The animation increment replaces those 
 with two typed row tables and five payload pools, shares unchanged owners, and removes its
 clip/channel validation descriptors. Shared time-domain/interpolation/extrapolation declarations
 serve authoring and reading directly. The final appearance increment replaces its records with
-five typed row tables and two pools in one owner. Authoring retains only resolved image borrows;
-all other appearance descriptors stay in the original input. Central validation allocates no
-appearance scratch, and unchanged edits share the complete owner. Shared closed domain types replace
+five typed row tables and two pools. Its inline root now has independent retained row and immutable
+payload owners, allowing material length changes without copying encoded images or text. Authoring
+retains only resolved image borrows; all other appearance descriptors stay in the original input.
+Central validation allocates no appearance scratch, and unchanged edits share both owners. Shared closed domain types replace
 duplicate Kind enums, a channel-mapping wrapper, and producerless Namespaced behavior variants.
 Delete their record writer/schema/decoder, edit rewrite, three validation projections, and inert
 record-leaf inheritance planning together. All seven semantic domains now use actual typed owners.
@@ -312,8 +313,11 @@ values and derivatives now use one complete exact-source conversion plan. Unchan
 animation owners remain shared, and each profile construction pass admits its complete selection
 work. Camera/light conversion now composes complete intrinsic axes without generating nodes;
 clipping distances, orthographic extents, and finite light ranges follow unit conversion while
-photometric emission is retained. Material spatial semantics and application vertex unification
-remain required to complete F.
+photometric emission is retained. Material thickness and signed displacement strength now follow the
+positive unit ratio, with exact preservation of other fields and independent row/payload retention.
+Texture bindings use a direct UV set index; generated spatial coordinate variants without executable
+semantics are removed. Custom attributes still require explicit spatial semantics for numeric
+conversion. Application vertex unification remains required to complete F.
 
 Add an explicit helper or operation for unifying corner attributes into application vertex tuples.
 Do not assume triangles alone form a GPU-ready vertex/index layout. Lossy influence truncation and

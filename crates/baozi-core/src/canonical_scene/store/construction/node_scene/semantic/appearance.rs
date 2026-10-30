@@ -1,15 +1,15 @@
-//! Borrowed semantic reads over the proof-qualified typed appearance owner.
+//! Borrowed semantic reads over proof-qualified typed appearance rows and payloads.
 //!
 //! Random reads select one row and its checked ranges. Ordered traversal closes the five tables
 //! and the combined image/media/source-key/name pools without record codecs or row resets.
 
 use crate::appearance::{
     AlphaMode, ColorInterpretation, MaterialFactors, ShadingModel, TextureBlendOperation,
-    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
+    TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
     validate_material_semantics, validate_texture_binding_semantics, validate_texture_source_key,
 };
 use crate::canonical_scene::store::typed_storage::appearance::{
-    AppearanceStorage, StoredBinding, StoredMaterial,
+    AppearancePayloads, AppearanceRows, StoredBinding, StoredMaterial,
 };
 use crate::canonical_scene::store::typed_storage::{TableRange, TextRange};
 use crate::canonical_scene::store::validation::NodeSceneValidationProof;
@@ -49,23 +49,25 @@ fn record_row_read() {
     ROWS_READ.with(|count| count.set(count.get() + 1));
 }
 
-/// The actual immutable owner; no proof or independently resolved payloads are retained.
+/// Borrows both actual immutable owners; no proof or resolved payload projection is retained.
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneAppearanceTables<'scene> {
-    storage: &'scene AppearanceStorage,
+    rows: &'scene AppearanceRows,
+    payloads: &'scene AppearancePayloads,
 }
 
 impl<'scene> NodeSceneAppearanceTables<'scene> {
     pub(in crate::canonical_scene::store) fn try_new(
-        storage: &'scene AppearanceStorage,
+        rows: &'scene AppearanceRows,
+        payloads: &'scene AppearancePayloads,
         proof: &NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
         if [
-            storage.images.len(),
-            storage.samplers.len(),
-            storage.textures.len(),
-            storage.bindings.len(),
-            storage.materials.len(),
+            rows.images.len(),
+            rows.samplers.len(),
+            rows.textures.len(),
+            rows.bindings.len(),
+            rows.materials.len(),
         ] != [
             proof.image_count(),
             proof.sampler_count(),
@@ -77,7 +79,7 @@ impl<'scene> NodeSceneAppearanceTables<'scene> {
                 "typed appearance tables disagree with central validation proof",
             ));
         }
-        Ok(Self { storage })
+        Ok(Self { rows, payloads })
     }
 
     pub(super) fn into_cursor(self) -> NodeSceneAppearanceCursor<'scene> {
@@ -245,10 +247,8 @@ impl<'scene> NodeSceneAppearanceBinding<'scene> {
         &self.stored.role
     }
 
-    pub(in crate::canonical_scene::store) const fn coordinate_source(
-        &self,
-    ) -> &'scene TextureCoordinateSource {
-        &self.stored.coordinate_source
+    pub(in crate::canonical_scene::store) const fn uv_set(&self) -> u16 {
+        self.stored.uv_set
     }
 
     pub(in crate::canonical_scene::store) const fn channel_mapping(&self) -> TextureChannelSwizzle {

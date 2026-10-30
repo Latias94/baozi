@@ -7,9 +7,8 @@ use baozi_import::authoring::{
     LogicalMeshLocalId, Mat4, MaterialFactors, MaterialLocalId, MipmapFilter, NodeAuthoringNode,
     NodeLocalId, NodeParent, PbrMetallicRoughnessFactors, Presence, Quat, ResourceIdentityLocalId,
     SamplerAuthoring, SamplerLocalId, SamplerState, SkinLocalId, TexelFilter, TextureAddressMode,
-    TextureAuthoring, TextureBlendOperation, TextureChannel, TextureChannelSwizzle,
-    TextureCoordinateSource, TextureLocalId, TextureRole, TextureSourceKey, TextureStrength,
-    TextureTransform, Vec2, Vec3,
+    TextureAuthoring, TextureBlendOperation, TextureChannel, TextureChannelSwizzle, TextureLocalId,
+    TextureRole, TextureSourceKey, TextureStrength, TextureTransform, Vec2, Vec3,
 };
 use baozi_import::{
     DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass, ImportWorkScope,
@@ -609,7 +608,7 @@ fn is_supported_extension(name: &str) -> bool {
 
 #[derive(Debug)]
 struct TextureBindingContract {
-    coordinate_source: TextureCoordinateSource,
+    uv_set: u16,
     transform: TextureTransform,
 }
 
@@ -860,7 +859,7 @@ fn compile_texture_binding_contract(
         }
         None => (tex_coord, TextureTransform::IDENTITY),
     };
-    let coordinate_source = TextureCoordinateSource::uv_set(tex_coord).map_err(|_| {
+    let uv_set = u16::try_from(tex_coord).map_err(|_| {
         gltf_parse_error(
             ctx,
             format!(
@@ -868,10 +867,7 @@ fn compile_texture_binding_contract(
             ),
         )
     })?;
-    Ok(TextureBindingContract {
-        coordinate_source,
-        transform,
-    })
+    Ok(TextureBindingContract { uv_set, transform })
 }
 
 fn preflight_canonical_base_strings(
@@ -2494,7 +2490,7 @@ fn add_texture_binding<'scope, 'document>(
         texture: texture_id,
         provenance: 0,
         role,
-        coordinate_source: contract.coordinate_source,
+        uv_set: contract.uv_set,
         channel_mapping: channel_swizzle,
         color_interpretation,
         transform: contract.transform,

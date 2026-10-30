@@ -330,7 +330,7 @@ fn reflection_and_winding_combine_by_parity_independently_of_units() {
     // The independently specified map is (x, y, z) -> (-x, -z, y), with two target units per meter.
     assert_eq!(conversion.direction([2.0, 3.0, 5.0]), Ok([-2.0, -5.0, 3.0]));
     assert_eq!(conversion.point([2.0, 3.0, 5.0]), Ok([-4.0, -10.0, 6.0]));
-    assert_eq!(conversion.unit_ratio(), 2.0);
+    assert_eq!(conversion.unit_ratio, 2.0);
     assert_eq!(conversion.source(), TargetSpace::STANDARD);
     assert_eq!(conversion.target(), target);
     assert_eq!(conversion.determinant_sign(), -1);
@@ -638,7 +638,7 @@ fn unit_ratio_rejects_overflow_and_zero_but_does_not_require_a_representable_rec
         None,
     )
     .unwrap();
-    assert_eq!(conversion.unit_ratio(), f64::from_bits(1));
+    assert_eq!(conversion.unit_ratio, f64::from_bits(1));
     assert_eq!(
         bits(conversion.point([-0.0, 0.0, -0.0]).unwrap()),
         bits([-0.0, 0.0, -0.0])

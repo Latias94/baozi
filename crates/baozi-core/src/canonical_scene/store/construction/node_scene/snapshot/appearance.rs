@@ -1,6 +1,6 @@
 use crate::appearance::{
     AlphaMode, ColorInterpretation, ShadingModel, TextureBlendOperation, TextureChannel,
-    TextureCoordinateSource, TextureRole,
+    TextureRole,
 };
 use crate::image::{MipmapFilter, SamplerState, TexelFilter, TextureAddressMode};
 
@@ -356,8 +356,7 @@ fn write_bindings(
                 reason: "material-binding collection ended before declared total",
             })?;
         let role = encode_texture_role(binding.role());
-        let (coordinate_source, coordinate_set) =
-            encode_coordinate_source(*binding.coordinate_source());
+        let uv_set = u32::from(binding.uv_set());
         let swizzle = binding.channel_mapping();
         let mut channels = [encode_channel(TextureChannel::Zero); 4];
         for (destination, channel) in channels.iter_mut().zip(swizzle.as_slice().iter().copied()) {
@@ -369,8 +368,9 @@ fn write_bindings(
         transcript.tagged_usize(TAG_REFERENCE, binding.source_index())?;
         transcript.tagged_usize(TAG_TEXTURE_REFERENCE, binding.texture())?;
         transcript.tagged_u8(TAG_TEXTURE_ROLE, role)?;
-        transcript.tagged_u8(TAG_COORDINATE_SOURCE, coordinate_source)?;
-        transcript.tagged_u32(TAG_COORDINATE_SET, coordinate_set)?;
+        // Keep the existing UvSet framing for the direct UV index representation.
+        transcript.tagged_u8(TAG_COORDINATE_SOURCE, 0)?;
+        transcript.tagged_u32(TAG_COORDINATE_SET, uv_set)?;
         transcript.tagged_u8(TAG_CHANNEL_LANE_COUNT, swizzle.lane_count())?;
         transcript.tagged_u8(TAG_CHANNEL_0, channels[0])?;
         transcript.tagged_u8(TAG_CHANNEL_1, channels[1])?;
@@ -417,8 +417,8 @@ fn write_bindings(
         let render = preview.begin_geometry_item("binding", binding.source_index())?;
         preview.geometry_field_usize(render, "texture", binding.texture());
         preview.geometry_field_u32(render, "role", u32::from(role));
-        preview.geometry_field_u32(render, "coordinate", u32::from(coordinate_source));
-        preview.geometry_field_u32(render, "coordinate_set", coordinate_set);
+        preview.geometry_field_u32(render, "coordinate", 0);
+        preview.geometry_field_u32(render, "coordinate_set", uv_set);
         preview.geometry_field_u32(render, "channels", u32::from(swizzle.lane_count()));
         preview.geometry_field_u32(render, "color", u32::from(color_interpretation));
         preview.geometry_field_usize(render, "semantic_offset", binding.semantic_offset());
@@ -579,15 +579,6 @@ const fn encode_texture_role(value: TextureRole) -> u8 {
         TextureRole::Thickness => 15,
         TextureRole::SheenColor => 16,
         TextureRole::SheenRoughness => 17,
-    }
-}
-
-const fn encode_coordinate_source(value: TextureCoordinateSource) -> (u8, u32) {
-    match value {
-        TextureCoordinateSource::UvSet(set) => (0, set as u32),
-        TextureCoordinateSource::ObjectPosition => (1, 0),
-        TextureCoordinateSource::ObjectNormal => (2, 0),
-        TextureCoordinateSource::ReflectionVector => (3, 0),
     }
 }
 

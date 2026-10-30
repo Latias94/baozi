@@ -7,12 +7,13 @@ use std::rc::Rc;
 use crate::appearance::{
     AlphaMode, AppearanceBuildError, ColorInterpretation, MaterialFactorGroup, MaterialFactors,
     MaterialSemantics, ShadingModel, TextureBindingSemantics, TextureBlendOperation,
-    TextureChannel, TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureSourceKey,
-    TextureStrength, TextureTransform,
+    TextureChannel, TextureChannelSwizzle, TextureRole, TextureSourceKey, TextureStrength,
+    TextureTransform,
 };
 use crate::canonical_scene::store::typed_storage::appearance::build::AppearanceStoragePlan;
 use crate::canonical_scene::store::typed_storage::appearance::{
-    AppearanceStorage, StoredBinding, StoredImage, StoredMaterial, StoredTexture,
+    AppearancePayloads, AppearanceRows, AppearanceStorage, StoredBinding, StoredImage,
+    StoredMaterial, StoredTexture,
 };
 use crate::extension::ExtensionMediaType;
 use crate::image::{MAX_ENCODED_IMAGE_BYTES, SamplerState};
@@ -53,11 +54,7 @@ fn with_input<T>(
         TextureRole::Normal,
         TextureRole::BaseColor,
     ];
-    let coordinates = [
-        TextureCoordinateSource::UvSet(0),
-        TextureCoordinateSource::UvSet(1),
-        TextureCoordinateSource::UvSet(0),
-    ];
+    let uv_sets = [0, 1, u16::MAX];
     let channels = [
         TextureChannelSwizzle::RGBA,
         TextureChannelSwizzle::RGB,
@@ -74,7 +71,7 @@ fn with_input<T>(
             TextureLocalId::new([0, 1, 0][index]),
             TextureBindingSemantics::new(
                 roles[index],
-                coordinates[index],
+                uv_sets[index],
                 channels[index],
                 colors[index],
                 TextureTransform::IDENTITY,
@@ -165,6 +162,8 @@ fn authoring_seals_actual_typed_footprint_and_borrows_original_semantics() {
         assert_eq!(control.traversal_work(), 4);
 
         let expected = (std::mem::size_of::<AppearanceStorage>()
+            + std::mem::size_of::<AppearanceRows>()
+            + std::mem::size_of::<AppearancePayloads>()
             + 2 * std::mem::size_of::<StoredImage>()
             + std::mem::size_of::<SamplerState>()
             + 2 * std::mem::size_of::<StoredTexture>()
@@ -178,8 +177,9 @@ fn authoring_seals_actual_typed_footprint_and_borrows_original_semantics() {
         assert_eq!(plan.row_counts(), batch.row_counts());
         assert_eq!(plan.payload_counts(), batch.payload_counts());
         assert_eq!(plan.name_bytes(), 24);
-        assert_eq!(plan.work().unwrap(), 41);
-        assert_eq!(plan.capacities().unwrap().len(), 7);
+        assert_eq!(plan.work().unwrap(), 49);
+        assert_eq!(plan.rows_capacities().unwrap().len(), 5);
+        assert_eq!(plan.payload_capacities().unwrap().len(), 2);
         assert_eq!(batch.scratch_bytes(), control.current_bytes.get());
         assert!(batch.scratch_bytes() <= appearance_shape_scratch_envelope(input).unwrap());
 
@@ -187,6 +187,13 @@ fn authoring_seals_actual_typed_footprint_and_borrows_original_semantics() {
         assert_eq!(batch.samplers().as_ptr(), input.samplers().as_ptr());
         assert_eq!(batch.textures().as_ptr(), input.textures().as_ptr());
         assert_eq!(batch.bindings().as_ptr(), input.bindings().as_ptr());
+        assert!(
+            batch
+                .bindings()
+                .iter()
+                .map(|binding| binding.semantics().uv_set())
+                .eq([0, 1, u16::MAX])
+        );
         assert_eq!(batch.materials().as_ptr(), input.materials().as_ptr());
         assert_eq!(
             batch.bindings()[1].semantics().strength().get().to_bits(),
@@ -313,7 +320,9 @@ fn exact_typed_limits_accept_and_each_one_less_boundary_releases_scratch() {
 #[test]
 fn empty_appearance_counts_the_typed_header_without_allocating_projection_scratch() {
     let input = AppearanceAuthoringBatch::empty();
-    let bytes = std::mem::size_of::<AppearanceStorage>() as u64;
+    let bytes = (std::mem::size_of::<AppearanceStorage>()
+        + std::mem::size_of::<AppearanceRows>()
+        + std::mem::size_of::<AppearancePayloads>()) as u64;
     assert_eq!(appearance_shape_scratch_envelope(input).unwrap(), 0);
     let limits = SceneValidationLimits::default()
         .with_max_canonical_bytes(bytes)
@@ -815,7 +824,7 @@ fn closed_roles_preserve_metallic_authority_conflicts() {
                 TextureLocalId::new(0),
                 TextureBindingSemantics::new(
                     roles[index],
-                    TextureCoordinateSource::UvSet(0),
+                    0,
                     channels[index],
                     ColorInterpretation::Data,
                     TextureTransform::IDENTITY,

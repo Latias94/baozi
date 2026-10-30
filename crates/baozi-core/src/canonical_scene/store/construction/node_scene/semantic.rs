@@ -185,8 +185,11 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             ));
         }
         let spatial = spatial::NodeSceneSpatialTables::try_new(scene.read_spatial(), proof)?;
-        let appearance =
-            appearance::NodeSceneAppearanceTables::try_new(scene.read_appearance(), proof)?;
+        let appearance = appearance::NodeSceneAppearanceTables::try_new(
+            scene.read_appearance().rows.as_ref(),
+            scene.read_appearance().payloads.as_ref(),
+            proof,
+        )?;
         let geometry = geometry::NodeSceneGeometryTables::try_new(scene.read_geometry(), proof)?;
         let deformation =
             deformation::NodeSceneDeformationTables::try_new(scene.read_deformation(), proof)?;

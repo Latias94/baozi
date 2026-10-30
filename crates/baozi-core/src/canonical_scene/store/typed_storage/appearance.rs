@@ -1,12 +1,14 @@
-//! Appearance rows and compact byte/text pools in one retained Scene owner.
+//! Appearance rows and immutable byte/text payloads with independent retained ownership.
 //!
 //! Indices are generation-independent logical rows, never record-store references.
 //! Shared public behavior values are stored directly after their domain shrink.
 
+use baozi_operation::__retained_store_integration::authority::SharedRetainedStorage;
+
 use crate::appearance::{
     AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemantics, ShadingModel,
-    TextureBindingSemantics, TextureBlendOperation, TextureChannelSwizzle, TextureCoordinateSource,
-    TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
+    TextureBindingSemantics, TextureBlendOperation, TextureChannelSwizzle, TextureRole,
+    TextureSourceKey, TextureStrength, TextureTransform,
 };
 use crate::image::SamplerState;
 
@@ -48,7 +50,7 @@ pub(in crate::canonical_scene::store) struct StoredTexture {
 pub(in crate::canonical_scene::store) struct StoredBinding {
     pub(in crate::canonical_scene::store) texture: StoredTextureIndex,
     pub(in crate::canonical_scene::store) role: TextureRole,
-    pub(in crate::canonical_scene::store) coordinate_source: TextureCoordinateSource,
+    pub(in crate::canonical_scene::store) uv_set: u16,
     pub(in crate::canonical_scene::store) channels: TextureChannelSwizzle,
     pub(in crate::canonical_scene::store) color: ColorInterpretation,
     pub(in crate::canonical_scene::store) transform: TextureTransform,
@@ -67,7 +69,7 @@ impl StoredBinding {
     ) -> TextureBindingSemantics<'view> {
         TextureBindingSemantics::new(
             self.role,
-            self.coordinate_source,
+            self.uv_set,
             self.channels,
             self.color,
             self.transform,
@@ -103,11 +105,19 @@ impl StoredMaterial {
 /// explicitly authored empty name; media types and source keys retain their own
 /// public construction constraints. Inline factors/behavior values are counted once.
 pub(in crate::canonical_scene::store) struct AppearanceStorage {
+    pub(in crate::canonical_scene::store) rows: SharedRetainedStorage<AppearanceRows>,
+    pub(in crate::canonical_scene::store) payloads: SharedRetainedStorage<AppearancePayloads>,
+}
+
+pub(in crate::canonical_scene::store) struct AppearanceRows {
     pub(in crate::canonical_scene::store) images: Vec<StoredImage>,
     pub(in crate::canonical_scene::store) samplers: Vec<SamplerState>,
     pub(in crate::canonical_scene::store) textures: Vec<StoredTexture>,
     pub(in crate::canonical_scene::store) bindings: Vec<StoredBinding>,
     pub(in crate::canonical_scene::store) materials: Vec<StoredMaterial>,
+}
+
+pub(in crate::canonical_scene::store) struct AppearancePayloads {
     pub(in crate::canonical_scene::store) image_bytes: Vec<u8>,
     pub(in crate::canonical_scene::store) text: Vec<u8>,
 }

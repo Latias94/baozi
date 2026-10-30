@@ -50,23 +50,23 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
     }
 
     pub(in crate::canonical_scene::store) fn image_count(&self) -> usize {
-        self.tables.storage.images.len()
+        self.tables.rows.images.len()
     }
 
     pub(in crate::canonical_scene::store) fn sampler_count(&self) -> usize {
-        self.tables.storage.samplers.len()
+        self.tables.rows.samplers.len()
     }
 
     pub(in crate::canonical_scene::store) fn texture_count(&self) -> usize {
-        self.tables.storage.textures.len()
+        self.tables.rows.textures.len()
     }
 
     pub(in crate::canonical_scene::store) fn material_count(&self) -> usize {
-        self.tables.storage.materials.len()
+        self.tables.rows.materials.len()
     }
 
     pub(in crate::canonical_scene::store) fn binding_count(&self) -> usize {
-        self.tables.storage.bindings.len()
+        self.tables.rows.bindings.len()
     }
 
     pub(in crate::canonical_scene::store) fn next_image(
@@ -78,7 +78,7 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
         }
         let row = self.next_image;
         let view = self.tables.image_at(row)?;
-        let stored = &self.tables.storage.images[row];
+        let stored = &self.tables.rows.images[row];
         consume(stored.payload, &mut self.image_bytes)?;
         if let Some(media) = stored.media_type {
             consume(media.0, &mut self.media_bytes)?;
@@ -120,7 +120,7 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
         }
         let row = self.next_material;
         let view = self.tables.material_at(row)?;
-        let stored = &self.tables.storage.materials[row];
+        let stored = &self.tables.rows.materials[row];
         consume(stored.bindings, &mut self.owned_bindings)?;
         if let Some(name) = stored.name {
             // Names are last in the shared text pool, but precede bindings in snapshot traversal.
@@ -150,7 +150,7 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
         let row = self.next_binding;
         let view = self.tables.binding_at(row)?;
         let offset = self.source_key_bytes;
-        if let Some(key) = self.tables.storage.bindings[row].source_key {
+        if let Some(key) = self.tables.rows.bindings[row].source_key {
             let mut absolute = self
                 .media_bytes
                 .checked_add(offset)
@@ -173,21 +173,21 @@ impl<'scene> NodeSceneAppearanceCursor<'scene> {
     }
 
     pub(in crate::canonical_scene::store) fn finish(self) -> NodeSceneSemanticResult<()> {
-        let storage = self.tables.storage;
+        let payloads = self.tables.payloads;
         let key_end = self
             .media_bytes
             .checked_add(self.source_key_bytes)
             .ok_or_else(|| invariant("appearance text boundary overflows"))?;
         let text_complete = match self.name_start {
-            Some(start) => start == key_end && self.name_end == storage.text.len(),
-            None => key_end == storage.text.len(),
+            Some(start) => start == key_end && self.name_end == payloads.text.len(),
+            None => key_end == payloads.text.len(),
         };
         if self.next_image != self.image_count()
             || self.next_sampler != self.sampler_count()
             || self.next_texture != self.texture_count()
             || self.next_material != self.material_count()
             || self.next_binding != self.binding_count()
-            || self.image_bytes != storage.image_bytes.len()
+            || self.image_bytes != payloads.image_bytes.len()
             || self.owned_bindings != self.binding_count()
             || !text_complete
         {
