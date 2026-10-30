@@ -707,6 +707,63 @@ fn prepare_candidate(
     }
 }
 
+// These terminal dispositions are mutually exclusive with successful publication. Keeping each
+// rejection's validation/preparation temporaries in its own frame leaves the successful caller
+// with only its live owner, rather than storage for every possible failure continuation.
+#[inline(never)]
+#[allow(clippy::result_large_err)]
+fn prepare_central_rejection(
+    owner: ImportSceneCentralRejected,
+    evidence: SceneEvidenceRecipe,
+) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
+    let control_cause = scene_rejection_control(owner.cause());
+    let cause_authority = validation_cause_authority(canonical_rejection_validation(owner.cause()));
+    let validation = owner
+        .validate_rich_failure(|session, root| evidence.validate_failure(session, root))
+        .map_err(ImportStoreActivationError::Containment)?;
+    prepare_ordinary_failure(
+        validation,
+        scene_final_progress(),
+        control_cause,
+        cause_authority,
+    )
+}
+
+#[inline(never)]
+#[allow(clippy::result_large_err)]
+fn prepare_central_interruption(
+    owner: ImportSceneCentralInterrupted,
+    evidence: SceneEvidenceRecipe,
+) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
+    let control_cause = owner.cause().control_cause().cloned();
+    let validation = owner
+        .validate_rich_failure(|session, root| evidence.validate_failure(session, root))
+        .map_err(ImportStoreActivationError::Containment)?;
+    prepare_ordinary_failure(
+        validation,
+        scene_final_progress(),
+        control_cause,
+        ImportStoreFailureCauseAuthority::OperationTerminal,
+    )
+}
+
+#[inline(never)]
+#[allow(clippy::result_large_err)]
+fn prepare_deferred_fallback(
+    owner: PendingMinimalFallback<ImportOperationOwner, ImportProgressPhase, ImportProgressUnit>,
+) -> Result<ImportStorePreparedScene, ImportStoreActivationError> {
+    let control_cause = runtime_control(owner.cause());
+    let (store, _cause) = owner
+        .prepare_minimal_fallback()
+        .map_err(ImportStoreActivationError::Preparation)?
+        .into_parts();
+    Ok(ImportStorePreparedScene::MinimalFallback {
+        store,
+        control_cause,
+        cause_authority: ImportStoreFailureCauseAuthority::OperationTerminal,
+    })
+}
+
 #[allow(clippy::result_large_err)]
 fn prepare_unsubmitted(
     owner: ImportStoreOutcomeOwner,
@@ -1016,50 +1073,15 @@ impl ImportStoreSessionOwner {
             ImportStoreSessionState::Pending(ImportPendingScene::CentralRejected {
                 owner,
                 evidence,
-            }) => {
-                let control_cause = scene_rejection_control(owner.cause());
-                let cause_authority =
-                    validation_cause_authority(canonical_rejection_validation(owner.cause()));
-                let validation = owner
-                    .validate_rich_failure(|session, root| evidence.validate_failure(session, root))
-                    .map_err(ImportStoreActivationError::Containment)?;
-                prepare_ordinary_failure(
-                    validation,
-                    scene_final_progress(),
-                    control_cause,
-                    cause_authority,
-                )
-            }
+            }) => prepare_central_rejection(owner, evidence),
             ImportStoreSessionState::Pending(ImportPendingScene::CentralInterrupted {
                 owner,
                 evidence,
-            }) => {
-                let control_cause = owner.cause().control_cause().cloned();
-                let validation = owner
-                    .validate_rich_failure(|session, root| evidence.validate_failure(session, root))
-                    .map_err(ImportStoreActivationError::Containment)?;
-                prepare_ordinary_failure(
-                    validation,
-                    scene_final_progress(),
-                    control_cause,
-                    ImportStoreFailureCauseAuthority::OperationTerminal,
-                )
-            }
+            }) => prepare_central_interruption(owner, evidence),
             ImportStoreSessionState::Pending(ImportPendingScene::DeferredFallback {
                 owner,
                 completed_boundary: _,
-            }) => {
-                let control_cause = runtime_control(owner.cause());
-                let (store, _cause) = owner
-                    .prepare_minimal_fallback()
-                    .map_err(ImportStoreActivationError::Preparation)?
-                    .into_parts();
-                Ok(ImportStorePreparedScene::MinimalFallback {
-                    store,
-                    control_cause,
-                    cause_authority: ImportStoreFailureCauseAuthority::OperationTerminal,
-                })
-            }
+            }) => prepare_deferred_fallback(owner),
             ImportStoreSessionState::Pending(ImportPendingScene::PreparedFallback {
                 owner,
                 completed_boundary: _,

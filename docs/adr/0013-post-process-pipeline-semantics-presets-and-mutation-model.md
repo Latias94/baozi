@@ -186,6 +186,17 @@ A direct operation's input-to-final relation is complete without compiled-step w
 remap-composition engine, or an intermediate Scene generation. A future composed executor must define
 its own concrete report requirements alongside its implementation.
 
+`convert_scene_space` is a direct whole-Scene operation. Its descriptor contains the exact input
+generation and `SpaceConversionOptions`; it does not manufacture a single-primitive target. Known
+source declarations and explicit assumptions resolve before collection traversal. The same closed
+Scene-edit transaction then plans nodes, geometry, spatial declarations, and owner provenance.
+The changed report owns centrally validated source/target facts, actual assumption fields, and
+triangle-lane reversal evidence independently of either Scene. An already satisfied target with no
+assumed source fields is `Unchanged`; filling unknown declarations is a canonical change even when
+numeric coordinates already match. A source conflict, numeric failure, unsupported present
+semantic, resource failure, or cancellation returns the original Scene and available terminal
+evidence. ADR 0008 defines the arithmetic and ADR 0032 defines the current capability boundary.
+
 The following sequence applies when a composed executor is introduced.
 
 ```mermaid

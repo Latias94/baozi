@@ -7,8 +7,9 @@ Current status: experimental parser foundation. STL, OBJ/MTL, and PLY have owned
 fixture and fuzz coverage. The glTF/GLB selected-scene PBR, skin, morph, and TRS animation profile
 is available through `format-gltf`; its [exact restrictions](docs/formats/gltf.md) apply.
 Scene nodes, geometry, materials, images, skins, morphs, and animation have borrowed typed readers.
-The optional `postprocess` feature provides explicit single-primitive triangulation and flat/smooth
-normal generation. Target-space conversion and application vertex unification remain in development.
+The optional `postprocess` feature provides explicit single-primitive triangulation, flat/smooth
+normal generation, and whole-Scene static coordinate/unit conversion. Spatial conversion of
+deformation, animation, cameras, and lights and application vertex unification remain in development.
 Bounded snapshots are available separately for test and debug evidence.
 
 ## Goals
@@ -27,7 +28,7 @@ Bounded snapshots are available separately for test and debug evidence.
 | `baozi-core` | Scene IR, IDs, diagnostics, errors, math, materials |
 | `baozi-io` | Asset IO, URI/path policy, resource limits |
 | `baozi-import` | Format importer traits, registry, capability metadata |
-| `baozi-postprocess` | Controlled geometry operations, transactional Scene edits, and retained Corner/Face remaps |
+| `baozi-postprocess` | Controlled Scene operations, transactional edits, and retained operation evidence |
 | `baozi-format-stl` | STL importer |
 | `baozi-format-obj` | OBJ/MTL importer |
 | `baozi-format-ply` | PLY importer; admitted for source builds but not yet published |
@@ -126,6 +127,16 @@ owner-local metadata. Smooth mode shares area-weighted normals by Vertex identit
 smoothing groups; group zero is hard per face, and UV seams do not split a shared Vertex.
 Attribute lookup requires both semantic and domain, so `normals(AttributeDomain::Corner)` and
 `texcoords(set, AttributeDomain::Vertex)` select the intended stream explicitly.
+
+`convert_scene_space(scene, options, control)` converts an entire static Scene to a validated
+`TargetSpace`. The target contains handedness, signed up/front axes, meters per unit, and front-face
+winding. Unknown source facts need explicit `source_assumptions`; an assumption conflicting with
+a known declaration fails. UV origin and tangent-generation declarations are preserved. Positions,
+normals, tangents, and authored Matrix/TRS transforms follow one basis conversion; reversed triangle
+lanes move all Corner tuples with their indices. The report retains source/target facts and actual
+assumptions after either Scene is dropped. Present semantics the current operation cannot convert
+return typed capability errors and the original Scene. See the
+[coordinate contract](docs/model/coordinate-and-render-conventions.md) for the current boundary.
 
 Run the import benchmark harness without collecting measurements:
 

@@ -14,6 +14,8 @@ use super::{
 };
 
 pub(in crate::canonical_scene::store) mod normals;
+pub(in crate::canonical_scene::store) mod space_geometry;
+pub(in crate::canonical_scene::store) mod space_nodes;
 
 type EditResult<T, E> = Result<T, TypedStorageBuildError<E>>;
 

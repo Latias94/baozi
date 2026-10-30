@@ -6,8 +6,7 @@ use crate::entity::{CameraProjection, LightKind};
 use crate::extension::ExtensionSchemaId;
 use crate::math::Vec3;
 use crate::scene_space::{
-    Axis, FrontFaceWinding, Handedness, TangentBasisConvention, TangentHandednessEncoding,
-    TransformConvention, UvOrigin,
+    Axis, FrontFaceWinding, Handedness, TangentBasisConvention, TangentHandednessEncoding, UvOrigin,
 };
 
 use super::{NodeSceneSemanticResult, invariant};
@@ -47,7 +46,6 @@ impl<'scene> NodeSceneSpatialTables<'scene> {
             unit_scale_to_meters: space.unit_scale_to_meters,
             front_face_winding: space.front_face_winding,
             uv_origin: space.uv_origin,
-            transform_convention: space.transform_convention,
             tangent_basis: match &space.tangent_basis {
                 TangentBasisConvention::Unknown => NodeSceneSpatialTangentBasis::Unknown,
                 TangentBasisConvention::MikkTspace => NodeSceneSpatialTangentBasis::MikkTspace,
@@ -135,7 +133,6 @@ pub(in crate::canonical_scene::store) struct NodeSceneSpatialSceneSpace<'scene> 
     unit_scale_to_meters: Option<f64>,
     front_face_winding: FrontFaceWinding,
     uv_origin: UvOrigin,
-    transform_convention: TransformConvention,
     tangent_basis: NodeSceneSpatialTangentBasis<'scene>,
     tangent_encoding: NodeSceneSpatialTangentEncoding<'scene>,
 }
@@ -158,11 +155,6 @@ impl<'scene> NodeSceneSpatialSceneSpace<'scene> {
     }
     pub(in crate::canonical_scene::store) const fn uv_origin(self) -> UvOrigin {
         self.uv_origin
-    }
-    pub(in crate::canonical_scene::store) const fn transform_convention(
-        self,
-    ) -> TransformConvention {
-        self.transform_convention
     }
     pub(in crate::canonical_scene::store) const fn tangent_basis(
         self,

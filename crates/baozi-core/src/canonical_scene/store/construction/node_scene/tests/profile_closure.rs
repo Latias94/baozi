@@ -34,7 +34,7 @@ use crate::namespaced::NamespacedName;
 use crate::provenance::SourceObjectKind;
 use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
-    TangentHandednessEncoding, TransformConvention, UvOrigin,
+    TangentHandednessEncoding, UvOrigin,
 };
 
 use super::{profile_fixture, terminal_failure_class, terminal_failure_code, test_limits};
@@ -257,7 +257,6 @@ fn profile_scene_space(variant: ProfileClosureInputVariant) -> SceneSpace {
         ),
         front_face_winding: FrontFaceWinding::Clockwise,
         uv_origin: UvOrigin::LowerLeft,
-        transform_convention: TransformConvention::ColumnVectorLocalToParent,
         tangent_basis: TangentBasisConvention::try_namespaced(Some(extension_schema(
             "baozi-tests:profile-closure-tangent-basis",
             1,
@@ -474,10 +473,6 @@ pub(in crate::canonical_scene::store) fn inspect_profile_closure_semantics_for_p
         FrontFaceWinding::Clockwise
     );
     assert_eq!(scene_space.uv_origin(), UvOrigin::LowerLeft);
-    assert_eq!(
-        scene_space.transform_convention(),
-        TransformConvention::ColumnVectorLocalToParent
-    );
     let unit_scale_to_meters = scene_space
         .unit_scale_to_meters()
         .expect("profile-closure unit scale");

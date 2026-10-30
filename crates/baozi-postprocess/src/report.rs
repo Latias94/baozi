@@ -3,11 +3,12 @@ use std::fmt;
 use baozi_core::{PrimitiveId, SceneGenerationId, ValidatedScene};
 
 use crate::{
-    NormalGenerationReport, NormalOptions, PostProcessResourceEvidence, TriangulationRemap,
+    NormalGenerationReport, NormalOptions, PostProcessResourceEvidence, SpaceConversionOptions,
+    SpaceConversionReport, TriangulationRemap,
 };
 
 /// The concrete operation evaluated against an input Scene.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PostProcessOperation {
     /// Triangulate one generation-qualified input primitive.
     Triangulate { target: PrimitiveId },
@@ -15,6 +16,11 @@ pub enum PostProcessOperation {
     GenerateNormals {
         target: PrimitiveId,
         options: NormalOptions,
+    },
+    /// Convert the complete input Scene using explicit spatial declarations.
+    ConvertSpace {
+        input_generation: SceneGenerationId,
+        options: SpaceConversionOptions,
     },
 }
 
@@ -42,9 +48,36 @@ enum OperationResult {
     Unchanged,
     Triangulation(TriangulationRemap),
     Normals(NormalGenerationReport),
+    SpaceConversion(SpaceConversionReport),
 }
 
 impl PostProcessReport {
+    pub(crate) fn space_conversion(
+        input_generation: SceneGenerationId,
+        options: SpaceConversionOptions,
+        output_generation: SceneGenerationId,
+        resources: PostProcessResourceEvidence,
+        effects: Option<SpaceConversionReport>,
+    ) -> Self {
+        Self {
+            operation: PostProcessOperation::ConvertSpace {
+                input_generation,
+                options,
+            },
+            output_generation,
+            resources,
+            result: effects.map_or(OperationResult::Unchanged, OperationResult::SpaceConversion),
+        }
+    }
+
+    /// Returns retained source/target declarations and winding effects for a changed conversion.
+    pub const fn space_conversion_effects(&self) -> Option<&SpaceConversionReport> {
+        match &self.result {
+            OperationResult::SpaceConversion(report) => Some(report),
+            _ => None,
+        }
+    }
+
     pub(crate) fn triangulation(
         target: PrimitiveId,
         output_generation: SceneGenerationId,
@@ -106,6 +139,9 @@ impl PostProcessReport {
         match self.operation {
             PostProcessOperation::Triangulate { target }
             | PostProcessOperation::GenerateNormals { target, .. } => target.generation(),
+            PostProcessOperation::ConvertSpace {
+                input_generation, ..
+            } => input_generation,
         }
     }
 

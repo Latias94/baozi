@@ -1,8 +1,10 @@
 use baozi::{
-    AttributeData, AttributeDomain, Importer, TopologyKind,
+    AttributeData, AttributeDomain, Axis, FrontFaceWinding, Handedness, Importer, SceneSpaceField,
+    TargetSpace, TopologyKind,
     postprocess::{
         ExistingNormals, NormalOptions, PostProcessControl, PostProcessOperation,
-        PostProcessRunDisposition, PrimitiveCorner, generate_normals, triangulate_primitive,
+        PostProcessRunDisposition, PrimitiveCorner, SpaceConversionOptions, convert_scene_space,
+        generate_normals, triangulate_primitive,
     },
 };
 
@@ -153,9 +155,78 @@ pub fn verify(importer: &Importer) -> baozi::Result<()> {
         panic!("normal generation must preserve corner UVs");
     };
     assert_eq!(values, expected_uvs);
+    let source_indices = output.indices().unwrap().to_vec();
+    let source_generation = scene.generation();
+    let target = TargetSpace::try_new(
+        Handedness::Left,
+        Axis::PositiveY,
+        Axis::NegativeZ,
+        0.01,
+        FrontFaceWinding::CounterClockwise,
+    )
+    .unwrap();
+    let (scene, conversion) = convert_scene_space(
+        scene,
+        SpaceConversionOptions {
+            target,
+            source_assumptions: Some(TargetSpace::STANDARD),
+        },
+        PostProcessControl::default(),
+    )
+    .expect("the public static Scene must convert to an explicit space")
+    .into_parts();
+    let effects = conversion.space_conversion_effects().unwrap();
+    assert_eq!(effects.input_generation(), source_generation);
+    assert_eq!(effects.output_generation(), scene.generation());
+    assert_eq!(effects.target(), target);
+    assert!(effects.assumed_source_field(SceneSpaceField::UnitScaleToMeters));
+    assert!(effects.reverses_triangle_winding());
+    assert_eq!(conversion.resources().current_live_bytes(), 0);
+    assert_eq!(conversion.resources().active_reservations(), 0);
+    let output = scene.meshes().next().unwrap().primitives().next().unwrap();
+    let AttributeData::DenseF32 {
+        values: positions,
+        lanes: 3,
+    } = output.positions().unwrap().data()
+    else {
+        panic!("converted positions");
+    };
+    assert_eq!(
+        positions,
+        &[
+            0.0, 0.0, 0.0, -100.0, 0.0, 0.0, -100.0, 100.0, 0.0, 0.0, 100.0, 0.0
+        ]
+    );
+    let AttributeData::DenseF32 {
+        values: uvs,
+        lanes: 2,
+    } = output.texcoords(0, AttributeDomain::Corner).unwrap().data()
+    else {
+        panic!("converted UVs");
+    };
+    let AttributeData::DenseF32 {
+        values: normals,
+        lanes: 3,
+    } = output.normals(AttributeDomain::Corner).unwrap().data()
+    else {
+        panic!("converted normals");
+    };
+    for triangle in 0..2 {
+        for (output_lane, source_lane) in [0, 2, 1].into_iter().enumerate() {
+            let corner = triangle * 3 + output_lane;
+            let origin = triangle * 3 + source_lane;
+            assert_eq!(output.indices().unwrap()[corner], source_indices[origin]);
+            assert_eq!(
+                &uvs[corner * 2..corner * 2 + 2],
+                &expected_uvs[origin * 2..origin * 2 + 2]
+            );
+            assert_eq!(&normals[corner * 3..corner * 3 + 3], &[0.0, 0.0, 1.0]);
+        }
+    }
     drop(scene);
     drop(import_evidence);
     assert_eq!(remap.source_face_triangle_offsets(), &[0, 2]);
     assert_eq!(normal_evidence.input_target(), normal_target);
+    assert_eq!(effects.target(), target);
     Ok(())
 }

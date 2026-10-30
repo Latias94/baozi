@@ -1,28 +1,37 @@
-//! Shared publication transaction for the closed set of concrete geometry operations.
+//! Shared publication transaction for the closed set of concrete Scene operations.
+
+#![allow(
+    clippy::result_large_err,
+    reason = "exact terminal errors retain their bounded evidence owners without a rejection-path allocation"
+)]
 
 use crate::direct_error::FailureOwner;
 use crate::operation::runtime::{REJECTION_CODE, final_progress};
 use crate::operation::{PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit};
 use crate::{PostProcessControlCause, PostProcessResourceEvidence};
 use baozi_core::scene::integration::{
-    SceneGeometryEditAdmission, SceneGeometryEditEvidence, SceneGeometryEditRejection,
-    SceneNormalReplacement, SceneTriangulationReplacement, consume_scene_edit_freeze_permit,
+    ResolvedSceneSpaceConversion, SceneCanonicalRootTag, SceneEditAdmission, SceneEditEvidence,
+    SceneEditEvidenceTag, SceneEditOutput, SceneEditPostflight, SceneEditRejection,
+    SceneEditTransaction, SceneEditValidationProof, SceneNormalReplacement,
+    SceneSpaceConversionIssue, SceneTriangulationReplacement, consume_scene_edit_freeze_permit,
 };
 use baozi_core::{PrimitiveId, SceneValidationLimits, ValidatedScene};
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
-    CanonicalFreezePermitIssue, CanonicalValidationProgress, StoreCanonicalRejection,
+    ActivatedCanonicalStoreSession, CanonicalActivationOutcome, CanonicalActivationSeal,
+    CanonicalCandidateStoreSession, CanonicalCentralValidationOutcome, CanonicalFreezePermitIssue,
+    CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner, StoreCanonicalRejection,
     StoreNeverActivatedCause,
 };
 use baozi_operation::__retained_store_integration::authority::{
-    PreparedStoreFailure, PreparedStoreFallback, PreparedStoreSuccessOutcome,
+    CanonicalInheritanceSource, PreparedStoreFailure, PreparedStoreFallback,
+    PreparedStoreSuccessOutcome,
 };
 use baozi_operation::{
     PublishedStoreFallbackParts, RecordBlock, StorePreparationFailureClass, StoreRuntimeError,
     StoreTerminalCause,
 };
 
-pub(crate) enum PreparedGeometry {
+pub(crate) enum PreparedEdit<'a> {
     Triangulation {
         target: PrimitiveId,
         origins: crate::triangulate::input::Origins,
@@ -32,14 +41,17 @@ pub(crate) enum PreparedGeometry {
         options: crate::NormalOptions,
         values: crate::normals::input::GeneratedNormals,
     },
+    Space {
+        resolved: ResolvedSceneSpaceConversion<'a>,
+    },
 }
 
-impl PreparedGeometry {
+impl PreparedEdit<'_> {
     fn transaction<'a>(
         &'a self,
         input: &'a ValidatedScene,
-        admission: SceneGeometryEditAdmission,
-    ) -> baozi_core::scene::integration::SceneGeometryEditTransaction<'a> {
+        admission: SceneEditAdmission,
+    ) -> baozi_core::scene::integration::SceneEditTransaction<'a> {
         match self {
             Self::Triangulation { target, origins } => admission.into_transaction(
                 input,
@@ -67,6 +79,9 @@ impl PreparedGeometry {
                 ),
                 SceneValidationLimits::default(),
             ),
+            Self::Space { resolved } => {
+                admission.into_space_transaction(*resolved, SceneValidationLimits::default())
+            }
         }
     }
 }
@@ -81,6 +96,9 @@ pub(crate) enum EditCause {
     },
     FinalControl,
     CoreRejected,
+    SpaceIssue {
+        issue: SceneSpaceConversionIssue,
+    },
     CentralValidation,
     Publication,
     Containment {
@@ -134,57 +152,75 @@ impl EditFailure {
     }
 }
 
-#[allow(
-    clippy::result_large_err,
-    reason = "all exact terminal owners remain inline"
-)]
-pub(crate) fn execute_changed(
-    input: &ValidatedScene,
-    owner: baozi_operation::__retained_store_integration::activation::RetainedStoreSessionOutcomeOwner<
-        PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit,
-        baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource,
-    >,
-    admission: SceneGeometryEditAdmission,
-    data: PreparedGeometry,
-) -> Result<
+type EditResult = Result<
     (
         ValidatedScene,
-        SceneGeometryEditEvidence,
+        SceneEditEvidence,
         PostProcessResourceEvidence,
     ),
     EditFailure,
-> {
+>;
+type EditOwner = RetainedStoreSessionOutcomeOwner<
+    PostProcessOwner,
+    PostProcessProgressPhase,
+    PostProcessProgressUnit,
+    CanonicalInheritanceSource,
+>;
+type EditActivation = CanonicalActivationOutcome<
+    PostProcessOwner,
+    PostProcessProgressPhase,
+    PostProcessProgressUnit,
+    SceneEditOutput,
+    SceneEditRejection,
+    RecordBlock,
+    SceneCanonicalRootTag,
+    CanonicalInheritanceSource,
+>;
+type ActivatedEdit = ActivatedCanonicalStoreSession<
+    PostProcessOwner,
+    PostProcessProgressPhase,
+    PostProcessProgressUnit,
+    SceneEditOutput,
+    RecordBlock,
+    SceneCanonicalRootTag,
+    CanonicalInheritanceSource,
+>;
+type CentralEdit = CanonicalCentralValidationOutcome<
+    PostProcessOwner,
+    PostProcessProgressPhase,
+    PostProcessProgressUnit,
+    SceneEditOutput,
+    SceneEditValidationProof,
+    SceneEditRejection,
+    RecordBlock,
+    SceneCanonicalRootTag,
+    RecordBlock,
+    SceneEditEvidenceTag,
+>;
+type EditCandidate = CanonicalCandidateStoreSession<
+    PostProcessOwner,
+    PostProcessProgressPhase,
+    PostProcessProgressUnit,
+    SceneEditOutput,
+    SceneEditValidationProof,
+    RecordBlock,
+    SceneCanonicalRootTag,
+    RecordBlock,
+    SceneEditEvidenceTag,
+>;
+
+// Each phase consumes the preceding linear owner. Keeping activation, central validation, and
+// publication in separate frames prevents debug builds from reserving all mutually exclusive
+// typestate temporaries in every caller. Scratch stays alive through central correspondence and
+// is dropped before any terminal preparation; these are boundaries of the same transaction.
+pub(crate) fn execute_changed(
+    input: &ValidatedScene,
+    owner: EditOwner,
+    admission: SceneEditAdmission,
+    data: PreparedEdit<'_>,
+) -> EditResult {
     let mut transaction = data.transaction(input, admission);
-    let activated = owner
-        .plan_and_activate_scoped(|mut planning| {
-            let ready = match planning.begin_semantic_work() {
-                Ok(mut semantic) => match transaction.preflight(&mut semantic) {
-                    Ok(plan) => match semantic.finish_exact() {
-                        Ok(completion) => Ok((plan, completion)),
-                        Err(cause) => {
-                            drop(plan);
-                            Err(SceneGeometryEditRejection::Runtime(cause))
-                        }
-                    },
-                    Err(cause) => {
-                        let _ = semantic.finish_rejected();
-                        Err(cause)
-                    }
-                },
-                Err(cause) => Err(SceneGeometryEditRejection::Runtime(cause)),
-            };
-            let (plan, completion) = match ready {
-                Ok(ready) => ready,
-                Err(cause) => return planning.reject(cause, REJECTION_CODE),
-            };
-            match planning.seal_activation(plan, completion) {
-                CanonicalActivationSeal::Sealed(permit) => {
-                    permit.activate(|lane, plan| plan.materialize(lane))
-                }
-                CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
-            }
-        })
-        .map_err(|source| EditFailure::new(EditCause::Containment { source }))?;
+    let activated = activate_edit(owner, &mut transaction)?;
     let postflight = transaction.finish();
     let activated = match activated {
         CanonicalActivationOutcome::Activated(activated) => activated,
@@ -208,7 +244,55 @@ pub(crate) fn execute_changed(
             return Err(publish_fallback(prepared, cause));
         }
     };
-    let central = activated
+    let central = validate_edit(activated, postflight)?;
+    // Retained evidence owns the complete relation. End caller scratch leases before preparation.
+    drop(data);
+    finish_validation(central)
+}
+
+#[inline(never)]
+fn activate_edit(
+    owner: EditOwner,
+    transaction: &mut SceneEditTransaction<'_>,
+) -> Result<EditActivation, EditFailure> {
+    owner
+        .plan_and_activate_scoped(|mut planning| {
+            let ready = match planning.begin_semantic_work() {
+                Ok(mut semantic) => match transaction.preflight(&mut semantic) {
+                    Ok(plan) => match semantic.finish_exact() {
+                        Ok(completion) => Ok((plan, completion)),
+                        Err(cause) => {
+                            drop(plan);
+                            Err(SceneEditRejection::Runtime(cause))
+                        }
+                    },
+                    Err(cause) => {
+                        let _ = semantic.finish_rejected();
+                        Err(cause)
+                    }
+                },
+                Err(cause) => Err(SceneEditRejection::Runtime(cause)),
+            };
+            let (plan, completion) = match ready {
+                Ok(ready) => ready,
+                Err(cause) => return planning.reject(cause, REJECTION_CODE),
+            };
+            match planning.seal_activation(plan, completion) {
+                CanonicalActivationSeal::Sealed(permit) => {
+                    permit.activate(|lane, plan| plan.materialize(lane))
+                }
+                CanonicalActivationSeal::Unsealed(failure) => failure.finish(),
+            }
+        })
+        .map_err(|source| EditFailure::new(EditCause::Containment { source }))
+}
+
+#[inline(never)]
+fn validate_edit(
+    activated: ActivatedEdit,
+    postflight: SceneEditPostflight<'_>,
+) -> Result<CentralEdit, EditFailure> {
+    activated
         .validate_centrally(
             CanonicalValidationProgress::new(
                 PostProcessProgressPhase::Validation,
@@ -217,9 +301,11 @@ pub(crate) fn execute_changed(
             |lane, output| postflight.build_evidence(lane, output),
             |planning, output| postflight.validate_candidate(planning, output),
         )
-        .map_err(|source| EditFailure::new(EditCause::Containment { source }))?;
-    // Retained origins in central evidence now own the complete remap. Temporary leases end here.
-    drop(data);
+        .map_err(|source| EditFailure::new(EditCause::Containment { source }))
+}
+
+#[inline(never)]
+fn finish_validation(central: CentralEdit) -> EditResult {
     let candidate = match central {
         CanonicalCentralValidationOutcome::Candidate(candidate) => candidate,
         CanonicalCentralValidationOutcome::Rejected(rejected) => {
@@ -242,6 +328,11 @@ pub(crate) fn execute_changed(
             return Err(resolve_fallback(fallback.prepare_minimal_fallback(), cause));
         }
     };
+    publish_candidate(candidate)
+}
+
+#[inline(never)]
+fn publish_candidate(candidate: EditCandidate) -> EditResult {
     let freeze = candidate
         .try_issue_freeze_permit(final_progress())
         .map_err(|source| EditFailure::new(EditCause::Containment { source }))?;
@@ -297,14 +388,15 @@ pub(crate) fn execute_changed(
     .map_err(|source| EditFailure::new(EditCause::Containment { source }))?
 }
 
-fn core_requested(cause: &SceneGeometryEditRejection) -> EditCause {
+fn core_requested(cause: &SceneEditRejection) -> EditCause {
     match cause {
-        SceneGeometryEditRejection::Runtime(cause) => cause.clone().into(),
+        SceneEditRejection::Runtime(cause) => cause.clone().into(),
+        SceneEditRejection::Space(issue) => EditCause::SpaceIssue { issue: *issue },
         _ => EditCause::CoreRejected,
     }
 }
 
-fn core_rejection(cause: &StoreCanonicalRejection<SceneGeometryEditRejection>) -> EditCause {
+fn core_rejection(cause: &StoreCanonicalRejection<SceneEditRejection>) -> EditCause {
     match cause {
         StoreCanonicalRejection::Runtime(cause) => cause.clone().into(),
         StoreCanonicalRejection::Requested(cause) => core_requested(cause),
@@ -357,7 +449,7 @@ fn publish_fallback(prepared: PreparedStoreFallback, cause: EditCause) -> EditFa
 fn publish_rich_failure(
     prepared: PreparedStoreFailure<
         RecordBlock,
-        baozi_core::scene::integration::SceneGeometryEditEvidenceTag,
+        baozi_core::scene::integration::SceneEditEvidenceTag,
     >,
     cause: EditCause,
 ) -> EditFailure {

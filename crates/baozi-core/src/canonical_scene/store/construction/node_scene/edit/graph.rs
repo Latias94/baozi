@@ -104,6 +104,33 @@ where
             )?;
             (nodes, geometry)
         }
+        NodeSceneEditProgram::ConvertSpace {
+            nodes,
+            geometry,
+            conversion,
+        } => {
+            let nodes = if conversion.changes_coordinates() {
+                lane.try_retain_storage(
+                    nodes.capacities(),
+                    nodes.work(),
+                    nodes.name_bytes() as u64,
+                    |control| nodes.materialize(control).map_err(map_build),
+                )?
+            } else {
+                lane.try_share_storage(&pending.input.tables.nodes)?
+            };
+            let geometry = if conversion.is_identity() {
+                lane.try_share_storage(&pending.input.tables.geometry)?
+            } else {
+                lane.try_retain_storage(
+                    geometry.capacities(),
+                    geometry.work(),
+                    geometry.name_bytes() as u64,
+                    |control| geometry.materialize(control).map_err(map_build),
+                )?
+            };
+            (nodes, geometry)
+        }
     };
     let profile = retain_edited_profile(
         lane,
@@ -112,7 +139,22 @@ where
         &pending.operation,
     )?;
     let inherited = inherit_unchanged_evidence_leaves(lane, pending)?;
-    let spatial = lane.try_share_storage(&pending.input.tables.spatial)?;
+    let spatial = if let NodeSceneEditProgram::ConvertSpace { conversion, .. } = &pending.program {
+        let source = pending.input.tables.spatial.as_ref();
+        let plan = crate::canonical_scene::store::typed_storage::spatial::build::SpatialStoragePlan::for_storage(source)
+            .map_err(StoreRuntimeError::Plan)?;
+        lane.try_retain_storage(
+            plan.capacities(),
+            plan.work().map_err(StoreRuntimeError::Plan)?,
+            plan.name_bytes() as u64,
+            |control| {
+                plan.rewrite_space(source, conversion.target(), control)
+                    .map_err(map_build)
+            },
+        )?
+    } else {
+        lane.try_share_storage(&pending.input.tables.spatial)?
+    };
     let appearance = rewrite_appearance(lane, pending, inherited.appearance)?;
     let deformation = rewrite_deformation(lane, pending, inherited.deformation)?;
     let animation = rewrite_animation(lane, pending, inherited.animation)?;

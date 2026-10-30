@@ -289,8 +289,11 @@ dense F32 positions, preserves topology and unrelated scalar bits, and owns oper
 published evidence. Its complete attribute key and owner mapping replace implicit semantic-only
 selection; multi-domain field edits outside the supported policy return explicit capability errors.
 The [delivery progress](../reviews/2026-10-29-delivery-progress.md) records numerical, ownership,
-cancellation, package, and target verification. Coordinate/unit conversion and application vertex
-unification remain required to complete F.
+cancellation, package, and target verification. Direct whole-Scene static coordinate/unit conversion
+now uses that same transaction, complete validated target facts, and explicit source assumptions.
+It preserves authored node form and dense/sparse attribute domains, with typed rejection of present
+spatial semantics it cannot yet convert. Deformation/animation/camera/light conversion and application
+vertex unification remain required to complete F; the static conversion is a bounded increment.
 
 Add an explicit helper or operation for unifying corner attributes into application vertex tuples.
 Do not assume triangles alone form a GPU-ready vertex/index layout. Lossy influence truncation and

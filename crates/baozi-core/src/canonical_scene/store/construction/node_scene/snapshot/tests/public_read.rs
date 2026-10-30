@@ -383,10 +383,6 @@ fn spatial_readers_borrow_retained_values_after_authoring_storage_is_dropped() {
         );
         assert_eq!(space.front_face_winding, FrontFaceWinding::Clockwise);
         assert_eq!(space.uv_origin, UvOrigin::LowerLeft);
-        assert_eq!(
-            space.transform_convention,
-            TransformConvention::ColumnVectorLocalToParent
-        );
         let crate::TangentBasisRef::Namespaced { name, version } = space.tangent_basis else {
             panic!("the retained tangent-basis identity must remain borrowed");
         };

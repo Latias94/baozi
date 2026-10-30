@@ -176,14 +176,15 @@ impl std::error::Error for NormalFailure {
         Some(&self.cause)
     }
 }
-impl From<crate::geometry_edit::EditFailure> for NormalFailure {
-    fn from(failure: crate::geometry_edit::EditFailure) -> Self {
-        use crate::geometry_edit::EditCause;
+impl From<crate::scene_edit::EditFailure> for NormalFailure {
+    fn from(failure: crate::scene_edit::EditFailure) -> Self {
+        use crate::scene_edit::EditCause;
         let cause = match failure.cause {
             EditCause::Runtime { source } => NormalCause::Runtime { source },
             EditCause::Control { cause } => NormalCause::Control { cause },
             EditCause::FinalControl => NormalCause::FinalControl,
             EditCause::CoreRejected => NormalCause::CoreRejected,
+            EditCause::SpaceIssue { .. } => NormalCause::CoreRejected,
             EditCause::CentralValidation => NormalCause::CentralValidation,
             EditCause::Publication => NormalCause::Publication,
             EditCause::Containment { source } => NormalCause::Containment { source },

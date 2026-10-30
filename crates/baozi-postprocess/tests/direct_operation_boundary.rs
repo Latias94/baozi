@@ -136,6 +136,10 @@ fn public_direct_operation_types_preserve_thread_transfer_contracts() {
     assert_send_sync::<baozi_postprocess::NormalCause>();
     assert_send_sync::<baozi_postprocess::NormalFailure>();
     assert_send_sync::<baozi_postprocess::NormalGenerationReport>();
+    assert_send_sync::<baozi_postprocess::SpaceConversionOptions>();
+    assert_send_sync::<baozi_postprocess::SpaceConversionCause>();
+    assert_send_sync::<baozi_postprocess::SpaceConversionFailure>();
+    assert_send_sync::<baozi_postprocess::SpaceConversionReport>();
     assert_send::<PostProcessControl>();
     assert_send::<PostProcessRunFailure>();
     assert_send::<PostProcessRunOutcome>();

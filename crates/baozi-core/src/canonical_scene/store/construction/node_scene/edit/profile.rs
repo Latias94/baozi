@@ -15,6 +15,7 @@ use crate::canonical_scene::store::production::{CanonicalProfileOwner, ProfileOw
 use crate::canonical_scene::store::profile_provenance::{
     ProfileProvenanceRef, ProfileSegmentAddressDomain, issue_profile_segment_nonce,
 };
+use crate::canonical_scene::store::typed_storage::TableRange;
 use crate::canonical_scene::store::typed_storage::build::{
     BuildResult, TypedStorageBuildControl, TypedStorageBuildError, allocate, capacity, count_work,
     finish, push,
@@ -29,7 +30,6 @@ use crate::canonical_scene::store::typed_storage::profile::{
     StoredOperationKind, StoredProfileOwner, StoredProfileSegment, StoredProvenance,
     StoredProvenanceKind,
 };
-use crate::canonical_scene::store::typed_storage::{GeometryStorage, TableRange};
 use crate::canonical_scene::store::validation::ProfileMeteredCounts;
 use crate::provenance::{DIGEST_LEN, OperationIdentity, OperationKind};
 
@@ -49,11 +49,59 @@ pub(super) enum ProfileEditTargets {
         attributes: NormalAttributeMapping,
         smooth: bool,
     },
+    Space(crate::space_conversion::SpaceConversion),
 }
 
 impl ProfileEditTargets {
-    fn selects(self, owner: CanonicalProfileOwner, geometry: &GeometryStorage) -> bool {
+    fn selects(self, owner: CanonicalProfileOwner, input: &SceneStorage) -> bool {
+        let geometry = input.read_geometry();
         match (self, owner) {
+            (Self::Space(_), CanonicalProfileOwner::Scene) => true,
+            (Self::Space(conversion), CanonicalProfileOwner::Node(index)) => {
+                conversion.changes_coordinates()
+                    && input
+                        .read_nodes()
+                        .nodes
+                        .get(index as usize)
+                        .and_then(|row| row.transform.authored())
+                        .is_some_and(|authored| {
+                            conversion
+                                .authored_transform(authored)
+                                .is_ok_and(|converted| !authored.has_same_authored_bits(converted))
+                        })
+            }
+            (Self::Space(conversion), CanonicalProfileOwner::Primitive(index)) => geometry
+                .primitives
+                .get(index as usize)
+                .is_some_and(|primitive| {
+                    (conversion.changes_coordinates() && primitive.vertex_count != 0)
+                        || (conversion.reverse_winding()
+                            && primitive.topology == crate::geometry::TopologyKind::TriangleList
+                            && primitive.corner_count != 0)
+                }),
+            (Self::Space(conversion), CanonicalProfileOwner::Attribute(index)) => {
+                let Some(attribute) = geometry.attributes.get(index as usize) else {
+                    return false;
+                };
+                if conversion.changes_coordinates() && matches!(attribute.semantic,
+                    crate::canonical_scene::store::typed_storage::StoredAttributeSemantic::Position
+                    | crate::canonical_scene::store::typed_storage::StoredAttributeSemantic::Normal
+                    | crate::canonical_scene::store::typed_storage::StoredAttributeSemantic::Tangent) { return true; }
+                if !conversion.reverse_winding() || attribute.domain != AttributeDomain::Corner {
+                    return false;
+                }
+                // Validated u32 cardinalities bound this binary lookup to 32 comparisons.
+                let primitive = geometry
+                    .primitives
+                    .partition_point(|primitive| primitive.attributes.start() <= index as usize);
+                primitive
+                    .checked_sub(1)
+                    .and_then(|index| geometry.primitives.get(index))
+                    .is_some_and(|primitive| {
+                        primitive.topology == crate::geometry::TopologyKind::TriangleList
+                            && primitive.corner_count != 0
+                    })
+            }
             (Self::Node(target), CanonicalProfileOwner::Node(node)) => target == node,
             (Self::Triangulation { primitive }, CanonicalProfileOwner::Primitive(index)) => {
                 primitive == index as usize
@@ -208,6 +256,9 @@ fn owner_parents(
         };
     } else {
         owners[0] = Some(targets.source_owner(output_owner)?);
+        if matches!(targets, ProfileEditTargets::Space(_)) {
+            owners[1] = Some(CanonicalProfileOwner::Scene);
+        }
     }
     let mut parents = OwnerParents {
         lists: [&[]; 4],
@@ -272,7 +323,7 @@ impl NodeSceneEditProfilePlan {
         for ordinal in 0..output_layout.owner_count() {
             poll()?;
             let owner = output_layout.owner_at(ordinal).ok_or_else(invalid)?;
-            let count = if targets.selects(owner, input.read_geometry()) {
+            let count = if targets.selects(owner, input) {
                 let sources =
                     owner_parents(input, source_layout, targets, owner).ok_or_else(invalid)?;
                 let mut source_count = 0_u32;
@@ -415,7 +466,7 @@ impl NodeSceneEditProfilePlan {
                 .run_unit(|| self.output_layout.owner_at(ordinal))
                 .map_err(TypedStorageBuildError::Control)?
                 .ok_or(TypedStorageBuildError::Invariant)?;
-            if !self.targets.selects(owner, input.read_geometry()) {
+            if !self.targets.selects(owner, input) {
                 continue;
             }
             let sources = owner_parents(input, self.source_layout, self.targets, owner)
@@ -502,7 +553,7 @@ impl NodeSceneEditProfilePlan {
                 .owner_at(ordinal)
                 .ok_or(TypedStorageBuildError::Invariant)?;
             let start = attachments.len();
-            let maximum_depth = if self.targets.selects(owner, input.read_geometry()) {
+            let maximum_depth = if self.targets.selects(owner, input) {
                 let reference = domain
                     .reference(local)
                     .ok_or(TypedStorageBuildError::Invariant)?;

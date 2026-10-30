@@ -105,6 +105,15 @@ pub(super) enum NodeSceneEditProgram<'scene> {
         >,
         smooth: bool,
     },
+    ConvertSpace {
+        nodes:
+            crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlan<'scene>,
+        geometry:
+            crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlan<
+                'scene,
+            >,
+        conversion: crate::space_conversion::SpaceConversion,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -146,6 +155,7 @@ impl NodeSceneEditProgram<'_> {
             Self::NodeTransform(_) => OperationKind::Transform,
             Self::TriangulatePrimitive(_) => OperationKind::Split,
             Self::GenerateNormals { .. } => OperationKind::Generated,
+            Self::ConvertSpace { .. } => OperationKind::Transform,
         }
     }
 }
@@ -230,6 +240,9 @@ impl NodeSceneEditFixedCounts {
                     smooth: *smooth,
                 }
             }
+            NodeSceneEditProgram::ConvertSpace { conversion, .. } => {
+                ProfileEditTargets::Space(*conversion)
+            }
         };
         let source_evidence = input.proof.counts();
         // The concrete operation supplies the final domain counts before profile planning.
@@ -260,6 +273,7 @@ impl NodeSceneEditFixedCounts {
             NodeSceneEditProgram::GenerateNormals { geometry, .. } => {
                 Some(geometry.validation_work())
             }
+            NodeSceneEditProgram::ConvertSpace { geometry, .. } => Some(geometry.validation_work()),
         };
         if let Some(work) = geometry_work {
             central_validation_plan = central_validation_plan.try_rebind_geometry(
@@ -520,6 +534,40 @@ impl PendingNodeSceneEdit {
 }
 
 impl<'scene> BoundPendingNodeSceneEdit<'scene> {
+    pub(super) fn try_space_conversion(
+        input: &'scene SceneStorage,
+        nodes: crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlan<
+            'scene,
+        >,
+        geometry: crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlan<'scene>,
+        conversion: crate::space_conversion::SpaceConversion,
+        options: crate::provenance::OptionsDigest,
+        poll: &mut impl FnMut() -> Result<(), NodeSceneEditPlanError>,
+    ) -> Result<Self, NodeSceneEditPlanError> {
+        let program = NodeSceneEditProgram::ConvertSpace {
+            nodes,
+            geometry,
+            conversion,
+        };
+        let proof = input.proof;
+        let counts = NodeSceneEditFixedCounts::try_new_for_program(
+            input,
+            &program,
+            proof.source_node_count(),
+            proof.source_root_count(),
+            proof.source_edge_count(),
+            poll,
+        )?;
+        Ok(Self {
+            _seal: BoundSourceSeal,
+            input,
+            program,
+            operation: OperationIdentity::new(OperationKind::Transform, options),
+            counts,
+            invalidations: CanonicalInvalidations::scene_bounds_invalidated(),
+        })
+    }
+
     pub(super) fn try_normals(
         input: &'scene SceneStorage,
         geometry: crate::canonical_scene::store::typed_storage::edit::normals::GeometryNormalsPlan<

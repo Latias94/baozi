@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-13
+updated: 2026-10-30
 authors:
   - Codex
 decision_type: architecture
@@ -34,7 +34,8 @@ Public math semantics are fixed independently from memory layout:
 | Topic | Canonical meaning |
 | --- | --- |
 | vectors | right/left handedness comes from `SceneSpace`, not the vector type |
-| matrices | column vectors; `p_parent = M_local_to_parent * p_local`; indexed accessors name row and column |
+| matrices | column vectors; indexed accessors name row and column; a matrix's domain defines its source and destination spaces |
+| authored node transforms | local-to-parent; `p_parent = M_local_to_parent * p_local`; TRS composes as `T * R * S` |
 | quaternion | `(x, y, z, w)` component meaning, finite unit rotation within documented tolerance; named constructors avoid positional ambiguity |
 | angles | radians |
 | normals | inverse-transpose under non-uniform scale |
@@ -62,12 +63,19 @@ The raw scene preserves source numbers and records a complete `SceneSpace`:
 - clockwise or counter-clockwise front-face winding
 - upper-left or lower-left UV origin, or unknown
 - tangent basis convention and handedness encoding, or unknown
-- column-vector, local-to-parent transform convention used by the canonical math API
+
+Column vectors and local-to-parent authored node transforms are fixed canonical API semantics,
+not source facts or target options. `SceneSpace` does not carry a duplicate transform-convention
+tag. Inverse bind, correction, and other matrices retain their domain-specific source/destination
+spaces; their meaning is not redefined as a node transform. Removing the redundant tag changes the
+deterministic snapshot schema to revision 4.
 
 Unknown is an explicit value, never a guessed default. The standard spatial target is right-handed,
-positive Y up, meters, and counter-clockwise front faces. UV origin and tangent basis are preserved
-unless the requested target explicitly names them; generated tangents use the documented Baozi
-basis. Reaching any target requires an explicit postprocess operation.
+positive Y up, negative Z front, meters, and counter-clockwise front faces. `TargetSpace` requires
+these five known spatial facts together. Coordinate conversion preserves UV origin and tangent
+basis declarations. A separate implemented operation is required to change those conventions;
+generated tangents use the documented Baozi basis. Reaching any target requires an explicit
+postprocess operation.
 
 Validation rejects signed up/front axes on the same underlying axis. When both are known, they and
 the declared handedness must derive one finite orthonormal side axis; a complete-space claim cannot
@@ -130,6 +138,26 @@ returns a scene whose metadata claims a conversion that only base geometry recei
 A basis transform with negative determinant reverses topology winding when required to preserve the
 declared front face and updates tangent handedness consistently. The operation validates the output
 space descriptor and geometric orientation together before commit.
+
+For signed cardinal axes, define the basis columns as `(side, up, front)`, where
+`side = handedness_sign * cross(front, up)`. Conversion from source to target uses the signed
+permutation `Q = B_target * transpose(B_source)` and positive unit ratio
+`s = source_units / target_units`. Positions and translations use `s * Q`, normals and tangent
+directions use `Q`, tangent `w` uses `det(Q)`, and a local-to-parent matrix uses
+`H * M * inverse(H)` with `H = diag(s * Q, 1)`. TRS scale components are permuted without the
+basis signs or unit factor; quaternion vector components use `det(Q) * Q` and retain `w`.
+Matrix/TRS authored form is preserved, including shear and singular affine matrices.
+
+Triangle lanes reverse exactly when `(det(Q) < 0) XOR (source_winding != target_winding)`.
+Index and every Corner tuple follow the same `[0, 2, 1]` permutation. A winding-only change does
+not multiply tangent `w` again. Transported normals retain their physical direction; independently
+generating normals from index-order cross products follows that operation's numeric-basis contract.
+
+Unknown source facts require explicit source assumptions. A complete assumption may fill unknown
+fields and repeat matching known fields, but cannot override any known field. The target never
+supplies implicit source facts. A changed conversion reports exactly which fields were assumed.
+Numeric conversion uses F64 intermediates for the uniform scale and one final F32 rounding;
+non-finite output or a nonzero component rounding to zero rejects the transaction.
 
 Floating-point snapshots use deterministic ordering and per-field documented absolute/relative or
 angular tolerances. Tolerances are test comparison policy, not permission to clamp imported data.

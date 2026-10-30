@@ -44,7 +44,7 @@ use crate::provenance::{
 };
 use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
-    TangentHandednessEncoding, TransformConvention, UvOrigin,
+    TangentHandednessEncoding, UvOrigin,
 };
 
 use super::super::edit::{
@@ -57,34 +57,40 @@ use super::{
     NodeSceneSnapshotLimits, SnapshotWorkMeter, capture_node_scene_with_test_transcript,
 };
 
+// Revision 4 derives from the revision 3 handwritten transcripts by changing the
+// little-endian revision word at bytes 40..44 from 3 to 4 and removing the two
+// bytes for tag 0xae and its value. The spatial vector removes ae01 at byte 85;
+// the other vectors remove ae00 at byte 76. All other bytes remain unchanged.
+// Each digest is SHA-256 of the complete expected transcript below, independently
+// recomputed after verifying its revision 3 predecessor against the old digest.
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
-    0x62, 0xc6, 0x70, 0x44, 0x4e, 0x7d, 0x62, 0xaf, 0x06, 0xc2, 0x68, 0x97, 0xb1, 0x6f, 0xaa, 0xb9,
-    0xa8, 0x71, 0x61, 0x65, 0x66, 0x84, 0x40, 0x6a, 0x40, 0xb4, 0xe5, 0xbd, 0xe0, 0xe1, 0x82, 0x18,
+    0x88, 0x1b, 0xbe, 0x65, 0x9a, 0xb6, 0xfa, 0x88, 0xae, 0x84, 0xb7, 0x41, 0xc4, 0x22, 0x62, 0xa9,
+    0x64, 0xfb, 0x8a, 0x92, 0xfa, 0x2c, 0xe8, 0x62, 0x70, 0x4d, 0xb9, 0xc6, 0xe1, 0x6c, 0x67, 0x82,
 ];
 const KNOWN_GENERIC_METADATA_DIGEST: [u8; 32] = [
-    0x5e, 0xa9, 0x27, 0x10, 0x65, 0x80, 0xe8, 0x49, 0x5e, 0x4d, 0x07, 0x1e, 0x60, 0xe9, 0x58, 0x43,
-    0xaf, 0x6b, 0xbe, 0xf1, 0xda, 0x86, 0x4f, 0x03, 0x96, 0x8a, 0x77, 0x3d, 0x88, 0x85, 0x2a, 0xad,
+    0x9a, 0x0d, 0x7c, 0x93, 0x84, 0xbd, 0xda, 0xe1, 0x16, 0xb5, 0x1d, 0x6b, 0x4a, 0x7f, 0x62, 0x9a,
+    0xda, 0x9a, 0xd5, 0x53, 0x47, 0x96, 0xa3, 0x8a, 0x48, 0x2f, 0x88, 0xbb, 0xd5, 0x75, 0xc1, 0x3d,
 ];
 // Known vectors are factored at canonical domain and owner-row boundaries, but every
 // assertion still compares the complete transcript byte for byte.
 const KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740203000000030600",
-    "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c010b0000000000000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740204000000030600",
+    "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c010b0000000000000000",
     "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d0000000000000000",
     "0a020e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f",
     "0e0000803f0b0a00000000000000da0c00c40c00c50c00070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_DIGEST: [u8; 32] = [
-    0xc1, 0x61, 0x54, 0x36, 0x62, 0x1d, 0x1d, 0x8f, 0xc2, 0x4b, 0xac, 0x88, 0xe4, 0x99, 0xc9, 0xe8,
-    0xc5, 0x19, 0x2d, 0x15, 0x62, 0x56, 0xda, 0xc6, 0x0d, 0x85, 0xd4, 0xc2, 0x4e, 0x4e, 0xb0, 0xdc,
+    0x76, 0x34, 0x87, 0x06, 0xfe, 0x9e, 0x03, 0x5a, 0xc6, 0x6e, 0xff, 0x63, 0x72, 0xc9, 0x94, 0x14,
+    0xbe, 0x83, 0x65, 0xef, 0x1d, 0x2b, 0xc1, 0xe9, 0xbb, 0x20, 0x8b, 0x93, 0xa7, 0xad, 0x5c, 0x5a,
 ];
 const KNOWN_SPATIAL_DIGEST: [u8; 32] = [
-    0x13, 0xa8, 0xef, 0x81, 0x85, 0xdb, 0x78, 0x55, 0x6a, 0x83, 0xe9, 0xfe, 0x7a, 0x2e, 0xbb, 0x21,
-    0xdf, 0x67, 0xac, 0x25, 0x42, 0xa2, 0x6f, 0xde, 0x0d, 0x67, 0x63, 0x60, 0x8d, 0x60, 0xe1, 0xa8,
+    0xf8, 0xc8, 0x6d, 0x02, 0xd8, 0x8d, 0xda, 0x2a, 0xcd, 0x3a, 0x25, 0x8f, 0x87, 0x1a, 0x27, 0x7b,
+    0x84, 0x8c, 0x2e, 0xef, 0x0b, 0x82, 0xd7, 0xbc, 0x10, 0xaa, 0x10, 0xb2, 0xd3, 0x76, 0x43, 0x21,
 ];
 const KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020300000003060000000000000073",
-    "6861323536a60c01a7a802a904aa05ab0c01c67b14ae47e17a843fac01ad02ae01af02b015000000000000006578616d706c653a7461",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020400000003060000000000000073",
+    "6861323536a60c01a7a802a904aa05ab0c01c67b14ae47e17a843fac01ad02af02b015000000000000006578616d706c653a7461",
     "6e67656e742d6261736973b102000000b202b014000000000000006578616d706c653a74616e67656e742d7369676eb103000000b30c",
     "01b40d0000000000000000b500b6c70000803fb70c01c70000c03fb8c7cdcccc3db90c01c70000c8420b0100000000000000ba0c01bb",
     "0d0000000000000000bc02bd0c01c700004842be0c01c70000803ebf0c01c70000403fc0c70000803fc1c70000803fc2c70000803fc3",
@@ -93,8 +99,8 @@ const KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX: &str = concat!(
     "0000da0c00c40c010d0000000000000000c50c010d0000000000000000070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020300000003",
-    "0600000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c01",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020400000003",
+    "0600000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c01",
     "0b0000000000000000ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000",
     "000000000a010e0000803f0e000000000e000000000e000000000e000000000e0000803f0e000000000e000000",
     "000e000000000e000000000e0000803f0e000000000e000080400e000000000e000000000e0000803f0b100000",
@@ -111,14 +117,25 @@ const EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
     "00780c01790c010b00000000000000007f0c010b0000000000000000",
 );
 const EMPTY_SCENE_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740203000000030600",
-    "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c010b0000000000000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740204000000030600",
+    "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c010b0000000000000000",
     "ba0c010b0000000000000000040c010b0000000000000000050c010b0000000000000000",
 );
-const FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX: &str = concat!(
+const EMPTY_METADATA_LANES_TRANSCRIPT_HEX: &str = concat!(
     "c8ce01cb00ce00cf0000000000000000cb01ce00cf0000000000000000cb02ce00cf0000000000000000",
     "cb03ce00cf0000000000000000cb04ce00cf0000000000000000cb05ce00cf0000000000000000",
-    "cb06ce00cf0000000000000000c9cc01ce01cf0100000000000000cacc01cd0000000000000000",
+    "cb06ce00cf0000000000000000",
+);
+// The metadata fixture owns 172 text bytes (keys, string, and media type), four
+// bytes, one bool/i64/u64/f64 scalar each, and 29 f32 scalars. The empty Vec3 array
+// shares the present f32 lane and retains its explicit zero element count below.
+const KNOWN_GENERIC_METADATA_LANES_TRANSCRIPT_HEX: &str = concat!(
+    "c8ce01cb00ce01cfac00000000000000cb01ce01cf0400000000000000cb02ce01cf0100000000000000",
+    "cb03ce01cf0100000000000000cb04ce01cf0100000000000000cb05ce01cf0100000000000000",
+    "cb06ce01cf1d00000000000000",
+);
+const FRESH_PROFILE_LINEAGE_TRANSCRIPT_PREFIX_HEX: &str = concat!(
+    "c9cc01ce01cf0100000000000000cacc01cd0000000000000000",
     "cb00ce01d6190000000000000066697874757265732f6e6f64652d7363656e652f696e707574cb01d001cb05d000",
     "c9cc02ce01cf0100000000000000cacc02cd0000000000000000cb00d20000000000000000",
     "cb01ce01d611000000000000006f72672e62616f7a692e66697874757265cb02d000cb03d000",
@@ -177,13 +194,46 @@ const PROFILE_MESH_INSTANCE_0_OWNER_ROW_HEX: &str = concat!(
     "cb03ce01cf0100000000000000d700000000",
 );
 const EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX: &str = "c9cc06ce00cf0000000000000000";
+// Explicit rows for the handwritten all-value-kind metadata fixture. The field
+// bytes retain scene ownership, sorted keys, scalar bits, media type, and the
+// empty dense array's Vec3 element kind and f32 storage kind.
+const KNOWN_GENERIC_METADATA_TRANSCRIPT_HEX: &str = concat!(
+    "c9cc06ce01cf0c00000000000000",
+    "cacc06cd0000000000000000cb00d000cb01d100000000cb02ce01d60b00000000000000746573743a615f626f6f6c",
+    "cb03d000cb05d20100000000000000cb06d001",
+    "cacc06cd0100000000000000cb00d000cb01d100000000cb02ce01d60a00000000000000746573743a625f693634",
+    "cb03d001cb05d20100000000000000cb06d3f9ffffffffffffff",
+    "cacc06cd0200000000000000cb00d000cb01d100000000cb02ce01d60a00000000000000746573743a635f753634",
+    "cb03d002cb05d20100000000000000cb06d20900000000000000",
+    "cacc06cd0300000000000000cb00d000cb01d100000000cb02ce01d60a00000000000000746573743a645f663634",
+    "cb03d003cb05d20100000000000000cb06d50000000000000440",
+    "cacc06cd0400000000000000cb00d000cb01d100000000cb02ce01d60d00000000000000746573743a655f737472696e67",
+    "cb03d004cb05d20100000000000000cb06ce01d608000000000000006d65746164617461",
+    "cacc06cd0500000000000000cb00d000cb01d100000000cb02ce01d60c00000000000000746573743a665f6279746573",
+    "cb03d005cb05d20100000000000000cb07ce01d618000000000000006170706c69636174696f6e2f6f637465742d73747265616d",
+    "cb06ce01d60400000000000000000102ff",
+    "cacc06cd0600000000000000cb00d000cb01d100000000cb02ce01d60b00000000000000746573743a675f76656332",
+    "cb03d006cb05d20100000000000000cb06ce01cf0200000000000000d40000803fd400000040",
+    "cacc06cd0700000000000000cb00d000cb01d100000000cb02ce01d60b00000000000000746573743a685f76656333",
+    "cb03d007cb05d20100000000000000cb06ce01cf0300000000000000d400004040d400008040d40000a040",
+    "cacc06cd0800000000000000cb00d000cb01d100000000cb02ce01d60b00000000000000746573743a695f76656334",
+    "cb03d008cb05d20100000000000000cb06ce01cf0400000000000000d40000c040d40000e040d400000041d400001041",
+    "cacc06cd0900000000000000cb00d000cb01d100000000cb02ce01d60c00000000000000746573743a6a5f636f6c6f72",
+    "cb03d009cb05d20100000000000000cb06ce01cf0400000000000000d4cdcccc3dd4cdcc4c3ed49a99993ed4cdcccc3e",
+    "cacc06cd0a00000000000000cb00d000cb01d100000000cb02ce01d60b00000000000000746573743a6b5f6d617434",
+    "cb03d00acb05d20100000000000000cb06ce01cf1000000000000000d40000803fd400000000d400000000d400000000",
+    "d400000000d40000803fd400000000d400000000d400000000d400000000d40000803fd400000000",
+    "d400000000d400000000d400000000d40000803f",
+    "cacc06cd0b00000000000000cb00d000cb01d100000000cb02ce01d61200000000000000746573743a6c5f64656e73655f656d707479",
+    "cb03d00bcb04d005cb05d20000000000000000cb08d005cb06ce01cf0000000000000000",
+);
 const KNOWN_POINT_GEOMETRY_DIGEST: [u8; 32] = [
-    0xb2, 0x1a, 0x73, 0x52, 0x08, 0xd6, 0x62, 0xc3, 0x75, 0xd9, 0x06, 0x81, 0xd8, 0x73, 0x53, 0x04,
-    0x2d, 0x35, 0x09, 0x51, 0x17, 0xcc, 0xa2, 0xba, 0x8f, 0x20, 0xdc, 0x0f, 0xcc, 0x92, 0x1e, 0xa7,
+    0x8d, 0x7c, 0x0b, 0x17, 0x70, 0x28, 0x42, 0x09, 0xca, 0x0e, 0x1f, 0xc4, 0x21, 0x28, 0xff, 0xf9,
+    0x89, 0xd4, 0xe2, 0x7b, 0x5a, 0x7d, 0x3b, 0x3d, 0x34, 0xac, 0x09, 0xf6, 0x44, 0xc0, 0xfb, 0xb3,
 ];
 const KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020300000003060000",
-    "0000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00ae00af00b200b30c010b0000000000000000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020400000003060000",
+    "0000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c010b0000000000000000",
     "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a02",
     "0e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000",
     "803f0b0a00000000000000da0c00c40c00c50c00070c010b00000000000000000b0100000000000000330c01340c010b000000000000000038",
@@ -553,7 +603,6 @@ fn namespaced_scene_space() -> SceneSpace {
         unit_scale_to_meters: Some(0.01),
         front_face_winding: FrontFaceWinding::Clockwise,
         uv_origin: UvOrigin::LowerLeft,
-        transform_convention: TransformConvention::ColumnVectorLocalToParent,
         tangent_basis: TangentBasisConvention::try_namespaced(Some(extension_schema(
             "example:tangent-basis",
             2,
@@ -1006,7 +1055,7 @@ fn known_vector_is_stable_and_human_reviewable() {
             .expect("known Scene snapshot");
 
     assert_eq!(snapshot.domain, "baozi.canonical-scene.snapshot");
-    assert_eq!(snapshot.schema_revision, 3);
+    assert_eq!(snapshot.schema_revision, 4);
     assert_eq!(snapshot.algorithm, NodeSceneSnapshotAlgorithm::Sha256);
     assert_eq!(snapshot.digest, KNOWN_SINGLE_TRS_DIGEST);
     assert!(transcript.complete);
@@ -1015,7 +1064,8 @@ fn known_vector_is_stable_and_human_reviewable() {
         &[
             KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX,
             EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX,
-            FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX,
+            EMPTY_METADATA_LANES_TRANSCRIPT_HEX,
+            FRESH_PROFILE_LINEAGE_TRANSCRIPT_PREFIX_HEX,
             PROFILE_OWNER_COLLECTION_3_HEX,
             PROFILE_SCENE_OWNER_ROW_HEX,
             PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX,
@@ -1053,7 +1103,7 @@ fn known_vector_is_stable_and_human_reviewable() {
     assert_eq!(snapshot.totals.profile_owner_count, 3);
     assert_eq!(snapshot.totals.profile_attachment_count, 3);
     assert_eq!(snapshot.totals.profile_metadata_entry_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_012);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_010);
     assert_eq!(snapshot.totals.work_units, 109);
     assert!(snapshot.preview.text.contains("roots(present,total=1)=[0]"));
     assert!(snapshot.preview.text.contains("transform=trs(total=10)"));
@@ -1506,6 +1556,21 @@ fn generic_metadata_round_trips_every_value_kind_without_provenance_ids() {
     assert!(transcript.complete);
     assert_eq!(snapshot.totals.profile_metadata_entry_count, metadata.len());
     assert_eq!(snapshot.digest, KNOWN_GENERIC_METADATA_DIGEST);
+    assert_hex_parts(
+        &transcript.bytes,
+        &[
+            KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX,
+            EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX,
+            KNOWN_GENERIC_METADATA_LANES_TRANSCRIPT_HEX,
+            FRESH_PROFILE_LINEAGE_TRANSCRIPT_PREFIX_HEX,
+            PROFILE_OWNER_COLLECTION_3_HEX,
+            PROFILE_SCENE_OWNER_ROW_HEX,
+            PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX,
+            PROFILE_NODE_0_OWNER_ROW_HEX,
+            KNOWN_GENERIC_METADATA_TRANSCRIPT_HEX,
+        ],
+    );
+    assert_eq!(snapshot.totals.transcript_bytes, 2_105);
     assert!(
         snapshot
             .preview
@@ -2330,7 +2395,8 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
         &[
             KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX,
             EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX,
-            FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX,
+            EMPTY_METADATA_LANES_TRANSCRIPT_HEX,
+            FRESH_PROFILE_LINEAGE_TRANSCRIPT_PREFIX_HEX,
             PROFILE_OWNER_COLLECTION_5_HEX,
             PROFILE_SCENE_OWNER_ROW_HEX,
             PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX,
@@ -2340,7 +2406,7 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
             EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX,
         ],
     );
-    assert_eq!(snapshot.totals.transcript_bytes, 1_312);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_310);
     assert_eq!(snapshot.totals.work_units, 134);
     assert_eq!(snapshot.totals.camera_count, 1);
     assert_eq!(snapshot.totals.light_count, 1);
@@ -2350,7 +2416,6 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
         "scene_space handedness=left up_axis=negative_y front_axis=positive_z ",
         "unit_scale_to_meters_bits=0x3f847ae147ae147b ",
         "front_face_winding=clockwise uv_origin=lower_left ",
-        "transform_convention=column_vector_local_to_parent ",
         "tangent_basis=namespaced tangent_basis_schema_name=example:tangent-basis ",
         "tangent_basis_schema_version=2 tangent_handedness_encoding=namespaced ",
         "tangent_handedness_encoding_schema_name=example:tangent-sign ",
@@ -2430,13 +2495,6 @@ fn scene_space_field_mutation_vectors_are_digest_visible() {
             "SceneSpace UV origin",
             SceneSpace {
                 uv_origin: UvOrigin::UpperLeft,
-                ..baseline.clone()
-            },
-        ),
-        (
-            "SceneSpace transform convention",
-            SceneSpace {
-                transform_convention: TransformConvention::Unknown,
                 ..baseline.clone()
             },
         ),
@@ -2873,7 +2931,8 @@ fn matrix_and_child_known_vector_pins_node_framing_and_empty_domains() {
         &[
             KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX,
             EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX,
-            FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX,
+            EMPTY_METADATA_LANES_TRANSCRIPT_HEX,
+            FRESH_PROFILE_LINEAGE_TRANSCRIPT_PREFIX_HEX,
             PROFILE_OWNER_COLLECTION_4_HEX,
             PROFILE_SCENE_OWNER_ROW_HEX,
             PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX,
@@ -2885,7 +2944,7 @@ fn matrix_and_child_known_vector_pins_node_framing_and_empty_domains() {
     assert_eq!(snapshot.totals.node_count, 2);
     assert_eq!(snapshot.totals.root_count, 1);
     assert_eq!(snapshot.totals.edge_count, 1);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_196);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_194);
     assert_eq!(snapshot.totals.work_units, 137);
 }
 
@@ -2906,7 +2965,8 @@ fn point_geometry_known_vector_pins_complete_scene_framing() {
         &transcript.bytes,
         &[
             KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX,
-            FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX,
+            EMPTY_METADATA_LANES_TRANSCRIPT_HEX,
+            FRESH_PROFILE_LINEAGE_TRANSCRIPT_PREFIX_HEX,
             PROFILE_OWNER_COLLECTION_8_HEX,
             PROFILE_SCENE_OWNER_ROW_HEX,
             PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX,
@@ -2938,7 +2998,7 @@ fn point_geometry_known_vector_pins_complete_scene_framing() {
     assert_eq!(snapshot.totals.canonical_scalar_count, 3);
     assert_eq!(snapshot.totals.f32_scalar_count, 3);
     assert_eq!(snapshot.totals.u32_scalar_count, 0);
-    assert_eq!(snapshot.totals.transcript_bytes, 1_883);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_881);
     assert_eq!(snapshot.totals.work_units, 194);
     assert!(snapshot.preview.text.contains("material[0]"));
     assert!(
@@ -3182,7 +3242,7 @@ fn empty_scene_snapshot_is_complete_and_deterministic() {
     assert_eq!(first_snapshot.totals.profile_provenance_node_count, 1);
     assert_eq!(first_snapshot.totals.profile_owner_count, 2);
     assert_eq!(first_snapshot.totals.profile_attachment_count, 2);
-    assert_eq!(first_snapshot.totals.transcript_bytes, 858);
+    assert_eq!(first_snapshot.totals.transcript_bytes, 856);
     assert_eq!(first_snapshot.totals.work_units, 87);
     assert!(transcript.complete);
     assert_hex_parts(
@@ -3190,7 +3250,8 @@ fn empty_scene_snapshot_is_complete_and_deterministic() {
         &[
             EMPTY_SCENE_TRANSCRIPT_PREFIX_HEX,
             EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX,
-            FRESH_PROFILE_TRANSCRIPT_PREFIX_HEX,
+            EMPTY_METADATA_LANES_TRANSCRIPT_HEX,
+            FRESH_PROFILE_LINEAGE_TRANSCRIPT_PREFIX_HEX,
             PROFILE_OWNER_COLLECTION_2_HEX,
             PROFILE_SCENE_OWNER_ROW_HEX,
             PROFILE_SYNTHETIC_ROOT_OWNER_ROW_HEX,
@@ -3809,7 +3870,7 @@ fn traversal_scales_linearly_while_preview_stays_bounded() {
         assert!(snapshot.preview.text.len() <= 64);
         assert_eq!(
             snapshot.totals.transcript_bytes,
-            858 + 154 * node_count as u64
+            856 + 154 * node_count as u64
         );
         assert_eq!(snapshot.totals.work_units, 87 + 22 * node_count as u64);
         assert_eq!(snapshot.totals.node_count, node_count);

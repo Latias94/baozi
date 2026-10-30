@@ -31,7 +31,7 @@ pub(super) struct SceneTables {
 }
 
 /// A half-open range in exactly one private typed table or scalar pool.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) struct TableRange<T> {
     start: usize,
     count: usize,
@@ -45,6 +45,14 @@ impl<T> Clone for TableRange<T> {
         *self
     }
 }
+
+impl<T> PartialEq for TableRange<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.start == other.start && self.count == other.count
+    }
+}
+
+impl<T> Eq for TableRange<T> {}
 
 impl<T> TableRange<T> {
     pub(super) const fn new(start: usize, count: usize) -> Self {

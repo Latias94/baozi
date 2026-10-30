@@ -87,23 +87,6 @@ impl UvOrigin {
     }
 }
 
-/// Matrix/vector convention used by scene transforms.
-///
-/// The known canonical convention means
-/// `p_parent = M_local_to_parent * p_local`. It states semantic multiplication
-/// order and does not promise a matrix byte layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TransformConvention {
-    Unknown,
-    ColumnVectorLocalToParent,
-}
-
-impl TransformConvention {
-    pub const fn is_unknown(self) -> bool {
-        matches!(self, Self::Unknown)
-    }
-}
-
 /// Algorithm or externally defined convention used to construct tangent space.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TangentBasisConvention {
@@ -175,7 +158,7 @@ impl TangentHandednessEncoding {
     }
 }
 
-/// Coordinate, unit, transform, and render conventions carried by a scene.
+/// Coordinate, unit, and render conventions carried by a scene.
 ///
 /// Unknown source facts remain explicit. [`Self::validate`] accepts a partial
 /// descriptor, while [`Self::validate_complete`] requires every field to be
@@ -188,7 +171,6 @@ pub struct SceneSpace {
     pub unit_scale_to_meters: Option<f64>,
     pub front_face_winding: FrontFaceWinding,
     pub uv_origin: UvOrigin,
-    pub transform_convention: TransformConvention,
     pub tangent_basis: TangentBasisConvention,
     pub tangent_handedness_encoding: TangentHandednessEncoding,
 }
@@ -202,7 +184,6 @@ impl SceneSpace {
         unit_scale_to_meters: None,
         front_face_winding: FrontFaceWinding::Unknown,
         uv_origin: UvOrigin::Unknown,
-        transform_convention: TransformConvention::Unknown,
         tangent_basis: TangentBasisConvention::Unknown,
         tangent_handedness_encoding: TangentHandednessEncoding::Unknown,
     };
@@ -218,7 +199,6 @@ impl SceneSpace {
         unit_scale_to_meters: Some(1.0),
         front_face_winding: FrontFaceWinding::CounterClockwise,
         uv_origin: UvOrigin::Unknown,
-        transform_convention: TransformConvention::ColumnVectorLocalToParent,
         tangent_basis: TangentBasisConvention::Unknown,
         tangent_handedness_encoding: TangentHandednessEncoding::Unknown,
     };
@@ -297,8 +277,6 @@ impl SceneSpace {
             Some(SceneSpaceField::FrontFaceWinding)
         } else if self.uv_origin.is_unknown() {
             Some(SceneSpaceField::UvOrigin)
-        } else if self.transform_convention.is_unknown() {
-            Some(SceneSpaceField::TransformConvention)
         } else if self.tangent_basis.is_unknown() {
             Some(SceneSpaceField::TangentBasis)
         } else if self.tangent_handedness_encoding.is_unknown() {
@@ -329,7 +307,6 @@ pub enum SceneSpaceField {
     UnitScaleToMeters,
     FrontFaceWinding,
     UvOrigin,
-    TransformConvention,
     TangentBasis,
     TangentHandednessEncoding,
 }
@@ -343,7 +320,6 @@ impl fmt::Display for SceneSpaceField {
             Self::UnitScaleToMeters => "unit scale to meters",
             Self::FrontFaceWinding => "front-face winding",
             Self::UvOrigin => "UV origin",
-            Self::TransformConvention => "transform convention",
             Self::TangentBasis => "tangent-basis convention",
             Self::TangentHandednessEncoding => "tangent-handedness encoding",
         })
@@ -391,7 +367,6 @@ mod tests {
             unit_scale_to_meters: Some(1.0),
             front_face_winding: FrontFaceWinding::CounterClockwise,
             uv_origin: UvOrigin::UpperLeft,
-            transform_convention: TransformConvention::ColumnVectorLocalToParent,
             tangent_basis: TangentBasisConvention::MikkTspace,
             tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
         }
@@ -534,13 +509,6 @@ mod tests {
                     ..complete_space()
                 },
                 SceneSpaceField::UvOrigin,
-            ),
-            (
-                SceneSpace {
-                    transform_convention: TransformConvention::Unknown,
-                    ..complete_space()
-                },
-                SceneSpaceField::TransformConvention,
             ),
             (
                 SceneSpace {

@@ -5,9 +5,7 @@ pub(crate) mod input;
 use baozi_core::{
     PrimitiveId, ValidatedScene,
     scene::authoring::OptionsDigest,
-    scene::integration::{
-        SceneGeometryEditBootstrap, SceneGeometryEditEvidence, try_start_scene_edit_operation,
-    },
+    scene::integration::{SceneEditBootstrap, SceneEditEvidence, try_start_scene_edit_operation},
 };
 use baozi_operation::__retained_store_integration::authority::{
     PreparedStoreEvidenceOnlyOutcome, PreparedStoreFallback,
@@ -53,7 +51,7 @@ pub fn triangulate_primitive(
     #[cfg(feature = "tracing")]
     let _span = tracing::info_span!("baozi.postprocess.triangulate").entered();
 
-    let bootstrap = match SceneGeometryEditBootstrap::try_new() {
+    let bootstrap = match SceneEditBootstrap::try_new() {
         Ok(bootstrap) => bootstrap,
         Err(_) => {
             return Err(PostProcessRunFailure::new(
@@ -125,13 +123,13 @@ pub fn triangulate_primitive(
             ));
         }
     };
-    match crate::geometry_edit::execute_changed(
+    match crate::scene_edit::execute_changed(
         &input,
         owner,
         admission,
-        crate::geometry_edit::PreparedGeometry::Triangulation { target, origins },
+        crate::scene_edit::PreparedEdit::Triangulation { target, origins },
     ) {
-        Ok((scene, SceneGeometryEditEvidence::Triangulation(evidence), resources)) => {
+        Ok((scene, SceneEditEvidence::Triangulation(evidence), resources)) => {
             let report = PostProcessReport::triangulation(
                 target,
                 scene.generation(),

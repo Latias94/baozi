@@ -62,6 +62,12 @@ python scripts/check_packages.py --toolchain 1.95.0 --case gltf
 python scripts/check_packages.py --toolchain 1.95.0 --case postprocess
 ```
 
+The postprocess case imports an OBJ quad with Corner UVs and authored normals, triangulates it,
+checks preservation before explicitly replacing normals, and converts the full static Scene to
+left-handed centimeters. Handwritten assertions check positions, normals, index/UV lane pairing,
+assumed source units, and evidence lifetime after Scene teardown. Application vertex unification
+and unimplemented spatial domains are not claimed by this case.
+
 The glTF feature's complete local production closure includes
 the maintained `baozi-gltf` and `baozi-gltf-json` packages as actual `.crate` artifacts.
 No patch points back to workspace or vendor source directories.

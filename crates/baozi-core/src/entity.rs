@@ -84,6 +84,11 @@ pub enum EntityNameError {
 }
 
 /// The source-authored representation of one node base pose.
+///
+/// Every representation maps local coordinates to parent coordinates using
+/// column vectors: `p_parent = M_local_to_parent * p_local`. TRS composes as
+/// `T * R * S`. These semantics are fixed independently of scene-space declarations;
+/// matrix and TRS authored forms remain distinct and preserve their component bits.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AuthoredTransform {
     representation: AuthoredTransformRepresentation,
@@ -151,7 +156,9 @@ impl AuthoredTransform {
         }
     }
 
-    /// Returns the derived local matrix while preserving the authored form.
+    /// Returns the local-to-parent matrix while preserving the authored form.
+    ///
+    /// TRS derives `T * R * S` under column-vector multiplication semantics.
     pub fn local_matrix(self) -> Mat4 {
         match self.representation {
             AuthoredTransformRepresentation::Matrix(matrix) => matrix,

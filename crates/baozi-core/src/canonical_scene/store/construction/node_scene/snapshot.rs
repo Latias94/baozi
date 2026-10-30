@@ -21,7 +21,7 @@ mod profile;
 mod spatial;
 
 const CANONICAL_SCENE_SNAPSHOT_DOMAIN: &str = "baozi.canonical-scene.snapshot";
-const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 3;
+const CANONICAL_SCENE_SNAPSHOT_SCHEMA_REVISION: u32 = 4;
 const NODE_SCENE_SNAPSHOT_ALGORITHM_ID: &str = "sha256";
 const NODE_SCENE_SNAPSHOT_POLL_INTERVAL: u64 = 64;
 const SNAPSHOT_PAYLOAD_CHUNK_BYTES: usize = 4 * 1024;
@@ -288,9 +288,9 @@ struct NodeSceneCaptureOutput {
 }
 
 #[cfg(test)]
-struct TestCanonicalTranscript {
-    bytes: Vec<u8>,
-    complete: bool,
+pub(super) struct TestCanonicalTranscript {
+    pub(super) bytes: Vec<u8>,
+    pub(super) complete: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -435,7 +435,7 @@ impl SceneStorage {
 }
 
 #[cfg(test)]
-fn capture_node_scene_with_test_transcript(
+pub(super) fn capture_node_scene_with_test_transcript(
     scene: &SceneStorage,
     limits: NodeSceneSnapshotLimits,
     cancellation: Option<&CancellationToken>,

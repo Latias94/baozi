@@ -474,6 +474,98 @@ Logs are `target/review/d2-spatial-workspace-nextest.log`, `d2-spatial-footprint
 `d2-spatial-native-consumer.log`, `d2-spatial-packaged-consumers.log`,
 `d2-spatial-wasi-consumer.log`, and `d2-spatial-browser-wasm-check.log`.
 
+## Whole-Scene Static Spatial Conversion (2026-10-30)
+
+The direct postprocess boundary now supports `convert_scene_space` with a complete validated
+`TargetSpace`: handedness, signed up/front axes, meters per unit, and front-face winding. Explicit
+source assumptions fill only unknown declarations. Matching known facts are accepted; a conflicting
+fact or missing source convention returns a typed reason and the original Scene. The target is never
+used to guess source units. Filling unknown declarations publishes a change; an already satisfied
+target with no filled assumptions preserves the exact input generation.
+
+The redundant `TransformConvention` tag is removed. Column-vector matrices and local-to-parent
+authored node transforms are fixed canonical semantics. Matrix domains such as inverse bind retain
+their own source/destination meaning. The deterministic snapshot schema is revision 4. Handwritten
+vectors and byte totals remove only the two-byte tag/value and update the revision word. The OBJ
+capability fixture additionally reconstructs its previous pinned transcript by restoring exactly
+those bytes, constraining the changed digest to the declared schema revision.
+
+The signed-permutation arithmetic transports positions with a positive uniform unit ratio, normals
+and tangent directions without normalization, and tangent `w` by the basis determinant. Node
+conjugation preserves authored Matrix/TRS form, shear, singular scales, hierarchy, and attachments.
+Triangle reversal follows determinant XOR source/target winding parity; indices and every Corner
+tuple move together. Nonindexed triangles gain explicit indices while retaining Vertex identity.
+Sparse defaults, explicit entries, and explicit values equal to defaults retain their representation.
+The geometry plan rebuilds compact scalar pools in canonical order without input-sized sorting scratch.
+
+The former geometry-only transaction is now a closed Scene-edit transaction with an explicit
+whole-Scene target. Resolution borrows the exact input publication. Existing activation, central
+validation, failure preparation, generation reservation, and joint handoff remain the sole protocol.
+Declaration-only edits share node/geometry owners; winding-only edits share nodes. The replacement
+spatial owner changes only the five target facts. Profile owner indices and metadata values remain
+stable; each affected owner derives from its own attachments and the original Scene's attachments.
+Reports own the actual validated evidence root and read conversion facts directly from it.
+
+The current capability boundary rejects numeric conversion with actual skins, morph deltas,
+animation channels, cameras, lights, or custom attributes. It also rejects unhandled spatial texture
+coordinate sources, nonzero Scene-unit thickness/displacement during a unit change, and reflected
+tangents with an encoding other than `SignInW`. Nonempty polygon/strip/fan topology needing reversal
+requires separately implemented lowering. Winding-only conversion can preserve otherwise unaffected
+domains and opaque custom Corner tuples. These are explicit current limitations, not completion of F.
+
+Independent read-only review checked sparse remapping, source binding, owner provenance, matrix and
+quaternion arithmetic, and build/correspondence/validation work. It found an additional limit gap:
+the transaction's caller-provided scratch ceiling covered the sealed plan but omitted central
+validation scratch. Preflight now checks the actual rebound scratch envelope before sealing.
+The shared allocator/ledger admission remains unchanged.
+
+The complete all-feature workspace suite passed **2,226/2,226 tests**, with three manual scale
+tests skipped in that invocation. All three scale tests then passed separately. The four-influence
+node-edit pilot retained its **19,732-byte allocator-request peak** at 10,000 and 100,000 vertices
+with either 1 MiB or 8 MiB metadata. This is requested-allocation evidence, not process RSS.
+Strict all-target/all-feature Clippy, workspace doctests, and rustdoc with `-D warnings` passed.
+Public conversion tests cover the complete triangulation/normal/conversion chain, sparse
+explicitness, multiple Normal/Tangent domains, reflection versus independent winding, precise F64
+opaque tuples under winding-only conversion, source assumptions/conflicts, unchanged results,
+one-MiB caller stacks, detached reports, cancellation during planning/validation/publication, and
+ordinary host-unwind release. Source-bound unit tests reject mutated actual descriptors/payloads
+and check exact build/correspondence/central validation work.
+
+The first freshly unpacked debug consumer exposed an additional ordinary-stack failure even though
+the release consumer and individual one-MiB-stack operations had passed. Debugger tracing located
+it in import's final typed-ledger detachment, reached from the complete caller workflow. The public
+consumer functions were left intact and the Windows main-stack reservation remained 1 MiB.
+Postprocess activation, central validation, and publication now have separate concrete private
+phase boundaries. Import's central rejection, interruption, and deferred-fallback preparation also
+have separate frames, so a successful import does not reserve their mutually exclusive temporary
+owners. The linear ownership protocol, source Scene, scratch-before-preparation order, control-cause
+precedence, and allocation-free rejection path are preserved.
+
+PE unwind/PDB inspection measured `execute_changed` at **211,240 → 94,360 bytes** and import's
+`prepare_scene` at **106,056 → 67,144 bytes** in the diagnostic debug consumer. The complete source
+debug postprocess consumer then passed on the unchanged default main stack. These measurements are
+specific compiled-frame observations, not a portable stack bound or a new generic instrumentation
+framework. Temporary progress probes were removed before that successful run.
+
+After the phase refactor, the complete workspace suite again passed **2,226/2,226** and strict
+Clippy passed. The unchanged full Windows consumer passed in both debug and release with all
+features and all four format workflows. A new unpacked artifact run built and executed the
+postprocess and selected glTF cases from `.crate` dependencies, including the maintained vendor
+packages; it verified that no local dependency resolved back to checkout source. The release WASI
+all-feature consumer executed the same four format workflows under Wasmtime 50.0.0. Browser WASM
+passed compilation only. The standalone empty-feature release consumer also passed. These checks
+do not admit the currently rejected spatial domains or finish application vertex lowering.
+
+Final logs are `target/review/f-space-workspace-nextest-final.log`, `f-space-clippy-final.log`,
+`f-space-storage-scale.log`, `f-space-doctests-final.log`, `f-space-rustdoc-final.log`,
+`f-space-native-debug-all.log`, `f-space-native-release-final.log`,
+`f-space-packaged-consumers-final.log`, `f-space-wasi-consumer.log`, and
+`f-space-browser-wasm-check.log`. The diagnostic stack trace, compiled-frame observations, and
+unchanged PE stack reservation are retained as `f-space-stack-trace.log`,
+`f-space-stack-frames-final.txt`, and `f-space-stack-header.log`. The initial failed package run
+remains in `f-space-packaged-consumers.log` to distinguish the discovered defect from the repaired
+artifact verification. No new sanitizer or sustained fuzz campaign is claimed by this increment.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
@@ -485,8 +577,8 @@ Logs are `target/review/d2-spatial-workspace-nextest.log`, `d2-spatial-footprint
   node/geometry/profile/spatial ownership cutovers and normal generation's concrete attribute-owner mapping.
   Delete each replaced record/projection path.
 - Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
-- Preserve F's triangulation and normal generation while delivering target-space conversion and
-  application vertex lowering.
+- Preserve F's triangulation, normal generation, and static target-space conversion while closing
+  the remaining spatial domains and application vertex lowering.
 - Finish G's behavioral governance cleanup and H's dependency, package, and executed-target proof.
 
 No change here asserts exact RSS from ledger counters, sustained fuzz coverage, completion of

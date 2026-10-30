@@ -1,4 +1,4 @@
-//! Regression coverage for normal edits against an actual retained, centrally validated source.
+//! Regression coverage for typed edits against an actual retained, centrally validated source.
 
 use std::convert::Infallible;
 use std::sync::atomic::AtomicU64;
@@ -331,7 +331,7 @@ fn source_scene(
     )
 }
 
-type RetainedNormals = ActivatedCanonicalStoreSession<
+type RetainedEdit = ActivatedCanonicalStoreSession<
     SceneConstructionOwner,
     SceneConstructionPhase,
     SceneConstructionUnit,
@@ -341,13 +341,13 @@ type RetainedNormals = ActivatedCanonicalStoreSession<
     CanonicalInheritanceSource,
 >;
 
-struct NormalActivation<'scene> {
+struct EditActivation<'scene> {
     request: CanonicalActivationRequest,
     requirements: CanonicalSuccessRequirements,
     pending: BoundPendingNodeSceneEdit<'scene>,
 }
 
-impl<'scene> CanonicalActivationDescription for NormalActivation<'scene> {
+impl<'scene> CanonicalActivationDescription for EditActivation<'scene> {
     type Execution = BoundPendingNodeSceneEdit<'scene>;
 
     fn seal_activation<'activation>(
@@ -360,7 +360,7 @@ impl<'scene> CanonicalActivationDescription for NormalActivation<'scene> {
 
 /// Uses the production graph/profile retention adapters and the existing same-account lane.
 /// Publication and postprocess orchestration are covered by their own transaction tests.
-fn retain_normals(pending: BoundPendingNodeSceneEdit<'_>) -> RetainedNormals {
+fn retain_edit(pending: BoundPendingNodeSceneEdit<'_>) -> RetainedEdit {
     let counts = pending.counts;
     let start = try_plan_scene_operation(
         test_limits(),
@@ -399,7 +399,7 @@ fn retain_normals(pending: BoundPendingNodeSceneEdit<'_>) -> RetainedNormals {
     .expect("normals success envelope")
     .with_request_identity(brand.activation_request_identity())
     .with_semantic_bytes(pending.input.read_geometry().names.len() as u64);
-    let mut description = Some(NormalActivation {
+    let mut description = Some(EditActivation {
         request,
         requirements,
         pending,
@@ -673,7 +673,7 @@ fn smooth_replacement_retains_distinct_parent_sets_and_compacts_removed_tangent_
         SECOND_PAYLOAD.len() as u32
     );
     assert!(plan.metadata.rewrites_payloads());
-    let output = retain_normals(pending);
+    let output = retain_edit(pending);
     let profile = &output.output().profile;
     assert_generated_lineage(&source.scene, profile, &parents, 4, options);
     assert_valid_profile(profile, plan);
@@ -756,7 +756,7 @@ fn adding_smooth_normals_reindexes_following_owners_without_copying_metadata_pay
     );
     assert_eq!(plan.output_counts.metadata_entry_count, 2);
     assert!(!plan.metadata.rewrites_payloads());
-    let output = retain_normals(pending);
+    let output = retain_edit(pending);
     let profile = &output.output().profile;
     assert_generated_lineage(&source.scene, profile, &parents, 4, options);
     assert_valid_profile(profile, plan);
@@ -848,7 +848,7 @@ fn flat_replacement_excludes_smoothing_group_and_unrelated_attribute_provenance(
         plan.output_counts.owner_count,
         source.scene.proof.profile_counts().owner_count
     );
-    let output = retain_normals(pending);
+    let output = retain_edit(pending);
     let profile = &output.output().profile;
     assert_generated_lineage(&source.scene, profile, &parents, 3, options);
     assert_valid_profile(profile, plan);
@@ -881,4 +881,172 @@ fn flat_replacement_excludes_smoothing_group_and_unrelated_attribute_provenance(
     assert!(!account.snapshot().poisoned());
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn winding_conversion_keeps_owner_indices_and_unions_each_owners_scene_parents() {
+    use crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlan;
+    use crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlan;
+    use crate::scene_space::{Axis, FrontFaceWinding, Handedness};
+    use crate::space_conversion::{SpaceConversion, TargetSpace};
+    let factory = test_factory();
+    let account = test_account(&factory, 1_024);
+    let source = source_scene(&account, &AtomicU64::new(1), false, false);
+    let target = TargetSpace::try_new(
+        Handedness::Right,
+        Axis::PositiveY,
+        Axis::NegativeZ,
+        1.0,
+        FrontFaceWinding::Clockwise,
+    )
+    .unwrap();
+    let conversion =
+        SpaceConversion::try_new(&SceneSpace::UNKNOWN, target, Some(TargetSpace::STANDARD))
+            .unwrap();
+    let nodes = NodeSpacePlan::try_new(
+        source.scene.read_nodes(),
+        conversion,
+        &mut Control::default(),
+    )
+    .unwrap();
+    let geometry = GeometrySpacePlan::try_new(
+        source.scene.read_geometry(),
+        conversion,
+        &mut Control::default(),
+    )
+    .unwrap();
+    let options = OptionsDigest::sha256([44; 32]);
+    let pending = BoundPendingNodeSceneEdit::try_space_conversion(
+        &source.scene,
+        nodes,
+        geometry,
+        conversion,
+        options,
+        &mut || Ok(()),
+    )
+    .unwrap();
+    let plan = pending.counts.profile;
+    let selected = [
+        CanonicalProfileOwner::Scene,
+        CanonicalProfileOwner::Primitive(0),
+        CanonicalProfileOwner::Primitive(1),
+        CanonicalProfileOwner::Attribute(1),
+    ];
+    assert_eq!(plan.target_count.as_usize(), selected.len());
+    let output = retain_edit(pending);
+    let profile = &output.output().profile;
+    assert!(std::ptr::eq(
+        output.output().nodes.as_ref(),
+        source.scene.tables.nodes.as_ref()
+    ));
+    let state = profile.state.as_ref();
+    let lineage = state.segments.last().unwrap().lineage.as_ref();
+    for (local, owner) in selected.into_iter().enumerate() {
+        assert_eq!(
+            lineage.provenance[local].parents.get(&lineage.parents),
+            Some(
+                expected_parents(&source.scene, &[owner, CanonicalProfileOwner::Scene]).as_slice()
+            )
+        );
+        assert!(matches!(
+            lineage.operations[local].kind,
+            StoredOperationKind::Transform
+        ));
+        assert_eq!(lineage.operations[local].options, options);
+        assert_eq!(attachments(profile, owner).len(), 1);
+    }
+    for owner in [
+        CanonicalProfileOwner::Attribute(0),
+        CanonicalProfileOwner::Attribute(2),
+        CanonicalProfileOwner::Attribute(3),
+        CanonicalProfileOwner::Attribute(4),
+        CanonicalProfileOwner::Attribute(5),
+    ] {
+        assert_eq!(
+            attachments(profile, owner),
+            attachments(&source.scene.tables.profile, owner)
+        );
+    }
+    assert!(std::ptr::eq(
+        profile.metadata.as_ref(),
+        source.scene.tables.profile.metadata.as_ref()
+    ));
+    assert_metadata(profile, false, 1, 5);
+    assert_valid_profile(profile, plan);
+    assert!(
+        geometry
+            .validate_correspondence(output.output().geometry.as_ref(), &mut Control::default())
+            .unwrap()
+    );
+    drop(output);
+    drop(source);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn declaration_only_conversion_shares_node_geometry_and_metadata_owners() {
+    use crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlan;
+    use crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlan;
+    use crate::space_conversion::{SpaceConversion, TargetSpace};
+    let factory = test_factory();
+    let account = test_account(&factory, 1_024);
+    let source = source_scene(&account, &AtomicU64::new(1), false, false);
+    let conversion = SpaceConversion::try_new(
+        &SceneSpace::UNKNOWN,
+        TargetSpace::STANDARD,
+        Some(TargetSpace::STANDARD),
+    )
+    .unwrap();
+    let nodes = NodeSpacePlan::try_new(
+        source.scene.read_nodes(),
+        conversion,
+        &mut Control::default(),
+    )
+    .unwrap();
+    let geometry = GeometrySpacePlan::try_new(
+        source.scene.read_geometry(),
+        conversion,
+        &mut Control::default(),
+    )
+    .unwrap();
+    let pending = BoundPendingNodeSceneEdit::try_space_conversion(
+        &source.scene,
+        nodes,
+        geometry,
+        conversion,
+        OptionsDigest::sha256([45; 32]),
+        &mut || Ok(()),
+    )
+    .unwrap();
+    let plan = pending.counts.profile;
+    assert_eq!(plan.target_count.as_u32(), 1);
+    let output = retain_edit(pending);
+    let tables = output.output();
+    assert!(std::ptr::eq(
+        tables.nodes.as_ref(),
+        source.scene.tables.nodes.as_ref()
+    ));
+    assert!(std::ptr::eq(
+        tables.geometry.as_ref(),
+        source.scene.tables.geometry.as_ref()
+    ));
+    assert!(!std::ptr::eq(
+        tables.spatial.as_ref(),
+        source.scene.tables.spatial.as_ref()
+    ));
+    assert!(std::ptr::eq(
+        tables.profile.metadata.as_ref(),
+        source.scene.tables.profile.metadata.as_ref()
+    ));
+    assert_eq!(tables.spatial.as_ref().space, SceneSpace::STANDARD_TARGET);
+    assert_valid_profile(&tables.profile, plan);
+    assert_eq!(
+        source.scene.tables.spatial.as_ref().space,
+        SceneSpace::UNKNOWN
+    );
+    drop(output);
+    drop(source);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }

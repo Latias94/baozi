@@ -11,24 +11,23 @@ use crate::canonical_scene::store::schema::{NodeSceneOutcomeEvidenceSchema, Scen
 use crate::canonical_scene::store::validation::{
     NodeSceneValidationProof, validate_node_scene_canonical_graph_metered,
 };
-use crate::identity::{PrimitiveId, SceneGenerationId};
+use crate::identity::SceneGenerationId;
 
-use super::evidence::SceneGeometryEditEvidenceRecipe;
+use super::evidence::SceneEditEvidenceRecipe;
 use super::{
-    SceneGeometryCornerOriginsTag, SceneGeometryEditEvidenceTag, SceneGeometryEditFailureEvidence,
-    SceneGeometryEditOutput, SceneGeometryEditPostflight, SceneGeometryEditRejection,
-    SceneGeometryFaceOffsetsTag, schema,
+    SceneEditEvidenceTag, SceneEditFailureEvidence, SceneEditOutput, SceneEditPostflight,
+    SceneEditRejection, SceneGeometryCornerOriginsTag, SceneGeometryFaceOffsetsTag, schema,
 };
 
 /// Proof of the actual canonical graph, scalar correspondence, and rooted edit evidence.
 #[derive(Clone, Copy)]
-pub struct SceneGeometryEditValidationProof {
+pub struct SceneEditValidationProof {
     pub(super) scene: NodeSceneValidationProof,
     pub(super) source_generation: SceneGenerationId,
-    pub(super) input_target: PrimitiveId,
+    pub(super) input_target: super::SceneEditTarget,
 }
 
-impl SceneGeometryEditPostflight<'_> {
+impl SceneEditPostflight<'_> {
     #[allow(clippy::type_complexity)]
     pub fn validate_candidate<'session, 'storage, 'scope, 'operation, O, PP, U>(
         &self,
@@ -43,11 +42,11 @@ impl SceneGeometryEditPostflight<'_> {
             RecordBlock,
             SceneDirectorySchema,
             RecordBlock,
-            SceneGeometryEditEvidenceTag,
-            SceneGeometryEditValidationProof,
-            SceneGeometryEditRejection,
+            SceneEditEvidenceTag,
+            SceneEditValidationProof,
+            SceneEditRejection,
         >,
-        output: &SceneGeometryEditOutput,
+        output: &SceneEditOutput,
     ) -> Result<(), StoreWorkError>
     where
         O: OperationOwner,
@@ -76,10 +75,10 @@ impl SceneGeometryEditPostflight<'_> {
                         if Some(output.facts) == expected {
                             if let Some(counts) = validate_changed_root(session, evidence, &recipe)?
                             {
-                                if geometry.validate_correspondence(
-                                    scene.tables.geometry.as_ref(),
-                                    session,
-                                )? {
+                                if geometry.validate_correspondence(&scene.tables, session)?
+                                    && self
+                                        .validate_spatial_correspondence(&scene.tables, session)?
+                                {
                                     let mut scratch = scratch.metered_view();
                                     validate_node_scene_canonical_graph_metered(
                                         session,
@@ -107,15 +106,13 @@ impl SceneGeometryEditPostflight<'_> {
                     None
                 };
                 Ok(match proof {
-                    Some(scene) => {
-                        CanonicalValidationDecision::accept(SceneGeometryEditValidationProof {
-                            scene,
-                            source_generation: output.source_generation,
-                            input_target: self.replacement.target(),
-                        })
-                    }
+                    Some(scene) => CanonicalValidationDecision::accept(SceneEditValidationProof {
+                        scene,
+                        source_generation: output.source_generation,
+                        input_target: self.replacement.target(),
+                    }),
                     None => CanonicalValidationDecision::reject(
-                        SceneGeometryEditRejection::construction_invariant(),
+                        SceneEditRejection::construction_invariant(),
                         super::super::super::NODE_SCENE_BUILD_INVARIANT_CODE,
                     ),
                 })
@@ -126,8 +123,8 @@ impl SceneGeometryEditPostflight<'_> {
 
 fn validate_changed_root<'session, O, PP, U>(
     session: &mut CanonicalValidationSession<'session, '_, '_, '_, O, PP, U>,
-    root: OutcomeEvidenceValidationMember<'session, RecordBlock, SceneGeometryEditEvidenceTag>,
-    recipe: &SceneGeometryEditEvidenceRecipe<'_>,
+    root: OutcomeEvidenceValidationMember<'session, RecordBlock, SceneEditEvidenceTag>,
+    recipe: &SceneEditEvidenceRecipe<'_>,
 ) -> Result<
     Option<OutcomeEvidenceValidationMember<'session, RecordBlock, NodeSceneOutcomeEvidenceSchema>>,
     StoreWorkError,
@@ -157,11 +154,16 @@ where
                     value
                 })? == Some(expected);
             }
+            for (offset, expected) in recipe.facts.units.into_iter().enumerate() {
+                valid &= row
+                    .scalar(schema::field::SOURCE_UNIT_BITS + offset, |value: u64| value)?
+                    == Some(expected);
+            }
             counts = row.record_ref::<NodeSceneOutcomeEvidenceSchema, _>(
                 schema::field::SCENE_COUNTS,
                 |member| member,
             )?;
-            if recipe.facts.words[0] == schema::OPERATION_NORMALS {
+            if recipe.facts.words[0] != schema::OPERATION_TRIANGULATE {
                 valid &= row.scalar(schema::field::CORNER_ORIGINS, |value: u8| value)? == Some(0);
                 valid &= row.scalar(schema::field::FACE_OFFSETS, |value: u8| value)? == Some(0);
             } else {
@@ -176,7 +178,7 @@ where
             }
             Ok(valid)
         })?;
-    if recipe.facts.words[0] == schema::OPERATION_NORMALS {
+    if recipe.facts.words[0] != schema::OPERATION_TRIANGULATE {
         return Ok(if complete { counts } else { None });
     }
     let (Some(counts), Some(corners), Some(faces)) = (counts, corners, faces) else {
@@ -207,12 +209,12 @@ where
     Ok(Some(counts))
 }
 
-impl SceneGeometryEditFailureEvidence {
+impl SceneEditFailureEvidence {
     /// Validates the fixed two-member preflight/materialization failure graph.
     pub fn validate_failure<'session, 'storage, 'control, O, PP, U>(
         &self,
         session: &mut FailureEvidenceValidationSession<'session, 'storage, 'control, O, PP, U>,
-        root: FailureEvidenceMember<'session, RecordBlock, SceneGeometryEditEvidenceTag>,
+        root: FailureEvidenceMember<'session, RecordBlock, SceneEditEvidenceTag>,
     ) -> bool
     where
         O: OperationOwner,

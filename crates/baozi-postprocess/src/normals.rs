@@ -13,15 +13,15 @@ pub use error::{NormalCause, NormalFailure, NormalIssue};
 pub use options::{ExistingNormals, NormalMode, NormalOptions, TangentHandling};
 pub use report::NormalGenerationReport;
 
-use crate::geometry_edit::{PreparedGeometry, execute_changed};
 use crate::operation::PostProcessOwner;
 use crate::operation::runtime::{REJECTION_CODE, final_progress, plan_runtime};
+use crate::scene_edit::{PreparedEdit, execute_changed};
 use crate::{
     PostProcessControl, PostProcessReport, PostProcessResourceEvidence, PostProcessRunError,
     PostProcessRunFailure, PostProcessRunOutcome,
 };
 use baozi_core::scene::integration::{
-    SceneGeometryEditBootstrap, SceneGeometryEditEvidence, try_start_scene_edit_operation,
+    SceneEditBootstrap, SceneEditEvidence, try_start_scene_edit_operation,
 };
 use baozi_core::{PrimitiveId, ValidatedScene};
 use baozi_operation::__retained_store_integration::authority::PreparedStoreEvidenceOnlyOutcome;
@@ -49,7 +49,7 @@ pub fn generate_normals(
 ) -> Result<PostProcessRunOutcome, PostProcessRunFailure> {
     #[cfg(feature = "tracing")]
     let _span = tracing::info_span!("baozi.postprocess.normals").entered();
-    let bootstrap = match SceneGeometryEditBootstrap::try_new() {
+    let bootstrap = match SceneEditBootstrap::try_new() {
         Ok(bootstrap) => bootstrap,
         Err(_) => {
             return Err(PostProcessRunFailure::new(
@@ -127,13 +127,13 @@ pub fn generate_normals(
         &input,
         owner,
         admission,
-        PreparedGeometry::Normals {
+        PreparedEdit::Normals {
             target,
             options,
             values,
         },
     ) {
-        Ok((scene, SceneGeometryEditEvidence::Normals(evidence), resources)) => {
+        Ok((scene, SceneEditEvidence::Normals(evidence), resources)) => {
             let normal_report = NormalGenerationReport::new(evidence);
             let report = PostProcessReport::normals(
                 target,

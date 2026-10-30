@@ -347,6 +347,10 @@ impl NodeSceneValidationScratchPlan {
         self.initialization_work
     }
 
+    pub(super) const fn envelope_bytes(&self) -> u64 {
+        self.envelope_bytes
+    }
+
     pub(super) const fn semantic_projection_work_units(&self) -> u64 {
         self.semantic_projection_work
     }

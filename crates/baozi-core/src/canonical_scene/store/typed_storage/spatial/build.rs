@@ -7,6 +7,7 @@ use crate::canonical_scene::store::typed_storage::build::{
 };
 
 use super::*;
+use crate::space_conversion::TargetSpace;
 
 /// One inline space action, one action per row, and one string action per inline name byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +18,63 @@ pub(in crate::canonical_scene::store) struct SpatialStoragePlan {
 }
 
 impl SpatialStoragePlan {
+    pub(in crate::canonical_scene::store) fn for_storage(
+        source: &SpatialStorage,
+    ) -> Result<Self, StorePlanError> {
+        Self::for_shape(
+            u32::try_from(source.cameras.len()).map_err(|_| StorePlanError::SizeOverflow)?,
+            u32::try_from(source.lights.len()).map_err(|_| StorePlanError::SizeOverflow)?,
+            u64::try_from(schema_name_bytes(&source.space))
+                .map_err(|_| StorePlanError::SizeOverflow)?,
+        )
+    }
+
+    /// Replaces only the explicit spatial declarations. Callers must either transform all other
+    /// spatial domains or reject their unsupported semantics before constructing this owner.
+    pub(in crate::canonical_scene::store) fn rewrite_space<C: TypedStorageBuildControl>(
+        self,
+        source: &SpatialStorage,
+        target: TargetSpace,
+        mut control: C,
+    ) -> BuildResult<SpatialStorage, C::Error> {
+        if source.cameras.len() != self.camera_count() as usize
+            || source.lights.len() != self.light_count() as usize
+            || schema_name_bytes(&source.space) != self.name_bytes
+        {
+            return Err(TypedStorageBuildError::Invariant);
+        }
+        let mut cameras = allocate(self.cameras)?;
+        let mut lights = allocate(self.lights)?;
+        let space = control
+            .run_unit(|| SceneSpace {
+                handedness: target.handedness(),
+                up_axis: target.up_axis(),
+                front_axis: target.front_axis(),
+                unit_scale_to_meters: Some(target.unit_scale_to_meters()),
+                front_face_winding: target.front_face_winding(),
+                ..source.space.clone()
+            })
+            .map_err(TypedStorageBuildError::Control)?;
+        for byte in schema_name_iter(&source.space) {
+            control
+                .run_string_unit(|| byte)
+                .map_err(TypedStorageBuildError::Control)?;
+        }
+        for &camera in &source.cameras {
+            push(&mut cameras, self.cameras, camera, &mut control)?;
+        }
+        for &light in &source.lights {
+            push(&mut lights, self.lights, light, &mut control)?;
+        }
+        finish(&cameras, self.cameras)?;
+        finish(&lights, self.lights)?;
+        Ok(SpatialStorage {
+            space,
+            cameras,
+            lights,
+        })
+    }
+
     pub(in crate::canonical_scene::store) fn new<R>(
         batch: &ValidatedSpatialBatch<'_, R>,
     ) -> Result<Self, StorePlanError> {

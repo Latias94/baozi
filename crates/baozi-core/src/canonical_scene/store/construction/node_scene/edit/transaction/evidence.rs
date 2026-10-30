@@ -17,18 +17,19 @@ use crate::canonical_scene::store::typed_storage::edit::GeometryTriangulationPla
 use crate::provenance::{DigestAlgorithm, OptionsDigest};
 
 use super::{
-    GeometryReplacement, SceneGeometryCornerOriginsTag, SceneGeometryEditEvidenceTag,
-    SceneGeometryEditOutput, SceneGeometryEditPostflight, SceneGeometryFaceOffsetsTag,
-    SceneNormalReplacement, SceneTriangulationReplacement, schema,
+    EditRequest, SceneEditEvidenceTag, SceneEditOutput, SceneEditPostflight,
+    SceneGeometryCornerOriginsTag, SceneGeometryFaceOffsetsTag, SceneNormalReplacement,
+    SceneTriangulationReplacement, schema,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct GeometryEditFacts {
+pub(super) struct SceneEditFacts {
     pub(super) words: [u32; 13],
     pub(super) digest: [u64; 4],
+    pub(super) units: [u64; 2],
 }
 
-impl GeometryEditFacts {
+impl SceneEditFacts {
     pub(super) fn new(
         input: &SceneStorage,
         replacement: SceneTriangulationReplacement<'_>,
@@ -63,6 +64,7 @@ impl GeometryEditFacts {
                 },
             ],
             digest: digest_words(options),
+            units: [0; 2],
         }
     }
 
@@ -107,7 +109,35 @@ impl GeometryEditFacts {
                 },
             ],
             digest: digest_words(replacement.options_digest),
+            units: [0; 2],
         })
+    }
+
+    pub(super) fn space(resolved: super::ResolvedSceneSpaceConversion<'_>) -> Self {
+        let [sh, su, sf, sw] = super::space::space_words(resolved.source());
+        let [th, tu, tf, tw] = super::space::space_words(resolved.target());
+        Self {
+            words: [
+                schema::OPERATION_SPACE_CONVERSION,
+                sh,
+                su,
+                sf,
+                sw,
+                th,
+                tu,
+                tf,
+                tw,
+                u32::from(resolved.assumed_fields_mask()),
+                u32::from(resolved.reverses_winding()),
+                u32::from(resolved.changes_coordinates()),
+                0,
+            ],
+            digest: digest_words(resolved.options_digest()),
+            units: [
+                resolved.source().unit_scale_to_meters().to_bits(),
+                resolved.target().unit_scale_to_meters().to_bits(),
+            ],
+        }
     }
 
     pub(super) fn write_prefix(
@@ -123,6 +153,9 @@ impl GeometryEditFacts {
         for word in self.digest {
             row.write_scalar(word)?;
         }
+        for unit in self.units {
+            row.write_scalar(unit)?;
+        }
         Ok(())
     }
 }
@@ -137,20 +170,20 @@ fn digest_words(options: OptionsDigest) -> [u64; 4] {
 
 /// Concrete evidence recipe; only triangulation carries the borrowed origin relation.
 #[derive(Clone, Copy)]
-pub(super) struct SceneGeometryEditEvidenceRecipe<'a> {
-    pub(super) facts: GeometryEditFacts,
+pub(super) struct SceneEditEvidenceRecipe<'a> {
+    pub(super) facts: SceneEditFacts,
     pub(super) counts: NodeSceneEvidenceRecipe,
-    pub(super) replacement: GeometryReplacement<'a>,
+    pub(super) replacement: EditRequest<'a>,
     root: RecordPlan,
 }
 
-impl<'a> SceneGeometryEditPostflight<'a> {
+impl<'a> SceneEditPostflight<'a> {
     /// Returns only core-derived counts and edit facts from the actual candidate output.
     pub(super) fn candidate_evidence(
         &self,
-        output: &SceneGeometryEditOutput,
-    ) -> SceneGeometryEditEvidenceRecipe<'a> {
-        SceneGeometryEditEvidenceRecipe {
+        output: &SceneEditOutput,
+    ) -> SceneEditEvidenceRecipe<'a> {
+        SceneEditEvidenceRecipe {
             facts: output.facts,
             counts: NodeSceneEvidenceRecipe::from_counts(
                 self.evidence.scene_counts().record_plan(),
@@ -162,7 +195,7 @@ impl<'a> SceneGeometryEditPostflight<'a> {
     }
 }
 
-impl<'a> SceneGeometryEditEvidenceRecipe<'a> {
+impl<'a> SceneEditEvidenceRecipe<'a> {
     const fn root_record_plan(&self) -> RecordPlan {
         self.root
     }
@@ -212,14 +245,14 @@ impl<'a> SceneGeometryEditEvidenceRecipe<'a> {
     }
 }
 
-impl SceneGeometryEditPostflight<'_> {
+impl SceneEditPostflight<'_> {
     /// Retains a two-member normal graph or four-member triangulation graph. Any member failure
     /// aborts the whole success graph.
     pub fn build_evidence<O, PP, U>(
         &self,
         lane: &mut CanonicalOutcomeEvidenceLane<'_, O, PP, U, CanonicalInheritanceSource>,
-        output: &SceneGeometryEditOutput,
-    ) -> OutcomeEvidenceDecision<RecordBlock, SceneGeometryEditEvidenceTag>
+        output: &SceneEditOutput,
+    ) -> OutcomeEvidenceDecision<RecordBlock, SceneEditEvidenceTag>
     where
         O: OperationOwner,
         PP: ProgressPhase,
@@ -234,7 +267,7 @@ impl SceneGeometryEditPostflight<'_> {
             Ok(reference) => reference,
             Err(_) => return lane.abort(),
         };
-        let corners = if matches!(self.replacement, GeometryReplacement::Normals(_)) {
+        let corners = if !matches!(self.replacement, EditRequest::Triangulation(_)) {
             None
         } else {
             Some(match recipe.corner_origins_plan() {
@@ -254,7 +287,7 @@ impl SceneGeometryEditPostflight<'_> {
                 Err(_) => return lane.abort(),
             })
         };
-        let faces = if matches!(self.replacement, GeometryReplacement::Normals(_)) {
+        let faces = if !matches!(self.replacement, EditRequest::Triangulation(_)) {
             None
         } else {
             Some(match recipe.face_offsets_plan() {
@@ -271,7 +304,7 @@ impl SceneGeometryEditPostflight<'_> {
         };
         let root = match lane.try_retain_records(
             recipe.root_record_plan(),
-            SceneGeometryEditEvidenceTag,
+            SceneEditEvidenceTag,
             |writer| writer.write_row(|row| recipe.write_root_row(row, counts, corners.zip(faces))),
         ) {
             Ok(reference) => reference,

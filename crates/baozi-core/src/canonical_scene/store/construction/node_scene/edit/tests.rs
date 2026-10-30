@@ -52,7 +52,7 @@ fn authored_transform_at(
         .authored_transform()
 }
 
-fn build_single_trs_scene(
+pub(super) fn build_single_trs_scene(
     account: &PhysicalStorageAccount,
     generation_source: &AtomicU64,
 ) -> NodeSceneSuccessParts {
@@ -180,7 +180,7 @@ fn spatial_fixture_values() -> (CameraProjection, LightKind, LightEmission) {
     )
 }
 
-fn build_populated_spatial_scene(
+pub(super) fn build_populated_spatial_scene(
     account: &PhysicalStorageAccount,
     generation_source: &AtomicU64,
 ) -> NodeSceneSuccessParts {

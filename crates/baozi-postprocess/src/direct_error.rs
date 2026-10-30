@@ -1,6 +1,6 @@
 use std::fmt;
 
-use baozi_core::scene::integration::SceneGeometryEditEvidenceTag;
+use baozi_core::scene::integration::SceneEditEvidenceTag;
 use baozi_core::{SceneLookupError, TopologyKind};
 use baozi_operation::__retained_store_integration::activation::StoreActivationContainment;
 use baozi_operation::__retained_store_integration::authority::RetainedStoreStartError;
@@ -93,7 +93,7 @@ pub(crate) enum FailureOwner {
         _owner: PublishedStoreFallbackOutput,
     },
     Rich {
-        _owner: PublishedRichFailureStore<RecordBlock, SceneGeometryEditEvidenceTag>,
+        _owner: PublishedRichFailureStore<RecordBlock, SceneEditEvidenceTag>,
     },
 }
 
@@ -160,14 +160,15 @@ impl std::error::Error for TriangulationFailure {
     }
 }
 
-impl From<crate::geometry_edit::EditFailure> for TriangulationFailure {
-    fn from(failure: crate::geometry_edit::EditFailure) -> Self {
-        use crate::geometry_edit::EditCause;
+impl From<crate::scene_edit::EditFailure> for TriangulationFailure {
+    fn from(failure: crate::scene_edit::EditFailure) -> Self {
+        use crate::scene_edit::EditCause;
         let cause = match failure.cause {
             EditCause::Runtime { source } => TriangulationCause::Runtime { source },
             EditCause::Control { cause } => TriangulationCause::Control { cause },
             EditCause::FinalControl => TriangulationCause::FinalControl,
             EditCause::CoreRejected => TriangulationCause::CoreRejected,
+            EditCause::SpaceIssue { .. } => TriangulationCause::CoreRejected,
             EditCause::CentralValidation => TriangulationCause::CentralValidation,
             EditCause::Publication => TriangulationCause::Publication,
             EditCause::Containment { source } => TriangulationCause::Containment { source },

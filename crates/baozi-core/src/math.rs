@@ -30,6 +30,11 @@ pub struct Quat {
     pub w: f32,
 }
 
+/// A matrix with column-vector multiplication semantics: `p_out = M * p_in`.
+///
+/// The owning domain defines the input and output spaces. Node base poses use
+/// [`crate::AuthoredTransform`]'s local-to-parent contract. These semantics are
+/// fixed independently of scene-space declarations and promise no binary ABI.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mat4 {
     pub cols: [[f32; 4]; 4],

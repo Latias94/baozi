@@ -64,6 +64,14 @@ failure value returns the exact original immutable `ValidatedScene`. Verified ca
 ordinary failure evidence follow the existing operation protocol; uncertain retained ownership
 remains fatal containment rather than a clean fallback.
 
+Concrete executors keep activation, central validation, and terminal publication in separate
+private phase functions. Their linear owners still follow this single protocol. Mutually exclusive
+failure continuations must not force every successful caller to reserve all their debug stack
+temporaries. Caller-owned scratch remains alive through correspondence validation and is released
+before ordinary terminal preparation. Ordinary-stack acceptance runs the complete public workflow
+in debug and release, including the unpacked-package consumer; isolated operation tests alone do
+not establish that composed caller footprint.
+
 Before a direct operation or compiled postprocess plan opens `SceneEdit`, derived-operation start
 linearizes against the input Scene account's shared ADR 0044 poison/counter state. Poison-first
 returns typed `AccountPoisoned` before step work, attempted/consumed charging, share/refcount/range access, scratch,
@@ -237,11 +245,54 @@ with that exact borrowed replacement and centrally validates the candidate. It t
 before final preparation. The operation reuses triangulation's existing geometry transaction,
 generation reservation, and publication protocol. Its evidence graph has only the edit root and
 Scene-count child; no empty remap sequences are constructed. The core handoff returns a closed enum
-of `SceneTriangulationEvidence` or `SceneNormalGenerationEvidence`. Each variant owns its actual
+with operation-specific evidence. Each variant owns its actual
 rooted store and exposes only the applicable facts; a Normal result cannot be used as a remap.
 Public `NormalGenerationReport` owns the latter directly, without duplicating decoded effects.
 
-Coordinate/unit conversion and application vertex unification remain subsequent F increments.
+### Direct Whole-Scene Spatial Conversion
+
+`convert_scene_space` consumes one immutable Scene and a validated complete `TargetSpace`, with
+optional explicit complete source assumptions. Resolution borrows the exact Scene used to derive
+the plan. No transaction API accepts an independently replaceable input alongside that resolved
+value. Its closed program extends the existing transaction, central validation, fallback,
+generation, and publication path rather than defining a second edit protocol.
+
+The static conversion transports every F32 Position, Normal, and Tangent across every authored
+domain, including sparse defaults and explicit entries. ADR 0008 supplies the arithmetic. Dense
+and sparse Corner attributes follow triangle index-lane reversal; sparse indices remain sorted
+without input-sized sorting scratch. A nonindexed triangle gains explicit indices so Vertex
+order and identity remain unchanged. Vertex, Face, Primitive, logical-mesh, and instance order
+remain unchanged. The report states the complete lane relation `[0, 2, 1]` when reversal is
+required; it does not expose an unbounded primitive lookup masquerading as a checked remap.
+Points and line streams retain their Corner order. Nonempty Polygons, TriangleStrip, and
+TriangleFan require a separately implemented lowering before a conversion needing reversal.
+
+Node conversion preserves authored Matrix/TRS form, hierarchy, names, and attachments. The new
+spatial owner changes only the target's five facts; UV origin, tangent basis/encoding, and eligible
+camera/light definitions remain bit-preserved. Declaration-only and winding-only edits share
+unaffected typed tables. Scene provenance records the resolved conversion. Changed Node,
+Primitive, and Attribute owners retain their own attachments together with the input Scene's
+attachments as operation parents. Metadata descriptors and immutable payloads retain their owners
+and values. Central validation compares the actual replacement tables with the exact borrowed
+source plan, including preserved values, and validates all published conversion facts.
+
+This increment has an explicit capability boundary. Coordinate or unit changes reject actual
+skins, morph deltas, animation channels, cameras, or lights until their spatial rules are
+implemented. Empty deformation alignment rows are not treated as present deformation data.
+Scene-unit thickness and displacement must be zero when units change; non-UV coordinate sources
+reject coordinate changes. Custom attributes reject numeric conversion because their spatial
+meaning is unknown; a winding-only conversion can retain and permute opaque Corner tuples.
+Reflection with a present Tangent requires `SignInW`. Each rejection retains its object location
+and typed reason. No rejected domain is silently inherited under a new target declaration.
+
+The public report directly owns `SceneSpaceConversionEvidence`, whose input/output generations,
+source/target facts, assumption mask, and winding effect are backed by the validated evidence
+root. It creates no empty Corner/Face origin sequences. The common root schema is revision 4;
+non-conversion evidence has zeroed conversion fields. Runtime success/failure capacity and work
+requirements cover the real schema. No independently cached decoded report facts are authoritative.
+
+Complete spatial conversion for the remaining domains and application vertex unification remain
+open F work. The static conversion does not complete plan F.
 
 ### Remap Contract
 

@@ -38,6 +38,7 @@ mod provenance;
     reason = "canonical domain implementation is exposed through sealed views"
 )]
 mod scene_space;
+mod space_conversion;
 mod validation_control;
 
 #[cfg(not(feature = "_scene-integration"))]
@@ -135,7 +136,10 @@ pub use ordered_map::{
 };
 pub use scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, SceneSpaceField, SceneSpaceValidationError,
-    TangentBasisConvention, TangentHandednessEncoding, TransformConvention, UvOrigin,
+    TangentBasisConvention, TangentHandednessEncoding, UvOrigin,
+};
+pub use space_conversion::{
+    ConventionValue, NumericConversionError, SourceSpaceError, TargetSpace,
 };
 pub use validation_control::{
     SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork,

@@ -8,7 +8,7 @@ use super::{ValidatedScene, checked_index, expect_validated};
 use crate::entity::{CameraProjection, LightKind};
 use crate::identity::{CameraId, LightId, SceneEntityKind, SceneLookupError};
 use crate::math::Vec3;
-use crate::scene_space::{Axis, FrontFaceWinding, Handedness, TransformConvention, UvOrigin};
+use crate::scene_space::{Axis, FrontFaceWinding, Handedness, UvOrigin};
 
 /// The authored tangent basis, including allocation-free borrowed extension identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,6 @@ pub struct SceneSpaceRef<'s> {
     pub unit_scale_to_meters: Option<f64>,
     pub front_face_winding: FrontFaceWinding,
     pub uv_origin: UvOrigin,
-    pub transform_convention: TransformConvention,
     pub tangent_basis: TangentBasisRef<'s>,
     pub tangent_handedness_encoding: TangentEncodingRef<'s>,
 }
@@ -123,7 +122,6 @@ impl ValidatedScene {
             unit_scale_to_meters: space.unit_scale_to_meters(),
             front_face_winding: space.front_face_winding(),
             uv_origin: space.uv_origin(),
-            transform_convention: space.transform_convention(),
             tangent_basis: match space.tangent_basis() {
                 NodeSceneSpatialTangentBasis::Unknown => TangentBasisRef::Unknown,
                 NodeSceneSpatialTangentBasis::MikkTspace => TangentBasisRef::MikkTspace,

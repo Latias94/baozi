@@ -15,7 +15,7 @@ mod importer;
 pub use error::{Error, Result};
 pub use importer::{Importer, ImporterBuilder};
 
-/// Explicit, controlled geometry operations on immutable validated Scenes.
+/// Explicit, controlled operations on immutable validated Scenes.
 #[cfg(feature = "postprocess")]
 pub use baozi_postprocess as postprocess;
 
@@ -49,18 +49,18 @@ pub use baozi_core::{
     MaterialBindingRef, MaterialId, MaterialRef, MeshInstanceId, MeshInstanceRef, MipmapFilter,
     NodeChildren, NodeId, NodeRef, PrimitiveId, PrimitiveRef, SamplerId, SamplerRef, SamplerState,
     SceneEntityKind, SceneLookupError, SceneSpaceRef, TangentBasisRef, TangentEncodingRef,
-    TexelFilter, TextureAddressMode, TextureId, TextureRef, TopologyKind, TransformConvention,
-    TrsTransform, UvOrigin,
+    TexelFilter, TextureAddressMode, TextureId, TextureRef, TopologyKind, TrsTransform, UvOrigin,
 };
 pub use baozi_core::{CameraProjectionError, CameraProjectionKind, LightError, LightKindCategory};
+pub use baozi_core::{
+    ConventionValue, NumericConversionError, SceneSpace, SceneSpaceField,
+    SceneSpaceValidationError, SourceSpaceError, TangentBasisConvention, TangentHandednessEncoding,
+    TargetSpace,
+};
 pub use baozi_core::{
     InfluenceRef, InfluenceRowRef, InfluenceRows, MorphDeltaData, MorphDeltaRef,
     MorphDeltaSemantic, MorphTargetDefinitionRef, MorphTargetId, MorphTargetRef, SkinId,
     SkinMatrixCorrection, SkinMatrixCorrectionError, SkinMatrixSpace, SkinMatrixSpaces, SkinRef,
-};
-pub use baozi_core::{
-    SceneSpace, SceneSpaceField, SceneSpaceValidationError, TangentBasisConvention,
-    TangentHandednessEncoding,
 };
 pub use baozi_import::{
     AuthorizedDependency, CapabilityStatus, CauseOwner, ConformancePolicy,

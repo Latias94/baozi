@@ -1,5 +1,5 @@
 use crate::entity::{CameraProjectionKind, LightKindCategory};
-use crate::scene_space::{Axis, FrontFaceWinding, Handedness, TransformConvention, UvOrigin};
+use crate::scene_space::{Axis, FrontFaceWinding, Handedness, UvOrigin};
 
 use super::super::semantic::{
     NodeSceneSemanticView, NodeSceneSpatialSceneSpace, NodeSceneSpatialTangentBasis,
@@ -18,7 +18,6 @@ const TAG_FRONT_AXIS: u8 = 170;
 const TAG_UNIT_SCALE: u8 = 171;
 const TAG_FRONT_FACE_WINDING: u8 = 172;
 const TAG_UV_ORIGIN: u8 = 173;
-const TAG_TRANSFORM_CONVENTION: u8 = 174;
 const TAG_TANGENT_BASIS: u8 = 175;
 const TAG_SCHEMA_NAME: u8 = 176;
 const TAG_SCHEMA_VERSION: u8 = 177;
@@ -61,8 +60,6 @@ const WINDING_COUNTER_CLOCKWISE: u8 = 2;
 const UV_ORIGIN_UNKNOWN: u8 = 0;
 const UV_ORIGIN_UPPER_LEFT: u8 = 1;
 const UV_ORIGIN_LOWER_LEFT: u8 = 2;
-const TRANSFORM_UNKNOWN: u8 = 0;
-const TRANSFORM_COLUMN_VECTOR_LOCAL_TO_PARENT: u8 = 1;
 const TANGENT_BASIS_UNKNOWN: u8 = 0;
 const TANGENT_BASIS_MIKKTSPACE: u8 = 1;
 const TANGENT_BASIS_NAMESPACED: u8 = 2;
@@ -349,10 +346,6 @@ fn write_scene_space(
         encode_winding(scene_space.front_face_winding()),
     )?;
     transcript.tagged_u8(TAG_UV_ORIGIN, encode_uv_origin(scene_space.uv_origin()))?;
-    transcript.tagged_u8(
-        TAG_TRANSFORM_CONVENTION,
-        encode_transform(scene_space.transform_convention()),
-    )?;
     preview.push_str("scene_space handedness=");
     preview.push_str(handedness_name(scene_space.handedness()));
     preview.push_str(" up_axis=");
@@ -368,8 +361,6 @@ fn write_scene_space(
     preview.push_str(winding_name(scene_space.front_face_winding()));
     preview.push_str(" uv_origin=");
     preview.push_str(uv_origin_name(scene_space.uv_origin()));
-    preview.push_str(" transform_convention=");
-    preview.push_str(transform_name(scene_space.transform_convention()));
     write_tangent_basis(scene_space.tangent_basis(), transcript, preview)?;
     write_tangent_encoding(scene_space.tangent_encoding(), transcript, preview)?;
     preview.push_str("\n");
@@ -527,13 +518,6 @@ const fn uv_origin_name(value: UvOrigin) -> &'static str {
     }
 }
 
-const fn transform_name(value: TransformConvention) -> &'static str {
-    match value {
-        TransformConvention::Unknown => "unknown",
-        TransformConvention::ColumnVectorLocalToParent => "column_vector_local_to_parent",
-    }
-}
-
 const fn encode_handedness(value: Handedness) -> u8 {
     match value {
         Handedness::Unknown => HANDEDNESS_UNKNOWN,
@@ -564,11 +548,5 @@ const fn encode_uv_origin(value: UvOrigin) -> u8 {
         UvOrigin::Unknown => UV_ORIGIN_UNKNOWN,
         UvOrigin::UpperLeft => UV_ORIGIN_UPPER_LEFT,
         UvOrigin::LowerLeft => UV_ORIGIN_LOWER_LEFT,
-    }
-}
-const fn encode_transform(value: TransformConvention) -> u8 {
-    match value {
-        TransformConvention::Unknown => TRANSFORM_UNKNOWN,
-        TransformConvention::ColumnVectorLocalToParent => TRANSFORM_COLUMN_VECTOR_LOCAL_TO_PARENT,
     }
 }

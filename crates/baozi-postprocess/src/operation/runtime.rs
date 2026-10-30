@@ -2,7 +2,7 @@
 
 use std::num::{NonZeroU32, NonZeroU64};
 
-use baozi_core::scene::integration::SceneGeometryEditBootstrap;
+use baozi_core::scene::integration::SceneEditBootstrap;
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationSessionPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
     RetainedStoreWriterRole,
@@ -91,12 +91,12 @@ pub(crate) fn plan_runtime(
     };
     let terminal = dimension(RuntimeDimension::FailureTerminalWork)?;
     let terminal_records = dimension(RuntimeDimension::TerminalEvidenceRecords)?;
-    let validation_work = SceneGeometryEditBootstrap::failure_field_work()
-        .checked_add(MAX_REMAP_EVIDENCE_VALIDATION_WORK)?;
+    let validation_work =
+        SceneEditBootstrap::failure_field_work().checked_add(MAX_REMAP_EVIDENCE_VALIDATION_WORK)?;
     let terminal_work = RetainedStoreFailureTerminalWorkPlan::with_evidence_work(
         terminal,
-        SceneGeometryEditBootstrap::success_evidence_members(),
-        SceneGeometryEditBootstrap::failure_field_work(),
+        SceneEditBootstrap::success_evidence_members(),
+        SceneEditBootstrap::failure_field_work(),
         validation_work,
         MAX_WORK,
         MAX_WORK,

@@ -62,5 +62,5 @@ pub use crate::provenance::{
 };
 pub use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
-    TangentHandednessEncoding, TransformConvention, UvOrigin,
+    TangentHandednessEncoding, UvOrigin,
 };

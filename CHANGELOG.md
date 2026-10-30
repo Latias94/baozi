@@ -6,6 +6,16 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Added whole-Scene static `convert_scene_space` with validated complete target facts and explicit
+  source assumptions. Nodes retain authored Matrix/TRS form; dense/sparse spatial attributes and
+  triangle Corner data convert together through the shared Scene-edit transaction. Unsupported
+  present semantics return typed locations and preserve the input. Reports own centrally validated
+  conversion evidence independently of Scene lifetimes.
+- Removed the redundant `TransformConvention` declaration. Column-vector math and local-to-parent
+  authored node transforms are fixed API semantics. Scene snapshot schema is now revision 4.
+- Fixed a debug Windows stack overflow when importing inside the complete postprocess workflow.
+  Activation, central validation, publication, and mutually exclusive terminal rejection paths now
+  use separate concrete phases while preserving the same ownership and failure protocol.
 - Replaced spatial records and scalar codecs with a retained typed owner for inline `SceneSpace`,
   camera projections, and light definitions. Edits share unchanged spatial storage; central
   validation borrows its actual values and checks placement closure.

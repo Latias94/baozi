@@ -70,6 +70,12 @@ pub enum PostProcessRunError {
         #[source]
         failure: crate::NormalFailure,
     },
+    /// Spatial conversion failed without replacing the input Scene.
+    #[error("scene space conversion failed: {failure}")]
+    SpaceConversion {
+        #[source]
+        failure: crate::SpaceConversionFailure,
+    },
 }
 
 /// A direct-operation failure that returns the original immutable input Scene.

@@ -1,14 +1,15 @@
 #![forbid(unsafe_code)]
 
-//! Direct, controlled geometry operations on immutable validated Scenes.
+//! Direct, controlled operations on immutable validated Scenes.
 
 mod direct_error;
 mod error;
-mod geometry_edit;
 mod normals;
 mod operation;
 mod remap;
 mod report;
+mod scene_edit;
+mod space;
 mod triangulate;
 mod triangulation;
 
@@ -36,4 +37,8 @@ pub use triangulation::PolygonError as TriangulationIssue;
 pub use normals::{
     ExistingNormals, NormalCause, NormalFailure, NormalGenerationReport, NormalIssue, NormalMode,
     NormalOptions, TangentHandling, generate_normals,
+};
+pub use space::{
+    SpaceConversionCause, SpaceConversionFailure, SpaceConversionIssue, SpaceConversionOptions,
+    SpaceConversionReport, convert_scene_space,
 };

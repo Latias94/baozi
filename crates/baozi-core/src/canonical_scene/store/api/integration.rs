@@ -6,18 +6,17 @@ use baozi_operation::{
     RetainedStoreFailureTerminalWorkRequirement, StoreLedgerEvidence,
 };
 
-pub use super::super::construction::node_scene::edit::geometry::{
-    SceneGeometryCornerOriginsTag, SceneGeometryEditAdmission, SceneGeometryEditBootstrap,
-    SceneGeometryEditBootstrapError, SceneGeometryEditEvidence, SceneGeometryEditEvidenceTag,
-    SceneGeometryEditFailureEvidence, SceneGeometryEditFreezePermit,
-    SceneGeometryEditFrozenGenerationRejection, SceneGeometryEditGenerationRejection,
-    SceneGeometryEditHandoffPairingError, SceneGeometryEditHandoffToken,
-    SceneGeometryEditJointCommit, SceneGeometryEditOutput, SceneGeometryEditPlan,
-    SceneGeometryEditPostflight, SceneGeometryEditPublishedSuccess, SceneGeometryEditRejection,
-    SceneGeometryEditTransaction, SceneGeometryEditValidationProof, SceneGeometryFaceOffsetsTag,
-    SceneNormalGenerationEvidence, SceneNormalReplacement, SceneTriangulationEvidence,
+pub use super::super::construction::node_scene::edit::transaction::{
+    ResolvedSceneSpaceConversion, SceneEditAdmission, SceneEditBootstrap, SceneEditBootstrapError,
+    SceneEditEvidence, SceneEditEvidenceTag, SceneEditFailureEvidence, SceneEditFreezePermit,
+    SceneEditFrozenGenerationRejection, SceneEditGenerationRejection, SceneEditHandoffPairingError,
+    SceneEditHandoffToken, SceneEditJointCommit, SceneEditOutput, SceneEditPlan,
+    SceneEditPostflight, SceneEditPublishedSuccess, SceneEditRejection, SceneEditTarget,
+    SceneEditTransaction, SceneEditValidationProof, SceneGeometryCornerOriginsTag,
+    SceneGeometryFaceOffsetsTag, SceneNormalGenerationEvidence, SceneNormalReplacement,
+    SceneSpaceConversionEvidence, SceneSpaceConversionIssue, SceneTriangulationEvidence,
     SceneTriangulationReplacement, consume_scene_edit_freeze_permit,
-    try_start_scene_edit_operation,
+    resolve_scene_space_conversion, try_start_scene_edit_operation,
 };
 pub use super::super::construction::node_scene::edit::{
     SceneEditCompilation, SceneEditCompileError, SceneNodeTransformEditPlan,

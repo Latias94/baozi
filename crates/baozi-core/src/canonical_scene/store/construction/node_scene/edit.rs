@@ -10,13 +10,13 @@ use crate::provenance::OptionsDigest;
 use super::SceneStorage;
 
 mod execution;
-pub(in crate::canonical_scene::store) mod geometry;
 mod graph;
 mod plan;
 mod profile;
 mod publication;
 mod report;
 mod source;
+pub(in crate::canonical_scene::store) mod transaction;
 
 use plan::PendingNodeSceneEdit;
 use source::NodeTransformEditStartError;
