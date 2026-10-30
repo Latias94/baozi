@@ -14,8 +14,7 @@ mod profile;
 pub(in crate::canonical_scene::store) mod spatial;
 
 pub(in crate::canonical_scene::store) use animation::{
-    NodeSceneAnimationCursor, NodeSceneAnimationExtrapolation, NodeSceneAnimationInterpolation,
-    NodeSceneAnimationTarget, NodeSceneAnimationTimeDomain,
+    NodeSceneAnimationCursor, NodeSceneAnimationTarget,
 };
 pub(in crate::canonical_scene::store) use appearance::NodeSceneAppearanceCursor;
 pub(in crate::canonical_scene::store) use deformation::{
@@ -193,12 +192,8 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         let geometry = geometry::NodeSceneGeometryTables::try_new(scene.read_geometry(), proof)?;
         let deformation =
             deformation::NodeSceneDeformationTables::try_new(scene.read_deformation(), proof)?;
-        let animation = animation::NodeSceneAnimationTables::try_new(
-            &scene.canonical,
-            scene.read_geometry(),
-            scene.read_deformation(),
-            proof,
-        )?;
+        let animation =
+            animation::NodeSceneAnimationTables::try_new(scene.read_animation(), proof)?;
         let profile = profile::NodeSceneProfileTables::try_new(&scene.tables.profile)?;
         Ok(Self {
             nodes,
@@ -361,7 +356,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             appearance: Some(self.appearance.into_cursor(self.proof)),
             geometry: Some(self.geometry.into_cursor()),
             deformation: Some(self.deformation.into_cursor()),
-            animation: Some(self.animation.into_cursor(self.proof)),
+            animation: Some(self.animation.into_cursor()),
             profile: Some(self.profile.into_cursor()),
             proof: self.proof,
             roots: Some(roots),

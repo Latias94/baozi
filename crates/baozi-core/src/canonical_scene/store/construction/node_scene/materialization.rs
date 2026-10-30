@@ -20,9 +20,8 @@ use baozi_operation::__retained_store_integration::producer::{
 use baozi_operation::FinalProgress;
 use baozi_operation::{
     CapacityPlan, OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit,
-    RecordBlock, RecordPlan, RetainedStoreBatchLimits, SequencePlan, StoreBuildError,
-    StoreDimensionKey, StorePhaseKey, StorePlanError, StoreRuntimeError, StoreWorkError,
-    StoredScalar, Utf8Plan,
+    RecordBlock, RecordPlan, RetainedStoreBatchLimits, StoreBuildError, StoreDimensionKey,
+    StorePhaseKey, StorePlanError, StoreRuntimeError, StoreWorkError,
 };
 
 use crate::SceneValidationLimits;
@@ -45,7 +44,6 @@ use crate::canonical_scene::store::production::{
     validate_profile_batch_with_control, validate_scene_aggregate,
     validate_spatial_batch_with_control,
 };
-use crate::canonical_scene::store::schema::animation::AnimationDirectorySchema;
 use crate::canonical_scene::store::schema::appearance::AppearanceDirectorySchema;
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
@@ -60,7 +58,6 @@ use crate::scene_space::SceneSpace;
 #[cfg(test)]
 use super::super::SceneConstructionError;
 use super::super::{SceneConstructionStartError, SceneStoreKeys};
-use super::animation::{AnimationMaterializationPlans, retain_animation};
 use super::appearance::{AppearanceMaterializationPlans, retain_appearance};
 use super::geometry::{retain_geometry, retain_nodes};
 use super::profile::{ProfileMaterializationPlans, retain_profile};
@@ -81,6 +78,9 @@ use super::{
 };
 #[cfg(test)]
 use super::{NodeSceneDraftBuild, PendingNodeSceneDraft, PendingNodeSceneFailure};
+use crate::canonical_scene::store::typed_storage::animation::{
+    build::AnimationStoragePlan, validation::AnimationMeteredCounts,
+};
 use crate::canonical_scene::store::typed_storage::deformation::{
     build::DeformationStoragePlan, validation::DeformationMeteredCounts,
 };
@@ -1013,7 +1013,6 @@ where
 #[derive(Clone, Copy)]
 struct SceneDomainDirectoryRefs {
     appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
-    animation: CanonicalBlockRef<AnimationDirectorySchema>,
 }
 
 struct SceneStorageBatches<'input, R> {
@@ -1095,7 +1094,6 @@ pub(in crate::canonical_scene::store) fn maximum_node_scene_structural_work(
 pub(in crate::canonical_scene::store) struct NodeSceneMaterializedRefs {
     pub(in crate::canonical_scene::store) directory: CanonicalBlockRef<SceneDirectorySchema>,
     pub(in crate::canonical_scene::store) appearance: super::appearance::RetainedAppearanceRefs,
-    pub(in crate::canonical_scene::store) animation: super::animation::RetainedAnimationRefs,
 }
 
 pub(in crate::canonical_scene::store) struct NodeSceneActivationOutput {
@@ -1113,7 +1111,7 @@ struct NodeSceneMaterializationPlans {
     appearance: AppearanceMaterializationPlans,
     geometry: GeometryStoragePlan,
     deformation: DeformationStoragePlan,
-    animation: AnimationMaterializationPlans,
+    animation: AnimationStoragePlan,
     profile: ProfileMaterializationPlans,
     directory: RecordPlan,
     canonical_block_count: u32,
@@ -1140,7 +1138,11 @@ impl<'input, R> NodeSceneSealedPlan<'input, R> {
             )
             .ok_or(StorePlanError::SizeOverflow)?,
             batches.deformation.maximum_uniqueness_capacity(),
-            materialization.animation.metered_counts(),
+            AnimationMeteredCounts::try_new(
+                materialization.animation.row_counts(),
+                materialization.animation.payload_counts(),
+            )
+            .ok_or(StorePlanError::SizeOverflow)?,
             materialization.profile.metered_counts(),
             materialization.profile.maximum_provenance_depth(),
         )?;
@@ -1194,7 +1196,6 @@ impl NodeSceneMaterializationPlans {
             self.spatial.validation_work()?,
             self.appearance.validation_work_units()?,
             self.geometry.validation_work()?,
-            self.animation.validation_work_units()?,
             self.profile.validation_work_units()?,
             record_validation_work(self.directory)?,
             validation_scratch.initialization_work_units(),
@@ -1230,8 +1231,8 @@ impl NodeSceneMaterializationPlans {
             primitive_deformation_count: self.deformation.row_counts()[3] as u32,
             morph_target_count: self.deformation.row_counts()[4] as u32,
             morph_delta_count: self.deformation.row_counts()[5] as u32,
-            animation_clip_count: self.animation.clip_count(),
-            animation_channel_count: self.animation.channel_count(),
+            animation_clip_count: self.animation.row_counts()[0] as u32,
+            animation_channel_count: self.animation.row_counts()[1] as u32,
             payload_block_count: self.payload_block_count,
             profile_segment_count: profile.segment_count,
             profile_resource_count: profile.resource_count,
@@ -1269,7 +1270,7 @@ impl NodeSceneMaterializationPlans {
             u64::from(geometry_batch.attribute_semantic_name_byte_count()),
             u64::from(deformation_batch.skin_name_byte_count()),
             u64::from(deformation_batch.morph_name_byte_count()),
-            u64::from(animation_batch.clip_name_byte_count()),
+            animation_batch.clip_name_byte_count(),
             u64::from(profile_shape.lineage_text_bytes()),
             u64::from(profile_shape.metadata_text_bytes()),
         ]
@@ -1282,19 +1283,15 @@ impl NodeSceneMaterializationPlans {
         let appearance = AppearanceMaterializationPlans::new(appearance_batch)?;
         let geometry = GeometryStoragePlan::new(geometry_batch)?;
         let deformation = DeformationStoragePlan::new(deformation_batch)?;
-        let animation = AnimationMaterializationPlans::new(animation_batch)?;
+        let animation = AnimationStoragePlan::new(animation_batch)?;
         let profile = ProfileMaterializationPlans::new(profile_batch)?;
         let directory = RecordPlan::new(1, SCENE_DIRECTORY_FIELD_COUNT)?;
         let canonical_block_count_usize = 1_usize
             .checked_add(appearance.canonical_block_count())
-            .and_then(|count| count.checked_add(animation.canonical_block_count()))
             .ok_or(StorePlanError::SizeOverflow)?;
         let canonical_block_count =
             u32::try_from(canonical_block_count_usize).map_err(|_| StorePlanError::SizeOverflow)?;
-        let domain_payload_block_count = appearance
-            .payload_block_count()
-            .checked_add(animation.payload_block_count())
-            .ok_or(StorePlanError::SizeOverflow)?;
+        let domain_payload_block_count = appearance.payload_block_count();
         let payload_block_count = domain_payload_block_count;
         let shareable_leaf_block_count = domain_payload_block_count;
         let build_invariant = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)?;
@@ -1325,26 +1322,6 @@ fn record_validation_work(plan: RecordPlan) -> Result<u64, StorePlanError> {
         .checked_mul(plan.fields())
         .ok_or(StorePlanError::SizeOverflow)?;
     u64::try_from(cells).map_err(|_| StorePlanError::SizeOverflow)
-}
-
-fn optional_record_validation_work(plan: Option<RecordPlan>) -> Result<u64, StorePlanError> {
-    plan.map(record_validation_work)
-        .transpose()
-        .map(|work| work.unwrap_or(0))
-}
-
-fn optional_sequence_validation_work<T: StoredScalar>(
-    plan: Option<SequencePlan<T>>,
-) -> Result<u64, StorePlanError> {
-    plan.map(|plan| u64::try_from(plan.element_count()).map_err(|_| StorePlanError::SizeOverflow))
-        .transpose()
-        .map(|work| work.unwrap_or(0))
-}
-
-fn optional_utf8_validation_work(plan: Option<Utf8Plan>) -> Result<u64, StorePlanError> {
-    plan.map(|plan| u64::try_from(plan.bytes()).map_err(|_| StorePlanError::SizeOverflow))
-        .transpose()
-        .map(|work| work.unwrap_or(0))
 }
 
 pub(super) fn node_scene_activation_roles(keys: SceneStoreKeys) -> NodeSceneActivationRoles {
@@ -1492,11 +1469,32 @@ where
             Ok(storage)
         },
     ));
-    let animation = materialize!(retain_animation(
-        &mut lane,
-        &plans.animation,
-        &batches.animations,
-        failure,
+    let animation_capacities = materialize!(
+        plans
+            .animation
+            .capacities()
+            .map_err(StoreRuntimeError::Plan)
+    );
+    let animation_work = materialize!(plans.animation.work().map_err(StoreRuntimeError::Plan));
+    let animation = materialize!(lane.try_retain_storage(
+        animation_capacities,
+        animation_work,
+        plans.animation.name_bytes() as u64,
+        |control| {
+            #[allow(
+                unused_mut,
+                reason = "tests corrupt actual values before central validation"
+            )]
+            let mut storage = plans
+                .animation
+                .build(&batches.animations, control)
+                .map_err(super::geometry::map_build)?;
+            #[cfg(test)]
+            if let Some(fault) = faults.animation {
+                fault.corrupt(&mut storage);
+            }
+            Ok(storage)
+        },
     ));
     let profile = materialize!(retain_profile(
         &mut lane,
@@ -1510,7 +1508,6 @@ where
         plans.directory,
         SceneDomainDirectoryRefs {
             appearance: appearance.directory(),
-            animation: animation.directory(),
         },
         plans,
     ));
@@ -1521,13 +1518,13 @@ where
             spatial,
             geometry,
             deformation,
+            animation,
             profile,
         },
         draft,
         refs: NodeSceneMaterializedRefs {
             directory,
             appearance,
-            animation,
         },
         evidence_counts: plans.evidence_counts(),
         central_validation: *central_validation,
@@ -1786,8 +1783,7 @@ where
             row.write_scalar(plans.geometry.primitive_count())?;
             row.write_scalar(plans.geometry.attribute_count())?;
             row.write_scalar(plans.geometry.mesh_instance_count())?;
-            row.write_record_ref(domains.appearance.into_store())?;
-            row.write_record_ref(domains.animation.into_store())
+            row.write_record_ref(domains.appearance.into_store())
         })
     })
     .map(CanonicalBlockRef::from_store)

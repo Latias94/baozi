@@ -96,6 +96,61 @@ with `-D warnings` passed. Logs use the `target/review/d2-deformation-` prefix w
 `browser-wasm-check.log`, `doctests.log`, and `rustdoc.log`. No new sanitizer execution or sustained
 fuzz campaign is claimed for this source state.
 
+## Typed animation owner cutover — 2026-10-30
+
+Animation now uses one retained owner with two typed row tables and five contiguous pools. Closed
+targets identify canonical nodes or logical mesh instances, while actual time/value ranges
+determine key count and value width. Whole-Scene construction, unchanged edits, central validation,
+public reads, and semantic snapshots use that one owner. The animation record schema, writer,
+edit rewrite, scalar decoder, and clip/channel validation descriptors are removed. Central
+validation borrows the actual node/geometry/deformation dependencies and initializes only duplicate
+target marks, excluding the synthetic root and allocating no marks for a channel-free domain.
+
+`AnimationTimeDomain`, `AnimationInterpolation`, and `AnimationExtrapolation` are common domain
+values rather than separate authoring, storage, semantic, and public-read enums. Producer APIs use
+those same types; the former `*Authoring` enum names are removed without compatibility aliases.
+Only resolved target coordinates and widths remain in retained authoring scratch. Canonical-byte
+admission counts actual initialized rows/pools and the owner header, with exact/one-short tests.
+The private Scene directory is revision 7 with eight fields; appearance is the sole remaining
+record-backed semantic domain. Semantic snapshot encoding remains revision 4.
+
+The first targeted run passed 213/213 tests, including ten post-construction corruption classes,
+public exact payload reads, existing snapshot vectors, real target resolution, cubic derivative
+shape, and per-action interruption/unwind. Read-only cross-reviews found a draft-only duration
+restriction: keys beyond declared clip duration passed authoring but failed the new validator.
+The restriction was removed to preserve the existing source contract. Finite negative pre-roll and
+keys beyond source duration remain valid and bit-preserved; duration itself stays finite and
+nonnegative. Dedicated tests pin both sides of that range. No unresolved review finding remains.
+The final integrated execution results are recorded after their gates complete below.
+
+The all-feature workspace nextest run passed 2,283/2,283 with three manual pilots skipped. After
+adding the complete-pipeline source-duration regression, the serial core rerun executed every
+unit test and all manual pilots: 447/447 passed with no skips. It explicitly exercises arbitrary
+finite keys through authoring, central validation, publication, and the public reader. Strict
+workspace all-target/all-feature Clippy passed after removing a redundant count conversion and
+naming the corruption-case tuple type; workspace formatting passed.
+
+For the unchanged 100,000-vertex/four-influence/8 MiB metadata workload, allocator-requested edit
+peak falls from 12,320 bytes at `79c91cb` to 10,792 bytes and requests from 58 to 55. All four
+vertex/metadata size combinations keep that same peak. This fixture has no animation channels;
+it measures removal of the empty animation directory and its edit/validation overhead, not an
+animated-sample benchmark. Deterministic work remains linear for the independent primitive
+buffers. Logs are `target/review/d2-animation-workspace-nextest.log`,
+`d2-animation-core-and-scale.log`, and `d2-animation-clippy.log` in the same directory. As before,
+allocator-requested bytes are not process RSS.
+
+All-feature standalone Windows consumers executed all four formats and the complete postprocess
+chain in debug and release on the ordinary main stack. Separate empty-feature and curated-default
+release consumers also executed successfully, outside workspace feature unification. Fresh
+archives under `target/package-check-b25bhbjq` built and executed postprocess and glTF consumers
+with dependency origins verified against the unpacked package closure. The all-feature release
+WASI consumer executed through Wasmtime 50.0.0; browser WASM passed compilation only. Workspace
+doctests, rustdoc with `-D warnings`, and workspace/standalone-consumer formatting passed.
+Logs use `target/review/d2-animation-` with suffixes `native-debug.log`, `native-release.log`,
+`native-feature-subsets.log`, `packaged-consumers.log`, `wasi-consumer.log`,
+`browser-wasm-check.log`, `doctests.log`, and `rustdoc.log`. No new sanitizer or sustained fuzz
+result is claimed for this source state.
+
 ## Recovery integration and storage pilot
 
 The continuation after source session `01a1834e-5379-76b0-b412-01aa80c80fc6` reverified operation

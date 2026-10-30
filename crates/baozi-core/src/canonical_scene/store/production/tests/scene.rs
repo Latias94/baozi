@@ -23,11 +23,11 @@ use super::super::scene::{
     profile_limits_after_animation, validate_scene_aggregate,
 };
 use super::super::{
-    AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationExtrapolationAuthoring,
-    AnimationInterpolationAuthoring, AnimationTargetAuthoring, AppearanceAuthoringBatch,
-    AuthoringRange, DeformationAuthoringBatch, GeometryAuthoringBatch, MaterialAuthoring,
-    MaterialBindingAuthoring, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence,
-    ProfileAuthoringBatch, SceneAuthoringBatch, SpatialAuthoringBatch, TextureLocalId,
+    AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationExtrapolation,
+    AnimationInterpolation, AnimationTargetAuthoring, AppearanceAuthoringBatch, AuthoringRange,
+    DeformationAuthoringBatch, GeometryAuthoringBatch, MaterialAuthoring, MaterialBindingAuthoring,
+    NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence, ProfileAuthoringBatch,
+    SceneAuthoringBatch, SpatialAuthoringBatch, TextureLocalId,
 };
 use super::{
     LineageAuthoringBatch, MetadataAuthoringBatch, TestControl, profile_fixture, trs, validate,
@@ -191,9 +191,9 @@ fn scene_envelope_reserves_nested_worst_case_without_deep_validation() {
     let channels = [AnimationChannelAuthoring::new(
         0,
         AnimationTargetAuthoring::NodeTranslation(NodeLocalId::new(99)),
-        AnimationInterpolationAuthoring::CubicSpline,
-        AnimationExtrapolationAuthoring::SourceDefault,
-        AnimationExtrapolationAuthoring::SourceDefault,
+        AnimationInterpolation::CubicSpline,
+        AnimationExtrapolation::SourceDefault,
+        AnimationExtrapolation::SourceDefault,
         &[],
         &[],
         Presence::Absent,

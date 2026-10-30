@@ -186,8 +186,6 @@ pub(super) struct NodeSceneEditFixedCounts {
     pub(super) primitives: CheckedCount,
     pub(super) attributes: CheckedCount,
     pub(super) mesh_instances: CheckedCount,
-    pub(super) animation_clips: CheckedCount,
-    pub(super) animation_channels: CheckedCount,
     pub(super) profile: NodeSceneEditProfilePlan,
 }
 
@@ -391,14 +389,6 @@ impl NodeSceneEditFixedCounts {
             mesh_instances: CheckedCount::try_from_u32(
                 evidence.mesh_instance_count,
                 "mesh instance row count",
-            )?,
-            animation_clips: CheckedCount::try_from_u32(
-                evidence.animation_clip_count,
-                "animation clip row count",
-            )?,
-            animation_channels: CheckedCount::try_from_u32(
-                evidence.animation_channel_count,
-                "animation channel row count",
             )?,
             profile,
         })

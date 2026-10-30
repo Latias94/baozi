@@ -5,7 +5,6 @@ use baozi_operation::{
     StoreRuntimeError,
 };
 
-use super::super::animation::{AnimationPayloadRefs, RetainedAnimationRefs};
 use super::super::appearance::{
     AppearancePayloadRefs, AppearanceTableRefs, RetainedAppearanceRefs,
 };
@@ -14,9 +13,6 @@ use super::super::{NodeSceneMaterializedRefs, SceneStorage};
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditProgram};
 use super::profile::retain_edited_profile;
 use super::required_record_view;
-use crate::canonical_scene::store::schema::animation::{
-    AnimationChannelTableSchema, AnimationClipTableSchema, AnimationDirectorySchema,
-};
 use crate::canonical_scene::store::schema::appearance::{
     AppearanceBindingTableSchema, AppearanceDirectorySchema, AppearanceImageTableSchema,
     AppearanceMaterialTableSchema, AppearanceSamplerTableSchema, AppearanceTextureTableSchema,
@@ -36,7 +32,6 @@ pub(super) struct RewrittenNodeSceneGraph {
 #[derive(Clone, Copy)]
 struct InheritedNodeSceneLeafRefs {
     appearance: AppearancePayloadRefs,
-    animation: AnimationPayloadRefs,
 }
 
 pub(super) fn try_rewrite_node_scene<'lane, 'scene, O, PP, U>(
@@ -147,13 +142,12 @@ where
     };
     let appearance = rewrite_appearance(lane, pending, inherited.appearance)?;
     let deformation = lane.try_share_storage(&pending.input.tables.deformation)?;
-    let animation = rewrite_animation(lane, pending, inherited.animation)?;
+    let animation = lane.try_share_storage(&pending.input.tables.animation)?;
     let directory = rewrite_directory_with_shape(
         lane,
         pending,
         NodeSceneDirectoryRefs {
             appearance: appearance.directory,
-            animation: animation.directory,
         },
     )?;
 
@@ -164,12 +158,12 @@ where
             spatial,
             geometry,
             deformation,
+            animation,
             profile,
         },
         refs: NodeSceneMaterializedRefs {
             directory,
             appearance,
-            animation,
         },
     })
 }
@@ -177,7 +171,6 @@ where
 #[derive(Clone, Copy)]
 struct NodeSceneDirectoryRefs {
     appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
-    animation: CanonicalBlockRef<AnimationDirectorySchema>,
 }
 
 fn rewrite_directory_with_shape<'lane, O, PP, U>(
@@ -210,8 +203,7 @@ where
                 row.write_scalar(pending.counts.primitives.as_u32())?;
                 row.write_scalar(pending.counts.attributes.as_u32())?;
                 row.write_scalar(pending.counts.mesh_instances.as_u32())?;
-                row.write_record_ref(refs.appearance.into_store())?;
-                row.write_record_ref(refs.animation.into_store())
+                row.write_record_ref(refs.appearance.into_store())
             })
         },
     )
@@ -269,41 +261,10 @@ where
         )?,
     };
 
-    let animation = AnimationPayloadRefs {
-        clip_names: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.animation_clip_names(),
-            &mut inherited,
-        )?,
-        times: inherit_optional_leaf(lane, pending.input, proof.animation_times(), &mut inherited)?,
-        values: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.animation_values(),
-            &mut inherited,
-        )?,
-        in_tangents: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.animation_in_tangents(),
-            &mut inherited,
-        )?,
-        out_tangents: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.animation_out_tangents(),
-            &mut inherited,
-        )?,
-    };
-
     if inherited != pending.counts.inherited_leaf_count.as_usize() {
         return Err(StoreRuntimeError::InvalidSourceSlot);
     }
-    Ok(InheritedNodeSceneLeafRefs {
-        appearance,
-        animation,
-    })
+    Ok(InheritedNodeSceneLeafRefs { appearance })
 }
 
 fn rewrite_appearance<'lane, O, PP, U>(
@@ -369,47 +330,6 @@ where
             bindings,
             materials,
         },
-        payloads,
-    })
-}
-
-fn rewrite_animation<'lane, O, PP, U>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-    pending: &BoundPendingNodeSceneEdit<'_>,
-    payloads: AnimationPayloadRefs,
-) -> Result<RetainedAnimationRefs, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let input = pending.input;
-    let proof = input.proof;
-    let channels = rewrite_optional_record(
-        lane,
-        input,
-        proof.animation_channels(),
-        pending.counts.animation_channels.as_usize(),
-        AnimationChannelTableSchema,
-    )?;
-    let clips = rewrite_optional_record(
-        lane,
-        input,
-        proof.animation_clips(),
-        pending.counts.animation_clips.as_usize(),
-        AnimationClipTableSchema,
-    )?;
-    let directory = rewrite_required_record(
-        lane,
-        input,
-        proof.animation_directory(),
-        1,
-        AnimationDirectorySchema,
-    )?;
-    Ok(RetainedAnimationRefs {
-        directory,
-        clips,
-        channels,
         payloads,
     })
 }

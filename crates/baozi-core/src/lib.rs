@@ -2,6 +2,7 @@
 
 //! Canonical Baozi scene, math, diagnostic, and domain types.
 
+mod animation;
 mod appearance;
 mod attribute;
 #[allow(
@@ -75,6 +76,7 @@ pub mod scene {
     }
 }
 
+pub use animation::{AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain};
 pub use appearance::{
     AlphaCutoff, AlphaMode, ColorInterpretation, ColorInterpretationKind, LegacyMaterialFactors,
     MaterialFactorError, MaterialFactorField, MaterialFactors, PbrMetallicRoughnessFactors,
@@ -86,8 +88,7 @@ pub use attribute::{
     AttributeDomain, AttributeSemantic, AttributeSemanticKind, CustomAttributeSemantic,
 };
 pub use canonical_scene::store::api::read::{
-    AnimationChannelRef, AnimationClipRef, AnimationExtrapolation, AnimationInterpolation,
-    AnimationTarget, AnimationTimeDomain,
+    AnimationChannelRef, AnimationClipRef, AnimationTarget,
 };
 pub use canonical_scene::store::api::read::{
     AttributeData, AttributeRef, AttributeSemanticRef, CameraRef, ImageRef, LightRef,

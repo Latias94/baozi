@@ -10,7 +10,6 @@ use baozi_operation::{
 };
 
 use crate::canonical_scene::store::validation::{
-    AnimationChannelValidationDescriptor, AnimationClipValidationDescriptor,
     AnimationMeteredCounts, AnimationValidationScratch, AnimationValidationScratchRequirements,
     AppearanceBindingValidationScratch, AppearanceCanonicalCounts,
     AppearanceMaterialValidationScratch, AppearanceValidationScratch,
@@ -113,15 +112,12 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
     appearance_materials: ScratchCapacityPlan,
     deformation_palette_maxima: ScratchCapacityPlan,
     deformation_uniqueness_marks: ScratchCapacityPlan,
-    animation_clip_descriptors: ScratchCapacityPlan,
-    animation_channel_descriptors: ScratchCapacityPlan,
     animation_target_marks: ScratchCapacityPlan,
     profile_provenance_depths: ScratchCapacityPlan,
     appearance_requirements: AppearanceValidationScratchRequirements,
     deformation_counts: DeformationMeteredCounts,
     deformation_requirements: DeformationValidationScratchRequirements,
     animation_counts: AnimationMeteredCounts,
-    animation_requirements: AnimationValidationScratchRequirements,
     profile_counts: ProfileMeteredCounts,
     profile_maximum_depth: u32,
     envelope_bytes: u64,
@@ -187,6 +183,11 @@ impl NodeSceneValidationScratchPlan {
                 deformation_counts.mesh_instance_count,
                 counts.mesh_instance_count,
             ),
+            (animation_counts.clip_count, counts.animation_clip_count),
+            (
+                animation_counts.channel_count,
+                counts.animation_channel_count,
+            ),
         ]
         .into_iter()
         .any(|(actual, expected)| actual != expected)
@@ -195,8 +196,9 @@ impl NodeSceneValidationScratchPlan {
         }
         let animation_requirements = AnimationValidationScratchRequirements::try_new(
             animation_counts,
-            counts.node_count,
-            counts.mesh_instance_count,
+            usize::try_from(counts.node_count).map_err(|_| StorePlanError::SizeOverflow)?,
+            usize::try_from(counts.mesh_instance_count)
+                .map_err(|_| StorePlanError::SizeOverflow)?,
         )
         .ok_or(StorePlanError::SizeOverflow)?;
         let camera_placement_counts = scratch_capacity_plan::<u32>(camera_count)?;
@@ -213,12 +215,6 @@ impl NodeSceneValidationScratchPlan {
             scratch_capacity_plan::<Option<u32>>(deformation_requirements.palette_maxima)?;
         let deformation_uniqueness_marks =
             scratch_capacity_plan::<u64>(deformation_requirements.uniqueness_marks)?;
-        let animation_clip_descriptors = scratch_capacity_plan::<AnimationClipValidationDescriptor>(
-            animation_requirements.clip_descriptors,
-        )?;
-        let animation_channel_descriptors = scratch_capacity_plan::<
-            AnimationChannelValidationDescriptor,
-        >(animation_requirements.channel_descriptors)?;
         let animation_target_marks =
             scratch_capacity_plan::<u32>(animation_requirements.target_marks)?;
         let profile_provenance_depths = scratch_capacity_plan::<u32>(
@@ -233,8 +229,6 @@ impl NodeSceneValidationScratchPlan {
             appearance_materials,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
-            animation_clip_descriptors,
-            animation_channel_descriptors,
             animation_target_marks,
             profile_provenance_depths,
         ]
@@ -280,6 +274,11 @@ impl NodeSceneValidationScratchPlan {
                     .validation_work()
                     .and_then(|deformation| work.checked_add(deformation))
             })
+            .and_then(|work| {
+                animation_counts
+                    .validation_work()
+                    .and_then(|animation| work.checked_add(animation))
+            })
             .ok_or(StorePlanError::SizeOverflow)?;
 
         Ok(Self {
@@ -290,15 +289,12 @@ impl NodeSceneValidationScratchPlan {
             appearance_materials,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
-            animation_clip_descriptors,
-            animation_channel_descriptors,
             animation_target_marks,
             profile_provenance_depths,
             appearance_requirements,
             deformation_counts,
             deformation_requirements,
             animation_counts,
-            animation_requirements,
             profile_counts,
             profile_maximum_depth,
             envelope_bytes,
@@ -381,8 +377,6 @@ where
     appearance_materials: Vec<AppearanceMaterialValidationScratch>,
     deformation_palette_maxima: Vec<Option<u32>>,
     deformation_uniqueness_marks: Vec<u64>,
-    animation_clip_descriptors: Vec<AnimationClipValidationDescriptor>,
-    animation_channel_descriptors: Vec<AnimationChannelValidationDescriptor>,
     animation_target_marks: Vec<u32>,
     profile_provenance_depths: Vec<u32>,
     _reservation: CanonicalReservation<'scope, O>,
@@ -434,8 +428,6 @@ where
         let appearance_materials = allocate!(appearance_materials);
         let deformation_palette_maxima = allocate!(deformation_palette_maxima);
         let deformation_uniqueness_marks = allocate!(deformation_uniqueness_marks);
-        let animation_clip_descriptors = allocate!(animation_clip_descriptors);
-        let animation_channel_descriptors = allocate!(animation_channel_descriptors);
         let animation_target_marks = allocate!(animation_target_marks);
         let profile_provenance_depths = allocate!(profile_provenance_depths);
         checkpoint.resize(&mut reservation, actual)?;
@@ -448,8 +440,6 @@ where
             appearance_materials,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
-            animation_clip_descriptors,
-            animation_channel_descriptors,
             animation_target_marks,
             profile_provenance_depths,
             _reservation: reservation,
@@ -485,14 +475,6 @@ where
         );
         initialize!(deformation_palette_maxima, None);
         initialize!(deformation_uniqueness_marks, 0);
-        initialize!(
-            animation_clip_descriptors,
-            AnimationClipValidationDescriptor::EMPTY
-        );
-        initialize!(
-            animation_channel_descriptors,
-            AnimationChannelValidationDescriptor::EMPTY
-        );
         initialize!(animation_target_marks, 0);
         initialize!(profile_provenance_depths, 0);
         Ok(true)
@@ -513,11 +495,7 @@ where
                 &mut self.deformation_palette_maxima,
                 &mut self.deformation_uniqueness_marks,
             ),
-            animation: AnimationValidationScratch::new(
-                &mut self.animation_clip_descriptors,
-                &mut self.animation_channel_descriptors,
-                &mut self.animation_target_marks,
-            ),
+            animation: AnimationValidationScratch::new(&mut self.animation_target_marks),
             profile: ProfileMeteredScratch::new(&mut self.profile_provenance_depths),
         }
     }

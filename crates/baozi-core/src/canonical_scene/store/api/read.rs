@@ -13,10 +13,7 @@ mod geometry;
 mod node;
 mod spatial;
 
-pub use animation::{
-    AnimationChannelRef, AnimationClipRef, AnimationExtrapolation, AnimationInterpolation,
-    AnimationTarget, AnimationTimeDomain,
-};
+pub use animation::{AnimationChannelRef, AnimationClipRef, AnimationTarget};
 pub use appearance::{ImageRef, MaterialBindingRef, MaterialRef, SamplerRef, TextureRef};
 pub use deformation::{
     InfluenceRef, InfluenceRowRef, InfluenceRows, MorphDeltaData, MorphDeltaRef,

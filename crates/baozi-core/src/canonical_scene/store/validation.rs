@@ -1,12 +1,13 @@
 mod node_scene;
 
+pub(in crate::canonical_scene::store) use super::typed_storage::animation::validation::{
+    AnimationMeteredCounts, AnimationValidationScratch, AnimationValidationScratchRequirements,
+};
 pub(in crate::canonical_scene::store) use super::typed_storage::deformation::validation::{
     DeformationMeteredCounts, DeformationValidationScratch,
     DeformationValidationScratchRequirements,
 };
 pub(in crate::canonical_scene::store) use node_scene::{
-    AnimationChannelValidationDescriptor, AnimationClipValidationDescriptor,
-    AnimationMeteredCounts, AnimationValidationScratch, AnimationValidationScratchRequirements,
     AppearanceBindingValidationScratch, AppearanceCanonicalCounts,
     AppearanceMaterialValidationScratch, AppearanceValidationScratch,
     AppearanceValidationScratchRequirements, NodeSceneValidationProof, NodeSceneValidationScratch,

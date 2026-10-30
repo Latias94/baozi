@@ -1,7 +1,6 @@
-use super::super::semantic::{
-    NodeSceneAnimationCursor, NodeSceneAnimationExtrapolation, NodeSceneAnimationInterpolation,
-    NodeSceneAnimationTarget, NodeSceneAnimationTimeDomain,
-};
+use crate::animation::{AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain};
+
+use super::super::semantic::{NodeSceneAnimationCursor, NodeSceneAnimationTarget};
 use super::{
     CanonicalDigestEncoder, NodeSceneSnapshotError, PRESENCE_ABSENT, PRESENCE_PRESENT, PreviewSink,
     SnapshotWorkMeter, TAG_COLLECTION_TOTAL, TAG_PRESENCE, TAG_REFERENCE,
@@ -284,11 +283,11 @@ fn add_scalars(
         .ok_or(NodeSceneSnapshotError::SemanticTotalOverflow { total: name })
 }
 
-const fn encode_time_domain(value: NodeSceneAnimationTimeDomain) -> (u8, Option<f64>) {
+const fn encode_time_domain(value: AnimationTimeDomain) -> (u8, Option<f64>) {
     match value {
-        NodeSceneAnimationTimeDomain::Seconds => (0, None),
-        NodeSceneAnimationTimeDomain::Frames { rate } => (1, Some(rate)),
-        NodeSceneAnimationTimeDomain::Ticks { rate } => (2, rate),
+        AnimationTimeDomain::Seconds => (0, None),
+        AnimationTimeDomain::Frames { rate } => (1, Some(rate)),
+        AnimationTimeDomain::Ticks { rate } => (2, rate),
     }
 }
 
@@ -301,19 +300,19 @@ const fn encode_target(value: NodeSceneAnimationTarget) -> (u8, usize) {
     }
 }
 
-const fn encode_interpolation(value: NodeSceneAnimationInterpolation) -> u8 {
+const fn encode_interpolation(value: AnimationInterpolation) -> u8 {
     match value {
-        NodeSceneAnimationInterpolation::Step => 0,
-        NodeSceneAnimationInterpolation::Linear => 1,
-        NodeSceneAnimationInterpolation::CubicSpline => 2,
+        AnimationInterpolation::Step => 0,
+        AnimationInterpolation::Linear => 1,
+        AnimationInterpolation::CubicSpline => 2,
     }
 }
 
-const fn encode_extrapolation(value: NodeSceneAnimationExtrapolation) -> u8 {
+const fn encode_extrapolation(value: AnimationExtrapolation) -> u8 {
     match value {
-        NodeSceneAnimationExtrapolation::SourceDefault => 0,
-        NodeSceneAnimationExtrapolation::Constant => 1,
-        NodeSceneAnimationExtrapolation::Linear => 2,
-        NodeSceneAnimationExtrapolation::Repeat => 3,
+        AnimationExtrapolation::SourceDefault => 0,
+        AnimationExtrapolation::Constant => 1,
+        AnimationExtrapolation::Linear => 2,
+        AnimationExtrapolation::Repeat => 3,
     }
 }

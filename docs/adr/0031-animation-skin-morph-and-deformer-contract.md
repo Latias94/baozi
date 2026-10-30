@@ -127,6 +127,14 @@ sources separately and does not bake the effective value into import output.
 
 ### Animation
 
+`AnimationTimeDomain`, `AnimationInterpolation`, and `AnimationExtrapolation` are shared domain
+types used by the producer, retained storage, and public readers. They do not have separate
+authoring, record-codec, or read-view enum copies. One private retained animation owner stores two
+typed row tables and five contiguous pools. Its target enum holds generation-independent node or
+mesh-instance indices; public lookups qualify those identities with the owning Scene generation.
+Central validation borrows actual clip/channel rows and payloads and uses only duplicate-target
+marks as mutable scratch. Edits that leave animation unchanged share the complete owner.
+
 An `AnimationClip` declares a source time domain and owns channels. Key times and duration are
 finite `f64` values in the authored domain. The time domain records seconds, frames with a rate,
 ticks with an optional ticks-per-second rate, or a validated namespaced source unit. A seconds view

@@ -20,6 +20,7 @@ evidence:
   - crates/baozi-core/src/canonical_scene/store/typed_storage/profile.rs
   - crates/baozi-core/src/canonical_scene/store/typed_storage/spatial.rs
   - crates/baozi-core/src/canonical_scene/store/typed_storage/deformation.rs
+  - crates/baozi-core/src/canonical_scene/store/typed_storage/animation.rs
 related:
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
@@ -127,9 +128,9 @@ hold. ADR 0032 owns operation-specific remaps, invalidation, and reports.
 ### Private Typed Storage
 
 The private `SceneStorage` root owns `SceneTables`, containing the actual node, geometry, profile,
-spatial, and deformation owners. Node rows retain an explicit synthetic/Matrix/TRS transform, ordered child
-ranges, optional name ranges, and optional
-spatial attachments. Geometry rows retain typed logical indices and ranges into contiguous scalar
+spatial, deformation, and animation owners. Node rows retain an explicit synthetic/Matrix/TRS
+transform, ordered child ranges, optional name ranges, and optional spatial attachments.
+Geometry rows retain typed logical indices and ranges into contiguous scalar
 pools. A row does not carry a publication-local concrete-store slot for another typed row or pool.
 Dense F32/F64/U32/I32 values, sparse indices and defaults, and Vertex/Corner/Face cardinalities remain
 explicit. Spatial storage owns an inline `SceneSpace`, typed camera projections, and typed light
@@ -145,6 +146,15 @@ influence columns remain directly borrowable; sparse morph omissions require no 
 tuple. An explicit empty sparse stream or weight override retains its presence. Owner indices and
 payload ranges are independent of Scene generations; public lookup qualifies identities at the
 Scene boundary. No deformation directory, scalar codec, or record rewrite is retained.
+
+Animation uses one retained owner for clip/channel rows, f64 key times, f32 values and cubic
+derivatives, and UTF-8 names. A closed target identifies a logical node or mesh instance; no
+separate scalar tag, target-context reference, or cached key/width field duplicates those facts.
+Validated target shape and actual ranges determine key count and width. Clip source order,
+channel source order, and complete owner/pool coverage remain explicit central checks. Domain
+time/interpolation/extrapolation types are shared by authoring, storage, and borrowed read APIs.
+Finite negative pre-roll remains a canonical source value; format-specific time restrictions stay
+at the format boundary.
 
 Core defines the row layout and exact `CapacityPlan` values. Operation owns admission, the physical
 account, retained leases, shared ownership, and storage-first release. A core builder runs only inside
@@ -165,12 +175,13 @@ admitted and charged shared header per table owner; inline evidence and path sto
 existing `RetainedStorage<T>` owner without a separate header per path.
 
 Central validation borrows the actual immutable tables and scalar pools. It allocates only mutable
-marks, traversal state, and caches required by an algorithm; immutable node, geometry, spatial, or deformation
-rows are not copied into a second validation projection. Reads and semantic validation remain
+marks, traversal state, and caches required by an algorithm; immutable node, geometry, spatial,
+deformation, or animation rows are not copied into a second validation projection. Reads and semantic validation remain
 cancellable and metered. Complete owner coverage, topology, payload shape, finite values, range
 bounds, sparse index order, and cross-domain references remain mandatory before generation reservation.
 
-A node-transform edit replaces its node table and shares the unchanged geometry, spatial, and deformation owners.
+A node-transform edit replaces its node table and shares the unchanged geometry, spatial,
+deformation, and animation owners.
 Geometry tables and their payload pools retain their original addresses and one physical charge
 across source and destination generations. No generic geometry-record rebuild or dynamic payload-slot scan is part
 of that edit. Spatial declarations and camera/light definitions retain their original owner while
@@ -180,16 +191,19 @@ per-logical-mesh palette maxima and bounded uniqueness marks. Animation target-w
 the same deformation and geometry owners rather than constructing cross-domain descriptors.
 Semantic cursors borrow validation authority when needed; typed geometry and deformation cursors
 derive lengths directly from their proof-qualified tables without copying the cross-domain proof.
+Animation validation allocates only per-target duplicate marks when channels exist; clip/channel
+descriptors and scalar projections are unnecessary. Its semantic cursors also borrow actual rows
+and pools without retaining the cross-domain proof.
 
 Typed owners follow the same rejection, publication, and ordinary host-unwind lifecycle as the
-directory-backed domains. Dropping either generation first leaves shared geometry, spatial, and deformation data
-available to the survivor; the final generation releases the storage before its charge. A refused
+directory-backed domains. Dropping either generation first leaves shared geometry, spatial,
+deformation, and animation data available to the survivor; the final generation releases the storage before its charge. A refused
 build action drops partially initialized vectors before the central admission is released. Retained
 rows, scalar pools, and their charge never escape as independently movable parts.
 
-During the domain cutover, appearance and animation storage may
-remain in the existing retained owner under the same Scene root. Their node/geometry dependency
-checks borrow the actual typed tables. This is a migration boundary between domains, not a second
+During the domain cutover, appearance storage may remain in the existing retained owner under the
+same Scene root. Its node/geometry dependency checks borrow the actual typed tables. This is a
+migration boundary between domains, not a second
 Scene representation or a permanent compatibility adapter. Each subsequent domain cutover deletes
 its replaced record schema and conversion/validation projection in the same change.
 

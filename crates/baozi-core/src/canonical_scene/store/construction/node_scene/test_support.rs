@@ -18,6 +18,66 @@ use super::materialization::{
 };
 use super::{NodeSceneBuildFaults, NodeSceneDraftBuild};
 
+/// Corrupts retained animation values after authoring admission has succeeded.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum AnimationBuildFault {
+    ClipCount,
+    ChannelPartition,
+    SyntheticNodeTarget,
+    DuplicateTarget,
+    UnorderedTimes,
+    NonUnitRotation,
+    MorphWidth,
+    MissingCubicTangent,
+    NonFiniteTangent,
+    NegativeDuration,
+}
+
+impl AnimationBuildFault {
+    pub(super) const ALL: [Self; 10] = [
+        Self::ClipCount,
+        Self::ChannelPartition,
+        Self::SyntheticNodeTarget,
+        Self::DuplicateTarget,
+        Self::UnorderedTimes,
+        Self::NonUnitRotation,
+        Self::MorphWidth,
+        Self::MissingCubicTangent,
+        Self::NonFiniteTangent,
+        Self::NegativeDuration,
+    ];
+
+    pub(super) fn corrupt(
+        self,
+        storage: &mut crate::canonical_scene::store::typed_storage::animation::AnimationStorage,
+    ) {
+        use crate::canonical_scene::store::typed_storage::animation::StoredAnimationTarget;
+        use crate::canonical_scene::store::typed_storage::{StoredNodeIndex, TableRange};
+
+        match self {
+            Self::ClipCount => storage.clips.clear(),
+            Self::ChannelPartition => storage.clips[0].channels = TableRange::new(0, 2),
+            Self::SyntheticNodeTarget => {
+                storage.channels[0].target =
+                    StoredAnimationTarget::NodeTranslation(StoredNodeIndex(0));
+            }
+            Self::DuplicateTarget => storage.channels[1].target = storage.channels[0].target,
+            Self::UnorderedTimes => storage.times[1] = storage.times[0],
+            Self::NonUnitRotation => {
+                let start = storage.channels[1].values.start();
+                storage.values[start + 3] = 0.0;
+            }
+            Self::MorphWidth => {
+                let range = storage.channels[2].values;
+                storage.channels[2].values = TableRange::new(range.start(), range.len() - 1);
+            }
+            Self::MissingCubicTangent => storage.channels[2].in_tangents = None,
+            Self::NonFiniteTangent => storage.in_tangents[0] = f32::NAN,
+            Self::NegativeDuration => storage.clips[0].duration = -1.0,
+        }
+    }
+}
+
 /// Corrupts real deformation rows and payloads before the central validator observes them.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum DeformationBuildFault {

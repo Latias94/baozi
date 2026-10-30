@@ -1,30 +1,20 @@
 use std::fmt;
 
 use super::super::super::construction::node_scene::semantic::animation::{
-    NodeSceneAnimationChannel, NodeSceneAnimationClip, NodeSceneAnimationExtrapolation,
-    NodeSceneAnimationInterpolation, NodeSceneAnimationTables, NodeSceneAnimationTarget,
-    NodeSceneAnimationTimeDomain,
+    NodeSceneAnimationChannel, NodeSceneAnimationClip, NodeSceneAnimationTables,
+    NodeSceneAnimationTarget,
 };
 use super::{ValidatedScene, checked_index, expect_validated};
+use crate::animation::{AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain};
 use crate::identity::{
     AnimationClipId, MeshInstanceId, NodeId, SceneEntityKind, SceneGenerationId, SceneLookupError,
 };
 
 fn tables(scene: &ValidatedScene) -> NodeSceneAnimationTables<'_> {
     expect_validated(NodeSceneAnimationTables::try_new(
-        scene.as_node_scene().read_canonical(),
-        scene.as_node_scene().read_geometry(),
-        scene.as_node_scene().read_deformation(),
+        scene.as_node_scene().read_animation(),
         scene.as_node_scene().read_proof(),
     ))
-}
-
-/// The authored time unit. Durations, key times, and tangent derivatives use this domain.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AnimationTimeDomain {
-    Seconds,
-    Frames { rate: f64 },
-    Ticks { rate: Option<f64> },
 }
 
 /// One channel's property and generation-qualified target in the same Scene.
@@ -34,23 +24,6 @@ pub enum AnimationTarget {
     NodeRotation(NodeId),
     NodeScale(NodeId),
     MeshInstanceMorphWeights(MeshInstanceId),
-}
-
-/// The retained interpolation rule; reading does not evaluate the curve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnimationInterpolation {
-    Step,
-    Linear,
-    CubicSpline,
-}
-
-/// The retained behavior before the first or after the last key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnimationExtrapolation {
-    SourceDefault,
-    Constant,
-    Linear,
-    Repeat,
 }
 
 /// One animation clip borrowing its authored data from the immutable Scene.
@@ -66,9 +39,7 @@ impl<'s> AnimationClipRef<'s> {
     }
 
     fn read(self) -> NodeSceneAnimationClip<'s> {
-        expect_validated(
-            tables(self.scene).clip_at(self.scene.as_node_scene().read_proof(), self.index),
-        )
+        expect_validated(tables(self.scene).clip_at(self.index))
     }
 
     pub fn id(self) -> AnimationClipId {
@@ -86,11 +57,7 @@ impl<'s> AnimationClipRef<'s> {
     }
 
     pub fn time_domain(self) -> AnimationTimeDomain {
-        match self.read().time_domain() {
-            NodeSceneAnimationTimeDomain::Seconds => AnimationTimeDomain::Seconds,
-            NodeSceneAnimationTimeDomain::Frames { rate } => AnimationTimeDomain::Frames { rate },
-            NodeSceneAnimationTimeDomain::Ticks { rate } => AnimationTimeDomain::Ticks { rate },
-        }
+        self.read().time_domain()
     }
 
     pub fn channel_count(self) -> usize {
@@ -137,9 +104,7 @@ impl<'s> AnimationChannelRef<'s> {
     fn at(scene: &'s ValidatedScene, row: usize) -> Self {
         Self {
             generation: scene.generation(),
-            channel: expect_validated(
-                tables(scene).channel_at(scene.as_node_scene().read_proof(), row),
-            ),
+            channel: expect_validated(tables(scene).channel_at(row)),
         }
     }
 
@@ -161,19 +126,15 @@ impl<'s> AnimationChannelRef<'s> {
     }
 
     pub fn interpolation(self) -> AnimationInterpolation {
-        match self.channel.interpolation() {
-            NodeSceneAnimationInterpolation::Step => AnimationInterpolation::Step,
-            NodeSceneAnimationInterpolation::Linear => AnimationInterpolation::Linear,
-            NodeSceneAnimationInterpolation::CubicSpline => AnimationInterpolation::CubicSpline,
-        }
+        self.channel.interpolation()
     }
 
     pub fn pre_extrapolation(self) -> AnimationExtrapolation {
-        extrapolation(self.channel.pre_extrapolation())
+        self.channel.pre_extrapolation()
     }
 
     pub fn post_extrapolation(self) -> AnimationExtrapolation {
-        extrapolation(self.channel.post_extrapolation())
+        self.channel.post_extrapolation()
     }
 
     pub const fn key_count(self) -> usize {
@@ -200,15 +161,6 @@ impl<'s> AnimationChannelRef<'s> {
 
     pub const fn out_tangents(self) -> Option<&'s [f32]> {
         self.channel.out_tangents()
-    }
-}
-
-fn extrapolation(value: NodeSceneAnimationExtrapolation) -> AnimationExtrapolation {
-    match value {
-        NodeSceneAnimationExtrapolation::SourceDefault => AnimationExtrapolation::SourceDefault,
-        NodeSceneAnimationExtrapolation::Constant => AnimationExtrapolation::Constant,
-        NodeSceneAnimationExtrapolation::Linear => AnimationExtrapolation::Linear,
-        NodeSceneAnimationExtrapolation::Repeat => AnimationExtrapolation::Repeat,
     }
 }
 

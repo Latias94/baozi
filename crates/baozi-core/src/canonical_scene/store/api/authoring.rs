@@ -2,8 +2,7 @@
 
 pub use super::super::production::input::animation::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
-    AnimationExtrapolationAuthoring, AnimationInterpolationAuthoring, AnimationTargetAuthoring,
-    AnimationTimeDomainAuthoring,
+    AnimationTargetAuthoring,
 };
 pub use super::super::production::input::appearance::{
     AppearanceAuthoringBatch, ImageAuthoring, ImageLocalId, MaterialAuthoring,
@@ -38,6 +37,7 @@ pub use super::super::production::input::{
     ProfileAuthoringBatch, ResourceSnapshotAuthoring, SceneAuthoringBatch,
 };
 pub use crate::FormatId;
+pub use crate::animation::{AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain};
 pub use crate::appearance::{
     AlphaMode, AppearanceBuildError, ColorInterpretation, LegacyMaterialFactors, MaterialFactors,
     PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel,

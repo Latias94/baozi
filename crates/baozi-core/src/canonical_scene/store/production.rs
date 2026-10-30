@@ -8,6 +8,10 @@ mod scene;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(super) use crate::animation::{
+    AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain,
+};
 pub(super) use control::{
     CanonicalAuthoringControl, OperationAuthoringControlError, ScopedAuthoringControl,
 };
@@ -19,13 +23,10 @@ pub(super) use input::ProfileAuthoringBatch;
 pub(super) use input::ResourceSnapshotAuthoring;
 #[cfg(test)]
 pub(super) use input::ResourceSnapshotAuthoringTable;
+pub(super) use input::animation::AnimationTargetAuthoring;
 #[cfg(test)]
 pub(super) use input::animation::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
-};
-pub(super) use input::animation::{
-    AnimationExtrapolationAuthoring, AnimationInterpolationAuthoring, AnimationTargetAuthoring,
-    AnimationTimeDomainAuthoring,
 };
 #[cfg(test)]
 pub(super) use input::appearance::AppearanceAuthoringBatch;

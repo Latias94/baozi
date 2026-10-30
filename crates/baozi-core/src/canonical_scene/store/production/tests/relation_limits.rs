@@ -32,9 +32,9 @@ use crate::canonical_scene::store::production::plan::{
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
-    AnimationExtrapolationAuthoring, AnimationInterpolationAuthoring, AnimationTargetAuthoring,
-    AnimationTimeDomainAuthoring, AppearanceAuthoringBatch, AuthoringRange, CameraAuthoring,
-    CameraLocalId, DeformationAuthoringBatch, GeometryAttributeAuthoring, GeometryAuthoringBatch,
+    AnimationExtrapolation, AnimationInterpolation, AnimationTargetAuthoring, AnimationTimeDomain,
+    AppearanceAuthoringBatch, AuthoringRange, CameraAuthoring, CameraLocalId,
+    DeformationAuthoringBatch, GeometryAttributeAuthoring, GeometryAuthoringBatch,
     GeometryLogicalMeshAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
     ImageAuthoring, ImageLocalId, LightAuthoring, LightLocalId, NodeAuthoringBatch,
     NodeAuthoringNode, NodeLocalId, Presence, SamplerAuthoring, SamplerLocalId, SkinAuthoring,
@@ -333,9 +333,9 @@ fn animation_relation_limit_failures_preserve_the_exact_completed_prefix() {
     let channels = [AnimationChannelAuthoring::new(
         0,
         AnimationTargetAuthoring::NodeTranslation(NodeLocalId::new(0)),
-        AnimationInterpolationAuthoring::Linear,
-        AnimationExtrapolationAuthoring::SourceDefault,
-        AnimationExtrapolationAuthoring::SourceDefault,
+        AnimationInterpolation::Linear,
+        AnimationExtrapolation::SourceDefault,
+        AnimationExtrapolation::SourceDefault,
         &times,
         &values,
         Presence::Absent,
@@ -344,7 +344,7 @@ fn animation_relation_limit_failures_preserve_the_exact_completed_prefix() {
     let clips = [AnimationClipAuthoring::new(
         0,
         1.0,
-        AnimationTimeDomainAuthoring::Seconds,
+        AnimationTimeDomain::Seconds,
         AuthoringRange::new(0, 1),
     )];
     let input = AnimationAuthoringBatch::new(&clips, &channels);

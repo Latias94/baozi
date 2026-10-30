@@ -1,62 +1,127 @@
+//! Constant-time row/range selection. No preceding row, scalar stream, or proof is decoded.
+
 use super::*;
 
-// Seed the exhaustive decoder from this row's exact offsets. The immutable Scene has
-// already validated owner coverage and payload contiguity; random reads need no prefix scan.
 impl<'scene> NodeSceneAnimationTables<'scene> {
     pub(in crate::canonical_scene::store) fn clip_at(
         self,
-        proof: &'scene NodeSceneValidationProof,
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAnimationClip<'scene>> {
-        let table = self
+        let clip = self
+            .storage
             .clips
-            .ok_or_else(|| invariant("animation-clip table is absent"))?;
-        let offset = read_u32_as_usize(
-            table,
-            row,
-            animation_clip_field::CHANNEL_OFFSET,
-            "animation-clip channel offset is unreadable",
-        )?;
-        let name_offset = read_u32_as_usize(
-            table,
-            row,
-            animation_clip_field::NAME_OFFSET,
-            "animation-clip name offset is unreadable",
-        )?;
-        let mut cursor = self.into_cursor(proof);
-        cursor.next_clip = row;
-        cursor.next_clip_channel_offset = offset;
-        cursor.next_clip_name_offset = name_offset;
-        cursor
-            .next_clip()?
-            .ok_or_else(|| invariant("animation-clip row is absent"))
+            .get(row)
+            .ok_or_else(|| invariant("animation clip is outside its proof-qualified table"))?;
+        record_row_read();
+        if !clip.duration.is_finite() || clip.duration < 0.0 || !valid_time_domain(clip.time_domain)
+        {
+            return Err(invariant(
+                "validated animation clip duration or rate is invalid",
+            ));
+        }
+        let channels = borrow_range(clip.channels, &self.storage.channels)?;
+        let name = clip
+            .name
+            .map(|range| {
+                range
+                    .get(&self.storage.names)
+                    .ok_or_else(|| invariant("validated animation clip name is unavailable"))
+            })
+            .transpose()?;
+        Ok(NodeSceneAnimationClip {
+            name,
+            source_index: clip.source_index as usize,
+            duration: clip.duration,
+            time_domain: clip.time_domain,
+            channel_offset: clip.channels.start(),
+            channel_count: channels.len(),
+        })
     }
 
     pub(in crate::canonical_scene::store) fn channel_at(
         self,
-        proof: &'scene NodeSceneValidationProof,
         row: usize,
     ) -> NodeSceneSemanticResult<NodeSceneAnimationChannel<'scene>> {
-        let table = self
-            .channels
-            .ok_or_else(|| invariant("animation-channel table is absent"))?;
-        let offset =
-            |field| read_u32_as_usize(table, row, field, "animation-channel offset is unreadable");
-        let time_offset = offset(animation_channel_field::TIME_OFFSET)?;
-        let value_offset = offset(animation_channel_field::VALUE_OFFSET)?;
-        let in_tangent_offset = offset(animation_channel_field::IN_TANGENT_OFFSET)?;
-        let out_tangent_offset = offset(animation_channel_field::OUT_TANGENT_OFFSET)?;
-        let mut cursor = self.into_cursor(proof);
-        cursor.phase = AnimationCursorPhase::Channels;
-        cursor.next_clip = proof.animation_clip_count();
-        cursor.next_clip_channel_offset = proof.animation_channel_count();
-        cursor.next_channel = row;
-        cursor.next_time_offset = time_offset;
-        cursor.next_value_offset = value_offset;
-        cursor.next_in_tangent_offset = in_tangent_offset;
-        cursor.next_out_tangent_offset = out_tangent_offset;
-        cursor
-            .next_channel()?
-            .ok_or_else(|| invariant("animation-channel row is absent"))
+        let channel =
+            self.storage.channels.get(row).ok_or_else(|| {
+                invariant("animation channel is outside its proof-qualified table")
+            })?;
+        record_row_read();
+        let target = self.checked_target(channel.target)?;
+        let times = borrow_range(channel.times, &self.storage.times)?;
+        let values = borrow_range(channel.values, &self.storage.values)?;
+        let value_width = channel
+            .value_width()
+            .ok_or_else(|| invariant("validated animation channel sample shape is inconsistent"))?
+            as usize;
+        let in_tangents = borrow_optional_range(channel.in_tangents, &self.storage.in_tangents)?;
+        let out_tangents = borrow_optional_range(channel.out_tangents, &self.storage.out_tangents)?;
+        match (channel.interpolation, in_tangents, out_tangents) {
+            (AnimationInterpolation::CubicSpline, Some(input), Some(output))
+                if input.len() == values.len() && output.len() == values.len() => {}
+            (AnimationInterpolation::Step | AnimationInterpolation::Linear, None, None) => {}
+            _ => {
+                return Err(invariant(
+                    "validated animation tangent presence or shape is inconsistent",
+                ));
+            }
+        }
+        Ok(NodeSceneAnimationChannel {
+            source_index: channel.source_index as usize,
+            target,
+            interpolation: channel.interpolation,
+            pre_extrapolation: channel.pre_extrapolation,
+            post_extrapolation: channel.post_extrapolation,
+            value_width,
+            times,
+            values,
+            in_tangents,
+            out_tangents,
+        })
+    }
+
+    fn checked_target(
+        self,
+        target: StoredAnimationTarget,
+    ) -> NodeSceneSemanticResult<NodeSceneAnimationTarget> {
+        match target {
+            StoredAnimationTarget::NodeTranslation(node) => Ok(
+                NodeSceneAnimationTarget::NodeTranslation(self.canonical_node(node)?),
+            ),
+            StoredAnimationTarget::NodeRotation(node) => Ok(
+                NodeSceneAnimationTarget::NodeRotation(self.canonical_node(node)?),
+            ),
+            StoredAnimationTarget::NodeScale(node) => Ok(NodeSceneAnimationTarget::NodeScale(
+                self.canonical_node(node)?,
+            )),
+            StoredAnimationTarget::MeshInstanceMorphWeights(instance) => {
+                let index = instance.0 as usize;
+                if index >= self.mesh_instance_count {
+                    return Err(invariant(
+                        "validated animation morph target is outside mesh-instance space",
+                    ));
+                }
+                Ok(NodeSceneAnimationTarget::MeshInstanceMorphWeights(index))
+            }
+        }
+    }
+
+    fn canonical_node(self, node: StoredNodeIndex) -> NodeSceneSemanticResult<usize> {
+        let index = node.0 as usize;
+        if index == 0 || index > self.source_node_count {
+            return Err(invariant(
+                "validated animation target is outside canonical node space",
+            ));
+        }
+        Ok(index)
+    }
+}
+
+fn valid_time_domain(domain: AnimationTimeDomain) -> bool {
+    match domain {
+        AnimationTimeDomain::Seconds | AnimationTimeDomain::Ticks { rate: None } => true,
+        AnimationTimeDomain::Frames { rate } | AnimationTimeDomain::Ticks { rate: Some(rate) } => {
+            rate.is_finite() && rate > 0.0
+        }
     }
 }

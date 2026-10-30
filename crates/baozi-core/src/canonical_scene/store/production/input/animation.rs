@@ -1,28 +1,7 @@
+use crate::animation::{AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain};
+
 use super::geometry::AuthoringRange;
 use super::{NodeLocalId, Presence};
-
-/// Built-in authored time domains accepted by the canonical producer seam.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AnimationTimeDomainAuthoring {
-    Seconds,
-    Frames { rate: f64 },
-    Ticks { rate: Option<f64> },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnimationInterpolationAuthoring {
-    Step,
-    Linear,
-    CubicSpline,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnimationExtrapolationAuthoring {
-    SourceDefault,
-    Constant,
-    Linear,
-    Repeat,
-}
 
 /// Dense target identity within one source-shaped authoring batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,9 +17,9 @@ pub enum AnimationTargetAuthoring {
 pub struct AnimationChannelAuthoring<'a> {
     source_index: u32,
     target: AnimationTargetAuthoring,
-    interpolation: AnimationInterpolationAuthoring,
-    pre_extrapolation: AnimationExtrapolationAuthoring,
-    post_extrapolation: AnimationExtrapolationAuthoring,
+    interpolation: AnimationInterpolation,
+    pre_extrapolation: AnimationExtrapolation,
+    post_extrapolation: AnimationExtrapolation,
     times: &'a [f64],
     values: &'a [f32],
     in_tangents: Presence<&'a [f32]>,
@@ -52,9 +31,9 @@ impl<'a> AnimationChannelAuthoring<'a> {
     pub const fn new(
         source_index: u32,
         target: AnimationTargetAuthoring,
-        interpolation: AnimationInterpolationAuthoring,
-        pre_extrapolation: AnimationExtrapolationAuthoring,
-        post_extrapolation: AnimationExtrapolationAuthoring,
+        interpolation: AnimationInterpolation,
+        pre_extrapolation: AnimationExtrapolation,
+        post_extrapolation: AnimationExtrapolation,
         times: &'a [f64],
         values: &'a [f32],
         in_tangents: Presence<&'a [f32]>,
@@ -81,21 +60,19 @@ impl<'a> AnimationChannelAuthoring<'a> {
         self.target
     }
 
-    pub(in crate::canonical_scene::store) const fn interpolation(
-        self,
-    ) -> AnimationInterpolationAuthoring {
+    pub(in crate::canonical_scene::store) const fn interpolation(self) -> AnimationInterpolation {
         self.interpolation
     }
 
     pub(in crate::canonical_scene::store) const fn pre_extrapolation(
         self,
-    ) -> AnimationExtrapolationAuthoring {
+    ) -> AnimationExtrapolation {
         self.pre_extrapolation
     }
 
     pub(in crate::canonical_scene::store) const fn post_extrapolation(
         self,
-    ) -> AnimationExtrapolationAuthoring {
+    ) -> AnimationExtrapolation {
         self.post_extrapolation
     }
 
@@ -122,7 +99,7 @@ pub struct AnimationClipAuthoring<'a> {
     source_index: u32,
     name: Presence<&'a str>,
     duration: f64,
-    time_domain: AnimationTimeDomainAuthoring,
+    time_domain: AnimationTimeDomain,
     channels: AuthoringRange,
 }
 
@@ -130,7 +107,7 @@ impl<'a> AnimationClipAuthoring<'a> {
     pub const fn new(
         source_index: u32,
         duration: f64,
-        time_domain: AnimationTimeDomainAuthoring,
+        time_domain: AnimationTimeDomain,
         channels: AuthoringRange,
     ) -> Self {
         Self {
@@ -162,9 +139,7 @@ impl<'a> AnimationClipAuthoring<'a> {
         self.duration
     }
 
-    pub(in crate::canonical_scene::store) const fn time_domain(
-        self,
-    ) -> AnimationTimeDomainAuthoring {
+    pub(in crate::canonical_scene::store) const fn time_domain(self) -> AnimationTimeDomain {
         self.time_domain
     }
 

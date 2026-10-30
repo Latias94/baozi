@@ -6,8 +6,8 @@ use super::{
 };
 use baozi_import::authoring::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
-    AnimationExtrapolationAuthoring, AnimationInterpolationAuthoring, AnimationTargetAuthoring,
-    AnimationTimeDomainAuthoring, AuthoringRange, NodeLocalId, Presence, Quat,
+    AnimationExtrapolation, AnimationInterpolation, AnimationTargetAuthoring, AnimationTimeDomain,
+    AuthoringRange, NodeLocalId, Presence, Quat,
 };
 use baozi_import::{
     DiagnosticCode, ImportStorageClass, ImportWorkClass, ImportWorkScope, MeteredString,
@@ -62,7 +62,7 @@ struct AnimationChannelContract<'document> {
     channel_index: usize,
     source_node_index: usize,
     property: AnimationProperty,
-    interpolation: AnimationInterpolationAuthoring,
+    interpolation: AnimationInterpolation,
     key_count: usize,
     output_count: usize,
     value_width: usize,
@@ -117,7 +117,7 @@ struct AnimationClipStorage<'scope> {
 struct AnimationChannelStorage<'scope> {
     source_index: usize,
     target: AnimationTargetAuthoring,
-    interpolation: AnimationInterpolationAuthoring,
+    interpolation: AnimationInterpolation,
     times: MeteredVec<'scope, f64>,
     values: MeteredVec<'scope, f32>,
     in_tangents: MeteredVec<'scope, f32>,
@@ -400,7 +400,7 @@ fn preflight_inner<'scope, 'document>(
                 channel_index,
                 sampler.interpolation.as_ref(),
             )?;
-            if interpolation == AnimationInterpolationAuthoring::CubicSpline && input.count < 2 {
+            if interpolation == AnimationInterpolation::CubicSpline && input.count < 2 {
                 return Err(gltf_parse_error(
                     ctx,
                     format!(
@@ -416,8 +416,7 @@ fn preflight_inner<'scope, 'document>(
                 "output",
                 output_contract(property),
             )?;
-            let output_multiplier = if interpolation == AnimationInterpolationAuthoring::CubicSpline
-            {
+            let output_multiplier = if interpolation == AnimationInterpolation::CubicSpline {
                 3
             } else {
                 1
@@ -619,16 +618,14 @@ fn checked_interpolation(
     animation_index: usize,
     channel_index: usize,
     interpolation: Checked<&json::animation::Interpolation>,
-) -> Result<AnimationInterpolationAuthoring> {
+) -> Result<AnimationInterpolation> {
     match interpolation {
-        Checked::Valid(json::animation::Interpolation::Step) => {
-            Ok(AnimationInterpolationAuthoring::Step)
-        }
+        Checked::Valid(json::animation::Interpolation::Step) => Ok(AnimationInterpolation::Step),
         Checked::Valid(json::animation::Interpolation::Linear) => {
-            Ok(AnimationInterpolationAuthoring::Linear)
+            Ok(AnimationInterpolation::Linear)
         }
         Checked::Valid(json::animation::Interpolation::CubicSpline) => {
-            Ok(AnimationInterpolationAuthoring::CubicSpline)
+            Ok(AnimationInterpolation::CubicSpline)
         }
         Checked::Invalid => Err(gltf_parse_error(
             ctx,
@@ -1039,7 +1036,7 @@ fn read_channel<'scope>(
         scalar_count,
         "gltf-animation-values",
     )?;
-    let tangent_count = if contract.interpolation == AnimationInterpolationAuthoring::CubicSpline {
+    let tangent_count = if contract.interpolation == AnimationInterpolation::CubicSpline {
         scalar_count
     } else {
         0
@@ -1185,8 +1182,8 @@ enum CubicPart {
 }
 
 impl CubicPart {
-    const fn at(interpolation: AnimationInterpolationAuthoring, ordinal: usize) -> Self {
-        if matches!(interpolation, AnimationInterpolationAuthoring::CubicSpline) {
+    const fn at(interpolation: AnimationInterpolation, ordinal: usize) -> Self {
+        if matches!(interpolation, AnimationInterpolation::CubicSpline) {
             match ordinal % 3 {
                 0 => Self::InTangent,
                 1 => Self::Value,
@@ -1443,7 +1440,7 @@ impl<'scope> AnimationStorage<'scope> {
             let authoring_offset = channels.len();
             for channel in source_channels {
                 let (in_tangents, out_tangents) =
-                    if channel.interpolation == AnimationInterpolationAuthoring::CubicSpline {
+                    if channel.interpolation == AnimationInterpolation::CubicSpline {
                         (
                             Presence::Present(channel.in_tangents.as_slice()),
                             Presence::Present(channel.out_tangents.as_slice()),
@@ -1459,8 +1456,8 @@ impl<'scope> AnimationStorage<'scope> {
                     )?,
                     channel.target,
                     channel.interpolation,
-                    AnimationExtrapolationAuthoring::SourceDefault,
-                    AnimationExtrapolationAuthoring::SourceDefault,
+                    AnimationExtrapolation::SourceDefault,
+                    AnimationExtrapolation::SourceDefault,
                     channel.times.as_slice(),
                     channel.values.as_slice(),
                     in_tangents,
@@ -1470,7 +1467,7 @@ impl<'scope> AnimationStorage<'scope> {
             let authored_clip = AnimationClipAuthoring::new(
                 authoring_u32(ctx, clip.source_index, "gltf-animation-source-clip-index")?,
                 clip.duration,
-                AnimationTimeDomainAuthoring::Seconds,
+                AnimationTimeDomain::Seconds,
                 AuthoringRange::new(
                     authoring_u32(ctx, authoring_offset, "gltf-animation-channel-offset")?,
                     authoring_u32(ctx, source_channels.len(), "gltf-animation-channel-count")?,

@@ -8,22 +8,22 @@ mod support;
 use baozi_core::{EntityNameError, FormatId, SceneSpaceValidationError};
 use baozi_import::authoring::{
     AlphaMode, AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
-    AnimationExtrapolationAuthoring, AnimationInterpolationAuthoring, AnimationTargetAuthoring,
-    AnimationTimeDomainAuthoring, AppearanceAuthoringBatch, AttributeDomain, AttributeSemantic,
-    AuthoredTransform, AuthoringRange, CameraLocalId, ColorInterpretation,
-    DeformationAuthoringBatch, ExtensionValueRef, GeometryAttributeAuthoring,
-    GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
-    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, ImageAuthoring, ImageLocalId,
-    LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring, Mat4, MaterialAuthoring,
-    MaterialBindingAuthoring, MaterialFactors, MeshInstanceDeformationAuthoring,
-    MetadataAuthoringBatch, MetadataAuthoringEntry, NamespacedName, NodeAuthoringBatch,
-    NodeAuthoringNode, NodeLocalId, OperationKind, OptionsDigest, OwnerProvenanceAuthoring,
-    Presence, PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner,
-    ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, SamplerAuthoring,
-    SamplerLocalId, SamplerState, SceneAuthoringBatch, SceneSpace, ShadingModel, SkinAuthoring,
-    SkinMatrixSpaces, SpatialAuthoringBatch, TextureAuthoring, TextureBlendOperation,
-    TextureChannelMapping, TextureChannelSwizzle, TextureCoordinateSource, TextureLocalId,
-    TextureRole, TextureStrength, TextureTransform,
+    AnimationExtrapolation, AnimationInterpolation, AnimationTargetAuthoring, AnimationTimeDomain,
+    AppearanceAuthoringBatch, AttributeDomain, AttributeSemantic, AuthoredTransform,
+    AuthoringRange, CameraLocalId, ColorInterpretation, DeformationAuthoringBatch,
+    ExtensionValueRef, GeometryAttributeAuthoring, GeometryAuthoringBatch,
+    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
+    GeometryTopologyAuthoring, ImageAuthoring, ImageLocalId, LineageAuthoringBatch,
+    LogicalMeshLocalId, LogicalMorphAuthoring, Mat4, MaterialAuthoring, MaterialBindingAuthoring,
+    MaterialFactors, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
+    MetadataAuthoringEntry, NamespacedName, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
+    OperationKind, OptionsDigest, OwnerProvenanceAuthoring, Presence,
+    PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId,
+    ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, SamplerAuthoring, SamplerLocalId,
+    SamplerState, SceneAuthoringBatch, SceneSpace, ShadingModel, SkinAuthoring, SkinMatrixSpaces,
+    SpatialAuthoringBatch, TextureAuthoring, TextureBlendOperation, TextureChannelMapping,
+    TextureChannelSwizzle, TextureCoordinateSource, TextureLocalId, TextureRole, TextureStrength,
+    TextureTransform,
 };
 use baozi_import::{
     CapabilityStatus, CauseOwner, DetectionOutcome, DetectionResult, DetectionScope,
@@ -259,9 +259,9 @@ fn submit_triangle(scope: &ParseScope<'_>, input: Input) -> ParseResult<SceneDra
                 0
             },
         )),
-        AnimationInterpolationAuthoring::Linear,
-        AnimationExtrapolationAuthoring::Constant,
-        AnimationExtrapolationAuthoring::Constant,
+        AnimationInterpolation::Linear,
+        AnimationExtrapolation::Constant,
+        AnimationExtrapolation::Constant,
         &times,
         if matches!(input, Input::InvalidAnimationValues) {
             &samples[..3]
@@ -276,9 +276,9 @@ fn submit_triangle(scope: &ParseScope<'_>, input: Input) -> ParseResult<SceneDra
         AnimationChannelAuthoring::new(
             11,
             AnimationTargetAuthoring::NodeTranslation(NodeLocalId::new(0)),
-            AnimationInterpolationAuthoring::Linear,
-            AnimationExtrapolationAuthoring::Constant,
-            AnimationExtrapolationAuthoring::Constant,
+            AnimationInterpolation::Linear,
+            AnimationExtrapolation::Constant,
+            AnimationExtrapolation::Constant,
             &times,
             &samples,
             Presence::Absent,
@@ -287,9 +287,9 @@ fn submit_triangle(scope: &ParseScope<'_>, input: Input) -> ParseResult<SceneDra
         AnimationChannelAuthoring::new(
             12,
             AnimationTargetAuthoring::NodeScale(NodeLocalId::new(0)),
-            AnimationInterpolationAuthoring::Linear,
-            AnimationExtrapolationAuthoring::Constant,
-            AnimationExtrapolationAuthoring::Constant,
+            AnimationInterpolation::Linear,
+            AnimationExtrapolation::Constant,
+            AnimationExtrapolation::Constant,
             &repeated_times,
             &samples,
             Presence::Absent,
@@ -300,7 +300,7 @@ fn submit_triangle(scope: &ParseScope<'_>, input: Input) -> ParseResult<SceneDra
         AnimationClipAuthoring::new(
             5,
             1.0,
-            AnimationTimeDomainAuthoring::Seconds,
+            AnimationTimeDomain::Seconds,
             AuthoringRange::new(0, 1),
         )
         .with_name(if matches!(input, Input::InvalidAnimationName) {
@@ -311,7 +311,7 @@ fn submit_triangle(scope: &ParseScope<'_>, input: Input) -> ParseResult<SceneDra
         AnimationClipAuthoring::new(
             9,
             1.0,
-            AnimationTimeDomainAuthoring::Seconds,
+            AnimationTimeDomain::Seconds,
             AuthoringRange::new(1, 2),
         ),
     ];

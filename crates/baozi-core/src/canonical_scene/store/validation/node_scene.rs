@@ -3,7 +3,6 @@ use baozi_operation::__retained_store_integration::activation::{
 };
 use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, StoreWorkError};
 
-mod animation;
 mod appearance;
 mod profile;
 
@@ -11,11 +10,6 @@ use super::super::construction::node_scene::SceneEvidenceCounts;
 use super::super::construction::node_scene::{
     NodeSceneCentralValidationPlan, NodeSceneMaterializedRefs, NodeSceneMeteredValidationScratch,
     NodeSceneValidationScratchPlan,
-};
-use super::super::schema::animation::{
-    AnimationChannelTableSchema, AnimationClipNameSchema, AnimationClipTableSchema,
-    AnimationDirectorySchema, AnimationInTangentsSchema, AnimationOutTangentsSchema,
-    AnimationTimesSchema, AnimationValuesSchema,
 };
 use super::super::schema::appearance::{
     AppearanceBindingSemanticScalarSchema, AppearanceBindingTableSchema, AppearanceDirectorySchema,
@@ -31,14 +25,6 @@ use super::super::schema::{
     scene_directory_field,
 };
 use super::super::typed_storage::SceneTables;
-pub(in crate::canonical_scene::store) use animation::{
-    AnimationChannelValidationDescriptor, AnimationClipValidationDescriptor,
-    AnimationMeteredCounts, AnimationValidationScratch, AnimationValidationScratchRequirements,
-};
-use animation::{
-    AnimationMeteredDependencies, AnimationValidatedRefs,
-    required_animation_target_marks as required_animation_marks, validate_animation_graph_metered,
-};
 pub(in crate::canonical_scene::store) use appearance::{
     AppearanceBindingValidationScratch, AppearanceCanonicalCounts,
     AppearanceMaterialValidationScratch, AppearanceValidationScratch,
@@ -59,14 +45,6 @@ impl NodeSceneValidationScratch {
     ) -> Option<usize> {
         usize::try_from(counts.light_count).ok()
     }
-    pub(in crate::canonical_scene::store) fn required_animation_target_marks(
-        counts: SceneEvidenceCounts,
-    ) -> Option<usize> {
-        required_animation_marks(
-            counts.node_count as usize,
-            counts.mesh_instance_count as usize,
-        )
-    }
 }
 
 /// Immutable semantic authority minted only by central node-scene validation.
@@ -74,9 +52,7 @@ impl NodeSceneValidationScratch {
 pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
     directory: CanonicalBlockRef<SceneDirectorySchema>,
     appearance_directory: CanonicalBlockRef<AppearanceDirectorySchema>,
-    animation_directory: CanonicalBlockRef<AnimationDirectorySchema>,
     appearance: AppearanceValidatedRefs,
-    animation: AnimationValidatedRefs,
     profile: ProfileMeteredCounts,
     maximum_provenance_depth: u32,
     source_node_count: usize,
@@ -101,12 +77,6 @@ impl NodeSceneValidationProof {
         &self,
     ) -> CanonicalBlockRef<AppearanceDirectorySchema> {
         self.appearance_directory
-    }
-
-    pub(in crate::canonical_scene::store) const fn animation_directory(
-        &self,
-    ) -> CanonicalBlockRef<AnimationDirectorySchema> {
-        self.animation_directory
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_images(
@@ -173,48 +143,6 @@ impl NodeSceneValidationProof {
         &self,
     ) -> Option<CanonicalBlockRef<AppearanceMaterialNameSchema>> {
         self.appearance.material_names
-    }
-
-    pub(in crate::canonical_scene::store) const fn animation_clips(
-        &self,
-    ) -> Option<CanonicalBlockRef<AnimationClipTableSchema>> {
-        self.animation.clips
-    }
-
-    pub(in crate::canonical_scene::store) const fn animation_clip_names(
-        &self,
-    ) -> Option<CanonicalBlockRef<AnimationClipNameSchema>> {
-        self.animation.clip_names
-    }
-
-    pub(in crate::canonical_scene::store) const fn animation_channels(
-        &self,
-    ) -> Option<CanonicalBlockRef<AnimationChannelTableSchema>> {
-        self.animation.channels
-    }
-
-    pub(in crate::canonical_scene::store) const fn animation_times(
-        &self,
-    ) -> Option<CanonicalBlockRef<AnimationTimesSchema>> {
-        self.animation.times
-    }
-
-    pub(in crate::canonical_scene::store) const fn animation_values(
-        &self,
-    ) -> Option<CanonicalBlockRef<AnimationValuesSchema>> {
-        self.animation.values
-    }
-
-    pub(in crate::canonical_scene::store) const fn animation_in_tangents(
-        &self,
-    ) -> Option<CanonicalBlockRef<AnimationInTangentsSchema>> {
-        self.animation.in_tangents
-    }
-
-    pub(in crate::canonical_scene::store) const fn animation_out_tangents(
-        &self,
-    ) -> Option<CanonicalBlockRef<AnimationOutTangentsSchema>> {
-        self.animation.out_tangents
     }
 
     pub(in crate::canonical_scene::store) const fn profile_counts(&self) -> ProfileMeteredCounts {
@@ -389,7 +317,6 @@ struct NodeMeteredStructure<'session> {
     directory: CanonicalValidationMember<'session, RecordBlock, SceneDirectorySchema>,
     appearance_directory:
         CanonicalValidationMember<'session, RecordBlock, AppearanceDirectorySchema>,
-    animation_directory: CanonicalValidationMember<'session, RecordBlock, AnimationDirectorySchema>,
     source_node_count: usize,
     source_root_count: usize,
     source_edge_count: usize,
@@ -413,7 +340,6 @@ where
         return Ok(None);
     }
     let mut appearance = None;
-    let mut animation = None;
     let mut root_count = None;
     let complete = session.visit_canonical_records(
         directory,
@@ -427,10 +353,6 @@ where
                 row.scalar(scene_directory_field::SOURCE_ROOT_COUNT, |value: u32| value)?;
             appearance = row.record_ref::<AppearanceDirectorySchema, _>(
                 scene_directory_field::APPEARANCE,
-                |value| value,
-            )?;
-            animation = row.record_ref::<AnimationDirectorySchema, _>(
-                scene_directory_field::ANIMATION,
                 |value| value,
             )?;
             let mut valid =
@@ -458,9 +380,7 @@ where
             Ok(valid)
         },
     )?;
-    let (Some(root_count), Some(appearance_directory), Some(animation_directory)) =
-        (root_count, appearance, animation)
-    else {
+    let (Some(root_count), Some(appearance_directory)) = (root_count, appearance) else {
         return Ok(None);
     };
     if !complete {
@@ -486,7 +406,6 @@ where
     Ok(Some(NodeMeteredStructure {
         directory,
         appearance_directory,
-        animation_directory,
         source_node_count,
         source_root_count: root_count as usize,
         source_edge_count,
@@ -682,21 +601,16 @@ where
     }
 
     let animation_counts = scratch_plan.animation_counts();
-    let Some(animation) = validate_animation_graph_metered(
+    if !tables.animation.as_ref().validate(
         session,
-        node.animation_directory,
-        AnimationMeteredDependencies::new(
-            tables.nodes.as_ref(),
-            expected_counts.node_count,
-            geometry,
-            tables.deformation.as_ref(),
-        ),
         animation_counts,
+        tables.nodes.as_ref(),
+        geometry,
+        tables.deformation.as_ref(),
         &mut scratch.animation,
-    )?
-    else {
+    )? {
         return Ok(None);
-    };
+    }
 
     let profile_counts = scratch_plan.profile_counts();
     let Some(profile_owners) = expected_counts.profile_owner_layout() else {
@@ -743,9 +657,12 @@ where
             deformation_counts.mesh_instance_count,
             expected_counts.mesh_instance_count,
         ),
-        (animation.clip_count, expected_counts.animation_clip_count),
         (
-            animation.channel_count,
+            animation_counts.clip_count,
+            expected_counts.animation_clip_count,
+        ),
+        (
+            animation_counts.channel_count,
             expected_counts.animation_channel_count,
         ),
         (
@@ -800,48 +717,30 @@ where
     .into_iter()
     .map(u32::from)
     .sum::<u32>();
-    let domain_payload_count = appearance_payload_count.checked_add(animation.payload_block_count);
-    let Some(domain_payload_count) = domain_payload_count else {
-        return Ok(None);
-    };
-    if domain_payload_count != expected_counts.payload_block_count
-        || domain_payload_count != expected_counts.shareable_leaf_block_count
+    if appearance_payload_count != expected_counts.payload_block_count
+        || appearance_payload_count != expected_counts.shareable_leaf_block_count
     {
         return Ok(None);
     }
-    let canonical_block_count = Some(1_u32)
-        .and_then(|count| {
-            count.checked_add(
-                1 + [
-                    appearance.images.is_some(),
-                    appearance.samplers.is_some(),
-                    appearance.textures.is_some(),
-                    appearance.materials.is_some(),
-                    appearance.bindings.is_some(),
-                    appearance.image_payloads.is_some(),
-                    appearance.media_types.is_some(),
-                    appearance.source_keys.is_some(),
-                    appearance.binding_semantic_scalars.is_some(),
-                    appearance.material_factor_scalars.is_some(),
-                    appearance.material_names.is_some(),
-                ]
-                .into_iter()
-                .map(u32::from)
-                .sum::<u32>(),
-            )
-        })
-        .and_then(|count| {
-            count.checked_add(
-                1 + [
-                    animation.members.clips.is_some(),
-                    animation.members.channels.is_some(),
-                ]
-                .into_iter()
-                .map(u32::from)
-                .sum::<u32>()
-                    + animation.payload_block_count,
-            )
-        });
+    // Only the Scene root and appearance directory retain concrete record-store roots.
+    let canonical_block_count = 2_u32.checked_add(
+        [
+            appearance.images.is_some(),
+            appearance.samplers.is_some(),
+            appearance.textures.is_some(),
+            appearance.materials.is_some(),
+            appearance.bindings.is_some(),
+            appearance.image_payloads.is_some(),
+            appearance.media_types.is_some(),
+            appearance.source_keys.is_some(),
+            appearance.binding_semantic_scalars.is_some(),
+            appearance.material_factor_scalars.is_some(),
+            appearance.material_names.is_some(),
+        ]
+        .into_iter()
+        .map(u32::from)
+        .sum::<u32>(),
+    );
     if canonical_block_count != Some(expected_counts.canonical_block_count) {
         return Ok(None);
     }
@@ -889,27 +788,6 @@ where
         && optional_member_identifies(
             appearance.material_names,
             expected_refs.appearance.payloads.material_names,
-        )
-        && node
-            .animation_directory
-            .identifies(expected_refs.animation.directory.into_store())
-        && optional_member_identifies(animation.members.clips, expected_refs.animation.clips)
-        && optional_member_identifies(animation.members.channels, expected_refs.animation.channels)
-        && optional_member_identifies(
-            animation.members.times,
-            expected_refs.animation.payloads.times,
-        )
-        && optional_member_identifies(
-            animation.members.values,
-            expected_refs.animation.payloads.values,
-        )
-        && optional_member_identifies(
-            animation.members.in_tangents,
-            expected_refs.animation.payloads.in_tangents,
-        )
-        && optional_member_identifies(
-            animation.members.out_tangents,
-            expected_refs.animation.payloads.out_tangents,
         );
     if !identities_match {
         return Ok(None);
@@ -917,7 +795,6 @@ where
     Ok(Some(NodeSceneValidationProof {
         directory: expected_refs.directory,
         appearance_directory: expected_refs.appearance.directory,
-        animation_directory: expected_refs.animation.directory,
         appearance: AppearanceValidatedRefs {
             images: expected_refs.appearance.tables.images,
             samplers: expected_refs.appearance.tables.samplers,
@@ -930,15 +807,6 @@ where
             binding_semantic_scalars: expected_refs.appearance.payloads.binding_semantic_scalars,
             material_factor_scalars: expected_refs.appearance.payloads.material_factor_scalars,
             material_names: expected_refs.appearance.payloads.material_names,
-        },
-        animation: AnimationValidatedRefs {
-            clip_names: expected_refs.animation.payloads.clip_names,
-            clips: expected_refs.animation.clips,
-            channels: expected_refs.animation.channels,
-            times: expected_refs.animation.payloads.times,
-            values: expected_refs.animation.payloads.values,
-            in_tangents: expected_refs.animation.payloads.in_tangents,
-            out_tangents: expected_refs.animation.payloads.out_tangents,
         },
         profile: profile_counts,
         maximum_provenance_depth: profile.maximum_provenance_depth,

@@ -527,6 +527,10 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         std::ptr::eq(source.read_deformation(), output.scene.read_deformation()),
         "a transform edit must share the complete deformation owner and its payloads",
     );
+    assert!(
+        std::ptr::eq(source.read_animation(), output.scene.read_animation()),
+        "a transform edit must share the complete animation owner and its payloads",
+    );
     let first_geometry_scalar = source.read_geometry().f32_values.first().copied();
     let source_central_validation = source.proof.central_validation_plan();
     let output_central_validation = output.scene.proof.central_validation_plan();
@@ -681,6 +685,10 @@ fn host_unwind_releases_edited_tables_and_preserves_shared_source_domains() {
         assert!(std::ptr::eq(
             original.scene.read_deformation(),
             edited.scene.read_deformation(),
+        ));
+        assert!(std::ptr::eq(
+            original.scene.read_animation(),
+            edited.scene.read_animation(),
         ));
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let _edited = edited;

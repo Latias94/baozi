@@ -6,6 +6,11 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Replaced animation record encoding and validation descriptors with one retained typed owner.
+  Clips and channels directly borrow f64 key times, values, and cubic tangents; unchanged edits
+  share that owner. Unified time-domain, interpolation, and extrapolation declarations across
+  authoring, storage, and public reads, removing the duplicate `*Authoring` enums. Finite negative
+  pre-roll and existing semantic snapshot bytes remain preserved.
 - Replaced deformation records with one retained typed owner for skins, variable influences,
   morph definitions/deltas, and instance overrides. Unchanged edits share that owner, public reads
   borrow its payloads directly, and validation retains only algorithm scratch. Removed redundant

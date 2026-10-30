@@ -53,7 +53,6 @@ impl ConstructionBrand {
     }
 }
 
-mod animation;
 mod appearance;
 pub(crate) mod edit;
 mod geometry;
@@ -158,6 +157,7 @@ struct NodeSceneBuildFaults {
     alter_first_geometry_f32: bool,
     spatial: Option<test_support::SpatialBuildFault>,
     deformation: Option<test_support::DeformationBuildFault>,
+    animation: Option<test_support::AnimationBuildFault>,
     profile: profile::ProfileBuildFault,
     planning: Option<materialization::NodeScenePlanningFault>,
     panic_central_validator: bool,
@@ -171,6 +171,7 @@ impl NodeSceneBuildFaults {
             alter_first_geometry_f32: false,
             spatial: None,
             deformation: None,
+            animation: None,
             profile: profile::ProfileBuildFault::none(),
             planning: None,
             panic_central_validator: false,
@@ -208,6 +209,13 @@ impl NodeSceneBuildFaults {
     const fn altered_deformation(fault: test_support::DeformationBuildFault) -> Self {
         Self {
             deformation: Some(fault),
+            ..Self::none()
+        }
+    }
+
+    const fn altered_animation(fault: test_support::AnimationBuildFault) -> Self {
+        Self {
+            animation: Some(fault),
             ..Self::none()
         }
     }
@@ -586,6 +594,12 @@ impl SceneStorage {
         &self,
     ) -> &super::super::typed_storage::deformation::DeformationStorage {
         self.tables.deformation.as_ref()
+    }
+
+    pub(in crate::canonical_scene::store) fn read_animation(
+        &self,
+    ) -> &super::super::typed_storage::animation::AnimationStorage {
+        self.tables.animation.as_ref()
     }
     pub(in crate::canonical_scene::store) const fn read_proof(&self) -> &NodeSceneValidationProof {
         &self.proof

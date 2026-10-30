@@ -9,9 +9,7 @@ use crate::canonical_scene::store::construction::node_scene::{
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
-    AnimationExtrapolationAuthoring as Extrapolation,
-    AnimationInterpolationAuthoring as Interpolation, AnimationTargetAuthoring as Target,
-    AnimationTimeDomainAuthoring as TimeDomain, AppearanceAuthoringBatch, AuthoringRange,
+    AnimationTargetAuthoring as Target, AppearanceAuthoringBatch, AuthoringRange,
     DeformationAuthoringBatch, GeometryAuthoringBatch, NodeAuthoringBatch, NodeAuthoringNode,
     NodeLocalId, Presence, SceneAuthoringBatch, SpatialAuthoringBatch,
 };
@@ -49,9 +47,9 @@ fn build_animation_scene_with_names(
         AnimationChannelAuthoring::new(
             3,
             Target::NodeTranslation(NodeLocalId::new(1)),
-            Interpolation::Linear,
-            Extrapolation::Constant,
-            Extrapolation::Linear,
+            AnimationInterpolation::Linear,
+            AnimationExtrapolation::Constant,
+            AnimationExtrapolation::Linear,
             &[0.12500000000000003, 1.0000000000000002],
             &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
             Presence::Absent,
@@ -60,9 +58,9 @@ fn build_animation_scene_with_names(
         AnimationChannelAuthoring::new(
             8,
             Target::NodeScale(NodeLocalId::new(0)),
-            Interpolation::CubicSpline,
-            Extrapolation::Repeat,
-            Extrapolation::Constant,
+            AnimationInterpolation::CubicSpline,
+            AnimationExtrapolation::Repeat,
+            AnimationExtrapolation::Constant,
             &[12.25, 24.125],
             &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             Presence::Present(&[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]),
@@ -71,9 +69,9 @@ fn build_animation_scene_with_names(
         AnimationChannelAuthoring::new(
             12,
             Target::NodeRotation(NodeLocalId::new(1)),
-            Interpolation::Step,
-            Extrapolation::SourceDefault,
-            Extrapolation::Repeat,
+            AnimationInterpolation::Step,
+            AnimationExtrapolation::SourceDefault,
+            AnimationExtrapolation::Repeat,
             &[0.0, 30.0, 120.0],
             &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             Presence::Absent,
@@ -82,9 +80,9 @@ fn build_animation_scene_with_names(
         AnimationChannelAuthoring::new(
             45,
             Target::NodeTranslation(NodeLocalId::new(0)),
-            Interpolation::Linear,
-            Extrapolation::Linear,
-            Extrapolation::SourceDefault,
+            AnimationInterpolation::Linear,
+            AnimationExtrapolation::Linear,
+            AnimationExtrapolation::SourceDefault,
             &[48000.125, 96000.125],
             &[9.0, 8.0, 7.0, 6.0, 5.0, 4.0],
             Presence::Absent,
@@ -95,13 +93,13 @@ fn build_animation_scene_with_names(
         AnimationClipAuthoring::new(
             7,
             1.0000000000000002,
-            TimeDomain::Seconds,
+            AnimationTimeDomain::Seconds,
             AuthoringRange::new(0, 1),
         ),
         AnimationClipAuthoring::new(
             11,
             2400.1250000000005,
-            TimeDomain::Frames {
+            AnimationTimeDomain::Frames {
                 rate: 29.97002997002997,
             },
             AuthoringRange::new(1, 2),
@@ -109,13 +107,13 @@ fn build_animation_scene_with_names(
         AnimationClipAuthoring::new(
             19,
             4294967296.125,
-            TimeDomain::Ticks { rate: None },
+            AnimationTimeDomain::Ticks { rate: None },
             AuthoringRange::new(3, 0),
         ),
         AnimationClipAuthoring::new(
             25,
             96000.125,
-            TimeDomain::Ticks {
+            AnimationTimeDomain::Ticks {
                 rate: Some(48000.25),
             },
             AuthoringRange::new(3, 1),
@@ -402,6 +400,86 @@ fn animation_morph_targets_resolve_mesh_instance_ids_and_borrow_cubic_payloads()
         morph.post_extrapolation(),
         AnimationExtrapolation::SourceDefault
     );
+    drop(scene);
+    drop(parts.report);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn animation_pipeline_preserves_finite_key_times_outside_declared_duration() {
+    let factory = test_factory();
+    let account = test_account(&factory, 1024);
+    let roots = [NodeLocalId::new(0)];
+    let node_rows = [NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
+    )];
+    let nodes = NodeAuthoringBatch::new(Presence::Present(&roots), &node_rows);
+    let times = [-2.0_f64, f64::from_bits(1.0_f64.to_bits() + 1)];
+    let values = [0.0_f32, 1.0, 2.0, 3.0, 4.0, 5.0];
+    let duration = 0.25_f64;
+    let channels = [AnimationChannelAuthoring::new(
+        0,
+        Target::NodeTranslation(NodeLocalId::new(0)),
+        AnimationInterpolation::Linear,
+        AnimationExtrapolation::SourceDefault,
+        AnimationExtrapolation::SourceDefault,
+        &times,
+        &values,
+        Presence::Absent,
+        Presence::Absent,
+    )];
+    let clips = [AnimationClipAuthoring::new(
+        0,
+        duration,
+        AnimationTimeDomain::Seconds,
+        AuthoringRange::new(0, 1),
+    )];
+    let animation = AnimationAuthoringBatch::new(&clips, &channels);
+    let spatial = SpatialAuthoringBatch::new(&crate::SceneSpace::UNKNOWN, &[], &[]);
+    let appearance = AppearanceAuthoringBatch::empty();
+    let geometry = GeometryAuthoringBatch::empty();
+    let deformation = DeformationAuthoringBatch::empty();
+    let profile = profile_fixture(spatial, nodes, appearance, geometry, deformation, animation);
+    let parts = successful_parts(
+        NodeSceneTestTransaction::with_account(
+            &account,
+            test_limits(),
+            SceneAuthoringBatch::new(
+                spatial,
+                nodes,
+                appearance,
+                geometry,
+                deformation,
+                animation,
+                profile.batch(),
+            ),
+            SceneValidationLimits::default(),
+        )
+        .expect("out-of-duration animation admission")
+        .finish_draft()
+        .expect("out-of-duration animation activation and central validation")
+        .publish_for_test()
+        .expect("out-of-duration animation publication"),
+    );
+    let scene = ValidatedScene::from_node_scene(parts.scene);
+    assert_eq!(scene.animation_clip_count(), 1);
+    let clip = scene.animation_clips().next().unwrap();
+    assert_eq!(clip.duration().to_bits(), duration.to_bits());
+    assert_eq!(clip.time_domain(), AnimationTimeDomain::Seconds);
+    assert_eq!(clip.channel_count(), 1);
+    let channel = clip.channel(0).unwrap();
+    assert_eq!(
+        channel.target(),
+        AnimationTarget::NodeTranslation(scene.nodes().next().unwrap().id())
+    );
+    assert_eq!(channel.key_count(), times.len());
+    for (&actual, expected) in channel.key_times().iter().zip(times) {
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+    assert_eq!(channel.values(), values.as_slice());
     drop(scene);
     drop(parts.report);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);

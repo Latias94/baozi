@@ -17,8 +17,7 @@ use crate::appearance::{
 use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::canonical_scene::store::construction::STORE_DIMENSION;
 use crate::canonical_scene::store::construction::node_scene::semantic::{
-    NodeSceneAnimationExtrapolation, NodeSceneAnimationInterpolation, NodeSceneAnimationTarget,
-    NodeSceneAnimationTimeDomain, NodeSceneDeformationF32Cursor, NodeSceneDeformationMorphPayload,
+    NodeSceneAnimationTarget, NodeSceneDeformationF32Cursor, NodeSceneDeformationMorphPayload,
     NodeSceneGeometryAttributePayload, NodeSceneGeometryAttributeSemantic,
     NodeSceneGeometryF32Cursor, NodeSceneGeometryI32Cursor, NodeSceneGeometryU32Cursor,
     NodeSceneProfileStep, NodeSceneSemanticResult,
@@ -32,8 +31,8 @@ use crate::canonical_scene::store::construction::node_scene::{
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AnimationAuthoringFailure, AnimationAuthoringSemanticError,
-    AnimationChannelAuthoring, AnimationClipAuthoring, AnimationExtrapolationAuthoring,
-    AnimationInterpolationAuthoring, AnimationTargetAuthoring, AnimationTimeDomainAuthoring,
+    AnimationChannelAuthoring, AnimationClipAuthoring, AnimationExtrapolation,
+    AnimationInterpolation, AnimationTargetAuthoring, AnimationTimeDomain,
     AppearanceAuthoringBatch, AppearanceAuthoringFailure, AppearanceAuthoringSemanticError,
     AuthoringRange, DeformationAuthoringBatch, DeformationAuthoringFailure,
     DeformationAuthoringSemanticError, GeometryAttributeAuthoring,
@@ -718,20 +717,20 @@ fn encode_gltf_source(
         }
     }
 
-    fn encode_interpolation(value: AnimationInterpolationAuthoring) -> u8 {
+    fn encode_interpolation(value: AnimationInterpolation) -> u8 {
         match value {
-            AnimationInterpolationAuthoring::Step => 0,
-            AnimationInterpolationAuthoring::Linear => 1,
-            AnimationInterpolationAuthoring::CubicSpline => 2,
+            AnimationInterpolation::Step => 0,
+            AnimationInterpolation::Linear => 1,
+            AnimationInterpolation::CubicSpline => 2,
         }
     }
 
-    fn encode_extrapolation(value: AnimationExtrapolationAuthoring) -> u8 {
+    fn encode_extrapolation(value: AnimationExtrapolation) -> u8 {
         match value {
-            AnimationExtrapolationAuthoring::SourceDefault => 0,
-            AnimationExtrapolationAuthoring::Constant => 1,
-            AnimationExtrapolationAuthoring::Linear => 2,
-            AnimationExtrapolationAuthoring::Repeat => 3,
+            AnimationExtrapolation::SourceDefault => 0,
+            AnimationExtrapolation::Constant => 1,
+            AnimationExtrapolation::Linear => 2,
+            AnimationExtrapolation::Repeat => 3,
         }
     }
 
@@ -972,12 +971,12 @@ fn encode_gltf_source(
     encoder.list(animations.clips(), |encoder, clip| {
         encoder.f64(clip.duration());
         match clip.time_domain() {
-            AnimationTimeDomainAuthoring::Seconds => encoder.u8(0),
-            AnimationTimeDomainAuthoring::Frames { rate } => {
+            AnimationTimeDomain::Seconds => encoder.u8(0),
+            AnimationTimeDomain::Frames { rate } => {
                 encoder.u8(1);
                 encoder.f64(rate);
             }
-            AnimationTimeDomainAuthoring::Ticks { rate } => {
+            AnimationTimeDomain::Ticks { rate } => {
                 encoder.u8(2);
                 match rate {
                     Some(rate) => {
@@ -1598,9 +1597,9 @@ fn with_gltf_capability_input<R>(
         AnimationChannelAuthoring::new(
             5,
             AnimationTargetAuthoring::NodeTranslation(NodeLocalId::new(0)),
-            AnimationInterpolationAuthoring::Linear,
-            AnimationExtrapolationAuthoring::SourceDefault,
-            AnimationExtrapolationAuthoring::SourceDefault,
+            AnimationInterpolation::Linear,
+            AnimationExtrapolation::SourceDefault,
+            AnimationExtrapolation::SourceDefault,
             key_times,
             &TRANSLATION_VALUES,
             Presence::Absent,
@@ -1609,9 +1608,9 @@ fn with_gltf_capability_input<R>(
         AnimationChannelAuthoring::new(
             8,
             AnimationTargetAuthoring::NodeRotation(NodeLocalId::new(2)),
-            AnimationInterpolationAuthoring::Step,
-            AnimationExtrapolationAuthoring::SourceDefault,
-            AnimationExtrapolationAuthoring::SourceDefault,
+            AnimationInterpolation::Step,
+            AnimationExtrapolation::SourceDefault,
+            AnimationExtrapolation::SourceDefault,
             key_times,
             &ROTATION_VALUES,
             Presence::Absent,
@@ -1620,9 +1619,9 @@ fn with_gltf_capability_input<R>(
         AnimationChannelAuthoring::new(
             13,
             AnimationTargetAuthoring::MeshInstanceMorphWeights(0),
-            AnimationInterpolationAuthoring::CubicSpline,
-            AnimationExtrapolationAuthoring::SourceDefault,
-            AnimationExtrapolationAuthoring::SourceDefault,
+            AnimationInterpolation::CubicSpline,
+            AnimationExtrapolation::SourceDefault,
+            AnimationExtrapolation::SourceDefault,
             key_times,
             &morph_animation_values,
             Presence::Present(&MORPH_TANGENTS),
@@ -1632,7 +1631,7 @@ fn with_gltf_capability_input<R>(
     let animation_clips = [AnimationClipAuthoring::new(
         3,
         1.0,
-        AnimationTimeDomainAuthoring::Seconds,
+        AnimationTimeDomain::Seconds,
         AuthoringRange::new(0, 3),
     )];
     let animations = AnimationAuthoringBatch::new(&animation_clips, &animation_channels);
@@ -1760,6 +1759,61 @@ fn central_validation_rejects_corrupted_typed_deformation_before_generation() {
                     SceneGenerationId::reserve_from(&generation_source)
                 })
                 .expect("central deformation rejection must publish bounded evidence");
+                let failure = rich_failure(terminal);
+                assert_eq!(
+                    generation_source.load(std::sync::atomic::Ordering::Relaxed),
+                    0,
+                    "{fault:?}"
+                );
+                assert_eq!(
+                    terminal_failure_code(failure.ledger_evidence()),
+                    super::super::NODE_SCENE_BUILD_INVARIANT_CODE,
+                    "{fault:?}",
+                );
+                let ledger = failure.ledger_evidence();
+                assert_eq!(ledger.header().current_live_bytes(), 0, "{fault:?}");
+                assert_eq!(ledger.header().active_reservations(), 0, "{fault:?}");
+                assert_eq!(
+                    ledger
+                        .dimension_by_semantic(STORE_DIMENSION)
+                        .unwrap()
+                        .committed_canonical_output(),
+                    0,
+                    "{fault:?}",
+                );
+                assert_released(failure, &account);
+                assert!(!account.snapshot().poisoned(), "{fault:?}");
+            },
+        );
+    }
+}
+
+#[test]
+fn central_validation_rejects_corrupted_typed_animation_before_generation() {
+    use super::super::NodeSceneBuildFaults;
+    use super::super::test_support::AnimationBuildFault;
+
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    for fault in AnimationBuildFault::ALL {
+        with_gltf_scene_input(
+            GltfCapabilityScope::All,
+            GltfCapabilityMutation::Baseline,
+            |input| {
+                let terminal = NodeSceneTestTransaction::with_account(
+                    &account,
+                    test_limits(),
+                    input,
+                    SceneValidationLimits::default(),
+                )
+                .expect("typed animation corruption fixture admission")
+                .finish_draft_with_faults(NodeSceneBuildFaults::altered_animation(fault))
+                .expect("central animation rejection must prepare cleanly")
+                .publish_with_generation_source_for_test(|| {
+                    SceneGenerationId::reserve_from(&generation_source)
+                })
+                .expect("central animation rejection must publish bounded evidence");
                 let failure = rich_failure(terminal);
                 assert_eq!(
                     generation_source.load(std::sync::atomic::Ordering::Relaxed),
@@ -2573,7 +2627,7 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
             .expect("declared glTF animation clip");
         assert_eq!(clip.source_index(), 3);
         assert_eq!(clip.duration(), 1.0);
-        assert_eq!(clip.time_domain(), NodeSceneAnimationTimeDomain::Seconds);
+        assert_eq!(clip.time_domain(), AnimationTimeDomain::Seconds);
         assert_eq!((clip.channel_offset(), clip.channel_count()), (0, 3));
         assert!(
             animation
@@ -2588,9 +2642,9 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
             NodeSceneAnimationTarget::MeshInstanceMorphWeights(0),
         ];
         let expected_interpolations = [
-            NodeSceneAnimationInterpolation::Linear,
-            NodeSceneAnimationInterpolation::Step,
-            NodeSceneAnimationInterpolation::CubicSpline,
+            AnimationInterpolation::Linear,
+            AnimationInterpolation::Step,
+            AnimationInterpolation::CubicSpline,
         ];
         let expected_values: [&[f32]; 3] = [
             &TRANSLATION_VALUES,
@@ -2608,11 +2662,11 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
             assert_eq!(channel.interpolation(), expected_interpolations[ordinal],);
             assert_eq!(
                 channel.pre_extrapolation(),
-                NodeSceneAnimationExtrapolation::SourceDefault,
+                AnimationExtrapolation::SourceDefault,
             );
             assert_eq!(
                 channel.post_extrapolation(),
-                NodeSceneAnimationExtrapolation::SourceDefault,
+                AnimationExtrapolation::SourceDefault,
             );
             assert_eq!(channel.times(), &KEY_TIMES);
             assert_eq!(channel.values(), expected_values[ordinal]);

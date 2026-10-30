@@ -223,10 +223,12 @@ adding coordinate conversion. The deformation increment retains its seven typed 
 ten payload buffers in one owner, cuts fresh construction, unchanged edits, central validation,
 public reads, and snapshot traversal over together, and removes its record schema and seven
 descriptor scratch tables. Animation target validation borrows actual deformation/geometry rows;
-channel records carry only target kind and logical index. Appearance and animation storage remain
-subsequent D2 cutovers.
+channel targets use logical coordinates. The animation increment replaces those remaining records
+with two typed row tables and five payload pools, shares unchanged owners, and removes its
+clip/channel validation descriptors. Shared time-domain/interpolation/extrapolation declarations
+serve authoring and reading directly. Appearance storage remains the subsequent D2 cutover.
 
-The private root becomes `SceneTables`, retaining node, geometry, profile, spatial, and deformation owners through the
+The private root becomes `SceneTables`, retaining node, geometry, profile, spatial, deformation, and animation owners through the
 existing storage-first release mechanism. Profile state owns typed owner/attachment and metadata
 descriptors; immutable lineage segments and metadata payloads have independent retained owners.
 Store operation digests as typed values, not offset/length rows. A provenance link identifies

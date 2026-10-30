@@ -2,14 +2,13 @@ use std::marker::PhantomData;
 
 use baozi_operation::{CanonicalStoreRef, RecordBlock};
 
-pub(super) mod animation;
 pub(super) mod appearance;
 
 pub(super) const PRESENCE_ABSENT: u8 = 0;
 pub(super) const PRESENCE_PRESENT: u8 = 1;
 
-pub(super) const SCENE_SCHEMA_REVISION: u32 = 6;
-pub(super) const SCENE_DIRECTORY_FIELD_COUNT: usize = 9;
+pub(super) const SCENE_SCHEMA_REVISION: u32 = 7;
+pub(super) const SCENE_DIRECTORY_FIELD_COUNT: usize = 8;
 /// Every root-directory cell is a U32 or a logical reference, each four logical bytes.
 /// Typed domain headers and payloads are counted independently by their storage plans.
 pub(super) const SCENE_DIRECTORY_CANONICAL_BYTES: u64 = SCENE_DIRECTORY_FIELD_COUNT as u64 * 4;
@@ -27,7 +26,6 @@ pub(super) mod scene_directory_field {
     pub(crate) const ATTRIBUTE_COUNT: usize = 5;
     pub(crate) const MESH_INSTANCE_COUNT: usize = 6;
     pub(crate) const APPEARANCE: usize = 7;
-    pub(crate) const ANIMATION: usize = 8;
 }
 
 pub(super) mod node_scene_evidence_field {
@@ -67,7 +65,7 @@ pub(super) mod node_scene_evidence_field {
     pub(crate) const SHAREABLE_LEAF_BLOCK_COUNT: usize = 33;
 }
 
-const _: [(); SCENE_DIRECTORY_FIELD_COUNT] = [(); scene_directory_field::ANIMATION + 1];
+const _: [(); SCENE_DIRECTORY_FIELD_COUNT] = [(); scene_directory_field::APPEARANCE + 1];
 const _: [(); NODE_SCENE_EVIDENCE_FIELD_COUNT] =
     [(); node_scene_evidence_field::SHAREABLE_LEAF_BLOCK_COUNT + 1];
 
