@@ -103,8 +103,8 @@ fn scene_from_parsed<'scope>(
         .map_err(|_| canonical_contract_failure(scope, "stl-default-material-factors"))?;
     let material = MaterialAuthoring::try_from_parts(
         AuthoringRange::new(0, 0),
-        &shading_model,
-        &alpha_mode,
+        shading_model,
+        alpha_mode,
         false,
         material_factors,
     )

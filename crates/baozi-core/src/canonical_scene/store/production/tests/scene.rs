@@ -1,8 +1,8 @@
 use crate::SceneValidationLimits;
 use crate::appearance::{
-    AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemanticsRef, ShadingModel,
-    TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelSwizzle,
-    TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
+    AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemantics, ShadingModel,
+    TextureBindingSemantics, TextureBlendOperation, TextureChannelSwizzle, TextureCoordinateSource,
+    TextureRole, TextureStrength, TextureTransform,
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionRejection, validate_node_scene_batches_for_test,
@@ -244,20 +244,20 @@ fn scene_envelope_reserves_complete_appearance_payload_envelope() {
     let channel_mapping = TextureChannelSwizzle::RGBA;
     let color_interpretation = ColorInterpretation::SrgbColor;
     let blend = TextureBlendOperation::Replace;
-    let binding_semantics = TextureBindingSemanticsRef::new(
-        &role,
-        &coordinate_source,
-        &channel_mapping,
-        &color_interpretation,
+    let binding_semantics = TextureBindingSemantics::new(
+        role,
+        coordinate_source,
+        channel_mapping,
+        color_interpretation,
         TextureTransform::IDENTITY,
         TextureStrength::ONE,
-        &blend,
+        blend,
         None,
     );
     let shading = ShadingModel::Unlit;
     let alpha = AlphaMode::Opaque;
     let material_semantics =
-        MaterialSemanticsRef::new(&shading, &alpha, false, MaterialFactors::empty());
+        MaterialSemantics::new(shading, alpha, false, MaterialFactors::empty());
     let bindings = [MaterialBindingAuthoring::new(
         TextureLocalId::new(0),
         binding_semantics,

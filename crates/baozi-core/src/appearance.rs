@@ -1,8 +1,9 @@
 //! Canonical material factors and texture-usage semantics.
 //!
 //! Retained scene storage owns identity, provenance, and collection layout.
-//! This module defines validated appearance values and the borrowed semantic
-//! views consumed while producing that storage.
+//! This module defines validated appearance values and the semantic values
+//! consumed while producing that storage. Only descriptive source keys borrow
+//! from their producer; closed behavior values are owned directly.
 
 use crate::math::{Color, Vec2, Vec3};
 use std::fmt;
@@ -58,7 +59,7 @@ impl AlphaMode {
         AlphaCutoff::try_new(cutoff).map(Self::Mask)
     }
 
-    pub const fn mask_cutoff(&self) -> Option<f32> {
+    pub const fn mask_cutoff(self) -> Option<f32> {
         match self {
             Self::Mask(cutoff) => Some(cutoff.get()),
             Self::Opaque | Self::Blend => None,
@@ -558,7 +559,7 @@ impl TextureRole {
         }
     }
 
-    const fn usage_class(&self) -> TextureUsageClass {
+    const fn usage_class(self) -> TextureUsageClass {
         match self {
             Self::BaseColor
             | Self::Diffuse
@@ -581,7 +582,7 @@ impl TextureRole {
         }
     }
 
-    const fn channel_lane_range(&self) -> (u8, u8) {
+    const fn channel_lane_range(self) -> (u8, u8) {
         match self {
             Self::BaseColor | Self::Diffuse => (3, 4),
             Self::Specular => (3, 3),
@@ -627,9 +628,9 @@ impl TextureCoordinateSource {
         Ok(Self::UvSet(set))
     }
 
-    pub const fn uv_set_index(&self) -> Option<u32> {
+    pub const fn uv_set_index(self) -> Option<u32> {
         match self {
-            Self::UvSet(set) => Some(*set as u32),
+            Self::UvSet(set) => Some(set as u32),
             Self::ObjectPosition | Self::ObjectNormal | Self::ReflectionVector => None,
         }
     }
@@ -878,8 +879,6 @@ pub enum TextureBlendOperation {
     Screen,
 }
 
-impl TextureBlendOperation {}
-
 /// A bounded source-format property or slot key.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TextureSourceKey {
@@ -964,29 +963,31 @@ pub(crate) fn validate_texture_source_key(value: &str) -> Result<(), TextureSour
     Ok(())
 }
 
-/// Borrowed material-use semantics independent from texture identity and storage layout.
+/// Material-use values independent from texture identity and storage layout.
+///
+/// Closed behavior values are owned; only the descriptive source key is borrowed.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct TextureBindingSemanticsRef<'a> {
-    role: &'a TextureRole,
-    coordinate_source: &'a TextureCoordinateSource,
-    channel_mapping: &'a TextureChannelSwizzle,
-    color_interpretation: &'a ColorInterpretation,
+pub(crate) struct TextureBindingSemantics<'a> {
+    role: TextureRole,
+    coordinate_source: TextureCoordinateSource,
+    channel_mapping: TextureChannelSwizzle,
+    color_interpretation: ColorInterpretation,
     transform: TextureTransform,
     strength: TextureStrength,
-    blend: &'a TextureBlendOperation,
+    blend: TextureBlendOperation,
     source_key: Option<&'a TextureSourceKey>,
 }
 
-impl<'a> TextureBindingSemanticsRef<'a> {
+impl<'a> TextureBindingSemantics<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) const fn new(
-        role: &'a TextureRole,
-        coordinate_source: &'a TextureCoordinateSource,
-        channel_mapping: &'a TextureChannelSwizzle,
-        color_interpretation: &'a ColorInterpretation,
+        role: TextureRole,
+        coordinate_source: TextureCoordinateSource,
+        channel_mapping: TextureChannelSwizzle,
+        color_interpretation: ColorInterpretation,
         transform: TextureTransform,
         strength: TextureStrength,
-        blend: &'a TextureBlendOperation,
+        blend: TextureBlendOperation,
         source_key: Option<&'a TextureSourceKey>,
     ) -> Self {
         Self {
@@ -1001,19 +1002,19 @@ impl<'a> TextureBindingSemanticsRef<'a> {
         }
     }
 
-    pub(crate) const fn role(self) -> &'a TextureRole {
+    pub(crate) const fn role(self) -> TextureRole {
         self.role
     }
 
-    pub(crate) const fn coordinate_source(self) -> &'a TextureCoordinateSource {
+    pub(crate) const fn coordinate_source(self) -> TextureCoordinateSource {
         self.coordinate_source
     }
 
-    pub(crate) const fn channel_mapping(self) -> &'a TextureChannelSwizzle {
+    pub(crate) const fn channel_mapping(self) -> TextureChannelSwizzle {
         self.channel_mapping
     }
 
-    pub(crate) const fn color_interpretation(self) -> &'a ColorInterpretation {
+    pub(crate) const fn color_interpretation(self) -> ColorInterpretation {
         self.color_interpretation
     }
 
@@ -1025,7 +1026,7 @@ impl<'a> TextureBindingSemanticsRef<'a> {
         self.strength
     }
 
-    pub(crate) const fn blend(self) -> &'a TextureBlendOperation {
+    pub(crate) const fn blend(self) -> TextureBlendOperation {
         self.blend
     }
 
@@ -1034,19 +1035,19 @@ impl<'a> TextureBindingSemanticsRef<'a> {
     }
 }
 
-/// Borrowed material-level semantics independent from retained representation.
+/// Owned material-level values independent from retained representation.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct MaterialSemanticsRef<'a> {
-    shading_model: &'a ShadingModel,
-    alpha_mode: &'a AlphaMode,
+pub(crate) struct MaterialSemantics {
+    shading_model: ShadingModel,
+    alpha_mode: AlphaMode,
     double_sided: bool,
     factors: MaterialFactors,
 }
 
-impl<'a> MaterialSemanticsRef<'a> {
+impl MaterialSemantics {
     pub(crate) const fn new(
-        shading_model: &'a ShadingModel,
-        alpha_mode: &'a AlphaMode,
+        shading_model: ShadingModel,
+        alpha_mode: AlphaMode,
         double_sided: bool,
         factors: MaterialFactors,
     ) -> Self {
@@ -1058,11 +1059,11 @@ impl<'a> MaterialSemanticsRef<'a> {
         }
     }
 
-    pub(crate) const fn shading_model(self) -> &'a ShadingModel {
+    pub(crate) const fn shading_model(self) -> ShadingModel {
         self.shading_model
     }
 
-    pub(crate) const fn alpha_mode(self) -> &'a AlphaMode {
+    pub(crate) const fn alpha_mode(self) -> AlphaMode {
         self.alpha_mode
     }
 
@@ -1164,7 +1165,7 @@ pub enum TextureStrengthRequirement {
 }
 
 pub(crate) fn validate_material_semantics(
-    semantics: MaterialSemanticsRef<'_>,
+    semantics: MaterialSemantics,
 ) -> Result<(), AppearanceBuildError> {
     let shading_model = semantics.shading_model();
     let factors = semantics.factors();
@@ -1191,7 +1192,7 @@ pub(crate) fn validate_material_semantics(
 
     if let Some(required) = required {
         return Err(AppearanceBuildError::MissingFactorGroup {
-            shading: *shading_model,
+            shading: shading_model,
             required,
         });
     }
@@ -1199,8 +1200,8 @@ pub(crate) fn validate_material_semantics(
 }
 
 fn validate_binding_color_interpretation(
-    role: &TextureRole,
-    interpretation: &ColorInterpretation,
+    role: TextureRole,
+    interpretation: ColorInterpretation,
 ) -> Result<(), AppearanceBuildError> {
     let compatible = match (role.usage_class(), interpretation) {
         (TextureUsageClass::Color, ColorInterpretation::SrgbColor)
@@ -1215,14 +1216,14 @@ fn validate_binding_color_interpretation(
         Ok(())
     } else {
         Err(AppearanceBuildError::IncompatibleColorInterpretation {
-            role: *role,
-            interpretation: *interpretation,
+            role,
+            interpretation,
         })
     }
 }
 
 pub(crate) fn validate_texture_binding_semantics(
-    semantics: TextureBindingSemanticsRef<'_>,
+    semantics: TextureBindingSemantics<'_>,
 ) -> Result<(), AppearanceBuildError> {
     validate_binding_color_interpretation(semantics.role(), semantics.color_interpretation())?;
     validate_binding_channel_mapping(semantics.role(), semantics.channel_mapping())?;
@@ -1231,8 +1232,8 @@ pub(crate) fn validate_texture_binding_semantics(
 }
 
 fn validate_binding_channel_mapping(
-    role: &TextureRole,
-    mapping: &TextureChannelSwizzle,
+    role: TextureRole,
+    mapping: TextureChannelSwizzle,
 ) -> Result<(), AppearanceBuildError> {
     let (minimum, maximum) = role.channel_lane_range();
     let actual = mapping.lane_count();
@@ -1240,7 +1241,7 @@ fn validate_binding_channel_mapping(
         Ok(())
     } else {
         Err(AppearanceBuildError::IncompatibleChannelCount {
-            role: *role,
+            role,
             minimum,
             maximum,
             actual,
@@ -1249,7 +1250,7 @@ fn validate_binding_channel_mapping(
 }
 
 fn validate_binding_strength(
-    role: &TextureRole,
+    role: TextureRole,
     strength: TextureStrength,
 ) -> Result<(), AppearanceBuildError> {
     let requirement = match role {
@@ -1281,21 +1282,18 @@ fn validate_binding_strength(
     if valid {
         Ok(())
     } else {
-        Err(AppearanceBuildError::IncompatibleStrength {
-            role: *role,
-            requirement,
-        })
+        Err(AppearanceBuildError::IncompatibleStrength { role, requirement })
     }
 }
 
 fn validate_binding_blend(
-    role: &TextureRole,
-    blend: &TextureBlendOperation,
+    role: TextureRole,
+    blend: TextureBlendOperation,
 ) -> Result<(), AppearanceBuildError> {
     if matches!(blend, TextureBlendOperation::Replace) {
         Ok(())
     } else {
-        Err(AppearanceBuildError::BuiltInRoleRequiresReplace { role: *role })
+        Err(AppearanceBuildError::BuiltInRoleRequiresReplace { role })
     }
 }
 
@@ -1316,7 +1314,7 @@ impl MaterialTextureBindingSemanticsValidator {
 
     pub(crate) fn validate_next(
         &mut self,
-        binding: TextureBindingSemanticsRef<'_>,
+        binding: TextureBindingSemantics<'_>,
     ) -> Result<(), AppearanceBuildError> {
         if self.next_index >= self.binding_count {
             return Err(AppearanceBuildError::LimitExceeded {
@@ -1328,7 +1326,7 @@ impl MaterialTextureBindingSemanticsValidator {
         }
         let duplicate_index = self.next_index;
         self.next_index += 1;
-        let role = *binding.role();
+        let role = binding.role();
         let first_index = &mut self.builtin_first_indices[role.builtin_index()];
         if let Some(first_index) = *first_index {
             return Err(AppearanceBuildError::DuplicateBindingAuthority {
@@ -1368,7 +1366,7 @@ impl MaterialTextureBindingSemanticsValidator {
 
 #[cfg(test)]
 pub(crate) fn validate_material_texture_binding_semantics<'a>(
-    bindings: impl ExactSizeIterator<Item = TextureBindingSemanticsRef<'a>>,
+    bindings: impl ExactSizeIterator<Item = TextureBindingSemantics<'a>>,
 ) -> Result<(), AppearanceBuildError> {
     let mut validator = MaterialTextureBindingSemanticsValidator::new(bindings.len());
     for binding in bindings {
@@ -1381,20 +1379,20 @@ pub(crate) fn validate_material_texture_binding_semantics<'a>(
 mod tests {
     use super::*;
 
-    static UV_ZERO: TextureCoordinateSource = TextureCoordinateSource::UvSet(0);
-    static REPLACE: TextureBlendOperation = TextureBlendOperation::Replace;
+    const UV_ZERO: TextureCoordinateSource = TextureCoordinateSource::UvSet(0);
+    const REPLACE: TextureBlendOperation = TextureBlendOperation::Replace;
 
     fn binding_semantics<'a>(
-        role: &'a TextureRole,
-        channel_mapping: &'a TextureChannelSwizzle,
-        color_interpretation: &'a ColorInterpretation,
+        role: TextureRole,
+        channel_mapping: TextureChannelSwizzle,
+        color_interpretation: ColorInterpretation,
         strength: TextureStrength,
-        blend: &'a TextureBlendOperation,
+        blend: TextureBlendOperation,
         source_key: Option<&'a TextureSourceKey>,
-    ) -> TextureBindingSemanticsRef<'a> {
-        TextureBindingSemanticsRef::new(
+    ) -> TextureBindingSemantics<'a> {
+        TextureBindingSemantics::new(
             role,
-            &UV_ZERO,
+            UV_ZERO,
             channel_mapping,
             color_interpretation,
             TextureTransform::IDENTITY,
@@ -1409,9 +1407,9 @@ mod tests {
         let shading_model = ShadingModel::PbrMetallicRoughness;
         let alpha_mode = AlphaMode::Opaque;
         assert_eq!(
-            validate_material_semantics(MaterialSemanticsRef::new(
-                &shading_model,
-                &alpha_mode,
+            validate_material_semantics(MaterialSemantics::new(
+                shading_model,
+                alpha_mode,
                 false,
                 MaterialFactors::empty(),
             )),
@@ -1438,12 +1436,112 @@ mod tests {
         .expect("legacy factors should be valid");
         let factors = MaterialFactors::try_new(Vec3::ZERO, Some(pbr), None, Some(legacy))
             .expect("factor set should be valid");
-        let semantics = MaterialSemanticsRef::new(&shading_model, &alpha_mode, true, factors);
+        let semantics = MaterialSemantics::new(shading_model, alpha_mode, true, factors);
 
         validate_material_semantics(semantics).expect("selected factor group is present");
         assert_eq!(semantics.factors().pbr_metallic_roughness(), Some(pbr));
         assert_eq!(semantics.factors().legacy(), Some(legacy));
         assert!(semantics.double_sided());
+    }
+
+    #[test]
+    fn semantics_own_closed_values_and_borrow_only_the_descriptive_source_key() {
+        let material = {
+            let shading_model = ShadingModel::Unlit;
+            let alpha_mode = AlphaMode::mask(-0.0).unwrap();
+            let factors =
+                MaterialFactors::try_new(Vec3::new(2.0, -0.0, 0.5), None, None, None).unwrap();
+            MaterialSemantics::new(shading_model, alpha_mode, true, factors)
+        };
+        validate_material_semantics(material).unwrap();
+        assert_eq!(material.shading_model(), ShadingModel::Unlit);
+        assert_eq!(
+            material.alpha_mode().mask_cutoff().unwrap().to_bits(),
+            (-0.0_f32).to_bits()
+        );
+        assert_eq!(
+            material.factors().emissive().y.to_bits(),
+            (-0.0_f32).to_bits()
+        );
+
+        let source_key = TextureSourceKey::try_new("source:normal").unwrap();
+        let binding = {
+            let role = TextureRole::Normal;
+            let coordinate_source = TextureCoordinateSource::UvSet(3);
+            let channel_mapping = TextureChannelSwizzle::RGB;
+            let color_interpretation = ColorInterpretation::Data;
+            let blend = TextureBlendOperation::Replace;
+            TextureBindingSemantics::new(
+                role,
+                coordinate_source,
+                channel_mapping,
+                color_interpretation,
+                TextureTransform::IDENTITY,
+                TextureStrength::try_new(-0.0).unwrap(),
+                blend,
+                Some(&source_key),
+            )
+        };
+        validate_texture_binding_semantics(binding).unwrap();
+        assert_eq!(binding.role(), TextureRole::Normal);
+        assert_eq!(binding.coordinate_source().uv_set_index(), Some(3));
+        assert_eq!(binding.channel_mapping(), TextureChannelSwizzle::RGB);
+        assert_eq!(binding.color_interpretation(), ColorInterpretation::Data);
+        assert_eq!(binding.blend(), TextureBlendOperation::Replace);
+        assert_eq!(binding.strength().get().to_bits(), (-0.0_f32).to_bits());
+        assert!(std::ptr::eq(binding.source_key().unwrap(), &source_key));
+    }
+
+    #[cfg(feature = "_scene-integration")]
+    #[test]
+    fn public_authoring_constructors_borrow_only_names_and_source_keys() {
+        use crate::scene::authoring::{
+            AuthoringRange, MaterialAuthoring, MaterialBindingAuthoring, Presence, TextureLocalId,
+        };
+
+        fn material<'name>(name: Presence<&'name str>) -> MaterialAuthoring<'name> {
+            let material = MaterialAuthoring::try_from_parts(
+                AuthoringRange::new(0, 0),
+                ShadingModel::Unlit,
+                AlphaMode::mask(-0.0).unwrap(),
+                true,
+                MaterialFactors::empty(),
+            )
+            .unwrap();
+            match name {
+                Presence::Absent => material,
+                Presence::Present(name) => material.with_name(name),
+            }
+        }
+
+        fn binding<'key>(
+            source_key: Option<&'key TextureSourceKey>,
+        ) -> MaterialBindingAuthoring<'key> {
+            MaterialBindingAuthoring::try_from_parts(
+                TextureLocalId::new(0),
+                TextureRole::Normal,
+                TextureCoordinateSource::uv_set(3).unwrap(),
+                TextureChannelSwizzle::RGB,
+                ColorInterpretation::Data,
+                TextureTransform::IDENTITY,
+                TextureStrength::try_new(-0.0).unwrap(),
+                TextureBlendOperation::Replace,
+                source_key,
+            )
+            .unwrap()
+        }
+
+        // Both return paths escape their constructors without borrowing enum temporaries.
+        let unnamed: MaterialAuthoring<'static> = material(Presence::Absent);
+        let unkeyed: MaterialBindingAuthoring<'static> = binding(None);
+        {
+            let name = String::from("caller-owned material name");
+            let source_key = TextureSourceKey::try_new("source:normal").unwrap();
+            assert_ne!(material(Presence::Present(name.as_str())), unnamed);
+            assert_ne!(binding(Some(&source_key)), unkeyed);
+        }
+        assert_eq!(unnamed, material(Presence::Absent));
+        assert_eq!(unkeyed, binding(None));
     }
 
     #[test]
@@ -1485,11 +1583,11 @@ mod tests {
         let srgb = ColorInterpretation::SrgbColor;
         assert_eq!(
             validate_texture_binding_semantics(binding_semantics(
-                &normal,
-                &rgb,
-                &srgb,
+                normal,
+                rgb,
+                srgb,
                 TextureStrength::ONE,
-                &REPLACE,
+                REPLACE,
                 None,
             )),
             Err(AppearanceBuildError::IncompatibleColorInterpretation {
@@ -1503,11 +1601,11 @@ mod tests {
         let linear = ColorInterpretation::LinearColor;
         assert_eq!(
             validate_texture_binding_semantics(binding_semantics(
-                &specular,
-                &rgba,
-                &linear,
+                specular,
+                rgba,
+                linear,
                 TextureStrength::ONE,
-                &REPLACE,
+                REPLACE,
                 None,
             )),
             Err(AppearanceBuildError::IncompatibleChannelCount {
@@ -1523,11 +1621,11 @@ mod tests {
         let data = ColorInterpretation::Data;
         assert_eq!(
             validate_texture_binding_semantics(binding_semantics(
-                &metallic,
-                &red,
-                &data,
+                metallic,
+                red,
+                data,
                 TextureStrength::try_new(0.5).expect("finite strength should build"),
-                &REPLACE,
+                REPLACE,
                 None,
             )),
             Err(AppearanceBuildError::IncompatibleStrength {
@@ -1540,11 +1638,11 @@ mod tests {
         let multiply = TextureBlendOperation::Multiply;
         assert_eq!(
             validate_texture_binding_semantics(binding_semantics(
-                &base_color,
-                &rgb,
-                &srgb,
+                base_color,
+                rgb,
+                srgb,
                 TextureStrength::ONE,
-                &multiply,
+                multiply,
                 None,
             )),
             Err(AppearanceBuildError::BuiltInRoleRequiresReplace {
@@ -1561,19 +1659,19 @@ mod tests {
         let first_key = TextureSourceKey::try_new("layer-0").expect("source key should be valid");
         let second_key = TextureSourceKey::try_new("layer-1").expect("source key should be valid");
         let first = binding_semantics(
-            &builtin_role,
-            &rgb,
-            &color,
+            builtin_role,
+            rgb,
+            color,
             TextureStrength::ONE,
-            &REPLACE,
+            REPLACE,
             Some(&first_key),
         );
         let duplicate = binding_semantics(
-            &builtin_role,
-            &rgb,
-            &color,
+            builtin_role,
+            rgb,
+            color,
             TextureStrength::ONE,
-            &REPLACE,
+            REPLACE,
             Some(&second_key),
         );
         assert_eq!(
@@ -1595,19 +1693,19 @@ mod tests {
         let metallic_mapping = TextureChannelSwizzle::RED;
         let data = ColorInterpretation::Data;
         let combined = binding_semantics(
-            &combined_role,
-            &combined_channels,
-            &data,
+            combined_role,
+            combined_channels,
+            data,
             TextureStrength::ONE,
-            &REPLACE,
+            REPLACE,
             None,
         );
         let separate = binding_semantics(
-            &metallic_role,
-            &metallic_mapping,
-            &data,
+            metallic_role,
+            metallic_mapping,
+            data,
             TextureStrength::ONE,
-            &REPLACE,
+            REPLACE,
             None,
         );
         assert_eq!(
@@ -1645,11 +1743,11 @@ mod tests {
         ];
         let swizzle = require_copy(TextureChannelSwizzle::try_new(&expected).unwrap());
         let semantics = binding_semantics(
-            &TextureRole::BaseColor,
-            &swizzle,
-            &ColorInterpretation::LinearColor,
+            TextureRole::BaseColor,
+            swizzle,
+            ColorInterpretation::LinearColor,
             TextureStrength::ONE,
-            &REPLACE,
+            REPLACE,
             None,
         );
         assert_eq!(semantics.channel_mapping().as_slice(), expected);
@@ -1736,19 +1834,19 @@ mod tests {
         let channels =
             TextureChannelSwizzle::try_new(&[TextureChannel::Blue, TextureChannel::Green]).unwrap();
         let combined = binding_semantics(
-            &TextureRole::MetallicRoughness,
-            &channels,
-            &ColorInterpretation::Data,
+            TextureRole::MetallicRoughness,
+            channels,
+            ColorInterpretation::Data,
             TextureStrength::ONE,
-            &REPLACE,
+            REPLACE,
             None,
         );
         let separate = binding_semantics(
-            &TextureRole::Roughness,
-            &TextureChannelSwizzle::RED,
-            &ColorInterpretation::Data,
+            TextureRole::Roughness,
+            TextureChannelSwizzle::RED,
+            ColorInterpretation::Data,
             TextureStrength::ONE,
-            &REPLACE,
+            REPLACE,
             None,
         );
         assert_eq!(

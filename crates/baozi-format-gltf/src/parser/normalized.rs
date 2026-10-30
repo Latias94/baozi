@@ -90,13 +90,13 @@ pub(super) fn submit_parts(
     for binding in appearance_storage.bindings.as_slice() {
         let authored = MaterialBindingAuthoring::try_from_parts(
             binding.texture,
-            &binding.role,
-            &binding.coordinate_source,
-            &binding.channel_mapping,
-            &binding.color_interpretation,
+            binding.role,
+            binding.coordinate_source,
+            binding.channel_mapping,
+            binding.color_interpretation,
             binding.transform,
             binding.strength,
-            &binding.blend,
+            binding.blend,
             Some(&binding.source_key),
         )
         .map_err(|_| gltf_parse_error(ctx, "glTF texture binding semantics are invalid"))?;
@@ -112,8 +112,8 @@ pub(super) fn submit_parts(
     for material in appearance_storage.materials.as_slice() {
         let mut authored = MaterialAuthoring::try_from_parts(
             material.bindings,
-            &shading_model,
-            &material.alpha_mode,
+            shading_model,
+            material.alpha_mode,
             material.double_sided,
             material.factors,
         )

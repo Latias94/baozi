@@ -1,6 +1,6 @@
 use crate::appearance::{
-    AlphaMode, AppearanceBuildError, ColorInterpretation, MaterialFactors, MaterialSemanticsRef,
-    ShadingModel, TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelSwizzle,
+    AlphaMode, AppearanceBuildError, ColorInterpretation, MaterialFactors, MaterialSemantics,
+    ShadingModel, TextureBindingSemantics, TextureBlendOperation, TextureChannelSwizzle,
     TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
     validate_material_semantics, validate_texture_binding_semantics,
 };
@@ -118,10 +118,12 @@ impl TextureAuthoring {
 }
 
 /// One material-owned typed texture binding.
+///
+/// Closed behavior values are owned. Only the optional descriptive source key is borrowed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MaterialBindingAuthoring<'a> {
     texture: TextureLocalId,
-    semantics: TextureBindingSemanticsRef<'a>,
+    semantics: TextureBindingSemantics<'a>,
 }
 
 impl<'a> MaterialBindingAuthoring<'a> {
@@ -129,16 +131,16 @@ impl<'a> MaterialBindingAuthoring<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn try_from_parts(
         texture: TextureLocalId,
-        role: &'a TextureRole,
-        coordinate_source: &'a TextureCoordinateSource,
-        channel_mapping: &'a TextureChannelSwizzle,
-        color_interpretation: &'a ColorInterpretation,
+        role: TextureRole,
+        coordinate_source: TextureCoordinateSource,
+        channel_mapping: TextureChannelSwizzle,
+        color_interpretation: ColorInterpretation,
         transform: TextureTransform,
         strength: TextureStrength,
-        blend: &'a TextureBlendOperation,
+        blend: TextureBlendOperation,
         source_key: Option<&'a TextureSourceKey>,
     ) -> Result<Self, AppearanceBuildError> {
-        let semantics = TextureBindingSemanticsRef::new(
+        let semantics = TextureBindingSemantics::new(
             role,
             coordinate_source,
             channel_mapping,
@@ -154,7 +156,7 @@ impl<'a> MaterialBindingAuthoring<'a> {
 
     pub(in crate::canonical_scene::store) const fn new(
         texture: TextureLocalId,
-        semantics: TextureBindingSemanticsRef<'a>,
+        semantics: TextureBindingSemantics<'a>,
     ) -> Self {
         Self { texture, semantics }
     }
@@ -163,18 +165,18 @@ impl<'a> MaterialBindingAuthoring<'a> {
         self.texture
     }
 
-    pub(in crate::canonical_scene::store) const fn semantics(
-        self,
-    ) -> TextureBindingSemanticsRef<'a> {
+    pub(in crate::canonical_scene::store) const fn semantics(self) -> TextureBindingSemantics<'a> {
         self.semantics
     }
 }
 
 /// One logical material owning a contiguous source-ordered binding range.
+///
+/// Material semantics are owned. The lifetime applies only to an optional source name.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MaterialAuthoring<'a> {
     bindings: AuthoringRange,
-    semantics: MaterialSemanticsRef<'a>,
+    semantics: MaterialSemantics,
     name: Presence<&'a str>,
 }
 
@@ -182,19 +184,19 @@ impl<'a> MaterialAuthoring<'a> {
     /// Creates one material from public semantic values after checking required factor groups.
     pub fn try_from_parts(
         bindings: AuthoringRange,
-        shading_model: &'a ShadingModel,
-        alpha_mode: &'a AlphaMode,
+        shading_model: ShadingModel,
+        alpha_mode: AlphaMode,
         double_sided: bool,
         factors: MaterialFactors,
     ) -> Result<Self, AppearanceBuildError> {
-        let semantics = MaterialSemanticsRef::new(shading_model, alpha_mode, double_sided, factors);
+        let semantics = MaterialSemantics::new(shading_model, alpha_mode, double_sided, factors);
         validate_material_semantics(semantics)?;
         Ok(Self::new(bindings, semantics))
     }
 
     pub(in crate::canonical_scene::store) const fn new(
         bindings: AuthoringRange,
-        semantics: MaterialSemanticsRef<'a>,
+        semantics: MaterialSemantics,
     ) -> Self {
         Self {
             bindings,
@@ -212,7 +214,7 @@ impl<'a> MaterialAuthoring<'a> {
         self.bindings
     }
 
-    pub(in crate::canonical_scene::store) const fn semantics(self) -> MaterialSemanticsRef<'a> {
+    pub(in crate::canonical_scene::store) const fn semantics(self) -> MaterialSemantics {
         self.semantics
     }
 

@@ -197,18 +197,18 @@ fn with_fixture<T>(action: impl FnOnce(&ValidatedAppearanceBatch<'_, u64>) -> T)
     let bindings: [_; 4] = std::array::from_fn(|index| {
         MaterialBindingAuthoring::new(
             TextureLocalId::new([0, 1, 2, 0][index]),
-            TextureBindingSemanticsRef::new(
-                &roles[index],
-                &coordinates[index],
-                &channels[index],
-                &colors[index],
+            TextureBindingSemantics::new(
+                roles[index],
+                coordinates[index],
+                channels[index],
+                colors[index],
                 if index == 0 {
                     transform
                 } else {
                     TextureTransform::IDENTITY
                 },
                 TextureStrength::try_new(strengths[index]).unwrap(),
-                &TextureBlendOperation::Replace,
+                TextureBlendOperation::Replace,
                 keys[index],
             ),
         )
@@ -256,7 +256,7 @@ fn with_fixture<T>(action: impl FnOnce(&ValidatedAppearanceBatch<'_, u64>) -> T)
                 AuthoringRange::new(4, 0),
                 AuthoringRange::new(4, 0),
             ][index],
-            MaterialSemanticsRef::new(&shadings[index], &alphas[index], index == 0, factors[index]),
+            MaterialSemantics::new(shadings[index], alphas[index], index == 0, factors[index]),
         );
         if let Some(name) = names[index] {
             material = material.with_name(name);

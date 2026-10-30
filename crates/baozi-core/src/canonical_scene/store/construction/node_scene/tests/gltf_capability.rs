@@ -8,9 +8,9 @@ use baozi_operation::{
 
 use crate::SceneValidationLimits;
 use crate::appearance::{
-    AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemanticsRef,
+    AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemantics,
     PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel,
-    SupplementalPbrFactors, TextureBindingSemanticsRef, TextureBlendOperation, TextureChannel,
+    SupplementalPbrFactors, TextureBindingSemantics, TextureBlendOperation, TextureChannel,
     TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength,
     TextureTransform,
 };
@@ -404,7 +404,7 @@ fn encode_gltf_source(
         }
     }
 
-    fn encode_texture_role(encoder: &mut GltfSourceEncoder, role: &TextureRole) {
+    fn encode_texture_role(encoder: &mut GltfSourceEncoder, role: TextureRole) {
         let tag = match role {
             TextureRole::BaseColor => 0,
             TextureRole::Diffuse => 1,
@@ -455,7 +455,7 @@ fn encode_gltf_source(
         encoder.f32(value.a);
     }
 
-    fn encode_shading_model(encoder: &mut GltfSourceEncoder, model: &ShadingModel) {
+    fn encode_shading_model(encoder: &mut GltfSourceEncoder, model: ShadingModel) {
         let tag = match model {
             ShadingModel::Unspecified => 7,
             ShadingModel::Unlit => 0,
@@ -468,7 +468,7 @@ fn encode_gltf_source(
         encoder.u8(tag);
     }
 
-    fn encode_alpha_mode(encoder: &mut GltfSourceEncoder, alpha_mode: &AlphaMode) {
+    fn encode_alpha_mode(encoder: &mut GltfSourceEncoder, alpha_mode: AlphaMode) {
         match alpha_mode {
             AlphaMode::Opaque => encoder.u8(0),
             AlphaMode::Mask(cutoff) => {
@@ -479,11 +479,11 @@ fn encode_gltf_source(
         }
     }
 
-    fn encode_coordinate_source(encoder: &mut GltfSourceEncoder, source: &TextureCoordinateSource) {
+    fn encode_coordinate_source(encoder: &mut GltfSourceEncoder, source: TextureCoordinateSource) {
         match source {
             TextureCoordinateSource::UvSet(set) => {
                 encoder.u8(0);
-                encoder.u32(u32::from(*set));
+                encoder.u32(u32::from(set));
             }
             TextureCoordinateSource::ObjectPosition => encoder.u8(1),
             TextureCoordinateSource::ObjectNormal => encoder.u8(2),
@@ -502,7 +502,7 @@ fn encode_gltf_source(
         });
     }
 
-    fn encode_channel_mapping(encoder: &mut GltfSourceEncoder, mapping: &TextureChannelSwizzle) {
+    fn encode_channel_mapping(encoder: &mut GltfSourceEncoder, mapping: TextureChannelSwizzle) {
         encoder.u8(0);
         encoder.list(mapping.as_slice(), |encoder, channel| {
             encode_channel(encoder, *channel);
@@ -511,7 +511,7 @@ fn encode_gltf_source(
 
     fn encode_color_interpretation(
         encoder: &mut GltfSourceEncoder,
-        interpretation: &ColorInterpretation,
+        interpretation: ColorInterpretation,
     ) {
         let tag = match interpretation {
             ColorInterpretation::SrgbColor => 0,
@@ -531,7 +531,7 @@ fn encode_gltf_source(
         encoder.f32(scale.y);
     }
 
-    fn encode_blend_operation(encoder: &mut GltfSourceEncoder, operation: &TextureBlendOperation) {
+    fn encode_blend_operation(encoder: &mut GltfSourceEncoder, operation: TextureBlendOperation) {
         let tag = match operation {
             TextureBlendOperation::Replace => 0,
             TextureBlendOperation::Multiply => 1,
@@ -1211,34 +1211,34 @@ fn with_gltf_capability_input<R>(
         TextureBlendOperation::Replace,
     ];
     let binding_semantics = [
-        TextureBindingSemanticsRef::new(
-            &roles[0],
-            &coordinate_sources[0],
-            &channel_mappings[0],
-            &color_interpretations[0],
+        TextureBindingSemantics::new(
+            roles[0],
+            coordinate_sources[0],
+            channel_mappings[0],
+            color_interpretations[0],
             transforms[0],
             strengths[0],
-            &blends[0],
+            blends[0],
             source_keys[0].as_ref(),
         ),
-        TextureBindingSemanticsRef::new(
-            &roles[1],
-            &coordinate_sources[1],
-            &channel_mappings[1],
-            &color_interpretations[1],
+        TextureBindingSemantics::new(
+            roles[1],
+            coordinate_sources[1],
+            channel_mappings[1],
+            color_interpretations[1],
             transforms[1],
             strengths[1],
-            &blends[1],
+            blends[1],
             source_keys[1].as_ref(),
         ),
-        TextureBindingSemanticsRef::new(
-            &roles[2],
-            &coordinate_sources[2],
-            &channel_mappings[2],
-            &color_interpretations[2],
+        TextureBindingSemantics::new(
+            roles[2],
+            coordinate_sources[2],
+            channel_mappings[2],
+            color_interpretations[2],
             transforms[2],
             strengths[2],
-            &blends[2],
+            blends[2],
             source_keys[2].as_ref(),
         ),
     ];
@@ -1291,9 +1291,9 @@ fn with_gltf_capability_input<R>(
         )
         .expect("default glTF PBR factors must be canonical")
     };
-    let material_semantics = MaterialSemanticsRef::new(
-        &shading_model,
-        &alpha_mode,
+    let material_semantics = MaterialSemantics::new(
+        shading_model,
+        alpha_mode,
         material_semantics_mutated,
         factors,
     );

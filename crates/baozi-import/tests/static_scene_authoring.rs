@@ -224,13 +224,13 @@ impl FormatImporter for CustomImporter {
         let blend = TextureBlendOperation::Replace;
         let bindings = [MaterialBindingAuthoring::try_from_parts(
             TextureLocalId::new(0),
-            &role,
-            &coordinates,
-            &channels,
-            &interpretation,
+            role,
+            coordinates,
+            channels,
+            interpretation,
             TextureTransform::IDENTITY,
             TextureStrength::ONE,
-            &blend,
+            blend,
             None,
         )
         .unwrap()];
@@ -238,8 +238,8 @@ impl FormatImporter for CustomImporter {
         let alpha = AlphaMode::Opaque;
         let materials = [MaterialAuthoring::try_from_parts(
             AuthoringRange::new(0, 1),
-            &shading,
-            &alpha,
+            shading,
+            alpha,
             false,
             MaterialFactors::empty(),
         )

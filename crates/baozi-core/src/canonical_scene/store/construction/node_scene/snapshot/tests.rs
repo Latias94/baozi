@@ -8,7 +8,7 @@ mod public_read;
 
 use crate::FormatId;
 use crate::SceneValidationLimits;
-use crate::appearance::{AlphaMode, MaterialFactors, MaterialSemanticsRef, ShadingModel};
+use crate::appearance::{AlphaMode, MaterialFactors, MaterialSemantics, ShadingModel};
 use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemantic};
 use crate::canonical_scene::store::construction::SceneConstructionLimits;
 use crate::canonical_scene::store::construction::node_scene::semantic::{
@@ -709,7 +709,7 @@ fn point_geometry_scene(
     let shading_model = ShadingModel::Unlit;
     let alpha_mode = AlphaMode::Opaque;
     let material_semantics =
-        MaterialSemanticsRef::new(&shading_model, &alpha_mode, false, MaterialFactors::empty());
+        MaterialSemantics::new(shading_model, alpha_mode, false, MaterialFactors::empty());
     let materials = [MaterialAuthoring::new(
         AuthoringRange::new(0, 0),
         material_semantics,
@@ -824,7 +824,7 @@ fn named_point_geometry_scene_with_shading(
     )];
     let alpha_mode = AlphaMode::Opaque;
     let material_semantics =
-        MaterialSemanticsRef::new(&shading_model, &alpha_mode, false, MaterialFactors::empty());
+        MaterialSemantics::new(shading_model, alpha_mode, false, MaterialFactors::empty());
     let material = MaterialAuthoring::new(AuthoringRange::new(0, 0), material_semantics);
     let materials = [match material_name {
         Some(name) => material.with_name(name),
@@ -1030,7 +1030,7 @@ fn all_attribute_payload_kinds_scene(account: &PhysicalStorageAccount) -> NodeSc
     let shading_model = ShadingModel::Unlit;
     let alpha_mode = AlphaMode::Opaque;
     let material_semantics =
-        MaterialSemanticsRef::new(&shading_model, &alpha_mode, false, MaterialFactors::empty());
+        MaterialSemantics::new(shading_model, alpha_mode, false, MaterialFactors::empty());
     let materials = [MaterialAuthoring::new(
         AuthoringRange::new(0, 0),
         material_semantics,

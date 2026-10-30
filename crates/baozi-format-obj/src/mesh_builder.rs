@@ -1456,13 +1456,13 @@ fn submit_complete_batch<'scope>(
             material_bindings.try_push_reserved(
                 MaterialBindingAuthoring::try_from_parts(
                     TextureLocalId::new(texture_index),
-                    &texture_role,
-                    &coordinate_source,
-                    &channel_mapping,
-                    &color_interpretation,
+                    texture_role,
+                    coordinate_source,
+                    channel_mapping,
+                    color_interpretation,
                     TextureTransform::IDENTITY,
                     TextureStrength::ONE,
-                    &blend,
+                    blend,
                     Some(&source_key),
                 )
                 .map_err(|_| {
@@ -1475,8 +1475,8 @@ fn submit_complete_batch<'scope>(
         };
         let authored = MaterialAuthoring::try_from_parts(
             AuthoringRange::new(binding_offset, binding_count),
-            &material.shading_model,
-            &material.alpha_mode,
+            material.shading_model,
+            material.alpha_mode,
             false,
             material.factors,
         )

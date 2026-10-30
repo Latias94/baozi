@@ -149,6 +149,9 @@ directly; duplicate `*Kind` enums and channel-mapping wrappers are unnecessary. 
 identity independently of equal content. Text is ordered by image media declarations, binding source
 keys, then material names; optional empty names remain distinct from absence. Unchanged edits share
 the complete owner, and readers borrow its actual payloads without a record decoder or projection.
+Closed material and binding behavior values are owned by their semantic values; only names and
+descriptive source keys borrow producer text. This keeps authoring lifetimes tied to actual text
+ownership and permits temporary validated behavior values without reference scaffolding.
 
 Embedded and external images use the same owned payload shape. External resolution occurs through
 the import session, which authorizes and snapshots the exact encoded bytes before transferring them

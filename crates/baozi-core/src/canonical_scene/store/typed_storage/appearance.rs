@@ -4,9 +4,9 @@
 //! Shared public behavior values are stored directly after their domain shrink.
 
 use crate::appearance::{
-    AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemanticsRef, ShadingModel,
-    TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelSwizzle,
-    TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
+    AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemantics, ShadingModel,
+    TextureBindingSemantics, TextureBlendOperation, TextureChannelSwizzle, TextureCoordinateSource,
+    TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
 };
 use crate::image::SamplerState;
 
@@ -62,17 +62,17 @@ impl StoredBinding {
     /// Central validation checks the actual key text separately without copying
     /// its bounded buffer into every row or granting it binding authority.
     pub(in crate::canonical_scene::store) const fn semantics<'view>(
-        &'view self,
+        &self,
         source_key: Option<&'view TextureSourceKey>,
-    ) -> TextureBindingSemanticsRef<'view> {
-        TextureBindingSemanticsRef::new(
-            &self.role,
-            &self.coordinate_source,
-            &self.channels,
-            &self.color,
+    ) -> TextureBindingSemantics<'view> {
+        TextureBindingSemantics::new(
+            self.role,
+            self.coordinate_source,
+            self.channels,
+            self.color,
             self.transform,
             self.strength,
-            &self.blend,
+            self.blend,
             source_key,
         )
     }
@@ -89,8 +89,8 @@ pub(in crate::canonical_scene::store) struct StoredMaterial {
 }
 
 impl StoredMaterial {
-    pub(in crate::canonical_scene::store) const fn semantics(&self) -> MaterialSemanticsRef<'_> {
-        MaterialSemanticsRef::new(&self.shading, &self.alpha, self.double_sided, self.factors)
+    pub(in crate::canonical_scene::store) const fn semantics(&self) -> MaterialSemantics {
+        MaterialSemantics::new(self.shading, self.alpha, self.double_sided, self.factors)
     }
 }
 

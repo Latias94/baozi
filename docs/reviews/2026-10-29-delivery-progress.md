@@ -233,6 +233,24 @@ The final all-feature release WASI consumer executed the same four-format and po
 under checksum-qualified Wasmtime 50.0.0. Browser WASM passed compilation only. Logs are
 `d2-appearance-wasi-final.log` and `d2-appearance-browser-wasm-final.log`.
 
+## Appearance semantic value ownership — 2026-10-31
+
+The follow-up API cutover removes unnecessary references from appearance authoring. Closed behavior
+values (`ShadingModel`, `AlphaMode`, `TextureRole`, coordinate source, swizzle, color interpretation,
+and blend operation) are copied into the private semantic values. Only the optional material name and
+descriptive texture source key retain producer lifetimes. `MaterialSemantics` has no lifetime;
+`TextureBindingSemantics` borrows only its optional source key. Public authoring constructors now take
+the closed values by value, so a producer can pass temporaries without allocating or keeping dummy
+borrowed arrays alive. Existing source keys, names, numeric bits, validation rules, and snapshot
+encoding remain unchanged.
+
+The authoring lifetime regression constructs owned semantics from inner scopes and asserts that only
+name/key borrows constrain the result. The core target run passed **477/477** tests with four manual
+pilots skipped; strict workspace Clippy and formatting passed. Logs are
+`target/review/appearance-owned-values-core.log`, `appearance-owned-values-check-final.log`, and
+`appearance-owned-values-clippy.log`. No compatibility alias or parallel borrowed semantic model was
+retained.
+
 ## Production package contents and fixed artifact matrix — 2026-10-31
 
 All ten self-owned production packages now include a local English README plus byte-identical

@@ -127,13 +127,13 @@ fn submit_triangle(scope: &ParseScope<'_>, input: Input) -> ParseResult<SceneDra
     let blend = TextureBlendOperation::Replace;
     let binding = MaterialBindingAuthoring::try_from_parts(
         TextureLocalId::new(0),
-        &role,
-        &coordinates,
-        &channel_mapping,
-        &interpretation,
+        role,
+        coordinates,
+        channel_mapping,
+        interpretation,
         TextureTransform::IDENTITY,
         TextureStrength::ONE,
-        &blend,
+        blend,
         None,
     )
     .unwrap();
@@ -149,8 +149,8 @@ fn submit_triangle(scope: &ParseScope<'_>, input: Input) -> ParseResult<SceneDra
                 0
             },
         ),
-        &shading,
-        &alpha,
+        shading,
+        alpha,
         false,
         MaterialFactors::default(),
     )

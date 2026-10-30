@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use crate::appearance::{
     AlphaMode, AppearanceBuildError, ColorInterpretation, MaterialFactorGroup, MaterialFactors,
-    MaterialSemanticsRef, ShadingModel, TextureBindingSemanticsRef, TextureBlendOperation,
+    MaterialSemantics, ShadingModel, TextureBindingSemantics, TextureBlendOperation,
     TextureChannel, TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureSourceKey,
     TextureStrength, TextureTransform,
 };
@@ -72,14 +72,14 @@ fn with_input<T>(
     let bindings: [_; 3] = std::array::from_fn(|index| {
         MaterialBindingAuthoring::new(
             TextureLocalId::new([0, 1, 0][index]),
-            TextureBindingSemanticsRef::new(
-                &roles[index],
-                &coordinates[index],
-                &channels[index],
-                &colors[index],
+            TextureBindingSemantics::new(
+                roles[index],
+                coordinates[index],
+                channels[index],
+                colors[index],
                 TextureTransform::IDENTITY,
                 TextureStrength::try_new(if index == 1 { -0.0 } else { 1.0 }).unwrap(),
-                &TextureBlendOperation::Replace,
+                TextureBlendOperation::Replace,
                 if index == 1 { None } else { Some(&key) },
             ),
         )
@@ -93,9 +93,9 @@ fn with_input<T>(
     let materials = [
         MaterialAuthoring::new(
             AuthoringRange::new(0, 2),
-            MaterialSemanticsRef::new(
-                &ShadingModel::Unlit,
-                &alphas[0],
+            MaterialSemantics::new(
+                ShadingModel::Unlit,
+                alphas[0],
                 false,
                 MaterialFactors::empty(),
             ),
@@ -103,9 +103,9 @@ fn with_input<T>(
         .with_name(&name),
         MaterialAuthoring::new(
             AuthoringRange::new(2, 0),
-            MaterialSemanticsRef::new(
-                &ShadingModel::Unlit,
-                &alphas[1],
+            MaterialSemantics::new(
+                ShadingModel::Unlit,
+                alphas[1],
                 true,
                 MaterialFactors::empty(),
             ),
@@ -113,9 +113,9 @@ fn with_input<T>(
         .with_name(""),
         MaterialAuthoring::new(
             AuthoringRange::new(2, 1),
-            MaterialSemanticsRef::new(
-                &ShadingModel::Unlit,
-                &alphas[2],
+            MaterialSemantics::new(
+                ShadingModel::Unlit,
+                alphas[2],
                 false,
                 MaterialFactors::empty(),
             ),
@@ -813,14 +813,14 @@ fn closed_roles_preserve_metallic_authority_conflicts() {
         let bindings: [_; 2] = std::array::from_fn(|index| {
             MaterialBindingAuthoring::new(
                 TextureLocalId::new(0),
-                TextureBindingSemanticsRef::new(
-                    &roles[index],
-                    &TextureCoordinateSource::UvSet(0),
-                    &channels[index],
-                    &ColorInterpretation::Data,
+                TextureBindingSemantics::new(
+                    roles[index],
+                    TextureCoordinateSource::UvSet(0),
+                    channels[index],
+                    ColorInterpretation::Data,
                     TextureTransform::IDENTITY,
                     TextureStrength::ONE,
-                    &TextureBlendOperation::Replace,
+                    TextureBlendOperation::Replace,
                     None,
                 ),
             )
@@ -870,9 +870,9 @@ fn material_factor_requirements_and_name_validation_remain_authoring_errors() {
             } else {
                 MaterialAuthoring::new(
                     AuthoringRange::new(0, 2),
-                    MaterialSemanticsRef::new(
-                        &ShadingModel::PbrMetallicRoughness,
-                        &AlphaMode::Opaque,
+                    MaterialSemantics::new(
+                        ShadingModel::PbrMetallicRoughness,
+                        AlphaMode::Opaque,
                         false,
                         MaterialFactors::empty(),
                     ),

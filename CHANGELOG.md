@@ -6,6 +6,9 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Made appearance authoring own compact material and binding behavior values directly. Constructor
+  lifetimes now apply only to optional material names and descriptive source keys; small enum and
+  swizzle temporaries no longer need caller-owned reference scaffolding.
 - Removed xtask's unused `repository-input-candidate` feature and IO dependency. Native dependency
   checks now reject asset/native IO in the tool's production closure and query its featureless graph
   once; CI no longer repeats an identical all-feature xtask test run.
