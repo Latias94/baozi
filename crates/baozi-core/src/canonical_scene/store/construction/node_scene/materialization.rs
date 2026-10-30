@@ -74,7 +74,7 @@ use super::scratch::{
     ScopedNodeSceneValidationScratchOwner,
 };
 use crate::canonical_scene::store::typed_storage::{
-    NodeGeometryStorage,
+    SceneTables,
     build::{GeometryStoragePlan, NodeStoragePlan},
 };
 mod spatial;
@@ -732,7 +732,7 @@ impl NodeSceneLaneOutput {
         Self(output)
     }
 
-    pub(in crate::canonical_scene::store) fn into_tables(self) -> NodeGeometryStorage {
+    pub(in crate::canonical_scene::store) fn into_tables(self) -> SceneTables {
         self.0.tables
     }
 
@@ -1020,8 +1020,6 @@ struct SceneDomainDirectoryRefs {
     appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
     deformation: CanonicalBlockRef<DeformationDirectorySchema>,
     animation: CanonicalBlockRef<AnimationDirectorySchema>,
-    profile:
-        CanonicalBlockRef<crate::canonical_scene::store::schema::profile::ProfileDirectorySchema>,
 }
 
 struct SceneStorageBatches<'input, R> {
@@ -1106,12 +1104,11 @@ pub(in crate::canonical_scene::store) struct NodeSceneMaterializedRefs {
     pub(in crate::canonical_scene::store) appearance: super::appearance::RetainedAppearanceRefs,
     pub(in crate::canonical_scene::store) deformation: super::deformation::RetainedDeformationRefs,
     pub(in crate::canonical_scene::store) animation: super::animation::RetainedAnimationRefs,
-    pub(in crate::canonical_scene::store) profile: super::profile::RetainedProfileRefs,
 }
 
 pub(in crate::canonical_scene::store) struct NodeSceneActivationOutput {
     pub(in crate::canonical_scene::store) tables:
-        crate::canonical_scene::store::typed_storage::NodeGeometryStorage,
+        crate::canonical_scene::store::typed_storage::SceneTables,
     pub(in crate::canonical_scene::store) draft: NodeSceneDraft,
     pub(in crate::canonical_scene::store) refs: NodeSceneMaterializedRefs,
     pub(in crate::canonical_scene::store) evidence_counts: SceneEvidenceCounts,
@@ -1149,7 +1146,8 @@ impl<'input, R> NodeSceneSealedPlan<'input, R> {
             materialization.deformation.influence_row_offset_count(),
             materialization.deformation.influence_count(),
             materialization.animation.metered_counts(),
-            materialization.profile.metered_counts()?,
+            materialization.profile.metered_counts(),
+            materialization.profile.maximum_provenance_depth(),
         )?;
         let central_validation = NodeSceneCentralValidationPlan::try_new(
             validation_scratch,
@@ -1216,7 +1214,7 @@ impl NodeSceneMaterializationPlans {
     }
 
     fn evidence_counts(&self) -> SceneEvidenceCounts {
-        let profile = self.profile.evidence_counts();
+        let profile = self.profile.metered_counts();
         SceneEvidenceCounts {
             canonical_block_count: self.canonical_block_count,
             node_count: self.node_count,
@@ -1240,15 +1238,15 @@ impl NodeSceneMaterializationPlans {
             animation_clip_count: self.animation.clip_count(),
             animation_channel_count: self.animation.channel_count(),
             payload_block_count: self.payload_block_count,
-            profile_segment_count: profile.segments,
-            profile_resource_count: profile.resources,
-            profile_source_count: profile.sources,
-            profile_provenance_count: profile.provenance,
-            profile_operation_count: profile.operations,
-            profile_parent_count: profile.parents,
-            profile_owner_count: profile.owners,
-            profile_attachment_count: profile.attachments,
-            profile_metadata_entry_count: profile.metadata_entries,
+            profile_segment_count: profile.segment_count,
+            profile_resource_count: profile.resource_count,
+            profile_source_count: profile.source_count,
+            profile_provenance_count: profile.provenance_count,
+            profile_operation_count: profile.operation_count,
+            profile_parent_count: profile.parent_count,
+            profile_owner_count: profile.owner_count,
+            profile_attachment_count: profile.attachment_count,
+            profile_metadata_entry_count: profile.metadata_entry_count,
             shareable_leaf_block_count: self.shareable_leaf_block_count,
         }
     }
@@ -1297,7 +1295,6 @@ impl NodeSceneMaterializationPlans {
             .and_then(|count| count.checked_add(appearance.canonical_block_count()))
             .and_then(|count| count.checked_add(deformation.canonical_block_count()))
             .and_then(|count| count.checked_add(animation.canonical_block_count()))
-            .and_then(|count| count.checked_add(profile.canonical_block_count()))
             .ok_or(StorePlanError::SizeOverflow)?;
         let canonical_block_count =
             u32::try_from(canonical_block_count_usize).map_err(|_| StorePlanError::SizeOverflow)?;
@@ -1307,12 +1304,8 @@ impl NodeSceneMaterializationPlans {
             .and_then(|count| count.checked_add(deformation.payload_block_count()))
             .and_then(|count| count.checked_add(animation.payload_block_count()))
             .ok_or(StorePlanError::SizeOverflow)?;
-        let payload_block_count = domain_payload_block_count
-            .checked_add(profile.payload_block_count())
-            .ok_or(StorePlanError::SizeOverflow)?;
-        let shareable_leaf_block_count = domain_payload_block_count
-            .checked_add(profile.shareable_leaf_block_count())
-            .ok_or(StorePlanError::SizeOverflow)?;
+        let payload_block_count = domain_payload_block_count;
+        let shareable_leaf_block_count = domain_payload_block_count;
         let build_invariant = StoreBuildError::domain(NODE_SCENE_BUILD_INVARIANT_CODE)?;
 
         Ok(Self {
@@ -1490,7 +1483,6 @@ where
         &batches.profile,
         #[cfg(test)]
         &mut faults.profile,
-        failure,
     ));
     let directory = materialize!(retain_node_scene_directory(
         &mut lane,
@@ -1500,13 +1492,16 @@ where
             appearance: appearance.directory(),
             deformation: deformation.directory(),
             animation: animation.directory(),
-            profile: profile.directory(),
         },
         plans,
     ));
     let draft = NodeSceneDraft { brand, directory };
     let output = NodeSceneActivationOutput {
-        tables: NodeGeometryStorage { nodes, geometry },
+        tables: SceneTables {
+            nodes,
+            geometry,
+            profile,
+        },
         draft,
         refs: NodeSceneMaterializedRefs {
             directory,
@@ -1514,7 +1509,6 @@ where
             appearance,
             deformation,
             animation,
-            profile,
         },
         evidence_counts: plans.evidence_counts(),
         central_validation: *central_validation,
@@ -1776,8 +1770,7 @@ where
             row.write_record_ref(domains.spatial.into_store())?;
             row.write_record_ref(domains.appearance.into_store())?;
             row.write_record_ref(domains.deformation.into_store())?;
-            row.write_record_ref(domains.animation.into_store())?;
-            row.write_record_ref(domains.profile.into_store())
+            row.write_record_ref(domains.animation.into_store())
         })
     })
     .map(CanonicalBlockRef::from_store)

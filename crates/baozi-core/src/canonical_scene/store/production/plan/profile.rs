@@ -5,14 +5,14 @@
 
 use baozi_operation::{CapacityPlan, CapacityPlanError};
 use std::error::Error;
+use std::mem::size_of;
 use thiserror::Error;
 
-use crate::canonical_scene::store::profile_provenance::PROFILE_PROVENANCE_ADDRESS_LOGICAL_BYTES;
-use crate::canonical_scene::store::schema::profile::{
-    PROFILE_DIRECTORY_LOGICAL_BYTES, PROFILE_EVIDENCE_SCALAR_COUNT,
-    PROFILE_METADATA_DIRECTORY_LOGICAL_BYTES, PROFILE_METADATA_ENTRY_LOGICAL_BYTES,
-    PROFILE_OPERATION_SCALAR_COUNT, PROFILE_OWNER_LOGICAL_BYTES, PROFILE_PROVENANCE_SCALAR_COUNT,
-    PROFILE_RESOURCE_SCALAR_COUNT, PROFILE_SEGMENT_LOGICAL_BYTES, PROFILE_SOURCE_SCALAR_COUNT,
+use crate::canonical_scene::store::profile_provenance::ProfileProvenanceRef;
+use crate::canonical_scene::store::typed_storage::profile::{
+    LineageSegment, MetadataPayloads, ProfileState, ProfileStorage, StoredMetadataEntry,
+    StoredOperation, StoredOperationEvidence, StoredProfileOwner, StoredProfileSegment,
+    StoredProvenance, StoredResource, StoredSource,
 };
 use crate::extension::{ExtensionArrayRef, ExtensionValueRef};
 use crate::provenance::{MAX_OPERATION_EVIDENCE_SUMMARIES, OperationKind, SourceObjectLocator};
@@ -35,17 +35,11 @@ use super::spatial::ValidatedSpatialBatch;
 
 mod lineage;
 mod metadata;
+#[cfg(test)]
+mod tests;
 
 use lineage::*;
 use metadata::validate_metadata;
-
-const LOGICAL_U8_BYTES: u64 = 1;
-const LOGICAL_U32_BYTES: u64 = 4;
-const LOGICAL_U64_BYTES: u64 = 8;
-const LOGICAL_F32_BYTES: u64 = 4;
-const LOGICAL_F64_BYTES: u64 = 8;
-const LOGICAL_REFERENCE_BYTES: u64 = 4;
-const LOGICAL_DIGEST_BYTES: u64 = 33;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) enum ProfileAuthoringLimit {
@@ -197,24 +191,24 @@ pub(in crate::canonical_scene::store) enum CanonicalProfileOwner {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ProfileOwnerCounts {
-    nodes: u32,
-    cameras: u32,
-    lights: u32,
-    images: u32,
-    samplers: u32,
-    textures: u32,
-    texture_bindings: u32,
-    materials: u32,
-    logical_meshes: u32,
-    primitives: u32,
-    attributes: u32,
-    mesh_instances: u32,
-    skins: u32,
-    morph_definitions: u32,
-    morph_deltas: u32,
-    animation_clips: u32,
-    animation_channels: u32,
+pub(in crate::canonical_scene::store) struct ProfileOwnerCounts {
+    pub(in crate::canonical_scene::store) nodes: u32,
+    pub(in crate::canonical_scene::store) cameras: u32,
+    pub(in crate::canonical_scene::store) lights: u32,
+    pub(in crate::canonical_scene::store) images: u32,
+    pub(in crate::canonical_scene::store) samplers: u32,
+    pub(in crate::canonical_scene::store) textures: u32,
+    pub(in crate::canonical_scene::store) texture_bindings: u32,
+    pub(in crate::canonical_scene::store) materials: u32,
+    pub(in crate::canonical_scene::store) logical_meshes: u32,
+    pub(in crate::canonical_scene::store) primitives: u32,
+    pub(in crate::canonical_scene::store) attributes: u32,
+    pub(in crate::canonical_scene::store) mesh_instances: u32,
+    pub(in crate::canonical_scene::store) skins: u32,
+    pub(in crate::canonical_scene::store) morph_definitions: u32,
+    pub(in crate::canonical_scene::store) morph_deltas: u32,
+    pub(in crate::canonical_scene::store) animation_clips: u32,
+    pub(in crate::canonical_scene::store) animation_channels: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -288,59 +282,20 @@ fn catalog_add(offset: u64, count: u32) -> Result<u64, ProfileOwnerCatalogError>
         .ok_or(ProfileOwnerCatalogError::AccountingOverflow)
 }
 
-/// Read-only owner directory derived from all six independently validated domains.
+/// Complete canonical owner layout, independent of authoring-local node coordinates.
 #[derive(Debug, Clone, Copy)]
-pub(in crate::canonical_scene::store) struct ProfileOwnerCatalog<'nodes> {
-    canonical_index_by_local: &'nodes [u32],
+pub(in crate::canonical_scene::store) struct ProfileOwnerLayout {
     counts: ProfileOwnerCounts,
     offsets: ProfileOwnerOffsets,
 }
 
-impl<'nodes> ProfileOwnerCatalog<'nodes> {
-    pub(in crate::canonical_scene::store) fn from_validated<SR, NR, AR, GR, DR, XR>(
-        spatial: &ValidatedSpatialBatch<'_, SR>,
-        nodes: &'nodes ValidatedNodeBatch<'_, NR>,
-        appearance: &ValidatedAppearanceBatch<'_, AR>,
-        geometry: &ValidatedGeometryBatch<'_, GR>,
-        deformation: &ValidatedDeformationBatch<'_, DR>,
-        animation: &ValidatedAnimationBatch<'_, XR>,
+impl ProfileOwnerLayout {
+    pub(in crate::canonical_scene::store) fn try_new(
+        counts: ProfileOwnerCounts,
     ) -> Result<Self, ProfileOwnerCatalogError> {
-        let canonical_index_by_local = nodes.canonical_index_by_local();
-        let canonical_count = u64::try_from(canonical_index_by_local.len())
-            .ok()
-            .and_then(|count| count.checked_add(1))
-            .ok_or(ProfileOwnerCatalogError::AccountingOverflow)?;
-        if canonical_count != nodes.canonical_node_count() {
-            return Err(ProfileOwnerCatalogError::NodeMappingMismatch {
-                mapping_count: canonical_index_by_local.len(),
-                canonical_count: nodes.canonical_node_count(),
-            });
-        }
-        let counts = ProfileOwnerCounts {
-            nodes: u32::try_from(canonical_index_by_local.len())
-                .map_err(|_| ProfileOwnerCatalogError::AccountingOverflow)?,
-            cameras: spatial.camera_count(),
-            lights: spatial.light_count(),
-            images: appearance.image_count(),
-            samplers: appearance.sampler_count(),
-            textures: appearance.texture_count(),
-            texture_bindings: appearance.binding_count(),
-            materials: appearance.material_count(),
-            logical_meshes: geometry.logical_mesh_count(),
-            primitives: geometry.primitive_count(),
-            attributes: geometry.attribute_count(),
-            mesh_instances: geometry.mesh_instance_count(),
-            skins: deformation.skin_count(),
-            morph_definitions: deformation.morph_definition_count(),
-            morph_deltas: deformation.morph_delta_count(),
-            animation_clips: animation.clip_count(),
-            animation_channels: animation.channel_count(),
-        };
-        let offsets = ProfileOwnerOffsets::new(counts)?;
         Ok(Self {
-            canonical_index_by_local,
             counts,
-            offsets,
+            offsets: ProfileOwnerOffsets::new(counts)?,
         })
     }
 
@@ -414,6 +369,144 @@ impl<'nodes> ProfileOwnerCatalog<'nodes> {
         Some(owner)
     }
 
+    pub(in crate::canonical_scene::store) fn contains(self, owner: CanonicalProfileOwner) -> bool {
+        self.ordinal(owner).is_some()
+    }
+
+    pub(in crate::canonical_scene::store) fn ordinal(
+        self,
+        owner: CanonicalProfileOwner,
+    ) -> Option<u64> {
+        let (index, count, offset) = match owner {
+            CanonicalProfileOwner::Scene => return Some(0),
+            CanonicalProfileOwner::SyntheticRoot => return Some(1),
+            CanonicalProfileOwner::Node(index) => {
+                (index.checked_sub(1)?, self.counts.nodes, self.offsets.node)
+            }
+            CanonicalProfileOwner::Camera(index) => {
+                (index, self.counts.cameras, self.offsets.camera)
+            }
+            CanonicalProfileOwner::Light(index) => (index, self.counts.lights, self.offsets.light),
+            CanonicalProfileOwner::Image(index) => (index, self.counts.images, self.offsets.image),
+            CanonicalProfileOwner::Sampler(index) => {
+                (index, self.counts.samplers, self.offsets.sampler)
+            }
+            CanonicalProfileOwner::Texture(index) => {
+                (index, self.counts.textures, self.offsets.texture)
+            }
+            CanonicalProfileOwner::TextureBinding(index) => (
+                index,
+                self.counts.texture_bindings,
+                self.offsets.texture_binding,
+            ),
+            CanonicalProfileOwner::Material(index) => {
+                (index, self.counts.materials, self.offsets.material)
+            }
+            CanonicalProfileOwner::LogicalMesh(index) => {
+                (index, self.counts.logical_meshes, self.offsets.logical_mesh)
+            }
+            CanonicalProfileOwner::Primitive(index) => {
+                (index, self.counts.primitives, self.offsets.primitive)
+            }
+            CanonicalProfileOwner::Attribute(index) => {
+                (index, self.counts.attributes, self.offsets.attribute)
+            }
+            CanonicalProfileOwner::MeshInstance(index) => (
+                index,
+                self.counts.mesh_instances,
+                self.offsets.mesh_instance,
+            ),
+            CanonicalProfileOwner::Skin(index) => (index, self.counts.skins, self.offsets.skin),
+            CanonicalProfileOwner::MorphDefinition(index) => (
+                index,
+                self.counts.morph_definitions,
+                self.offsets.morph_definition,
+            ),
+            CanonicalProfileOwner::MorphDelta(index) => {
+                (index, self.counts.morph_deltas, self.offsets.morph_delta)
+            }
+            CanonicalProfileOwner::AnimationClip(index) => (
+                index,
+                self.counts.animation_clips,
+                self.offsets.animation_clip,
+            ),
+            CanonicalProfileOwner::AnimationChannel(index) => (
+                index,
+                self.counts.animation_channels,
+                self.offsets.animation_channel,
+            ),
+        };
+        if index >= count {
+            return None;
+        }
+        offset.checked_add(u64::from(index))
+    }
+}
+
+/// Read-only owner directory derived from all six independently validated domains.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::canonical_scene::store) struct ProfileOwnerCatalog<'nodes> {
+    canonical_index_by_local: &'nodes [u32],
+    layout: ProfileOwnerLayout,
+}
+
+impl<'nodes> ProfileOwnerCatalog<'nodes> {
+    pub(in crate::canonical_scene::store) fn from_validated<SR, NR, AR, GR, DR, XR>(
+        spatial: &ValidatedSpatialBatch<'_, SR>,
+        nodes: &'nodes ValidatedNodeBatch<'_, NR>,
+        appearance: &ValidatedAppearanceBatch<'_, AR>,
+        geometry: &ValidatedGeometryBatch<'_, GR>,
+        deformation: &ValidatedDeformationBatch<'_, DR>,
+        animation: &ValidatedAnimationBatch<'_, XR>,
+    ) -> Result<Self, ProfileOwnerCatalogError> {
+        let canonical_index_by_local = nodes.canonical_index_by_local();
+        let canonical_count = u64::try_from(canonical_index_by_local.len())
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .ok_or(ProfileOwnerCatalogError::AccountingOverflow)?;
+        if canonical_count != nodes.canonical_node_count() {
+            return Err(ProfileOwnerCatalogError::NodeMappingMismatch {
+                mapping_count: canonical_index_by_local.len(),
+                canonical_count: nodes.canonical_node_count(),
+            });
+        }
+        let counts = ProfileOwnerCounts {
+            nodes: u32::try_from(canonical_index_by_local.len())
+                .map_err(|_| ProfileOwnerCatalogError::AccountingOverflow)?,
+            cameras: spatial.camera_count(),
+            lights: spatial.light_count(),
+            images: appearance.image_count(),
+            samplers: appearance.sampler_count(),
+            textures: appearance.texture_count(),
+            texture_bindings: appearance.binding_count(),
+            materials: appearance.material_count(),
+            logical_meshes: geometry.logical_mesh_count(),
+            primitives: geometry.primitive_count(),
+            attributes: geometry.attribute_count(),
+            mesh_instances: geometry.mesh_instance_count(),
+            skins: deformation.skin_count(),
+            morph_definitions: deformation.morph_definition_count(),
+            morph_deltas: deformation.morph_delta_count(),
+            animation_clips: animation.clip_count(),
+            animation_channels: animation.channel_count(),
+        };
+        Ok(Self {
+            canonical_index_by_local,
+            layout: ProfileOwnerLayout::try_new(counts)?,
+        })
+    }
+
+    pub(in crate::canonical_scene::store) const fn owner_count(self) -> u64 {
+        self.layout.owner_count()
+    }
+
+    pub(in crate::canonical_scene::store) fn owner_at(
+        self,
+        ordinal: u64,
+    ) -> Option<CanonicalProfileOwner> {
+        self.layout.owner_at(ordinal)
+    }
+
     fn normalize(
         self,
         owner: ProfileOwner,
@@ -428,12 +521,13 @@ impl<'nodes> ProfileOwnerCatalog<'nodes> {
                     .canonical_index_by_local
                     .get(local_index)
                     .ok_or(ProfileAuthoringSemanticError::OwnerOutOfRange { owner })?;
-                if canonical == 0 || canonical > self.counts.nodes {
+                if canonical == 0 || canonical > self.layout.counts.nodes {
                     return Err(ProfileAuthoringSemanticError::OwnerOutOfRange { owner });
                 }
                 (
                     CanonicalProfileOwner::Node(canonical),
-                    self.offsets
+                    self.layout
+                        .offsets
                         .node
                         .checked_add(u64::from(canonical - 1))
                         .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
@@ -444,113 +538,113 @@ impl<'nodes> ProfileOwnerCatalog<'nodes> {
             ProfileOwner::Camera(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.cameras,
-                self.offsets.camera,
+                self.layout.counts.cameras,
+                self.layout.offsets.camera,
                 CanonicalProfileOwner::Camera,
             )?,
             ProfileOwner::Light(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.lights,
-                self.offsets.light,
+                self.layout.counts.lights,
+                self.layout.offsets.light,
                 CanonicalProfileOwner::Light,
             )?,
             ProfileOwner::Image(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.images,
-                self.offsets.image,
+                self.layout.counts.images,
+                self.layout.offsets.image,
                 CanonicalProfileOwner::Image,
             )?,
             ProfileOwner::Sampler(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.samplers,
-                self.offsets.sampler,
+                self.layout.counts.samplers,
+                self.layout.offsets.sampler,
                 CanonicalProfileOwner::Sampler,
             )?,
             ProfileOwner::Texture(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.textures,
-                self.offsets.texture,
+                self.layout.counts.textures,
+                self.layout.offsets.texture,
                 CanonicalProfileOwner::Texture,
             )?,
             ProfileOwner::TextureBinding(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.texture_bindings,
-                self.offsets.texture_binding,
+                self.layout.counts.texture_bindings,
+                self.layout.offsets.texture_binding,
                 CanonicalProfileOwner::TextureBinding,
             )?,
             ProfileOwner::Material(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.materials,
-                self.offsets.material,
+                self.layout.counts.materials,
+                self.layout.offsets.material,
                 CanonicalProfileOwner::Material,
             )?,
             ProfileOwner::LogicalMesh(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.logical_meshes,
-                self.offsets.logical_mesh,
+                self.layout.counts.logical_meshes,
+                self.layout.offsets.logical_mesh,
                 CanonicalProfileOwner::LogicalMesh,
             )?,
             ProfileOwner::Primitive(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.primitives,
-                self.offsets.primitive,
+                self.layout.counts.primitives,
+                self.layout.offsets.primitive,
                 CanonicalProfileOwner::Primitive,
             )?,
             ProfileOwner::Attribute(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.attributes,
-                self.offsets.attribute,
+                self.layout.counts.attributes,
+                self.layout.offsets.attribute,
                 CanonicalProfileOwner::Attribute,
             )?,
             ProfileOwner::MeshInstance(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.mesh_instances,
-                self.offsets.mesh_instance,
+                self.layout.counts.mesh_instances,
+                self.layout.offsets.mesh_instance,
                 CanonicalProfileOwner::MeshInstance,
             )?,
             ProfileOwner::Skin(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.skins,
-                self.offsets.skin,
+                self.layout.counts.skins,
+                self.layout.offsets.skin,
                 CanonicalProfileOwner::Skin,
             )?,
             ProfileOwner::MorphDefinition(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.morph_definitions,
-                self.offsets.morph_definition,
+                self.layout.counts.morph_definitions,
+                self.layout.offsets.morph_definition,
                 CanonicalProfileOwner::MorphDefinition,
             )?,
             ProfileOwner::MorphDelta(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.morph_deltas,
-                self.offsets.morph_delta,
+                self.layout.counts.morph_deltas,
+                self.layout.offsets.morph_delta,
                 CanonicalProfileOwner::MorphDelta,
             )?,
             ProfileOwner::AnimationClip(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.animation_clips,
-                self.offsets.animation_clip,
+                self.layout.counts.animation_clips,
+                self.layout.offsets.animation_clip,
                 CanonicalProfileOwner::AnimationClip,
             )?,
             ProfileOwner::AnimationChannel(index) => indexed_owner(
                 owner,
                 index,
-                self.counts.animation_channels,
-                self.offsets.animation_channel,
+                self.layout.counts.animation_channels,
+                self.layout.offsets.animation_channel,
                 CanonicalProfileOwner::AnimationChannel,
             )?,
         };
@@ -670,7 +764,6 @@ struct ProfileValidationStorage<R> {
     reference_count: u64,
     payload_cell_count: u64,
     metadata_bytes: u64,
-    canonical_bytes: u64,
     retention_shape: ProfileRetentionShape,
     validation_work: u64,
     scratch_bytes: u64,
@@ -770,8 +863,10 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         self.compiled.metadata_bytes
     }
 
+    /// Initialized typed storage bytes for the target ABI, including headers and payloads.
+    /// Allocator overhead and spare capacity belong to operation's separate storage admission.
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
-        self.compiled.canonical_bytes
+        self.compiled.retention_shape.canonical_bytes()
     }
 
     pub(in crate::canonical_scene::store) const fn retention_shape(&self) -> ProfileRetentionShape {
@@ -1072,9 +1167,6 @@ pub(in crate::canonical_scene::store) struct ProfileRetentionShape {
     metadata_u64_count: u32,
     metadata_f64_count: u32,
     metadata_f32_count: u32,
-    canonical_block_count: u32,
-    payload_block_count: u32,
-    shareable_leaf_block_count: u32,
     canonical_bytes: u64,
 }
 
@@ -1131,18 +1223,6 @@ impl ProfileRetentionShape {
         self.metadata_f32_count
     }
 
-    pub(in crate::canonical_scene::store) const fn canonical_block_count(self) -> u32 {
-        self.canonical_block_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn payload_block_count(self) -> u32 {
-        self.payload_block_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn shareable_leaf_block_count(self) -> u32 {
-        self.shareable_leaf_block_count
-    }
-
     pub(in crate::canonical_scene::store) const fn canonical_bytes(self) -> u64 {
         self.canonical_bytes
     }
@@ -1155,7 +1235,6 @@ struct ProfileMetrics {
     references: u64,
     payload_cells: u64,
     metadata_bytes: u64,
-    canonical_bytes: u64,
     parent_edges: u64,
     owner_attachments: u64,
     operation_count: u32,
@@ -1293,115 +1372,56 @@ fn retention_shape_from_metrics(
     let metadata_f32_count =
         retention_count(metrics.metadata_f32_count, "profile metadata f32 values")?;
 
-    let payload_block_count = [
-        lineage_text_bytes,
-        lineage_digest_bytes,
-        metadata_text_bytes,
-        metadata_payload_bytes,
-        metadata_bool_count,
-        metadata_i64_count,
-        metadata_u64_count,
-        metadata_f64_count,
-        metadata_f32_count,
-    ]
-    .into_iter()
-    .try_fold(0_u32, |count, value| {
-        count.checked_add(u32::from(value != 0)).ok_or(
-            ProfileAuthoringSemanticError::AccountingOverflow {
-                dimension: "profile payload block count",
-            },
-        )
-    })?;
-    let structural_leaf_count = [
-        resource_count,
-        source_count,
-        provenance_node_count,
-        operation_count,
-        evidence_count,
-        parent_count,
-        wide_count,
-        attachment_count,
-    ]
-    .into_iter()
-    .try_fold(0_u32, |count, value| {
-        count.checked_add(u32::from(value != 0)).ok_or(
-            ProfileAuthoringSemanticError::AccountingOverflow {
-                dimension: "profile structural leaf count",
-            },
-        )
-    })?;
-    let canonical_block_count = 4_u32
-        .checked_add(structural_leaf_count)
-        .and_then(|count| count.checked_add(payload_block_count))
-        .and_then(|count| count.checked_add(u32::from(metadata_entry_count != 0)))
-        .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
-            dimension: "profile canonical block count",
-        })?;
-    let shareable_leaf_block_count = structural_leaf_count
-        .checked_add(payload_block_count)
-        .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
-            dimension: "profile shareable leaf block count",
-        })?;
-
-    let resource_scalars = scalar_row_bytes(
-        resource_count,
-        PROFILE_RESOURCE_SCALAR_COUNT,
-        "profile resource rows",
-    )?;
-    let source_scalars = scalar_row_bytes(
-        source_count,
-        PROFILE_SOURCE_SCALAR_COUNT,
-        "profile source rows",
-    )?;
-    let provenance_scalars = scalar_row_bytes(
-        provenance_node_count,
-        PROFILE_PROVENANCE_SCALAR_COUNT,
-        "profile provenance rows",
-    )?;
-    let operation_scalars = scalar_row_bytes(
-        operation_count,
-        PROFILE_OPERATION_SCALAR_COUNT,
-        "profile operation rows",
-    )?;
-    let evidence_scalars = scalar_row_bytes(
-        evidence_count,
-        PROFILE_EVIDENCE_SCALAR_COUNT,
-        "profile evidence rows",
-    )?;
+    // Fresh construction owns one lineage segment. Count live typed storage, including inline
+    // digests and wide values in their descriptors, without charging those semantic totals twice.
+    // Retained-owner infrastructure, allocator overhead, and capacity slack are admitted separately.
     let canonical_bytes = checked_sum(
         [
-            PROFILE_DIRECTORY_LOGICAL_BYTES,
-            PROFILE_SEGMENT_LOGICAL_BYTES,
-            PROFILE_METADATA_DIRECTORY_LOGICAL_BYTES,
-            u64::from(owner_count)
-                .checked_mul(PROFILE_OWNER_LOGICAL_BYTES)
-                .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
-                    dimension: "profile owner row bytes",
-                })?,
-            u64::from(metadata_entry_count)
-                .checked_mul(PROFILE_METADATA_ENTRY_LOGICAL_BYTES)
-                .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
-                    dimension: "profile metadata row bytes",
-                })?,
-            resource_scalars,
-            source_scalars,
-            provenance_scalars,
-            operation_scalars,
-            evidence_scalars,
-            u64::from(parent_count) * PROFILE_PROVENANCE_ADDRESS_LOGICAL_BYTES,
-            u64::from(wide_count) * LOGICAL_U64_BYTES,
+            typed_table_bytes::<ProfileStorage>(1, "profile storage handles")?,
+            typed_table_bytes::<ProfileState>(1, "profile state header")?,
+            typed_table_bytes::<LineageSegment>(1, "profile lineage header")?,
+            typed_table_bytes::<MetadataPayloads>(1, "profile metadata header")?,
+            typed_table_bytes::<StoredProfileSegment>(1, "profile segment row")?,
+            typed_table_bytes::<StoredProfileOwner>(u64::from(owner_count), "profile owner rows")?,
+            typed_table_bytes::<StoredMetadataEntry>(
+                u64::from(metadata_entry_count),
+                "profile metadata rows",
+            )?,
+            typed_table_bytes::<StoredResource>(
+                u64::from(resource_count),
+                "profile resource rows",
+            )?,
+            typed_table_bytes::<StoredSource>(u64::from(source_count), "profile source rows")?,
+            typed_table_bytes::<StoredProvenance>(
+                u64::from(provenance_node_count),
+                "profile provenance rows",
+            )?,
+            typed_table_bytes::<StoredOperation>(
+                u64::from(operation_count),
+                "profile operation rows",
+            )?,
+            typed_table_bytes::<StoredOperationEvidence>(
+                u64::from(evidence_count),
+                "profile evidence rows",
+            )?,
+            typed_table_bytes::<ProfileProvenanceRef>(
+                u64::from(parent_count),
+                "profile parent references",
+            )?,
+            typed_table_bytes::<ProfileProvenanceRef>(
+                u64::from(attachment_count),
+                "profile owner attachments",
+            )?,
             u64::from(lineage_text_bytes),
-            u64::from(lineage_digest_bytes),
-            u64::from(attachment_count) * PROFILE_PROVENANCE_ADDRESS_LOGICAL_BYTES,
             u64::from(metadata_text_bytes),
             u64::from(metadata_payload_bytes),
-            u64::from(metadata_bool_count) * LOGICAL_U8_BYTES,
-            u64::from(metadata_i64_count) * LOGICAL_U64_BYTES,
-            u64::from(metadata_u64_count) * LOGICAL_U64_BYTES,
-            u64::from(metadata_f64_count) * LOGICAL_F64_BYTES,
-            u64::from(metadata_f32_count) * LOGICAL_F32_BYTES,
+            typed_table_bytes::<u8>(u64::from(metadata_bool_count), "profile metadata booleans")?,
+            typed_table_bytes::<i64>(u64::from(metadata_i64_count), "profile metadata i64 values")?,
+            typed_table_bytes::<u64>(u64::from(metadata_u64_count), "profile metadata u64 values")?,
+            typed_table_bytes::<f64>(u64::from(metadata_f64_count), "profile metadata f64 values")?,
+            typed_table_bytes::<f32>(u64::from(metadata_f32_count), "profile metadata f32 values")?,
         ],
-        "profile retained logical bytes",
+        "profile initialized typed storage bytes",
     )?;
 
     Ok(ProfileRetentionShape {
@@ -1418,21 +1438,16 @@ fn retention_shape_from_metrics(
         metadata_u64_count,
         metadata_f64_count,
         metadata_f32_count,
-        canonical_block_count,
-        payload_block_count,
-        shareable_leaf_block_count,
         canonical_bytes,
     })
 }
 
-fn scalar_row_bytes(
-    rows: u32,
-    fields: usize,
+fn typed_table_bytes<T>(
+    count: u64,
     dimension: &'static str,
 ) -> Result<u64, ProfileAuthoringSemanticError> {
-    u64::from(rows)
-        .checked_mul(usize_to_u64(fields, dimension)?)
-        .and_then(|values| values.checked_mul(LOGICAL_U32_BYTES))
+    count
+        .checked_mul(usize_to_u64(size_of::<T>(), dimension)?)
         .ok_or(ProfileAuthoringSemanticError::AccountingOverflow { dimension })
 }
 
@@ -1603,11 +1618,9 @@ where
         metadata_entry_count,
         &metrics,
     )?;
-    metrics.canonical_bytes = retention_shape.canonical_bytes();
-
     enforce_limit::<C::Error>(
         ProfileAuthoringLimit::CanonicalBytes,
-        metrics.canonical_bytes,
+        retention_shape.canonical_bytes(),
         limits.max_canonical_bytes(),
     )?;
 
@@ -1637,7 +1650,6 @@ where
         reference_count: metrics.references,
         payload_cell_count: metrics.payload_cells,
         metadata_bytes: metrics.metadata_bytes,
-        canonical_bytes: metrics.canonical_bytes,
         retention_shape,
         validation_work: context.work,
         scratch_bytes: retained_scratch_bytes,
@@ -1680,7 +1692,7 @@ where
                 )?,
                 "profile lineage text bytes",
             )?;
-            let (stability_cells, _stability_bytes) = stability_measure(resource.stability())?;
+            let stability_cells = stability_cells(resource.stability())?;
             let cells = text_bytes.checked_add(stability_cells).ok_or(
                 ProfileAuthoringSemanticError::AccountingOverflow {
                     dimension: "resource identity semantic cells",
@@ -1708,7 +1720,7 @@ where
     let maximum_references = context.limits.max_references();
     for (source_index, source) in lineage.source_identities().iter().copied().enumerate() {
         let cells = context.run_semantic_unit(SceneValidationWork::Entity, || {
-            let (cells, _bytes) = source_identity_measure(source)?;
+            let cells = source_identity_cells(source)?;
             account_source_retention(source, metrics)?;
             metrics.add_entity(maximum_entities)?;
             Ok(cells)
@@ -1792,7 +1804,7 @@ where
                     Ok(())
                 })?;
                 let depth = validate_operation_node(node_id, operation, depths, metrics, context)?;
-                let (cells, _bytes) = operation_measure(operation)?;
+                let cells = operation_cells(operation)?;
                 account_operation_retention(operation, metrics)?;
                 metrics.add_payload(cells, context)?;
                 depth

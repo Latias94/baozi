@@ -259,7 +259,8 @@ evidence_subject = "baozi.source-identity-provenance-metadata"
 evidence_revision = 2
 implementation_tracers = [
   "crates/baozi-core/src/canonical_scene/store/profile_provenance.rs",
-  "crates/baozi-core/src/canonical_scene/store/schema/profile.rs",
+  "crates/baozi-core/src/canonical_scene/store/typed_storage/profile.rs",
+  "crates/baozi-core/src/canonical_scene/store/typed_storage/profile/validation.rs",
   "crates/baozi-core/src/canonical_scene/store/construction/node_scene/semantic/profile.rs",
 ]
 test_tracers = [

@@ -43,7 +43,7 @@ impl GeometryEditFacts {
         let options = replacement.options_digest();
         Self {
             words: [
-                u32::from(crate::canonical_scene::store::schema::profile::PROFILE_OPERATION_SPLIT),
+                schema::OPERATION_TRIANGULATE,
                 replacement.target().logical_mesh().index(),
                 replacement.target().local(),
                 geometry.target_row() as u32,

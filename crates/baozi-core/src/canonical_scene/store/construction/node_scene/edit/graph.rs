@@ -1,9 +1,8 @@
-mod profile;
-
 use baozi_operation::__retained_store_integration::activation::CanonicalLane;
 use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::{
-    OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, RecordPlan, StoreRuntimeError,
+    OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, RecordPlan, ShareableStoreKind,
+    StoreRuntimeError,
 };
 
 use super::super::animation::{AnimationPayloadRefs, RetainedAnimationRefs};
@@ -15,10 +14,9 @@ use super::super::deformation::{
 };
 use super::super::geometry::map_build;
 use super::super::materialization::RetainedSpatialRefs;
-use super::super::profile::MetadataLeafRefs;
 use super::super::{NodeSceneMaterializedRefs, SceneStorage};
-use super::leaf_plan::{NodeSceneInheritedLeafPlan, inherit_optional_leaf};
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditProgram};
+use super::profile::retain_edited_profile;
 use super::required_record_view;
 use crate::canonical_scene::store::schema::animation::{
     AnimationChannelTableSchema, AnimationClipTableSchema, AnimationDirectorySchema,
@@ -33,7 +31,6 @@ use crate::canonical_scene::store::schema::deformation::{
     DeformationMorphDeltaTableSchema, DeformationMorphTargetTableSchema,
     DeformationPrimitiveTableSchema, DeformationSkinTableSchema,
 };
-use crate::canonical_scene::store::schema::profile::ProfileDirectorySchema;
 use crate::canonical_scene::store::schema::spatial::{
     SpatialCameraTableSchema, SpatialDirectorySchema, SpatialLightTableSchema,
     SpatialTangentBasisSchemaNameSchema, SpatialTangentEncodingSchemaNameSchema,
@@ -42,12 +39,12 @@ use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
     SceneDirectorySchema,
 };
-use crate::canonical_scene::store::typed_storage::{NodeGeometryStorage, build::NodeStoragePlan};
+use crate::canonical_scene::store::typed_storage::{SceneTables, build::NodeStoragePlan};
 
 pub(super) struct RewrittenNodeSceneGraph {
     pub(super) directory: CanonicalBlockRef<SceneDirectorySchema>,
     pub(super) refs: NodeSceneMaterializedRefs,
-    pub(super) tables: NodeGeometryStorage,
+    pub(super) tables: SceneTables,
 }
 
 #[derive(Clone, Copy)]
@@ -57,13 +54,11 @@ struct InheritedNodeSceneLeafRefs {
     appearance: AppearancePayloadRefs,
     deformation: DeformationPayloadRefs,
     animation: AnimationPayloadRefs,
-    metadata: MetadataLeafRefs,
 }
 
-pub(super) fn try_rewrite_node_scene<'lane, 'scope, 'scene, O, PP, U>(
+pub(super) fn try_rewrite_node_scene<'lane, 'scene, O, PP, U>(
     lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
     pending: &BoundPendingNodeSceneEdit<'scene>,
-    inherited_leaf_plan: &NodeSceneInheritedLeafPlan<'scope, O>,
 ) -> Result<RewrittenNodeSceneGraph, StoreRuntimeError>
 where
     O: OperationOwner,
@@ -107,21 +102,17 @@ where
             (nodes, geometry)
         }
     };
-    let profile_leaves = profile::rewrite_lineage_leaves(lane, pending)?;
-    let inherited = inherit_unchanged_evidence_leaves(lane, pending, inherited_leaf_plan)?;
+    let profile = retain_edited_profile(
+        lane,
+        pending.input,
+        pending.counts.profile,
+        &pending.operation,
+    )?;
+    let inherited = inherit_unchanged_evidence_leaves(lane, pending)?;
     let spatial = rewrite_spatial(lane, pending, inherited)?;
     let appearance = rewrite_appearance(lane, pending, inherited.appearance)?;
     let deformation = rewrite_deformation(lane, pending, inherited.deformation)?;
     let animation = rewrite_animation(lane, pending, inherited.animation)?;
-    let profile_segments = profile::rewrite_segments(lane, pending, profile_leaves)?;
-    let profile = profile::rewrite_profile_records(
-        lane,
-        pending,
-        profile_segments,
-        profile_leaves,
-        inherited.metadata,
-    )?;
-
     let directory = rewrite_directory_with_shape(
         lane,
         pending,
@@ -130,20 +121,22 @@ where
             appearance: appearance.directory,
             deformation: deformation.directory,
             animation: animation.directory,
-            profile: profile.directory,
         },
     )?;
 
     Ok(RewrittenNodeSceneGraph {
         directory,
-        tables: NodeGeometryStorage { nodes, geometry },
+        tables: SceneTables {
+            nodes,
+            geometry,
+            profile,
+        },
         refs: NodeSceneMaterializedRefs {
             directory,
             spatial,
             appearance,
             deformation,
             animation,
-            profile,
         },
     })
 }
@@ -154,7 +147,6 @@ struct NodeSceneDirectoryRefs {
     appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
     deformation: CanonicalBlockRef<DeformationDirectorySchema>,
     animation: CanonicalBlockRef<AnimationDirectorySchema>,
-    profile: CanonicalBlockRef<ProfileDirectorySchema>,
 }
 
 fn rewrite_directory_with_shape<'lane, O, PP, U>(
@@ -190,18 +182,16 @@ where
                 row.write_record_ref(refs.spatial.into_store())?;
                 row.write_record_ref(refs.appearance.into_store())?;
                 row.write_record_ref(refs.deformation.into_store())?;
-                row.write_record_ref(refs.animation.into_store())?;
-                row.write_record_ref(refs.profile.into_store())
+                row.write_record_ref(refs.animation.into_store())
             })
         },
     )
     .map(CanonicalBlockRef::from_store)
 }
 
-fn inherit_unchanged_evidence_leaves<'lane, 'scope, 'scene, O, PP, U>(
+fn inherit_unchanged_evidence_leaves<'lane, 'scene, O, PP, U>(
     lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
     pending: &BoundPendingNodeSceneEdit<'scene>,
-    inherited_leaf_plan: &NodeSceneInheritedLeafPlan<'scope, O>,
 ) -> Result<InheritedNodeSceneLeafRefs, StoreRuntimeError>
 where
     O: OperationOwner,
@@ -372,8 +362,7 @@ where
         )?,
     };
 
-    let metadata = inherited_leaf_plan.inherit(lane, pending.input, &mut inherited)?;
-    if inherited != pending.counts.evidence_leaves.inherited.as_usize() {
+    if inherited != pending.counts.inherited_leaf_count.as_usize() {
         return Err(StoreRuntimeError::InvalidSourceSlot);
     }
     Ok(InheritedNodeSceneLeafRefs {
@@ -382,7 +371,6 @@ where
         appearance,
         deformation,
         animation,
-        metadata,
     })
 }
 
@@ -661,4 +649,27 @@ where
     let plan = RecordPlan::new(view.rows(), view.fields()).map_err(StoreRuntimeError::Plan)?;
     lane.try_copy_mapped_records(&input.canonical, source.into_store(), plan, tag)
         .map(CanonicalBlockRef::from_store)
+}
+
+fn inherit_optional_leaf<'lane, O, PP, U, Schema>(
+    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
+    input: &SceneStorage,
+    source: Option<CanonicalBlockRef<Schema>>,
+    inherited: &mut usize,
+) -> Result<Option<CanonicalBlockRef<Schema>>, StoreRuntimeError>
+where
+    O: OperationOwner,
+    PP: ProgressPhase,
+    U: ProgressUnit,
+    Schema: CanonicalSchema,
+    Schema::StoreKind: ShareableStoreKind,
+{
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    let mapped = lane.try_share_canonical(&input.canonical, source.into_store())?;
+    *inherited = inherited
+        .checked_add(1)
+        .ok_or(StoreRuntimeError::AccountingOverflow)?;
+    Ok(Some(CanonicalBlockRef::from_store(mapped)))
 }

@@ -1,26 +1,15 @@
-use baozi_operation::{BytesPlan, RecordPlan, SequencePlan, StorePlanError};
+use baozi_operation::StorePlanError;
 use thiserror::Error;
 
-use crate::canonical_scene::store::profile_provenance::PROFILE_PROVENANCE_ADDRESS_SCALARS;
-use crate::canonical_scene::store::schema::profile::{
-    PROFILE_OPERATION_SCALAR_COUNT, PROFILE_OWNER_ATTRIBUTE, PROFILE_OWNER_FIELD_COUNT,
-    PROFILE_OWNER_NODE, PROFILE_OWNER_PRIMITIVE, PROFILE_PROVENANCE_SCALAR_COUNT,
-    PROFILE_SEGMENT_FIELD_COUNT, ProfileLineageAttachmentSchema, profile_owner_field,
-};
 use crate::canonical_scene::store::schema::{CanonicalBlockRef, SceneDirectorySchema};
-use crate::canonical_scene::store::validation::ProfileMeteredCounts;
 use crate::entity::AuthoredTransform;
 use crate::identity::SceneGenerationId;
-use crate::provenance::{DIGEST_LEN, OperationIdentity, OperationKind};
+use crate::provenance::{OperationIdentity, OperationKind};
 
 use super::super::scratch::NodeSceneCentralValidationPlan;
 use super::super::{SceneEvidenceCounts, SceneStorage};
-use super::leaf_plan::NodeSceneInheritedLeafScanPlan;
+use super::profile::{NodeSceneEditProfilePlan, ProfileEditTargets};
 use super::report::CanonicalInvalidations;
-
-const NODE_TRANSFORM_PROFILE_CANONICAL_BLOCK_DELTA: u32 = 4;
-const NODE_TRANSFORM_PROFILE_PAYLOAD_LEAF_DELTA: u32 = 1;
-const NODE_TRANSFORM_PROFILE_SHAREABLE_LEAF_DELTA: u32 = 4;
 
 /// A count proven to fit both retained-store plans and canonical `u32` fields.
 #[derive(Debug, Clone, Copy)]
@@ -30,7 +19,7 @@ pub(super) struct CheckedCount {
 }
 
 impl CheckedCount {
-    fn try_from_usize(
+    pub(super) fn try_from_usize(
         value: usize,
         quantity: &'static str,
     ) -> Result<Self, NodeSceneEditPlanError> {
@@ -42,7 +31,10 @@ impl CheckedCount {
         })
     }
 
-    fn try_from_u32(value: u32, quantity: &'static str) -> Result<Self, NodeSceneEditPlanError> {
+    pub(super) fn try_from_u32(
+        value: u32,
+        quantity: &'static str,
+    ) -> Result<Self, NodeSceneEditPlanError> {
         let usize_value = usize::try_from(value)
             .map_err(|_| NodeSceneEditPlanError::SizeOverflow { quantity })?;
         Ok(Self {
@@ -57,82 +49,6 @@ impl CheckedCount {
 
     pub(super) const fn as_u32(self) -> u32 {
         self.u32_value
-    }
-}
-
-/// Exact disposition of every evidence-counted shareable leaf across one node-Scene edit.
-///
-/// `SceneEvidenceCounts::shareable_leaf_block_count` covers payload and profile leaves. Record
-/// blocks are always rebuilt, while operation-specific leaves such as authored transforms are
-/// tracked by their operation plan. Keeping this boundary explicit makes deletion a core concern
-/// instead of relying on a storage-wide "inherit everything else" operation.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct NodeSceneEvidenceLeafPlan {
-    pub(super) source: CheckedCount,
-    pub(super) inherited: CheckedCount,
-    pub(super) rewritten: CheckedCount,
-    pub(super) added: CheckedCount,
-    pub(super) deleted: CheckedCount,
-    pub(super) output: CheckedCount,
-}
-
-impl NodeSceneEvidenceLeafPlan {
-    fn try_new(
-        source: u32,
-        output: u32,
-        rewritten: usize,
-        added: usize,
-        deleted: usize,
-    ) -> Result<Self, NodeSceneEditPlanError> {
-        let source = CheckedCount::try_from_u32(source, "source shareable leaf count")?;
-        let output = CheckedCount::try_from_u32(output, "output shareable leaf count")?;
-        let rewritten = CheckedCount::try_from_usize(rewritten, "rewritten shareable leaf count")?;
-        let added = CheckedCount::try_from_usize(added, "added shareable leaf count")?;
-        let deleted = CheckedCount::try_from_usize(deleted, "deleted shareable leaf count")?;
-        let inherited_count = source
-            .as_usize()
-            .checked_sub(rewritten.as_usize())
-            .and_then(|count| count.checked_sub(deleted.as_usize()))
-            .ok_or(NodeSceneEditPlanError::InvalidSource {
-                reason: "shareable leaf rewrites and deletions exceed the source leaf set",
-            })?;
-        let expected_output = inherited_count
-            .checked_add(rewritten.as_usize())
-            .and_then(|count| count.checked_add(added.as_usize()))
-            .ok_or(NodeSceneEditPlanError::SizeOverflow {
-                quantity: "output shareable leaf count",
-            })?;
-        require_count(
-            output.as_usize(),
-            expected_output,
-            "output shareable leaf count disagrees with the sealed leaf dispositions",
-        )?;
-
-        Ok(Self {
-            source,
-            inherited: CheckedCount::try_from_usize(
-                inherited_count,
-                "inherited shareable leaf count",
-            )?,
-            rewritten,
-            added,
-            deleted,
-            output,
-        })
-    }
-
-    pub(super) fn is_exact(self) -> bool {
-        self.inherited
-            .as_usize()
-            .checked_add(self.rewritten.as_usize())
-            .and_then(|count| count.checked_add(self.deleted.as_usize()))
-            == Some(self.source.as_usize())
-            && self
-                .inherited
-                .as_usize()
-                .checked_add(self.rewritten.as_usize())
-                .and_then(|count| count.checked_add(self.added.as_usize()))
-                == Some(self.output.as_usize())
     }
 }
 
@@ -219,17 +135,6 @@ impl NodeSceneEditProgram<'_> {
         Self::NodeTransform(NodeTransformRewrite::new(target, replacement))
     }
 
-    pub(super) const fn profile_operation_code(&self) -> u8 {
-        match self {
-            Self::NodeTransform(_) => {
-                crate::canonical_scene::store::schema::profile::PROFILE_OPERATION_TRANSFORM
-            }
-            Self::TriangulatePrimitive(_) => {
-                crate::canonical_scene::store::schema::profile::PROFILE_OPERATION_SPLIT
-            }
-        }
-    }
-
     pub(super) const fn operation_kind(&self) -> OperationKind {
         match self {
             Self::NodeTransform(_) => OperationKind::Transform,
@@ -249,16 +154,12 @@ pub(super) struct NodeSceneEditFixedCounts {
     pub(super) canonical_blocks: CheckedCount,
     /// Every target block that must be newly retained for the destination generation.
     pub(super) new_canonical_blocks: CheckedCount,
-    pub(super) evidence_leaves: NodeSceneEvidenceLeafPlan,
-    pub(super) inherited_leaf_scan: NodeSceneInheritedLeafScanPlan,
+    pub(super) inherited_leaf_count: CheckedCount,
     pub(super) canonical_attribution_slots: CheckedCount,
     pub(super) outcome_evidence_blocks: CheckedCount,
     pub(super) outcome_evidence_attribution_slots: CheckedCount,
     pub(super) canonical_node_rows: CheckedCount,
-    pub(super) source_node_rows: CheckedCount,
     pub(super) source_root_rows: CheckedCount,
-    pub(super) source_edge_rows: CheckedCount,
-    pub(super) source_reference_rows: CheckedCount,
     pub(super) cameras: CheckedCount,
     pub(super) lights: CheckedCount,
     pub(super) images: CheckedCount,
@@ -279,71 +180,6 @@ pub(super) struct NodeSceneEditFixedCounts {
     pub(super) animation_clips: CheckedCount,
     pub(super) animation_channels: CheckedCount,
     pub(super) profile: NodeSceneEditProfilePlan,
-}
-
-/// Exact source coordinates and allocation plans for appending one transform lineage segment.
-#[derive(Clone, Copy)]
-pub(super) struct NodeSceneEditProfilePlan {
-    pub(super) source_segment_count: CheckedCount,
-    pub(super) output_segment_count: CheckedCount,
-    pub(super) target_owner_row: CheckedCount,
-    pub(super) target_count: CheckedCount,
-    targets: NodeSceneEditProfileTargets,
-    pub(super) target_attachment_count: CheckedCount,
-    pub(super) source_attachment_count: CheckedCount,
-    pub(super) output_attachment_count: CheckedCount,
-    pub(super) source_attachments: CanonicalBlockRef<ProfileLineageAttachmentSchema>,
-    pub(super) fresh_provenance_index: CheckedCount,
-    pub(super) attachments: SequencePlan<u64>,
-    pub(super) parents: SequencePlan<u64>,
-    pub(super) provenance: SequencePlan<u32>,
-    pub(super) operation: SequencePlan<u32>,
-    pub(super) digest: BytesPlan,
-    pub(super) segments: RecordPlan,
-    pub(super) owners: RecordPlan,
-}
-
-/// Closed owner selection; attributes retain their actual, separate source parent sets.
-#[derive(Debug, Clone, Copy)]
-enum NodeSceneEditProfileTargets {
-    Node(u32),
-    Triangulation { primitive: usize },
-}
-
-impl NodeSceneEditProfileTargets {
-    fn selects(self, input: &SceneStorage, kind: u8, index: u32) -> bool {
-        match self {
-            Self::Node(node) => kind == PROFILE_OWNER_NODE && index == node,
-            Self::Triangulation { primitive } => {
-                if kind == PROFILE_OWNER_PRIMITIVE {
-                    return index as usize == primitive;
-                }
-                if kind != PROFILE_OWNER_ATTRIBUTE {
-                    return false;
-                }
-                let geometry = input.read_geometry();
-                let Some(primitive) = geometry.primitives.get(primitive) else {
-                    return false;
-                };
-                primitive
-                    .attributes
-                    .checked(geometry.attributes.len())
-                    .is_some_and(|range| {
-                        range.contains(&(index as usize))
-                            && geometry
-                                .attributes
-                                .get(index as usize)
-                                .is_some_and(|attribute| {
-                                    matches!(
-                                        attribute.domain,
-                                        crate::attribute::AttributeDomain::Corner
-                                            | crate::attribute::AttributeDomain::Face
-                                    )
-                                })
-                    })
-            }
-        }
-    }
 }
 
 impl NodeSceneEditFixedCounts {
@@ -374,60 +210,31 @@ impl NodeSceneEditFixedCounts {
     ) -> Result<Self, NodeSceneEditPlanError> {
         let targets = match program {
             NodeSceneEditProgram::NodeTransform(rewrite) => {
-                NodeSceneEditProfileTargets::Node(rewrite.target().canonical_row.as_u32())
+                ProfileEditTargets::Node(rewrite.target().canonical_row.as_u32())
             }
             NodeSceneEditProgram::TriangulatePrimitive(geometry) => {
-                NodeSceneEditProfileTargets::Triangulation {
+                ProfileEditTargets::Triangulation {
                     primitive: geometry.target_row(),
                 }
             }
         };
         let source_evidence = input.proof.counts();
-        let profile = NodeSceneEditProfilePlan::try_new(input, targets, source_evidence, poll)?;
+        // The concrete operation supplies the final domain counts before profile planning.
         let mut evidence = source_evidence;
-        evidence.canonical_block_count = checked_add_u32(
-            evidence.canonical_block_count,
-            NODE_TRANSFORM_PROFILE_CANONICAL_BLOCK_DELTA,
-            "canonical output block count",
-        )?;
-        evidence.payload_block_count = checked_add_u32(
-            evidence.payload_block_count,
-            NODE_TRANSFORM_PROFILE_PAYLOAD_LEAF_DELTA,
-            "canonical payload block count",
-        )?;
-        evidence.profile_segment_count =
-            checked_add_u32(evidence.profile_segment_count, 1, "profile segment count")?;
-        evidence.profile_provenance_count = checked_add_u32(
-            evidence.profile_provenance_count,
-            profile.target_count.as_u32(),
-            "profile provenance count",
-        )?;
-        evidence.profile_operation_count = checked_add_u32(
-            evidence.profile_operation_count,
-            profile.target_count.as_u32(),
-            "profile operation count",
-        )?;
-        evidence.profile_parent_count = checked_add_u32(
-            evidence.profile_parent_count,
-            profile.target_attachment_count.as_u32(),
-            "profile parent count",
-        )?;
-        evidence.profile_attachment_count = profile.output_attachment_count.as_u32();
-        evidence.shareable_leaf_block_count = checked_add_u32(
-            evidence.shareable_leaf_block_count,
-            NODE_TRANSFORM_PROFILE_SHAREABLE_LEAF_DELTA,
-            "shareable canonical leaf block count",
-        )?;
+        let profile = NodeSceneEditProfilePlan::try_new(input, targets, evidence, poll)?;
+        let counts = profile.output_counts;
+        evidence.profile_segment_count = counts.segment_count;
+        evidence.profile_provenance_count = counts.provenance_count;
+        evidence.profile_operation_count = counts.operation_count;
+        evidence.profile_parent_count = counts.parent_count;
+        evidence.profile_owner_count = counts.owner_count;
+        evidence.profile_attachment_count = counts.attachment_count;
         let source_central_validation = input.proof.central_validation_plan();
-        let source_validation_scratch = source_central_validation.scratch_plan();
-        let profile_counts = try_node_transform_profile_counts(
-            source_validation_scratch.profile_counts(),
-            source_evidence,
+        let mut central_validation_plan = source_central_validation.try_rebind_profile_edit(
             evidence,
-            profile,
+            counts,
+            profile.maximum_depth,
         )?;
-        let mut central_validation_plan =
-            source_central_validation.try_rebind_node_transform(evidence, profile_counts)?;
         if let NodeSceneEditProgram::TriangulatePrimitive(geometry) = program {
             central_validation_plan = central_validation_plan.try_rebind_geometry(
                 input
@@ -486,21 +293,19 @@ impl NodeSceneEditFixedCounts {
             "source root and edge counts do not partition the source nodes",
         )?;
 
-        let evidence_leaves = NodeSceneEvidenceLeafPlan::try_new(
-            source_evidence.shareable_leaf_block_count,
-            evidence.shareable_leaf_block_count,
-            1,
-            4,
-            0,
+        // The concrete typed edits leave every remaining record-store payload unchanged.
+        require_count(
+            evidence.shareable_leaf_block_count as usize,
+            source_evidence.shareable_leaf_block_count as usize,
+            "typed edits must preserve the remaining record-store leaf set",
         )?;
-        let inherited_leaf_scan = NodeSceneInheritedLeafScanPlan::try_new(
-            input,
-            profile.source_segment_count.as_usize(),
-            evidence_leaves,
+        let inherited_leaf_count = CheckedCount::try_from_u32(
+            source_evidence.shareable_leaf_block_count,
+            "inherited record-store leaf count",
         )?;
         let new_canonical_block_count = canonical_blocks
             .as_usize()
-            .checked_sub(evidence_leaves.inherited.as_usize())
+            .checked_sub(inherited_leaf_count.as_usize())
             .ok_or(NodeSceneEditPlanError::InvalidSource {
                 reason: "inherited shareable leaf count exceeds the canonical output block count",
             })?;
@@ -520,8 +325,7 @@ impl NodeSceneEditFixedCounts {
             central_validation_plan,
             canonical_blocks,
             new_canonical_blocks,
-            evidence_leaves,
-            inherited_leaf_scan,
+            inherited_leaf_count,
             canonical_attribution_slots,
             outcome_evidence_blocks: CheckedCount::try_from_u32(1, "outcome-evidence block count")?,
             outcome_evidence_attribution_slots: CheckedCount::try_from_u32(
@@ -529,10 +333,7 @@ impl NodeSceneEditFixedCounts {
                 "outcome-evidence attribution slot count",
             )?,
             canonical_node_rows,
-            source_node_rows,
             source_root_rows,
-            source_edge_rows,
-            source_reference_rows: source_node_rows,
             cameras: CheckedCount::try_from_u32(evidence.camera_count, "camera row count")?,
             lights: CheckedCount::try_from_u32(evidence.light_count, "light row count")?,
             images: CheckedCount::try_from_u32(evidence.image_count, "image row count")?,
@@ -590,146 +391,6 @@ impl NodeSceneEditFixedCounts {
             )?,
             profile,
         })
-    }
-}
-
-impl NodeSceneEditProfilePlan {
-    fn try_new(
-        input: &SceneStorage,
-        targets: NodeSceneEditProfileTargets,
-        evidence: SceneEvidenceCounts,
-        poll: &mut impl FnMut() -> Result<(), NodeSceneEditPlanError>,
-    ) -> Result<Self, NodeSceneEditPlanError> {
-        let invalid = || NodeSceneEditPlanError::InvalidSource {
-            reason: "profile owner attachments disagree with the sealed source",
-        };
-        let count = |value, quantity| CheckedCount::try_from_usize(value, quantity);
-        let source_segment_count = count(input.proof.profile_segment_count(), "source segments")?;
-        let output_segment_count = count(
-            source_segment_count
-                .as_usize()
-                .checked_add(1)
-                .ok_or_else(invalid)?,
-            "output segments",
-        )?;
-        let owners = input
-            .canonical
-            .records(input.proof.profile_owners().into_store())
-            .ok_or_else(invalid)?;
-        if owners.rows() != evidence.profile_owner_count as usize
-            || owners.fields() != PROFILE_OWNER_FIELD_COUNT
-        {
-            return Err(invalid());
-        }
-        let mut target_count = 0_usize;
-        let mut target_parents = 0_usize;
-        let mut first_target = None;
-        let mut source_attachments = None;
-        let mut next = 0_usize;
-        for row in 0..owners.rows() {
-            poll()?;
-            let kind = owners
-                .scalar::<u8>(row, profile_owner_field::OWNER_KIND)
-                .ok_or_else(invalid)?;
-            let index = owners
-                .scalar::<u32>(row, profile_owner_field::OWNER_INDEX)
-                .ok_or_else(invalid)?;
-            let offset = owners
-                .scalar::<u32>(row, profile_owner_field::ATTACHMENT_OFFSET)
-                .ok_or_else(invalid)? as usize;
-            let length = owners
-                .scalar::<u32>(row, profile_owner_field::ATTACHMENT_COUNT)
-                .ok_or_else(invalid)? as usize;
-            let reference = owners
-                .sequence_ref::<u64, ProfileLineageAttachmentSchema>(
-                    row,
-                    profile_owner_field::ATTACHMENTS,
-                )
-                .map(CanonicalBlockRef::from_store)
-                .ok_or_else(invalid)?;
-            if offset != next
-                || length == 0
-                || source_attachments.is_some_and(|previous| previous != reference)
-            {
-                return Err(invalid());
-            }
-            source_attachments = Some(reference);
-            next = next.checked_add(length).ok_or_else(invalid)?;
-            if targets.selects(input, kind, index) {
-                first_target.get_or_insert(row);
-                target_count = target_count.checked_add(1).ok_or_else(invalid)?;
-                target_parents = target_parents.checked_add(length).ok_or_else(invalid)?;
-            }
-        }
-        let source_attachments = source_attachments.ok_or_else(invalid)?;
-        if next != evidence.profile_attachment_count as usize || target_count == 0 {
-            return Err(invalid());
-        }
-        // The source proof fixes one owner per primitive and attribute; every selected owner is
-        // traversed independently, never replaced by a union of another owner's parents.
-        let attachments = input
-            .canonical
-            .sequence(source_attachments.into_store())
-            .ok_or_else(invalid)?;
-        if attachments.as_slice().len()
-            != next
-                .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
-                .ok_or_else(invalid)?
-        {
-            return Err(invalid());
-        }
-        let output_count = next
-            .checked_sub(target_parents)
-            .and_then(|n| n.checked_add(target_count))
-            .ok_or_else(invalid)?;
-        Ok(Self {
-            source_segment_count,
-            output_segment_count,
-            target_owner_row: count(
-                first_target.ok_or_else(invalid)?,
-                "first changed profile owner",
-            )?,
-            target_count: count(target_count, "changed profile owners")?,
-            targets,
-            target_attachment_count: count(target_parents, "changed owners' parent count")?,
-            source_attachment_count: count(next, "source attachments")?,
-            output_attachment_count: count(output_count, "output attachments")?,
-            source_attachments,
-            fresh_provenance_index: CheckedCount::try_from_u32(
-                evidence.profile_provenance_count,
-                "fresh provenance base",
-            )?,
-            attachments: SequencePlan::new(
-                output_count
-                    .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
-                    .ok_or_else(invalid)?,
-            )?,
-            parents: SequencePlan::new(
-                target_parents
-                    .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
-                    .ok_or_else(invalid)?,
-            )?,
-            provenance: SequencePlan::new(
-                target_count
-                    .checked_mul(PROFILE_PROVENANCE_SCALAR_COUNT)
-                    .ok_or_else(invalid)?,
-            )?,
-            operation: SequencePlan::new(
-                target_count
-                    .checked_mul(PROFILE_OPERATION_SCALAR_COUNT)
-                    .ok_or_else(invalid)?,
-            )?,
-            digest: BytesPlan::new(target_count.checked_mul(DIGEST_LEN).ok_or_else(invalid)?)?,
-            segments: RecordPlan::new(
-                output_segment_count.as_usize(),
-                PROFILE_SEGMENT_FIELD_COUNT,
-            )?,
-            owners: RecordPlan::new(owners.rows(), PROFILE_OWNER_FIELD_COUNT)?,
-        })
-    }
-
-    pub(super) fn selects(self, input: &SceneStorage, kind: u8, index: u32) -> bool {
-        self.targets.selects(input, kind, index)
     }
 }
 
@@ -882,15 +543,6 @@ impl<'scene> BoundPendingNodeSceneEdit<'scene> {
     }
 }
 
-fn checked_add_u32(
-    left: u32,
-    right: u32,
-    quantity: &'static str,
-) -> Result<u32, NodeSceneEditPlanError> {
-    left.checked_add(right)
-        .ok_or(NodeSceneEditPlanError::SizeOverflow { quantity })
-}
-
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum NodeSceneEditPlanError {
     #[error(
@@ -910,73 +562,6 @@ pub(in crate::canonical_scene::store) enum NodeSceneEditPlanError {
     Runtime(#[from] baozi_operation::StoreRuntimeError),
 }
 
-fn try_node_transform_profile_counts(
-    source: ProfileMeteredCounts,
-    source_evidence: SceneEvidenceCounts,
-    output_evidence: SceneEvidenceCounts,
-    profile: NodeSceneEditProfilePlan,
-) -> Result<ProfileMeteredCounts, NodeSceneEditPlanError> {
-    if source.resource_count != source_evidence.profile_resource_count
-        || source.source_count != source_evidence.profile_source_count
-        || source.provenance_count != source_evidence.profile_provenance_count
-        || source.operation_count != source_evidence.profile_operation_count
-        || source.parent_count != source_evidence.profile_parent_count
-        || source.owner_count != source_evidence.profile_owner_count
-        || source.attachment_count != source_evidence.profile_attachment_count
-        || source.metadata_entry_count != source_evidence.profile_metadata_entry_count
-    {
-        return Err(NodeSceneEditPlanError::InvalidSource {
-            reason: "sealed profile validation counts disagree with source evidence",
-        });
-    }
-    let digest_bytes = u32::try_from(profile.digest.bytes()).map_err(|_| {
-        NodeSceneEditPlanError::SizeOverflow {
-            quantity: "profile lineage digest bytes",
-        }
-    })?;
-    Ok(ProfileMeteredCounts {
-        segment_count: output_evidence.profile_segment_count,
-        resource_count: source.resource_count,
-        source_count: source.source_count,
-        provenance_count: output_evidence.profile_provenance_count,
-        operation_count: output_evidence.profile_operation_count,
-        evidence_count: source.evidence_count,
-        parent_count: output_evidence.profile_parent_count,
-        wide_count: source.wide_count,
-        lineage_text_bytes: source.lineage_text_bytes,
-        lineage_digest_bytes: checked_add_u32(
-            source.lineage_digest_bytes,
-            digest_bytes,
-            "profile lineage digest bytes",
-        )?,
-        owner_count: output_evidence.profile_owner_count,
-        attachment_count: output_evidence.profile_attachment_count,
-        metadata_entry_count: output_evidence.profile_metadata_entry_count,
-        metadata_text_bytes: source.metadata_text_bytes,
-        metadata_payload_bytes: source.metadata_payload_bytes,
-        metadata_bool_count: source.metadata_bool_count,
-        metadata_i64_count: source.metadata_i64_count,
-        metadata_u64_count: source.metadata_u64_count,
-        metadata_f64_count: source.metadata_f64_count,
-        metadata_f32_count: source.metadata_f32_count,
-        canonical_block_count: checked_add_u32(
-            source.canonical_block_count,
-            NODE_TRANSFORM_PROFILE_CANONICAL_BLOCK_DELTA,
-            "profile canonical block count",
-        )?,
-        payload_leaf_count: checked_add_u32(
-            source.payload_leaf_count,
-            NODE_TRANSFORM_PROFILE_PAYLOAD_LEAF_DELTA,
-            "profile payload leaf count",
-        )?,
-        shareable_leaf_count: checked_add_u32(
-            source.shareable_leaf_count,
-            NODE_TRANSFORM_PROFILE_SHAREABLE_LEAF_DELTA,
-            "profile shareable leaf count",
-        )?,
-    })
-}
-
 fn require_count(
     actual: usize,
     expected: usize,
@@ -991,24 +576,7 @@ fn require_count(
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeSceneEditPlanError, NodeSceneEvidenceLeafPlan, NodeTransformEditTarget};
-
-    #[test]
-    fn shareable_leaf_plan_requires_exact_source_and_output_partitions() {
-        let exact = NodeSceneEvidenceLeafPlan::try_new(5, 7, 1, 3, 1)
-            .expect("exact leaf dispositions must seal");
-
-        assert!(exact.is_exact());
-        assert_eq!(exact.inherited.as_usize(), 3);
-        assert!(matches!(
-            NodeSceneEvidenceLeafPlan::try_new(1, 1, 1, 0, 1),
-            Err(NodeSceneEditPlanError::InvalidSource { .. })
-        ));
-        assert!(matches!(
-            NodeSceneEvidenceLeafPlan::try_new(5, 6, 1, 3, 1),
-            Err(NodeSceneEditPlanError::InvalidSource { .. })
-        ));
-    }
+    use super::{NodeSceneEditPlanError, NodeTransformEditTarget};
 
     #[test]
     fn target_coordinates_reject_a_non_synthetic_row_offset() {

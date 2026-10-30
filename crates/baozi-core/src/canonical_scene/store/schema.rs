@@ -5,14 +5,13 @@ use baozi_operation::{CanonicalStoreRef, RecordBlock};
 pub(super) mod animation;
 pub(super) mod appearance;
 pub(super) mod deformation;
-pub(super) mod profile;
 pub(super) mod spatial;
 
 pub(super) const PRESENCE_ABSENT: u8 = 0;
 pub(super) const PRESENCE_PRESENT: u8 = 1;
 
-pub(super) const SCENE_SCHEMA_REVISION: u32 = 3;
-pub(super) const SCENE_DIRECTORY_FIELD_COUNT: usize = 12;
+pub(super) const SCENE_SCHEMA_REVISION: u32 = 4;
+pub(super) const SCENE_DIRECTORY_FIELD_COUNT: usize = 11;
 pub(super) const NODE_SCENE_EVIDENCE_FIELD_COUNT: usize = 34;
 pub(super) const NODE_SCENE_MATRIX_SCALAR_COUNT: usize = 16;
 pub(super) const NODE_SCENE_TRS_SCALAR_COUNT: usize = 10;
@@ -30,7 +29,6 @@ pub(super) mod scene_directory_field {
     pub(crate) const APPEARANCE: usize = 8;
     pub(crate) const DEFORMATION: usize = 9;
     pub(crate) const ANIMATION: usize = 10;
-    pub(crate) const PROFILE: usize = 11;
 }
 
 pub(super) mod node_scene_evidence_field {
@@ -70,7 +68,7 @@ pub(super) mod node_scene_evidence_field {
     pub(crate) const SHAREABLE_LEAF_BLOCK_COUNT: usize = 33;
 }
 
-const _: [(); SCENE_DIRECTORY_FIELD_COUNT] = [(); scene_directory_field::PROFILE + 1];
+const _: [(); SCENE_DIRECTORY_FIELD_COUNT] = [(); scene_directory_field::ANIMATION + 1];
 const _: [(); NODE_SCENE_EVIDENCE_FIELD_COUNT] =
     [(); node_scene_evidence_field::SHAREABLE_LEAF_BLOCK_COUNT + 1];
 

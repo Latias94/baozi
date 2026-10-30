@@ -130,7 +130,7 @@ pub enum FormatIdError {
     InvalidSeparator { offset: usize },
 }
 
-fn validate_format_id(value: &str) -> Result<(), FormatIdError> {
+pub(crate) fn validate_format_id(value: &str) -> Result<(), FormatIdError> {
     if value.is_empty() {
         return Err(FormatIdError::Empty);
     }

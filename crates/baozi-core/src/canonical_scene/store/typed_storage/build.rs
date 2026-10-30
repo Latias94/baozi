@@ -21,13 +21,25 @@ pub(in crate::canonical_scene::store) enum TypedStorageBuildError<E> {
     Control(#[source] E),
 }
 
-type BuildResult<T, E> = Result<T, TypedStorageBuildError<E>>;
+pub(in crate::canonical_scene::store) type BuildResult<T, E> = Result<T, TypedStorageBuildError<E>>;
 
 /// Action-scoped work adapter; admission and counters stay in operation.
 pub(in crate::canonical_scene::store) trait TypedStorageBuildControl {
     type Error;
     fn run_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error>;
     fn run_string_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error>;
+}
+
+impl<C: TypedStorageBuildControl + ?Sized> TypedStorageBuildControl for &mut C {
+    type Error = C::Error;
+
+    fn run_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error> {
+        C::run_unit(self, action)
+    }
+
+    fn run_string_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error> {
+        C::run_string_unit(self, action)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -529,7 +541,9 @@ impl GeometryStoragePlan {
     }
 }
 
-fn capacity<T>(count: u64) -> Result<CapacityPlan, StorePlanError> {
+pub(in crate::canonical_scene::store) fn capacity<T>(
+    count: u64,
+) -> Result<CapacityPlan, StorePlanError> {
     CapacityPlan::for_type::<T>(
         0,
         0,
@@ -538,7 +552,9 @@ fn capacity<T>(count: u64) -> Result<CapacityPlan, StorePlanError> {
     .map_err(StorePlanError::Capacity)
 }
 
-fn count_work<const N: usize>(plans: [CapacityPlan; N]) -> Result<u64, StorePlanError> {
+pub(in crate::canonical_scene::store) fn count_work<const N: usize>(
+    plans: [CapacityPlan; N],
+) -> Result<u64, StorePlanError> {
     plans.into_iter().try_fold(0_u64, |sum, plan| {
         sum.checked_add(
             u64::try_from(plan.desired_capacity()).map_err(|_| StorePlanError::SizeOverflow)?,
@@ -547,7 +563,9 @@ fn count_work<const N: usize>(plans: [CapacityPlan; N]) -> Result<u64, StorePlan
     })
 }
 
-fn allocate<T, E>(plan: CapacityPlan) -> BuildResult<Vec<T>, E> {
+pub(in crate::canonical_scene::store) fn allocate<T, E>(
+    plan: CapacityPlan,
+) -> BuildResult<Vec<T>, E> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(plan.allocator_additional())
@@ -557,7 +575,7 @@ fn allocate<T, E>(plan: CapacityPlan) -> BuildResult<Vec<T>, E> {
     Ok(values)
 }
 
-fn push<T, C: TypedStorageBuildControl>(
+pub(in crate::canonical_scene::store) fn push<T, C: TypedStorageBuildControl>(
     values: &mut Vec<T>,
     plan: CapacityPlan,
     value: T,
@@ -571,7 +589,7 @@ fn push<T, C: TypedStorageBuildControl>(
     Ok(())
 }
 
-fn append<T: Copy, C: TypedStorageBuildControl>(
+pub(super) fn append<T: Copy, C: TypedStorageBuildControl>(
     values: &mut Vec<T>,
     plan: CapacityPlan,
     source: &[T],
@@ -584,7 +602,7 @@ fn append<T: Copy, C: TypedStorageBuildControl>(
     Ok(TableRange::new(start, source.len()))
 }
 
-fn append_name<C: TypedStorageBuildControl>(
+pub(super) fn append_name<C: TypedStorageBuildControl>(
     text: &mut Vec<u8>,
     plan: CapacityPlan,
     name: Presence<&str>,
@@ -604,7 +622,10 @@ fn append_name<C: TypedStorageBuildControl>(
     Ok(Some(TextRange(TableRange::new(start, name.len()))))
 }
 
-fn finish<T, E>(values: &Vec<T>, plan: CapacityPlan) -> BuildResult<(), E> {
+pub(in crate::canonical_scene::store) fn finish<T, E>(
+    values: &Vec<T>,
+    plan: CapacityPlan,
+) -> BuildResult<(), E> {
     if values.len() != plan.desired_capacity() {
         return Err(TypedStorageBuildError::Invariant);
     }

@@ -302,6 +302,51 @@ checksum-qualified cap-primitives 4.0.2 and 4.0.3 archives. Their source hashes 
 that continuity observation are recorded in the native-filesystem admission research. This is
 dependency and behavior evidence, not promotion of a new runtime target.
 
+## Typed Profile and Provenance Cutover (2026-10-30)
+
+Fresh construction, edit planning/materialization, central validation, semantic reading, and snapshot
+traversal now use one typed profile representation. `SceneTables` owns nodes, geometry, and profile.
+Profile state owns the final-layout owner/attachment and metadata descriptors; immutable lineage
+segments and metadata payload pools have independent retained owners. Node-transform and
+triangulation edits share their unchanged allocations through operation's existing physical owner.
+Each changed owner receives its own operation node with its actual parents.
+
+Provenance edges store only segment ordinal, nonce, and local node. Checked lookup derives the global
+index from validated segment prefixes. Digests and wide values are typed inline values, and text
+pools are `String` values that remain valid UTF-8 through interrupted construction. Owner maximum
+depth caches are verified against actual attachment depths. Profile canonical-byte planning counts
+initialized typed headers/tables and used payloads under the target ABI; allocator capacity and
+retained-owner infrastructure remain separately admitted by operation.
+
+Central validation borrows actual retained profile data and allocates only provenance depths.
+The generic profile schema, scalar codecs, record writers, dynamic inherited-profile leaf scan,
+record rewrite, and full lineage/descriptor projection buffers have been deleted. The remaining
+record-store block ceiling counts only domains that still use those blocks. Ordinary handle
+sharing now consumes import `WorkUnits`, independently of that smaller Scene-record ceiling.
+Callback, hash, read, and cancellation tests use actual action-entry baselines while retaining
+exact completed-prefix assertions. Hash-reuse tests deny another full hash chunk while allowing
+the unrelated ownership work.
+
+The combined all-feature workspace suite passed **2,103/2,103 tests**, with three manual scale tests
+skipped in that invocation. Strict all-target/all-feature Clippy, doctests, rustdoc with `-D warnings`,
+and formatting passed. The maintained consumer built and executed the glTF and textured
+triangulation workflows against freshly unpacked `.crate` dependencies, without resolving checkout
+paths. An independent read-only review of typed storage, prepared admission, profile edits, grammar,
+work, and branch qualification found no outstanding concrete P0-P2 issue; it did not replace runtime
+verification.
+
+All three manual scale tests passed separately. For both 10,000 and 100,000 four-influence vertices,
+the node edit's allocator-request peak remained **21,284 bytes** when metadata grew from **1 MiB to
+8 MiB**. The edit retained shared lineage and metadata payloads after source destruction, and final
+account bytes/allocations returned to zero. Independent primitive-buffer workloads at
+256/1,024/4,096 and node-edit workloads at 1,000/10,000 nodes also passed. These are requested
+allocation and deterministic work observations, not exact process-RSS claims.
+
+Logs are `target/review/d2-workspace-nextest.log`, `d2-storage-scale.log`,
+`d2-workspace-clippy.log`, `d2-workspace-doctests.log`, `d2-workspace-rustdoc.log`,
+and `d2-packaged-consumers.log`. This increment does not provide normal generation, target-space
+conversion, application vertex unification, or a new sanitizer campaign.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
@@ -309,9 +354,9 @@ dependency and behavior evidence, not promotion of a new runtime target.
 - Preserve B's verified retained manifest/evidence ownership and fidelity behavior through the
   remaining storage and postprocessing cutovers.
 - Preserve C's verified typed reads and required-dependency context through the storage cutover; retain the single Scene owner.
-- Extend D1's measured typed node/geometry cutover to the remaining D2 domains, starting with the
-  complete profile/provenance ownership and output-owner-layout cutover required by normals.
-  Delete each replaced record/projection path.
+- Continue D2 through appearance, deformation/animation, and spatial storage. Preserve the completed
+  node/geometry/profile ownership cutovers, and implement concrete added/deleted/reindexed owner
+  mappings with the normal-generation operation. Delete each replaced record/projection path.
 - Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
 - Preserve F's verified triangulation while delivering normals, target-space conversion, and
   application vertex lowering.

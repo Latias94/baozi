@@ -34,7 +34,7 @@ type PreparedEditStoreFailure = PreparedStoreFailure<RecordBlock, NodeSceneOutco
 
 pub(super) struct PreparedNodeSceneEditSuccess {
     generation: ReservedSceneGeneration,
-    tables: crate::canonical_scene::store::typed_storage::NodeGeometryStorage,
+    tables: crate::canonical_scene::store::typed_storage::SceneTables,
     store: PreparedEditStoreSuccess,
     proof: crate::canonical_scene::store::validation::NodeSceneValidationProof,
     invalidations: CanonicalInvalidations,
@@ -126,7 +126,7 @@ where
     U: ProgressUnit,
 {
     generation: ReservedSceneGeneration,
-    tables: crate::canonical_scene::store::typed_storage::NodeGeometryStorage,
+    tables: crate::canonical_scene::store::typed_storage::SceneTables,
     proof: crate::canonical_scene::store::validation::NodeSceneValidationProof,
     invalidations: CanonicalInvalidations,
     remaps: CanonicalRemapSet,

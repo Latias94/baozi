@@ -24,7 +24,6 @@ fn chunked_hashes_preserve_sha256_and_charge_exact_bytes() {
         let limits = ResourceLimits::default();
         let owner = store_owner(&limits);
         let host = owner.host();
-        let mut expected_work = 0;
         for length in [
             0,
             1,
@@ -37,16 +36,16 @@ fn chunked_hashes_preserve_sha256_and_charge_exact_bytes() {
             2 * HASH_CHUNK_BYTES + 17,
         ] {
             let bytes: Vec<_> = (0..length).map(|index| (index % 251) as u8).collect();
+            let before = host.dimension_state(dimension).unwrap();
             let digest = chunked_sha256(host, &bytes, dimension).unwrap();
             assert_eq!(
                 digest,
                 ManifestDigest::of(&bytes).as_bytes(),
                 "length {length}"
             );
-            expected_work += length as u64;
             let work = host.dimension_state(dimension).unwrap();
-            assert_eq!(work.attempted(), expected_work);
-            assert_eq!(work.consumed(), expected_work);
+            assert_eq!(work.attempted() - before.attempted(), length as u64);
+            assert_eq!(work.consumed() - before.consumed(), length as u64);
         }
     }
 }
@@ -60,9 +59,14 @@ fn hash_work_rejection_keeps_the_completed_chunk_prefix() {
         let limits = ResourceLimits::default();
         let owner = store_owner(&limits);
         let host = owner.host();
+        let before = host.dimension_state(dimension).unwrap();
         host.tighten_dimension_policy(
             dimension,
-            DimensionPolicy::counter(HASH_CHUNK_BYTES as u64, HASH_CHUNK_BYTES as u64, 0),
+            DimensionPolicy::counter(
+                before.attempted() + HASH_CHUNK_BYTES as u64,
+                before.consumed() + HASH_CHUNK_BYTES as u64,
+                0,
+            ),
         )
         .unwrap();
         let bytes = vec![7; 2 * HASH_CHUNK_BYTES + 17];
@@ -74,8 +78,11 @@ fn hash_work_rejection_keeps_the_completed_chunk_prefix() {
             )) if rejected == dimension
         ));
         let work = host.dimension_state(dimension).unwrap();
-        assert_eq!(work.attempted(), 2 * HASH_CHUNK_BYTES as u64);
-        assert_eq!(work.consumed(), HASH_CHUNK_BYTES as u64);
+        assert_eq!(
+            work.attempted() - before.attempted(),
+            2 * HASH_CHUNK_BYTES as u64
+        );
+        assert_eq!(work.consumed() - before.consumed(), HASH_CHUNK_BYTES as u64);
     }
 }
 
@@ -95,6 +102,7 @@ fn hash_cancellation_stops_before_the_next_chunk_admission() {
             });
             let owner = store_owner_with_control(&limits, control);
             let host = owner.host();
+            let work_before = host.dimension_state(dimension).unwrap();
             let before = calls.load(Ordering::Acquire);
             cancel_at.store(before + completed_chunks + 1, Ordering::Release);
             let bytes = vec![11; 3 * HASH_CHUNK_BYTES + 17];
@@ -105,8 +113,8 @@ fn hash_cancellation_stops_before_the_next_chunk_admission() {
             ));
             let work = host.dimension_state(dimension).unwrap();
             let completed = (completed_chunks * HASH_CHUNK_BYTES) as u64;
-            assert_eq!(work.attempted(), completed);
-            assert_eq!(work.consumed(), completed);
+            assert_eq!(work.attempted() - work_before.attempted(), completed);
+            assert_eq!(work.consumed() - work_before.consumed(), completed);
             assert_eq!(calls.load(Ordering::Acquire) - before, completed_chunks + 1);
         }
     }
@@ -123,6 +131,7 @@ fn empty_resource_and_manifest_hashes_observe_cancellation() {
         let control = ImportOperationControl::default().with_cancellation(cancellation.clone());
         let owner = store_owner_with_control(&limits, control);
         let host = owner.host();
+        let before = host.dimension_state(dimension).unwrap();
         cancellation.cancel();
 
         assert!(matches!(
@@ -130,8 +139,8 @@ fn empty_resource_and_manifest_hashes_observe_cancellation() {
             Err(ScopeAbortCause::Control(ControlCause::Cancelled { .. }))
         ));
         let work = host.dimension_state(dimension).unwrap();
-        assert_eq!(work.attempted(), 0);
-        assert_eq!(work.consumed(), 0);
+        assert_eq!(work.attempted() - before.attempted(), 0);
+        assert_eq!(work.consumed() - before.consumed(), 0);
     }
 }
 
@@ -145,11 +154,29 @@ fn primary_snapshot_hash_is_metered_once_before_manifest_sealing() {
     let bytes = vec![23; 2 * HASH_CHUNK_BYTES + 17];
     let mut graph = ResourceGraph::new(limits);
 
+    let before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
     graph.bind_primary(host, &authority, &path, &bytes).unwrap();
     assert_eq!(graph.nodes[0].content_digest, ManifestDigest::of(&bytes));
-    let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-    assert_eq!(work.attempted(), bytes.len() as u64);
-    assert_eq!(work.consumed(), bytes.len() as u64);
+    let before_sealing = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+    assert_eq!(
+        before_sealing.attempted() - before.attempted(),
+        bytes.len() as u64
+    );
+    assert_eq!(
+        before_sealing.consumed() - before.consumed(),
+        bytes.len() as u64
+    );
+    // Manifest ownership may share handles, but cannot admit even the first hash chunk again.
+    let sealing_budget = HASH_CHUNK_BYTES as u64 - 1;
+    host.tighten_dimension_policy(
+        ImportDimension::WorkUnits,
+        DimensionPolicy::counter(
+            before_sealing.attempted() + sealing_budget,
+            before_sealing.consumed() + sealing_budget,
+            0,
+        ),
+    )
+    .unwrap();
     graph.seal(host).unwrap();
     let manifest = graph.take_manifest().unwrap();
     assert_eq!(
@@ -157,8 +184,10 @@ fn primary_snapshot_hash_is_metered_once_before_manifest_sealing() {
         ManifestDigest::of(&bytes)
     );
     let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-    assert_eq!(work.attempted(), bytes.len() as u64);
-    assert_eq!(work.consumed(), bytes.len() as u64);
+    let attempted = work.attempted() - before_sealing.attempted();
+    let consumed = work.consumed() - before_sealing.consumed();
+    assert!(attempted <= sealing_budget);
+    assert_eq!(consumed, attempted);
 }
 
 #[test]
@@ -182,7 +211,9 @@ fn cancelled_primary_hash_does_not_publish_a_partial_node() {
             reserve_graph_storage(host, bytes)
         })
         .unwrap();
-    cancel_at.store(calls.load(Ordering::Acquire) + 2, Ordering::Release);
+    let before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+    let polls_before = calls.load(Ordering::Acquire);
+    cancel_at.store(polls_before + 2, Ordering::Release);
 
     assert!(matches!(
         graph.bind_primary(host, &authority, &path, &bytes),
@@ -193,8 +224,12 @@ fn cancelled_primary_hash_does_not_publish_a_partial_node() {
     assert!(graph.nodes.is_empty());
     assert!(graph.primary.is_none());
     let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-    assert_eq!(work.attempted(), HASH_CHUNK_BYTES as u64);
-    assert_eq!(work.consumed(), HASH_CHUNK_BYTES as u64);
+    assert_eq!(
+        work.attempted() - before.attempted(),
+        HASH_CHUNK_BYTES as u64
+    );
+    assert_eq!(work.consumed() - before.consumed(), HASH_CHUNK_BYTES as u64);
+    assert_eq!(calls.load(Ordering::Acquire) - polls_before, 2);
     let nodes = host
         .dimension_state(ImportDimension::ResourceGraphNodes)
         .unwrap();
@@ -218,11 +253,26 @@ fn repeated_available_references_reuse_the_snapshot_digest() {
         .unwrap();
     let primary = graph.source_for_primary().unwrap();
     let (cache_index, snapshot) = cache_snapshot(&mut graph, host, &identity, &bytes);
+    let before_hash = host.dimension_state(ImportDimension::WorkUnits).unwrap();
     let node = add_available(&mut graph, host, primary, &role, &identity, &bytes);
-    let expected_work = (b"primary".len() + bytes.len()) as u64;
+    let before_reuse = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+    assert_eq!(
+        before_reuse.attempted() - before_hash.attempted(),
+        bytes.len() as u64
+    );
+    assert_eq!(
+        before_reuse.consumed() - before_hash.consumed(),
+        bytes.len() as u64
+    );
+    // Admit incidental handle work, but reject even the first chunk of a repeated payload hash.
+    let reuse_budget = HASH_CHUNK_BYTES as u64 - 1;
     host.tighten_dimension_policy(
         ImportDimension::WorkUnits,
-        DimensionPolicy::counter(expected_work, expected_work, 0),
+        DimensionPolicy::counter(
+            before_reuse.attempted() + reuse_budget,
+            before_reuse.consumed() + reuse_budget,
+            0,
+        ),
     )
     .unwrap();
 
@@ -249,8 +299,10 @@ fn repeated_available_references_reuse_the_snapshot_digest() {
     assert_eq!(manifest.counts().available_relation_occurrence_count(), 128);
     assert_eq!(manifest.counts().quotient_relation_record_count(), 1);
     let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-    assert_eq!(work.attempted(), expected_work);
-    assert_eq!(work.consumed(), expected_work);
+    let attempted = work.attempted() - before_reuse.attempted();
+    let consumed = work.consumed() - before_reuse.consumed();
+    assert!(attempted <= reuse_budget);
+    assert_eq!(consumed, attempted);
 }
 
 #[test]
@@ -268,7 +320,17 @@ fn digest_follows_the_shared_snapshot_across_distinct_cache_entries() {
     graph.bind_primary(host, &authority, &path, b"").unwrap();
     let primary = graph.source_for_primary().unwrap();
     let (_, snapshot) = cache_snapshot(&mut graph, host, &identity, &bytes);
+    let before_hash = host.dimension_state(ImportDimension::WorkUnits).unwrap();
     let first = add_available(&mut graph, host, primary, &role, &identity, &bytes);
+    let after_hash = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+    assert_eq!(
+        after_hash.attempted() - before_hash.attempted(),
+        bytes.len() as u64
+    );
+    assert_eq!(
+        after_hash.consumed() - before_hash.consumed(),
+        bytes.len() as u64
+    );
     graph.reserve_acquisition_capacity(host).unwrap();
     assert!(
         graph
@@ -281,9 +343,15 @@ fn digest_follows_the_shared_snapshot_across_distinct_cache_entries() {
     graph
         .complete_acquisition(&alias, Arc::clone(&snapshot), None)
         .unwrap();
+    let before_reuse = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+    let reuse_budget = HASH_CHUNK_BYTES as u64 - 1;
     host.tighten_dimension_policy(
         ImportDimension::WorkUnits,
-        DimensionPolicy::counter(bytes.len() as u64, bytes.len() as u64, 0),
+        DimensionPolicy::counter(
+            before_reuse.attempted() + reuse_budget,
+            before_reuse.consumed() + reuse_budget,
+            0,
+        ),
     )
     .unwrap();
 
@@ -295,8 +363,10 @@ fn digest_follows_the_shared_snapshot_across_distinct_cache_entries() {
         graph.nodes[second].content_digest
     );
     let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-    assert_eq!(work.attempted(), bytes.len() as u64);
-    assert_eq!(work.consumed(), bytes.len() as u64);
+    let attempted = work.attempted() - before_reuse.attempted();
+    let consumed = work.consumed() - before_reuse.consumed();
+    assert!(attempted <= reuse_budget);
+    assert_eq!(consumed, attempted);
 }
 
 #[test]
@@ -329,7 +399,9 @@ fn cancelled_dependency_hash_does_not_seal_a_partial_digest() {
         )
         .unwrap();
     graph.prepare_target(host, &mut pending, &identity).unwrap();
-    cancel_at.store(calls.load(Ordering::Acquire) + 2, Ordering::Release);
+    let before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+    let polls_before = calls.load(Ordering::Acquire);
+    cancel_at.store(polls_before + 2, Ordering::Release);
 
     assert!(matches!(
         graph.complete_available(
@@ -346,14 +418,18 @@ fn cancelled_dependency_hash_does_not_seal_a_partial_digest() {
     assert_eq!(graph.nodes.len(), 1);
     assert_eq!(graph.relation_count, 0);
     assert!(graph.source_for_cache(cache_index).is_err());
+    assert_eq!(calls.load(Ordering::Acquire) - polls_before, 2);
     // A sealed partial digest would bypass the operation's sticky cancellation on this access.
     assert!(matches!(
         snapshot.content_digest(host),
         Err(ScopeAbortCause::Control(ControlCause::Cancelled { .. }))
     ));
     let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-    assert_eq!(work.attempted(), HASH_CHUNK_BYTES as u64);
-    assert_eq!(work.consumed(), HASH_CHUNK_BYTES as u64);
+    assert_eq!(
+        work.attempted() - before.attempted(),
+        HASH_CHUNK_BYTES as u64
+    );
+    assert_eq!(work.consumed() - before.consumed(), HASH_CHUNK_BYTES as u64);
 }
 
 #[test]
@@ -390,6 +466,7 @@ fn available_reference_rejects_cache_index_and_byte_owner_mismatches() {
             _ => unreachable!(),
         };
 
+        let before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
         assert!(
             matches!(
                 graph.complete_available(
@@ -406,8 +483,8 @@ fn available_reference_rejects_cache_index_and_byte_owner_mismatches() {
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.relation_count, 0);
         let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-        assert_eq!(work.attempted(), 0);
-        assert_eq!(work.consumed(), 0);
+        assert_eq!(work.attempted() - before.attempted(), 0);
+        assert_eq!(work.consumed() - before.consumed(), 0);
     }
 }
 
@@ -451,6 +528,7 @@ fn cached_snapshot_keeps_existing_node_digest_and_cycle_checks() {
     graph.prepare_target(host, &mut pending, &identity).unwrap();
     let (cache_index, snapshot) = cache_snapshot(&mut graph, host, &identity, b"dependency");
     graph.nodes[dependency].content_digest = ManifestDigest::of(b"conflicting-digest");
+    let before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
     assert!(matches!(
         graph.complete_available(
             host,
@@ -462,6 +540,6 @@ fn cached_snapshot_keeps_existing_node_digest_and_cycle_checks() {
         Err(ResourceGraphError::DigestCollision)
     ));
     let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-    assert_eq!(work.attempted(), b"dependency".len() as u64);
-    assert_eq!(work.consumed(), b"dependency".len() as u64);
+    assert_eq!(work.attempted() - before.attempted(), 0);
+    assert_eq!(work.consumed() - before.consumed(), 0);
 }

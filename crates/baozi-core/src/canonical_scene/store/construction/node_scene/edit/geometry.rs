@@ -7,7 +7,6 @@ mod evidence;
 mod publication;
 mod schema;
 mod validation;
-use super::leaf_plan::NodeSceneInheritedLeafPlan;
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditPlanError, NodeSceneEditProgram};
 use crate::canonical_scene::store::construction::node_scene::NodeSceneDraft;
 use crate::canonical_scene::store::construction::node_scene::materialization::{
@@ -332,7 +331,6 @@ pub struct SceneGeometryEditPlan<'a, 'scope, O: OperationOwner> {
     source_generation: SceneGenerationId,
     replacement: SceneTriangulationReplacement<'a>,
     sealed: Vec<BoundPendingNodeSceneEdit<'a>>,
-    inherited: NodeSceneInheritedLeafPlan<'scope, O>,
     success_requirements: CanonicalSuccessRequirements,
     reservation: CanonicalReservation<'scope, O>,
 }
@@ -441,7 +439,13 @@ impl<'a> SceneGeometryEditTransaction<'a> {
             },
         )
         .map_err(map_plan)?;
-        let inherited = NodeSceneInheritedLeafPlan::try_collect(&pending, semantic)?;
+        if u64::from(pending.counts.profile.maximum_depth) > self.limits.max_provenance_depth() {
+            return Err(SceneGeometryEditRejection::Limit {
+                resource: "provenance depth",
+                actual: u64::from(pending.counts.profile.maximum_depth),
+                maximum: self.limits.max_provenance_depth(),
+            });
+        }
         let total = pending.counts.canonical_blocks.as_usize();
         let extra_work = (schema::ROOT_FIELDS as u64)
             // The rebound Scene plan already includes its Scene-count evidence record.
@@ -475,7 +479,6 @@ impl<'a> SceneGeometryEditTransaction<'a> {
             source_generation: input.generation(),
             replacement: self.replacement,
             sealed,
-            inherited,
             success_requirements,
             reservation,
         })
@@ -517,7 +520,6 @@ pub struct SceneGeometryEditExecutionPlan<'a, 'scope, O: OperationOwner> {
     brand: ConstructionBrand,
     replacement: SceneTriangulationReplacement<'a>,
     sealed: Vec<BoundPendingNodeSceneEdit<'a>>,
-    inherited: NodeSceneInheritedLeafPlan<'scope, O>,
     _reservation: CanonicalReservation<'scope, O>,
 }
 
@@ -533,7 +535,6 @@ impl<'a, 'scope, O: OperationOwner> CanonicalActivationDescription
             admission,
             replacement,
             sealed,
-            inherited,
             success_requirements,
             reservation,
             ..
@@ -545,7 +546,6 @@ impl<'a, 'scope, O: OperationOwner> CanonicalActivationDescription
                 brand: admission.brand,
                 replacement,
                 sealed,
-                inherited,
                 _reservation: reservation,
             },
         )
@@ -576,8 +576,7 @@ impl<O: OperationOwner> SceneGeometryEditExecutionPlan<'_, '_, O> {
             let code = rejection.stable_code();
             return lane.reject(rejection, code);
         };
-        let graph = match super::graph::try_rewrite_node_scene(&mut lane, pending, &self.inherited)
-        {
+        let graph = match super::graph::try_rewrite_node_scene(&mut lane, pending) {
             Ok(graph) => graph,
             Err(cause) => {
                 let rejection = SceneGeometryEditRejection::Runtime(cause);

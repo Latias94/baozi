@@ -53,11 +53,11 @@ pub(super) use input::geometry::{GeometryAttributePayloadAuthoring, GeometryTopo
 #[cfg(test)]
 pub(super) use input::lineage::{
     LineageAuthoringBatch, ObservedResourceAuthoring, OwnerProvenanceAuthoring, ProfileOwner,
-    ResourceIdentityLocalId, SourceIdentityAuthoring, SourceIdentityLocalId,
+    ProvenanceOperationAuthoring, ResourceIdentityLocalId, SourceIdentityAuthoring,
+    SourceIdentityLocalId,
 };
 pub(super) use input::lineage::{
-    ProvenanceLocalId, ProvenanceNodeAuthoring, ProvenanceOperationAuthoring,
-    ResourceIdentityStability, SessionOpaqueReason,
+    ProvenanceLocalId, ProvenanceNodeAuthoring, ResourceIdentityStability, SessionOpaqueReason,
 };
 #[cfg(test)]
 pub(super) use input::lineage::{
@@ -95,7 +95,8 @@ pub(super) use plan::geometry::{
 pub(super) use plan::geometry::{GeometryAuthoringLimit, GeometryAuthoringSemanticError};
 pub(super) use plan::profile::{
     CanonicalProfileOwner, ProfileAuthoringFailure, ProfileOwnerCatalog, ProfileOwnerCatalogError,
-    ValidatedProfileBatch, validate_profile_batch_with_control,
+    ProfileOwnerCounts, ProfileOwnerLayout, ValidatedProfileBatch,
+    validate_profile_batch_with_control,
 };
 pub(super) use plan::profile::{ProfileAuthoringLimit, ProfileAuthoringSemanticError};
 pub(super) use plan::spatial::{

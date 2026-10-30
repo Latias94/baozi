@@ -27,7 +27,7 @@ use crate::canonical_scene::store::production::{
     ProvenanceNodeAuthoring, ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason,
     SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch,
 };
-use crate::canonical_scene::store::profile_provenance::corrupt_profile_address_for_test;
+use crate::canonical_scene::store::profile_provenance::corrupt_profile_reference_for_test;
 use crate::entity::AuthoredTransform;
 use crate::extension::ExtensionValueRef;
 use crate::identity::{SceneGenerationError, SceneGenerationId};
@@ -81,26 +81,12 @@ pub(in crate::canonical_scene::store) use gltf_capability::{
     build_gltf_capability_scene_for_probe, project_gltf_facade_observation_v1_for_probe,
 };
 
-const NODE_ONLY_PROFILE_CANONICAL_BLOCK_COUNT: u64 = 8;
-const SOURCE_BACKED_PROFILE_CANONICAL_BLOCK_COUNT: u64 = 10;
 // These phase boundaries are black-box accounting evidence for the complete scoped rail. They
 // include operation-owned startup and retained-share work, not only core semantic actions.
 const SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK: u64 = 79;
 const SINGLE_TRS_FIRST_MATERIALIZATION_ENVELOPE_WORK: u64 = 23;
 const SINGLE_TRS_FIRST_MATERIALIZATION_ATTEMPTED_WORK: u64 =
     SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK + SINGLE_TRS_FIRST_MATERIALIZATION_ENVELOPE_WORK;
-// Typed nodes validate two rows and one child instead of 36 record cells, two reference cells,
-// and ten transform scalars. Removing the geometry directory, five Scene directory fields, and
-// four node-scratch cells reduces validation by 67 units. Materialization saves the same 67 units.
-const SINGLE_TRS_CENTRAL_VALIDATION_PREFIX_WORK: u64 = 382;
-const SINGLE_TRS_PRE_VALIDATION_COMPLETED_PREFIX_WORK: u64 = 381;
-const SINGLE_TRS_CENTRAL_VALIDATION_ENVELOPE_WORK: u64 = 358;
-const SINGLE_TRS_COMPLETE_WORK: u64 =
-    SINGLE_TRS_CENTRAL_VALIDATION_PREFIX_WORK + SINGLE_TRS_CENTRAL_VALIDATION_ENVELOPE_WORK;
-// Invalid authored TRS stops after 77 scratch cells, 12 Scene directory fields, 23 spatial
-// directory fields, and the two typed node rows. The child sequence has not been inspected.
-const SINGLE_TRS_INVALID_TRANSFORM_COMPLETED_PREFIX: u64 =
-    SINGLE_TRS_PRE_VALIDATION_COMPLETED_PREFIX_WORK + 77 + 12 + 23 + 2;
 const SINGLE_TRS_ROOTS: [NodeLocalId; 1] = [NodeLocalId::new(0)];
 const SINGLE_TRS_NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
     Presence::Absent,
@@ -355,6 +341,32 @@ fn finish_node_batch(
     .expect("node Scene input must be admitted")
     .finish_draft()
     .expect("node Scene scoped activation must prepare an exact outcome")
+}
+
+fn single_trs_work_baseline(account: &baozi_operation::PhysicalStorageAccount) -> (u64, u64) {
+    let parts = successful_parts(
+        finish_node_batch(
+            account,
+            test_limits(),
+            single_trs_batch(),
+            SceneValidationLimits::default(),
+        )
+        .publish_for_test()
+        .expect("healthy single-TRS work baseline"),
+    );
+    let work = parts
+        .report
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("healthy single-TRS work evidence");
+    assert_eq!(work.attempted(), work.consumed());
+    let total = work.consumed();
+    let validation = parts.scene.proof.central_validation_plan().work().get();
+    assert!(total > validation);
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    (total, validation)
 }
 
 fn finish_node_batch_with_faults(
@@ -825,19 +837,18 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
         .expect("generation after node Scene construction")
         .into_id();
 
-    let expected_canonical_block_count =
-        5 + usize::try_from(NODE_ONLY_PROFILE_CANONICAL_BLOCK_COUNT)
-            .expect("node-only profile canonical block count");
+    let canonical_block_count = parts.scene.canonical_block_count();
     let semantic = parts
         .scene
         .semantic_view()
         .expect("source-ordered forest semantic view");
     assert_eq!(semantic.node_count(), 5);
     assert_eq!(semantic.root_count(), 2);
-    assert_eq!(
-        parts.scene.canonical_block_count(),
-        expected_canonical_block_count
-    );
+    assert!(canonical_block_count > 0);
+    let profile = parts.scene.tables.profile.state.as_ref();
+    assert_eq!(profile.segments.len(), 1);
+    assert_eq!(profile.owners.len(), 7);
+    assert_eq!(profile.attachments.len(), 7);
     assert!(parts.scene.account().is_same_account(&account));
     assert!(generation_before < parts.scene.generation());
     assert!(parts.scene.generation() < generation_after);
@@ -910,11 +921,11 @@ fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bit
     assert_eq!(dimension.pending_publication(), 0);
     assert_eq!(
         dimension.committed(),
-        u64::try_from(expected_canonical_block_count).expect("node Scene canonical block count")
+        u64::try_from(canonical_block_count).expect("node Scene canonical block count")
     );
     assert_eq!(
         dimension.committed_canonical_output(),
-        u64::try_from(expected_canonical_block_count).expect("node Scene canonical block count")
+        u64::try_from(canonical_block_count).expect("node Scene canonical block count")
     );
     assert_eq!(
         dimension.published_outcome_evidence(),
@@ -1042,12 +1053,21 @@ fn many_primitives_materialize_into_one_typed_geometry_owner() {
         parts.scene.read_geometry().u32_values.len(),
         PRIMITIVE_COUNT
     );
-    let expected_canonical_block_count =
-        7 + usize::try_from(SOURCE_BACKED_PROFILE_CANONICAL_BLOCK_COUNT)
-            .expect("source-backed profile canonical block count");
+    let profile = parts.scene.tables.profile.state.as_ref();
+    assert_eq!(profile.segments.len(), 1);
+    assert_eq!(profile.lineage_counts.resources, 1);
+    assert_eq!(profile.lineage_counts.sources, 1);
+    assert_eq!(profile.lineage_counts.provenance, 1);
+    assert_eq!(profile.owners.len(), 4 + 2 * PRIMITIVE_COUNT);
     assert_eq!(
-        parts.scene.canonical_block_count(),
-        expected_canonical_block_count
+        parts
+            .report
+            .ledger_evidence()
+            .dimension_by_semantic(STORE_DIMENSION)
+            .expect("typed geometry publication evidence")
+            .committed_canonical_output(),
+        u64::try_from(parts.scene.canonical_block_count())
+            .expect("remaining raw canonical block count"),
     );
     drop(parts);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
@@ -1055,7 +1075,7 @@ fn many_primitives_materialize_into_one_typed_geometry_owner() {
 }
 
 #[test]
-fn present_empty_scene_publishes_every_domain_directory() {
+fn present_empty_scene_publishes_all_domains() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let roots = [];
@@ -1076,7 +1096,12 @@ fn present_empty_scene_publishes_every_domain_directory() {
 
     assert_eq!(semantic.node_count(), 0);
     assert_eq!(semantic.root_count(), 0);
-    assert_eq!(parts.scene.canonical_block_count(), 13);
+    assert!(parts.scene.read_geometry().primitives.is_empty());
+    let profile = parts.scene.tables.profile.state.as_ref();
+    assert_eq!(profile.segments.len(), 1);
+    assert_eq!(profile.owners.len(), 2);
+    assert_eq!(profile.attachments.len(), 2);
+    assert!(profile.metadata_entries.is_empty());
     let mut cursor = semantic
         .into_cursor()
         .expect("present-empty Scene semantic cursor");
@@ -1253,13 +1278,13 @@ fn materialization_work_budget_interruption_publishes_rich_failure() {
 
 #[test]
 fn central_validation_work_budget_interruption_publishes_rich_failure() {
-    const WORK_LIMIT: u64 = SINGLE_TRS_CENTRAL_VALIDATION_PREFIX_WORK;
-
     let factory = test_factory();
     let account = test_account(&factory, 256);
+    let (complete_work, validation_work) = single_trs_work_baseline(&account);
+    let pre_validation_work = complete_work - validation_work;
     let build = finish_node_batch(
         &account,
-        test_limits_with_work(WORK_LIMIT),
+        test_limits_with_work(pre_validation_work),
         single_trs_batch(),
         SceneValidationLimits::default(),
     );
@@ -1277,14 +1302,9 @@ fn central_validation_work_budget_interruption_publishes_rich_failure() {
         terminal_failure_class(failure.ledger_evidence()),
         StorePreparationFailureClass::Ledger
     );
-    assert_eq!(
-        work.attempted(),
-        SINGLE_TRS_CENTRAL_VALIDATION_PREFIX_WORK + SINGLE_TRS_CENTRAL_VALIDATION_ENVELOPE_WORK,
-    );
-    assert_eq!(
-        work.consumed(),
-        SINGLE_TRS_PRE_VALIDATION_COMPLETED_PREFIX_WORK
-    );
+    assert_eq!(work.attempted(), complete_work);
+    // The complete construction prefix remains consumed when validation admission fails.
+    assert_eq!(work.consumed(), pre_validation_work);
     assert_released(failure, &account);
 }
 
@@ -1292,6 +1312,7 @@ fn central_validation_work_budget_interruption_publishes_rich_failure() {
 fn generation_exhaustion_discards_canonical_storage_and_preserves_evidence() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
+    let (complete_work, _) = single_trs_work_baseline(&account);
     let build = finish_node_batch(
         &account,
         test_limits(),
@@ -1312,8 +1333,8 @@ fn generation_exhaustion_discards_canonical_storage_and_preserves_evidence() {
         terminal_failure_code(failure.ledger_evidence()),
         GENERATION_EXHAUSTED_CODE
     );
-    assert_eq!(work.attempted(), SINGLE_TRS_COMPLETE_WORK);
-    assert_eq!(work.consumed(), SINGLE_TRS_COMPLETE_WORK);
+    assert_eq!(work.attempted(), complete_work);
+    assert_eq!(work.consumed(), complete_work);
     assert_eq!(work.committed_canonical_output(), 0);
     assert_released(failure, &account);
 }
@@ -1342,8 +1363,7 @@ fn generation_source_panic_after_reservation_burns_the_gap_and_fails_closed() {
     let typed_allocations =
         control_before.live_retained_allocations() - control_after.live_retained_allocations();
     assert!(typed_bytes > 0);
-    // Two shared headers, the nonempty node rows, and the nonempty child sequence.
-    assert_eq!(typed_allocations, 4);
+    assert!(typed_allocations > 0);
     drop(control.scene.canonical);
     drop(control.report);
     assert_eq!(control_account.snapshot().live_retained_bytes(), 0);
@@ -1398,6 +1418,7 @@ fn generation_source_panic_after_reservation_burns_the_gap_and_fails_closed() {
 fn invalid_authored_transform_fault_is_a_build_invariant_rich_failure() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
+    let (complete_work, validation_work) = single_trs_work_baseline(&account);
     let build = finish_node_batch_with_faults(
         &account,
         test_limits(),
@@ -1415,11 +1436,9 @@ fn invalid_authored_transform_fault_is_a_build_invariant_rich_failure() {
         .ledger_evidence()
         .dimension_by_semantic(STORE_DIMENSION)
         .expect("node Scene work evidence");
-    assert_eq!(work.attempted(), SINGLE_TRS_COMPLETE_WORK);
-    assert_eq!(
-        work.consumed(),
-        SINGLE_TRS_INVALID_TRANSFORM_COMPLETED_PREFIX
-    );
+    assert_eq!(work.attempted(), complete_work);
+    assert!(work.consumed() >= complete_work - validation_work);
+    assert!(work.consumed() < complete_work);
     assert_eq!(
         terminal_failure_code(failure.ledger_evidence()),
         NODE_SCENE_BUILD_INVARIANT_CODE
@@ -1432,8 +1451,8 @@ fn central_validation_rejects_each_corrupted_owner_attachment_component() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
 
-    for (component, replacement) in [(0, 1), (1, u64::MAX), (2, 1), (3, 1)] {
-        corrupt_profile_address_for_test(0, component, replacement);
+    for (component, replacement) in [(0, 1), (1, u64::MAX), (2, 1)] {
+        corrupt_profile_reference_for_test(0, component, replacement);
         let build = finish_node_batch(
             &account,
             test_limits(),

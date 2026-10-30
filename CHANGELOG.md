@@ -6,6 +6,12 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Replaced generic profile/provenance records with retained typed tables. Edits share immutable
+  lineage segments and metadata payloads; central validation borrows their actual storage and
+  keeps only provenance depth scratch. Segment-local references derive their global coordinates
+  from validated prefixes.
+- Counted ordinary retained-handle work in the import operation's `WorkUnits` budget, independently
+  of the number of remaining Scene record blocks.
 - Added direct, controlled `triangulate_primitive` operations with centrally validated immutable
   output, retained Corner/Face remaps, and the original Scene returned on failure. Triangle lists
   preserve their generation and return `Unchanged`. Removed the empty request compiler and its

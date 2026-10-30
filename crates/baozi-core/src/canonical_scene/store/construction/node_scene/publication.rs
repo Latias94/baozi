@@ -98,7 +98,7 @@ impl NodeSceneLaneGenerationRejection {
 pub struct NodeSceneHandoffToken {
     generation: ReservedSceneGeneration,
     proof: super::NodeSceneValidationProof,
-    tables: crate::canonical_scene::store::typed_storage::NodeGeometryStorage,
+    tables: crate::canonical_scene::store::typed_storage::SceneTables,
 }
 
 /// Exact published owners returned only after the prepared canonical root matches core's proof.

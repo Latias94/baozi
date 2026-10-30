@@ -1,5 +1,10 @@
 use super::*;
 
+// Metadata byte limits measure the scalar representation, independently of descriptor layouts.
+const METADATA_BOOL_BYTES: u64 = 1;
+const METADATA_SCALAR64_BYTES: u64 = 8;
+const METADATA_FLOAT32_BYTES: u64 = 4;
+
 pub(super) fn validate_metadata<C, R>(
     metadata: MetadataAuthoringBatch<'_>,
     owners: ProfileOwnerCatalog<'_>,
@@ -304,22 +309,22 @@ fn metadata_value_measure(
 ) -> Result<MetadataValueMeasure, ProfileAuthoringSemanticError> {
     let measure = match value {
         ExtensionValueRef::Bool(_) => MetadataValueMeasure {
-            bytes: LOGICAL_U8_BYTES,
+            bytes: METADATA_BOOL_BYTES,
             bool_count: 1,
             ..MetadataValueMeasure::default()
         },
         ExtensionValueRef::I64(_) => MetadataValueMeasure {
-            bytes: LOGICAL_U64_BYTES,
+            bytes: METADATA_SCALAR64_BYTES,
             i64_count: 1,
             ..MetadataValueMeasure::default()
         },
         ExtensionValueRef::U64(_) => MetadataValueMeasure {
-            bytes: LOGICAL_U64_BYTES,
+            bytes: METADATA_SCALAR64_BYTES,
             u64_count: 1,
             ..MetadataValueMeasure::default()
         },
         ExtensionValueRef::F64(_) => MetadataValueMeasure {
-            bytes: LOGICAL_U64_BYTES,
+            bytes: METADATA_SCALAR64_BYTES,
             f64_count: 1,
             ..MetadataValueMeasure::default()
         },
@@ -361,22 +366,22 @@ fn metadata_value_measure(
             }
         }
         ExtensionValueRef::Vec2(_) => MetadataValueMeasure {
-            bytes: 2 * LOGICAL_F32_BYTES,
+            bytes: 2 * METADATA_FLOAT32_BYTES,
             f32_count: 2,
             ..MetadataValueMeasure::default()
         },
         ExtensionValueRef::Vec3(_) => MetadataValueMeasure {
-            bytes: 3 * LOGICAL_F32_BYTES,
+            bytes: 3 * METADATA_FLOAT32_BYTES,
             f32_count: 3,
             ..MetadataValueMeasure::default()
         },
         ExtensionValueRef::Vec4(_) | ExtensionValueRef::Color(_) => MetadataValueMeasure {
-            bytes: 4 * LOGICAL_F32_BYTES,
+            bytes: 4 * METADATA_FLOAT32_BYTES,
             f32_count: 4,
             ..MetadataValueMeasure::default()
         },
         ExtensionValueRef::Mat4(_) => MetadataValueMeasure {
-            bytes: 16 * LOGICAL_F32_BYTES,
+            bytes: 16 * METADATA_FLOAT32_BYTES,
             f32_count: 16,
             ..MetadataValueMeasure::default()
         },
@@ -752,15 +757,15 @@ fn dense_array_measure(
     values: ExtensionArrayRef<'_>,
 ) -> Result<MetadataValueMeasure, ProfileAuthoringSemanticError> {
     let (length, element_cells, element_bytes, lane) = match values {
-        ExtensionArrayRef::Bool(values) => (values.len(), 1_u64, LOGICAL_U8_BYTES, 0_u8),
-        ExtensionArrayRef::I64(values) => (values.len(), 1, LOGICAL_U64_BYTES, 1),
-        ExtensionArrayRef::U64(values) => (values.len(), 1, LOGICAL_U64_BYTES, 2),
-        ExtensionArrayRef::F64(values) => (values.len(), 1, LOGICAL_U64_BYTES, 3),
-        ExtensionArrayRef::Vec2(values) => (values.len(), 2, 2 * LOGICAL_F32_BYTES, 4),
-        ExtensionArrayRef::Vec3(values) => (values.len(), 3, 3 * LOGICAL_F32_BYTES, 4),
-        ExtensionArrayRef::Vec4(values) => (values.len(), 4, 4 * LOGICAL_F32_BYTES, 4),
-        ExtensionArrayRef::Color(values) => (values.len(), 4, 4 * LOGICAL_F32_BYTES, 4),
-        ExtensionArrayRef::Mat4(values) => (values.len(), 16, 16 * LOGICAL_F32_BYTES, 4),
+        ExtensionArrayRef::Bool(values) => (values.len(), 1_u64, METADATA_BOOL_BYTES, 0_u8),
+        ExtensionArrayRef::I64(values) => (values.len(), 1, METADATA_SCALAR64_BYTES, 1),
+        ExtensionArrayRef::U64(values) => (values.len(), 1, METADATA_SCALAR64_BYTES, 2),
+        ExtensionArrayRef::F64(values) => (values.len(), 1, METADATA_SCALAR64_BYTES, 3),
+        ExtensionArrayRef::Vec2(values) => (values.len(), 2, 2 * METADATA_FLOAT32_BYTES, 4),
+        ExtensionArrayRef::Vec3(values) => (values.len(), 3, 3 * METADATA_FLOAT32_BYTES, 4),
+        ExtensionArrayRef::Vec4(values) => (values.len(), 4, 4 * METADATA_FLOAT32_BYTES, 4),
+        ExtensionArrayRef::Color(values) => (values.len(), 4, 4 * METADATA_FLOAT32_BYTES, 4),
+        ExtensionArrayRef::Mat4(values) => (values.len(), 16, 16 * METADATA_FLOAT32_BYTES, 4),
     };
     let elements = usize_to_u64(length, "metadata dense array elements")?;
     let cells = elements.checked_mul(element_cells).ok_or(

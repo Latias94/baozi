@@ -194,7 +194,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         let deformation =
             deformation::NodeSceneDeformationTables::try_new(&scene.canonical, proof)?;
         let animation = animation::NodeSceneAnimationTables::try_new(&scene.canonical, proof)?;
-        let profile = profile::NodeSceneProfileTables::try_new(&scene.canonical, proof)?;
+        let profile = profile::NodeSceneProfileTables::try_new(&scene.tables.profile)?;
         Ok(Self {
             nodes,
             spatial,

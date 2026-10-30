@@ -31,6 +31,7 @@ fn operation_result<T>(result: ImportResult<T>) -> Result<T, ImportFailure> {
 
 #[derive(Clone, Copy)]
 enum WorkCase {
+    EntryFailure,
     ExactGroup,
     ZeroGroup,
     DynamicChunks,
@@ -62,6 +63,7 @@ struct WorkImporter {
 impl WorkImporter {
     fn id(&self) -> &'static str {
         match self.case {
+            WorkCase::EntryFailure => "dev.baozi.test.work-callback-entry",
             WorkCase::ExactGroup => "dev.baozi.test.work-callback-exact",
             WorkCase::ZeroGroup => "dev.baozi.test.work-callback-zero",
             WorkCase::DynamicChunks => "dev.baozi.test.work-callback-dynamic",
@@ -88,6 +90,7 @@ impl WorkImporter {
 
     fn extension(&self) -> &'static str {
         match self.case {
+            WorkCase::EntryFailure => "work-entry",
             WorkCase::ExactGroup => "work-exact",
             WorkCase::ZeroGroup => "work-zero",
             WorkCase::DynamicChunks => "work-dynamic",
@@ -137,6 +140,9 @@ impl FormatImporter for WorkImporter {
 
     fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
         match self.case {
+            WorkCase::EntryFailure => {
+                return Err(scope.resource_limit_exceeded("work-callback-entry", 0));
+            }
             WorkCase::ExactGroup => {
                 scope.with_work_group(
                     [
@@ -426,15 +432,32 @@ fn assert_dimension(
         .ledger()
         .dimension(dimension)
         .expect("work callback dimension evidence");
-    // These imports bind bytes directly: hashing the immutable fixture is the only WorkUnits
-    // prefix before parser entry. All expected amounts below describe callback work alone.
-    let acquisition_work = if dimension == ImportDimension::WorkUnits {
-        b"fixture".len() as u64
+    // Stop a matching direct-bytes import at parser entry so startup, ownership sharing and
+    // hashing remain observable without being mistaken for attempted or completed callback work.
+    let (entry_attempted, entry_consumed) = if dimension == ImportDimension::WorkUnits {
+        let baseline = run_case(WorkCase::EntryFailure, None)
+            .expect_err("the baseline stops before callback admission");
+        assert!(matches!(
+            baseline.cause(),
+            ImportCause::Scope(abort)
+                if matches!(
+                    abort.cause(),
+                    ScopeAbortCause::ResourceLimit {
+                        resource: "work-callback-entry",
+                        limit: 0,
+                    }
+                )
+        ));
+        let entry_work = baseline
+            .ledger()
+            .dimension(dimension)
+            .expect("parser-entry work evidence");
+        (entry_work.attempted(), entry_work.consumed())
     } else {
-        0
+        (0, 0)
     };
-    assert_eq!(evidence.attempted(), acquisition_work + attempted);
-    assert_eq!(evidence.consumed(), acquisition_work + consumed);
+    assert_eq!(evidence.attempted(), entry_attempted + attempted);
+    assert_eq!(evidence.consumed(), entry_consumed + consumed);
 }
 
 #[test]

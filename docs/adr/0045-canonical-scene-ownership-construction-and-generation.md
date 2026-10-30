@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-08-19
+updated: 2026-10-30
 authors:
   - Codex
 decision_type: architecture
@@ -16,6 +17,7 @@ evidence:
   - crates/baozi-core/src/canonical_scene/store/api/scene.rs
   - docs/plans/2026-10-29-001-refactor-library-delivery-plan.md
   - crates/baozi-core/src/canonical_scene/store/typed_storage.rs
+  - crates/baozi-core/src/canonical_scene/store/typed_storage/profile.rs
 related:
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
@@ -122,7 +124,8 @@ hold. ADR 0032 owns operation-specific remaps, invalidation, and reports.
 
 ### Private Typed Storage
 
-The private `SceneStorage` root owns the actual node and geometry tables. Node rows retain an
+The private `SceneStorage` root owns `SceneTables`, containing the actual node, geometry, and profile
+owners. Node rows retain an
 explicit synthetic/Matrix/TRS transform, ordered child ranges, optional name ranges, and optional
 spatial attachments. Geometry rows retain typed logical indices and ranges into contiguous scalar
 pools. A row does not carry a publication-local concrete-store slot for another typed row or pool.
@@ -155,11 +158,25 @@ survivor; the final generation releases the storage before its charge. A refused
 partially initialized vectors before the central admission is released. Retained rows, scalar pools,
 and their charge never escape as independently movable parts.
 
-During the node/geometry cutover, appearance, deformation, animation, spatial, and profile storage may
+During the domain cutover, appearance, deformation, animation, and spatial storage may
 remain in the existing retained owner under the same Scene root. Their node/geometry dependency
 checks borrow the actual typed tables. This is a migration boundary between domains, not a second
 Scene representation or a permanent compatibility adapter. Each subsequent domain cutover deletes
 its replaced record schema and conversion/validation projection in the same change.
+
+Profile state owns the current typed owner/attachment table, immutable lineage segment handles,
+and owner-bearing metadata descriptors. Each lineage segment and the metadata payload pools have
+independent retained owners. Operation digests are inline typed values. Lineage text and metadata
+text are `String` values, retaining UTF-8 validity through construction and cancellation. The central
+profile validator borrows these actual tables and pools, allocating only one depth value per
+provenance node. There is no parallel scalar-record encoding or full immutable-payload projection.
+
+An edit derives its owner catalog from its concrete final domain layout. Every changed owner gets
+its own operation node with its actual parent attachments; unaffected attachments preserve their
+segment qualification. Existing node-transform and triangulation edits share ancestor lineage and
+metadata payloads. New operations that change owner coordinates must update the same concrete
+mapping for attachments and metadata descriptors before publication. Neither a fixed input-owner
+row count nor an independent optional geometry plan authorizes the output layout.
 
 The D1 behavior gates cover borrowed Vertex/Corner/Face data, dense F64 values, sparse defaults and
 ordered indices, malformed ranges and references, interruption before a validation or copy action,

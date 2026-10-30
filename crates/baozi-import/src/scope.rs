@@ -4733,8 +4733,8 @@ mod tests {
     use baozi_io::AssetPath;
     use baozi_io::{AssetLength, AuthorityDomain};
     use baozi_operation::{
-        PhysicalStorageAccount, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
-        PhysicalStorageAccountLimits,
+        DimensionPolicy, PhysicalStorageAccount, PhysicalStorageAccountFactory,
+        PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
     };
     use std::io::Cursor;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -4942,10 +4942,14 @@ mod tests {
                     Cursor::new(b"a"),
                     length,
                 );
+                let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
                 let snapshot =
                     read_opened_asset(host, opened, ledger_phase, progress_phase, dimension, 4, 2)
                         .expect("unspent total-byte credit must carry into the next resource");
                 assert_eq!(&*snapshot, b"a");
+                let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+                assert_eq!(work.attempted() - work_before.attempted(), 2);
+                assert_eq!(work.consumed() - work_before.consumed(), 2);
                 assert_eq!(
                     current_live_bytes(host),
                     baseline + snapshot.capacity_bytes()
@@ -4966,9 +4970,6 @@ mod tests {
                 .unwrap();
             assert_eq!(dependency.attempted(), 1);
             assert_eq!(dependency.consumed(), 1);
-            let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            assert_eq!(work.attempted(), 4);
-            assert_eq!(work.consumed(), 4);
             assert_eq!(current_live_bytes(host), baseline);
             store.assert_released();
         }
@@ -4996,6 +4997,7 @@ mod tests {
             )
             .with_backend_hard_limit(0);
 
+            let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
             let snapshot = read_opened_asset(
                 host,
                 opened,
@@ -5019,8 +5021,8 @@ mod tests {
                 assert_eq!(state.live_bytes(), 0);
             }
             let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            assert_eq!(work.attempted(), 1);
-            assert_eq!(work.consumed(), 1);
+            assert_eq!(work.attempted() - work_before.attempted(), 1);
+            assert_eq!(work.consumed() - work_before.consumed(), 1);
         }
     }
 
@@ -5038,6 +5040,7 @@ mod tests {
                 Some(AssetLength::Exact(4)),
             );
 
+            let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
             let cause = read_opened_asset(
                 host,
                 opened,
@@ -5070,8 +5073,8 @@ mod tests {
                 assert_eq!(state.consumed(), payload.len() as u64);
             }
             let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            assert_eq!(work.attempted(), 2);
-            assert_eq!(work.consumed(), 2);
+            assert_eq!(work.attempted() - work_before.attempted(), 2);
+            assert_eq!(work.consumed() - work_before.consumed(), 2);
             assert_eq!(current_live_bytes(host), baseline);
             store.assert_released();
         }
@@ -5113,6 +5116,7 @@ mod tests {
                 None,
             );
 
+            let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
             let cause = read_opened_asset(
                 host,
                 opened,
@@ -5139,8 +5143,11 @@ mod tests {
             assert_eq!(primary.attempted(), 4);
             assert_eq!(primary.consumed(), 1);
             let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            assert_eq!(work.attempted(), 2);
-            assert_eq!(work.consumed(), if panics { 1 } else { 2 });
+            assert_eq!(work.attempted() - work_before.attempted(), 2);
+            assert_eq!(
+                work.consumed() - work_before.consumed(),
+                if panics { 1 } else { 2 }
+            );
             assert_eq!(current_live_bytes(host), baseline);
             store.assert_released();
         }
@@ -5149,10 +5156,7 @@ mod tests {
     #[test]
     fn asset_reads_poll_cancellation_and_admit_work_before_the_next_backend_call() {
         for cancel in [false, true] {
-            let limits = ResourceLimits {
-                max_work_units: 1,
-                ..ResourceLimits::default()
-            };
+            let limits = ResourceLimits::default();
             let control = if cancel {
                 ImportOperationControl::default().with_progress_observer(
                     |event: baozi_operation::ProgressEvent<
@@ -5183,6 +5187,13 @@ mod tests {
                 None,
             );
 
+            let work_before = host.dimension_state(ImportDimension::WorkUnits).unwrap();
+            let work_limit = work_before.attempted() + 1;
+            host.tighten_dimension_policy(
+                ImportDimension::WorkUnits,
+                DimensionPolicy::counter(work_limit, work_before.consumed() + 1, 0),
+            )
+            .expect("one backend read must fit after the startup work");
             let cause = read_opened_asset(
                 host,
                 opened,
@@ -5200,9 +5211,9 @@ mod tests {
                         cause,
                         ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
                             dimension: ImportDimension::WorkUnits,
-                            limit: 1,
+                            limit,
                             ..
-                        })
+                        }) if limit == work_limit
                     ) && !cancel
             );
             assert_eq!(calls.load(Ordering::Acquire), 1);
@@ -5210,8 +5221,11 @@ mod tests {
             assert_eq!(primary.attempted(), 4);
             assert_eq!(primary.consumed(), 1);
             let work = host.dimension_state(ImportDimension::WorkUnits).unwrap();
-            assert_eq!(work.attempted(), if cancel { 1 } else { 2 });
-            assert_eq!(work.consumed(), 1);
+            assert_eq!(
+                work.attempted() - work_before.attempted(),
+                if cancel { 1 } else { 2 }
+            );
+            assert_eq!(work.consumed() - work_before.consumed(), 1);
             assert_eq!(current_live_bytes(host), baseline);
             store.assert_released();
         }

@@ -9,11 +9,6 @@ use baozi_operation::{
     StoreWorkError,
 };
 
-use crate::canonical_scene::store::profile_provenance::PROFILE_PROVENANCE_ADDRESS_SCALARS;
-use crate::canonical_scene::store::schema::profile::{
-    PROFILE_EVIDENCE_SCALAR_COUNT, PROFILE_OPERATION_SCALAR_COUNT, PROFILE_PROVENANCE_SCALAR_COUNT,
-    PROFILE_RESOURCE_SCALAR_COUNT, PROFILE_SOURCE_SCALAR_COUNT,
-};
 use crate::canonical_scene::store::validation::{
     AnimationChannelValidationDescriptor, AnimationClipValidationDescriptor,
     AnimationMeteredCounts, AnimationValidationScratch, AnimationValidationScratchRequirements,
@@ -25,7 +20,6 @@ use crate::canonical_scene::store::validation::{
     DeformationPrimitiveValidationProjection, DeformationSkinValidationProjection,
     DeformationValidationScratch, DeformationValidationScratchRequirements,
     NodeSceneValidationScratch, ProfileMeteredCounts, ProfileMeteredScratch,
-    ProfileSegmentValidationScratch,
 };
 
 use super::{NODE_SCENE_STORAGE_REJECTION_CODE, SceneEvidenceCounts};
@@ -75,23 +69,24 @@ impl NodeSceneCentralValidationPlan {
         Self::try_new(self.scratch, work)
     }
 
-    pub(super) fn try_rebind_node_transform(
+    pub(super) fn try_rebind_profile_edit(
         self,
         counts: SceneEvidenceCounts,
         profile_counts: ProfileMeteredCounts,
+        maximum_depth: u32,
     ) -> Result<Self, StorePlanError> {
-        let scratch = self
-            .scratch
-            .try_rebind_profile_edit(counts, profile_counts)?;
-        let source_profile_work = self
-            .scratch
-            .profile_counts()
-            .validation_work()
-            .ok_or(StorePlanError::SizeOverflow)?;
-        let output_profile_work = scratch
-            .profile_counts()
-            .validation_work()
-            .ok_or(StorePlanError::SizeOverflow)?;
+        let scratch =
+            self.scratch
+                .try_rebind_profile_edit(counts, profile_counts, maximum_depth)?;
+        let profile_work = |counts: ProfileMeteredCounts| {
+            counts
+                .validation_work()?
+                .checked_add(counts.scratch_initialization_work()?)
+        };
+        let source_profile_work =
+            profile_work(self.scratch.profile_counts()).ok_or(StorePlanError::SizeOverflow)?;
+        let output_profile_work =
+            profile_work(scratch.profile_counts()).ok_or(StorePlanError::SizeOverflow)?;
         // Transform variants live inline in typed node rows; central validation performs
         // one checked authored-transform action per node regardless of Matrix/TRS width.
         let output_work = self
@@ -124,25 +119,13 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
     animation_clip_descriptors: ScratchCapacityPlan,
     animation_channel_descriptors: ScratchCapacityPlan,
     animation_target_marks: ScratchCapacityPlan,
-    profile_segments: ScratchCapacityPlan,
-    profile_resources: ScratchCapacityPlan,
-    profile_sources: ScratchCapacityPlan,
-    profile_provenance: ScratchCapacityPlan,
-    profile_operations: ScratchCapacityPlan,
-    profile_evidence: ScratchCapacityPlan,
-    profile_parents: ScratchCapacityPlan,
-    profile_wide: ScratchCapacityPlan,
-    profile_lineage_text: ScratchCapacityPlan,
-    profile_lineage_digests: ScratchCapacityPlan,
     profile_provenance_depths: ScratchCapacityPlan,
-    profile_owner_rows: ScratchCapacityPlan,
-    profile_attachments: ScratchCapacityPlan,
-    profile_metadata_rows: ScratchCapacityPlan,
     appearance_requirements: AppearanceValidationScratchRequirements,
     deformation_requirements: DeformationValidationScratchRequirements,
     animation_counts: AnimationMeteredCounts,
     animation_requirements: AnimationValidationScratchRequirements,
     profile_counts: ProfileMeteredCounts,
+    profile_maximum_depth: u32,
     envelope_bytes: u64,
     initialization_work: u64,
     semantic_projection_work: u64,
@@ -156,6 +139,7 @@ impl NodeSceneValidationScratchPlan {
         deformation_influence_count: u32,
         animation_counts: AnimationMeteredCounts,
         profile_counts: ProfileMeteredCounts,
+        profile_maximum_depth: u32,
     ) -> Result<Self, StorePlanError> {
         let camera_count = NodeSceneValidationScratch::required_camera_placement_counts(counts)
             .ok_or(StorePlanError::SizeOverflow)?;
@@ -232,50 +216,10 @@ impl NodeSceneValidationScratchPlan {
         >(animation_requirements.channel_descriptors)?;
         let animation_target_marks =
             scratch_capacity_plan::<u32>(animation_requirements.target_marks)?;
-        let profile_segments = scratch_capacity_plan::<ProfileSegmentValidationScratch<'static>>(
-            profile_count(profile_counts.segment_count)?,
+        let profile_provenance_depths = scratch_capacity_plan::<u32>(
+            ProfileMeteredScratch::required_provenance_depths(profile_counts.provenance_count)
+                .ok_or(StorePlanError::SizeOverflow)?,
         )?;
-        let profile_resources = scratch_capacity_plan::<u32>(profile_physical_count(
-            profile_counts.resource_count,
-            PROFILE_RESOURCE_SCALAR_COUNT,
-        )?)?;
-        let profile_sources = scratch_capacity_plan::<u32>(profile_physical_count(
-            profile_counts.source_count,
-            PROFILE_SOURCE_SCALAR_COUNT,
-        )?)?;
-        let profile_provenance = scratch_capacity_plan::<u32>(profile_physical_count(
-            profile_counts.provenance_count,
-            PROFILE_PROVENANCE_SCALAR_COUNT,
-        )?)?;
-        let profile_operations = scratch_capacity_plan::<u32>(profile_physical_count(
-            profile_counts.operation_count,
-            PROFILE_OPERATION_SCALAR_COUNT,
-        )?)?;
-        let profile_evidence = scratch_capacity_plan::<u32>(profile_physical_count(
-            profile_counts.evidence_count,
-            PROFILE_EVIDENCE_SCALAR_COUNT,
-        )?)?;
-        let profile_parents = scratch_capacity_plan::<u64>(profile_physical_count(
-            profile_counts.parent_count,
-            PROFILE_PROVENANCE_ADDRESS_SCALARS,
-        )?)?;
-        let profile_wide = scratch_capacity_plan::<u64>(profile_count(profile_counts.wide_count)?)?;
-        let profile_lineage_text =
-            scratch_capacity_plan::<u8>(profile_count(profile_counts.lineage_text_bytes)?)?;
-        let profile_lineage_digests =
-            scratch_capacity_plan::<u8>(profile_count(profile_counts.lineage_digest_bytes)?)?;
-        let profile_provenance_depths =
-            scratch_capacity_plan::<u32>(profile_count(profile_counts.provenance_count)?)?;
-        let profile_owner_rows =
-            scratch_capacity_plan::<u32>(profile_physical_count(profile_counts.owner_count, 4)?)?;
-        let profile_attachments = scratch_capacity_plan::<u64>(profile_physical_count(
-            profile_counts.attachment_count,
-            PROFILE_PROVENANCE_ADDRESS_SCALARS,
-        )?)?;
-        let profile_metadata_rows = scratch_capacity_plan::<u32>(profile_physical_count(
-            profile_counts.metadata_entry_count,
-            13,
-        )?)?;
         let envelope_bytes = [
             camera_placement_counts,
             light_placement_counts,
@@ -294,20 +238,7 @@ impl NodeSceneValidationScratchPlan {
             animation_clip_descriptors,
             animation_channel_descriptors,
             animation_target_marks,
-            profile_segments,
-            profile_resources,
-            profile_sources,
-            profile_provenance,
-            profile_operations,
-            profile_evidence,
-            profile_parents,
-            profile_wide,
-            profile_lineage_text,
-            profile_lineage_digests,
             profile_provenance_depths,
-            profile_owner_rows,
-            profile_attachments,
-            profile_metadata_rows,
         ]
         .into_iter()
         .try_fold(0_u64, |total, plan| {
@@ -350,11 +281,6 @@ impl NodeSceneValidationScratchPlan {
             .ok_or(StorePlanError::SizeOverflow)?;
         let semantic_projection_work = appearance_requirements
             .semantic_projection_work_units()
-            .and_then(|work| {
-                profile_counts
-                    .semantic_work()
-                    .and_then(|additional| work.checked_add(additional))
-            })
             .ok_or(StorePlanError::SizeOverflow)?;
 
         Ok(Self {
@@ -375,25 +301,13 @@ impl NodeSceneValidationScratchPlan {
             animation_clip_descriptors,
             animation_channel_descriptors,
             animation_target_marks,
-            profile_segments,
-            profile_resources,
-            profile_sources,
-            profile_provenance,
-            profile_operations,
-            profile_evidence,
-            profile_parents,
-            profile_wide,
-            profile_lineage_text,
-            profile_lineage_digests,
             profile_provenance_depths,
-            profile_owner_rows,
-            profile_attachments,
-            profile_metadata_rows,
             appearance_requirements,
             deformation_requirements,
             animation_counts,
             animation_requirements,
             profile_counts,
+            profile_maximum_depth,
             envelope_bytes,
             initialization_work,
             semantic_projection_work,
@@ -404,6 +318,7 @@ impl NodeSceneValidationScratchPlan {
         self,
         counts: SceneEvidenceCounts,
         profile_counts: ProfileMeteredCounts,
+        maximum_depth: u32,
     ) -> Result<Self, StorePlanError> {
         let influence_row_offset_count =
             u32::try_from(self.deformation_requirements.influence_row_offset_count)
@@ -417,6 +332,7 @@ impl NodeSceneValidationScratchPlan {
             influence_count,
             self.animation_counts,
             profile_counts,
+            maximum_depth,
         )
     }
 
@@ -449,14 +365,15 @@ impl NodeSceneValidationScratchPlan {
     pub(in crate::canonical_scene::store) const fn profile_counts(&self) -> ProfileMeteredCounts {
         self.profile_counts
     }
+
+    pub(in crate::canonical_scene::store) const fn profile_maximum_depth(&self) -> u32 {
+        self.profile_maximum_depth
+    }
 }
 
 /// Scoped validation scratch whose storage is reserved before the exact validation permit starts.
-pub(in crate::canonical_scene::store) struct ScopedNodeSceneValidationScratchOwner<
-    'session,
-    'scope,
-    O,
-> where
+pub(in crate::canonical_scene::store) struct ScopedNodeSceneValidationScratchOwner<'scope, O>
+where
     O: OperationOwner,
 {
     // Storage must drop before the reservation that accounts for it.
@@ -477,33 +394,20 @@ pub(in crate::canonical_scene::store) struct ScopedNodeSceneValidationScratchOwn
     animation_clip_descriptors: Vec<AnimationClipValidationDescriptor>,
     animation_channel_descriptors: Vec<AnimationChannelValidationDescriptor>,
     animation_target_marks: Vec<u32>,
-    profile_segments: Vec<ProfileSegmentValidationScratch<'session>>,
-    profile_resources: Vec<u32>,
-    profile_sources: Vec<u32>,
-    profile_provenance: Vec<u32>,
-    profile_operations: Vec<u32>,
-    profile_evidence: Vec<u32>,
-    profile_parents: Vec<u64>,
-    profile_wide: Vec<u64>,
-    profile_lineage_text: Vec<u8>,
-    profile_lineage_digests: Vec<u8>,
     profile_provenance_depths: Vec<u32>,
-    profile_owner_rows: Vec<u32>,
-    profile_attachments: Vec<u64>,
-    profile_metadata_rows: Vec<u32>,
     _reservation: CanonicalReservation<'scope, O>,
 }
 
-pub(in crate::canonical_scene::store) struct NodeSceneMeteredValidationScratch<'scratch, 'session> {
+pub(in crate::canonical_scene::store) struct NodeSceneMeteredValidationScratch<'scratch> {
     pub(in crate::canonical_scene::store) camera_placement_counts: &'scratch mut [u32],
     pub(in crate::canonical_scene::store) light_placement_counts: &'scratch mut [u32],
     pub(in crate::canonical_scene::store) appearance: AppearanceValidationScratch<'scratch>,
     pub(in crate::canonical_scene::store) deformation: DeformationValidationScratch<'scratch>,
     pub(in crate::canonical_scene::store) animation: AnimationValidationScratch<'scratch>,
-    pub(in crate::canonical_scene::store) profile: ProfileMeteredScratch<'scratch, 'session>,
+    pub(in crate::canonical_scene::store) profile: ProfileMeteredScratch<'scratch>,
 }
 
-impl<'session, 'scope, O> ScopedNodeSceneValidationScratchOwner<'session, 'scope, O>
+impl<'scope, O> ScopedNodeSceneValidationScratchOwner<'scope, O>
 where
     O: OperationOwner,
 {
@@ -550,20 +454,7 @@ where
         let animation_clip_descriptors = allocate!(animation_clip_descriptors);
         let animation_channel_descriptors = allocate!(animation_channel_descriptors);
         let animation_target_marks = allocate!(animation_target_marks);
-        let profile_segments = allocate!(profile_segments);
-        let profile_resources = allocate!(profile_resources);
-        let profile_sources = allocate!(profile_sources);
-        let profile_provenance = allocate!(profile_provenance);
-        let profile_operations = allocate!(profile_operations);
-        let profile_evidence = allocate!(profile_evidence);
-        let profile_parents = allocate!(profile_parents);
-        let profile_wide = allocate!(profile_wide);
-        let profile_lineage_text = allocate!(profile_lineage_text);
-        let profile_lineage_digests = allocate!(profile_lineage_digests);
         let profile_provenance_depths = allocate!(profile_provenance_depths);
-        let profile_owner_rows = allocate!(profile_owner_rows);
-        let profile_attachments = allocate!(profile_attachments);
-        let profile_metadata_rows = allocate!(profile_metadata_rows);
         checkpoint.resize(&mut reservation, actual)?;
 
         Ok(Self {
@@ -584,20 +475,7 @@ where
             animation_clip_descriptors,
             animation_channel_descriptors,
             animation_target_marks,
-            profile_segments,
-            profile_resources,
-            profile_sources,
-            profile_provenance,
-            profile_operations,
-            profile_evidence,
-            profile_parents,
-            profile_wide,
-            profile_lineage_text,
-            profile_lineage_digests,
             profile_provenance_depths,
-            profile_owner_rows,
-            profile_attachments,
-            profile_metadata_rows,
             _reservation: reservation,
         })
     }
@@ -668,26 +546,13 @@ where
             AnimationChannelValidationDescriptor::EMPTY
         );
         initialize!(animation_target_marks, 0);
-        initialize!(profile_segments, ProfileSegmentValidationScratch::EMPTY);
-        initialize!(profile_resources, 0);
-        initialize!(profile_sources, 0);
-        initialize!(profile_provenance, 0);
-        initialize!(profile_operations, 0);
-        initialize!(profile_evidence, 0);
-        initialize!(profile_parents, 0);
-        initialize!(profile_wide, 0);
-        initialize!(profile_lineage_text, 0);
-        initialize!(profile_lineage_digests, 0);
         initialize!(profile_provenance_depths, 0);
-        initialize!(profile_owner_rows, 0);
-        initialize!(profile_attachments, 0);
-        initialize!(profile_metadata_rows, 0);
         Ok(true)
     }
 
     pub(in crate::canonical_scene::store) fn metered_view(
         &mut self,
-    ) -> NodeSceneMeteredValidationScratch<'_, 'session> {
+    ) -> NodeSceneMeteredValidationScratch<'_> {
         NodeSceneMeteredValidationScratch {
             camera_placement_counts: &mut self.camera_placement_counts,
             light_placement_counts: &mut self.light_placement_counts,
@@ -712,22 +577,7 @@ where
                 &mut self.animation_channel_descriptors,
                 &mut self.animation_target_marks,
             ),
-            profile: ProfileMeteredScratch {
-                segments: &mut self.profile_segments,
-                resources: &mut self.profile_resources,
-                sources: &mut self.profile_sources,
-                provenance: &mut self.profile_provenance,
-                operations: &mut self.profile_operations,
-                evidence: &mut self.profile_evidence,
-                parents: &mut self.profile_parents,
-                wide: &mut self.profile_wide,
-                lineage_text: &mut self.profile_lineage_text,
-                lineage_digests: &mut self.profile_lineage_digests,
-                provenance_depths: &mut self.profile_provenance_depths,
-                owner_rows: &mut self.profile_owner_rows,
-                attachments: &mut self.profile_attachments,
-                metadata_rows: &mut self.profile_metadata_rows,
-            },
+            profile: ProfileMeteredScratch::new(&mut self.profile_provenance_depths),
         }
     }
 }
@@ -765,16 +615,6 @@ fn scratch_capacity_plan<T>(count: usize) -> Result<ScratchCapacityPlan, StorePl
         count,
         envelope_bytes,
     })
-}
-
-fn profile_count(count: u32) -> Result<usize, StorePlanError> {
-    usize::try_from(count).map_err(|_| StorePlanError::SizeOverflow)
-}
-
-fn profile_physical_count(count: u32, width: usize) -> Result<usize, StorePlanError> {
-    profile_count(count)?
-        .checked_mul(width)
-        .ok_or(StorePlanError::SizeOverflow)
 }
 
 fn validation_scratch_runtime_error(

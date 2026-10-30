@@ -185,6 +185,14 @@ Rejected.
 This preserves non-refundable work prefixes, exact memory lifetime, and terminal evidence while
 keeping physical allocation ownership separate. Chosen.
 
+### Ordinary Handle Work
+
+Ordinary retained-handle cloning and construction consume the operation's general work budget.
+Their envelope is independent of the number of record-store Scene members: resource acquisition,
+manifest ownership, and report ownership also share retained handles. Scene structural-work limits
+cover the actual record-store assembly and publication work. A typed-domain cutover can reduce that
+record count without reducing the work admitted for unrelated resource ownership.
+
 ## Consequences
 
 Positive:

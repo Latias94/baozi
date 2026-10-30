@@ -200,7 +200,7 @@ pages where justified. Delete each replaced record/projection/conversion rail in
 Remove unused alternate validator entry points and abstract APIs that no longer have callers.
 E and F can deliver after their required domain cutovers; they do not wait for every D2 domain.
 
-The next D2 increment is the complete profile/provenance domain, including owner attachments and
+The profile/provenance D2 increment covers the complete domain, including owner attachments and
 metadata. Normal generation can add, replace, or remove attributes, so its output owner catalog
 must come from the final typed domain layout rather than a scan of input owners. Keep immutable
 metadata payloads separate from owner-bearing descriptors so owner reindexing does not copy large
@@ -208,6 +208,12 @@ payloads. Share unchanged lineage segments through the existing retained-storage
 Cut fresh build, edit, central validation, semantic reads, and snapshot traversal over together;
 delete their replaced profile schemas, scalar codecs, record rewrites, and projection scratch.
 This is the prerequisite for normals' owner changes, not a new generic patch or scheduler layer.
+
+This storage cutover is implemented for fresh construction, node-transform edits, and triangulation.
+Its behavior and allocation evidence are recorded in the
+[delivery progress](../reviews/2026-10-29-delivery-progress.md#typed-profile-and-provenance-cutover-2026-10-30).
+Attribute-producing operations still need their concrete added/deleted/reindexed owner mappings.
+Appearance, deformation/animation, and spatial storage remain subsequent D2 domain cutovers.
 
 The private root becomes `SceneTables`, retaining node, geometry, and profile owners through the
 existing storage-first release mechanism. Profile state owns typed owner/attachment and metadata

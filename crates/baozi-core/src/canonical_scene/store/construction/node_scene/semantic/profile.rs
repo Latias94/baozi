@@ -1,53 +1,51 @@
-use baozi_operation::{
-    CanonicalRecordView, PublishedCanonicalStore, RecordBlock, ScalarSequence, SequenceView,
-    StoredScalar, Utf8Block,
-};
-
 use crate::canonical_scene::store::production::{CanonicalProfileOwner, SessionOpaqueReason};
-use crate::canonical_scene::store::profile_provenance::{
-    PROFILE_PROVENANCE_ADDRESS_SCALARS, QualifiedProvenanceAddressSlice,
+use crate::canonical_scene::store::profile_provenance::ProfileProvenanceRef;
+use crate::canonical_scene::store::typed_storage::TextRange;
+use crate::canonical_scene::store::typed_storage::profile::{
+    LineageCounts, LineageSegment, MetadataPayloads, ProfileState, ProfileStorage,
+    StoredOperationEvidence, StoredOperationKind, StoredProfileSegment, StoredProvenance,
+    StoredProvenanceKind, StoredResource, StoredResourceStability, StoredSource,
+    StoredSourceLocator,
 };
-use crate::canonical_scene::store::schema::profile::*;
-use crate::canonical_scene::store::schema::{
-    CanonicalBlockRef, CanonicalSchema, SceneDirectorySchema,
-};
-use crate::canonical_scene::store::validation::NodeSceneValidationProof;
 use crate::provenance::{DigestAlgorithm, SourceObjectKind};
 
-use super::{NodeSceneSemanticResult, invariant, read_scalar, read_u32_as_usize};
-
-type SceneCanonicalStore = PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>;
-type OptionalCanonicalValue<'scene, Tag, Value> =
-    (Option<CanonicalBlockRef<Tag>>, Option<&'scene Value>);
+use super::{NodeSceneSemanticResult, invariant};
 
 mod metadata;
-mod storage;
 
+use metadata::MetadataCursor;
 pub(in crate::canonical_scene::store) use metadata::{
     NodeSceneProfileMetadataArray, NodeSceneProfileMetadataArrayKind,
     NodeSceneProfileMetadataEntry, NodeSceneProfileMetadataValue,
 };
-use metadata::{decode_metadata_value, metadata_shape, require_metadata_lane_references};
-use storage::*;
 
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneProfileProvenanceIndices<'scene> {
-    addresses: QualifiedProvenanceAddressSlice<'scene>,
+    references: &'scene [ProfileProvenanceRef],
+    profile: &'scene ProfileStorage,
 }
 
 impl<'scene> NodeSceneProfileProvenanceIndices<'scene> {
-    const fn new(addresses: QualifiedProvenanceAddressSlice<'scene>) -> Self {
-        Self { addresses }
+    const fn new(
+        profile: &'scene ProfileStorage,
+        references: &'scene [ProfileProvenanceRef],
+    ) -> Self {
+        Self {
+            references,
+            profile,
+        }
     }
 
     pub(in crate::canonical_scene::store) const fn len(self) -> usize {
-        self.addresses.len()
+        self.references.len()
     }
 
     pub(in crate::canonical_scene::store) fn iter(
         self,
     ) -> impl ExactSizeIterator<Item = Option<u32>> + 'scene {
-        self.addresses.global_indices()
+        self.references
+            .iter()
+            .map(move |reference| self.profile.resolve(*reference).map(|(index, _)| index))
     }
 }
 
@@ -67,437 +65,142 @@ impl<'left, 'right> PartialEq<NodeSceneProfileProvenanceIndices<'right>>
 
 impl Eq for NodeSceneProfileProvenanceIndices<'_> {}
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-struct ProfileLineageCounts {
-    resources: usize,
-    sources: usize,
-    provenance: usize,
-    operations: usize,
-    evidence: usize,
-    parents: usize,
-    wide: usize,
-    text: usize,
-    digests: usize,
-}
-
-impl ProfileLineageCounts {
-    fn checked_add(self, other: Self) -> NodeSceneSemanticResult<Self> {
-        Ok(Self {
-            resources: checked_add(self.resources, other.resources)?,
-            sources: checked_add(self.sources, other.sources)?,
-            provenance: checked_add(self.provenance, other.provenance)?,
-            operations: checked_add(self.operations, other.operations)?,
-            evidence: checked_add(self.evidence, other.evidence)?,
-            parents: checked_add(self.parents, other.parents)?,
-            wide: checked_add(self.wide, other.wide)?,
-            text: checked_add(self.text, other.text)?,
-            digests: checked_add(self.digests, other.digests)?,
-        })
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ProfileSegmentProgress {
-    next_segment: usize,
-    lineage_prefixes: ProfileLineageCounts,
-}
-
-impl ProfileSegmentProgress {
-    const fn empty() -> Self {
-        Self {
-            next_segment: 0,
-            lineage_prefixes: ProfileLineageCounts {
-                resources: 0,
-                sources: 0,
-                provenance: 0,
-                operations: 0,
-                evidence: 0,
-                parents: 0,
-                wide: 0,
-                text: 0,
-                digests: 0,
-            },
-        }
-    }
-}
-
-struct ProfileLineageCursor<'scene> {
-    progress: ProfileSegmentProgress,
-    active_segment: Option<ProfileSegmentDecoder<'scene>>,
-}
-
-impl ProfileLineageCursor<'_> {
-    const fn empty() -> Self {
-        Self {
-            progress: ProfileSegmentProgress::empty(),
-            active_segment: None,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.progress = ProfileSegmentProgress::empty();
-        self.active_segment = None;
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct NodeSceneProfileTables<'scene> {
-    canonical: &'scene SceneCanonicalStore,
-    segments: CanonicalRecordView<'scene>,
-    owners: CanonicalRecordView<'scene>,
-    attachments_ref: CanonicalBlockRef<ProfileLineageAttachmentSchema>,
-    attachments: QualifiedProvenanceAddressSlice<'scene>,
-    metadata_entries: Option<CanonicalRecordView<'scene>>,
-    metadata_text_ref: Option<CanonicalBlockRef<ProfileMetadataTextSchema>>,
-    metadata_bytes_ref: Option<CanonicalBlockRef<ProfileMetadataBytesSchema>>,
-    metadata_bools_ref: Option<CanonicalBlockRef<ProfileMetadataBoolSchema>>,
-    metadata_i64s_ref: Option<CanonicalBlockRef<ProfileMetadataI64Schema>>,
-    metadata_u64s_ref: Option<CanonicalBlockRef<ProfileMetadataU64Schema>>,
-    metadata_f64s_ref: Option<CanonicalBlockRef<ProfileMetadataF64Schema>>,
-    metadata_f32s_ref: Option<CanonicalBlockRef<ProfileMetadataF32Schema>>,
-    metadata_text: Option<&'scene str>,
-    metadata_bytes: Option<&'scene [u8]>,
-    metadata_bools: Option<&'scene [u8]>,
-    metadata_i64s: Option<&'scene [i64]>,
-    metadata_u64s: Option<&'scene [u64]>,
-    metadata_f64s: Option<&'scene [f64]>,
-    metadata_f32s: Option<&'scene [f32]>,
-    lineage_counts: ProfileLineageCounts,
+    profile: &'scene ProfileStorage,
+    state: &'scene ProfileState,
+    metadata: &'scene MetadataPayloads,
 }
 
 impl<'scene> NodeSceneProfileTables<'scene> {
-    pub(super) fn try_new(
-        canonical: &'scene SceneCanonicalStore,
-        proof: NodeSceneValidationProof,
-    ) -> NodeSceneSemanticResult<Self> {
-        let directory = canonical
-            .records(proof.profile_directory().into_store())
-            .ok_or_else(|| invariant("validated profile directory is unavailable or mistyped"))?;
-        require_table_layout(
-            directory,
-            1,
-            PROFILE_DIRECTORY_FIELD_COUNT,
-            "validated profile directory layout disagrees with its schema",
-        )?;
-        if read_scalar::<u32>(
-            directory,
-            0,
-            profile_directory_field::SCHEMA_REVISION,
-            "validated profile schema revision is unreadable",
-        )? != PROFILE_SCHEMA_REVISION
-        {
+    pub(super) fn try_new(profile: &'scene ProfileStorage) -> NodeSceneSemanticResult<Self> {
+        let state = profile.state.as_ref();
+        if state.segments.is_empty() || state.owners.len() < 2 {
             return Err(invariant(
-                "validated profile schema revision is unsupported",
+                "validated typed profile is missing segments or required owners",
             ));
         }
-
-        let segment_count = read_u32_as_usize(
-            directory,
-            0,
-            profile_directory_field::SEGMENT_COUNT,
-            "validated profile segment count is unreadable",
-        )?;
-        if segment_count == 0 || segment_count != proof.profile_segment_count() {
-            return Err(invariant(
-                "validated profile segment count disagrees with validation proof",
-            ));
-        }
-        require_record_reference(
-            directory,
-            0,
-            profile_directory_field::SEGMENTS,
-            proof.profile_segments(),
-            "validated profile segment-table reference is unreadable",
-            "validated profile segment-table reference disagrees with validation proof",
-        )?;
-        let segments = canonical
-            .records(proof.profile_segments().into_store())
-            .ok_or_else(|| {
-                invariant("validated profile segment table is unavailable or mistyped")
-            })?;
-        require_table_layout(
-            segments,
-            segment_count,
-            PROFILE_SEGMENT_FIELD_COUNT,
-            "validated profile segment-table layout disagrees with validation proof",
-        )?;
-        let lineage_counts = ProfileLineageCounts {
-            resources: u32_to_usize(proof.profile_resource_count())?,
-            sources: u32_to_usize(proof.profile_source_count())?,
-            provenance: u32_to_usize(proof.profile_provenance_count())?,
-            operations: u32_to_usize(proof.profile_operation_count())?,
-            evidence: u32_to_usize(proof.profile_evidence_count())?,
-            parents: u32_to_usize(proof.profile_parent_count())?,
-            wide: u32_to_usize(proof.profile_wide_count())?,
-            text: u32_to_usize(proof.profile_lineage_text_bytes())?,
-            digests: u32_to_usize(proof.profile_lineage_digest_bytes())?,
-        };
-
-        let owner_count = read_u32_as_usize(
-            directory,
-            0,
-            profile_directory_field::OWNER_COUNT,
-            "validated profile owner count is unreadable",
-        )?;
-        if owner_count < 2 {
-            return Err(invariant(
-                "validated profile has fewer than its required owners",
-            ));
-        }
-        require_record_reference(
-            directory,
-            0,
-            profile_directory_field::OWNERS,
-            proof.profile_owners(),
-            "validated profile owner-table reference is unreadable",
-            "validated profile owner-table reference disagrees with validation proof",
-        )?;
-        let owners = canonical
-            .records(proof.profile_owners().into_store())
-            .ok_or_else(|| invariant("validated profile owner table is unavailable or mistyped"))?;
-        require_table_layout(
-            owners,
-            owner_count,
-            PROFILE_OWNER_FIELD_COUNT,
-            "validated profile owner-table layout disagrees with its directory",
-        )?;
-        let attachments_ref = owners
-            .sequence_ref::<u64, ProfileLineageAttachmentSchema>(
-                0,
-                profile_owner_field::ATTACHMENTS,
-            )
-            .map(CanonicalBlockRef::from_store)
-            .ok_or_else(|| invariant("validated profile attachment reference is unreadable"))?;
-        let attachments = canonical
-            .sequence(attachments_ref.into_store())
-            .map(|values: SequenceView<'scene, u64>| values.as_slice())
-            .filter(|values| !values.is_empty())
-            .ok_or_else(|| invariant("validated profile attachments are unavailable or empty"))?;
-        let attachments = QualifiedProvenanceAddressSlice::from_scalars(
-            attachments,
-            u32_to_usize(proof.counts().profile_attachment_count)?,
-        )
-        .ok_or_else(|| invariant("validated profile attachment width is inconsistent"))?;
-
-        require_record_reference(
-            directory,
-            0,
-            profile_directory_field::METADATA,
-            proof.profile_metadata_directory(),
-            "validated profile metadata-directory reference is unreadable",
-            "validated profile metadata-directory reference disagrees with validation proof",
-        )?;
-        let metadata_directory = canonical
-            .records(proof.profile_metadata_directory().into_store())
-            .ok_or_else(|| {
-                invariant("validated profile metadata directory is unavailable or mistyped")
-            })?;
-        require_table_layout(
-            metadata_directory,
-            1,
-            PROFILE_METADATA_DIRECTORY_FIELD_COUNT,
-            "validated profile metadata-directory layout disagrees with its schema",
-        )?;
-        if read_scalar::<u32>(
-            metadata_directory,
-            0,
-            profile_metadata_directory_field::SCHEMA_REVISION,
-            "validated profile metadata schema revision is unreadable",
-        )? != PROFILE_METADATA_SCHEMA_REVISION
-        {
-            return Err(invariant(
-                "validated profile metadata schema revision is unsupported",
-            ));
-        }
-
-        let entry_count = read_u32_as_usize(
-            metadata_directory,
-            0,
-            profile_metadata_directory_field::ENTRY_COUNT,
-            "validated profile metadata-entry count is unreadable",
-        )?;
-        let metadata_entries = resolve_optional_table(
-            canonical,
-            metadata_directory,
-            profile_metadata_directory_field::ENTRIES,
-            entry_count,
-            PROFILE_METADATA_ENTRY_FIELD_COUNT,
-            proof.profile_metadata_entries(),
-            "validated profile metadata-entry table is inconsistent",
-        )?;
-
-        let (metadata_text_ref, metadata_text) = resolve_optional_utf8(
-            canonical,
-            metadata_directory,
-            profile_metadata_directory_field::TEXT_COUNT,
-            profile_metadata_directory_field::TEXTS,
-            "validated profile metadata text lane is inconsistent",
-        )?;
-        let (metadata_bytes_ref, metadata_bytes) = resolve_optional_bytes(
-            canonical,
-            metadata_directory,
-            profile_metadata_directory_field::BYTE_COUNT,
-            profile_metadata_directory_field::BYTES,
-            "validated profile metadata byte lane is inconsistent",
-        )?;
-        let (metadata_bools_ref, metadata_bools) =
-            resolve_optional_sequence::<u8, ProfileMetadataBoolSchema>(
-                canonical,
-                metadata_directory,
-                0,
-                profile_metadata_directory_field::BOOL_COUNT,
-                profile_metadata_directory_field::BOOL_VALUES,
-                1,
-                "validated profile metadata bool lane is inconsistent",
-            )?;
-        let (metadata_i64s_ref, metadata_i64s) =
-            resolve_optional_sequence::<i64, ProfileMetadataI64Schema>(
-                canonical,
-                metadata_directory,
-                0,
-                profile_metadata_directory_field::I64_COUNT,
-                profile_metadata_directory_field::I64_VALUES,
-                1,
-                "validated profile metadata i64 lane is inconsistent",
-            )?;
-        let (metadata_u64s_ref, metadata_u64s) =
-            resolve_optional_sequence::<u64, ProfileMetadataU64Schema>(
-                canonical,
-                metadata_directory,
-                0,
-                profile_metadata_directory_field::U64_COUNT,
-                profile_metadata_directory_field::U64_VALUES,
-                1,
-                "validated profile metadata u64 lane is inconsistent",
-            )?;
-        let (metadata_f64s_ref, metadata_f64s) =
-            resolve_optional_sequence::<f64, ProfileMetadataF64Schema>(
-                canonical,
-                metadata_directory,
-                0,
-                profile_metadata_directory_field::F64_COUNT,
-                profile_metadata_directory_field::F64_VALUES,
-                1,
-                "validated profile metadata f64 lane is inconsistent",
-            )?;
-        let (metadata_f32s_ref, metadata_f32s) =
-            resolve_optional_sequence::<f32, ProfileMetadataF32Schema>(
-                canonical,
-                metadata_directory,
-                0,
-                profile_metadata_directory_field::F32_COUNT,
-                profile_metadata_directory_field::F32_VALUES,
-                1,
-                "validated profile metadata f32 lane is inconsistent",
-            )?;
-
         Ok(Self {
-            canonical,
-            segments,
-            owners,
-            attachments_ref,
-            attachments,
-            metadata_entries,
-            metadata_text_ref,
-            metadata_bytes_ref,
-            metadata_bools_ref,
-            metadata_i64s_ref,
-            metadata_u64s_ref,
-            metadata_f64s_ref,
-            metadata_f32s_ref,
-            metadata_text,
-            metadata_bytes,
-            metadata_bools,
-            metadata_i64s,
-            metadata_u64s,
-            metadata_f64s,
-            metadata_f32s,
-            lineage_counts,
+            profile,
+            state,
+            metadata: profile.metadata.as_ref(),
         })
     }
 
-    pub(super) const fn into_cursor(self) -> NodeSceneProfileCursor<'scene> {
+    pub(super) fn into_cursor(self) -> NodeSceneProfileCursor<'scene> {
         NodeSceneProfileCursor {
             tables: self,
-            phase: ProfileCursorPhase::Resources,
-            lineage: ProfileLineageCursor::empty(),
+            resources: LineageCursor::default(),
+            sources: LineageCursor::default(),
+            provenance: LineageCursor::default(),
+            evidence: LineageCursor::default(),
+            next_operation: 0,
             next_owner: 0,
             next_attachment: 0,
             previous_owner: None,
-            next_metadata_entry: 0,
-            metadata_text_cursor: 0,
-            metadata_byte_cursor: 0,
-            metadata_bool_cursor: 0,
-            metadata_i64_cursor: 0,
-            metadata_u64_cursor: 0,
-            metadata_f64_cursor: 0,
-            metadata_f32_cursor: 0,
-            previous_metadata_owner: None,
-            previous_metadata_key: None,
-            #[cfg(test)]
-            decoded_lineage_rows: [0; 4],
-            #[cfg(test)]
-            lineage_segment_checkpoints: [0; 4],
+            metadata: MetadataCursor::default(),
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ProfileCursorPhase {
-    Resources,
-    Sources,
-    Provenance,
-    Evidence,
-    Owners,
-    Metadata,
-}
-
-#[cfg(test)]
-fn lineage_phase_slot(phase: ProfileCursorPhase) -> NodeSceneSemanticResult<usize> {
-    match phase {
-        ProfileCursorPhase::Resources => Ok(0),
-        ProfileCursorPhase::Sources => Ok(1),
-        ProfileCursorPhase::Provenance => Ok(2),
-        ProfileCursorPhase::Evidence => Ok(3),
-        ProfileCursorPhase::Owners | ProfileCursorPhase::Metadata => Err(invariant(
-            "profile test counter received a non-lineage phase",
-        )),
-    }
-}
-
-/// One bounded advance through the proof-qualified profile projection.
-///
-/// A checkpoint resolves at most one physical lineage segment. It deliberately
-/// carries no semantic value: physical segment framing is retained-storage
-/// topology, not canonical Scene meaning.
+/// A call opens at most one segment or reads one semantic row. Segment framing
+/// produces a checkpoint so snapshot work can yield even through empty domains.
 pub(in crate::canonical_scene::store) enum NodeSceneProfileStep<T> {
     Checkpoint,
     Item(T),
     End,
 }
 
+#[derive(Default)]
+struct LineageCursor<'scene> {
+    next_segment: usize,
+    next_row: usize,
+    prefixes: LineageCounts,
+    active: Option<&'scene StoredProfileSegment>,
+    finished: bool,
+    #[cfg(test)]
+    decoded_rows: usize,
+    #[cfg(test)]
+    segment_checkpoints: usize,
+}
+
+impl<'scene> LineageCursor<'scene> {
+    fn step<Row: 'scene, View>(
+        &mut self,
+        profile: &'scene ProfileStorage,
+        rows: impl FnOnce(&'scene LineageSegment) -> &'scene [Row],
+        read: impl FnOnce(
+            &'scene StoredProfileSegment,
+            usize,
+            &'scene Row,
+        ) -> NodeSceneSemanticResult<View>,
+    ) -> NodeSceneSemanticResult<NodeSceneProfileStep<View>> {
+        if self.finished {
+            return Ok(NodeSceneProfileStep::End);
+        }
+        if let Some(segment) = self.active {
+            let rows = rows(segment.lineage.as_ref());
+            if let Some(row) = rows.get(self.next_row) {
+                let value = read(segment, self.next_row, row)?;
+                self.next_row += 1;
+                #[cfg(test)]
+                {
+                    self.decoded_rows += 1;
+                }
+                return Ok(NodeSceneProfileStep::Item(value));
+            }
+            if self.next_row != rows.len() {
+                return Err(invariant("profile lineage cursor exceeds its typed rows"));
+            }
+            self.active = None;
+        }
+        let state = profile.state.as_ref();
+        if self.next_segment == state.segments.len() {
+            if self.prefixes != state.lineage_counts {
+                return Err(invariant(
+                    "validated profile segment totals disagree with typed storage",
+                ));
+            }
+            self.finished = true;
+            return Ok(NodeSceneProfileStep::End);
+        }
+        let segment = state
+            .segments
+            .get(self.next_segment)
+            .ok_or_else(|| invariant("profile lineage cursor exceeds its typed segments"))?;
+        let counts = segment.lineage.as_ref().counts();
+        if segment.prefixes != self.prefixes || counts == LineageCounts::default() {
+            return Err(invariant(
+                "validated profile segment prefixes are inconsistent",
+            ));
+        }
+        self.prefixes = self
+            .prefixes
+            .checked_add(counts)
+            .ok_or_else(|| invariant("validated profile segment totals overflow"))?;
+        self.next_segment += 1;
+        self.next_row = 0;
+        self.active = Some(segment);
+        #[cfg(test)]
+        {
+            self.segment_checkpoints += 1;
+        }
+        Ok(NodeSceneProfileStep::Checkpoint)
+    }
+}
+
 #[must_use = "the profile cursor must be consumed or deliberately discarded"]
 pub(in crate::canonical_scene::store) struct NodeSceneProfileCursor<'scene> {
     tables: NodeSceneProfileTables<'scene>,
-    phase: ProfileCursorPhase,
-    lineage: ProfileLineageCursor<'scene>,
+    resources: LineageCursor<'scene>,
+    sources: LineageCursor<'scene>,
+    provenance: LineageCursor<'scene>,
+    evidence: LineageCursor<'scene>,
+    next_operation: usize,
     next_owner: usize,
     next_attachment: usize,
     previous_owner: Option<CanonicalProfileOwner>,
-    next_metadata_entry: usize,
-    metadata_text_cursor: usize,
-    metadata_byte_cursor: usize,
-    metadata_bool_cursor: usize,
-    metadata_i64_cursor: usize,
-    metadata_u64_cursor: usize,
-    metadata_f64_cursor: usize,
-    metadata_f32_cursor: usize,
-    previous_metadata_owner: Option<CanonicalProfileOwner>,
-    previous_metadata_key: Option<&'scene str>,
-    #[cfg(test)]
-    decoded_lineage_rows: [usize; 4],
-    #[cfg(test)]
-    lineage_segment_checkpoints: [usize; 4],
+    metadata: MetadataCursor<'scene>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -543,586 +246,190 @@ impl<'scene> NodeSceneProfileMetadataLanes<'scene> {
 
 impl<'scene> NodeSceneProfileCursor<'scene> {
     pub(in crate::canonical_scene::store) const fn resource_count(&self) -> usize {
-        self.tables.lineage_counts.resources
+        self.tables.state.lineage_counts.resources
     }
 
     pub(in crate::canonical_scene::store) const fn source_count(&self) -> usize {
-        self.tables.lineage_counts.sources
+        self.tables.state.lineage_counts.sources
     }
 
     pub(in crate::canonical_scene::store) const fn provenance_count(&self) -> usize {
-        self.tables.lineage_counts.provenance
+        self.tables.state.lineage_counts.provenance
     }
 
     pub(in crate::canonical_scene::store) const fn operation_count(&self) -> usize {
-        self.tables.lineage_counts.operations
+        self.tables.state.lineage_counts.operations
     }
 
     pub(in crate::canonical_scene::store) const fn evidence_count(&self) -> usize {
-        self.tables.lineage_counts.evidence
+        self.tables.state.lineage_counts.evidence
     }
 
     pub(in crate::canonical_scene::store) const fn parent_count(&self) -> usize {
-        self.tables.lineage_counts.parents
+        self.tables.state.lineage_counts.parents
     }
 
     pub(in crate::canonical_scene::store) const fn wide_count(&self) -> usize {
-        self.tables.lineage_counts.wide
+        self.tables.state.lineage_counts.wide
     }
 
     pub(in crate::canonical_scene::store) const fn lineage_text_bytes(&self) -> usize {
-        self.tables.lineage_counts.text
+        self.tables.state.lineage_counts.text
     }
 
     pub(in crate::canonical_scene::store) const fn lineage_digest_bytes(&self) -> usize {
-        self.tables.lineage_counts.digests
+        self.tables.state.lineage_counts.digests
     }
 
     pub(in crate::canonical_scene::store) const fn owner_count(&self) -> usize {
-        self.tables.owners.rows()
+        self.tables.state.owners.len()
     }
 
     pub(in crate::canonical_scene::store) const fn attachment_count(&self) -> usize {
-        self.tables.attachments.len()
+        self.tables.state.attachments.len()
     }
 
     pub(in crate::canonical_scene::store) const fn metadata_entry_count(&self) -> usize {
-        match self.tables.metadata_entries {
-            Some(entries) => entries.rows(),
-            None => 0,
-        }
+        self.tables.state.metadata_entries.len()
     }
 
-    pub(in crate::canonical_scene::store) const fn metadata_lanes(
+    pub(in crate::canonical_scene::store) fn metadata_lanes(
         &self,
     ) -> NodeSceneProfileMetadataLanes<'scene> {
+        let pools = self.tables.metadata;
+        // Empty pools are absent lanes in the semantic transcript.
         NodeSceneProfileMetadataLanes {
-            text: self.tables.metadata_text,
-            bytes: self.tables.metadata_bytes,
-            bools: self.tables.metadata_bools,
-            i64s: self.tables.metadata_i64s,
-            u64s: self.tables.metadata_u64s,
-            f64s: self.tables.metadata_f64s,
-            f32s: self.tables.metadata_f32s,
+            text: (!pools.text.is_empty()).then_some(pools.text.as_str()),
+            bytes: (!pools.bytes.is_empty()).then_some(pools.bytes.as_slice()),
+            bools: (!pools.bools.is_empty()).then_some(pools.bools.as_slice()),
+            i64s: (!pools.i64s.is_empty()).then_some(pools.i64s.as_slice()),
+            u64s: (!pools.u64s.is_empty()).then_some(pools.u64s.as_slice()),
+            f64s: (!pools.f64s.is_empty()).then_some(pools.f64s.as_slice()),
+            f32s: (!pools.f32s.is_empty()).then_some(pools.f32s.as_slice()),
         }
     }
 
     pub(in crate::canonical_scene::store) fn step_resource(
         &mut self,
     ) -> NodeSceneSemanticResult<NodeSceneProfileStep<NodeSceneProfileResource<'scene>>> {
-        self.enter_lineage_phase(ProfileCursorPhase::Resources)?;
-        if let Some(segment) = &mut self.lineage.active_segment {
-            if let Some(resource) = segment.next_resource()? {
-                #[cfg(test)]
-                self.record_decoded_lineage_row(ProfileCursorPhase::Resources)?;
-                return Ok(NodeSceneProfileStep::Item(resource));
-            }
-            self.complete_active_segment()?;
-        }
-        self.open_next_segment()
+        self.resources.step(
+            self.tables.profile,
+            |segment| &segment.resources,
+            read_resource,
+        )
     }
 
     pub(in crate::canonical_scene::store) fn step_source(
         &mut self,
     ) -> NodeSceneSemanticResult<NodeSceneProfileStep<NodeSceneProfileSource<'scene>>> {
-        self.enter_lineage_phase(ProfileCursorPhase::Sources)?;
-        if let Some(segment) = &mut self.lineage.active_segment {
-            if let Some(source) = segment.next_source()? {
-                #[cfg(test)]
-                self.record_decoded_lineage_row(ProfileCursorPhase::Sources)?;
-                return Ok(NodeSceneProfileStep::Item(source));
-            }
-            self.complete_active_segment()?;
-        }
-        self.open_next_segment()
+        self.sources
+            .step(self.tables.profile, |segment| &segment.sources, read_source)
     }
 
     pub(in crate::canonical_scene::store) fn step_provenance(
         &mut self,
     ) -> NodeSceneSemanticResult<NodeSceneProfileStep<NodeSceneProfileProvenance<'scene>>> {
-        self.enter_lineage_phase(ProfileCursorPhase::Provenance)?;
-        if let Some(segment) = &mut self.lineage.active_segment {
-            if let Some(provenance) = segment.next_provenance()? {
-                #[cfg(test)]
-                self.record_decoded_lineage_row(ProfileCursorPhase::Provenance)?;
-                return Ok(NodeSceneProfileStep::Item(provenance));
-            }
-            self.complete_active_segment()?;
-        }
-        self.open_next_segment()
+        let profile = self.tables.profile;
+        let next_operation = &mut self.next_operation;
+        self.provenance.step(
+            profile,
+            |segment| &segment.provenance,
+            |segment, row, value| read_provenance(profile, segment, row, value, next_operation),
+        )
     }
 
     pub(in crate::canonical_scene::store) fn step_evidence(
         &mut self,
     ) -> NodeSceneSemanticResult<NodeSceneProfileStep<NodeSceneProfileEvidence<'scene>>> {
-        self.enter_lineage_phase(ProfileCursorPhase::Evidence)?;
-        if let Some(segment) = &mut self.lineage.active_segment {
-            if let Some(evidence) = segment.next_evidence()? {
-                #[cfg(test)]
-                self.record_decoded_lineage_row(ProfileCursorPhase::Evidence)?;
-                return Ok(NodeSceneProfileStep::Item(evidence));
-            }
-            self.complete_active_segment()?;
-        }
-        self.open_next_segment()
+        self.evidence.step(
+            self.tables.profile,
+            |segment| &segment.evidence,
+            read_evidence,
+        )
     }
 
     pub(in crate::canonical_scene::store) fn next_owner(
         &mut self,
     ) -> NodeSceneSemanticResult<Option<NodeSceneProfileOwner<'scene>>> {
-        self.enter_owner_phase()?;
-        if self.next_owner == self.tables.owners.rows() {
+        if self.next_owner == self.owner_count() {
             return Ok(None);
         }
-        if self.next_owner > self.tables.owners.rows() {
-            return Err(invariant(
-                "profile owner cursor advanced beyond its proof-qualified count",
-            ));
-        }
-
-        let row = self.next_owner;
-        let owner = decode_owner(
-            read_scalar::<u8>(
-                self.tables.owners,
-                row,
-                profile_owner_field::OWNER_KIND,
-                "validated profile owner kind is unreadable",
-            )?,
-            read_scalar::<u32>(
-                self.tables.owners,
-                row,
-                profile_owner_field::OWNER_INDEX,
-                "validated profile owner index is unreadable",
-            )?,
-        )?;
-        require_owner_order(row, owner, self.previous_owner)?;
-
-        let attachment_offset = read_u32_as_usize(
-            self.tables.owners,
-            row,
-            profile_owner_field::ATTACHMENT_OFFSET,
-            "validated profile attachment offset is unreadable",
-        )?;
-        let attachment_count = read_u32_as_usize(
-            self.tables.owners,
-            row,
-            profile_owner_field::ATTACHMENT_COUNT,
-            "validated profile attachment count is unreadable",
-        )?;
-        if attachment_count == 0 || attachment_offset != self.next_attachment {
+        let row = self
+            .tables
+            .state
+            .owners
+            .get(self.next_owner)
+            .ok_or_else(|| invariant("profile owner cursor exceeds its typed rows"))?;
+        require_owner_order(self.next_owner, row.owner, self.previous_owner)?;
+        if row.attachments.is_empty() || row.attachments.start() != self.next_attachment {
             return Err(invariant(
                 "validated profile attachment range is not canonical",
             ));
         }
-        require_sequence_reference::<u64, ProfileLineageAttachmentSchema>(
-            self.tables.owners,
-            row,
-            profile_owner_field::ATTACHMENTS,
-            self.tables.attachments_ref,
-            "validated profile attachment reference is unreadable",
-            "validated profile attachment reference disagrees across owners",
-        )?;
-        let attachments = self
-            .tables
+        let attachments = row
             .attachments
-            .get_range(attachment_offset, attachment_count)
+            .get(&self.tables.state.attachments)
             .ok_or_else(|| invariant("validated profile attachment range is unreadable"))?;
-
-        self.next_attachment = checked_add(attachment_offset, attachment_count)?;
-        self.next_owner = advance(row, "profile owner cursor index overflows")?;
-        self.previous_owner = Some(owner);
+        self.next_attachment = checked_add(row.attachments.start(), attachments.len())?;
+        self.next_owner += 1;
+        self.previous_owner = Some(row.owner);
         Ok(Some(NodeSceneProfileOwner {
-            owner,
-            attachment_offset,
-            attachments: NodeSceneProfileProvenanceIndices::new(attachments),
+            owner: row.owner,
+            attachment_offset: row.attachments.start(),
+            attachments: NodeSceneProfileProvenanceIndices::new(self.tables.profile, attachments),
         }))
     }
 
     pub(in crate::canonical_scene::store) fn next_metadata_entry(
         &mut self,
     ) -> NodeSceneSemanticResult<Option<NodeSceneProfileMetadataEntry<'scene>>> {
-        self.enter_metadata_phase()?;
-        let entry_count = self.metadata_entry_count();
-        if self.next_metadata_entry == entry_count {
-            return Ok(None);
-        }
-        if self.next_metadata_entry > entry_count {
-            return Err(invariant(
-                "profile metadata cursor advanced beyond its proof-qualified count",
-            ));
-        }
-        let entries = self
-            .tables
-            .metadata_entries
-            .ok_or_else(|| invariant("validated profile metadata-entry table is absent"))?;
-        let row = self.next_metadata_entry;
-        let owner = decode_owner(
-            read_scalar::<u8>(
-                entries,
-                row,
-                profile_metadata_entry_field::OWNER_KIND,
-                "validated profile metadata owner kind is unreadable",
-            )?,
-            read_scalar::<u32>(
-                entries,
-                row,
-                profile_metadata_entry_field::OWNER_INDEX,
-                "validated profile metadata owner index is unreadable",
-            )?,
-        )?;
-        let key = consume_utf8(
-            self.tables.metadata_text,
-            &mut self.metadata_text_cursor,
-            read_u32_as_usize(
-                entries,
-                row,
-                profile_metadata_entry_field::KEY_OFFSET,
-                "validated profile metadata key offset is unreadable",
-            )?,
-            read_u32_as_usize(
-                entries,
-                row,
-                profile_metadata_entry_field::KEY_COUNT,
-                "validated profile metadata key count is unreadable",
-            )?,
-            true,
-            "validated profile metadata key range is inconsistent",
-        )?;
-        if self
-            .previous_metadata_owner
-            .is_some_and(|previous| owner < previous)
-            || self.previous_metadata_owner == Some(owner)
-                && self
-                    .previous_metadata_key
-                    .is_some_and(|previous| previous.as_bytes() >= key.as_bytes())
+        self.metadata.next(self.tables.state, self.tables.metadata)
+    }
+
+    pub(in crate::canonical_scene::store) fn finish(self) -> NodeSceneSemanticResult<()> {
+        // Observing End also closes each domain's segment totals, including empty domains.
+        if !self.resources.finished
+            || !self.sources.finished
+            || !self.provenance.finished
+            || !self.evidence.finished
+            || self.next_operation != self.operation_count()
         {
             return Err(invariant(
-                "validated profile metadata entries are not canonically ordered",
+                "profile cursor ended before all lineage rows were exhausted",
             ));
         }
-
-        let value_kind = read_scalar::<u8>(
-            entries,
-            row,
-            profile_metadata_entry_field::VALUE_KIND,
-            "validated profile metadata value kind is unreadable",
-        )?;
-        let array_kind = read_scalar::<u8>(
-            entries,
-            row,
-            profile_metadata_entry_field::ARRAY_KIND,
-            "validated profile metadata array kind is unreadable",
-        )?;
-        let logical_count = read_u32_as_usize(
-            entries,
-            row,
-            profile_metadata_entry_field::LOGICAL_ELEMENT_COUNT,
-            "validated profile metadata logical count is unreadable",
-        )?;
-        let shape = metadata_shape(value_kind, array_kind, logical_count)?;
-
-        let auxiliary = consume_utf8(
-            self.tables.metadata_text,
-            &mut self.metadata_text_cursor,
-            read_u32_as_usize(
-                entries,
-                row,
-                profile_metadata_entry_field::AUX_TEXT_OFFSET,
-                "validated profile metadata auxiliary-text offset is unreadable",
-            )?,
-            read_u32_as_usize(
-                entries,
-                row,
-                profile_metadata_entry_field::AUX_TEXT_COUNT,
-                "validated profile metadata auxiliary-text count is unreadable",
-            )?,
-            value_kind == PROFILE_METADATA_BYTES,
-            "validated profile metadata auxiliary-text range is inconsistent",
-        )?;
-        if !shape.auxiliary_text && !auxiliary.is_empty() {
-            return Err(invariant(
-                "validated profile metadata value has unexpected auxiliary text",
-            ));
-        }
-
-        let byte_offset = read_u32_as_usize(
-            entries,
-            row,
-            profile_metadata_entry_field::BYTE_OFFSET,
-            "validated profile metadata byte offset is unreadable",
-        )?;
-        let byte_count = read_u32_as_usize(
-            entries,
-            row,
-            profile_metadata_entry_field::BYTE_COUNT,
-            "validated profile metadata byte count is unreadable",
-        )?;
-        if byte_offset != self.metadata_byte_cursor || !shape.bytes && byte_count != 0 {
-            return Err(invariant(
-                "validated profile metadata byte range is inconsistent",
-            ));
-        }
-        let payload = slice_optional_range(
-            self.tables.metadata_bytes,
-            byte_offset,
-            byte_count,
-            "validated profile metadata byte range is unreadable",
-        )?;
-        self.metadata_byte_cursor = checked_add(byte_offset, byte_count)?;
-
-        require_metadata_lane_references(entries, row, shape, &self.tables, byte_count)?;
-        let scalar_offset = read_u32_as_usize(
-            entries,
-            row,
-            profile_metadata_entry_field::SCALAR_OFFSET,
-            "validated profile metadata scalar offset is unreadable",
-        )?;
-        let scalar_count = read_u32_as_usize(
-            entries,
-            row,
-            profile_metadata_entry_field::SCALAR_COUNT,
-            "validated profile metadata scalar count is unreadable",
-        )?;
-        if scalar_count != shape.scalar_count {
-            return Err(invariant(
-                "validated profile metadata scalar count disagrees with its value kind",
-            ));
-        }
-        let value = self.read_metadata_value(
-            value_kind,
-            array_kind,
-            logical_count,
-            shape,
-            auxiliary,
-            payload,
-            scalar_offset,
-            scalar_count,
-        )?;
-
-        self.next_metadata_entry = advance(row, "profile metadata cursor index overflows")?;
-        self.previous_metadata_owner = Some(owner);
-        self.previous_metadata_key = Some(key);
-        Ok(Some(NodeSceneProfileMetadataEntry::new(owner, key, value)))
-    }
-
-    pub(in crate::canonical_scene::store) fn finish(mut self) -> NodeSceneSemanticResult<()> {
-        self.enter_metadata_phase()?;
-        if self.next_metadata_entry != self.metadata_entry_count()
-            || self.metadata_text_cursor != payload_len_str(self.tables.metadata_text)
-            || self.metadata_byte_cursor != payload_len(self.tables.metadata_bytes)
-            || self.metadata_bool_cursor != payload_len(self.tables.metadata_bools)
-            || self.metadata_i64_cursor != payload_len(self.tables.metadata_i64s)
-            || self.metadata_u64_cursor != payload_len(self.tables.metadata_u64s)
-            || self.metadata_f64_cursor != payload_len(self.tables.metadata_f64s)
-            || self.metadata_f32_cursor != payload_len(self.tables.metadata_f32s)
+        if self.next_owner != self.owner_count() || self.next_attachment != self.attachment_count()
         {
             return Err(invariant(
-                "profile cursor ended before all metadata rows and lanes were exhausted",
+                "profile cursor ended before all owners and attachments were exhausted",
             ));
         }
-        Ok(())
-    }
-
-    fn enter_lineage_phase(&mut self, target: ProfileCursorPhase) -> NodeSceneSemanticResult<()> {
-        if target > ProfileCursorPhase::Evidence {
-            return Err(invariant("profile lineage phase is invalid"));
-        }
-        if self.phase > target {
-            return Err(invariant(
-                "profile cursor cannot return to an earlier lineage phase",
-            ));
-        }
-        if self.phase < target {
-            if !self.lineage_is_exhausted() {
-                return Err(invariant(
-                    "profile lineage phase must be exhausted before advancing",
-                ));
-            }
-            self.lineage.reset();
-            self.phase = target;
-        }
-        Ok(())
-    }
-
-    fn lineage_is_exhausted(&self) -> bool {
-        self.lineage.active_segment.is_none()
-            && self.lineage.progress.next_segment == self.tables.segments.rows()
-            && self.lineage.progress.lineage_prefixes == self.tables.lineage_counts
-    }
-
-    fn open_next_segment<T>(&mut self) -> NodeSceneSemanticResult<NodeSceneProfileStep<T>> {
-        let row = self.lineage.progress.next_segment;
-        if row == self.tables.segments.rows() {
-            return Ok(NodeSceneProfileStep::End);
-        }
-        if row > self.tables.segments.rows() {
-            return Err(invariant(
-                "profile lineage cursor advanced beyond its proof-qualified segments",
-            ));
-        }
-
-        let segment = resolve_segment(
-            self.tables.canonical,
-            self.tables.segments,
-            row,
-            self.lineage.progress.lineage_prefixes,
-        )?;
-        self.lineage.active_segment = Some(segment);
-        #[cfg(test)]
-        self.record_lineage_segment_checkpoint()?;
-        Ok(NodeSceneProfileStep::Checkpoint)
+        self.metadata
+            .finish(self.tables.state, self.tables.metadata)
     }
 
     #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn decoded_lineage_rows_for_test(
         &self,
     ) -> [usize; 4] {
-        self.decoded_lineage_rows
+        [
+            self.resources.decoded_rows,
+            self.sources.decoded_rows,
+            self.provenance.decoded_rows,
+            self.evidence.decoded_rows,
+        ]
     }
 
     #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn lineage_segment_checkpoints_for_test(
         &self,
     ) -> [usize; 4] {
-        self.lineage_segment_checkpoints
-    }
-
-    #[cfg(test)]
-    fn record_decoded_lineage_row(
-        &mut self,
-        phase: ProfileCursorPhase,
-    ) -> NodeSceneSemanticResult<()> {
-        let slot = lineage_phase_slot(phase)?;
-        self.decoded_lineage_rows[slot] = self.decoded_lineage_rows[slot]
-            .checked_add(1)
-            .ok_or_else(|| invariant("profile test decode counter overflows"))?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn record_lineage_segment_checkpoint(&mut self) -> NodeSceneSemanticResult<()> {
-        let slot = lineage_phase_slot(self.phase)?;
-        self.lineage_segment_checkpoints[slot] = self.lineage_segment_checkpoints[slot]
-            .checked_add(1)
-            .ok_or_else(|| invariant("profile test checkpoint counter overflows"))?;
-        Ok(())
-    }
-
-    fn complete_active_segment(&mut self) -> NodeSceneSemanticResult<()> {
-        let segment = self
-            .lineage
-            .active_segment
-            .take()
-            .ok_or_else(|| invariant("profile lineage segment is unavailable"))?;
-        self.lineage.progress = segment.completed_progress;
-        Ok(())
-    }
-
-    fn enter_owner_phase(&mut self) -> NodeSceneSemanticResult<()> {
-        if self.phase > ProfileCursorPhase::Owners {
-            return Err(invariant("profile cursor cannot return to the owner phase"));
-        }
-        if self.phase < ProfileCursorPhase::Owners
-            && (self.phase != ProfileCursorPhase::Evidence || !self.lineage_is_exhausted())
-        {
-            return Err(invariant(
-                "global profile lineage must be exhausted before owners",
-            ));
-        }
-        self.phase = ProfileCursorPhase::Owners;
-        Ok(())
-    }
-
-    fn enter_metadata_phase(&mut self) -> NodeSceneSemanticResult<()> {
-        if self.phase < ProfileCursorPhase::Metadata {
-            self.enter_owner_phase()?;
-        }
-        if self.next_owner != self.tables.owners.rows()
-            || self.next_attachment != self.tables.attachments.len()
-        {
-            return Err(invariant(
-                "profile owners must be exhausted before metadata",
-            ));
-        }
-        self.phase = ProfileCursorPhase::Metadata;
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn read_metadata_value(
-        &mut self,
-        value_kind: u8,
-        array_kind: u8,
-        logical_count: usize,
-        shape: MetadataShape,
-        auxiliary: &'scene str,
-        payload: &'scene [u8],
-        offset: usize,
-        count: usize,
-    ) -> NodeSceneSemanticResult<NodeSceneProfileMetadataValue<'scene>> {
-        let lane = match shape.lane {
-            MetadataLane::None => {
-                if offset != 0 || count != 0 {
-                    return Err(invariant(
-                        "validated profile metadata non-scalar range is not empty",
-                    ));
-                }
-                NodeSceneProfileMetadataArray::None
-            }
-            MetadataLane::Bool => {
-                let values = consume_sequence(
-                    self.tables.metadata_bools,
-                    &mut self.metadata_bool_cursor,
-                    offset,
-                    count,
-                    "validated profile metadata bool range is inconsistent",
-                )?;
-                NodeSceneProfileMetadataArray::Bool(values)
-            }
-            MetadataLane::I64 => NodeSceneProfileMetadataArray::I64(consume_sequence(
-                self.tables.metadata_i64s,
-                &mut self.metadata_i64_cursor,
-                offset,
-                count,
-                "validated profile metadata i64 range is inconsistent",
-            )?),
-            MetadataLane::U64 => NodeSceneProfileMetadataArray::U64(consume_sequence(
-                self.tables.metadata_u64s,
-                &mut self.metadata_u64_cursor,
-                offset,
-                count,
-                "validated profile metadata u64 range is inconsistent",
-            )?),
-            MetadataLane::F64 => {
-                let values = consume_sequence(
-                    self.tables.metadata_f64s,
-                    &mut self.metadata_f64_cursor,
-                    offset,
-                    count,
-                    "validated profile metadata f64 range is inconsistent",
-                )?;
-                NodeSceneProfileMetadataArray::F64(values)
-            }
-            MetadataLane::F32 => {
-                let values = consume_sequence(
-                    self.tables.metadata_f32s,
-                    &mut self.metadata_f32_cursor,
-                    offset,
-                    count,
-                    "validated profile metadata f32 range is inconsistent",
-                )?;
-                NodeSceneProfileMetadataArray::F32(values)
-            }
-        };
-
-        decode_metadata_value(
-            value_kind,
-            array_kind,
-            logical_count,
-            auxiliary,
-            payload,
-            lane,
-        )
+        [
+            self.resources.segment_checkpoints,
+            self.sources.segment_checkpoints,
+            self.provenance.segment_checkpoints,
+            self.evidence.segment_checkpoints,
+        ]
     }
 }
 
@@ -1146,486 +453,6 @@ impl<'scene> NodeSceneProfileOwner<'scene> {
         self,
     ) -> NodeSceneProfileProvenanceIndices<'scene> {
         self.attachments
-    }
-}
-
-#[must_use = "the profile segment decoder must be consumed or deliberately discarded"]
-struct ProfileSegmentDecoder<'scene> {
-    completed_progress: ProfileSegmentProgress,
-    counts: ProfileLineageCounts,
-    prefixes: ProfileLineageCounts,
-    resources: &'scene [u32],
-    sources: &'scene [u32],
-    provenance: &'scene [u32],
-    operations: &'scene [u32],
-    evidence: &'scene [u32],
-    parents: QualifiedProvenanceAddressSlice<'scene>,
-    wide: &'scene [u64],
-    text: &'scene str,
-    digests: &'scene [u8],
-    next_resource: usize,
-    next_source: usize,
-    next_provenance: usize,
-    next_evidence: usize,
-}
-
-// Central validation proves lane continuity once. Semantic projection therefore
-// addresses each proof-qualified row range directly instead of replaying prior
-// domains to reconstruct a physical lane cursor.
-fn read_utf8_at<'scene>(
-    text: &'scene str,
-    offset: usize,
-    count: usize,
-    nonempty: bool,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<&'scene str> {
-    let mut direct = offset;
-    consume_utf8(Some(text), &mut direct, offset, count, nonempty, reason)
-}
-
-fn read_optional_utf8_at<'scene>(
-    text: &'scene str,
-    presence: u32,
-    offset: u32,
-    count: u32,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<Option<&'scene str>> {
-    let mut direct = u32_to_usize(offset)?;
-    consume_optional_utf8(text, &mut direct, presence, offset, count, reason)
-}
-
-fn read_required_digest_at<'scene>(
-    digests: &'scene [u8],
-    algorithm: u32,
-    offset: u32,
-    count: u32,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<NodeSceneProfileDigest<'scene>> {
-    let mut direct = u32_to_usize(offset)?;
-    consume_required_digest(digests, &mut direct, algorithm, offset, count, reason)
-}
-
-fn read_optional_digest_at<'scene>(
-    digests: &'scene [u8],
-    presence: u32,
-    algorithm: u32,
-    offset: u32,
-    count: u32,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<Option<NodeSceneProfileDigest<'scene>>> {
-    let mut direct = u32_to_usize(offset)?;
-    consume_optional_digest(
-        digests,
-        &mut direct,
-        presence,
-        algorithm,
-        offset,
-        count,
-        reason,
-    )
-}
-
-fn read_slice_at<'scene, T>(
-    values: &'scene [T],
-    offset: usize,
-    count: usize,
-    expected_count: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<&'scene [T]> {
-    let mut direct = offset;
-    consume_slice(values, &mut direct, offset, count, expected_count, reason)
-}
-
-fn require_empty_range_at(
-    payload_len: usize,
-    offset: u32,
-    count: u32,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<()> {
-    let direct = u32_to_usize(offset)?;
-    if direct > payload_len {
-        return Err(invariant(reason));
-    }
-    require_empty_range(direct, offset, count, reason)
-}
-
-impl<'scene> ProfileSegmentDecoder<'scene> {
-    fn next_resource(
-        &mut self,
-    ) -> NodeSceneSemanticResult<Option<NodeSceneProfileResource<'scene>>> {
-        let Some(row) = next_row(self.next_resource, self.counts.resources)? else {
-            return Ok(None);
-        };
-        let values = scalar_row(
-            self.resources,
-            row,
-            PROFILE_RESOURCE_SCALAR_COUNT,
-            "validated profile resource row is unreadable",
-        )?;
-        let identity = read_utf8_at(
-            self.text,
-            u32_to_usize(values[profile_resource_scalar::IDENTITY_OFFSET])?,
-            u32_to_usize(values[profile_resource_scalar::IDENTITY_COUNT])?,
-            true,
-            "validated profile resource identity range is inconsistent",
-        )?;
-        let stability = match values[profile_resource_scalar::STABILITY_KIND] {
-            value if value == u32::from(PROFILE_RESOURCE_STABILITY_STABLE) => {
-                let owner = read_utf8_at(
-                    self.text,
-                    u32_to_usize(values[profile_resource_scalar::STABILITY_OWNER_OFFSET])?,
-                    u32_to_usize(values[profile_resource_scalar::STABILITY_OWNER_COUNT])?,
-                    true,
-                    "validated stable-resource owner range is inconsistent",
-                )?;
-                let schema = read_utf8_at(
-                    self.text,
-                    u32_to_usize(values[profile_resource_scalar::STABILITY_SCHEMA_OFFSET])?,
-                    u32_to_usize(values[profile_resource_scalar::STABILITY_SCHEMA_COUNT])?,
-                    true,
-                    "validated stable-resource schema range is inconsistent",
-                )?;
-                let schema_version = values[profile_resource_scalar::STABILITY_SCHEMA_VERSION];
-                if schema_version == 0
-                    || values[profile_resource_scalar::SESSION_OPAQUE_REASON] != 0
-                {
-                    return Err(invariant(
-                        "validated stable-resource classification is inconsistent",
-                    ));
-                }
-                NodeSceneProfileResourceStability::Stable {
-                    owner,
-                    schema,
-                    schema_version,
-                }
-            }
-            value if value == u32::from(PROFILE_RESOURCE_STABILITY_SESSION_OPAQUE) => {
-                require_empty_range_at(
-                    self.text.len(),
-                    values[profile_resource_scalar::STABILITY_OWNER_OFFSET],
-                    values[profile_resource_scalar::STABILITY_OWNER_COUNT],
-                    "validated opaque-resource owner range is not empty",
-                )?;
-                require_empty_range_at(
-                    self.text.len(),
-                    values[profile_resource_scalar::STABILITY_SCHEMA_OFFSET],
-                    values[profile_resource_scalar::STABILITY_SCHEMA_COUNT],
-                    "validated opaque-resource schema range is not empty",
-                )?;
-                if values[profile_resource_scalar::STABILITY_SCHEMA_VERSION] != 0 {
-                    return Err(invariant(
-                        "validated opaque-resource schema version is nonzero",
-                    ));
-                }
-                NodeSceneProfileResourceStability::SessionOpaque(decode_session_opaque_reason(
-                    values[profile_resource_scalar::SESSION_OPAQUE_REASON],
-                )?)
-            }
-            _ => {
-                return Err(invariant(
-                    "validated profile resource stability kind is unknown",
-                ));
-            }
-        };
-
-        self.next_resource = advance(row, "profile resource cursor index overflows")?;
-        Ok(Some(NodeSceneProfileResource {
-            index: checked_add(self.prefixes.resources, row)?,
-            identity,
-            stability,
-        }))
-    }
-
-    fn next_source(&mut self) -> NodeSceneSemanticResult<Option<NodeSceneProfileSource<'scene>>> {
-        let Some(row) = next_row(self.next_source, self.counts.sources)? else {
-            return Ok(None);
-        };
-        let values = scalar_row(
-            self.sources,
-            row,
-            PROFILE_SOURCE_SCALAR_COUNT,
-            "validated profile source row is unreadable",
-        )?;
-        let resource = u32_to_usize(values[profile_source_scalar::RESOURCE])?;
-        let visible_resource_end = checked_add(self.prefixes.resources, self.counts.resources)?;
-        if resource >= visible_resource_end {
-            return Err(invariant(
-                "validated profile source resource is outside resource space",
-            ));
-        }
-        let format = read_utf8_at(
-            self.text,
-            u32_to_usize(values[profile_source_scalar::FORMAT_OFFSET])?,
-            u32_to_usize(values[profile_source_scalar::FORMAT_COUNT])?,
-            true,
-            "validated profile source format range is inconsistent",
-        )?;
-        let locator = match values[profile_source_scalar::LOCATOR_KIND] {
-            value if value == u32::from(PROFILE_LOCATOR_INDEXED) => {
-                let kind =
-                    decode_source_object_kind(values[profile_source_scalar::INDEXED_OBJECT_KIND])?;
-                let wide = read_slice_at(
-                    self.wide,
-                    u32_to_usize(values[profile_source_scalar::WIDE_OFFSET])?,
-                    u32_to_usize(values[profile_source_scalar::WIDE_COUNT])?,
-                    1,
-                    "validated indexed source locator range is inconsistent",
-                )?;
-                require_empty_range_at(
-                    self.text.len(),
-                    values[profile_source_scalar::LOCATOR_SCHEMA_OFFSET],
-                    values[profile_source_scalar::LOCATOR_SCHEMA_COUNT],
-                    "validated indexed source locator schema range is not empty",
-                )?;
-                require_empty_range_at(
-                    self.text.len(),
-                    values[profile_source_scalar::LOCATOR_VALUE_OFFSET],
-                    values[profile_source_scalar::LOCATOR_VALUE_COUNT],
-                    "validated indexed source locator value range is not empty",
-                )?;
-                if values[profile_source_scalar::LOCATOR_SCHEMA_VERSION] != 0 {
-                    return Err(invariant(
-                        "validated indexed source locator has a schema version",
-                    ));
-                }
-                NodeSceneProfileSourceLocator::Indexed {
-                    kind,
-                    index: wide[0],
-                }
-            }
-            value if value == u32::from(PROFILE_LOCATOR_NAMESPACED) => {
-                if values[profile_source_scalar::INDEXED_OBJECT_KIND] != 0 {
-                    return Err(invariant(
-                        "validated namespaced source locator has an indexed kind",
-                    ));
-                }
-                require_empty_range_at(
-                    self.wide.len(),
-                    values[profile_source_scalar::WIDE_OFFSET],
-                    values[profile_source_scalar::WIDE_COUNT],
-                    "validated namespaced source locator wide range is not empty",
-                )?;
-                let schema = read_utf8_at(
-                    self.text,
-                    u32_to_usize(values[profile_source_scalar::LOCATOR_SCHEMA_OFFSET])?,
-                    u32_to_usize(values[profile_source_scalar::LOCATOR_SCHEMA_COUNT])?,
-                    true,
-                    "validated namespaced source locator schema range is inconsistent",
-                )?;
-                let schema_version = values[profile_source_scalar::LOCATOR_SCHEMA_VERSION];
-                if schema_version == 0 {
-                    return Err(invariant(
-                        "validated namespaced source locator schema version is zero",
-                    ));
-                }
-                let value = read_utf8_at(
-                    self.text,
-                    u32_to_usize(values[profile_source_scalar::LOCATOR_VALUE_OFFSET])?,
-                    u32_to_usize(values[profile_source_scalar::LOCATOR_VALUE_COUNT])?,
-                    true,
-                    "validated namespaced source locator value range is inconsistent",
-                )?;
-                NodeSceneProfileSourceLocator::Namespaced {
-                    schema,
-                    schema_version,
-                    value,
-                }
-            }
-            _ => {
-                return Err(invariant(
-                    "validated profile source locator kind is unknown",
-                ));
-            }
-        };
-        let display_name = read_optional_utf8_at(
-            self.text,
-            values[profile_source_scalar::DISPLAY_NAME_PRESENCE],
-            values[profile_source_scalar::DISPLAY_NAME_OFFSET],
-            values[profile_source_scalar::DISPLAY_NAME_COUNT],
-            "validated profile source display-name range is inconsistent",
-        )?;
-        let content_digest = read_optional_digest_at(
-            self.digests,
-            values[profile_source_scalar::CONTENT_DIGEST_PRESENCE],
-            values[profile_source_scalar::CONTENT_DIGEST_ALGORITHM],
-            values[profile_source_scalar::CONTENT_DIGEST_OFFSET],
-            values[profile_source_scalar::CONTENT_DIGEST_COUNT],
-            "validated profile source content digest is inconsistent",
-        )?;
-
-        self.next_source = advance(row, "profile source cursor index overflows")?;
-        Ok(Some(NodeSceneProfileSource {
-            index: checked_add(self.prefixes.sources, row)?,
-            resource,
-            format,
-            locator,
-            display_name,
-            content_digest,
-        }))
-    }
-
-    fn next_provenance(
-        &mut self,
-    ) -> NodeSceneSemanticResult<Option<NodeSceneProfileProvenance<'scene>>> {
-        let Some(row) = next_row(self.next_provenance, self.counts.provenance)? else {
-            return Ok(None);
-        };
-        let values = scalar_row(
-            self.provenance,
-            row,
-            PROFILE_PROVENANCE_SCALAR_COUNT,
-            "validated profile provenance row is unreadable",
-        )?;
-        let index = checked_add(self.prefixes.provenance, row)?;
-        let depth = u32_to_usize(values[profile_provenance_scalar::DEPTH])?;
-        let parent_offset = u32_to_usize(values[profile_provenance_scalar::PARENT_OFFSET])?;
-        let parent_count = u32_to_usize(values[profile_provenance_scalar::PARENT_COUNT])?;
-        let parents = self
-            .parents
-            .get_range(parent_offset, parent_count)
-            .ok_or_else(|| invariant("validated profile provenance parent range is unreadable"))?;
-        let kind = match values[profile_provenance_scalar::KIND] {
-            value if value == u32::from(PROFILE_PROVENANCE_SOURCE) => {
-                if depth != 1 || parent_count != 0 {
-                    return Err(invariant(
-                        "validated source provenance node has operation structure",
-                    ));
-                }
-                let source = u32_to_usize(values[profile_provenance_scalar::VARIANT_INDEX])?;
-                let visible_source_end = checked_add(self.prefixes.sources, self.counts.sources)?;
-                if source >= visible_source_end {
-                    return Err(invariant(
-                        "validated source provenance node is outside source space",
-                    ));
-                }
-                NodeSceneProfileProvenanceKind::Source { source }
-            }
-            value if value == u32::from(PROFILE_PROVENANCE_OPERATION) => {
-                let operation_index =
-                    u32_to_usize(values[profile_provenance_scalar::VARIANT_INDEX])?;
-                if operation_index >= self.counts.operations || depth == 0 {
-                    return Err(invariant(
-                        "validated operation provenance header is inconsistent",
-                    ));
-                }
-                let operation = self.read_operation(operation_index)?;
-                NodeSceneProfileProvenanceKind::Operation(operation)
-            }
-            _ => {
-                return Err(invariant(
-                    "validated profile provenance-node kind is unknown",
-                ));
-            }
-        };
-        self.next_provenance = advance(row, "profile provenance cursor index overflows")?;
-        Ok(Some(NodeSceneProfileProvenance {
-            index,
-            depth,
-            parent_offset: checked_add(self.prefixes.parents, parent_offset)?,
-            parents: NodeSceneProfileProvenanceIndices::new(parents),
-            kind,
-        }))
-    }
-
-    fn next_evidence(
-        &mut self,
-    ) -> NodeSceneSemanticResult<Option<NodeSceneProfileEvidence<'scene>>> {
-        let Some(row) = next_row(self.next_evidence, self.counts.evidence)? else {
-            return Ok(None);
-        };
-        let values = scalar_row(
-            self.evidence,
-            row,
-            PROFILE_EVIDENCE_SCALAR_COUNT,
-            "validated profile evidence row is unreadable",
-        )?;
-        let code = read_utf8_at(
-            self.text,
-            u32_to_usize(values[profile_evidence_scalar::CODE_OFFSET])?,
-            u32_to_usize(values[profile_evidence_scalar::CODE_COUNT])?,
-            true,
-            "validated profile evidence code range is inconsistent",
-        )?;
-        let occurrence = read_slice_at(
-            self.wide,
-            u32_to_usize(values[profile_evidence_scalar::OCCURRENCE_WIDE_OFFSET])?,
-            u32_to_usize(values[profile_evidence_scalar::OCCURRENCE_WIDE_COUNT])?,
-            1,
-            "validated profile evidence occurrence range is inconsistent",
-        )?[0];
-        if occurrence == 0 {
-            return Err(invariant(
-                "validated profile evidence occurrence count is zero",
-            ));
-        }
-        let digest = read_optional_digest_at(
-            self.digests,
-            values[profile_evidence_scalar::DIGEST_PRESENCE],
-            values[profile_evidence_scalar::DIGEST_ALGORITHM],
-            values[profile_evidence_scalar::DIGEST_OFFSET],
-            values[profile_evidence_scalar::DIGEST_COUNT],
-            "validated profile evidence digest is inconsistent",
-        )?;
-        self.next_evidence = advance(row, "profile evidence cursor index overflows")?;
-        Ok(Some(NodeSceneProfileEvidence {
-            index: checked_add(self.prefixes.evidence, row)?,
-            code,
-            occurrence_count: occurrence,
-            digest,
-        }))
-    }
-
-    fn read_operation(
-        &self,
-        row: usize,
-    ) -> NodeSceneSemanticResult<NodeSceneProfileOperation<'scene>> {
-        let values = scalar_row(
-            self.operations,
-            row,
-            PROFILE_OPERATION_SCALAR_COUNT,
-            "validated profile operation row is unreadable",
-        )?;
-        let name_offset = values[profile_operation_scalar::NAME_OFFSET];
-        let name_count = values[profile_operation_scalar::NAME_COUNT];
-        let kind =
-            if values[profile_operation_scalar::KIND] == u32::from(PROFILE_OPERATION_NAMESPACED) {
-                NodeSceneProfileOperationKind::Namespaced(read_utf8_at(
-                    self.text,
-                    u32_to_usize(name_offset)?,
-                    u32_to_usize(name_count)?,
-                    true,
-                    "validated namespaced profile operation name is inconsistent",
-                )?)
-            } else {
-                require_empty_range_at(
-                    self.text.len(),
-                    name_offset,
-                    name_count,
-                    "validated standard profile operation name is not empty",
-                )?;
-                decode_standard_operation_kind(values[profile_operation_scalar::KIND])?
-            };
-        let options_digest = read_required_digest_at(
-            self.digests,
-            values[profile_operation_scalar::OPTIONS_DIGEST_ALGORITHM],
-            values[profile_operation_scalar::OPTIONS_DIGEST_OFFSET],
-            values[profile_operation_scalar::OPTIONS_DIGEST_COUNT],
-            "validated profile operation options digest is inconsistent",
-        )?;
-        let evidence_offset = u32_to_usize(values[profile_operation_scalar::EVIDENCE_OFFSET])?;
-        let evidence_count = u32_to_usize(values[profile_operation_scalar::EVIDENCE_COUNT])?;
-        if checked_add(evidence_offset, evidence_count)? > self.counts.evidence {
-            return Err(invariant(
-                "validated profile operation evidence range is inconsistent",
-            ));
-        }
-        Ok(NodeSceneProfileOperation {
-            index: checked_add(self.prefixes.operations, row)?,
-            kind,
-            options_digest,
-            evidence_offset: checked_add(self.prefixes.evidence, evidence_offset)?,
-            evidence_count,
-        })
     }
 }
 
@@ -1849,432 +676,200 @@ impl<'scene> NodeSceneProfileEvidence<'scene> {
     }
 }
 
-fn read_segment_counts(
-    segments: CanonicalRecordView<'_>,
+fn read_resource<'scene>(
+    segment: &'scene StoredProfileSegment,
     row: usize,
-) -> NodeSceneSemanticResult<ProfileLineageCounts> {
-    if read_u32_as_usize(
-        segments,
-        row,
-        profile_segment_field::SEGMENT,
-        "validated profile segment identity is unreadable",
-    )? != row
-    {
-        return Err(invariant(
-            "validated profile segment identity disagrees with its row",
-        ));
-    }
-    let counts = ProfileLineageCounts {
-        resources: read_u32_as_usize(
-            segments,
-            row,
-            profile_segment_field::RESOURCE_COUNT,
-            "validated profile resource count is unreadable",
-        )?,
-        sources: read_u32_as_usize(
-            segments,
-            row,
-            profile_segment_field::SOURCE_COUNT,
-            "validated profile source count is unreadable",
-        )?,
-        provenance: read_u32_as_usize(
-            segments,
-            row,
-            profile_segment_field::PROVENANCE_COUNT,
-            "validated profile provenance count is unreadable",
-        )?,
-        operations: read_u32_as_usize(
-            segments,
-            row,
-            profile_segment_field::OPERATION_COUNT,
-            "validated profile operation count is unreadable",
-        )?,
-        evidence: read_u32_as_usize(
-            segments,
-            row,
-            profile_segment_field::EVIDENCE_COUNT,
-            "validated profile evidence count is unreadable",
-        )?,
-        parents: read_u32_as_usize(
-            segments,
-            row,
-            profile_segment_field::PARENT_COUNT,
-            "validated profile parent count is unreadable",
-        )?,
-        wide: read_u32_as_usize(
-            segments,
-            row,
-            profile_segment_field::WIDE_COUNT,
-            "validated profile wide-value count is unreadable",
-        )?,
-        text: read_u32_as_usize(
-            segments,
-            row,
-            profile_segment_field::TEXT_COUNT,
-            "validated profile text-byte count is unreadable",
-        )?,
-        digests: read_u32_as_usize(
-            segments,
-            row,
-            profile_segment_field::DIGEST_COUNT,
-            "validated profile digest-byte count is unreadable",
-        )?,
+    resource: &'scene StoredResource,
+) -> NodeSceneSemanticResult<NodeSceneProfileResource<'scene>> {
+    let text = segment.lineage.as_ref().text.as_str();
+    let stability = match resource.stability {
+        StoredResourceStability::Stable {
+            owner,
+            schema,
+            version,
+        } => NodeSceneProfileResourceStability::Stable {
+            owner: read_text(text, owner)?,
+            schema: read_text(text, schema)?,
+            schema_version: version.get(),
+        },
+        StoredResourceStability::SessionOpaque(reason) => {
+            NodeSceneProfileResourceStability::SessionOpaque(reason)
+        }
     };
-    if counts == ProfileLineageCounts::default() {
-        return Err(invariant(
-            "validated profile contains an empty lineage segment",
-        ));
-    }
-    Ok(counts)
-}
-
-fn resolve_segment<'scene>(
-    canonical: &'scene SceneCanonicalStore,
-    segments: CanonicalRecordView<'scene>,
-    row: usize,
-    prefixes: ProfileLineageCounts,
-) -> NodeSceneSemanticResult<ProfileSegmentDecoder<'scene>> {
-    let counts = read_segment_counts(segments, row)?;
-    let completed_progress = ProfileSegmentProgress {
-        next_segment: advance(row, "profile segment cursor index overflows")?,
-        lineage_prefixes: prefixes.checked_add(counts)?,
-    };
-    let (_, resources) = resolve_optional_sequence::<u32, ProfileLineageResourceSchema>(
-        canonical,
-        segments,
-        row,
-        profile_segment_field::RESOURCE_COUNT,
-        profile_segment_field::RESOURCES,
-        PROFILE_RESOURCE_SCALAR_COUNT,
-        "validated profile resource leaf is inconsistent",
-    )?;
-    let (_, sources) = resolve_optional_sequence::<u32, ProfileLineageSourceSchema>(
-        canonical,
-        segments,
-        row,
-        profile_segment_field::SOURCE_COUNT,
-        profile_segment_field::SOURCES,
-        PROFILE_SOURCE_SCALAR_COUNT,
-        "validated profile source leaf is inconsistent",
-    )?;
-    let (_, provenance) = resolve_optional_sequence::<u32, ProfileLineageProvenanceSchema>(
-        canonical,
-        segments,
-        row,
-        profile_segment_field::PROVENANCE_COUNT,
-        profile_segment_field::PROVENANCE_NODES,
-        PROFILE_PROVENANCE_SCALAR_COUNT,
-        "validated profile provenance leaf is inconsistent",
-    )?;
-    let (_, operations) = resolve_optional_sequence::<u32, ProfileLineageOperationSchema>(
-        canonical,
-        segments,
-        row,
-        profile_segment_field::OPERATION_COUNT,
-        profile_segment_field::OPERATIONS,
-        PROFILE_OPERATION_SCALAR_COUNT,
-        "validated profile operation leaf is inconsistent",
-    )?;
-    let (_, evidence) = resolve_optional_sequence::<u32, ProfileLineageEvidenceSchema>(
-        canonical,
-        segments,
-        row,
-        profile_segment_field::EVIDENCE_COUNT,
-        profile_segment_field::EVIDENCE,
-        PROFILE_EVIDENCE_SCALAR_COUNT,
-        "validated profile evidence leaf is inconsistent",
-    )?;
-    let (_, parent_scalars) = resolve_optional_sequence::<u64, ProfileLineageParentSchema>(
-        canonical,
-        segments,
-        row,
-        profile_segment_field::PARENT_COUNT,
-        profile_segment_field::PARENTS,
-        PROFILE_PROVENANCE_ADDRESS_SCALARS,
-        "validated profile parent leaf is inconsistent",
-    )?;
-    let (_, wide) = resolve_optional_sequence::<u64, ProfileLineageWideSchema>(
-        canonical,
-        segments,
-        row,
-        profile_segment_field::WIDE_COUNT,
-        profile_segment_field::WIDE_VALUES,
-        1,
-        "validated profile wide-value leaf is inconsistent",
-    )?;
-    let (_, text) = resolve_optional_utf8_at::<ProfileLineageTextSchema>(
-        canonical,
-        segments,
-        row,
-        profile_segment_field::TEXT_COUNT,
-        profile_segment_field::TEXTS,
-        "validated profile text leaf is inconsistent",
-    )?;
-    let (_, digests) = resolve_optional_bytes_at::<ProfileLineageDigestSchema>(
-        canonical,
-        segments,
-        row,
-        profile_segment_field::DIGEST_COUNT,
-        profile_segment_field::DIGESTS,
-        "validated profile digest leaf is inconsistent",
-    )?;
-
-    if resources.map_or(0, <[u32]>::len)
-        != counts
-            .resources
-            .checked_mul(PROFILE_RESOURCE_SCALAR_COUNT)
-            .ok_or_else(|| invariant("validated profile resource leaf length overflows"))?
-        || sources.map_or(0, <[u32]>::len)
-            != counts
-                .sources
-                .checked_mul(PROFILE_SOURCE_SCALAR_COUNT)
-                .ok_or_else(|| invariant("validated profile source leaf length overflows"))?
-        || provenance.map_or(0, <[u32]>::len)
-            != counts
-                .provenance
-                .checked_mul(PROFILE_PROVENANCE_SCALAR_COUNT)
-                .ok_or_else(|| invariant("validated profile provenance leaf length overflows"))?
-        || operations.map_or(0, <[u32]>::len)
-            != counts
-                .operations
-                .checked_mul(PROFILE_OPERATION_SCALAR_COUNT)
-                .ok_or_else(|| invariant("validated profile operation leaf length overflows"))?
-        || evidence.map_or(0, <[u32]>::len)
-            != counts
-                .evidence
-                .checked_mul(PROFILE_EVIDENCE_SCALAR_COUNT)
-                .ok_or_else(|| invariant("validated profile evidence leaf length overflows"))?
-        || parent_scalars.map_or(0, <[u64]>::len)
-            != counts
-                .parents
-                .checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)
-                .ok_or_else(|| invariant("validated profile parent scalar count overflows"))?
-        || wide.map_or(0, <[u64]>::len) != counts.wide
-        || text.map_or(0, str::len) != counts.text
-        || digests.map_or(0, <[u8]>::len) != counts.digests
-    {
-        return Err(invariant(
-            "validated profile segment leaf lengths disagree with its row",
-        ));
-    }
-
-    let parents = QualifiedProvenanceAddressSlice::from_scalars(
-        parent_scalars.unwrap_or(&[]),
-        counts.parents,
-    )
-    .ok_or_else(|| invariant("validated profile parent address width is inconsistent"))?;
-
-    Ok(ProfileSegmentDecoder {
-        completed_progress,
-        counts,
-        prefixes,
-        resources: resources.unwrap_or(&[]),
-        sources: sources.unwrap_or(&[]),
-        provenance: provenance.unwrap_or(&[]),
-        operations: operations.unwrap_or(&[]),
-        evidence: evidence.unwrap_or(&[]),
-        parents,
-        wide: wide.unwrap_or(&[]),
-        text: text.unwrap_or(""),
-        digests: digests.unwrap_or(&[]),
-        next_resource: 0,
-        next_source: 0,
-        next_provenance: 0,
-        next_evidence: 0,
+    Ok(NodeSceneProfileResource {
+        index: checked_add(segment.prefixes.resources, row)?,
+        identity: read_text(text, resource.identity)?,
+        stability,
     })
 }
 
-fn resolve_optional_table<'scene, Tag>(
-    canonical: &'scene SceneCanonicalStore,
-    directory: CanonicalRecordView<'scene>,
-    field: usize,
-    rows: usize,
-    fields: usize,
-    proof_reference: Option<CanonicalBlockRef<Tag>>,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<Option<CanonicalRecordView<'scene>>>
-where
-    Tag: CanonicalSchema<StoreKind = RecordBlock>,
-{
-    match (rows, proof_reference) {
-        (0, None) => {
-            require_absent(directory, 0, field, reason)?;
-            Ok(None)
+fn read_source<'scene>(
+    segment: &'scene StoredProfileSegment,
+    row: usize,
+    source: &'scene StoredSource,
+) -> NodeSceneSemanticResult<NodeSceneProfileSource<'scene>> {
+    let lineage = segment.lineage.as_ref();
+    let resource = index(source.resource)?;
+    if resource >= checked_add(segment.prefixes.resources, lineage.resources.len())? {
+        return Err(invariant(
+            "validated profile source is outside resource space",
+        ));
+    }
+    let text = lineage.text.as_str();
+    let locator = match source.locator {
+        StoredSourceLocator::Indexed { kind, index } => {
+            NodeSceneProfileSourceLocator::Indexed { kind, index }
         }
-        (0, Some(_)) | (_, None) => Err(invariant(reason)),
-        (_, Some(reference)) => {
-            require_record_reference(directory, 0, field, reference, reason, reason)?;
-            let view = canonical
-                .records(reference.into_store())
-                .ok_or_else(|| invariant(reason))?;
-            require_table_layout(view, rows, fields, reason)?;
-            Ok(Some(view))
+        StoredSourceLocator::Namespaced {
+            schema,
+            version,
+            value,
+        } => NodeSceneProfileSourceLocator::Namespaced {
+            schema: read_text(text, schema)?,
+            schema_version: version.get(),
+            value: read_text(text, value)?,
+        },
+    };
+    Ok(NodeSceneProfileSource {
+        index: checked_add(segment.prefixes.sources, row)?,
+        resource,
+        format: read_text(text, source.format)?,
+        locator,
+        display_name: source
+            .display_name
+            .map(|range| read_text(text, range))
+            .transpose()?,
+        content_digest: source
+            .content_digest
+            .as_ref()
+            .map(|digest| NodeSceneProfileDigest {
+                algorithm: digest.algorithm(),
+                bytes: digest.as_bytes(),
+            }),
+    })
+}
+
+fn read_provenance<'scene>(
+    profile: &'scene ProfileStorage,
+    segment: &'scene StoredProfileSegment,
+    row: usize,
+    provenance: &'scene StoredProvenance,
+    next_operation: &mut usize,
+) -> NodeSceneSemanticResult<NodeSceneProfileProvenance<'scene>> {
+    let lineage = segment.lineage.as_ref();
+    let parents = provenance
+        .parents
+        .get(&lineage.parents)
+        .ok_or_else(|| invariant("validated profile provenance parent range is unreadable"))?;
+    let depth = index(provenance.depth)?;
+    let kind = match provenance.kind {
+        StoredProvenanceKind::Source(source) => {
+            let source = index(source)?;
+            if depth != 1
+                || !parents.is_empty()
+                || source >= checked_add(segment.prefixes.sources, lineage.sources.len())?
+            {
+                return Err(invariant(
+                    "validated source provenance node is inconsistent",
+                ));
+            }
+            NodeSceneProfileProvenanceKind::Source { source }
         }
-    }
+        StoredProvenanceKind::Operation(operation) => {
+            if depth == 0 {
+                return Err(invariant("validated operation provenance depth is zero"));
+            }
+            let operation = read_operation(segment, index(operation)?)?;
+            if operation.index != *next_operation {
+                return Err(invariant(
+                    "validated profile operations are not fully and uniquely covered",
+                ));
+            }
+            *next_operation = checked_add(*next_operation, 1)?;
+            NodeSceneProfileProvenanceKind::Operation(operation)
+        }
+    };
+    Ok(NodeSceneProfileProvenance {
+        index: checked_add(segment.prefixes.provenance, row)?,
+        depth,
+        parent_offset: checked_add(segment.prefixes.parents, provenance.parents.start())?,
+        parents: NodeSceneProfileProvenanceIndices::new(profile, parents),
+        kind,
+    })
 }
 
-fn resolve_optional_utf8<'scene>(
-    canonical: &'scene SceneCanonicalStore,
-    directory: CanonicalRecordView<'scene>,
-    count_field: usize,
-    reference_field: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<OptionalCanonicalValue<'scene, ProfileMetadataTextSchema, str>> {
-    resolve_optional_utf8_at::<ProfileMetadataTextSchema>(
-        canonical,
-        directory,
-        0,
-        count_field,
-        reference_field,
-        reason,
-    )
-}
-
-fn resolve_optional_bytes<'scene>(
-    canonical: &'scene SceneCanonicalStore,
-    directory: CanonicalRecordView<'scene>,
-    count_field: usize,
-    reference_field: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<OptionalCanonicalValue<'scene, ProfileMetadataBytesSchema, [u8]>> {
-    resolve_optional_bytes_at::<ProfileMetadataBytesSchema>(
-        canonical,
-        directory,
-        0,
-        count_field,
-        reference_field,
-        reason,
-    )
-}
-
-fn resolve_optional_utf8_at<'scene, Tag>(
-    canonical: &'scene SceneCanonicalStore,
-    records: CanonicalRecordView<'scene>,
+fn read_operation<'scene>(
+    segment: &'scene StoredProfileSegment,
     row: usize,
-    count_field: usize,
-    reference_field: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<OptionalCanonicalValue<'scene, Tag, str>>
-where
-    Tag: CanonicalSchema<StoreKind = Utf8Block>,
-{
-    let count = read_u32_as_usize(records, row, count_field, reason)?;
-    if count == 0 {
-        require_absent(records, row, reference_field, reason)?;
-        return Ok((None, None));
-    }
-    let reference = records
-        .utf8_ref::<Tag>(row, reference_field)
-        .map(CanonicalBlockRef::from_store)
-        .ok_or_else(|| invariant(reason))?;
-    let value = canonical
-        .utf8(reference.into_store())
-        .filter(|value| value.len() == count)
-        .ok_or_else(|| invariant(reason))?;
-    Ok((Some(reference), Some(value)))
+) -> NodeSceneSemanticResult<NodeSceneProfileOperation<'scene>> {
+    let lineage = segment.lineage.as_ref();
+    let operation = lineage
+        .operations
+        .get(row)
+        .ok_or_else(|| invariant("validated profile operation row is unreadable"))?;
+    let kind = match operation.kind {
+        StoredOperationKind::Generated => NodeSceneProfileOperationKind::Generated,
+        StoredOperationKind::Default => NodeSceneProfileOperationKind::Default,
+        StoredOperationKind::Normalize => NodeSceneProfileOperationKind::Normalize,
+        StoredOperationKind::Repair => NodeSceneProfileOperationKind::Repair,
+        StoredOperationKind::Split => NodeSceneProfileOperationKind::Split,
+        StoredOperationKind::Merge => NodeSceneProfileOperationKind::Merge,
+        StoredOperationKind::Convert => NodeSceneProfileOperationKind::Convert,
+        StoredOperationKind::Transform => NodeSceneProfileOperationKind::Transform,
+        StoredOperationKind::Optimize => NodeSceneProfileOperationKind::Optimize,
+        StoredOperationKind::Namespaced(name) => {
+            NodeSceneProfileOperationKind::Namespaced(read_text(&lineage.text, name)?)
+        }
+    };
+    let evidence = operation
+        .evidence
+        .checked(lineage.evidence.len())
+        .ok_or_else(|| invariant("validated profile operation evidence range is unreadable"))?;
+    Ok(NodeSceneProfileOperation {
+        index: checked_add(segment.prefixes.operations, row)?,
+        kind,
+        options_digest: NodeSceneProfileDigest {
+            algorithm: operation.options.algorithm(),
+            bytes: operation.options.as_bytes(),
+        },
+        evidence_offset: checked_add(segment.prefixes.evidence, evidence.start)?,
+        evidence_count: operation.evidence.len(),
+    })
 }
 
-fn resolve_optional_bytes_at<'scene, Tag>(
-    canonical: &'scene SceneCanonicalStore,
-    records: CanonicalRecordView<'scene>,
+fn read_evidence<'scene>(
+    segment: &'scene StoredProfileSegment,
     row: usize,
-    count_field: usize,
-    reference_field: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<OptionalCanonicalValue<'scene, Tag, [u8]>>
-where
-    Tag: CanonicalSchema<StoreKind = baozi_operation::ByteBlock>,
-{
-    let count = read_u32_as_usize(records, row, count_field, reason)?;
-    if count == 0 {
-        require_absent(records, row, reference_field, reason)?;
-        return Ok((None, None));
-    }
-    let reference = records
-        .bytes_ref::<Tag>(row, reference_field)
-        .map(CanonicalBlockRef::from_store)
-        .ok_or_else(|| invariant(reason))?;
-    let value = canonical
-        .bytes(reference.into_store())
-        .filter(|value| value.len() == count)
-        .ok_or_else(|| invariant(reason))?;
-    Ok((Some(reference), Some(value)))
+    evidence: &'scene StoredOperationEvidence,
+) -> NodeSceneSemanticResult<NodeSceneProfileEvidence<'scene>> {
+    Ok(NodeSceneProfileEvidence {
+        index: checked_add(segment.prefixes.evidence, row)?,
+        code: read_text(&segment.lineage.as_ref().text, evidence.code)?,
+        occurrence_count: evidence.occurrences.get(),
+        digest: evidence
+            .digest
+            .as_ref()
+            .map(|digest| NodeSceneProfileDigest {
+                algorithm: digest.algorithm(),
+                bytes: digest.as_bytes(),
+            }),
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn resolve_optional_sequence<'scene, T, Tag>(
-    canonical: &'scene SceneCanonicalStore,
-    records: CanonicalRecordView<'scene>,
-    row: usize,
-    count_field: usize,
-    reference_field: usize,
-    stride: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<OptionalCanonicalValue<'scene, Tag, [T]>>
-where
-    T: StoredScalar,
-    Tag: CanonicalSchema<StoreKind = ScalarSequence<T>>,
-{
-    let count = read_u32_as_usize(records, row, count_field, reason)?;
-    if count == 0 {
-        require_absent(records, row, reference_field, reason)?;
-        return Ok((None, None));
-    }
-    let expected = count.checked_mul(stride).ok_or_else(|| invariant(reason))?;
-    let reference = records
-        .sequence_ref::<T, Tag>(row, reference_field)
-        .map(CanonicalBlockRef::from_store)
-        .ok_or_else(|| invariant(reason))?;
-    let values: SequenceView<'scene, T> = canonical
-        .sequence(reference.into_store())
-        .ok_or_else(|| invariant(reason))?;
-    if values.len() != expected {
-        return Err(invariant(reason));
-    }
-    Ok((Some(reference), Some(values.as_slice())))
+fn read_text(text: &str, range: TextRange) -> NodeSceneSemanticResult<&str> {
+    range
+        .get_str(text)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invariant("validated profile text range is unreadable or empty"))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MetadataLane {
-    None,
-    Bool,
-    I64,
-    U64,
-    F64,
-    F32,
+fn checked_add(left: usize, right: usize) -> NodeSceneSemanticResult<usize> {
+    left.checked_add(right)
+        .ok_or_else(|| invariant("validated profile count overflows"))
 }
 
-#[derive(Clone, Copy)]
-struct MetadataShape {
-    lane: MetadataLane,
-    scalar_count: usize,
-    auxiliary_text: bool,
-    bytes: bool,
-}
-
-fn decode_owner(kind: u8, index: u32) -> NodeSceneSemanticResult<CanonicalProfileOwner> {
-    match kind {
-        PROFILE_OWNER_SCENE if index == 0 => Ok(CanonicalProfileOwner::Scene),
-        PROFILE_OWNER_SYNTHETIC_ROOT if index == 0 => Ok(CanonicalProfileOwner::SyntheticRoot),
-        PROFILE_OWNER_NODE if index != 0 => Ok(CanonicalProfileOwner::Node(index)),
-        PROFILE_OWNER_CAMERA => Ok(CanonicalProfileOwner::Camera(index)),
-        PROFILE_OWNER_LIGHT => Ok(CanonicalProfileOwner::Light(index)),
-        PROFILE_OWNER_IMAGE => Ok(CanonicalProfileOwner::Image(index)),
-        PROFILE_OWNER_SAMPLER => Ok(CanonicalProfileOwner::Sampler(index)),
-        PROFILE_OWNER_TEXTURE => Ok(CanonicalProfileOwner::Texture(index)),
-        PROFILE_OWNER_TEXTURE_BINDING => Ok(CanonicalProfileOwner::TextureBinding(index)),
-        PROFILE_OWNER_MATERIAL => Ok(CanonicalProfileOwner::Material(index)),
-        PROFILE_OWNER_LOGICAL_MESH => Ok(CanonicalProfileOwner::LogicalMesh(index)),
-        PROFILE_OWNER_PRIMITIVE => Ok(CanonicalProfileOwner::Primitive(index)),
-        PROFILE_OWNER_ATTRIBUTE => Ok(CanonicalProfileOwner::Attribute(index)),
-        PROFILE_OWNER_MESH_INSTANCE => Ok(CanonicalProfileOwner::MeshInstance(index)),
-        PROFILE_OWNER_SKIN => Ok(CanonicalProfileOwner::Skin(index)),
-        PROFILE_OWNER_MORPH_DEFINITION => Ok(CanonicalProfileOwner::MorphDefinition(index)),
-        PROFILE_OWNER_MORPH_DELTA => Ok(CanonicalProfileOwner::MorphDelta(index)),
-        PROFILE_OWNER_ANIMATION_CLIP => Ok(CanonicalProfileOwner::AnimationClip(index)),
-        PROFILE_OWNER_ANIMATION_CHANNEL => Ok(CanonicalProfileOwner::AnimationChannel(index)),
-        _ => Err(invariant("validated profile owner kind is unknown")),
-    }
+fn index(value: u32) -> NodeSceneSemanticResult<usize> {
+    usize::try_from(value).map_err(|_| invariant("validated profile index does not fit usize"))
 }
 
 fn require_owner_order(
@@ -2291,105 +886,4 @@ fn require_owner_order(
         ));
     }
     Ok(())
-}
-
-fn decode_session_opaque_reason(value: u32) -> NodeSceneSemanticResult<SessionOpaqueReason> {
-    match u8::try_from(value)
-        .map_err(|_| invariant("validated session-opaque reason does not fit u8"))?
-    {
-        PROFILE_SESSION_OPAQUE_CALLER_LABEL => Ok(SessionOpaqueReason::CallerLabel),
-        PROFILE_SESSION_OPAQUE_GENERATED => Ok(SessionOpaqueReason::Generated),
-        PROFILE_SESSION_OPAQUE_UNREGISTERED_RESOLVER => {
-            Ok(SessionOpaqueReason::UnregisteredResolver)
-        }
-        PROFILE_SESSION_OPAQUE_SESSION_FALLBACK => Ok(SessionOpaqueReason::SessionFallback),
-        _ => Err(invariant(
-            "validated profile session-opaque reason is unknown",
-        )),
-    }
-}
-
-fn decode_source_object_kind(value: u32) -> NodeSceneSemanticResult<SourceObjectKind> {
-    match u8::try_from(value)
-        .map_err(|_| invariant("validated source-object kind does not fit u8"))?
-    {
-        PROFILE_SOURCE_OBJECT_DOCUMENT => Ok(SourceObjectKind::Document),
-        PROFILE_SOURCE_OBJECT_SCENE => Ok(SourceObjectKind::Scene),
-        PROFILE_SOURCE_OBJECT_NODE => Ok(SourceObjectKind::Node),
-        PROFILE_SOURCE_OBJECT_MESH => Ok(SourceObjectKind::Mesh),
-        PROFILE_SOURCE_OBJECT_PRIMITIVE => Ok(SourceObjectKind::Primitive),
-        PROFILE_SOURCE_OBJECT_MATERIAL => Ok(SourceObjectKind::Material),
-        PROFILE_SOURCE_OBJECT_IMAGE => Ok(SourceObjectKind::Image),
-        PROFILE_SOURCE_OBJECT_TEXTURE => Ok(SourceObjectKind::Texture),
-        PROFILE_SOURCE_OBJECT_SAMPLER => Ok(SourceObjectKind::Sampler),
-        PROFILE_SOURCE_OBJECT_SKIN => Ok(SourceObjectKind::Skin),
-        PROFILE_SOURCE_OBJECT_ANIMATION => Ok(SourceObjectKind::Animation),
-        PROFILE_SOURCE_OBJECT_ANIMATION_CHANNEL => Ok(SourceObjectKind::AnimationChannel),
-        PROFILE_SOURCE_OBJECT_CAMERA => Ok(SourceObjectKind::Camera),
-        PROFILE_SOURCE_OBJECT_LIGHT => Ok(SourceObjectKind::Light),
-        PROFILE_SOURCE_OBJECT_VERTEX => Ok(SourceObjectKind::Vertex),
-        PROFILE_SOURCE_OBJECT_FACE => Ok(SourceObjectKind::Face),
-        PROFILE_SOURCE_OBJECT_ELEMENT => Ok(SourceObjectKind::Element),
-        PROFILE_SOURCE_OBJECT_ROW => Ok(SourceObjectKind::Row),
-        PROFILE_SOURCE_OBJECT_STATEMENT => Ok(SourceObjectKind::Statement),
-        PROFILE_SOURCE_OBJECT_SEGMENT => Ok(SourceObjectKind::Segment),
-        PROFILE_SOURCE_OBJECT_BUFFER => Ok(SourceObjectKind::Buffer),
-        _ => Err(invariant("validated profile source-object kind is unknown")),
-    }
-}
-
-fn decode_standard_operation_kind(
-    value: u32,
-) -> NodeSceneSemanticResult<NodeSceneProfileOperationKind<'static>> {
-    match u8::try_from(value).map_err(|_| invariant("validated operation kind does not fit u8"))? {
-        PROFILE_OPERATION_GENERATED => Ok(NodeSceneProfileOperationKind::Generated),
-        PROFILE_OPERATION_DEFAULT => Ok(NodeSceneProfileOperationKind::Default),
-        PROFILE_OPERATION_NORMALIZE => Ok(NodeSceneProfileOperationKind::Normalize),
-        PROFILE_OPERATION_REPAIR => Ok(NodeSceneProfileOperationKind::Repair),
-        PROFILE_OPERATION_SPLIT => Ok(NodeSceneProfileOperationKind::Split),
-        PROFILE_OPERATION_MERGE => Ok(NodeSceneProfileOperationKind::Merge),
-        PROFILE_OPERATION_CONVERT => Ok(NodeSceneProfileOperationKind::Convert),
-        PROFILE_OPERATION_TRANSFORM => Ok(NodeSceneProfileOperationKind::Transform),
-        PROFILE_OPERATION_OPTIMIZE => Ok(NodeSceneProfileOperationKind::Optimize),
-        _ => Err(invariant(
-            "validated profile standard operation kind is unknown",
-        )),
-    }
-}
-
-fn decode_digest_algorithm(value: u32) -> NodeSceneSemanticResult<DigestAlgorithm> {
-    match u8::try_from(value)
-        .map_err(|_| invariant("validated digest algorithm does not fit u8"))?
-    {
-        PROFILE_DIGEST_SHA256 => Ok(DigestAlgorithm::Sha256),
-        PROFILE_DIGEST_BLAKE3 => Ok(DigestAlgorithm::Blake3),
-        _ => Err(invariant("validated profile digest algorithm is unknown")),
-    }
-}
-
-#[cfg(test)]
-mod provenance_index_tests {
-    use super::*;
-
-    fn indices(scalars: &[u64]) -> NodeSceneProfileProvenanceIndices<'_> {
-        NodeSceneProfileProvenanceIndices::new(
-            QualifiedProvenanceAddressSlice::from_scalars(scalars, 1)
-                .expect("test qualified provenance address"),
-        )
-    }
-
-    #[test]
-    fn semantic_indices_ignore_physical_address_qualification() {
-        let left_scalars = [0, 7, 3, 3];
-        let right_scalars = [1, 11, 1, 3];
-        let different_global_scalars = [1, 11, 2, 4];
-
-        let left = indices(&left_scalars);
-        let right = indices(&right_scalars);
-        let different_global = indices(&different_global_scalars);
-
-        assert_eq!(left, right);
-        assert_ne!(left, different_global);
-        assert_eq!(format!("{left:?}"), "[Some(3)]");
-    }
 }

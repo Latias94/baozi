@@ -1,8 +1,8 @@
 use super::*;
 
-pub(super) fn stability_measure(
+pub(super) fn stability_cells(
     stability: &ResourceIdentityStability,
-) -> Result<(u64, u64), ProfileAuthoringSemanticError> {
+) -> Result<u64, ProfileAuthoringSemanticError> {
     match stability {
         ResourceIdentityStability::Stable {
             owner,
@@ -16,19 +16,13 @@ pub(super) fn stability_measure(
                     dimension: "stable identity bytes",
                 },
             )?;
-            let cells = text_bytes.checked_add(4).ok_or(
-                ProfileAuthoringSemanticError::AccountingOverflow {
-                    dimension: "stable identity semantic cells",
-                },
-            )?;
-            let bytes = text_bytes
-                .checked_add(LOGICAL_U8_BYTES + LOGICAL_U32_BYTES)
+            text_bytes
+                .checked_add(4)
                 .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
-                    dimension: "stable identity canonical bytes",
-                })?;
-            Ok((cells, bytes))
+                    dimension: "stable identity semantic cells",
+                })
         }
-        ResourceIdentityStability::SessionOpaque(_) => Ok((2, 2 * LOGICAL_U8_BYTES)),
+        ResourceIdentityStability::SessionOpaque(_) => Ok(2),
     }
 }
 
@@ -139,88 +133,50 @@ pub(super) fn account_operation_retention(
     Ok(())
 }
 
-pub(super) fn source_identity_measure(
+pub(super) fn source_identity_cells(
     source: SourceIdentityAuthoring<'_>,
-) -> Result<(u64, u64), ProfileAuthoringSemanticError> {
+) -> Result<u64, ProfileAuthoringSemanticError> {
     let format_bytes = usize_to_u64(source.format().as_str().len(), "source format bytes")?;
-    let locator_bytes = source_locator_bytes(source.locator())?;
+    let locator_cells = source_locator_cells(source.locator())?;
     let display_bytes = match source.display_name() {
         Some(display) => usize_to_u64(display.as_str().len(), "source display-name bytes")?,
         None => 0,
     };
-    let digest_bytes = if source.content_digest().is_some() {
-        LOGICAL_DIGEST_BYTES
-    } else {
-        LOGICAL_U8_BYTES
-    };
-    let variable_bytes = checked_sum(
-        [format_bytes, locator_bytes, display_bytes, digest_bytes],
-        "source identity bytes",
-    )?;
-    let bytes = LOGICAL_REFERENCE_BYTES
-        .checked_add(3 * LOGICAL_U8_BYTES)
-        .and_then(|bytes| bytes.checked_add(variable_bytes))
-        .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
-            dimension: "source identity canonical bytes",
-        })?;
-    let cells = checked_sum(
-        [format_bytes, locator_bytes, display_bytes, 4],
+    checked_sum(
+        [format_bytes, locator_cells, display_bytes, 4],
         "source identity semantic cells",
-    )?;
-    Ok((cells, bytes))
+    )
 }
 
-pub(super) fn source_locator_bytes(
+fn source_locator_cells(
     locator: &SourceObjectLocator,
 ) -> Result<u64, ProfileAuthoringSemanticError> {
+    // Preserve the semantic work contract: one tag cell and one cell per numeric byte or text byte.
+    // These counts do not describe the inline StoredSourceLocator layout.
     match locator {
-        SourceObjectLocator::Indexed { .. } => Ok(LOGICAL_U8_BYTES + LOGICAL_U64_BYTES),
+        SourceObjectLocator::Indexed { .. } => Ok(9),
         SourceObjectLocator::Namespaced(locator) => {
             let schema = usize_to_u64(
                 locator.schema_id().name().as_str().len(),
                 "source locator schema bytes",
             )?;
             let value = usize_to_u64(locator.value().as_str().len(), "source locator bytes")?;
-            checked_sum(
-                [LOGICAL_U8_BYTES, LOGICAL_U32_BYTES, schema, value],
-                "source locator canonical bytes",
-            )
+            checked_sum([5, schema, value], "source locator semantic cells")
         }
     }
 }
 
-pub(super) fn operation_measure(
+pub(super) fn operation_cells(
     operation: ProvenanceOperationAuthoring<'_>,
-) -> Result<(u64, u64), ProfileAuthoringSemanticError> {
-    let kind_bytes = match operation.kind() {
+) -> Result<u64, ProfileAuthoringSemanticError> {
+    let kind_cells = match operation.kind() {
         OperationKind::Namespaced(name) => usize_to_u64(name.as_str().len(), "operation kind")?,
-        _ => LOGICAL_U8_BYTES,
+        _ => 1,
     };
     let parent_count = usize_to_u64(operation.parents().len(), "operation parents")?;
-    let parent_bytes = parent_count.checked_mul(LOGICAL_REFERENCE_BYTES).ok_or(
-        ProfileAuthoringSemanticError::AccountingOverflow {
-            dimension: "operation parent bytes",
-        },
-    )?;
-    let mut evidence_bytes = 0_u64;
     let mut evidence_cells = 0_u64;
     for evidence in operation.evidence() {
         let code_bytes = usize_to_u64(evidence.code().as_str().len(), "operation evidence code")?;
-        let digest_bytes = if evidence.digest().is_some() {
-            LOGICAL_DIGEST_BYTES
-        } else {
-            LOGICAL_U8_BYTES
-        };
-        checked_add(
-            &mut evidence_bytes,
-            code_bytes
-                .checked_add(LOGICAL_U64_BYTES)
-                .and_then(|bytes| bytes.checked_add(digest_bytes))
-                .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
-                    dimension: "operation evidence bytes",
-                })?,
-            "operation evidence bytes",
-        )?;
         checked_add(
             &mut evidence_cells,
             code_bytes
@@ -231,21 +187,8 @@ pub(super) fn operation_measure(
             "operation evidence semantic cells",
         )?;
     }
-    let bytes = checked_sum(
-        [
-            LOGICAL_U8_BYTES,
-            kind_bytes,
-            LOGICAL_DIGEST_BYTES,
-            LOGICAL_U32_BYTES,
-            parent_bytes,
-            LOGICAL_U32_BYTES,
-            evidence_bytes,
-        ],
-        "operation canonical bytes",
-    )?;
-    let cells = checked_sum(
-        [kind_bytes, 4, parent_count, evidence_cells],
+    checked_sum(
+        [kind_cells, 4, parent_count, evidence_cells],
         "operation semantic cells",
-    )?;
-    Ok((cells, bytes))
+    )
 }

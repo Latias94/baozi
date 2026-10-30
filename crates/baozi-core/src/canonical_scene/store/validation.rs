@@ -11,8 +11,7 @@ pub(in crate::canonical_scene::store) use node_scene::{
     DeformationPrimitiveValidationProjection, DeformationSkinValidationProjection,
     DeformationValidationScratch, DeformationValidationScratchRequirements,
     NodeSceneValidationProof, NodeSceneValidationScratch, ProfileMeteredCounts,
-    ProfileMeteredScratch, ProfileSegmentValidationScratch,
-    validate_node_scene_canonical_graph_metered,
+    ProfileMeteredScratch, validate_node_scene_canonical_graph_metered,
 };
 
 fn require_scalar<T: Copy + Eq>(actual: Option<T>, expected: T) -> Option<()> {

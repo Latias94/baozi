@@ -20,9 +20,6 @@ use crate::canonical_scene::store::production::{
     GeometryMeshInstanceAuthoring, InfluenceAuthoring, InfluenceRowsAuthoring, LogicalMeshLocalId,
     MeshInstanceDeformationAuthoring, SkinAuthoring, SkinLocalId,
 };
-use crate::canonical_scene::store::schema::profile::{
-    ProfileMetadataBytesSchema, profile_metadata_directory_field,
-};
 use crate::deform::SkinMatrixSpaces;
 use crate::extension::ExtensionMediaType;
 use crate::geometry::TopologyKind;
@@ -168,17 +165,16 @@ fn positions(scene: &ValidatedScene) -> &[f32] {
 }
 
 fn metadata_bytes(scene: &ValidatedScene) -> &[u8] {
-    // Metadata has no public borrowed reader yet. Inspect the actual retained byte lane;
+    // Metadata has no public borrowed reader yet. Inspect the actual typed payload owner;
     // do not generate a snapshot or another copy of the metadata to observe this pilot.
-    let scene = scene.as_node_scene();
-    let canonical = scene.read_canonical();
-    let directory = canonical
-        .records(scene.read_proof().profile_metadata_directory().into_store())
-        .expect("scale metadata directory");
-    let bytes = directory
-        .bytes_ref::<ProfileMetadataBytesSchema>(0, profile_metadata_directory_field::BYTES)
-        .expect("scale metadata byte reference");
-    canonical.bytes(bytes).expect("scale metadata byte payload")
+    scene
+        .as_node_scene()
+        .tables
+        .profile
+        .metadata
+        .as_ref()
+        .bytes
+        .as_slice()
 }
 
 #[test]
@@ -701,17 +697,6 @@ fn influence_and_metadata_validation_scale() {
                 allocations,
                 &account,
             );
-            // At fixture capture, the old validator copied all three U32 lanes into scratch:
-            // (vertices + 1) row offsets, 4 * vertices joints, and 4 * vertices source orders.
-            // These are hand-counted payload bytes, not measured allocation or RSS results.
-            assert_eq!(
-                (offsets.len() + 2 * influences.len()) * size_of::<u32>(),
-                vertices * 36 + 4
-            );
-            eprintln!(
-                "influences/{vertices}/metadata/{metadata_size}: logical_influence_u32_bytes={}",
-                vertices * 36 + 4
-            );
             let source = ValidatedScene::from_node_scene(parts.scene);
             let (terminal, allocations) = measured_edit(&source, 3);
             let NodeSceneEditTerminal::Success(edited) = terminal else {
@@ -787,6 +772,18 @@ fn influence_and_metadata_validation_scale() {
             assert!(std::ptr::eq(
                 metadata_bytes(&source),
                 metadata_bytes(&destination)
+            ));
+            let source_profile = &source.as_node_scene().tables.profile;
+            let destination_profile = &destination.as_node_scene().tables.profile;
+            assert!(std::ptr::eq(
+                source_profile.metadata.as_ref(),
+                destination_profile.metadata.as_ref(),
+            ));
+            assert!(std::ptr::eq(
+                source_profile.state.as_ref().segments[0].lineage.as_ref(),
+                destination_profile.state.as_ref().segments[0]
+                    .lineage
+                    .as_ref(),
             ));
             assert!(std::ptr::eq(positions(&source), positions(&destination)));
             assert!(

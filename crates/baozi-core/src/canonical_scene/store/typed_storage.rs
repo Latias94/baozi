@@ -1,4 +1,4 @@
-//! Private node and geometry tables. Rows contain logical indices and pool ranges only.
+//! Private typed Scene tables. Rows contain logical indices and pool ranges only.
 //!
 //! The containing Scene owns these tables through operation's retained-storage owner. In
 //! particular, no row contains a publication-local concrete-store slot: an unchanged geometry
@@ -16,14 +16,16 @@ use crate::math::{Mat4, Quat, Vec3};
 
 pub(super) mod build;
 pub(super) mod edit;
+pub(super) mod profile;
 #[cfg(test)]
 mod tests;
 pub(super) mod validation;
 
 /// The same actual table owners move from materialization through proof into the Scene root.
-pub(super) struct NodeGeometryStorage {
+pub(super) struct SceneTables {
     pub(super) nodes: RetainedStorage<NodeStorage>,
     pub(super) geometry: RetainedStorage<GeometryStorage>,
+    pub(super) profile: profile::ProfileStorage,
 }
 
 /// A half-open range in exactly one private typed table or scalar pool.
@@ -83,6 +85,10 @@ pub(super) struct TextRange(pub(super) TableRange<u8>);
 impl TextRange {
     pub(super) fn get(self, text: &[u8]) -> Option<&str> {
         std::str::from_utf8(self.0.get(text)?).ok()
+    }
+
+    pub(super) fn get_str(self, text: &str) -> Option<&str> {
+        text.get(self.0.checked(text.len())?)
     }
 }
 

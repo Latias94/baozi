@@ -38,10 +38,6 @@ use super::super::schema::deformation::{
     DeformationPrimitiveTableSchema, DeformationSkinCorrectionMatrixSchema,
     DeformationSkinJointNodeSchema, DeformationSkinNameSchema, DeformationSkinTableSchema,
 };
-use super::super::schema::profile::{
-    ProfileDirectorySchema, ProfileMetadataDirectorySchema, ProfileMetadataEntryTableSchema,
-    ProfileOwnerTableSchema, ProfileSegmentTableSchema,
-};
 use super::super::schema::spatial::{
     SpatialCameraTableSchema, SpatialDirectorySchema, SpatialLightTableSchema,
     SpatialTangentBasisSchemaNameSchema, SpatialTangentEncodingSchemaNameSchema,
@@ -52,7 +48,7 @@ use super::super::schema::{
     SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION, SceneDirectorySchema,
     scene_directory_field,
 };
-use super::super::typed_storage::NodeGeometryStorage;
+use super::super::typed_storage::SceneTables;
 pub(in crate::canonical_scene::store) use animation::{
     AnimationChannelValidationDescriptor, AnimationClipValidationDescriptor,
     AnimationMeteredCounts, AnimationValidationScratch, AnimationValidationScratchRequirements,
@@ -78,10 +74,8 @@ pub(in crate::canonical_scene::store) use deformation::{
     DeformationSkinValidationProjection, DeformationValidationScratch,
     DeformationValidationScratchRequirements,
 };
-pub(in crate::canonical_scene::store) use profile::{
-    ProfileMeteredCounts, ProfileMeteredScratch, ProfileSegmentValidationScratch,
-};
-use profile::{ProfileValidatedRefs, validate_profile_graph_metered};
+use profile::validate_profile_graph_metered;
+pub(in crate::canonical_scene::store) use profile::{ProfileMeteredCounts, ProfileMeteredScratch};
 use spatial::{
     SpatialValidatedMembers, SpatialValidatedRefs, validate_spatial_canonical_structure_metered,
 };
@@ -124,7 +118,8 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
     appearance: AppearanceValidatedRefs,
     deformation: DeformationValidatedRefs,
     animation: AnimationValidatedRefs,
-    profile: ProfileValidatedRefs,
+    profile: ProfileMeteredCounts,
+    maximum_provenance_depth: u32,
     source_node_count: usize,
     source_root_count: usize,
     source_edge_count: usize,
@@ -416,16 +411,12 @@ impl NodeSceneValidationProof {
         self.animation.out_tangents
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_directory(
-        &self,
-    ) -> CanonicalBlockRef<ProfileDirectorySchema> {
-        self.profile.directory
+    pub(in crate::canonical_scene::store) const fn profile_counts(&self) -> ProfileMeteredCounts {
+        self.profile
     }
 
-    pub(in crate::canonical_scene::store) const fn profile_segments(
-        &self,
-    ) -> CanonicalBlockRef<ProfileSegmentTableSchema> {
-        self.profile.segments
+    pub(in crate::canonical_scene::store) const fn profile_maximum_provenance_depth(&self) -> u32 {
+        self.maximum_provenance_depth
     }
 
     pub(in crate::canonical_scene::store) fn profile_segment_count(&self) -> usize {
@@ -466,24 +457,6 @@ impl NodeSceneValidationProof {
 
     pub(in crate::canonical_scene::store) const fn profile_lineage_digest_bytes(&self) -> u32 {
         self.profile.lineage_digest_bytes
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_owners(
-        &self,
-    ) -> CanonicalBlockRef<ProfileOwnerTableSchema> {
-        self.profile.owners
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_metadata_directory(
-        &self,
-    ) -> CanonicalBlockRef<ProfileMetadataDirectorySchema> {
-        self.profile.metadata_directory
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_metadata_entries(
-        &self,
-    ) -> Option<CanonicalBlockRef<ProfileMetadataEntryTableSchema>> {
-        self.profile.metadata_entries
     }
 
     pub(in crate::canonical_scene::store) const fn source_node_count(&self) -> usize {
@@ -620,7 +593,6 @@ struct NodeMeteredStructure<'session> {
     deformation_directory:
         CanonicalValidationMember<'session, RecordBlock, DeformationDirectorySchema>,
     animation_directory: CanonicalValidationMember<'session, RecordBlock, AnimationDirectorySchema>,
-    profile_directory: CanonicalValidationMember<'session, RecordBlock, ProfileDirectorySchema>,
     source_node_count: usize,
     source_root_count: usize,
     source_edge_count: usize,
@@ -630,8 +602,8 @@ fn validate_node_canonical_structure_metered<'session, 'storage, 'control, 'oper
     session: &mut CanonicalValidationSession<'session, 'storage, 'control, 'operation, O, PP, U>,
     directory: CanonicalValidationMember<'session, RecordBlock, SceneDirectorySchema>,
     counts: SceneEvidenceCounts,
-    tables: &NodeGeometryStorage,
-    scratch: &mut NodeSceneMeteredValidationScratch<'_, 'session>,
+    tables: &SceneTables,
+    scratch: &mut NodeSceneMeteredValidationScratch<'_>,
 ) -> Result<Option<NodeMeteredStructure<'session>>, StoreWorkError>
 where
     O: OperationOwner,
@@ -642,7 +614,6 @@ where
     let mut appearance = None;
     let mut deformation = None;
     let mut animation = None;
-    let mut profile = None;
     let mut root_count = None;
     let complete = session.visit_canonical_records(
         directory,
@@ -668,10 +639,6 @@ where
             )?;
             animation = row.record_ref::<AnimationDirectorySchema, _>(
                 scene_directory_field::ANIMATION,
-                |value| value,
-            )?;
-            profile = row.record_ref::<ProfileDirectorySchema, _>(
-                scene_directory_field::PROFILE,
                 |value| value,
             )?;
             let mut valid =
@@ -705,15 +672,7 @@ where
         Some(appearance_directory),
         Some(deformation_directory),
         Some(animation_directory),
-        Some(profile_directory),
-    ) = (
-        root_count,
-        spatial,
-        appearance,
-        deformation,
-        animation,
-        profile,
-    )
+    ) = (root_count, spatial, appearance, deformation, animation)
     else {
         return Ok(None);
     };
@@ -752,7 +711,6 @@ where
         appearance_directory,
         deformation_directory,
         animation_directory,
-        profile_directory,
         source_node_count,
         source_root_count: root_count as usize,
         source_edge_count,
@@ -871,9 +829,9 @@ pub(in crate::canonical_scene::store) fn validate_node_scene_canonical_graph_met
     >,
     expected_counts: SceneEvidenceCounts,
     expected_refs: NodeSceneMaterializedRefs,
-    tables: &NodeGeometryStorage,
+    tables: &SceneTables,
     validation_plan: NodeSceneCentralValidationPlan,
-    scratch: &mut NodeSceneMeteredValidationScratch<'_, 'session>,
+    scratch: &mut NodeSceneMeteredValidationScratch<'_>,
 ) -> Result<Option<NodeSceneValidationProof>, StoreWorkError>
 where
     O: OperationOwner,
@@ -974,11 +932,15 @@ where
     };
 
     let profile_counts = scratch_plan.profile_counts();
+    let Some(profile_owners) = expected_counts.profile_owner_layout() else {
+        return Ok(None);
+    };
     let Some(profile) = validate_profile_graph_metered(
         session,
-        node.profile_directory,
+        &tables.profile,
         profile_counts,
-        expected_refs.profile.lineage,
+        profile_owners,
+        scratch_plan.profile_maximum_depth(),
         &mut scratch.profile,
     )?
     else {
@@ -988,10 +950,6 @@ where
         return Ok(None);
     }
 
-    let source_node_count = expected_counts.node_count.checked_sub(1);
-    let Some(source_node_count) = source_node_count else {
-        return Ok(None);
-    };
     for (actual, expected) in [
         (node.spatial.camera_count, expected_counts.camera_count),
         (node.spatial.light_count, expected_counts.light_count),
@@ -1025,28 +983,40 @@ where
             animation.channel_count,
             expected_counts.animation_channel_count,
         ),
-        (profile.segment_count, expected_counts.profile_segment_count),
         (
-            profile.resource_count,
+            profile_counts.segment_count,
+            expected_counts.profile_segment_count,
+        ),
+        (
+            profile_counts.resource_count,
             expected_counts.profile_resource_count,
         ),
-        (profile.source_count, expected_counts.profile_source_count),
         (
-            profile.provenance_count,
+            profile_counts.source_count,
+            expected_counts.profile_source_count,
+        ),
+        (
+            profile_counts.provenance_count,
             expected_counts.profile_provenance_count,
         ),
         (
-            profile.operation_count,
+            profile_counts.operation_count,
             expected_counts.profile_operation_count,
         ),
-        (profile.parent_count, expected_counts.profile_parent_count),
-        (profile.owner_count, expected_counts.profile_owner_count),
         (
-            profile.attachment_count,
+            profile_counts.parent_count,
+            expected_counts.profile_parent_count,
+        ),
+        (
+            profile_counts.owner_count,
+            expected_counts.profile_owner_count,
+        ),
+        (
+            profile_counts.attachment_count,
             expected_counts.profile_attachment_count,
         ),
         (
-            profile.metadata_entry_count,
+            profile_counts.metadata_entry_count,
             expected_counts.profile_metadata_entry_count,
         ),
     ] {
@@ -1054,66 +1024,6 @@ where
             return Ok(None);
         }
     }
-    for (actual, expected) in [
-        (profile.owner_classes.nodes, source_node_count),
-        (profile.owner_classes.cameras, expected_counts.camera_count),
-        (profile.owner_classes.lights, expected_counts.light_count),
-        (profile.owner_classes.images, expected_counts.image_count),
-        (
-            profile.owner_classes.samplers,
-            expected_counts.sampler_count,
-        ),
-        (
-            profile.owner_classes.textures,
-            expected_counts.texture_count,
-        ),
-        (
-            profile.owner_classes.texture_bindings,
-            expected_counts.material_binding_count,
-        ),
-        (
-            profile.owner_classes.materials,
-            expected_counts.material_count,
-        ),
-        (
-            profile.owner_classes.logical_meshes,
-            expected_counts.logical_mesh_count,
-        ),
-        (
-            profile.owner_classes.primitives,
-            expected_counts.primitive_count,
-        ),
-        (
-            profile.owner_classes.attributes,
-            expected_counts.attribute_count,
-        ),
-        (
-            profile.owner_classes.mesh_instances,
-            expected_counts.mesh_instance_count,
-        ),
-        (profile.owner_classes.skins, expected_counts.skin_count),
-        (
-            profile.owner_classes.morph_definitions,
-            expected_counts.morph_definition_count,
-        ),
-        (
-            profile.owner_classes.morph_deltas,
-            expected_counts.morph_delta_count,
-        ),
-        (
-            profile.owner_classes.animation_clips,
-            expected_counts.animation_clip_count,
-        ),
-        (
-            profile.owner_classes.animation_channels,
-            expected_counts.animation_channel_count,
-        ),
-    ] {
-        if actual != expected {
-            return Ok(None);
-        }
-    }
-
     let spatial_payload_count = [
         node.spatial.tangent_basis_schema_name.is_some(),
         node.spatial.tangent_encoding_schema_name.is_some(),
@@ -1139,15 +1049,12 @@ where
     let Some(domain_payload_count) = domain_payload_count else {
         return Ok(None);
     };
-    if domain_payload_count.checked_add(profile.payload_leaf_count)
-        != Some(expected_counts.payload_block_count)
-        || domain_payload_count.checked_add(profile.shareable_leaf_count)
-            != Some(expected_counts.shareable_leaf_block_count)
+    if domain_payload_count != expected_counts.payload_block_count
+        || domain_payload_count != expected_counts.shareable_leaf_block_count
     {
         return Ok(None);
     }
-    let canonical_block_count = 1_u32
-        .checked_add(0)
+    let canonical_block_count = Some(1_u32)
         .and_then(|count| {
             count.checked_add(
                 1 + [
@@ -1209,8 +1116,7 @@ where
                 .sum::<u32>()
                     + animation.payload_block_count,
             )
-        })
-        .and_then(|count| count.checked_add(profile.canonical_block_count));
+        });
     if canonical_block_count != Some(expected_counts.canonical_block_count) {
         return Ok(None);
     }
@@ -1376,58 +1282,10 @@ where
         && optional_member_identifies(
             animation.members.out_tangents,
             expected_refs.animation.payloads.out_tangents,
-        )
-        && profile
-            .directory
-            .identifies(expected_refs.profile.directory.into_store())
-        && profile
-            .segments
-            .identifies(expected_refs.profile.segments.into_store())
-        && profile
-            .owners
-            .identifies(expected_refs.profile.owners.into_store())
-        && profile
-            .metadata_directory
-            .identifies(expected_refs.profile.metadata.directory.into_store())
-        && optional_member_identifies(
-            profile.metadata_entries,
-            expected_refs.profile.metadata.leaves.entries,
-        )
-        && optional_member_identifies(
-            profile.metadata_text,
-            expected_refs.profile.metadata.leaves.text,
-        )
-        && optional_member_identifies(
-            profile.metadata_bytes,
-            expected_refs.profile.metadata.leaves.bytes,
-        )
-        && optional_member_identifies(
-            profile.metadata_bools,
-            expected_refs.profile.metadata.leaves.bools,
-        )
-        && optional_member_identifies(
-            profile.metadata_i64s,
-            expected_refs.profile.metadata.leaves.i64s,
-        )
-        && optional_member_identifies(
-            profile.metadata_u64s,
-            expected_refs.profile.metadata.leaves.u64s,
-        )
-        && optional_member_identifies(
-            profile.metadata_f64s,
-            expected_refs.profile.metadata.leaves.f64s,
-        )
-        && optional_member_identifies(
-            profile.metadata_f32s,
-            expected_refs.profile.metadata.leaves.f32s,
         );
     if !identities_match {
         return Ok(None);
     }
-    let Some(profile_attachments) = expected_refs.profile.lineage.attachments() else {
-        return Ok(None);
-    };
-
     Ok(Some(NodeSceneValidationProof {
         directory: expected_refs.directory,
         spatial: SpatialValidatedRefs {
@@ -1486,46 +1344,8 @@ where
             in_tangents: expected_refs.animation.payloads.in_tangents,
             out_tangents: expected_refs.animation.payloads.out_tangents,
         },
-        profile: ProfileValidatedRefs {
-            directory: expected_refs.profile.directory,
-            segments: expected_refs.profile.segments,
-            owners: expected_refs.profile.owners,
-            attachments: profile_attachments,
-            metadata_directory: expected_refs.profile.metadata.directory,
-            metadata_entries: expected_refs.profile.metadata.leaves.entries,
-            metadata_text: expected_refs.profile.metadata.leaves.text,
-            metadata_bytes: expected_refs.profile.metadata.leaves.bytes,
-            metadata_bools: expected_refs.profile.metadata.leaves.bools,
-            metadata_i64s: expected_refs.profile.metadata.leaves.i64s,
-            metadata_u64s: expected_refs.profile.metadata.leaves.u64s,
-            metadata_f64s: expected_refs.profile.metadata.leaves.f64s,
-            metadata_f32s: expected_refs.profile.metadata.leaves.f32s,
-            segment_count: profile.segment_count,
-            resource_count: profile.resource_count,
-            source_count: profile.source_count,
-            provenance_count: profile.provenance_count,
-            operation_count: profile.operation_count,
-            evidence_count: profile.evidence_count,
-            parent_count: profile.parent_count,
-            wide_count: profile.wide_count,
-            lineage_text_bytes: profile.lineage_text_bytes,
-            lineage_digest_bytes: profile.lineage_digest_bytes,
-            attachment_count: profile.attachment_count,
-            owner_count: profile.owner_count,
-            metadata_entry_count: profile.metadata_entry_count,
-            metadata_text_bytes: profile.metadata_text_bytes,
-            metadata_payload_bytes: profile.metadata_payload_bytes,
-            metadata_bool_count: profile.metadata_bool_count,
-            metadata_i64_count: profile.metadata_i64_count,
-            metadata_u64_count: profile.metadata_u64_count,
-            metadata_f64_count: profile.metadata_f64_count,
-            metadata_f32_count: profile.metadata_f32_count,
-            canonical_block_count: profile.canonical_block_count,
-            payload_leaf_count: profile.payload_leaf_count,
-            shareable_leaf_count: profile.shareable_leaf_count,
-            maximum_provenance_depth: profile.maximum_provenance_depth,
-            owner_classes: profile.owner_classes,
-        },
+        profile: profile_counts,
+        maximum_provenance_depth: profile.maximum_provenance_depth,
         source_node_count: node.source_node_count,
         source_root_count: node.source_root_count,
         source_edge_count: node.source_edge_count,

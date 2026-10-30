@@ -139,9 +139,8 @@ fn scene_envelope_accounts_for_the_complete_scene_shape() {
     let empty_input = empty_scene_input(Presence::Present(&empty_roots), &empty_nodes);
     let empty = SceneInputEnvelope::try_new(empty_input.batch(), SceneValidationLimits::default())
         .expect("the empty Scene shape is representable");
-    // Admission reserves the complete fresh-profile block ceiling even when its optional lanes
-    // are empty; nested validation later commits only the blocks actually materialized.
-    assert_eq!(empty.terminal_attribution_slots(), 32);
+    // Node, geometry, and profile use typed retained owners outside the record-store table.
+    assert_eq!(empty.terminal_attribution_slots(), 8);
 
     let roots = [NodeLocalId::new(0)];
     let nodes = [trs(Presence::Absent)];
@@ -149,7 +148,10 @@ fn scene_envelope_accounts_for_the_complete_scene_shape() {
     let populated_nodes =
         SceneInputEnvelope::try_new(populated_input.batch(), SceneValidationLimits::default())
             .expect("the populated node shape is representable");
-    assert_eq!(populated_nodes.terminal_attribution_slots(), 35);
+    assert_eq!(
+        populated_nodes.terminal_attribution_slots(),
+        empty.terminal_attribution_slots()
+    );
 }
 
 #[test]
@@ -229,9 +231,8 @@ fn scene_envelope_reserves_nested_worst_case_without_deep_validation() {
     let envelope = SceneInputEnvelope::try_new(input, limits)
         .expect("the envelope must not inspect invalid nested animation semantics");
 
-    // One channel conservatively admits its table plus all four possible payload blocks, and the
-    // mandatory profile reserves its complete fresh-publication ceiling.
-    assert_eq!(envelope.terminal_attribution_slots(), 37);
+    // One channel conservatively admits its table and all four possible payload blocks.
+    assert_eq!(envelope.terminal_attribution_slots(), 13);
 }
 
 #[test]
@@ -292,9 +293,8 @@ fn scene_envelope_reserves_complete_appearance_payload_envelope() {
         .expect("appearance envelope should be representable without deep validation");
 
     // Binding semantics, optional source keys, material factors, and material names each own an
-    // independently attributable aggregate payload block; the mandatory profile adds its
-    // complete ceiling.
-    assert_eq!(envelope.terminal_attribution_slots(), 38);
+    // independently attributable aggregate payload block.
+    assert_eq!(envelope.terminal_attribution_slots(), 14);
 }
 
 #[test]

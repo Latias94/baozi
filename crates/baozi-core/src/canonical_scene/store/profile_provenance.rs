@@ -1,29 +1,22 @@
 //! Private qualification for retained canonical provenance references.
 //!
-//! A global topology index alone cannot distinguish two sibling segments that
-//! happen to append the same local node. Every stored edge therefore carries
-//! the segment ordinal, its process-unique nonce, the segment-local index, and
-//! the generation-wide topology index. This module is the only place that
-//! constructs or validates that four-part address.
+//! Each edge identifies a local node in one process-unique immutable segment.
+//! Global topology indices are derived from the validated segment prefix at lookup.
 
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-pub(in crate::canonical_scene::store) const PROFILE_PROVENANCE_ADDRESS_SCALARS: usize = 4;
-pub(in crate::canonical_scene::store) const PROFILE_PROVENANCE_ADDRESS_LOGICAL_BYTES: u64 =
-    PROFILE_PROVENANCE_ADDRESS_SCALARS as u64 * 8;
 
 #[cfg(test)]
 thread_local! {
     static ISSUED_PROFILE_SEGMENT_NONCES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static FAIL_NEXT_PROFILE_SEGMENT_NONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static NEXT_PROFILE_ADDRESS_CORRUPTION: std::cell::Cell<Option<ProfileAddressCorruption>> = const { std::cell::Cell::new(None) };
+    static NEXT_PROFILE_REFERENCE_CORRUPTION: std::cell::Cell<Option<ProfileReferenceCorruption>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
-struct ProfileAddressCorruption {
-    addresses_to_skip: usize,
+struct ProfileReferenceCorruption {
+    references_to_skip: usize,
     component: usize,
     replacement: u64,
 }
@@ -96,101 +89,51 @@ pub(in crate::canonical_scene::store) fn fail_next_profile_segment_nonce_for_tes
     FAIL_NEXT_PROFILE_SEGMENT_NONCE.with(|flag| flag.set(true));
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(in crate::canonical_scene::store) struct QualifiedProvenanceAddress {
-    segment_ordinal: u64,
-    segment_nonce: ProfileSegmentNonce,
-    local_index: u64,
-    global_index: u64,
-}
-
-impl QualifiedProvenanceAddress {
-    pub(in crate::canonical_scene::store) fn from_scalars(scalars: &[u64]) -> Option<Self> {
-        let scalars: &[u64; PROFILE_PROVENANCE_ADDRESS_SCALARS] = scalars.try_into().ok()?;
-        let [segment_ordinal, segment_nonce, local_index, global_index] = *scalars;
-        Some(Self {
-            segment_ordinal,
-            segment_nonce: ProfileSegmentNonce::from_stored(segment_nonce)?,
-            local_index,
-            global_index,
-        })
-    }
-
-    pub(in crate::canonical_scene::store) fn into_scalars(
-        self,
-    ) -> [u64; PROFILE_PROVENANCE_ADDRESS_SCALARS] {
-        let scalars = [
-            self.segment_ordinal,
-            self.segment_nonce.get(),
-            self.local_index,
-            self.global_index,
-        ];
-        #[cfg(test)]
-        let scalars = {
-            let mut scalars = scalars;
-            apply_next_profile_address_corruption_for_test(&mut scalars);
-            scalars
-        };
-        scalars
-    }
-
-    pub(in crate::canonical_scene::store) fn segment_ordinal(self) -> Option<u32> {
-        u32::try_from(self.segment_ordinal).ok()
-    }
-
-    pub(in crate::canonical_scene::store) fn global_index(self) -> Option<u32> {
-        u32::try_from(self.global_index).ok()
-    }
-
-    pub(in crate::canonical_scene::store) fn validate_against(
-        self,
-        segment: ProfileSegmentAddressDomain,
-    ) -> Option<u32> {
-        let ordinal = self.segment_ordinal()?;
-        let local = u32::try_from(self.local_index).ok()?;
-        let global = self.global_index()?;
-        (ordinal == segment.ordinal
-            && self.segment_nonce == segment.nonce
-            && local < segment.provenance_count
-            && segment.provenance_base.checked_add(local) == Some(global))
-        .then_some(global)
-    }
-}
-
 #[cfg(test)]
-pub(in crate::canonical_scene::store) fn corrupt_profile_address_for_test(
-    addresses_to_skip: usize,
+pub(in crate::canonical_scene::store) fn corrupt_profile_reference_for_test(
+    references_to_skip: usize,
     component: usize,
     replacement: u64,
 ) {
-    assert!(component < PROFILE_PROVENANCE_ADDRESS_SCALARS);
-    NEXT_PROFILE_ADDRESS_CORRUPTION.with(|corruption| {
+    assert!(component < 3);
+    assert!(
+        component != 1 || replacement != 0,
+        "nonce zero is unrepresentable"
+    );
+    NEXT_PROFILE_REFERENCE_CORRUPTION.with(|slot| {
         assert!(
-            corruption
-                .replace(Some(ProfileAddressCorruption {
-                    addresses_to_skip,
-                    component,
-                    replacement,
-                }))
-                .is_none()
+            slot.replace(Some(ProfileReferenceCorruption {
+                references_to_skip,
+                component,
+                replacement,
+            }))
+            .is_none()
         );
     });
 }
 
 #[cfg(test)]
-fn apply_next_profile_address_corruption_for_test(
-    scalars: &mut [u64; PROFILE_PROVENANCE_ADDRESS_SCALARS],
+pub(in crate::canonical_scene::store) fn apply_profile_reference_corruption_for_test(
+    reference: &mut ProfileProvenanceRef,
 ) {
-    NEXT_PROFILE_ADDRESS_CORRUPTION.with(|slot| {
+    NEXT_PROFILE_REFERENCE_CORRUPTION.with(|slot| {
         let Some(mut corruption) = slot.take() else {
             return;
         };
-        if corruption.addresses_to_skip != 0 {
-            corruption.addresses_to_skip -= 1;
+        if corruption.references_to_skip != 0 {
+            corruption.references_to_skip -= 1;
             slot.set(Some(corruption));
             return;
         }
-        scalars[corruption.component] = corruption.replacement;
+        match corruption.component {
+            0 => reference.segment = u32::try_from(corruption.replacement).unwrap_or(u32::MAX),
+            1 => {
+                reference.nonce = ProfileSegmentNonce::from_stored(corruption.replacement)
+                    .expect("test corruption uses a nonzero nonce")
+            }
+            2 => reference.local = u32::try_from(corruption.replacement).unwrap_or(u32::MAX),
+            _ => unreachable!("test corruption selects one of three stored components"),
+        }
     });
 }
 
@@ -200,6 +143,35 @@ pub(in crate::canonical_scene::store) struct ProfileSegmentAddressDomain {
     nonce: ProfileSegmentNonce,
     provenance_base: u32,
     provenance_count: u32,
+}
+
+/// A logical node in one exact immutable segment. The global index is derived at lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::canonical_scene::store) struct ProfileProvenanceRef {
+    segment: u32,
+    nonce: ProfileSegmentNonce,
+    local: u32,
+}
+
+impl ProfileProvenanceRef {
+    pub(in crate::canonical_scene::store) const fn segment(self) -> u32 {
+        self.segment
+    }
+
+    pub(in crate::canonical_scene::store) const fn local(self) -> u32 {
+        self.local
+    }
+
+    pub(in crate::canonical_scene::store) fn resolve(
+        self,
+        domain: ProfileSegmentAddressDomain,
+    ) -> Option<u32> {
+        (self.segment == domain.ordinal
+            && self.nonce == domain.nonce
+            && self.local < domain.provenance_count)
+            .then(|| domain.provenance_base.checked_add(self.local))
+            .flatten()
+    }
 }
 
 impl ProfileSegmentAddressDomain {
@@ -221,83 +193,22 @@ impl ProfileSegmentAddressDomain {
         self.nonce
     }
 
-    /// Constructs an address within this exact segment. The caller supplies only a local index;
-    /// the domain owns its nonce, extent, and global base, so those cannot drift independently.
-    pub(in crate::canonical_scene::store) fn address(
+    pub(in crate::canonical_scene::store) fn reference(
         self,
-        local_index: u32,
-    ) -> Option<QualifiedProvenanceAddress> {
-        if local_index >= self.provenance_count {
+        local: u32,
+    ) -> Option<ProfileProvenanceRef> {
+        if local >= self.provenance_count || self.provenance_base.checked_add(local).is_none() {
             return None;
         }
-        let global_index = self.provenance_base.checked_add(local_index)?;
-        Some(QualifiedProvenanceAddress {
-            segment_ordinal: u64::from(self.ordinal),
-            segment_nonce: self.nonce,
-            local_index: u64::from(local_index),
-            global_index: u64::from(global_index),
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::canonical_scene::store) struct QualifiedProvenanceAddressSlice<'values> {
-    scalars: &'values [u64],
-}
-
-impl<'values> QualifiedProvenanceAddressSlice<'values> {
-    pub(in crate::canonical_scene::store) fn from_scalars(
-        scalars: &'values [u64],
-        address_count: usize,
-    ) -> Option<Self> {
-        let expected = address_count.checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)?;
-        (scalars.len() == expected).then_some(Self { scalars })
-    }
-
-    pub(in crate::canonical_scene::store) const fn len(self) -> usize {
-        self.scalars.len() / PROFILE_PROVENANCE_ADDRESS_SCALARS
-    }
-
-    pub(in crate::canonical_scene::store) fn get_range(
-        self,
-        start: usize,
-        count: usize,
-    ) -> Option<Self> {
-        let scalar_start = start.checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)?;
-        let scalar_count = count.checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)?;
-        let scalar_end = scalar_start.checked_add(scalar_count)?;
-        Self::from_scalars(self.scalars.get(scalar_start..scalar_end)?, count)
-    }
-
-    pub(in crate::canonical_scene::store) fn raw_prefix(
-        self,
-        address_count: usize,
-    ) -> Option<&'values [u64]> {
-        let end = address_count.checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)?;
-        self.scalars.get(..end)
-    }
-
-    pub(in crate::canonical_scene::store) fn raw_suffix(
-        self,
-        address_start: usize,
-    ) -> Option<&'values [u64]> {
-        let start = address_start.checked_mul(PROFILE_PROVENANCE_ADDRESS_SCALARS)?;
-        self.scalars.get(start..)
-    }
-
-    pub(in crate::canonical_scene::store) fn iter(
-        self,
-    ) -> impl ExactSizeIterator<Item = Option<QualifiedProvenanceAddress>> + 'values {
-        self.scalars
-            .chunks_exact(PROFILE_PROVENANCE_ADDRESS_SCALARS)
-            .map(QualifiedProvenanceAddress::from_scalars)
-    }
-
-    pub(in crate::canonical_scene::store) fn global_indices(
-        self,
-    ) -> impl ExactSizeIterator<Item = Option<u32>> + 'values {
-        self.iter()
-            .map(|address| address.and_then(QualifiedProvenanceAddress::global_index))
+        #[allow(unused_mut)]
+        let mut reference = ProfileProvenanceRef {
+            segment: self.ordinal,
+            nonce: self.nonce,
+            local,
+        };
+        #[cfg(test)]
+        apply_profile_reference_corruption_for_test(&mut reference);
+        Some(reference)
     }
 }
 
@@ -310,42 +221,45 @@ mod tests {
     }
 
     #[test]
-    fn qualified_address_rejects_each_independently_corrupted_component() {
+    fn references_reject_foreign_segments_nonces_and_local_indices() {
         let domain = ProfileSegmentAddressDomain::new(3, nonce(41), 12, 5);
-        let valid = domain.address(2).expect("valid qualified address");
-        assert_eq!(valid.validate_against(domain), Some(14));
-        assert!(QualifiedProvenanceAddress::from_scalars(&[3, 0, 2, 14]).is_none());
-
+        let valid = domain.reference(2).expect("valid segment-local reference");
+        assert_eq!(valid.resolve(domain), Some(14));
+        assert_eq!(ProfileSegmentNonce::from_stored(0), None);
         for corrupted in [
-            [4, 41, 2, 14],
-            [3, 42, 2, 14],
-            [3, 41, 5, 14],
-            [3, 41, 2, 15],
+            ProfileProvenanceRef {
+                segment: 4,
+                ..valid
+            },
+            ProfileProvenanceRef {
+                nonce: nonce(42),
+                ..valid
+            },
+            ProfileProvenanceRef { local: 5, ..valid },
         ] {
-            let corrupted = QualifiedProvenanceAddress::from_scalars(&corrupted)
-                .expect("corruption remains structurally decodable");
-            assert_eq!(corrupted.validate_against(domain), None);
+            assert_eq!(corrupted.resolve(domain), None);
         }
+        // Prefixes belong to the validated segment directory, not to each edge.
+        assert_eq!(
+            valid.resolve(ProfileSegmentAddressDomain::new(3, nonce(41), 100, 5)),
+            Some(102)
+        );
     }
 
     #[test]
-    fn segment_addresses_derive_global_indices_and_check_the_local_extent() {
+    fn segment_references_derive_global_indices_and_check_the_local_extent() {
         let domain = ProfileSegmentAddressDomain::new(3, nonce(41), 12, 5);
         for local in 0..5 {
-            let address = domain
-                .address(local)
-                .expect("local index belongs to this segment");
-            assert_eq!(address.validate_against(domain), Some(12 + local));
-            assert_eq!(
-                address.into_scalars(),
-                [3, 41, u64::from(local), 12 + u64::from(local)]
-            );
+            let reference = domain
+                .reference(local)
+                .expect("local node belongs to segment");
+            assert_eq!(reference.resolve(domain), Some(12 + local));
         }
-        assert!(domain.address(5).is_none());
-        assert!(domain.address(u32::MAX).is_none());
+        assert!(domain.reference(5).is_none());
+        assert!(domain.reference(u32::MAX).is_none());
         let overflow = ProfileSegmentAddressDomain::new(0, nonce(42), u32::MAX, 2);
-        assert!(overflow.address(0).is_some());
-        assert!(overflow.address(1).is_none());
+        assert!(overflow.reference(0).is_some());
+        assert!(overflow.reference(1).is_none());
     }
 
     #[test]
@@ -381,10 +295,10 @@ mod tests {
     fn sibling_nonce_substitution_is_rejected() {
         let left_domain = ProfileSegmentAddressDomain::new(1, nonce(51), 7, 2);
         let right_domain = ProfileSegmentAddressDomain::new(1, nonce(52), 7, 2);
-        let left_address = left_domain.address(1).expect("left sibling address");
+        let left_address = left_domain.reference(1).expect("left sibling address");
 
-        assert_eq!(left_address.validate_against(left_domain), Some(8));
-        assert_eq!(left_address.validate_against(right_domain), None);
+        assert_eq!(left_address.resolve(left_domain), Some(8));
+        assert_eq!(left_address.resolve(right_domain), None);
     }
 
     #[test]

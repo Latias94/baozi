@@ -77,7 +77,7 @@ pub enum ExtensionMediaTypeError {
     InvalidByte { offset: usize },
 }
 
-fn validate_media_type(value: &str) -> Result<(), ExtensionMediaTypeError> {
+pub(crate) fn validate_media_type(value: &str) -> Result<(), ExtensionMediaTypeError> {
     if value.is_empty() {
         return Err(ExtensionMediaTypeError::Empty);
     }

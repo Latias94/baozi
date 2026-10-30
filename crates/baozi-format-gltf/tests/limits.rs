@@ -266,17 +266,32 @@ fn glb_json_surface_cancellation_is_bounded_by_scan_chunks() -> TestResult<()> {
 #[test]
 fn glb_container_chunk_scan_respects_the_work_budget() -> TestResult<()> {
     let json = br#"{"asset":{"version":"2.0"}}"#;
-    let document = append_glb_chunk(
-        append_glb_chunk(
-            append_glb_chunk(glb_with_json(json), b"BIN\0", &[0, 0, 0, 0]),
-            b"ONE1",
-            &[0, 0, 0, 0],
-        ),
-        b"TWO2",
-        &[0, 0, 0, 0],
+    let mut document = append_glb_chunk(glb_with_json(json), b"BIN\0", &[0, 0, 0, 0]);
+    // Keep enough valid extension headers that the small scan allowance cannot finish the
+    // container even when terminal failure ownership adds a few work units to calibration.
+    for _ in 0..32 {
+        document = append_glb_chunk(document, b"PAD0", &[0, 0, 0, 0]);
+    }
+    // An equally sized invalid first chunk enters the same controlled work group, including
+    // its owned handles, then rejects before completing the first admitted header.
+    let mut invalid_first_chunk = document.clone();
+    invalid_first_chunk[16..20].copy_from_slice(b"BAD!");
+    let (baseline, baseline_diagnostics) = import_assets_result_with_control(
+        "chunk-work-limit.glb",
+        [("chunk-work-limit.glb", invalid_first_chunk)],
+        GltfTestOptions::memory(),
+        ImportOperationControl::default(),
+    )?;
+    assert!(baseline_diagnostics.is_empty());
+    let baseline = expected_error(baseline)?;
+    assert_gltf_failure(&baseline, GltfFailureCode::InvalidDocument, None)?;
+    let prefix = dimension_consumed(&baseline, ImportDimension::WorkUnits);
+    assert_eq!(
+        dimension_attempted(&baseline, ImportDimension::WorkUnits),
+        prefix + 1
     );
     let mut options = GltfTestOptions::memory();
-    options.limits.max_work_units = 3;
+    options.limits.max_work_units = prefix + 3;
 
     let (result, diagnostics) = import_assets_result_with_control(
         "chunk-work-limit.glb",
@@ -287,7 +302,9 @@ fn glb_container_chunk_scan_respects_the_work_budget() -> TestResult<()> {
     let failure = expected_error(result)?;
 
     assert!(diagnostics.is_empty());
-    assert_ledger_limit(&failure, ImportDimension::WorkUnits, 3);
+    assert_ledger_limit(&failure, ImportDimension::WorkUnits, prefix + 3);
+    // Terminal failure ownership also performs handle work. The absent DecodeWork admission
+    // proves the exhausted budget stopped container scanning before JSON processing began.
     assert_eq!(
         dimension_attempted(&failure, ImportDimension::DecodeWork),
         0

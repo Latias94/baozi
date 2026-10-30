@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-27
+updated: 2026-10-30
 authors:
   - Codex
 decision_type: architecture
@@ -134,6 +135,10 @@ An inline owner does not allocate another shared header for every path or vector
 allocation covers its inline fields; its lease covers only its own qualified backing allocations.
 Separately owned children retain their own charge and are not also counted in the parent. Sharing
 an immutable table or page uses the existing admitted shared-allocation mechanism when needed.
+For an aggregate containing shared children, central admission covers its handle-vector capacities
+before preparation acquires those existing child handles. Preparation and table construction consume
+the same admission. A returned failure destroys the prepared handles and backing vectors before
+releasing that admission. This is one storage ownership path, not a second domain allocator.
 Both ownership forms use the same storage-first release and poison handling, including ordinary
 host unwind. A destructor failure preserves uncertain charges rather than reporting clean release.
 

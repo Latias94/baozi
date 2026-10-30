@@ -128,7 +128,7 @@ pub enum ResourceIdentityError {
     AllocationFailed,
 }
 
-fn validate_resource_identity(value: &str) -> Result<(), ResourceIdentityError> {
+pub(crate) fn validate_resource_identity(value: &str) -> Result<(), ResourceIdentityError> {
     if value.is_empty() {
         return Err(ResourceIdentityError::Empty);
     }
@@ -252,7 +252,7 @@ pub enum SourceDisplayNameError {
     AllocationFailed,
 }
 
-fn validate_source_display_name(value: &str) -> Result<(), SourceDisplayNameError> {
+pub(crate) fn validate_source_display_name(value: &str) -> Result<(), SourceDisplayNameError> {
     if value.is_empty() {
         return Err(SourceDisplayNameError::Empty);
     }
@@ -382,7 +382,7 @@ pub enum SourceLocatorValueError {
     AllocationFailed,
 }
 
-fn validate_source_locator_value(value: &str) -> Result<(), SourceLocatorValueError> {
+pub(crate) fn validate_source_locator_value(value: &str) -> Result<(), SourceLocatorValueError> {
     if value.is_empty() {
         return Err(SourceLocatorValueError::Empty);
     }

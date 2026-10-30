@@ -13,7 +13,7 @@ use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemant
 use crate::canonical_scene::store::construction::SceneConstructionLimits;
 use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneProfileCursor, NodeSceneProfileMetadataArray, NodeSceneProfileMetadataArrayKind,
-    NodeSceneProfileMetadataValue, NodeSceneProfileStep,
+    NodeSceneProfileMetadataValue, NodeSceneProfileProvenanceKind, NodeSceneProfileStep,
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionTerminal, NodeSceneSuccessParts, NodeSceneTestTransaction, SceneStorage,
@@ -32,7 +32,6 @@ use crate::canonical_scene::store::production::{
     SceneAuthoringBatch, SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId,
     SpatialAuthoringBatch,
 };
-use crate::canonical_scene::store::schema::profile::profile_segment_field;
 use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
 use crate::extension::{
     ExtensionArrayRef, ExtensionMediaType, ExtensionSchemaId, ExtensionValueRef,
@@ -1529,12 +1528,39 @@ fn fresh_segment_nonce_is_excluded_from_the_semantic_snapshot() {
     let second = single_root_scene(&account, AuthoredTransform::identity_trs());
     let segment_nonce = |scene: &SceneStorage| {
         scene
-            .canonical
-            .records(scene.proof.profile_segments().into_store())
-            .and_then(|segments| segments.scalar::<u64>(0, profile_segment_field::NONCE))
+            .tables
+            .profile
+            .state
+            .as_ref()
+            .segments
+            .first()
             .expect("validated fresh profile segment nonce")
+            .lineage
+            .as_ref()
+            .nonce
+            .get()
     };
     assert_ne!(segment_nonce(&first.scene), segment_nonce(&second.scene));
+    let first_profile = &first.scene.tables.profile;
+    let second_profile = &second.scene.tables.profile;
+    let first_reference = first_profile.state.as_ref().attachments[0];
+    let second_reference = second_profile.state.as_ref().attachments[0];
+    assert_eq!(first_reference.segment(), second_reference.segment());
+    assert_eq!(first_reference.local(), second_reference.local());
+    assert_eq!(
+        first_profile
+            .resolve(first_reference)
+            .map(|(index, _)| index),
+        Some(0)
+    );
+    assert_eq!(
+        second_profile
+            .resolve(second_reference)
+            .map(|(index, _)| index),
+        Some(0)
+    );
+    assert!(first_profile.resolve(second_reference).is_none());
+    assert!(second_profile.resolve(first_reference).is_none());
 
     let (first_snapshot, first_transcript) =
         capture_node_scene_with_test_transcript(&first.scene, snapshot_limits(4_096, 64), None)
@@ -1676,8 +1702,10 @@ pub(in crate::canonical_scene::store) fn collect_segment_partition_snapshot_obse
     );
     let direct = publish_scene_input(&account, direct_input);
 
-    assert_eq!(direct.scene.proof.profile_segment_count(), 1);
-    assert_eq!(edited.scene.proof.profile_segment_count(), 2);
+    let direct_segment_count = direct.scene.tables.profile.state.as_ref().segments.len();
+    let edited_segment_count = edited.scene.tables.profile.state.as_ref().segments.len();
+    assert_eq!(direct_segment_count, 1);
+    assert_eq!(edited_segment_count, 2);
     let limits = snapshot_limits(MAX_PREVIEW_BYTES, MAX_COLLECTION_ITEMS);
     let (direct_snapshot, direct_transcript) =
         capture_node_scene_with_test_transcript(&direct.scene, limits, None)
@@ -1706,7 +1734,7 @@ pub(in crate::canonical_scene::store) fn collect_segment_partition_snapshot_obse
         draft_schema_revision: direct_snapshot.schema_revision,
         algorithm: direct_snapshot.algorithm,
         direct: SegmentPartitionSnapshotReceipt {
-            segment_count: direct.scene.proof.profile_segment_count(),
+            segment_count: direct_segment_count,
             digest: direct_snapshot.digest,
             preview_text: direct_snapshot.preview.text,
             preview_items_omitted_by_limit: direct_snapshot.preview.items_omitted_by_limit,
@@ -1717,7 +1745,7 @@ pub(in crate::canonical_scene::store) fn collect_segment_partition_snapshot_obse
             work_units: direct_work,
         },
         edited: SegmentPartitionSnapshotReceipt {
-            segment_count: edited.scene.proof.profile_segment_count(),
+            segment_count: edited_segment_count,
             digest: edited_snapshot.digest,
             preview_text: edited_snapshot.preview.text,
             preview_items_omitted_by_limit: edited_snapshot.preview.items_omitted_by_limit,
@@ -1769,57 +1797,181 @@ fn snapshot_semantics_are_independent_of_validated_profile_segment_partitioning(
 }
 
 #[test]
-fn profile_cursor_requires_each_global_lineage_phase_to_be_exhausted() {
+fn profile_cursor_allows_interleaved_lineage_phases() {
     let factory = factory();
     let account = account(&factory);
     let parts = single_root_scene(&account, AuthoredTransform::identity_trs());
-    let view = parts.scene.semantic_view().expect("profile semantic view");
-    let mut cursor = view.into_cursor().expect("profile semantic cursor");
 
-    let mut roots = cursor.take_roots().expect("profile roots");
-    assert_eq!(roots.next().expect("profile root"), Some(0));
-    assert_eq!(roots.next().expect("profile root end"), None);
-    roots.finish().expect("complete profile roots");
-
-    let node = cursor
-        .next_node()
-        .expect("profile node read")
-        .expect("profile node");
-    node.into_children()
-        .finish()
-        .expect("complete profile node children");
-    assert!(cursor.next_node().expect("profile node end").is_none());
-
-    {
-        let profile = cursor.profile().expect("profile cursor");
-        assert!(profile.step_source().is_err());
+    inspect_single_node_profile(&parts.scene, |profile| {
+        assert!(matches!(
+            profile
+                .step_source()
+                .expect("interleaved source checkpoint"),
+            NodeSceneProfileStep::Checkpoint
+        ));
+        assert!(matches!(
+            profile
+                .step_provenance()
+                .expect("interleaved provenance checkpoint"),
+            NodeSceneProfileStep::Checkpoint
+        ));
         assert!(matches!(
             profile
                 .step_resource()
-                .expect("profile resource checkpoint"),
+                .expect("interleaved resource checkpoint"),
             NodeSceneProfileStep::Checkpoint
         ));
         assert!(matches!(
-            profile.step_resource().expect("profile resource read"),
-            NodeSceneProfileStep::Item(_)
+            profile
+                .step_evidence()
+                .expect("interleaved empty evidence checkpoint"),
+            NodeSceneProfileStep::Checkpoint
         ));
-        assert!(profile.step_source().is_err());
+
+        let expected_owners = [
+            CanonicalProfileOwner::Scene,
+            CanonicalProfileOwner::SyntheticRoot,
+            CanonicalProfileOwner::Node(1),
+        ];
+        for expected_owner in expected_owners {
+            let owner = profile
+                .next_owner()
+                .expect("owner before lineage exhaustion")
+                .expect("interleaved profile owner");
+            assert_eq!(owner.owner(), expected_owner);
+            assert!(owner.attachments().iter().eq([Some(0)]));
+        }
+        assert!(
+            profile
+                .next_owner()
+                .expect("interleaved owner end")
+                .is_none()
+        );
+        assert!(
+            profile
+                .next_metadata_entry()
+                .expect("metadata before lineage exhaustion")
+                .is_none()
+        );
+
+        let NodeSceneProfileStep::Item(provenance) = profile
+            .step_provenance()
+            .expect("interleaved provenance read")
+        else {
+            panic!("interleaved profile must expose its source provenance");
+        };
+        assert_eq!(provenance.index(), 0);
+        assert_eq!(provenance.depth(), 1);
+        assert_eq!(
+            provenance.kind(),
+            NodeSceneProfileProvenanceKind::Source { source: 0 },
+        );
+        let NodeSceneProfileStep::Item(resource) =
+            profile.step_resource().expect("interleaved resource read")
+        else {
+            panic!("interleaved profile must expose its resource identity");
+        };
+        assert_eq!(resource.index(), 0);
+        assert_eq!(resource.identity(), "fixtures/node-scene/input");
+        let NodeSceneProfileStep::Item(source) =
+            profile.step_source().expect("interleaved source read")
+        else {
+            panic!("interleaved profile must expose its source identity");
+        };
+        assert_eq!(source.index(), 0);
+        assert_eq!(source.resource(), 0);
+        assert_eq!(source.format(), "org.baozi.fixture");
+
         assert!(matches!(
-            profile.step_resource().expect("profile resource end"),
+            profile.step_provenance().expect("provenance end"),
             NodeSceneProfileStep::End
         ));
         assert!(matches!(
-            profile.step_source().expect("profile source checkpoint"),
-            NodeSceneProfileStep::Checkpoint
+            profile.step_evidence().expect("empty evidence end"),
+            NodeSceneProfileStep::End
         ));
         assert!(matches!(
-            profile.step_source().expect("profile source read"),
-            NodeSceneProfileStep::Item(_)
+            profile.step_source().expect("source end"),
+            NodeSceneProfileStep::End
         ));
-        assert!(profile.next_owner().is_err());
+        assert!(matches!(
+            profile.step_resource().expect("resource end"),
+            NodeSceneProfileStep::End
+        ));
+        assert_eq!(profile.decoded_lineage_rows_for_test(), [1, 1, 1, 0]);
+        assert_eq!(profile.lineage_segment_checkpoints_for_test(), [1; 4]);
+    });
+
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn profile_cursor_finish_rejects_each_unexhausted_lineage_phase() {
+    let factory = factory();
+    let account = account(&factory);
+    let parts = single_root_scene(&account, AuthoredTransform::identity_trs());
+
+    for incomplete_phase in 0..4 {
+        let view = parts.scene.semantic_view().expect("profile semantic view");
+        let mut cursor = view.into_cursor().expect("profile semantic cursor");
+        let mut roots = cursor.take_roots().expect("profile roots");
+        assert_eq!(roots.next().expect("profile root"), Some(0));
+        assert_eq!(roots.next().expect("profile root end"), None);
+        roots.finish().expect("complete profile roots");
+        let node = cursor
+            .next_node()
+            .expect("profile node read")
+            .expect("profile node");
+        node.into_children()
+            .finish()
+            .expect("complete profile node children");
+        assert!(cursor.next_node().expect("profile node end").is_none());
+
+        let profile = cursor.profile().expect("profile cursor");
+        macro_rules! consume_lineage_phase {
+            ($phase:expr, $step:ident) => {
+                if incomplete_phase == $phase {
+                    assert!(matches!(
+                        profile.$step().expect("unexhausted segment checkpoint"),
+                        NodeSceneProfileStep::Checkpoint
+                    ));
+                    if incomplete_phase != 3 {
+                        assert!(matches!(
+                            profile.$step().expect("last unexhausted lineage row"),
+                            NodeSceneProfileStep::Item(_)
+                        ));
+                    }
+                } else {
+                    while !matches!(
+                        profile.$step().expect("complete lineage phase"),
+                        NodeSceneProfileStep::End
+                    ) {}
+                }
+            };
+        }
+        consume_lineage_phase!(2, step_provenance);
+        consume_lineage_phase!(0, step_resource);
+        consume_lineage_phase!(3, step_evidence);
+        consume_lineage_phase!(1, step_source);
+        while profile.next_owner().expect("profile owner read").is_some() {}
+        while profile
+            .next_metadata_entry()
+            .expect("profile metadata read")
+            .is_some()
+        {}
+        assert_eq!(profile.decoded_lineage_rows_for_test(), [1, 1, 1, 0]);
+        assert_eq!(profile.lineage_segment_checkpoints_for_test(), [1; 4]);
+        assert!(
+            cursor.finish().is_err(),
+            "phase {incomplete_phase} must observe End even when all its rows were read",
+        );
     }
 
-    assert!(cursor.finish().is_err());
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }
 
 #[test]

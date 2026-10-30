@@ -13,16 +13,18 @@ use baozi_operation::__retained_store_integration::activation::{
 use baozi_operation::__retained_store_integration::authority::SharedRetainedStorage as RetainedStorage;
 use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError};
 
-impl<O, PP, U> TypedStorageBuildControl for &mut CanonicalRetainedStorageBuildControl<'_, O, PP, U>
+impl<O, PP, U> TypedStorageBuildControl for CanonicalRetainedStorageBuildControl<'_, O, PP, U>
 where
     O: OperationOwner,
     PP: ProgressPhase,
     U: ProgressUnit,
 {
     type Error = StoreRuntimeError;
+
     fn run_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error> {
         CanonicalRetainedStorageBuildControl::run_unit(self, action)
     }
+
     fn run_string_unit<R>(&mut self, action: impl FnOnce() -> R) -> Result<R, Self::Error> {
         CanonicalRetainedStorageBuildControl::run_string_unit(self, action)
     }

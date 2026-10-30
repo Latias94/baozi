@@ -20,7 +20,8 @@ impl CanonicalSchema for SceneGeometryEditEvidenceTag {
     type StoreKind = RecordBlock;
 }
 
-pub(super) const REVISION: u32 = 1;
+pub(super) const REVISION: u32 = 2;
+pub(super) const OPERATION_TRIANGULATE: u32 = 1;
 pub(super) const TRIANGULATION_SEMANTIC_VERSION: u32 = 1;
 pub(super) const OUTCOME_CHANGED: u32 = 1;
 pub(super) const OUTCOME_FAILED: u32 = 2;

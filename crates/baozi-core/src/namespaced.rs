@@ -110,7 +110,7 @@ pub enum NamespacedNameError {
     InvalidByte { offset: usize },
 }
 
-fn validate_namespaced_name(value: &str) -> Result<(), NamespacedNameError> {
+pub(crate) fn validate_namespaced_name(value: &str) -> Result<(), NamespacedNameError> {
     if value.is_empty() {
         return Err(NamespacedNameError::Empty);
     }

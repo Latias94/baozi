@@ -2,7 +2,6 @@ use thiserror::Error;
 
 use crate::SceneValidationLimits;
 
-use super::super::schema::profile::FRESH_PROFILE_MAX_CANONICAL_BLOCKS;
 use super::input::{Presence, SceneAuthoringBatch};
 use super::{
     ValidatedAnimationBatch, ValidatedAppearanceBatch, ValidatedDeformationBatch,
@@ -56,10 +55,8 @@ impl SceneInputEnvelope {
         self.terminal_attribution_slots
     }
 
-    pub(in crate::canonical_scene::store) fn maximum_canonical_blocks(
-        limits: SceneValidationLimits,
-    ) -> Option<usize> {
-        SceneTopLevelShape::maximum_admitted(limits)?
+    pub(in crate::canonical_scene::store) fn maximum_canonical_blocks() -> Option<usize> {
+        SceneTopLevelShape::all_present()
             .canonical_block_upper_bound()
             .ok()
     }
@@ -123,19 +120,6 @@ impl SceneTopLevelShape {
             owner_provenance: 1,
             metadata_entries: 1,
         }
-    }
-
-    fn maximum_admitted(limits: SceneValidationLimits) -> Option<Self> {
-        let maximum_count = u64::from(u32::MAX);
-        let attribute_count = limits.max_entities().min(maximum_count);
-        let primitive_count = limits
-            .max_entities()
-            .saturating_sub(attribute_count)
-            .min(maximum_count);
-        let mut shape = Self::all_present();
-        shape.attributes = usize::try_from(attribute_count).ok()?;
-        shape.primitives = usize::try_from(primitive_count).ok()?;
-        Some(shape)
     }
 
     fn from_input(input: SceneAuthoringBatch<'_>) -> Self {
@@ -265,10 +249,6 @@ impl SceneTopLevelShape {
             ],
             "spatial block upper bound",
         )?;
-        let node = checked_block_sum(
-            [1, scaled_presence(self.nodes, 2)?, presence(self.nodes)],
-            "node block upper bound",
-        )?;
         let appearance = checked_block_sum(
             [
                 1,
@@ -287,22 +267,6 @@ impl SceneTopLevelShape {
                 presence(self.materials),
             ],
             "appearance block upper bound",
-        )?;
-        let geometry = checked_block_sum(
-            [
-                1,
-                presence(self.logical_meshes),
-                // Logical meshes may retain one aggregate display-name payload.
-                presence(self.logical_meshes),
-                presence(self.primitives),
-                presence(self.attributes),
-                presence(self.mesh_instances),
-                checked_block_mul(self.primitives, 2, "primitive payload block upper bound")?,
-                checked_block_mul(self.attributes, 3, "attribute payload block upper bound")?,
-                // Custom attributes may retain one aggregate semantic-name payload.
-                presence(self.attributes),
-            ],
-            "geometry block upper bound",
         )?;
         let deformation = checked_block_sum(
             [
@@ -335,16 +299,7 @@ impl SceneTopLevelShape {
         )?;
 
         checked_block_sum(
-            [
-                1,
-                spatial,
-                node,
-                appearance,
-                geometry,
-                deformation,
-                animation,
-                FRESH_PROFILE_MAX_CANONICAL_BLOCKS,
-            ],
+            [1, spatial, appearance, deformation, animation],
             "canonical block upper bound",
         )
     }
@@ -355,9 +310,8 @@ mod maximum_tests {
     use super::*;
 
     #[test]
-    fn canonical_block_ceiling_covers_count_scaled_geometry_payloads() {
-        let limits = SceneValidationLimits::default().with_max_entities(64);
-        let maximum = SceneInputEnvelope::maximum_canonical_blocks(limits)
+    fn canonical_block_ceiling_is_independent_of_typed_geometry_counts() {
+        let maximum = SceneInputEnvelope::maximum_canonical_blocks()
             .expect("the bounded maximum must be representable");
         let mut admitted_shape = SceneTopLevelShape::all_present();
         admitted_shape.primitives = 8;
@@ -366,7 +320,7 @@ mod maximum_tests {
             .canonical_block_upper_bound()
             .expect("the admitted shape must be representable");
 
-        assert!(maximum >= admitted);
+        assert_eq!(maximum, admitted);
     }
 }
 

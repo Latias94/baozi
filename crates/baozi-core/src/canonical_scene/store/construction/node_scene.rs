@@ -72,9 +72,6 @@ pub use materialization::{
     NodeSceneSessionActivationBootstrap,
 };
 mod profile;
-pub(in crate::canonical_scene::store) use profile::{
-    ProfileLeafRefs, ProfileLineageMaterializedRefs,
-};
 mod publication;
 #[cfg(feature = "_scene-integration")]
 pub use publication::{
@@ -422,6 +419,32 @@ pub(in crate::canonical_scene::store) struct SceneEvidenceCounts {
 }
 
 impl SceneEvidenceCounts {
+    pub(in crate::canonical_scene::store) fn profile_owner_layout(
+        self,
+    ) -> Option<crate::canonical_scene::store::production::ProfileOwnerLayout> {
+        use crate::canonical_scene::store::production::{ProfileOwnerCounts, ProfileOwnerLayout};
+        ProfileOwnerLayout::try_new(ProfileOwnerCounts {
+            nodes: self.node_count.checked_sub(1)?,
+            cameras: self.camera_count,
+            lights: self.light_count,
+            images: self.image_count,
+            samplers: self.sampler_count,
+            textures: self.texture_count,
+            texture_bindings: self.material_binding_count,
+            materials: self.material_count,
+            logical_meshes: self.logical_mesh_count,
+            primitives: self.primitive_count,
+            attributes: self.attribute_count,
+            mesh_instances: self.mesh_instance_count,
+            skins: self.skin_count,
+            morph_definitions: self.morph_definition_count,
+            morph_deltas: self.morph_delta_count,
+            animation_clips: self.animation_clip_count,
+            animation_channels: self.animation_channel_count,
+        })
+        .ok()
+    }
+
     const fn authoring_rejection() -> Self {
         Self {
             canonical_block_count: 0,
@@ -515,7 +538,7 @@ impl From<PreparedNodeSceneFailure> for PreparedNodeSceneConstruction {
 /// Private inspector over a centrally validated node-domain Scene.
 pub(in crate::canonical_scene::store) struct SceneStorage {
     generation: SceneGenerationId,
-    tables: super::super::typed_storage::NodeGeometryStorage,
+    tables: super::super::typed_storage::SceneTables,
     canonical: PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>,
     proof: NodeSceneValidationProof,
     #[cfg(test)]

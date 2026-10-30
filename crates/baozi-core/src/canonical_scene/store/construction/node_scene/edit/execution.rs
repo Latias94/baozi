@@ -27,7 +27,6 @@ use super::super::materialization::{
 };
 use super::super::{NodeSceneConstructionRejection, NodeSceneDraft, PendingNodeSceneFailure};
 use super::graph::try_rewrite_node_scene;
-use super::leaf_plan::NodeSceneInheritedLeafPlan;
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditPlanError, PendingNodeSceneEdit};
 use super::publication::{
     PreparedNodeSceneEdit, prepare_edit_candidate, prepare_pending_edit_failure,
@@ -43,29 +42,14 @@ pub(in crate::canonical_scene::store) enum NodeSceneEditPrepareError {
     Construction(#[from] SceneConstructionError),
 }
 
-struct NodeSceneEditExecutionPlan<'scope, 'scene, O>
-where
-    O: OperationOwner,
-{
-    pending: BoundPendingNodeSceneEdit<'scene>,
-    inherited: NodeSceneInheritedLeafPlan<'scope, O>,
-}
-
-struct NodeSceneEditActivationDescription<'scope, 'scene, O>
-where
-    O: OperationOwner,
-{
+struct NodeSceneEditActivationDescription<'scene> {
     activation_request: CanonicalActivationRequest,
     requirements: CanonicalSuccessRequirements,
-    execution: NodeSceneEditExecutionPlan<'scope, 'scene, O>,
+    execution: BoundPendingNodeSceneEdit<'scene>,
 }
 
-impl<'scope, 'scene, O> CanonicalActivationDescription
-    for NodeSceneEditActivationDescription<'scope, 'scene, O>
-where
-    O: OperationOwner,
-{
-    type Execution = NodeSceneEditExecutionPlan<'scope, 'scene, O>;
+impl<'scene> CanonicalActivationDescription for NodeSceneEditActivationDescription<'scene> {
+    type Execution = BoundPendingNodeSceneEdit<'scene>;
 
     fn seal_activation<'activation>(
         self,
@@ -223,16 +207,33 @@ where
                 return planning.reject(rejection, stable_code);
             }
         };
-        let planned = match planning.begin_semantic_work() {
+        let completion = match planning.begin_semantic_work() {
             Ok(mut semantic) => {
-                match NodeSceneInheritedLeafPlan::try_collect(&pending, &mut semantic) {
-                    Ok(inherited) => match semantic.finish_exact() {
-                        Ok(completion) => Ok((inherited, completion)),
-                        Err(cause) => {
-                            drop(inherited);
-                            Err(cause)
+                let checked = semantic
+                    .run_unit(|| {
+                        let super::plan::NodeSceneEditProgram::NodeTransform(rewrite) =
+                            &pending.program
+                        else {
+                            return Err(StoreRuntimeError::ConstructionInvariantUnverified);
+                        };
+                        let source = pending
+                            .input
+                            .semantic_authored_transform_at(
+                                rewrite.target().source_index.as_usize(),
+                            )
+                            .map_err(|_| StoreRuntimeError::InvalidSourceSlot)?;
+                        if source
+                            .authored_transform()
+                            .has_same_authored_bits(rewrite.replacement())
+                            || *pending.operation.kind() != pending.program.operation_kind()
+                        {
+                            return Err(StoreRuntimeError::InvalidSourceSlot);
                         }
-                    },
+                        Ok(())
+                    })
+                    .and_then(|result| result);
+                match checked {
+                    Ok(()) => semantic.finish_exact(),
                     Err(cause) => {
                         let _ = semantic.finish_rejected();
                         Err(cause)
@@ -241,8 +242,8 @@ where
             }
             Err(cause) => Err(cause),
         };
-        let (inherited, completion) = match planned {
-            Ok(planned) => planned,
+        let completion = match completion {
+            Ok(completion) => completion,
             Err(cause) => {
                 let rejection = NodeSceneLaneRejection::from(
                     NodeSceneConstructionRejection::Materialization(cause),
@@ -258,7 +259,7 @@ where
             requirements: success_requirements
                 .take()
                 .expect("the edit success requirements are consumed exactly once"),
-            execution: NodeSceneEditExecutionPlan { pending, inherited },
+            execution: pending,
         };
         let permit = match planning.seal_activation(description, completion) {
             CanonicalActivationSeal::Sealed(permit) => permit,
@@ -354,7 +355,7 @@ fn edit_success_requirements(
     })
 }
 
-fn materialize_edit<'lane, 'scope, O, PP, U>(
+fn materialize_edit<'lane, O, PP, U>(
     mut lane: baozi_operation::__retained_store_integration::activation::CanonicalLane<
         'lane,
         O,
@@ -362,7 +363,7 @@ fn materialize_edit<'lane, 'scope, O, PP, U>(
         U,
         CanonicalInheritanceSource,
     >,
-    execution: &NodeSceneEditExecutionPlan<'scope, '_, O>,
+    pending: &BoundPendingNodeSceneEdit<'_>,
     brand: super::super::super::ConstructionBrand,
 ) -> CanonicalMaterialization<
     'lane,
@@ -376,7 +377,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let graph = match try_rewrite_node_scene(&mut lane, &execution.pending, &execution.inherited) {
+    let graph = match try_rewrite_node_scene(&mut lane, pending) {
         Ok(graph) => graph,
         Err(cause) => {
             let rejection = NodeSceneConstructionRejection::Materialization(cause);
@@ -391,8 +392,8 @@ where
             directory: graph.directory,
         },
         refs: graph.refs,
-        evidence_counts: execution.pending.counts.evidence,
-        central_validation: execution.pending.counts.central_validation_plan,
+        evidence_counts: pending.counts.evidence,
+        central_validation: pending.counts.central_validation_plan,
     };
     lane.complete(
         graph.directory.into_store(),

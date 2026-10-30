@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-07-17
+updated: 2026-10-30
 authors:
   - Codex
 decision_type: architecture
@@ -155,10 +155,13 @@ identities.
 Each Scene owns one immutable `ProvenanceArena` view over a persistent segmented DAG. A branch shares
 its immutable ancestor segments and appends changes in a segment with a fresh process-unique nonce.
 An ancestor attachment therefore remains valid in every descendant that retains that segment,
-whereas an attachment created in one sibling branch is foreign to every other sibling. Segment
-ordinal, segment nonce, local node address, and global topological index are validated together
-before range access. A private `ProvenanceNodeId` is meaningful only inside that qualified address;
-it is not a public source identity or an independently reusable cross-generation handle.
+whereas an attachment created in one sibling branch is foreign to every other sibling. An edge stores
+the segment ordinal, its nonce, and the segment-local node index. Checked lookup validates those
+coordinates against the actual retained segment and derives the global topological index from its
+validated prefix. Edges do not store a redundant global coordinate. Central validation checks the
+complete segment prefix sequence before using it. A private provenance reference is meaningful only
+inside this qualified segment domain; it is not a public source identity or an independently reusable
+cross-generation handle.
 An identity-preserving fork remap retains a bounded source-segment snapshot and remains bound to one
 target branch; the source arena or another sibling cannot substitute as its publication target.
 
@@ -209,8 +212,16 @@ Generic metadata and extension values contain no dense scene or provenance-arena
 behavior descriptor that needs a dense reference is part of the canonical schema and must register
 central validation and ADR 0032 remapping; encoding a numeric ID into a string/number is invalid.
 
+Metadata descriptors identify owners in the final Scene layout. Their immutable text, byte, and
+scalar payload pools have an independent retained owner, so changing owner coordinates does not
+require copying unchanged payloads. A concrete operation must remap descriptors together with its
+owner additions, deletions, or reindexing. Central validation requires canonical descriptor order,
+valid owner membership, and contiguous complete coverage of each payload pool.
+
 Metadata, locator strings, provenance previews, and lineage arrays are all charged before allocation
-and traversed by central validation.
+and traversed by central validation. Validation borrows the retained typed data; only provenance
+depths require mutable profile scratch. Cached owner depths are checked against the actual attachment
+depths rather than trusted as a second semantic authority.
 
 ## Considered Options
 

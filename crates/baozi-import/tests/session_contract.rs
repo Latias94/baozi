@@ -840,11 +840,13 @@ enum TerminalLatchTrigger {
     Cancellation,
 }
 
+#[derive(Clone)]
 struct TerminalLatchImporter {
     trigger: TerminalLatchTrigger,
     required_role: DependencyRoleId,
     optional_role: DependencyRoleId,
     cancellation: CancellationToken,
+    attempt_late_capabilities: bool,
     late_successes: Arc<AtomicUsize>,
     diagnostic_callbacks: Arc<AtomicUsize>,
     format_detail_callbacks: Arc<AtomicUsize>,
@@ -1044,6 +1046,9 @@ impl FormatImporter for TerminalLatchImporter {
                     .expect_err("the injected cancellation must fail")
             }
         };
+        if !self.attempt_late_capabilities {
+            return Err(first_failure);
+        }
         drop(first_failure);
 
         let record_late_success = |succeeded: bool| {
@@ -1629,6 +1634,26 @@ fn variable_length_reads_are_admitted_before_backend_entry_and_retain_consumptio
                 RecordingImporter::plain("dev.baozi.test.variable-budget", "variable-budget"),
                 limits,
             );
+            // An oversized exact declaration reaches the same opened-resource boundary but
+            // fails before any backend read, preserving the startup and ownership work prefix.
+            let baseline_io = VariableLengthIo::new(
+                source.clone(),
+                b"ten bytes!",
+                Some(AssetLength::Exact(b"ten bytes!".len() as u64)),
+            );
+            let baseline = import_asset(
+                &request,
+                &baseline_io,
+                source.clone(),
+                ImportOperationControl::default(),
+            )
+            .expect_err("the exact declaration must exceed the byte limit before reading");
+            assert!(baseline_io.requests.lock().unwrap().is_empty());
+            assert_eq!(baseline_io.observed.load(Ordering::Acquire), 0);
+            let baseline_work = baseline
+                .ledger()
+                .dimension(ImportDimension::WorkUnits)
+                .unwrap();
 
             let failure = import_asset(&request, &io, source, ImportOperationControl::default())
                 .expect_err("the bounded variable-length resource must fail closed at its limit");
@@ -1656,8 +1681,16 @@ fn variable_length_reads_are_admitted_before_backend_entry_and_retain_consumptio
                 .ledger()
                 .dimension(ImportDimension::WorkUnits)
                 .unwrap();
-            assert_eq!(work.attempted(), 2);
-            assert_eq!(work.consumed(), 2);
+            assert_eq!(
+                work.attempted() - baseline_work.attempted(),
+                2,
+                "admit exactly the payload read and EOF probe"
+            );
+            assert_eq!(
+                work.consumed() - baseline_work.consumed(),
+                2,
+                "retain exactly the two completed backend calls"
+            );
         }
     }
 }
@@ -1891,22 +1924,48 @@ fn terminal_latch_rejects_every_late_capability_without_side_effects() {
             required_role,
             optional_role,
             cancellation: cancellation.clone(),
+            attempt_late_capabilities: true,
             late_successes: Arc::clone(&late_successes),
             diagnostic_callbacks: Arc::clone(&diagnostic_callbacks),
             format_detail_callbacks: Arc::clone(&format_detail_callbacks),
         };
-        let request = lossy_request_for(importer);
-        let source = AssetPath::new("asset.terminal-latch").unwrap();
-        let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
-        let control = match trigger {
+        let control = |cancellation| match trigger {
             TerminalLatchTrigger::Cancellation => {
                 ImportOperationControl::default().with_cancellation(cancellation)
             }
             TerminalLatchTrigger::MissingRequiredDependency
             | TerminalLatchTrigger::ResourceLimit => ImportOperationControl::default(),
         };
+        let baseline_cancellation = CancellationToken::new();
+        let baseline_request = lossy_request_for(TerminalLatchImporter {
+            cancellation: baseline_cancellation.clone(),
+            attempt_late_capabilities: false,
+            ..importer.clone()
+        });
+        let source = AssetPath::new("asset.terminal-latch").unwrap();
+        let baseline_io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+        // Keep the same trigger and setup, then return its first failure without invoking any
+        // late capability. Trigger-specific ownership work belongs to this baseline as well.
+        let baseline = import_asset(
+            &baseline_request,
+            &baseline_io,
+            source.clone(),
+            control(baseline_cancellation),
+        )
+        .expect_err("the baseline returns the first latched failure");
+        assert_eq!(
+            baseline.last_completed().phase(),
+            ImportPhase::SelectionCompleted,
+            "{trigger:?}: the baseline must reach the trigger"
+        );
+        let baseline_work = baseline
+            .ledger()
+            .dimension(ImportDimension::WorkUnits)
+            .unwrap();
+        let request = lossy_request_for(importer);
+        let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
 
-        let failure = import_asset(&request, &io, source, control)
+        let failure = import_asset(&request, &io, source, control(cancellation))
             .expect_err("the first scope abort must remain terminal");
 
         let ImportCause::Scope(abort) = failure.cause() else {
@@ -1966,16 +2025,15 @@ fn terminal_latch_rejects_every_late_capability_without_side_effects() {
             .ledger()
             .dimension(ImportDimension::WorkUnits)
             .unwrap();
-        let acquisition_work = b"primary".len() as u64 + 2;
         assert_eq!(
             work.attempted(),
-            acquisition_work,
-            "primary snapshot hash, payload read and EOF; {trigger:?}"
+            baseline_work.attempted(),
+            "late capabilities must not attempt any work; {trigger:?}"
         );
         assert_eq!(
             work.consumed(),
-            acquisition_work,
-            "primary snapshot hash, payload read and EOF; {trigger:?}"
+            baseline_work.consumed(),
+            "late capabilities must not consume any work; {trigger:?}"
         );
         let expected_opens = if expected_references == 0 { 1 } else { 2 };
         assert_eq!(io.open_count(), expected_opens, "{trigger:?}");

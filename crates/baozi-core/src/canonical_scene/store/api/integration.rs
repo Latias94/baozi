@@ -6,8 +6,6 @@ use baozi_operation::{
     RetainedStoreFailureTerminalWorkRequirement, StoreLedgerEvidence,
 };
 
-use crate::validation_control::SceneValidationLimits;
-
 pub use super::super::construction::node_scene::edit::geometry::{
     SceneGeometryCornerOriginsTag, SceneGeometryEditAdmission, SceneGeometryEditBootstrap,
     SceneGeometryEditBootstrapError, SceneGeometryEditEvidence, SceneGeometryEditEvidenceRecipe,
@@ -55,14 +53,14 @@ use super::scene::ValidatedScene;
 
 pub use super::SceneDraft;
 
-/// Returns the maximum canonical block count admitted under `limits`.
-pub fn maximum_scene_canonical_blocks(limits: SceneValidationLimits) -> Option<usize> {
-    SceneInputEnvelope::maximum_canonical_blocks(limits)
+/// Returns the maximum number of remaining record-store blocks in a fresh Scene.
+pub fn maximum_scene_canonical_blocks() -> Option<usize> {
+    SceneInputEnvelope::maximum_canonical_blocks()
 }
 
-/// Returns the protected structural-work ceiling for any fresh Scene admitted under `limits`.
-pub fn maximum_scene_structural_work(limits: SceneValidationLimits) -> Option<u64> {
-    let canonical_blocks = maximum_scene_canonical_blocks(limits)?;
+/// Returns the protected structural-work ceiling for the remaining record-store domains.
+pub fn maximum_scene_structural_work() -> Option<u64> {
+    let canonical_blocks = maximum_scene_canonical_blocks()?;
     maximum_node_scene_structural_work(canonical_blocks)
 }
 

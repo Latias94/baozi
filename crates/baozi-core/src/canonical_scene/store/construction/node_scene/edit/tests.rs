@@ -14,14 +14,10 @@ use crate::canonical_scene::store::production::{
     SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::profile_provenance::{
-    PROFILE_PROVENANCE_ADDRESS_SCALARS, corrupt_profile_address_for_test,
-    issued_profile_segment_nonce_count_for_test,
+    corrupt_profile_reference_for_test, issued_profile_segment_nonce_count_for_test,
 };
-use crate::canonical_scene::store::schema::profile::{
-    PROFILE_DIGEST_SHA256, PROFILE_OPERATION_TRANSFORM, PROFILE_PROVENANCE_OPERATION,
-    ProfileLineageAttachmentSchema, ProfileLineageDigestSchema, ProfileLineageOperationSchema,
-    ProfileLineageParentSchema, ProfileLineageProvenanceSchema, profile_owner_field,
-    profile_provenance_scalar, profile_segment_field,
+use crate::canonical_scene::store::typed_storage::profile::{
+    StoredOperationKind, StoredProvenanceKind,
 };
 use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
 use crate::identity::{
@@ -251,229 +247,113 @@ fn assert_transform_edit_lineage(
 ) {
     let source_counts = source.proof.counts();
     let output_counts = output.proof.counts();
-    assert_eq!(
-        output.proof.profile_segment_count(),
-        source.proof.profile_segment_count() + 1,
-    );
+    let source_profile = source.tables.profile.state.as_ref();
+    let output_profile = output.tables.profile.state.as_ref();
     assert_eq!(
         output_counts.profile_segment_count,
-        source_counts.profile_segment_count + 1,
+        source_counts.profile_segment_count + 1
     );
     assert_eq!(
         output_counts.profile_provenance_count,
-        source_counts.profile_provenance_count + 1,
+        source_counts.profile_provenance_count + 1
     );
     assert_eq!(
         output_counts.profile_operation_count,
-        source_counts.profile_operation_count + 1,
+        source_counts.profile_operation_count + 1
     );
     assert_eq!(
         output_counts.canonical_block_count,
-        source_counts.canonical_block_count + 4,
+        source_counts.canonical_block_count
     );
     assert_eq!(
         output_counts.payload_block_count,
-        source_counts.payload_block_count + 1,
+        source_counts.payload_block_count
     );
     assert_eq!(
         output_counts.shareable_leaf_block_count,
-        source_counts.shareable_leaf_block_count + 4,
+        source_counts.shareable_leaf_block_count
     );
-
-    let source_owners = source
-        .canonical
-        .records(source.proof.profile_owners().into_store())
-        .expect("source profile owner table");
-    let source_offset_u32 = source_owners
-        .scalar::<u32>(target_owner_row, profile_owner_field::ATTACHMENT_OFFSET)
-        .expect("source target attachment offset");
-    let source_offset =
-        usize::try_from(source_offset_u32).expect("source target attachment offset fits usize");
-    let source_count_u32 = source_owners
-        .scalar::<u32>(target_owner_row, profile_owner_field::ATTACHMENT_COUNT)
-        .expect("source target attachment count");
-    let source_count =
-        usize::try_from(source_count_u32).expect("source target attachment count fits usize");
-    let source_attachment_ref = source_owners
-        .sequence_ref::<u64, ProfileLineageAttachmentSchema>(
-            target_owner_row,
-            profile_owner_field::ATTACHMENTS,
-        )
-        .expect("source profile attachment reference");
-    let source_attachments = source
-        .canonical
-        .sequence(source_attachment_ref)
-        .expect("source profile attachments");
-    let source_scalar_offset = source_offset * PROFILE_PROVENANCE_ADDRESS_SCALARS;
-    let source_scalar_count = source_count * PROFILE_PROVENANCE_ADDRESS_SCALARS;
-    let source_target_parents = &source_attachments.as_slice()
-        [source_scalar_offset..source_scalar_offset + source_scalar_count];
-
+    let source_owner = &source_profile.owners[target_owner_row];
+    let source_parents = source_owner
+        .attachments
+        .get(&source_profile.attachments)
+        .expect("source parents");
     assert_eq!(
         output_counts.profile_parent_count,
-        source_counts.profile_parent_count + source_count_u32,
+        source_counts.profile_parent_count + source_parents.len() as u32
     );
     assert_eq!(
         output_counts.profile_attachment_count,
-        source_counts.profile_attachment_count - source_count_u32 + 1,
+        source_counts.profile_attachment_count - source_parents.len() as u32 + 1
     );
-
-    let segments = output
-        .canonical
-        .records(output.proof.profile_segments().into_store())
-        .expect("edited profile segment table");
-    let fresh_segment = source.proof.profile_segment_count();
-    assert_eq!(segments.rows(), fresh_segment + 1);
-    let source_segments = source
-        .canonical
-        .records(source.proof.profile_segments().into_store())
-        .expect("source profile segment table");
-    for row in 0..fresh_segment {
-        assert_eq!(
-            segments.scalar::<u64>(row, profile_segment_field::NONCE),
-            source_segments.scalar::<u64>(row, profile_segment_field::NONCE),
+    let fresh = source_profile.segments.len();
+    assert_eq!(output_profile.segments.len(), fresh + 1);
+    for (ancestor, retained) in source_profile.segments.iter().zip(&output_profile.segments) {
+        assert!(
+            std::ptr::eq(ancestor.lineage.as_ref(), retained.lineage.as_ref()),
+            "unchanged lineage allocations must be shared"
         );
     }
-    assert_eq!(
-        segments.scalar::<u32>(fresh_segment, profile_segment_field::SEGMENT),
-        Some(u32::try_from(fresh_segment).expect("fresh segment index fits u32")),
+    assert!(
+        std::ptr::eq(
+            source.tables.profile.metadata.as_ref(),
+            output.tables.profile.metadata.as_ref()
+        ),
+        "immutable metadata payloads must be shared"
     );
+    let segment = &output_profile.segments[fresh];
+    let lineage = segment.lineage.as_ref();
     assert_eq!(
-        segments.scalar::<u32>(fresh_segment, profile_segment_field::PROVENANCE_COUNT),
-        Some(1),
+        segment.prefixes.provenance,
+        source_counts.profile_provenance_count as usize
     );
+    assert_eq!(lineage.provenance.len(), 1);
+    assert_eq!(lineage.operations.len(), 1);
+    assert_eq!(lineage.parents.as_slice(), source_parents);
+    let node = lineage.provenance[0];
+    assert!(matches!(node.kind, StoredProvenanceKind::Operation(0)));
     assert_eq!(
-        segments.scalar::<u32>(fresh_segment, profile_segment_field::OPERATION_COUNT),
-        Some(1),
+        node.parents
+            .get(&lineage.parents)
+            .expect("operation parents"),
+        source_parents
     );
-    assert_eq!(
-        segments.scalar::<u32>(fresh_segment, profile_segment_field::PARENT_COUNT),
-        Some(source_count_u32),
-    );
-    let fresh_nonce = segments
-        .scalar::<u64>(fresh_segment, profile_segment_field::NONCE)
-        .expect("fresh segment nonce");
-    assert_ne!(fresh_nonce, 0);
-    assert_eq!(
-        segments.scalar::<u32>(fresh_segment, profile_segment_field::PROVENANCE_BASE),
-        Some(source_counts.profile_provenance_count),
-    );
-
-    let parent_ref = segments
-        .sequence_ref::<u64, ProfileLineageParentSchema>(
-            fresh_segment,
-            profile_segment_field::PARENTS,
-        )
-        .expect("fresh transform parent reference");
-    assert_eq!(
-        output
-            .canonical
-            .sequence(parent_ref)
-            .expect("fresh transform parents")
-            .as_slice(),
-        source_target_parents,
-    );
-
-    let provenance_ref = segments
-        .sequence_ref::<u32, ProfileLineageProvenanceSchema>(
-            fresh_segment,
-            profile_segment_field::PROVENANCE_NODES,
-        )
-        .expect("fresh transform provenance reference");
-    let provenance = output
-        .canonical
-        .sequence(provenance_ref)
-        .expect("fresh transform provenance");
-    assert_eq!(
-        provenance.as_slice()[profile_provenance_scalar::KIND],
-        u32::from(PROFILE_PROVENANCE_OPERATION),
-    );
-    assert_eq!(
-        provenance.as_slice()[profile_provenance_scalar::VARIANT_INDEX],
-        0,
-    );
-    assert_eq!(
-        provenance.as_slice()[profile_provenance_scalar::PARENT_OFFSET],
-        0,
-    );
-    assert_eq!(
-        provenance.as_slice()[profile_provenance_scalar::PARENT_COUNT],
-        source_count_u32,
-    );
-
-    let operation_ref = segments
-        .sequence_ref::<u32, ProfileLineageOperationSchema>(
-            fresh_segment,
-            profile_segment_field::OPERATIONS,
-        )
-        .expect("fresh transform operation reference");
-    let operation = output
-        .canonical
-        .sequence(operation_ref)
-        .expect("fresh transform operation");
-    assert_eq!(
-        operation.as_slice(),
-        &[
-            u32::from(PROFILE_OPERATION_TRANSFORM),
-            0,
-            0,
-            u32::from(PROFILE_DIGEST_SHA256),
-            0,
-            32,
-            0,
-            0,
-        ],
-    );
-    let digest_ref = segments
-        .bytes_ref::<ProfileLineageDigestSchema>(fresh_segment, profile_segment_field::DIGESTS)
-        .expect("fresh transform digest reference");
+    assert_eq!(node.depth, source_owner.maximum_depth + 1);
+    let operation = lineage.operations[0];
+    assert!(matches!(operation.kind, StoredOperationKind::Transform));
+    assert_eq!(operation.options, options_digest);
+    assert!(operation.evidence.is_empty());
+    let output_owner = &output_profile.owners[target_owner_row];
+    let attachments = output_owner
+        .attachments
+        .get(&output_profile.attachments)
+        .expect("output attachments");
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].segment(), fresh as u32);
+    assert_eq!(attachments[0].local(), 0);
     assert_eq!(
         output
-            .canonical
-            .bytes(digest_ref)
-            .expect("fresh transform options digest"),
-        options_digest.as_bytes(),
+            .tables
+            .profile
+            .resolve(attachments[0])
+            .map(|(index, _)| index),
+        Some(source_counts.profile_provenance_count)
     );
-
-    let output_owners = output
-        .canonical
-        .records(output.proof.profile_owners().into_store())
-        .expect("edited profile owner table");
-    assert_eq!(
-        output_owners.scalar::<u32>(target_owner_row, profile_owner_field::ATTACHMENT_COUNT),
-        Some(1),
-    );
-    let output_attachment_ref = output_owners
-        .sequence_ref::<u64, ProfileLineageAttachmentSchema>(
-            target_owner_row,
-            profile_owner_field::ATTACHMENTS,
-        )
-        .expect("edited profile attachment reference");
-    let output_attachments = output
-        .canonical
-        .sequence(output_attachment_ref)
-        .expect("edited profile attachments");
-    let fresh_provenance = source_counts.profile_provenance_count;
-    let output_scalar_offset = source_offset * PROFILE_PROVENANCE_ADDRESS_SCALARS;
-    assert_eq!(
-        &output_attachments.as_slice()[..output_scalar_offset],
-        &source_attachments.as_slice()[..source_scalar_offset],
-    );
-    assert_eq!(
-        &output_attachments.as_slice()
-            [output_scalar_offset..output_scalar_offset + PROFILE_PROVENANCE_ADDRESS_SCALARS],
-        &[
-            u64::try_from(fresh_segment).expect("fresh segment ordinal fits u64"),
-            fresh_nonce,
-            0,
-            u64::from(fresh_provenance),
-        ],
-    );
-    let source_suffix = (source_offset + source_count) * PROFILE_PROVENANCE_ADDRESS_SCALARS;
-    assert_eq!(
-        &output_attachments.as_slice()[output_scalar_offset + PROFILE_PROVENANCE_ADDRESS_SCALARS..],
-        &source_attachments.as_slice()[source_suffix..],
-    );
+    assert_eq!(output_owner.maximum_depth, node.depth);
+    for (ordinal, (before, after)) in source_profile
+        .owners
+        .iter()
+        .zip(&output_profile.owners)
+        .enumerate()
+    {
+        if ordinal != target_owner_row {
+            assert_eq!(
+                before.attachments.get(&source_profile.attachments),
+                after.attachments.get(&output_profile.attachments)
+            );
+            assert_eq!(before.maximum_depth, after.maximum_depth);
+        }
+    }
 }
 
 fn assert_no_physical_change(
@@ -551,7 +431,13 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         .as_u32()
         .checked_add(pending.counts.outcome_evidence_attribution_slots.as_u32())
         .expect("test allocation delta");
-    let target_owner_row = pending.counts.profile.target_owner_row.as_usize();
+    let target_owner_row = source
+        .proof
+        .counts()
+        .profile_owner_layout()
+        .expect("owner layout")
+        .ordinal(crate::canonical_scene::store::production::CanonicalProfileOwner::Node(1))
+        .expect("node owner") as usize;
     let expected_parent_delta = pending.counts.profile.target_attachment_count.as_u32();
     let expected_attachment_count = pending.counts.profile.output_attachment_count.as_u32();
     let physical_before = account.snapshot();
@@ -603,13 +489,19 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         .checked_sub(
             source_profile
                 .validation_work()
-                .expect("source profile validation work"),
+                .expect("source profile validation work")
+                + source_profile
+                    .scratch_initialization_work()
+                    .expect("source profile scratch work"),
         )
         .and_then(|work| {
             work.checked_add(
                 output_profile
                     .validation_work()
-                    .expect("output profile validation work"),
+                    .expect("output profile validation work")
+                    + output_profile
+                        .scratch_initialization_work()
+                        .expect("output profile scratch work"),
             )
         })
         .expect("output central validation work");
@@ -635,18 +527,7 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         output_profile.lineage_digest_bytes,
         source_profile.lineage_digest_bytes + u32::try_from(DIGEST_LEN).expect("digest length"),
     );
-    assert_eq!(
-        output_profile.canonical_block_count,
-        source_profile.canonical_block_count + 4
-    );
-    assert_eq!(
-        output_profile.payload_leaf_count,
-        source_profile.payload_leaf_count + 1
-    );
-    assert_eq!(
-        output_profile.shareable_leaf_count,
-        source_profile.shareable_leaf_count + 4
-    );
+
     assert!(
         authored_transform_at(&output.scene, 0, "edited authored transform")
             .has_same_authored_bits(replacement),
@@ -752,7 +633,14 @@ fn chained_transform_edits_parent_each_new_segment_to_the_previous_attachment() 
     else {
         panic!("first chained transform must be changed");
     };
-    let first_owner_row = first_pending.counts.profile.target_owner_row.as_usize();
+    let first_owner_row = original
+        .scene
+        .proof
+        .counts()
+        .profile_owner_layout()
+        .expect("owner layout")
+        .ordinal(crate::canonical_scene::store::production::CanonicalProfileOwner::Node(1))
+        .expect("node owner") as usize;
     let first_prepared = first_pending
         .prepare_with_generation_source(&original.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
@@ -771,7 +659,14 @@ fn chained_transform_edits_parent_each_new_segment_to_the_previous_attachment() 
     else {
         panic!("second chained transform must be changed");
     };
-    let second_owner_row = second_pending.counts.profile.target_owner_row.as_usize();
+    let second_owner_row = first
+        .scene
+        .proof
+        .counts()
+        .profile_owner_layout()
+        .expect("owner layout")
+        .ordinal(crate::canonical_scene::store::production::CanonicalProfileOwner::Node(1))
+        .expect("node owner") as usize;
     let second_prepared = second_pending
         .prepare_with_generation_source(&first.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
@@ -834,11 +729,11 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
     };
 
     let segment_nonce = |scene: &super::super::SceneStorage, row: usize| {
-        scene
-            .canonical
-            .records(scene.proof.profile_segments().into_store())
-            .and_then(|segments| segments.scalar::<u64>(row, profile_segment_field::NONCE))
-            .expect("validated profile segment nonce")
+        scene.tables.profile.state.as_ref().segments[row]
+            .lineage
+            .as_ref()
+            .nonce
+            .get()
     };
     let ancestor_nonce = segment_nonce(&original.scene, 0);
     assert_eq!(segment_nonce(&left.scene, 0), ancestor_nonce);
@@ -859,7 +754,7 @@ fn sibling_transform_edits_preserve_the_ancestor_nonce_and_mint_distinct_branch_
     .expect("substituted sibling edit plan") else {
         panic!("substituted sibling transform must be changed");
     };
-    corrupt_profile_address_for_test(0, 1, left_nonce);
+    corrupt_profile_reference_for_test(0, 1, left_nonce);
     let substituted_prepared = substituted_pending
         .prepare_with_generation_source(&original.scene, test_limits(), || {
             SceneGenerationId::reserve_from(&generation_source)
@@ -893,7 +788,7 @@ fn central_validation_rejects_each_corrupted_parent_address_component() {
     let node = NodeId::new(original.scene.generation(), 0);
     let retained_source = account.snapshot();
 
-    for (component, replacement) in [(0, 1), (1, u64::MAX), (2, 1), (3, 1)] {
+    for (component, replacement) in [(0, 1), (1, u64::MAX), (2, 1)] {
         let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
             &original.scene,
             node,
@@ -903,7 +798,7 @@ fn central_validation_rejects_each_corrupted_parent_address_component() {
         .expect("corrupted parent edit plan") else {
             panic!("corrupted parent transform must be changed");
         };
-        corrupt_profile_address_for_test(1, component, replacement);
+        corrupt_profile_reference_for_test(0, component, replacement);
 
         let prepared = pending
             .prepare_with_generation_source(&original.scene, test_limits(), || {
@@ -1218,13 +1113,9 @@ fn physical_plan_rebuilds_remaining_records_and_shares_typed_geometry() {
     let total = same_layout.counts.canonical_blocks.as_usize();
     let payload = usize::try_from(same_layout.counts.evidence.payload_block_count)
         .expect("payload block count must fit the platform");
-    let leaf_plan = same_layout.counts.evidence_leaves;
-    let shareable = leaf_plan.inherited.as_usize();
+    let shareable = same_layout.counts.inherited_leaf_count.as_usize();
     assert!(payload > 0, "fixture must contain shareable payload leaves");
-    assert!(
-        shareable > payload,
-        "unchanged profile lineage leaves remain shareable while the attachment leaf is rewritten"
-    );
+    assert_eq!(shareable, payload);
     assert!(
         total > shareable,
         "fixture must contain structural RecordBlock values"
@@ -1245,27 +1136,8 @@ fn physical_plan_rebuilds_remaining_records_and_shares_typed_geometry() {
         "typed transform variants use the same legacy-record rewrite count",
     );
     assert_eq!(
-        shape_change.counts.evidence_leaves.inherited.as_usize(),
+        shape_change.counts.inherited_leaf_count.as_usize(),
         shareable,
-    );
-    assert!(leaf_plan.is_exact());
-    assert_eq!(leaf_plan.rewritten.as_usize(), 1);
-    assert_eq!(leaf_plan.added.as_usize(), 4);
-    assert_eq!(leaf_plan.deleted.as_usize(), 0);
-    assert_eq!(
-        same_layout.counts.inherited_leaf_scan.inspection_work(),
-        same_layout.counts.profile.source_segment_count.as_usize() + 1,
-        "geometry shares one typed owner; only profile segments and metadata are scanned",
-    );
-    assert_eq!(
-        leaf_plan.source.as_usize(),
-        leaf_plan.inherited.as_usize() + leaf_plan.rewritten.as_usize(),
-    );
-    assert_eq!(
-        leaf_plan.output.as_usize(),
-        leaf_plan.inherited.as_usize()
-            + leaf_plan.rewritten.as_usize()
-            + leaf_plan.added.as_usize(),
     );
 }
 

@@ -869,17 +869,14 @@ impl ImportStoreBootstrapRequirements {
     pub(crate) fn for_node_scene(
         limits: &ResourceLimits,
     ) -> Result<Self, ImportStoreBootstrapError> {
-        let validation_limits = scene_validation_limits(limits);
         let terminal_attribution_slots = scene_failure_evidence_member_count()
             .checked_add(1)
             .ok_or(StorePlanError::SizeOverflow)?;
-        let canonical_retained_member_limit = u64::try_from(
-            maximum_scene_canonical_blocks(validation_limits)
-                .ok_or(StorePlanError::SizeOverflow)?,
-        )
-        .map_err(|_| StorePlanError::SizeOverflow)?;
+        let canonical_retained_member_limit =
+            u64::try_from(maximum_scene_canonical_blocks().ok_or(StorePlanError::SizeOverflow)?)
+                .map_err(|_| StorePlanError::SizeOverflow)?;
         let canonical_structural_work_limit =
-            maximum_scene_structural_work(validation_limits).ok_or(StorePlanError::SizeOverflow)?;
+            maximum_scene_structural_work().ok_or(StorePlanError::SizeOverflow)?;
         let import_limits =
             import_ledger_limits(limits).map_err(ImportStoreBootstrapError::ImportLedgerLimits)?;
         let (ordinary_attempted, ordinary_consumed) = ImportDimension::ALL.into_iter().try_fold(
@@ -1938,9 +1935,11 @@ pub(crate) fn try_import_store_bootstrap(
             vocabulary.startup_outcome_evidence,
             requirements.terminal_writer_limits,
         ),
+        // Ordinary handle sharing also serves resource acquisition and report ownership. Its
+        // work belongs to the general operation envelope, independent of Scene record count.
         RetainedStoreSharePlan::new(
-            vocabulary.canonical_structural_work_dimension(),
-            vocabulary.canonical_structural_work_dimension(),
+            vocabulary.dimension(ImportDimension::WorkUnits),
+            vocabulary.dimension(ImportDimension::WorkUnits),
         ),
         StoreFallbackEnvelope::new(IMPORT_STORE_FALLBACK_CODE),
         vocabulary.startup_outcome_evidence,

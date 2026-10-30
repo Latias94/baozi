@@ -124,16 +124,47 @@ where
     where
         T: Send + Sync + 'static,
     {
-        let result = self.retain_storage(capacities, work, semantic_bytes, build);
-        preserve_first_fault(self.first_fault, result)
+        self.try_retain_storage_prepared(
+            capacities,
+            work,
+            semantic_bytes,
+            |_| Ok(()),
+            |(), control| build(control),
+        )
     }
 
-    fn retain_storage<T, const N: usize>(
+    /// Admits one aggregate before preparing its shared children and building its own tables.
+    ///
+    /// Preparation may use the existing lane sharing operations and allocate only capacities
+    /// included in this admission. Its returned storage must move into the final value. Separate
+    /// retained child allocations keep their own existing owners and are not charged again here.
+    /// A returned failure destroys preparation data before releasing this aggregate's admission.
+    pub fn try_retain_storage_prepared<P, T, const N: usize>(
         &mut self,
         capacities: [CapacityPlan; N],
         work: u64,
         semantic_bytes: u64,
+        prepare: impl FnOnce(&mut Self) -> Result<P, StoreRuntimeError>,
         build: impl FnOnce(
+            P,
+            &mut CanonicalRetainedStorageBuildControl<'_, O, PP, U>,
+        ) -> Result<T, StoreRuntimeError>,
+    ) -> Result<SharedRetainedStorage<T>, StoreRuntimeError>
+    where
+        T: Send + Sync + 'static,
+    {
+        let result = self.retain_storage(capacities, work, semantic_bytes, prepare, build);
+        preserve_first_fault(self.first_fault, result)
+    }
+
+    fn retain_storage<P, T, const N: usize>(
+        &mut self,
+        capacities: [CapacityPlan; N],
+        work: u64,
+        semantic_bytes: u64,
+        prepare: impl FnOnce(&mut Self) -> Result<P, StoreRuntimeError>,
+        build: impl FnOnce(
+            P,
             &mut CanonicalRetainedStorageBuildControl<'_, O, PP, U>,
         ) -> Result<T, StoreRuntimeError>,
     ) -> Result<SharedRetainedStorage<T>, StoreRuntimeError>
@@ -176,6 +207,37 @@ where
         let (mut attribution, physical) = operation
             .reserve_retained_storage(phase, dimension, bytes, allocations)
             .map_err(|cause| map_writer_error(&cause))?;
+        let prepared = match catch_unwind(AssertUnwindSafe(|| prepare(self))) {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(cause)) => {
+                if !crate::retained::release_owned_storage(physical, ()) {
+                    attribution.retain_fail_closed_in_place();
+                }
+                return Err(cause);
+            }
+            Err(payload) => {
+                physical.record_unresolved();
+                attribution.retain_fail_closed_in_place();
+                std::mem::forget(physical);
+                discard_untrusted_panic_payload(payload);
+                return Err(StoreRuntimeError::ConstructionInvariantUnverified);
+            }
+        };
+        if let Some(cause) = preserved_fault(self.first_fault) {
+            if !crate::retained::release_owned_storage(physical, prepared) {
+                attribution.retain_fail_closed_in_place();
+            }
+            return Err(cause);
+        }
+        let operation = match self.assembly.raw.storage_operation() {
+            Ok(operation) => operation,
+            Err(cause) => {
+                if !crate::retained::release_owned_storage(physical, prepared) {
+                    attribution.retain_fail_closed_in_place();
+                }
+                return Err(map_publication_error(&cause));
+            }
+        };
         let mut host = operation.producer_host();
         let observed = match if work == 0 {
             Ok(None)
@@ -185,7 +247,7 @@ where
         } {
             Ok(work) => work,
             Err(cause) => {
-                if !crate::retained::release_owned_storage(physical, ()) {
+                if !crate::retained::release_owned_storage(physical, prepared) {
                     attribution.retain_fail_closed_in_place();
                 }
                 return Err(super::super::map_producer_work_start_error(cause));
@@ -197,7 +259,7 @@ where
             sticky: None,
             since_poll: 0,
         };
-        let built = catch_unwind(AssertUnwindSafe(|| build(&mut control)));
+        let built = catch_unwind(AssertUnwindSafe(|| build(prepared, &mut control)));
         let completion = control.finish(matches!(&built, Ok(Ok(_))));
         drop(control);
         let value = match built {

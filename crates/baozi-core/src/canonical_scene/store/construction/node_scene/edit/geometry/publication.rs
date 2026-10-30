@@ -81,7 +81,7 @@ pub type SceneGeometryEditFrozenGenerationRejection<O, PP, U> =
 pub struct SceneGeometryEditHandoffToken {
     generation: ReservedSceneGeneration,
     proof: SceneGeometryEditValidationProof,
-    tables: crate::canonical_scene::store::typed_storage::NodeGeometryStorage,
+    tables: crate::canonical_scene::store::typed_storage::SceneTables,
 }
 
 /// Published remap evidence retained beside the edited Scene.

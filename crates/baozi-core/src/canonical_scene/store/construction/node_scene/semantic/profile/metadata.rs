@@ -1,4 +1,10 @@
-use super::*;
+use crate::canonical_scene::store::production::CanonicalProfileOwner;
+use crate::canonical_scene::store::typed_storage::profile::{
+    MetadataPayloads, ProfileState, StoredMetadataValue,
+};
+use crate::canonical_scene::store::typed_storage::{TableRange, TextRange};
+
+use super::super::{NodeSceneSemanticResult, invariant};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::canonical_scene::store) enum NodeSceneProfileMetadataArray<'scene> {
@@ -54,14 +60,6 @@ pub(in crate::canonical_scene::store) struct NodeSceneProfileMetadataEntry<'scen
 }
 
 impl<'scene> NodeSceneProfileMetadataEntry<'scene> {
-    pub(super) const fn new(
-        owner: CanonicalProfileOwner,
-        key: &'scene str,
-        value: NodeSceneProfileMetadataValue<'scene>,
-    ) -> Self {
-        Self { owner, key, value }
-    }
-
     pub(in crate::canonical_scene::store) const fn owner(self) -> CanonicalProfileOwner {
         self.owner
     }
@@ -77,312 +75,246 @@ impl<'scene> NodeSceneProfileMetadataEntry<'scene> {
     }
 }
 
-pub(super) fn metadata_shape(
-    value_kind: u8,
-    array_kind: u8,
-    logical_count: usize,
-) -> NodeSceneSemanticResult<MetadataShape> {
-    let scalar = |lane, scalar_count| MetadataShape {
-        lane,
-        scalar_count,
-        auxiliary_text: false,
-        bytes: false,
-    };
-    let shape = match value_kind {
-        PROFILE_METADATA_BOOL
-            if array_kind == PROFILE_METADATA_ARRAY_BOOL && logical_count == 1 =>
+#[derive(Default)]
+pub(super) struct MetadataCursor<'scene> {
+    next_entry: usize,
+    text: usize,
+    bytes: usize,
+    bools: usize,
+    i64s: usize,
+    u64s: usize,
+    f64s: usize,
+    f32s: usize,
+    previous_owner: Option<CanonicalProfileOwner>,
+    previous_key: Option<&'scene str>,
+}
+
+impl<'scene> MetadataCursor<'scene> {
+    pub(super) fn next(
+        &mut self,
+        state: &'scene ProfileState,
+        pools: &'scene MetadataPayloads,
+    ) -> NodeSceneSemanticResult<Option<NodeSceneProfileMetadataEntry<'scene>>> {
+        if self.next_entry == state.metadata_entries.len() {
+            return Ok(None);
+        }
+        let entry = state
+            .metadata_entries
+            .get(self.next_entry)
+            .ok_or_else(|| invariant("profile metadata cursor exceeds its typed rows"))?;
+        let key = consume_text(&pools.text, &mut self.text, entry.key)?;
+        if key.is_empty() {
+            return Err(invariant("validated profile metadata key is empty"));
+        }
+        if self
+            .previous_owner
+            .is_some_and(|previous| entry.owner < previous)
+            || self.previous_owner == Some(entry.owner)
+                && self
+                    .previous_key
+                    .is_some_and(|previous| previous.as_bytes() >= key.as_bytes())
         {
-            scalar(MetadataLane::Bool, 1)
+            return Err(invariant(
+                "validated profile metadata entries are not canonically ordered",
+            ));
         }
-        PROFILE_METADATA_I64 if array_kind == PROFILE_METADATA_ARRAY_BOOL && logical_count == 1 => {
-            scalar(MetadataLane::I64, 1)
-        }
-        PROFILE_METADATA_U64 if array_kind == PROFILE_METADATA_ARRAY_BOOL && logical_count == 1 => {
-            scalar(MetadataLane::U64, 1)
-        }
-        PROFILE_METADATA_F64 if array_kind == PROFILE_METADATA_ARRAY_BOOL && logical_count == 1 => {
-            scalar(MetadataLane::F64, 1)
-        }
-        PROFILE_METADATA_STRING
-            if array_kind == PROFILE_METADATA_ARRAY_BOOL && logical_count == 1 =>
+        let value = self.read_value(pools, entry.value)?;
+        self.next_entry += 1;
+        self.previous_owner = Some(entry.owner);
+        self.previous_key = Some(key);
+        Ok(Some(NodeSceneProfileMetadataEntry {
+            owner: entry.owner,
+            key,
+            value,
+        }))
+    }
+
+    pub(super) fn finish(
+        &self,
+        state: &ProfileState,
+        pools: &MetadataPayloads,
+    ) -> NodeSceneSemanticResult<()> {
+        if self.next_entry != state.metadata_entries.len()
+            || self.text != pools.text.len()
+            || self.bytes != pools.bytes.len()
+            || self.bools != pools.bools.len()
+            || self.i64s != pools.i64s.len()
+            || self.u64s != pools.u64s.len()
+            || self.f64s != pools.f64s.len()
+            || self.f32s != pools.f32s.len()
         {
-            MetadataShape {
-                lane: MetadataLane::None,
-                scalar_count: 0,
-                auxiliary_text: true,
-                bytes: false,
-            }
+            return Err(invariant(
+                "profile cursor ended before all metadata rows and pools were exhausted",
+            ));
         }
-        PROFILE_METADATA_BYTES
-            if array_kind == PROFILE_METADATA_ARRAY_BOOL && logical_count == 1 =>
-        {
-            MetadataShape {
-                lane: MetadataLane::None,
-                scalar_count: 0,
-                auxiliary_text: true,
-                bytes: true,
-            }
-        }
-        PROFILE_METADATA_VEC2
-            if array_kind == PROFILE_METADATA_ARRAY_BOOL && logical_count == 1 =>
-        {
-            scalar(MetadataLane::F32, 2)
-        }
-        PROFILE_METADATA_VEC3
-            if array_kind == PROFILE_METADATA_ARRAY_BOOL && logical_count == 1 =>
-        {
-            scalar(MetadataLane::F32, 3)
-        }
-        PROFILE_METADATA_VEC4 | PROFILE_METADATA_COLOR
-            if array_kind == PROFILE_METADATA_ARRAY_BOOL && logical_count == 1 =>
-        {
-            scalar(MetadataLane::F32, 4)
-        }
-        PROFILE_METADATA_MAT4
-            if array_kind == PROFILE_METADATA_ARRAY_BOOL && logical_count == 1 =>
-        {
-            scalar(MetadataLane::F32, 16)
-        }
-        PROFILE_METADATA_DENSE_ARRAY => {
-            let (lane, width) = match array_kind {
-                PROFILE_METADATA_ARRAY_BOOL => (MetadataLane::Bool, 1),
-                PROFILE_METADATA_ARRAY_I64 => (MetadataLane::I64, 1),
-                PROFILE_METADATA_ARRAY_U64 => (MetadataLane::U64, 1),
-                PROFILE_METADATA_ARRAY_F64 => (MetadataLane::F64, 1),
-                PROFILE_METADATA_ARRAY_VEC2 => (MetadataLane::F32, 2),
-                PROFILE_METADATA_ARRAY_VEC3 => (MetadataLane::F32, 3),
-                PROFILE_METADATA_ARRAY_VEC4 | PROFILE_METADATA_ARRAY_COLOR => {
-                    (MetadataLane::F32, 4)
+        Ok(())
+    }
+
+    fn read_value(
+        &mut self,
+        pools: &'scene MetadataPayloads,
+        value: StoredMetadataValue,
+    ) -> NodeSceneSemanticResult<NodeSceneProfileMetadataValue<'scene>> {
+        use NodeSceneProfileMetadataArray as Array;
+        use NodeSceneProfileMetadataArrayKind as Kind;
+        use NodeSceneProfileMetadataValue as Value;
+
+        Ok(match value {
+            StoredMetadataValue::Bool(range) => {
+                match consume(&pools.bools, &mut self.bools, range)? {
+                    [value] if *value <= 1 => Value::Bool(*value != 0),
+                    _ => return Err(invariant("validated profile metadata bool is unreadable")),
                 }
-                PROFILE_METADATA_ARRAY_MAT4 => (MetadataLane::F32, 16),
-                _ => {
+            }
+            StoredMetadataValue::I64(range) => {
+                Value::I64(one(consume(&pools.i64s, &mut self.i64s, range)?)?)
+            }
+            StoredMetadataValue::U64(range) => {
+                Value::U64(one(consume(&pools.u64s, &mut self.u64s, range)?)?)
+            }
+            StoredMetadataValue::F64(range) => {
+                Value::F64(one(consume(&pools.f64s, &mut self.f64s, range)?)?)
+            }
+            StoredMetadataValue::String(range) => {
+                Value::String(consume_text(&pools.text, &mut self.text, range)?)
+            }
+            StoredMetadataValue::Bytes {
+                media_type,
+                payload,
+            } => {
+                let media_type = consume_text(&pools.text, &mut self.text, media_type)?;
+                if media_type.is_empty() {
                     return Err(invariant(
-                        "validated profile metadata array kind is unknown",
+                        "validated profile metadata bytes have no media type",
                     ));
                 }
-            };
-            scalar(
-                lane,
-                logical_count.checked_mul(width).ok_or_else(|| {
-                    invariant("validated profile metadata scalar count overflows")
-                })?,
-            )
-        }
-        _ => {
+                Value::Bytes {
+                    media_type,
+                    payload: consume(&pools.bytes, &mut self.bytes, payload)?,
+                }
+            }
+            StoredMetadataValue::Vec2(range) => Value::Vec2(self.fixed_f32(pools, range, 2)?),
+            StoredMetadataValue::Vec3(range) => Value::Vec3(self.fixed_f32(pools, range, 3)?),
+            StoredMetadataValue::Vec4(range) => Value::Vec4(self.fixed_f32(pools, range, 4)?),
+            StoredMetadataValue::Color(range) => Value::Color(self.fixed_f32(pools, range, 4)?),
+            StoredMetadataValue::Mat4(range) => Value::Mat4(self.fixed_f32(pools, range, 16)?),
+            StoredMetadataValue::BoolArray(range) => Value::DenseArray {
+                element_kind: Kind::Bool,
+                logical_element_count: range.len(),
+                values: Array::Bool(consume(&pools.bools, &mut self.bools, range)?),
+            },
+            StoredMetadataValue::I64Array(range) => Value::DenseArray {
+                element_kind: Kind::I64,
+                logical_element_count: range.len(),
+                values: Array::I64(consume(&pools.i64s, &mut self.i64s, range)?),
+            },
+            StoredMetadataValue::U64Array(range) => Value::DenseArray {
+                element_kind: Kind::U64,
+                logical_element_count: range.len(),
+                values: Array::U64(consume(&pools.u64s, &mut self.u64s, range)?),
+            },
+            StoredMetadataValue::F64Array(range) => Value::DenseArray {
+                element_kind: Kind::F64,
+                logical_element_count: range.len(),
+                values: Array::F64(consume(&pools.f64s, &mut self.f64s, range)?),
+            },
+            StoredMetadataValue::Vec2Array(range) => self.f32_array(pools, range, Kind::Vec2, 2)?,
+            StoredMetadataValue::Vec3Array(range) => self.f32_array(pools, range, Kind::Vec3, 3)?,
+            StoredMetadataValue::Vec4Array(range) => self.f32_array(pools, range, Kind::Vec4, 4)?,
+            StoredMetadataValue::ColorArray(range) => {
+                self.f32_array(pools, range, Kind::Color, 4)?
+            }
+            StoredMetadataValue::Mat4Array(range) => {
+                self.f32_array(pools, range, Kind::Mat4, 16)?
+            }
+        })
+    }
+
+    fn fixed_f32(
+        &mut self,
+        pools: &'scene MetadataPayloads,
+        range: TableRange<f32>,
+        width: usize,
+    ) -> NodeSceneSemanticResult<&'scene [f32]> {
+        if range.len() != width {
             return Err(invariant(
-                "validated profile metadata value shape is unknown",
+                "validated profile metadata vector width is inconsistent",
             ));
         }
-    };
-    Ok(shape)
-}
+        consume(&pools.f32s, &mut self.f32s, range)
+    }
 
-pub(super) fn require_metadata_lane_references(
-    entries: CanonicalRecordView<'_>,
-    row: usize,
-    shape: MetadataShape,
-    tables: &NodeSceneProfileTables<'_>,
-    byte_count: usize,
-) -> NodeSceneSemanticResult<()> {
-    require_optional_utf8_reference(
-        entries,
-        row,
-        profile_metadata_entry_field::TEXTS,
-        true,
-        tables.metadata_text_ref,
-        "validated profile metadata text reference is inconsistent",
-    )?;
-    require_optional_bytes_reference(
-        entries,
-        row,
-        profile_metadata_entry_field::BYTES,
-        shape.bytes && byte_count != 0,
-        tables.metadata_bytes_ref,
-        "validated profile metadata byte reference is inconsistent",
-    )?;
-    require_optional_sequence_reference::<u8, ProfileMetadataBoolSchema>(
-        entries,
-        row,
-        profile_metadata_entry_field::BOOL_VALUES,
-        shape.lane == MetadataLane::Bool && shape.scalar_count != 0,
-        tables.metadata_bools_ref,
-        "validated profile metadata bool reference is inconsistent",
-    )?;
-    require_optional_sequence_reference::<i64, ProfileMetadataI64Schema>(
-        entries,
-        row,
-        profile_metadata_entry_field::I64_VALUES,
-        shape.lane == MetadataLane::I64 && shape.scalar_count != 0,
-        tables.metadata_i64s_ref,
-        "validated profile metadata i64 reference is inconsistent",
-    )?;
-    require_optional_sequence_reference::<u64, ProfileMetadataU64Schema>(
-        entries,
-        row,
-        profile_metadata_entry_field::U64_VALUES,
-        shape.lane == MetadataLane::U64 && shape.scalar_count != 0,
-        tables.metadata_u64s_ref,
-        "validated profile metadata u64 reference is inconsistent",
-    )?;
-    require_optional_sequence_reference::<f64, ProfileMetadataF64Schema>(
-        entries,
-        row,
-        profile_metadata_entry_field::F64_VALUES,
-        shape.lane == MetadataLane::F64 && shape.scalar_count != 0,
-        tables.metadata_f64s_ref,
-        "validated profile metadata f64 reference is inconsistent",
-    )?;
-    require_optional_sequence_reference::<f32, ProfileMetadataF32Schema>(
-        entries,
-        row,
-        profile_metadata_entry_field::F32_VALUES,
-        shape.lane == MetadataLane::F32 && shape.scalar_count != 0,
-        tables.metadata_f32s_ref,
-        "validated profile metadata f32 reference is inconsistent",
-    )
-}
-
-pub(super) fn decode_metadata_value<'scene>(
-    value_kind: u8,
-    array_kind: u8,
-    logical_count: usize,
-    auxiliary: &'scene str,
-    payload: &'scene [u8],
-    lane: NodeSceneProfileMetadataArray<'scene>,
-) -> NodeSceneSemanticResult<NodeSceneProfileMetadataValue<'scene>> {
-    let value = match value_kind {
-        PROFILE_METADATA_BOOL => NodeSceneProfileMetadataValue::Bool(require_one_bool(
-            lane,
-            "validated profile metadata bool value is unreadable",
-        )?),
-        PROFILE_METADATA_I64 => NodeSceneProfileMetadataValue::I64(require_one_i64(
-            lane,
-            "validated profile metadata i64 value is unreadable",
-        )?),
-        PROFILE_METADATA_U64 => NodeSceneProfileMetadataValue::U64(require_one_u64(
-            lane,
-            "validated profile metadata u64 value is unreadable",
-        )?),
-        PROFILE_METADATA_F64 => NodeSceneProfileMetadataValue::F64(require_one_f64(
-            lane,
-            "validated profile metadata f64 value is unreadable",
-        )?),
-        PROFILE_METADATA_STRING => {
-            require_no_lane(lane)?;
-            if !payload.is_empty() {
-                return Err(invariant(
-                    "validated profile metadata string has a byte payload",
-                ));
-            }
-            NodeSceneProfileMetadataValue::String(auxiliary)
-        }
-        PROFILE_METADATA_BYTES => {
-            require_no_lane(lane)?;
-            if auxiliary.is_empty() {
-                return Err(invariant(
-                    "validated profile metadata bytes have no media type",
-                ));
-            }
-            NodeSceneProfileMetadataValue::Bytes {
-                media_type: auxiliary,
-                payload,
-            }
-        }
-        PROFILE_METADATA_VEC2 => NodeSceneProfileMetadataValue::Vec2(require_f32_width(lane, 2)?),
-        PROFILE_METADATA_VEC3 => NodeSceneProfileMetadataValue::Vec3(require_f32_width(lane, 3)?),
-        PROFILE_METADATA_VEC4 => NodeSceneProfileMetadataValue::Vec4(require_f32_width(lane, 4)?),
-        PROFILE_METADATA_COLOR => NodeSceneProfileMetadataValue::Color(require_f32_width(lane, 4)?),
-        PROFILE_METADATA_MAT4 => NodeSceneProfileMetadataValue::Mat4(require_f32_width(lane, 16)?),
-        PROFILE_METADATA_DENSE_ARRAY => NodeSceneProfileMetadataValue::DenseArray {
-            element_kind: decode_metadata_array_kind(array_kind)?,
-            logical_element_count: logical_count,
-            values: lane,
-        },
-        _ => {
+    fn f32_array(
+        &mut self,
+        pools: &'scene MetadataPayloads,
+        range: TableRange<f32>,
+        element_kind: NodeSceneProfileMetadataArrayKind,
+        width: usize,
+    ) -> NodeSceneSemanticResult<NodeSceneProfileMetadataValue<'scene>> {
+        if !range.len().is_multiple_of(width) {
             return Err(invariant(
-                "validated profile metadata value kind is unknown",
+                "validated profile metadata array width is inconsistent",
             ));
         }
-    };
+        Ok(NodeSceneProfileMetadataValue::DenseArray {
+            element_kind,
+            logical_element_count: range.len() / width,
+            values: NodeSceneProfileMetadataArray::F32(consume(
+                &pools.f32s,
+                &mut self.f32s,
+                range,
+            )?),
+        })
+    }
+}
+
+fn consume<'scene, T>(
+    pool: &'scene [T],
+    cursor: &mut usize,
+    range: TableRange<T>,
+) -> NodeSceneSemanticResult<&'scene [T]> {
+    if range.start() != *cursor {
+        return Err(invariant(
+            "validated profile metadata pool range is not contiguous",
+        ));
+    }
+    let range = range
+        .checked(pool.len())
+        .ok_or_else(|| invariant("validated profile metadata pool range is unreadable"))?;
+    let end = range.end;
+    let values = pool
+        .get(range)
+        .ok_or_else(|| invariant("validated profile metadata pool range is unreadable"))?;
+    *cursor = end;
+    Ok(values)
+}
+
+fn consume_text<'scene>(
+    pool: &'scene str,
+    cursor: &mut usize,
+    range: TextRange,
+) -> NodeSceneSemanticResult<&'scene str> {
+    if range.0.start() != *cursor {
+        return Err(invariant(
+            "validated profile metadata text range is not contiguous",
+        ));
+    }
+    let value = range
+        .get_str(pool)
+        .ok_or_else(|| invariant("validated profile metadata text range is unreadable"))?;
+    *cursor = range
+        .0
+        .start()
+        .checked_add(range.0.len())
+        .ok_or_else(|| invariant("validated profile metadata text range overflows"))?;
     Ok(value)
 }
 
-fn require_one_bool(
-    lane: NodeSceneProfileMetadataArray<'_>,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<bool> {
-    match lane {
-        NodeSceneProfileMetadataArray::Bool([value]) if *value <= 1 => Ok(*value != 0),
-        _ => Err(invariant(reason)),
-    }
-}
-
-fn require_one_i64(
-    lane: NodeSceneProfileMetadataArray<'_>,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<i64> {
-    match lane {
-        NodeSceneProfileMetadataArray::I64([value]) => Ok(*value),
-        _ => Err(invariant(reason)),
-    }
-}
-
-fn require_one_u64(
-    lane: NodeSceneProfileMetadataArray<'_>,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<u64> {
-    match lane {
-        NodeSceneProfileMetadataArray::U64([value]) => Ok(*value),
-        _ => Err(invariant(reason)),
-    }
-}
-
-fn require_one_f64(
-    lane: NodeSceneProfileMetadataArray<'_>,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<f64> {
-    match lane {
-        NodeSceneProfileMetadataArray::F64([value]) => Ok(*value),
-        _ => Err(invariant(reason)),
-    }
-}
-
-fn require_f32_width<'scene>(
-    lane: NodeSceneProfileMetadataArray<'scene>,
-    width: usize,
-) -> NodeSceneSemanticResult<&'scene [f32]> {
-    match lane {
-        NodeSceneProfileMetadataArray::F32(values) if values.len() == width => Ok(values),
+fn one<T: Copy>(values: &[T]) -> NodeSceneSemanticResult<T> {
+    match values {
+        [value] => Ok(*value),
         _ => Err(invariant(
-            "validated profile metadata vector width is inconsistent",
-        )),
-    }
-}
-
-fn require_no_lane(lane: NodeSceneProfileMetadataArray<'_>) -> NodeSceneSemanticResult<()> {
-    match lane {
-        NodeSceneProfileMetadataArray::None => Ok(()),
-        _ => Err(invariant(
-            "validated profile metadata non-scalar value has a scalar lane",
-        )),
-    }
-}
-
-fn decode_metadata_array_kind(
-    value: u8,
-) -> NodeSceneSemanticResult<NodeSceneProfileMetadataArrayKind> {
-    match value {
-        PROFILE_METADATA_ARRAY_BOOL => Ok(NodeSceneProfileMetadataArrayKind::Bool),
-        PROFILE_METADATA_ARRAY_I64 => Ok(NodeSceneProfileMetadataArrayKind::I64),
-        PROFILE_METADATA_ARRAY_U64 => Ok(NodeSceneProfileMetadataArrayKind::U64),
-        PROFILE_METADATA_ARRAY_F64 => Ok(NodeSceneProfileMetadataArrayKind::F64),
-        PROFILE_METADATA_ARRAY_VEC2 => Ok(NodeSceneProfileMetadataArrayKind::Vec2),
-        PROFILE_METADATA_ARRAY_VEC3 => Ok(NodeSceneProfileMetadataArrayKind::Vec3),
-        PROFILE_METADATA_ARRAY_VEC4 => Ok(NodeSceneProfileMetadataArrayKind::Vec4),
-        PROFILE_METADATA_ARRAY_COLOR => Ok(NodeSceneProfileMetadataArrayKind::Color),
-        PROFILE_METADATA_ARRAY_MAT4 => Ok(NodeSceneProfileMetadataArrayKind::Mat4),
-        _ => Err(invariant(
-            "validated profile metadata array kind is unknown",
+            "validated profile metadata scalar width is inconsistent",
         )),
     }
 }
