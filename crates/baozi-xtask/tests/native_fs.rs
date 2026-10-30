@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
-const CAP_STD_ID: &str = "registry+https://github.com/rust-lang/crates.io-index#cap-std@4.0.2";
+const CAP_STD_ID: &str = "registry+https://github.com/rust-lang/crates.io-index#cap-std@4.0.3";
 const CAP_FS_EXT_ID: &str =
-    "registry+https://github.com/rust-lang/crates.io-index#cap-fs-ext@4.0.2";
+    "registry+https://github.com/rust-lang/crates.io-index#cap-fs-ext@4.0.3";
 const CAP_PRIMITIVES_ID: &str =
-    "registry+https://github.com/rust-lang/crates.io-index#cap-primitives@4.0.2";
+    "registry+https://github.com/rust-lang/crates.io-index#cap-primitives@4.0.3";
 const RUSTIX_ID: &str = "registry+https://github.com/rust-lang/crates.io-index#rustix@1.1.4";
 const FIXTURE_IO_ID: &str = "path+file:///fixture/baozi-io#0.1.0";
 const FIXTURE_FACADE_ID: &str = "path+file:///fixture/baozi#0.1.0";
@@ -30,21 +30,21 @@ version = 4
 
 [[package]]
 name = "cap-fs-ext"
-version = "4.0.2"
+version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d78e5a3368ae89b7cb68186411452b4b9fac8b41be9c19bf3f47c2d2c8e36e6b"
+checksum = "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f"
 
 [[package]]
 name = "cap-primitives"
-version = "4.0.2"
+version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdadbd7c002d3a484b35243669abdae85a0ebaded5a61117169dc3400f9a7ff0"
+checksum = "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18"
 
 [[package]]
 name = "cap-std"
-version = "4.0.2"
+version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7281235d6e96d3544ca18bba9049be92f4190f8d923e3caef1b5f66cfa752608"
+checksum = "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8"
 
 [[package]]
 name = "rustix"
@@ -961,7 +961,7 @@ fn repository_closure_feature_checksum_and_baseline_drift_are_rejected() {
 
     let mut checksum_drift = Fixture::canonical();
     checksum_drift.lockfile = checksum_drift.lockfile.replace(
-        "d78e5a3368ae89b7cb68186411452b4b9fac8b41be9c19bf3f47c2d2c8e36e6b",
+        "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f",
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     );
     let checksum_report = checksum_drift.check();
@@ -970,18 +970,18 @@ fn repository_closure_feature_checksum_and_baseline_drift_are_rejected() {
             .violations
             .iter()
             .any(|violation| violation.contains("repository profile")
-                && violation.contains("cap-fs-ext must resolve to 4.0.2")),
+                && violation.contains("cap-fs-ext must resolve to 4.0.3")),
         "{:#?}",
         checksum_report.violations
     );
 
     let mut baseline_drift = Fixture::canonical();
-    baseline_drift.repository_baseline["dependency_audit_profiles"]["linux"]["nodes"]["added"]["cap-fs-ext@4.0.2"]
+    baseline_drift.repository_baseline["dependency_audit_profiles"]["linux"]["nodes"]["added"]["cap-fs-ext@4.0.3"]
         ["dependencies"] = json!([]);
     let baseline_report = baseline_drift.check();
     assert!(
         baseline_report.violations.iter().any(|violation| violation.contains(
-            "repository baseline.dependency_audit_profiles.linux.nodes.added.cap-fs-ext@4.0.2.dependencies"
+            "repository baseline.dependency_audit_profiles.linux.nodes.added.cap-fs-ext@4.0.3.dependencies"
         )),
         "{:#?}",
         baseline_report.violations
@@ -1023,7 +1023,7 @@ fn source_and_target_root_drift_are_rejected() {
         source_report
             .violations
             .iter()
-            .any(|violation| violation.contains("missing checksum for cap-std@4.0.2")),
+            .any(|violation| violation.contains("missing checksum for cap-std@4.0.3")),
         "{:#?}",
         source_report.violations
     );
@@ -1135,7 +1135,7 @@ fn portable_byte_graph_rejects_native_filesystem_packages() {
     wasm["packages"]
         .as_array_mut()
         .expect("fixture packages")
-        .push(package(CAP_STD_ID, "cap-std", "4.0.2"));
+        .push(package(CAP_STD_ID, "cap-std", "4.0.3"));
     wasm["resolve"]["nodes"]
         .as_array_mut()
         .expect("fixture nodes")
@@ -1349,7 +1349,7 @@ fn manifest_metadata() -> Value {
                     {
                         "name": "cap-fs-ext",
                         "source": SOURCE,
-                        "req": "=4.0.2",
+                        "req": "=4.0.3",
                         "kind": null,
                         "rename": null,
                         "optional": true,
@@ -1360,7 +1360,7 @@ fn manifest_metadata() -> Value {
                     {
                         "name": "cap-std",
                         "source": SOURCE,
-                        "req": "=4.0.2",
+                        "req": "=4.0.3",
                         "kind": null,
                         "rename": null,
                         "optional": true,
@@ -1536,8 +1536,8 @@ fn native_metadata(target: &str, direct_rustix: bool) -> Value {
     let root_id = "path+file:///fixture/baozi-io#0.1.0";
     let mut packages = vec![
         package(root_id, "baozi-io", "0.1.0"),
-        package(CAP_STD_ID, "cap-std", "4.0.2"),
-        package(CAP_PRIMITIVES_ID, "cap-primitives", "4.0.2"),
+        package(CAP_STD_ID, "cap-std", "4.0.3"),
+        package(CAP_PRIMITIVES_ID, "cap-primitives", "4.0.3"),
     ];
     let mut root_dependencies = vec![dependency("cap_std", CAP_STD_ID)];
     let mut nodes = vec![
@@ -1565,7 +1565,7 @@ fn add_cap_fs_ext(metadata: &mut Value, repository_feature: bool) {
     metadata["packages"]
         .as_array_mut()
         .expect("fixture packages")
-        .push(package(CAP_FS_EXT_ID, "cap-fs-ext", "4.0.2"));
+        .push(package(CAP_FS_EXT_ID, "cap-fs-ext", "4.0.3"));
     let nodes = metadata["resolve"]["nodes"]
         .as_array_mut()
         .expect("fixture nodes");

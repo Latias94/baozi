@@ -1,6 +1,7 @@
 use baozi::Importer;
 use baozi_test_support::{ObjScale, ObjScaleFixture};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 
 fn bench_obj_triangle(c: &mut Criterion) {
     let importer = Importer::new().expect("default format registry should freeze");

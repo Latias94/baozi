@@ -70,6 +70,7 @@ Crates intended for eventual publication:
 - `baozi-format-stl`
 - `baozi-format-obj`
 - `baozi-format-ply`
+- `baozi-format-gltf` and its maintained `baozi-gltf` / `baozi-gltf-json` dependencies
 
 Crates intentionally not published from the current repository state:
 
@@ -77,8 +78,8 @@ Crates intentionally not published from the current repository state:
 - `baozi-xtask`: repository-only governance tooling
 - `baozi-format-ply`: intended for the release unit, but publication remains disabled until its
   package and release evidence is complete
-- `baozi-format-gltf`: internal candidate, not facade-admitted or publishable until ADR 0027 baseline
-  gates pass; broader conformance governs maturity only after admission
+- `baozi-format-gltf`: the selected profile is source-admitted after the `2dc2fc8` Linux ASan and
+  independent consumer gates; publication remains disabled pending package/release evidence
 - `baozi-fuzz`: cargo-fuzz workspace
 
 Shell format crates must stay `publish = false` until they import representative fixtures into
@@ -101,7 +102,8 @@ Canonical release order:
 6. `baozi-format-stl`
 7. `baozi-format-obj`
 8. `baozi-format-ply` after its publication gate is complete
-9. `baozi`
+9. `baozi-gltf-json`, `baozi-gltf`, then `baozi-format-gltf` after their publication gates are complete
+10. `baozi`
 
 Package each crate from a clean checkout of the exact tagged release commit with
 `cargo package --locked -p <crate>`. Release gates must not use `--allow-dirty` or `--no-verify`.

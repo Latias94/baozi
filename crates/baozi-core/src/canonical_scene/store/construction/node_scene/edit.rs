@@ -10,6 +10,7 @@ use crate::provenance::OptionsDigest;
 use super::SceneStorage;
 
 mod execution;
+pub(in crate::canonical_scene::store) mod geometry;
 mod graph;
 mod leaf_plan;
 mod plan;

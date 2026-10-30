@@ -1,8 +1,8 @@
 # Native Filesystem Bound-Handle Admission
 
-**Decision date:** 2026-07-10
+**Historical decision date:** 2026-07-10
 
-**Decision:** Admit `cap-std` 4.0.2 as the capability backend for the
+**Historical decision:** Admit `cap-std` 4.0.2 as the capability backend for the
 `baozi-io/fs-candidate` implementation in
 U3 and exact direct `rustix` 1.1.4 solely as the source of Unix `OFlags::NONBLOCK`, subject to the
 acceptance suite below. Baozi passes that flag through `cap_std::fs::OpenOptionsExt`; it does not use
@@ -12,6 +12,40 @@ behavior. Runtime candidate code is limited to `x86_64-unknown-linux-gnu`,
 `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin`. `x86_64-unknown-freebsd` remains in the exact
 dependency audit and future implementation research only; its candidate adapter must fail closed.
 Do not retain or fall back to `canonicalize + starts_with + File::open`.
+
+## Current Pin Status (2026-10-30)
+
+The root `Cargo.lock` now resolves `cap-std`, `cap-primitives`, and `cap-fs-ext` to 4.0.3.
+`crates/baozi-xtask/src/native_fs/contract.rs` and its behavioral fixtures pin these exact versions
+and checksums from that lockfile:
+
+| Crate | Current version | Crates.io checksum |
+| --- | --- | --- |
+| `cap-std` | 4.0.3 | `c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8` |
+| `cap-primitives` | 4.0.3 | `8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18` |
+| `cap-fs-ext` | 4.0.3 | `56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f` |
+
+A local comparison of the checksum-qualified 4.0.2 and 4.0.3 registry sources found
+`cap-primitives/src/windows/fs/dir_utils.rs` and `src/windows/fs/open_impl.rs` byte-identical.
+Their 4.0.3 SHA-256 values are respectively
+`1b23c6388cdef4d2a25eef5651ac4f86f266e400c52f78edb3b5d584bc484603` and
+`08766478419324ae2e3dd0d31f995f6344860673ea71c66f1d8256a1163c19b5`.
+The current closure therefore binds the retained Windows directory share-mode observation to
+`cap-primitives@4.0.3`. This source comparison does not qualify other changed code by implication.
+
+The source remains `registry+https://github.com/rust-lang/crates.io-index`. Direct `rustix` remains
+pinned to 1.1.4 with the checksum recorded in the historical review below.
+
+This update records local pin alignment and does not claim a new external security re-review of
+4.0.3. The original decision and the remaining sections preserve the 2026-07-10 research: the
+4.0.2 versions, checksums, upstream commits, platform findings, license/MSRV evidence, and Windows
+smoke-test results remain historical evidence for 4.0.2.
+
+Both resolved-closure JSON baselines were regenerated with the existing snapshot functions from
+locked metadata for four native profiles and two portable byte-only profiles. The 65 xtask tests,
+including the actual repository admission check, passed on 2026-10-30. These checks establish the
+reviewed dependency closure; they do not establish additional runtime conformance or promote a
+release target.
 
 ## Question
 
@@ -32,7 +66,7 @@ flowchart LR
 
 A resolved pathname is not sufficient because a directory entry can be replaced before a later open.
 
-## Current Gap
+## Gap at the Historical Review
 
 The existing prototype canonicalizes the root and candidate, compares path prefixes, and then opens
 the returned path. That has a check/open time-of-check-to-time-of-use (TOCTOU) window. The U3 native
@@ -286,7 +320,7 @@ evidence; CI must have at least one authoritative runner where they execute.
 | Mount beneath authorized root | grants content selected by host namespace | host authority; optional no-cross-device policy can be proposed later |
 | OOM/abort while snapshotting | process availability | preflight/read limits reduce risk but hard guarantee requires subprocess |
 
-## Verification Commands Used
+## Historical Verification Commands Used
 
 ```powershell
 cargo search cap-std --limit 3
@@ -304,7 +338,7 @@ cargo test --manifest-path $env:TEMP\baozi-cap-std-admission-20260710\Cargo.toml
 cargo +1.95.0 test --locked --manifest-path $env:TEMP\baozi-cap-std-admission-20260710\Cargo.toml -- --nocapture
 ```
 
-Observed dependency metadata and reviewed crates.io package checksums:
+Observed dependency metadata and reviewed crates.io package checksums from 2026-07-10:
 
 | Crate | Reviewed version | Crates.io checksum | License | Upstream MSRV evidence |
 | --- | --- | --- | --- | --- |

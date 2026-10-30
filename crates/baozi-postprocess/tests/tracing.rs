@@ -2,8 +2,10 @@
 
 mod common;
 
-use baozi_postprocess::{PostProcessRequests, PostProcessRunDisposition};
-use common::canonical_triangle_scene;
+use baozi_postprocess::{
+    PostProcessControl, PostProcessOperation, PostProcessRunDisposition, triangulate_primitive,
+};
+use common::{canonical_quad_scene, canonical_triangle_scene};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::span::{Attributes, Id, Record};
@@ -67,66 +69,95 @@ impl Subscriber for CapturingSubscriber {
 
 #[test]
 fn tracing_is_fieldless_and_does_not_change_postprocess_results() {
-    let scene_without_subscriber = canonical_triangle_scene();
-    let scene_with_subscriber = canonical_triangle_scene();
+    for changed in [false, true] {
+        let fixture = if changed {
+            canonical_quad_scene
+        } else {
+            canonical_triangle_scene
+        };
+        let scene_without_subscriber = fixture();
+        let scene_with_subscriber = fixture();
+        let run = |scene: baozi_core::ValidatedScene| {
+            let generation = scene.generation();
+            let target = scene
+                .meshes()
+                .next()
+                .unwrap()
+                .primitives()
+                .next()
+                .unwrap()
+                .id();
+            let outcome = triangulate_primitive(scene, target, PostProcessControl::default())
+                .expect("the direct operation should succeed regardless of tracing");
+            assert_eq!(
+                outcome.report().operation(),
+                PostProcessOperation::Triangulate { target }
+            );
+            assert_eq!(outcome.report().input_generation(), generation);
+            assert!(outcome.report().matches_scene(outcome.scene()));
+            assert_eq!(outcome.scene().generation() != generation, changed);
+            outcome
+        };
+        let without_subscriber =
+            with_default(NoSubscriber::default(), || run(scene_without_subscriber));
 
-    let without_subscriber = with_default(NoSubscriber::default(), move || {
-        let scene = scene_without_subscriber;
-        let generation = scene.generation();
-        let canonical_block_count = scene.canonical_block_count();
-        let outcome = PostProcessRequests::empty()
-            .compile(scene)
-            .expect("requests should compile without a subscriber")
-            .execute()
-            .expect("requests should succeed without a subscriber");
-        (outcome, generation, canonical_block_count)
-    });
+        let subscriber = CapturingSubscriber::default();
+        let with_subscriber = with_default(subscriber.clone(), || run(scene_with_subscriber));
 
-    let subscriber = CapturingSubscriber::default();
-    let with_subscriber = with_default(subscriber.clone(), move || {
-        let scene = scene_with_subscriber;
-        let generation = scene.generation();
-        let canonical_block_count = scene.canonical_block_count();
-        let outcome = PostProcessRequests::empty()
-            .compile(scene)
-            .expect("requests should compile with a subscriber")
-            .execute()
-            .expect("requests should succeed with a subscriber");
-        (outcome, generation, canonical_block_count)
-    });
-    let (without_subscriber, without_generation, without_blocks) = without_subscriber;
-    let (with_subscriber, with_generation, with_blocks) = with_subscriber;
-
-    assert_eq!(
-        subscriber.captured_spans(),
-        [
-            CapturedSpan {
-                name: "baozi.postprocess.compile",
+        assert_eq!(
+            subscriber.captured_spans(),
+            [CapturedSpan {
+                name: "baozi.postprocess.triangulate",
                 fields: Vec::new(),
-            },
-            CapturedSpan {
-                name: "baozi.postprocess.execute",
-                fields: Vec::new(),
-            },
-        ]
-    );
-    assert_eq!(
-        without_subscriber.disposition(),
-        PostProcessRunDisposition::Unchanged
-    );
-    assert_eq!(
-        with_subscriber.disposition(),
-        PostProcessRunDisposition::Unchanged
-    );
-    assert_eq!(without_subscriber.scene().generation(), without_generation);
-    assert_eq!(with_subscriber.scene().generation(), with_generation);
-    assert_eq!(
-        without_subscriber.scene().canonical_block_count(),
-        without_blocks
-    );
-    assert_eq!(with_subscriber.scene().canonical_block_count(), with_blocks);
-    assert_eq!(
-        without_subscriber.report().resources(),
-        with_subscriber.report().resources()
-    );
+            }]
+        );
+        let expected = if changed {
+            PostProcessRunDisposition::Changed
+        } else {
+            PostProcessRunDisposition::Unchanged
+        };
+        assert_eq!(without_subscriber.disposition(), expected);
+        assert_eq!(with_subscriber.disposition(), expected);
+        assert_eq!(
+            without_subscriber.scene().canonical_block_count(),
+            with_subscriber.scene().canonical_block_count()
+        );
+        let primitive = |outcome: &baozi_postprocess::PostProcessRunOutcome| {
+            let primitive = outcome
+                .scene()
+                .meshes()
+                .next()
+                .unwrap()
+                .primitives()
+                .next()
+                .unwrap();
+            (
+                primitive.topology(),
+                primitive.vertex_count(),
+                primitive.corner_count(),
+                primitive.face_count(),
+                primitive.indices().map(<[u32]>::to_vec),
+            )
+        };
+        assert_eq!(primitive(&without_subscriber), primitive(&with_subscriber));
+        let without_report = without_subscriber.report();
+        let with_report = with_subscriber.report();
+        assert_eq!(without_report.resources(), with_report.resources());
+        assert_eq!(
+            without_report
+                .triangulation_remap()
+                .map(|remap| remap.source_corner_origins()),
+            with_report
+                .triangulation_remap()
+                .map(|remap| remap.source_corner_origins())
+        );
+        assert_eq!(
+            without_report
+                .triangulation_remap()
+                .map(|remap| remap.source_face_triangle_offsets()),
+            with_report
+                .triangulation_remap()
+                .map(|remap| remap.source_face_triangle_offsets())
+        );
+    }
 }

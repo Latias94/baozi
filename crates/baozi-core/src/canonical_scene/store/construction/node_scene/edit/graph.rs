@@ -72,26 +72,41 @@ where
 {
     lane.try_bind_canonical_source(&pending.input.canonical)?;
 
-    let node_transform = match &pending.program {
-        NodeSceneEditProgram::NodeTransform(rewrite) => *rewrite,
-    };
-    let source_nodes = pending.input.read_nodes();
-    let plan = NodeStoragePlan::for_storage(source_nodes).map_err(StoreRuntimeError::Plan)?;
-    let nodes = lane.try_retain_storage(
-        plan.capacities(),
-        plan.work().map_err(StoreRuntimeError::Plan)?,
-        plan.name_bytes() as u64,
-        |control| {
-            plan.rewrite(
-                source_nodes,
-                node_transform.target().canonical_row.as_usize(),
-                node_transform.replacement(),
-                control,
+    let (nodes, geometry) = match &pending.program {
+        NodeSceneEditProgram::NodeTransform(rewrite) => {
+            let source_nodes = pending.input.read_nodes();
+            let plan =
+                NodeStoragePlan::for_storage(source_nodes).map_err(StoreRuntimeError::Plan)?;
+            let nodes = lane.try_retain_storage(
+                plan.capacities(),
+                plan.work().map_err(StoreRuntimeError::Plan)?,
+                plan.name_bytes() as u64,
+                |control| {
+                    plan.rewrite(
+                        source_nodes,
+                        rewrite.target().canonical_row.as_usize(),
+                        rewrite.replacement(),
+                        control,
+                    )
+                    .map_err(map_build)
+                },
+            )?;
+            (
+                nodes,
+                lane.try_share_storage(&pending.input.tables.geometry)?,
             )
-            .map_err(map_build)
-        },
-    )?;
-    let geometry = lane.try_share_storage(&pending.input.tables.geometry)?;
+        }
+        NodeSceneEditProgram::TriangulatePrimitive(plan) => {
+            let nodes = lane.try_share_storage(&pending.input.tables.nodes)?;
+            let geometry = lane.try_retain_storage(
+                plan.capacities(),
+                plan.work(),
+                plan.name_bytes() as u64,
+                |mut control| plan.materialize(&mut control).map_err(map_build),
+            )?;
+            (nodes, geometry)
+        }
+    };
     let profile_leaves = profile::rewrite_lineage_leaves(lane, pending)?;
     let inherited = inherit_unchanged_evidence_leaves(lane, pending, inherited_leaf_plan)?;
     let spatial = rewrite_spatial(lane, pending, inherited)?;

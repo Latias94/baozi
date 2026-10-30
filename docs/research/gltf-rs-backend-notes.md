@@ -6,6 +6,19 @@
 This note records backend hazards that affect Baozi's parser ownership, fuzzing, diagnostics, resource limits, or future fork work.
 It is not a public API contract; ADR 0027 remains the architectural policy.
 
+## Selected Profile Admission (2026-10-29)
+
+The selected profile is source-admitted through `baozi/format-gltf` after integration `2dc2fc8`.
+The normalized model, selected raw source mapping, generated/default lineage, exact limits, and
+independent complex debug/release consumers pass on ordinary Windows stacks. A fresh immutable
+archive passed six malformed JSON/GLB reproducers and a bounded 256-run Linux ASan campaign.
+The archive SHA-256 is `558ff81b88cd38d8da78a609368dcfa19dff970f4f53e05453cd1bee72af6e39`.
+The [profile document](../formats/gltf.md) defines supported semantics and explicit rejections;
+the [progress record](../reviews/2026-10-29-delivery-progress.md) records execution scope.
+Earlier quarantine and proposed correction sections below remain historical investigation evidence.
+They do not describe current facade registration. Publication and Beta/Stable maturity remain
+separate from source admission.
+
 ## Current Backend Boundary
 
 - `gltf-rs` types are contained inside `baozi-format-gltf`.
@@ -46,8 +59,8 @@ original license files and a short change inventory are retained beside each pac
 
 The initial unmodified-backend workspace run executed the acceptance tests: the two direct backend
 checks and their two importer JSON/GLB checks failed as predicted. Installation is not sanitizer
-admission or completion of ADR 0027's normalized-model and source-span boundary. Facade registration
-and fuzz quarantine remain unchanged until the remaining execution gates pass.
+admission or completion of ADR 0027's normalized-model and source-span boundary. The subsequent
+2026-10-29 profile admission is recorded above.
 
 ### Evidence and Exact Failure Paths
 
@@ -130,9 +143,9 @@ and cancellation remain Baozi responsibilities and are not superseded by the for
    amplification, and cancellation cases remain part of the acceptance boundary.
 5. Execute each checked-in malformed fixture through `gltf_import` under Linux AddressSanitizer,
    then run a bounded corpus campaign. Record the exact dependency revision, command, completion,
-   and absence of panic/abort. Retain the current quarantine and absent facade registration until
-   this execution evidence and the selected-profile consumer checks exist. `cargo fuzz check` is
-   compilation evidence only.
+   and absence of panic/abort. That original execution gate closed for the selected profile in
+   the admission record above; later source changes still require fresh qualification.
+   `cargo fuzz check` remains compilation evidence only.
 
 The new test target is `crates/baozi-format-gltf/tests/backend_malformed.rs`. Its seven tests cover
 direct backend rejection without a panic-catching wrapper; structured importer failure for JSON and
@@ -180,12 +193,14 @@ investigation.
 
 ### Validation Panic Under Cargo Fuzz
 
-- **Observed:** `cargo +nightly-2026-05-27 fuzz run gltf_import -- -runs=256` can trigger a panic in `gltf-json` 1.4.1 validation while parsing malformed glTF input.
+- **Historical observed failure:** before the maintained correction, the selected malformed input
+  could trigger a panic in `gltf-json` 1.4.1 validation during `cargo fuzz run`.
 - **Why `catch_unwind` is insufficient:** cargo-fuzz/libFuzzer builds can abort on panic before unwinding reaches Baozi's `safe_gltf` wrapper.
-- **Current CI policy:** `gltf_import` is a non-admitted internal check-only target. CI may run
-  `cargo fuzz check gltf_import`, but the target is not facade, sanitizer, or maturity evidence.
-  The public facade has no glTF feature while this baseline abort remains reproducible.
-- **Re-enable condition:** Baozi must prevent this abort class before the backend validation call, or fork/replace the affected parser/validation slice so malformed input returns a structured error.
+- **Historical CI policy:** before the profile-admission record above, `gltf_import` was a
+  non-admitted internal check-only target. The current target policy is documented in
+  `docs/contributing/fuzzing.md` and `docs/formats/gltf.md`.
+- **Resolved for the selected profile:** Baozi installs a narrow backend correction so the
+  demonstrated malformed POSITION and camera payloads return structured errors before reader entry.
 - **Local artifact policy:** crash artifacts under `fuzz/artifacts/gltf_import/` are gitignored. Record the hash/name in issue or verification notes when useful, but do not commit generated crash files.
 
 ### Reader API Panic Boundaries
@@ -251,11 +266,11 @@ Fork or replace the relevant glTF backend slice if any of these remain true afte
 
 ## Short-Term Policy
 
-- Keep `gltf_import` compiling in CI with `cargo fuzz check`.
+- Keep `gltf_import` in Linux sanitizer smoke and scheduled fuzz CI.
 - Keep malformed glTF regression tests in normal Rust test suites where `safe_gltf` can catch unwindable panics.
-- Do not claim glTF sanitizer fuzz promotion until `cargo fuzz run gltf_import` passes on Linux CI without hitting backend aborts.
-- Apply the narrow maintained backport selected above; do not grow another validator around the
-  unchanged abort-capable backend.
+- The bounded `2dc2fc8` campaign closes the selected-profile baseline quarantine; keep sustained
+  campaign evidence separate from source admission.
+- Preserve the narrow maintained corrections; do not grow another validator around the backend.
 
 ## References
 

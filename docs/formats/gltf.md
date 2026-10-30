@@ -1,16 +1,16 @@
-# glTF Development Candidate
+# Selected glTF 2.0 / GLB Profile
 
 ## Summary
 
 - Format: glTF 2.0 / GLB
 - Crate: `baozi-format-gltf`
-- Admission: blocked; internal development candidate only
+- Admission: source builds, for the exact profile below
 - Declaration evidence: Unverified
 - Baozi maturity: None (no current `BaoziVerified` evidence record)
-- Public facade feature: none
+- Public facade feature: `format-gltf` (also included in `all-formats`)
 - Parser backend: maintained `baozi-gltf` / `baozi-gltf-json` packages based on `gltf-rs` 1.4.1
-- Candidate extensions: `.gltf`, `.glb`
-- Candidate media types: `model/gltf+json`, `model/gltf-binary`
+- Extensions: `.gltf`, `.glb`
+- Media types: `model/gltf+json`, `model/gltf-binary`
 - Encoding: JSON plus binary buffers, base64 buffer data URIs, or GLB container
 - Sidecar policy: selected external buffers and images through the origin-qualified `ParseScope`
   dependency resolver; base64 buffer data URIs and GLB BIN payloads remain embedded in the
@@ -18,29 +18,28 @@
 
 ## Current Status
 
-`baozi-format-gltf` contains an internal mesh, material, camera, and skinning development slice, but
-it is not a first-party inventory entry and is not registered by the public `baozi` facade. The
-crate remains in the workspace so its preflight, normalized-model, and sanitizer work can proceed
-without presenting the backend as admitted support.
+`baozi-format-gltf` imports the selected-scene PBR, skin, morph, and TRS animation profile below.
+Enable `baozi/format-gltf` to register it through `Importer::new()`, or register `GltfImporter`
+in a custom registry. The curated default format set remains OBJ/MTL and STL.
 
 The dependency on `gltf-rs` is intentionally hidden inside this crate. Baozi does not expose
 `gltf-rs` types in public API, so the backend can later be forked or replaced by a Baozi-owned parser
 without changing facade users. The ownership and replacement boundary is defined in
 [`ADR 0027`](../adr/0027-gltf-backend-ownership-and-replacement-policy.md).
 
-The crate remains `publish = false`. A public facade feature may be reintroduced only after the ADR
-0027 baseline admission gates pass. A separate managed evidence inventory must verify an exact
-admitted subject before Baozi can assign it any maturity.
+The crate remains `publish = false` until package/release checks are complete. Source admission
+does not assign Beta/Stable maturity or a full glTF conformance claim.
 
-The `gltf_import` development fuzz target executed the six known malformed JSON/GLB reproducers and
-a bounded 256-run Linux ASan campaign on the immutable `04d6874` source state. The maintained
+The `gltf_import` fuzz target executed the six known malformed JSON/GLB reproducers and
+a bounded 256-run Linux ASan campaign on the immutable `2dc2fc8` source archive. The maintained
 validator corrections reject the demonstrated out-of-range POSITION reference and missing camera
-projection payload without a panic fallback. This evidence does not qualify later edits or complete
-the normalized-model, source-mapping, and consumer gates. Exact execution scope is recorded in
-the [delivery progress](../reviews/2026-10-29-delivery-progress.md); the remaining admission criteria
-are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
+projection payload without a panic fallback. That integration also passed the complete workspace
+suite, normalized/source-mapping regressions, and independent debug/release typed consumers on
+ordinary Windows main stacks. Exact execution scope is recorded in
+the [delivery progress](../reviews/2026-10-29-delivery-progress.md). The short campaign establishes
+baseline malformed-input safety for that source state; it is not sustained fuzz evidence.
 
-## Implemented Development Slice
+## Supported Profile
 
 - Static primitives using points, lines, or triangles.
 - Positions, normals, tangents, texture coordinates, colors, indices, `JOINTS_0`, and `WEIGHTS_0`
@@ -76,8 +75,7 @@ are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
   meshes/primitives, materials, textures/images/samplers, skins, accessors/buffer views/buffers,
   animations, and animation channels. The selected core resource closure is compiled before
   dependency IO; omitted external buffers/images are not authorized, and selected data-URI or
-  buffer-view images are materialized as encoded payloads. This remains development evidence, not
-  public admission evidence.
+  buffer-view images are materialized as encoded payloads.
 - Selected external buffers and images are recorded in the canonical source profile after the
   primary document, with formal Buffer/Image locators and owner provenance for geometry,
   attributes, skins, animation clips/channels, and buffer-view images. External buffer snapshots
@@ -98,14 +96,13 @@ are tracked in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
   `extensionsUsed` are invalid; unsupported required extensions return typed format failure, while
   unsupported optional extensions retain the core fallback and emit `gltf.extension_ignored`.
   Duplicate detection uses metered name storage and bounded `WorkUnits` sorting.
-- Development gates for GLB import, snapshots, malformed external buffers/data URIs, skin validation,
-  text preflight, bounded format failures, and a check-only glTF fuzz target. These are not facade
-  admission evidence.
+- Gates cover GLB import, snapshots, malformed external buffers/data URIs, skin validation,
+  text preflight, bounded format failures, and the Linux sanitizer-run glTF fuzz target.
 
 ## Text Preflight, Resource Accounting, and Cancellation
 
-This development preflight is intentionally outside U4.6's line-record migration. glTF is not in
-the first-party format inventory, and JSON is a document grammar rather than a line-record grammar.
+This preflight uses document admission because JSON is a document grammar rather than a
+line-record grammar.
 Materializing the complete JSON surface as `ConformedTextInput` would add a decoded copy and line
 index without enforcing duplicate-key, nesting, token, object, array, string, number, GLB chunk, or
 padding limits. U6 therefore uses one borrowed, bounded JSON/GLB admission path that preserves
@@ -131,8 +128,7 @@ GLB container or materializes its BIN payload.
   offset before producing format evidence.
 
 These contracts are exercised by `crates/baozi-format-gltf/tests/text_preflight.rs` and
-`crates/baozi-format-gltf/tests/limits.rs`. They are development safety evidence only and do not
-promote glTF into the public facade inventory.
+`crates/baozi-format-gltf/tests/limits.rs`.
 
 ## Bounded Format Failure Evidence
 
@@ -148,12 +144,11 @@ There is no backend downcast target, backend vtable, or plugin-owned destructor 
 storage, sanitization, bounded packing, teardown, and source-chain termination are covered by the unit
 and import-contract tests.
 
-## Admission Blockers And Missing Semantics
+## Explicit Restrictions
 
 - Embedded image buffer views and image data URIs are materialized as encoded image payloads without
   pixel decoding. Sparse morph accessors, typed extension payloads beyond
-  `KHR_texture_transform`, extras, and the remaining backend/admission gaps are still fail-closed or
-  explicitly deferred.
+  `KHR_texture_transform`, and selected extras are rejected explicitly.
 - Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
 - Selected `extras` and unsupported extension payloads are explicitly rejected with original raw byte
   ranges. A supported extension at an unsupported owner/site is rejected as well. Unselected entity
@@ -161,20 +156,17 @@ and import-contract tests.
   payload retains the core fallback with `gltf.extension_ignored`.
 - The current `SourceScopeRecord` includes ADR 0039's typed selection outcome, camera rows, and
   animation-sampler rows. Entity-level extension rows, typed extension-reference closure for
-  reference-bearing schemas, extras policy, and a sealed bridge for stable canonical dependency
-  evidence remain admission blockers. Selected dependency provenance and the complete successful
+  reference-bearing schemas, and a sealed bridge for stable canonical dependency evidence remain
+  outside this profile. Unsupported selected payloads are rejected. Selected dependency provenance and the complete successful
   input manifest are now compiled and tested, global extension declarations are gated, and GLB BIN
-  data is isolated from the bootstrap backend, but those results remain development evidence until
-  the independent admission matrix passes.
-- The maintained backend remains private and replaceable. The complete normalized/source-mapping
-  boundary and the acceptance matrix are still under implementation.
-- `gltf_import` remains a development target until the updated source state and complete admission
-  matrix pass; the recorded baseline sanitizer run alone does not register the format.
+  data is isolated from the bootstrap backend. Canonical dependency identities remain
+  session-opaque; the successful input manifest retains resolver stability evidence.
+- The maintained backend remains private and replaceable. Canonical authoring reads the bounded
+  normalized model after backend data and its allowance have been released.
 
-## Exact Development Profile: Version Metadata and Resource URIs
+## Version Metadata and Resource URIs
 
-The following profile applies to the internal development importer and does not change its admission
-status. Its version and URI rules follow the
+Version and URI rules follow the
 [glTF asset and URI specification](https://github.com/KhronosGroup/glTF/blob/main/specification/2.0/Specification.adoc)
 and the [asset schema](https://github.com/KhronosGroup/glTF/blob/main/specification/2.0/schema/asset.schema.json),
 with the explicit restrictions listed below.

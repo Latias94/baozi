@@ -1797,7 +1797,7 @@ mod tests {
 
     impl FormatImporter for InspectAdmission {
         fn descriptor(&self) -> FormatDescriptor {
-            crate::format_descriptor_for_development()
+            crate::format_descriptor()
         }
 
         fn detect(

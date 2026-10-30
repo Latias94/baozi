@@ -61,6 +61,20 @@ impl NodeSceneCentralValidationPlan {
         self.work
     }
 
+    pub(super) fn try_rebind_geometry(
+        self,
+        source_work: u64,
+        output_work: u64,
+    ) -> Result<Self, StorePlanError> {
+        let work = self
+            .work
+            .get()
+            .checked_sub(source_work)
+            .and_then(|work| work.checked_add(output_work))
+            .ok_or(StorePlanError::SizeOverflow)?;
+        Self::try_new(self.scratch, work)
+    }
+
     pub(super) fn try_rebind_node_transform(
         self,
         counts: SceneEvidenceCounts,

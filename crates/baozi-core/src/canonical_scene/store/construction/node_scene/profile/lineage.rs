@@ -2,7 +2,7 @@ use crate::canonical_scene::store::production::{
     ProvenanceNodeAuthoring, ResourceIdentityStability, SessionOpaqueReason, ValidatedProfileBatch,
 };
 use crate::canonical_scene::store::profile_provenance::{
-    ProfileSegmentNonce, QualifiedProvenanceAddress,
+    ProfileSegmentAddressDomain, ProfileSegmentNonce,
 };
 use crate::canonical_scene::store::schema::CanonicalBlockRef;
 use crate::canonical_scene::store::schema::profile::{
@@ -344,14 +344,19 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    let domain = ProfileSegmentAddressDomain::new(
+        0,
+        segment_nonce,
+        0,
+        u32::try_from(batch.lineage().provenance_nodes().len())
+            .map_err(|_| StoreRuntimeError::AccountingOverflow)?,
+    );
     lane.try_retain_sequence(plan, ProfileLineageParentSchema, |control| {
         let mut cursor = 0_u32;
         for node in batch.lineage().provenance_nodes().iter().copied() {
             if let ProvenanceNodeAuthoring::Operation(operation) = node {
                 for parent in operation.parents().iter().copied() {
-                    let address =
-                        QualifiedProvenanceAddress::new(0, segment_nonce, parent.index(), 0)
-                            .ok_or(failure)?;
+                    let address = domain.address(parent.index()).ok_or(failure)?;
                     control.extend_from_slice(&address.into_scalars())?;
                     cursor = cursor.checked_add(1).ok_or(failure)?;
                 }
@@ -377,14 +382,19 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    let domain = ProfileSegmentAddressDomain::new(
+        0,
+        segment_nonce,
+        0,
+        u32::try_from(batch.lineage().provenance_nodes().len())
+            .map_err(|_| StoreRuntimeError::AccountingOverflow)?,
+    );
     lane.try_retain_sequence(plan, ProfileLineageAttachmentSchema, |control| {
         let mut cursor = 0_u32;
         for owner_ordinal in 0..batch.owner_count() {
             let (_, provenance) = batch.owner_provenance_at(owner_ordinal).ok_or(failure)?;
             for provenance in provenance.iter().copied() {
-                let address =
-                    QualifiedProvenanceAddress::new(0, segment_nonce, provenance.index(), 0)
-                        .ok_or(failure)?;
+                let address = domain.address(provenance.index()).ok_or(failure)?;
                 control.extend_from_slice(&address.into_scalars())?;
                 cursor = cursor.checked_add(1).ok_or(failure)?;
             }

@@ -15,6 +15,7 @@ use crate::geometry::TopologyKind;
 use crate::math::{Mat4, Quat, Vec3};
 
 pub(super) mod build;
+pub(super) mod edit;
 #[cfg(test)]
 mod tests;
 pub(super) mod validation;
@@ -252,4 +253,22 @@ pub(super) struct GeometryStorage {
     pub(super) f64_values: Vec<f64>,
     pub(super) u32_values: Vec<u32>,
     pub(super) i32_values: Vec<i32>,
+}
+
+impl GeometryStorage {
+    pub(in crate::canonical_scene::store) fn validation_work(&self) -> Option<u64> {
+        [
+            self.logical_meshes.len(),
+            self.primitives.len(),
+            self.primitives.len(),
+            self.attributes.len(),
+            self.mesh_instances.len(),
+            self.f32_values.len(),
+            self.f64_values.len(),
+            self.u32_values.len(),
+            self.i32_values.len(),
+        ]
+        .into_iter()
+        .try_fold(0_u64, |sum, count| sum.checked_add(count as u64))
+    }
 }

@@ -14,11 +14,13 @@ description.workspace = true
 default = ["default-formats"]
 native-fs-candidate = ["baozi-io/fs-candidate"]
 default-formats = ["format-stl", "format-obj"]
-all-formats = ["format-stl", "format-obj", "format-ply"]
+all-formats = ["format-stl", "format-obj", "format-ply", "format-gltf"]
 format-stl = ["dep:baozi-format-stl"]
 format-obj = ["dep:baozi-format-obj"]
 format-ply = ["dep:baozi-format-ply"]
-tracing = ["baozi-import/tracing"]
+format-gltf = ["dep:baozi-format-gltf"]
+postprocess = ["dep:baozi-postprocess"]
+tracing = ["baozi-import/tracing", "baozi-postprocess?/tracing"]
 mint = ["baozi-core/mint"]
 
 [dependencies]
@@ -26,10 +28,12 @@ baozi-core.workspace = true
 baozi-import.workspace = true
 baozi-io.workspace = true
 baozi-operation.workspace = true
+baozi-postprocess = { workspace = true, optional = true }
 thiserror.workspace = true
 baozi-format-stl = { workspace = true, optional = true }
 baozi-format-obj = { workspace = true, optional = true }
 baozi-format-ply = { workspace = true, optional = true }
+baozi-format-gltf = { workspace = true, optional = true }
 
 [dev-dependencies]
 baozi-test-support.workspace = true

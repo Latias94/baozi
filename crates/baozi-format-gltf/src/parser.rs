@@ -5889,7 +5889,7 @@ mod provenance_work_tests {
 
     impl FormatImporter for InspectWork {
         fn descriptor(&self) -> FormatDescriptor {
-            crate::format_descriptor_for_development()
+            crate::format_descriptor()
         }
 
         fn detect(

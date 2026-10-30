@@ -178,7 +178,12 @@ mod tests {
 
     #[test]
     fn every_published_row_is_unverified_without_baozi_maturity() {
-        for crate_name in ["baozi-format-stl", "baozi-format-obj", "baozi-format-ply"] {
+        for crate_name in [
+            "baozi-format-stl",
+            "baozi-format-obj",
+            "baozi-format-ply",
+            "baozi-format-gltf",
+        ] {
             let columns = parse_markdown_row(support_matrix_row(crate_name));
             assert_eq!(
                 columns[2], "Unverified",

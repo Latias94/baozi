@@ -3,8 +3,8 @@
   "review_basis": {
     "authority": "docs/research/native-filesystem-bound-handle-admission.md",
     "windows_directory_share_mode": {
-      "identity_binding": "package_identities.cap-primitives@4.0.2",
-      "package": "cap-primitives@4.0.2",
+      "identity_binding": "package_identities.cap-primitives@4.0.3",
+      "package": "cap-primitives@4.0.3",
       "reviewed_path": "src/windows/fs/dir_utils.rs",
       "semantic_contract": "root and descendant directory opens use FILE_FLAG_BACKUP_SEMANTICS and share only FILE_SHARE_READ | FILE_SHARE_WRITE, excluding FILE_SHARE_DELETE"
     }
@@ -14,7 +14,7 @@
       "nodes": {
         "ambient-authority@0.0.2": { "dependencies": [], "features": [] },
         "bitflags@2.13.1": { "dependencies": [], "features": ["std"] },
-        "cap-primitives@4.0.2": {
+        "cap-primitives@4.0.3": {
           "dependencies": [
             "normal:ambient_authority=ambient-authority@0.0.2",
             "normal:fs_set_times=fs-set-times@0.20.3",
@@ -26,9 +26,9 @@
           ],
           "features": []
         },
-        "cap-std@4.0.2": {
+        "cap-std@4.0.3": {
           "dependencies": [
-            "normal:cap_primitives=cap-primitives@4.0.2",
+            "normal:cap_primitives=cap-primitives@4.0.3",
             "normal:io_extras=io-extras@0.19.0",
             "normal:io_lifetimes=io-lifetimes@3.0.1",
             "normal:rustix=rustix@1.1.4"
@@ -64,20 +64,21 @@
           "features": ["alloc", "default", "fs", "process", "std", "termios", "time"]
         }
       },
-      "roots": ["cap-std@4.0.2", "rustix@1.1.4"],
+      "roots": ["cap-std@4.0.3", "rustix@1.1.4"],
       "full_package_keys": [
         "ambient-authority@0.0.2",
         "bitflags@2.13.1",
-        "block-buffer@0.10.4",
-        "cap-primitives@4.0.2",
-        "cap-std@4.0.2",
+        "block-buffer@0.12.1",
+        "cap-primitives@4.0.3",
+        "cap-std@4.0.3",
         "cfg-if@1.0.4",
-        "cpufeatures@0.2.17",
-        "crypto-common@0.1.7",
-        "digest@0.10.7",
+        "const-oid@0.10.2",
+        "cpufeatures@0.3.1",
+        "crypto-common@0.2.2",
+        "digest@0.11.3",
         "errno@0.3.14",
         "fs-set-times@0.20.3",
-        "generic-array@0.14.7",
+        "hybrid-array@0.4.15",
         "io-extras@0.19.0",
         "io-lifetimes@2.0.4",
         "io-lifetimes@3.0.1",
@@ -87,13 +88,12 @@
         "proc-macro2@1.0.107",
         "quote@1.0.47",
         "rustix@1.1.4",
-        "sha2@0.10.9",
+        "sha2@0.11.1",
         "syn@3.0.9",
         "thiserror-impl@2.0.19",
         "thiserror@2.0.19",
         "typenum@1.20.1",
-        "unicode-ident@1.0.24",
-        "version_check@0.9.5"
+        "unicode-ident@1.0.24"
       ],
       "target": "x86_64-unknown-freebsd"
     },
@@ -101,7 +101,7 @@
       "nodes": {
         "ambient-authority@0.0.2": { "dependencies": [], "features": [] },
         "bitflags@2.13.1": { "dependencies": [], "features": ["std"] },
-        "cap-primitives@4.0.2": {
+        "cap-primitives@4.0.3": {
           "dependencies": [
             "normal:ambient_authority=ambient-authority@0.0.2",
             "normal:fs_set_times=fs-set-times@0.20.3",
@@ -114,9 +114,9 @@
           ],
           "features": []
         },
-        "cap-std@4.0.2": {
+        "cap-std@4.0.3": {
           "dependencies": [
-            "normal:cap_primitives=cap-primitives@4.0.2",
+            "normal:cap_primitives=cap-primitives@4.0.3",
             "normal:io_extras=io-extras@0.19.0",
             "normal:io_lifetimes=io-lifetimes@3.0.1",
             "normal:rustix=rustix@1.1.4"
@@ -168,20 +168,21 @@
           "features": ["alloc", "default", "fs", "process", "std", "termios", "time"]
         }
       },
-      "roots": ["cap-std@4.0.2", "rustix@1.1.4"],
+      "roots": ["cap-std@4.0.3", "rustix@1.1.4"],
       "full_package_keys": [
         "ambient-authority@0.0.2",
         "bitflags@2.13.1",
-        "block-buffer@0.10.4",
-        "cap-primitives@4.0.2",
-        "cap-std@4.0.2",
+        "block-buffer@0.12.1",
+        "cap-primitives@4.0.3",
+        "cap-std@4.0.3",
         "cfg-if@1.0.4",
-        "cpufeatures@0.2.17",
-        "crypto-common@0.1.7",
-        "digest@0.10.7",
+        "const-oid@0.10.2",
+        "cpufeatures@0.3.1",
+        "crypto-common@0.2.2",
+        "digest@0.11.3",
         "errno@0.3.14",
         "fs-set-times@0.20.3",
-        "generic-array@0.14.7",
+        "hybrid-array@0.4.15",
         "io-extras@0.19.0",
         "io-lifetimes@2.0.4",
         "io-lifetimes@3.0.1",
@@ -194,13 +195,12 @@
         "quote@1.0.47",
         "rustix-linux-procfs@0.1.1",
         "rustix@1.1.4",
-        "sha2@0.10.9",
+        "sha2@0.11.1",
         "syn@3.0.9",
         "thiserror-impl@2.0.19",
         "thiserror@2.0.19",
         "typenum@1.20.1",
-        "unicode-ident@1.0.24",
-        "version_check@0.9.5"
+        "unicode-ident@1.0.24"
       ],
       "target": "x86_64-unknown-linux-gnu"
     },
@@ -208,7 +208,7 @@
       "nodes": {
         "ambient-authority@0.0.2": { "dependencies": [], "features": [] },
         "bitflags@2.13.1": { "dependencies": [], "features": ["std"] },
-        "cap-primitives@4.0.2": {
+        "cap-primitives@4.0.3": {
           "dependencies": [
             "normal:ambient_authority=ambient-authority@0.0.2",
             "normal:fs_set_times=fs-set-times@0.20.3",
@@ -220,9 +220,9 @@
           ],
           "features": []
         },
-        "cap-std@4.0.2": {
+        "cap-std@4.0.3": {
           "dependencies": [
-            "normal:cap_primitives=cap-primitives@4.0.2",
+            "normal:cap_primitives=cap-primitives@4.0.3",
             "normal:io_extras=io-extras@0.19.0",
             "normal:io_lifetimes=io-lifetimes@3.0.1",
             "normal:rustix=rustix@1.1.4"
@@ -258,20 +258,21 @@
           "features": ["alloc", "default", "fs", "process", "std", "termios", "time"]
         }
       },
-      "roots": ["cap-std@4.0.2", "rustix@1.1.4"],
+      "roots": ["cap-std@4.0.3", "rustix@1.1.4"],
       "full_package_keys": [
         "ambient-authority@0.0.2",
         "bitflags@2.13.1",
-        "block-buffer@0.10.4",
-        "cap-primitives@4.0.2",
-        "cap-std@4.0.2",
+        "block-buffer@0.12.1",
+        "cap-primitives@4.0.3",
+        "cap-std@4.0.3",
         "cfg-if@1.0.4",
-        "cpufeatures@0.2.17",
-        "crypto-common@0.1.7",
-        "digest@0.10.7",
+        "const-oid@0.10.2",
+        "cpufeatures@0.3.1",
+        "crypto-common@0.2.2",
+        "digest@0.11.3",
         "errno@0.3.14",
         "fs-set-times@0.20.3",
-        "generic-array@0.14.7",
+        "hybrid-array@0.4.15",
         "io-extras@0.19.0",
         "io-lifetimes@2.0.4",
         "io-lifetimes@3.0.1",
@@ -281,13 +282,12 @@
         "proc-macro2@1.0.107",
         "quote@1.0.47",
         "rustix@1.1.4",
-        "sha2@0.10.9",
+        "sha2@0.11.1",
         "syn@3.0.9",
         "thiserror-impl@2.0.19",
         "thiserror@2.0.19",
         "typenum@1.20.1",
-        "unicode-ident@1.0.24",
-        "version_check@0.9.5"
+        "unicode-ident@1.0.24"
       ],
       "target": "aarch64-apple-darwin"
     },
@@ -295,7 +295,7 @@
       "nodes": {
         "ambient-authority@0.0.2": { "dependencies": [], "features": [] },
         "bitflags@2.13.1": { "dependencies": [], "features": ["std"] },
-        "cap-primitives@4.0.2": {
+        "cap-primitives@4.0.3": {
           "dependencies": [
             "normal:ambient_authority=ambient-authority@0.0.2",
             "normal:fs_set_times=fs-set-times@0.20.3",
@@ -308,9 +308,9 @@
           ],
           "features": []
         },
-        "cap-std@4.0.2": {
+        "cap-std@4.0.3": {
           "dependencies": [
-            "normal:cap_primitives=cap-primitives@4.0.2",
+            "normal:cap_primitives=cap-primitives@4.0.3",
             "normal:io_extras=io-extras@0.19.0",
             "normal:io_lifetimes=io-lifetimes@3.0.1"
           ],
@@ -406,19 +406,20 @@
           "features": []
         }
       },
-      "roots": ["cap-std@4.0.2"],
+      "roots": ["cap-std@4.0.3"],
       "full_package_keys": [
         "ambient-authority@0.0.2",
         "bitflags@2.13.1",
-        "block-buffer@0.10.4",
-        "cap-primitives@4.0.2",
-        "cap-std@4.0.2",
+        "block-buffer@0.12.1",
+        "cap-primitives@4.0.3",
+        "cap-std@4.0.3",
         "cfg-if@1.0.4",
-        "cpufeatures@0.2.17",
-        "crypto-common@0.1.7",
-        "digest@0.10.7",
+        "const-oid@0.10.2",
+        "cpufeatures@0.3.1",
+        "crypto-common@0.2.2",
+        "digest@0.11.3",
         "fs-set-times@0.20.3",
-        "generic-array@0.14.7",
+        "hybrid-array@0.4.15",
         "io-extras@0.19.0",
         "io-lifetimes@2.0.4",
         "io-lifetimes@3.0.1",
@@ -426,13 +427,12 @@
         "maybe-owned@0.3.4",
         "proc-macro2@1.0.107",
         "quote@1.0.47",
-        "sha2@0.10.9",
+        "sha2@0.11.1",
         "syn@3.0.9",
         "thiserror-impl@2.0.19",
         "thiserror@2.0.19",
         "typenum@1.20.1",
         "unicode-ident@1.0.24",
-        "version_check@0.9.5",
         "windows-link@0.2.1",
         "windows-sys@0.59.0",
         "windows-sys@0.60.2",
@@ -455,12 +455,12 @@
       "checksum": "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
-    "cap-primitives@4.0.2": {
-      "checksum": "cdadbd7c002d3a484b35243669abdae85a0ebaded5a61117169dc3400f9a7ff0",
+    "cap-primitives@4.0.3": {
+      "checksum": "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
-    "cap-std@4.0.2": {
-      "checksum": "7281235d6e96d3544ca18bba9049be92f4190f8d923e3caef1b5f66cfa752608",
+    "cap-std@4.0.3": {
+      "checksum": "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8",
       "source": "registry+https://github.com/rust-lang/crates.io-index"
     },
     "errno@0.3.14": {

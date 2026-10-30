@@ -696,7 +696,7 @@ fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
         dependencies,
         ManifestDependency {
             name: "cap-fs-ext",
-            requirement: "=4.0.2",
+            requirement: "=4.0.3",
             target: CAP_STD_TARGET,
             features: &["std"],
         },
@@ -706,7 +706,7 @@ fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
         dependencies,
         ManifestDependency {
             name: "cap-std",
-            requirement: "=4.0.2",
+            requirement: "=4.0.3",
             target: CAP_STD_TARGET,
             features: &[],
         },
@@ -1756,12 +1756,12 @@ fn review_basis() -> Value {
             Value::Object(Map::from_iter([
                 (
                     "package".to_owned(),
-                    Value::String("cap-primitives@4.0.2".to_owned()),
+                    Value::String("cap-primitives@4.0.3".to_owned()),
                 ),
                 (
                     "identity_binding".to_owned(),
                     Value::String(
-                        "package_identities.cap-primitives@4.0.2".to_owned(),
+                        "package_identities.cap-primitives@4.0.3".to_owned(),
                     ),
                 ),
                 (

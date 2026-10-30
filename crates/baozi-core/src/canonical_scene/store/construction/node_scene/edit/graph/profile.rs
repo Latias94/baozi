@@ -3,8 +3,8 @@ use baozi_operation::__retained_store_integration::activation::{
 };
 use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
 use baozi_operation::{
-    CanonicalRecordView, OperationOwner, ProgressPhase, ProgressUnit, SequenceWriter,
-    StoreBuildError, StoreControlledError, StoreRuntimeError,
+    CanonicalRecordView, OperationOwner, ProgressPhase, ProgressUnit, StoreBuildError,
+    StoreControlledError, StoreRuntimeError,
 };
 
 use crate::canonical_scene::store::profile_provenance::{
@@ -67,25 +67,40 @@ where
         plan.source_attachment_count.as_usize(),
     )
     .ok_or(StoreRuntimeError::InvalidSourceSlot)?;
-    let target_start = plan.target_attachment_offset.as_usize();
-    let target_end = target_start
-        .checked_add(plan.target_attachment_count.as_usize())
-        .ok_or(StoreRuntimeError::AccountingOverflow)?;
-    let target_parents = source_addresses
-        .get_range(target_start, plan.target_attachment_count.as_usize())
+    let owners = pending
+        .input
+        .canonical
+        .records(pending.input.proof.profile_owners().into_store())
         .ok_or(StoreRuntimeError::InvalidSourceSlot)?;
     let segment_nonce =
         issue_profile_segment_nonce().map_err(|_| StoreRuntimeError::MembershipExhausted)?;
-    let fresh_address = QualifiedProvenanceAddress::new(
+    let output_domain = ProfileSegmentAddressDomain::new(
         plan.source_segment_count.as_u32(),
         segment_nonce,
-        0,
         plan.fresh_provenance_index.as_u32(),
-    )
-    .ok_or(StoreRuntimeError::AccountingOverflow)?;
-
-    // This exact source leaf must be mapped before explicit unchanged-leaf inheritance so the
-    // old attachment storage is not retained into the edited generation.
+        plan.target_count.as_u32(),
+    );
+    let segments = required_segment_view(pending)?;
+    let selected = |row: usize| -> Result<bool, StoreBuildError> {
+        let kind = owners
+            .scalar::<u8>(row, profile_owner_field::OWNER_KIND)
+            .ok_or(failure)?;
+        let index = owners
+            .scalar::<u32>(row, profile_owner_field::OWNER_INDEX)
+            .ok_or(failure)?;
+        Ok(plan.selects(pending.input, kind, index))
+    };
+    let source_range = |row: usize| {
+        let offset = owners
+            .scalar::<u32>(row, profile_owner_field::ATTACHMENT_OFFSET)
+            .ok_or(failure)? as usize;
+        let count = owners
+            .scalar::<u32>(row, profile_owner_field::ATTACHMENT_COUNT)
+            .ok_or(failure)? as usize;
+        source_addresses.get_range(offset, count).ok_or(failure)
+    };
+    // Replace the shared attachment leaf once. Each selected owner receives its own operation
+    // provenance address; unaffected owner ranges keep their exact ancestor addresses.
     let attachments = lane
         .try_rewrite_sequence(
             &pending.input.canonical,
@@ -93,73 +108,121 @@ where
             plan.attachments,
             ProfileLineageAttachmentSchema,
             |control| {
-                let prefix = source_addresses.raw_prefix(target_start).ok_or(failure)?;
-                let suffix = source_addresses.raw_suffix(target_end).ok_or(failure)?;
-                control.extend_from_slice(prefix)?;
-                control.extend_from_slice(&fresh_address.into_scalars())?;
-                control.extend_from_slice(suffix)
+                let mut local = 0_u32;
+                for row in 0..owners.rows() {
+                    control.poll()?;
+                    if selected(row)? {
+                        let address = output_domain.address(local).ok_or(failure)?;
+                        control.extend_from_slice(&address.into_scalars())?;
+                        local = local.checked_add(1).ok_or(failure)?;
+                    } else {
+                        for address in source_range(row)?.iter() {
+                            control.extend_from_slice(&address.ok_or(failure)?.into_scalars())?;
+                        }
+                    }
+                }
+                if local != plan.target_count.as_u32() {
+                    return Err(failure.into());
+                }
+                Ok(())
             },
         )
         .map(CanonicalBlockRef::from_store)?;
 
-    let segments = required_segment_view(pending)?;
-    let mut fresh_depth = None;
     let parents = lane
         .try_retain_sequence(plan.parents, ProfileLineageParentSchema, |control| {
-            let mut previous = None;
-            let mut maximum_depth = 0_u32;
-            for parent in target_parents.iter() {
+            for row in 0..owners.rows() {
                 control.poll()?;
-                let parent = parent.ok_or(failure)?;
-                let (global, depth) =
-                    resolve_qualified_depth(pending, &segments, parent, control, failure)?;
-                if global >= plan.fresh_provenance_index.as_u32()
-                    || previous.is_some_and(|previous| previous >= global)
-                {
-                    return Err(failure.into());
+                if !selected(row)? {
+                    continue;
                 }
-                control.extend_from_slice(&parent.into_scalars())?;
-                maximum_depth = maximum_depth.max(depth);
-                previous = Some(global);
+                let mut previous = None;
+                for address in source_range(row)?.iter() {
+                    let address = address.ok_or(failure)?;
+                    let (global, _) =
+                        resolve_qualified_depth(pending, &segments, address, control, failure)?;
+                    if global >= plan.fresh_provenance_index.as_u32()
+                        || previous.is_some_and(|prior| prior >= global)
+                    {
+                        return Err(failure.into());
+                    }
+                    control.extend_from_slice(&address.into_scalars())?;
+                    previous = Some(global);
+                }
             }
-            fresh_depth = Some(maximum_depth.checked_add(1).ok_or(failure)?);
             Ok(())
         })
         .map(CanonicalBlockRef::from_store)?;
-    let fresh_depth = fresh_depth.ok_or(StoreRuntimeError::InvalidSourceSlot)?;
-
     let digest = lane
         .try_retain_bytes(plan.digest, ProfileLineageDigestSchema, |control| {
-            control.write_bytes(pending.operation.options_digest().as_bytes())
+            for _ in 0..plan.target_count.as_usize() {
+                control.write_bytes(pending.operation.options_digest().as_bytes())?;
+            }
+            Ok(())
         })
         .map(CanonicalBlockRef::from_store)?;
-
     let operation = lane
         .try_retain_sequence(plan.operation, ProfileLineageOperationSchema, |control| {
-            control.extend_from_slice(&[
-                u32::from(pending.program.profile_operation_code()),
-                0,
-                0,
-                u32::from(encode_digest_algorithm(
-                    pending.operation.options_digest().algorithm(),
-                )),
-                0,
-                u32::try_from(DIGEST_LEN).map_err(|_| failure)?,
-                0,
-                0,
-            ])
+            for operation in 0..plan.target_count.as_usize() {
+                let digest_offset = operation
+                    .checked_mul(DIGEST_LEN)
+                    .and_then(|offset| u32::try_from(offset).ok())
+                    .ok_or(failure)?;
+                control.extend_from_slice(&[
+                    u32::from(pending.program.profile_operation_code()),
+                    0,
+                    0,
+                    u32::from(encode_digest_algorithm(
+                        pending.operation.options_digest().algorithm(),
+                    )),
+                    digest_offset,
+                    u32::try_from(DIGEST_LEN).map_err(|_| failure)?,
+                    0,
+                    0,
+                ])?;
+            }
+            Ok(())
         })
         .map(CanonicalBlockRef::from_store)?;
-
     let provenance = lane
         .try_retain_sequence(plan.provenance, ProfileLineageProvenanceSchema, |control| {
-            control.extend_from_slice(&[
-                u32::from(PROFILE_PROVENANCE_OPERATION),
-                0,
-                fresh_depth,
-                0,
-                plan.target_attachment_count.as_u32(),
-            ])
+            let mut local = 0_u32;
+            let mut parent_offset = 0_u32;
+            for row in 0..owners.rows() {
+                control.poll()?;
+                if !selected(row)? {
+                    continue;
+                }
+                let parents = source_range(row)?;
+                let mut maximum_depth = 0_u32;
+                let mut count = 0_u32;
+                for parent in parents.iter() {
+                    let (_, depth) = resolve_qualified_depth(
+                        pending,
+                        &segments,
+                        parent.ok_or(failure)?,
+                        control,
+                        failure,
+                    )?;
+                    maximum_depth = maximum_depth.max(depth);
+                    count = count.checked_add(1).ok_or(failure)?;
+                }
+                control.extend_from_slice(&[
+                    u32::from(PROFILE_PROVENANCE_OPERATION),
+                    local,
+                    maximum_depth.checked_add(1).ok_or(failure)?,
+                    parent_offset,
+                    count,
+                ])?;
+                local = local.checked_add(1).ok_or(failure)?;
+                parent_offset = parent_offset.checked_add(count).ok_or(failure)?;
+            }
+            if local != plan.target_count.as_u32()
+                || parent_offset != plan.target_attachment_count.as_u32()
+            {
+                return Err(failure.into());
+            }
+            Ok(())
         })
         .map(CanonicalBlockRef::from_store)?;
 
@@ -197,13 +260,6 @@ where
     {
         return Err(StoreRuntimeError::InvalidSourceSlot);
     }
-    let removed_attachments = pending
-        .counts
-        .profile
-        .target_attachment_count
-        .as_u32()
-        .checked_sub(1)
-        .ok_or(StoreRuntimeError::AccountingOverflow)?;
     let owners = lane
         .try_rewrite_records(
             &input.canonical,
@@ -211,6 +267,7 @@ where
             pending.counts.profile.owners,
             ProfileOwnerTableSchema,
             |control| {
+                let mut next_offset = 0_u32;
                 for row_index in 0..source_owners.rows() {
                     let owner_kind = source_owners
                         .scalar::<u8>(row_index, profile_owner_field::OWNER_KIND)
@@ -218,23 +275,21 @@ where
                     let owner_index = source_owners
                         .scalar::<u32>(row_index, profile_owner_field::OWNER_INDEX)
                         .ok_or(failure)?;
-                    let source_offset = source_owners
-                        .scalar::<u32>(row_index, profile_owner_field::ATTACHMENT_OFFSET)
-                        .ok_or(failure)?;
                     let source_count = source_owners
                         .scalar::<u32>(row_index, profile_owner_field::ATTACHMENT_COUNT)
                         .ok_or(failure)?;
-                    let (attachment_offset, attachment_count) =
-                        match row_index.cmp(&pending.counts.profile.target_owner_row.as_usize()) {
-                            std::cmp::Ordering::Less => (source_offset, source_count),
-                            std::cmp::Ordering::Equal => (source_offset, 1),
-                            std::cmp::Ordering::Greater => (
-                                source_offset
-                                    .checked_sub(removed_attachments)
-                                    .ok_or(failure)?,
-                                source_count,
-                            ),
+                    let attachment_offset = next_offset;
+                    let attachment_count =
+                        if pending
+                            .counts
+                            .profile
+                            .selects(input, owner_kind, owner_index)
+                        {
+                            1
+                        } else {
+                            source_count
                         };
+                    next_offset = next_offset.checked_add(attachment_count).ok_or(failure)?;
                     control.write_row(|row| {
                         row.write_scalar(owner_kind)?;
                         row.write_scalar(owner_index)?;
@@ -355,9 +410,9 @@ where
                 row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
                 row.write_scalar(0_u32)?;
                 row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
-                row.write_scalar(1_u32)?;
+                row.write_scalar(pending.counts.profile.target_count.as_u32())?;
                 row.write_sequence_ref(leaves.provenance.into_store())?;
-                row.write_scalar(1_u32)?;
+                row.write_scalar(pending.counts.profile.target_count.as_u32())?;
                 row.write_sequence_ref(leaves.operation.into_store())?;
                 row.write_scalar(0_u32)?;
                 row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
@@ -367,7 +422,9 @@ where
                 row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
                 row.write_scalar(0_u32)?;
                 row.write_scalar(PROFILE_ABSENT_REFERENCE)?;
-                row.write_scalar(u32::try_from(DIGEST_LEN).map_err(|_| failure)?)?;
+                row.write_scalar(
+                    u32::try_from(pending.counts.profile.digest.bytes()).map_err(|_| failure)?,
+                )?;
                 row.write_bytes_ref(leaves.digest.into_store())?;
                 row.write_scalar(leaves.segment_nonce.get())?;
                 row.write_scalar(pending.counts.profile.fresh_provenance_index.as_u32())
@@ -393,11 +450,11 @@ fn required_segment_view<'scene>(
     Ok(segments)
 }
 
-fn resolve_qualified_depth<O, PP, U>(
+fn resolve_qualified_depth<O, PP, U, W>(
     pending: &BoundPendingNodeSceneEdit<'_>,
     segments: &CanonicalRecordView<'_>,
     address: QualifiedProvenanceAddress,
-    control: &mut CanonicalBuildControl<'_, '_, '_, O, PP, U, SequenceWriter<u64>>,
+    control: &mut CanonicalBuildControl<'_, '_, '_, O, PP, U, W>,
     failure: StoreBuildError,
 ) -> Result<(u32, u32), StoreControlledError>
 where

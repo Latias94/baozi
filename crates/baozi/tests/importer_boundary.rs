@@ -360,6 +360,8 @@ fn enabled_builtin_registry_is_frozen_with_qualified_ids() {
         "org.baozi.obj",
         #[cfg(feature = "format-ply")]
         "org.baozi.ply",
+        #[cfg(feature = "format-gltf")]
+        "org.baozi.gltf",
     ];
     expected.sort_unstable();
 

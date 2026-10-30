@@ -200,6 +200,31 @@ pages where justified. Delete each replaced record/projection/conversion rail in
 Remove unused alternate validator entry points and abstract APIs that no longer have callers.
 E and F can deliver after their required domain cutovers; they do not wait for every D2 domain.
 
+The next D2 increment is the complete profile/provenance domain, including owner attachments and
+metadata. Normal generation can add, replace, or remove attributes, so its output owner catalog
+must come from the final typed domain layout rather than a scan of input owners. Keep immutable
+metadata payloads separate from owner-bearing descriptors so owner reindexing does not copy large
+payloads. Share unchanged lineage segments through the existing retained-storage mechanism.
+Cut fresh build, edit, central validation, semantic reads, and snapshot traversal over together;
+delete their replaced profile schemas, scalar codecs, record rewrites, and projection scratch.
+This is the prerequisite for normals' owner changes, not a new generic patch or scheduler layer.
+
+The private root becomes `SceneTables`, retaining node, geometry, and profile owners through the
+existing storage-first release mechanism. Profile state owns typed owner/attachment and metadata
+descriptors; immutable lineage segments and metadata payloads have independent retained owners.
+Store operation digests as typed values, not offset/length rows. A provenance link identifies
+its exact segment and local node; derive other coordinates at checked lookup boundaries instead
+of asking callers to maintain duplicate indices. Preserve sibling-branch isolation and source
+identity. Derive owner additions/removals/reindexing from the concrete operation's final layout,
+and remap metadata descriptors without copying unchanged payloads.
+
+The cutover removes `schema/profile.rs`, old profile lineage/metadata record writers,
+`edit/graph/profile.rs`, profile-specific inherited-leaf machinery, scalar-decoding semantic
+readers, and full lineage/descriptor validation projections. Legacy block-count deltas are
+replaced by actual typed table capacities and semantic counts. Existing corrupt-reference,
+branch-nonce, metadata-value, cancellation, teardown, and large-payload tests remain behavioral
+acceptance; obsolete physical row/stride assertions do not constrain the replacement.
+
 **Acceptance:** identical semantic outputs; all invalid-reference/cardinality/control cases remain
 rejected; simple node edits avoid copying unrelated tables; validation does not duplicate full
 immutable influence/metadata payloads. Record requested allocation and observed process memory

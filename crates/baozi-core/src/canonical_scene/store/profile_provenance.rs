@@ -105,21 +105,6 @@ pub(in crate::canonical_scene::store) struct QualifiedProvenanceAddress {
 }
 
 impl QualifiedProvenanceAddress {
-    pub(in crate::canonical_scene::store) fn new(
-        segment_ordinal: u32,
-        segment_nonce: ProfileSegmentNonce,
-        local_index: u32,
-        provenance_base: u32,
-    ) -> Option<Self> {
-        let global_index = provenance_base.checked_add(local_index)?;
-        Some(Self {
-            segment_ordinal: u64::from(segment_ordinal),
-            segment_nonce,
-            local_index: u64::from(local_index),
-            global_index: u64::from(global_index),
-        })
-    }
-
     pub(in crate::canonical_scene::store) fn from_scalars(scalars: &[u64]) -> Option<Self> {
         let scalars: &[u64; PROFILE_PROVENANCE_ADDRESS_SCALARS] = scalars.try_into().ok()?;
         let [segment_ordinal, segment_nonce, local_index, global_index] = *scalars;
@@ -235,6 +220,24 @@ impl ProfileSegmentAddressDomain {
     pub(in crate::canonical_scene::store) const fn nonce(self) -> ProfileSegmentNonce {
         self.nonce
     }
+
+    /// Constructs an address within this exact segment. The caller supplies only a local index;
+    /// the domain owns its nonce, extent, and global base, so those cannot drift independently.
+    pub(in crate::canonical_scene::store) fn address(
+        self,
+        local_index: u32,
+    ) -> Option<QualifiedProvenanceAddress> {
+        if local_index >= self.provenance_count {
+            return None;
+        }
+        let global_index = self.provenance_base.checked_add(local_index)?;
+        Some(QualifiedProvenanceAddress {
+            segment_ordinal: u64::from(self.ordinal),
+            segment_nonce: self.nonce,
+            local_index: u64::from(local_index),
+            global_index: u64::from(global_index),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,8 +312,7 @@ mod tests {
     #[test]
     fn qualified_address_rejects_each_independently_corrupted_component() {
         let domain = ProfileSegmentAddressDomain::new(3, nonce(41), 12, 5);
-        let valid =
-            QualifiedProvenanceAddress::new(3, nonce(41), 2, 12).expect("valid qualified address");
+        let valid = domain.address(2).expect("valid qualified address");
         assert_eq!(valid.validate_against(domain), Some(14));
         assert!(QualifiedProvenanceAddress::from_scalars(&[3, 0, 2, 14]).is_none());
 
@@ -324,6 +326,26 @@ mod tests {
                 .expect("corruption remains structurally decodable");
             assert_eq!(corrupted.validate_against(domain), None);
         }
+    }
+
+    #[test]
+    fn segment_addresses_derive_global_indices_and_check_the_local_extent() {
+        let domain = ProfileSegmentAddressDomain::new(3, nonce(41), 12, 5);
+        for local in 0..5 {
+            let address = domain
+                .address(local)
+                .expect("local index belongs to this segment");
+            assert_eq!(address.validate_against(domain), Some(12 + local));
+            assert_eq!(
+                address.into_scalars(),
+                [3, 41, u64::from(local), 12 + u64::from(local)]
+            );
+        }
+        assert!(domain.address(5).is_none());
+        assert!(domain.address(u32::MAX).is_none());
+        let overflow = ProfileSegmentAddressDomain::new(0, nonce(42), u32::MAX, 2);
+        assert!(overflow.address(0).is_some());
+        assert!(overflow.address(1).is_none());
     }
 
     #[test]
@@ -359,8 +381,7 @@ mod tests {
     fn sibling_nonce_substitution_is_rejected() {
         let left_domain = ProfileSegmentAddressDomain::new(1, nonce(51), 7, 2);
         let right_domain = ProfileSegmentAddressDomain::new(1, nonce(52), 7, 2);
-        let left_address =
-            QualifiedProvenanceAddress::new(1, nonce(51), 1, 7).expect("left sibling address");
+        let left_address = left_domain.address(1).expect("left sibling address");
 
         assert_eq!(left_address.validate_against(left_domain), Some(8));
         assert_eq!(left_address.validate_against(right_domain), None);

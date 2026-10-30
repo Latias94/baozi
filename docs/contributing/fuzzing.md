@@ -7,11 +7,7 @@ canonical sanitizer smoke run is the Linux CI job in `.github/workflows/ci.yml`
 because the Rust nightly, compiler-rt, and sanitizer runtime are pinned and run
 in a predictable Linux environment there.
 
-Fuzz targets have two CI tiers:
-
-- sanitizer-run targets: compile with `cargo fuzz check` and run a short sanitizer smoke in CI
-- non-admitted candidate targets: compile with `cargo fuzz check`, but do not run under libFuzzer or
-  count as parser evidence until their backend passes baseline admission
+Parser fuzz targets compile with `cargo fuzz check` and run a short sanitizer smoke in CI.
 
 Longer fuzz campaigns run from `.github/workflows/fuzz.yml` on a schedule and
 through manual dispatch. That workflow is Linux-only, has a bounded job timeout,
@@ -26,15 +22,15 @@ must be recorded as toolchain evidence rather than parser evidence.
 
 ```powershell
 cargo check --manifest-path fuzz\Cargo.toml
-cargo +nightly-2026-05-27 fuzz check stl_import
-cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
-cargo +nightly-2026-05-27 fuzz check obj_import
-cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
-cargo +nightly-2026-05-27 fuzz check ply_import
-cargo +nightly-2026-05-27 fuzz run ply_import -- -runs=256
-cargo +nightly-2026-05-27 fuzz check registry_detection
-cargo +nightly-2026-05-27 fuzz run registry_detection -- -runs=256 -max_len=4106
-cargo +nightly-2026-05-27 fuzz check gltf_import
+cargo +nightly-2026-10-28 fuzz check stl_import
+cargo +nightly-2026-10-28 fuzz run --sanitizer address stl_import -- -runs=256
+cargo +nightly-2026-10-28 fuzz check obj_import
+cargo +nightly-2026-10-28 fuzz run --sanitizer address obj_import -- -runs=256
+cargo +nightly-2026-10-28 fuzz check ply_import
+cargo +nightly-2026-10-28 fuzz run --sanitizer address ply_import -- -runs=256
+cargo +nightly-2026-10-28 fuzz check registry_detection
+cargo +nightly-2026-10-28 fuzz run --sanitizer address registry_detection -- -runs=256 -max_len=4106
+cargo +nightly-2026-10-28 fuzz check gltf_import
 ```
 
 ## Windows MSVC Setup
@@ -91,22 +87,24 @@ Stable promotion additionally needs sustained fuzz/security campaign evidence fo
 support subset. A local toolchain failure is environment evidence only and never substitutes for the
 baseline Linux sanitizer gate.
 
-`gltf_import` is currently a non-admitted, check-only development target. It can compile and is
-useful for local parser work, but malformed inputs can still reach a `gltf-rs` 1.4.x validation panic
-in a fuzz build where the panic aborts before Baozi's `catch_unwind` fallback can convert it to
-`BaoziError`. Do not
-treat a skipped `gltf_import` sanitizer run as parser evidence. The re-enable criteria and known
-backend hazards live in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
+`gltf_import` is included in sanitizer smoke and scheduled runs for the selected profile. Its
+maintained backend rejects the demonstrated POSITION and camera defects before reader entry.
+The immutable `2dc2fc8` archive passed six malformed JSON/GLB reproducers and a bounded 256-run
+Linux ASan campaign; the [delivery progress](../reviews/2026-10-29-delivery-progress.md) records
+the exact source/toolchain scope. This short campaign does not establish sustained fuzz coverage.
+Known backend hazards and unsupported slices remain in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
 
 ## CI Tool Pinning
 
 The fuzz workflows intentionally pin:
 
-- `RUST_FUZZ_NIGHTLY=nightly-2026-05-27`
+- `RUST_FUZZ_NIGHTLY=nightly-2026-10-28`
 - `CARGO_FUZZ_VERSION=0.13.2`
 
 Dependency automation is currently disabled, so review these pins manually when changing fuzz
 infrastructure or promoting a parser support tier. Broader CI policy lives in [CI Policy](ci.md).
+Cargo-fuzz 0.13.2 does not accept `--locked`. Workflows resolve the fuzz manifest with locked Cargo
+metadata first and require an unchanged fuzz lockfile after execution.
 
 ## Targets
 
@@ -116,4 +114,4 @@ infrastructure or promoting a parser support tier. Broader CI policy lives in [C
 | `obj_import` | `baozi-format-obj` | Sanitizer-run target for OBJ facade import plus optional MTL sidecar bytes split by the first NUL byte; every success traverses the canonical snapshot. |
 | `ply_import` | `baozi-format-ply` | Sanitizer-run target for PLY ASCII and binary facade import; every success traverses the canonical snapshot. |
 | `registry_detection` | `baozi-import` | Sanitizer-run contract target for bounded Automatic, Preferred, and Forced detection through compiled requests and the public import session. It checks that registration order cannot change selection or detection evidence. |
-| `gltf_import` | `baozi-format-gltf` | Non-admitted check-only target for the internal glTF/GLB candidate. Inputs beginning with the `glTF` magic are treated as whole GLB bytes; other inputs use primary `.gltf` bytes plus external `buffer.bin` bytes split by the first NUL byte. Successful candidates traverse the canonical snapshot, but this target is not facade or sanitizer evidence. |
+| `gltf_import` | `baozi-format-gltf` | Sanitizer-run selected glTF/GLB profile. Inputs beginning with the `glTF` magic are whole GLB bytes; other inputs use primary `.gltf` bytes plus external `buffer.bin` bytes split by the first NUL byte. Every success traverses the canonical snapshot. |

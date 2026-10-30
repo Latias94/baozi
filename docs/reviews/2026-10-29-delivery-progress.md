@@ -17,7 +17,7 @@ another toolchain is named. Commands use one Cargo build job and reuse `target`.
 | B resource work | Short reads reuse admitted byte credit across serial resources; EOF probes are bounded read work; payload ceilings and live buffer capacity are independent. Hashes use 64 KiB control boundaries and dependency snapshots retain one digest. Geometry caches group slot identities without prefix scans. | Core/import/PLY/STL integration ran 804 tests: 801 passed and three old error/test-fixture expectations failed; those were corrected. Import's full portion, public reader allocation tests, five geometry-cache tests, eleven hashing tests, and short-read cases passed. Final combined rerun remains the integration gate. |
 | C reading | One immutable Scene exposes borrowed nodes/roots, geometry, scalar payloads, placements, materials/bindings, encoded images/samplers/textures, space declarations, cameras/lights, and checked typed IDs. | Dense/sparse/presence/spatial tests passed, including zero counted allocations during repeated reads. Facade geometry and appearance tests passed in 182/182. Independent default OBJ/STL consumer passed outside workspace feature unification. |
 | C authoring/errors | Static plugins use a borrowed builder with metered default alignment and primary-document provenance. Node, geometry, appearance, deformation, animation, spatial, profile, and aggregate errors preserve bounded semantic detail through finalization. | Nine static-plugin and eight submission-error tests passed, including domain/rule/value cases, later terminal cancellation, nested material rules, and digest reuse. Required-dependency context retains the declaring origin, role, original reference, normalized path, and resolver-authorized target. Nested missing/denied/redirected/rejected-reference tests passed in the integrated workspace run. |
-| G feature/modules | Empty `std` and unused tracing forwarding are removed. Facade errors and importer workflows have separate modules; compiled-in registration is named `builtin`. Typed readers have private domain modules. | Existing facade and tracing tests passed; independent feature matrix is the follow-up gate. Native candidate extraction and hidden integration bridge migration remain separate future cutovers. |
+| G feature/modules | Empty `std` and unused tracing forwarding are removed. Facade errors and importer workflows have separate modules; compiled-in registration is named `builtin`. Typed readers have private domain modules. | Existing facade/tracing tests and the independent source feature matrix pass, including the selected glTF profile. Native candidate extraction and hidden integration bridge migration remain separate future cutovers. |
 
 ## Independent consumer
 
@@ -215,6 +215,93 @@ public rustdoc with `-D warnings`, formatting, and whitespace checks passed. Loc
 `target/review/bde-workspace-final.log`, `bde-workspace-clippy-final.log`,
 `bde-workspace-doctests-final.log`, and `bde-workspace-rustdoc-final.log`.
 
+## Selected glTF Profile Admission
+
+The immutable `2dc2fc891fcacbd33f3c541b768b59ea575a3297` archive passed the updated Linux
+AddressSanitizer gate on Ubuntu 26.04 x86_64. Its SHA-256 is
+`558ff81b88cd38d8da78a609368dcfa19dff970f4f53e05453cd1bee72af6e39`. A fresh per-commit target
+directory compiled the maintained backend closure. The executed 112,096,088-byte binary contains
+`__asan_init` and `__asan_report_load1`. Three malformed JSON reproducers and their three GLB
+equivalents completed, followed by 256 runs over the six checked-in seeds without panic or abort.
+The campaign used a 10-second input timeout, 4,096 MiB RSS cap, 65,536-byte maximum input, and
+120-second campaign cap; the final 147 MiB RSS is an observation of that short run only.
+
+Both root and fuzz lockfiles remained byte-identical. Cargo-fuzz 0.13.2 has no `--locked` option:
+locked Cargo metadata resolved the closure first, then the build/run used offline mode and
+checked both lockfiles after each invocation. The stored archive and original corpus remain
+unchanged; the mutation campaign ran against an evidence-directory copy. Local output is
+`target/review/linux-gltf-asan-2dc2fc8.log`.
+
+This closes the baseline quarantine for the exact selected profile and permits facade registration
+through `format-gltf` and `all-formats`. The curated default remains OBJ/MTL and STL. The support
+matrix keeps partial capabilities and no Beta/Stable maturity; package publication remains disabled.
+The profile explicitly rejects unsupported selected extras/extensions and sparse/strip/fan slices.
+
+## Direct Triangulation and Edit Ownership (2026-10-30)
+
+The first F operation, `triangulate_primitive`, now runs against the exact input account before
+target inspection, temporary allocation, or kernel work. It preserves authored attributes, source
+winding, and Corner/Face origins; triangle lists return the original Scene unchanged. Changed
+results publish a new generation together with the actual retained origin relation. A detached
+report keeps that relation alive after both the output Scene and the import evidence are dropped.
+Ordinary failures return the original immutable Scene.
+
+The textured quad consumer exposed two multi-owner provenance defects: operation digest ranges
+reused one offset, and each local provenance index was added twice to its segment's global base.
+The fixed path retains a distinct digest range per operation. Address construction now belongs
+to `ProfileSegmentAddressDomain::address(local)`, which owns the exact nonce, extent, and base.
+The old four-argument address constructor is removed. Regression assertions read exact UVs,
+authored normals, and duplicated Face smoothing groups through the actual published Scene.
+
+The edit program now contains its source-bound geometry plan. Materialization accepts that closed
+program directly; it no longer takes a separate optional plan or reconstructs its validation work
+from a caller-supplied scalar. The execution cell no longer stores a second geometry-plan copy.
+Unbound transform edits retain only their transform rewrite and source identity.
+
+The obsolete empty request compiler, compiled-run/step types, separate coordinator/ledger, and
+empty diagnostic/loss placeholders have been removed. Public reports identify the concrete
+`PostProcessOperation::Triangulate { target }`, input/output generations, resource evidence, and
+the actual remap. Cancellation, deadline, original-input, generation, thread-transfer, tracing,
+and drop-lifetime checks now exercise the direct operation instead of the empty pipeline.
+
+Resource evidence now separates published domain-evidence bytes from terminal ledger/fallback
+record counts. Their private dimension vocabulary records those units explicitly. A terminal
+ledger snapshot is not reported as one byte of domain evidence, and frozen operation-live
+counters are not presented as dynamic retained-owner measurements.
+
+The combined all-feature workspace suite passed 2,097 tests with three planned skips. After the
+final lint cleanup, all 37 direct-operation/kernel tests passed again. Strict all-target,
+all-feature Clippy, doctests, rustdoc, formatting, and the edited workflow syntax passed.
+The native release `all` consumer ran on the normal Windows main-thread stack. Fresh extracted
+`.crate` builds executed both the selected glTF and textured-triangulation consumer cases.
+The release `wasm32-wasip1` all-feature consumer executed under Wasmtime 50.0.0, and the
+`wasm32-unknown-unknown` all-feature consumer passed compilation only. The WASI runner was
+downloaded from the fixed official release and verified against its published SHA-256;
+it is a transient verification artifact, not a repository runtime dependency.
+
+Evidence is in `target/review/fgh-workspace-current.log`, `final-postprocess.log`,
+`final-workspace-clippy.log`, `final-workspace-doctests.log`, `final-workspace-rustdoc.log`,
+`final-packaged-consumers.log`, `final-native-release-consumer.log`,
+`final-wasi-release-consumer.log`, and `final-browser-wasm-check.log`. The independent static
+ownership review found no concrete P0-P2 issue; it did not replace dynamic verification.
+Normal generation, target-space conversion, and application vertex unification remain unimplemented.
+
+## Dependency Closure Refresh (2026-10-30)
+
+The current source resolves triomphe 0.1.17, cap-std/cap-fs-ext/cap-primitives 4.0.3,
+sha2 0.11.1, criterion 0.8.2, and xtask toml 1.1.8. Runtime and repository native-filesystem
+snapshots were regenerated through the existing snapshot functions from ten serial locked
+metadata profiles. The exact critical package pins and fixtures now match the lockfile.
+All 65 xtask tests, including the actual repository dependency check, passed.
+The standalone fuzz lockfile now resolves the same sha2/triomphe requirements, while retaining
+its existing arbitrary/cc/find-msvc-tools versions. Locked fuzz metadata resolved successfully;
+this is dependency-resolution evidence, not a new sanitizer campaign.
+
+The previously reviewed Windows directory-open source files are byte-identical between the
+checksum-qualified cap-primitives 4.0.2 and 4.0.3 archives. Their source hashes and the limits of
+that continuity observation are recorded in the native-filesystem admission research. This is
+dependency and behavior evidence, not promotion of a new runtime target.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
@@ -222,11 +309,13 @@ public rustdoc with `-D warnings`, formatting, and whitespace checks passed. Loc
 - Preserve B's verified retained manifest/evidence ownership and fidelity behavior through the
   remaining storage and postprocessing cutovers.
 - Preserve C's verified typed reads and required-dependency context through the storage cutover; retain the single Scene owner.
-- Extend D1's measured typed node/geometry cutover to the remaining D2 appearance,
-  deformation/animation, and profile domains; delete each replaced record/projection path.
-- Complete E's backend decision and real Linux sanitizer admission before facade glTF registration.
-- Deliver F's triangulation, normals, target-space conversion, and application vertex lowering.
+- Extend D1's measured typed node/geometry cutover to the remaining D2 domains, starting with the
+  complete profile/provenance ownership and output-owner-layout cutover required by normals.
+  Delete each replaced record/projection path.
+- Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
+- Preserve F's verified triangulation while delivering normals, target-space conversion, and
+  application vertex lowering.
 - Finish G's behavioral governance cleanup and H's dependency, package, and executed-target proof.
 
-No change here asserts exact RSS from ledger counters, glTF sanitizer qualification, a public
-postprocessing workflow, or publication readiness.
+No change here asserts exact RSS from ledger counters, sustained fuzz coverage, completion of
+the full geometry workflow, or publication readiness.

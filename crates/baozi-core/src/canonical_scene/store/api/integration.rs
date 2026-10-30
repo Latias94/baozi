@@ -8,6 +8,18 @@ use baozi_operation::{
 
 use crate::validation_control::SceneValidationLimits;
 
+pub use super::super::construction::node_scene::edit::geometry::{
+    SceneGeometryCornerOriginsTag, SceneGeometryEditAdmission, SceneGeometryEditBootstrap,
+    SceneGeometryEditBootstrapError, SceneGeometryEditEvidence, SceneGeometryEditEvidenceRecipe,
+    SceneGeometryEditEvidenceTag, SceneGeometryEditFailureEvidence, SceneGeometryEditFreezePermit,
+    SceneGeometryEditFrozenGenerationRejection, SceneGeometryEditGenerationRejection,
+    SceneGeometryEditHandoffPairingError, SceneGeometryEditHandoffToken,
+    SceneGeometryEditJointCommit, SceneGeometryEditOutput, SceneGeometryEditPlan,
+    SceneGeometryEditPostflight, SceneGeometryEditPublishedSuccess, SceneGeometryEditRejection,
+    SceneGeometryEditTransaction, SceneGeometryEditValidationProof, SceneGeometryFaceOffsetsTag,
+    SceneTriangulationReplacement, consume_scene_edit_freeze_permit,
+    try_start_scene_edit_operation,
+};
 pub use super::super::construction::node_scene::edit::{
     SceneEditCompilation, SceneEditCompileError, SceneNodeTransformEditPlan,
     SceneNodeTransformEditRequest, compile_node_transform_edit,

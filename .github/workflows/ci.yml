@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  RUST_FUZZ_NIGHTLY: nightly-2026-05-27
+  RUST_FUZZ_NIGHTLY: nightly-2026-10-28
   CARGO_FUZZ_VERSION: 0.13.2
   ACTIONLINT_VERSION: v1.7.12
   GO_VERSION: 1.26.x
@@ -253,6 +253,7 @@ jobs:
           - stl_import
           - obj_import
           - ply_import
+          - gltf_import
           - registry_detection
     steps:
       - name: Checkout
@@ -274,38 +275,11 @@ jobs:
         run: cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
 
       - name: Check fuzz target
-        run: cargo fuzz check "${{ matrix.target }}"
+        run: |
+          cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
+          cargo fuzz check "${{ matrix.target }}"
 
       - name: Run fuzz smoke
-        run: cargo fuzz run "${{ matrix.target }}" -- -runs=256
-
-  non-admitted-fuzz-check:
-    name: ${{ matrix.target }} non-admitted candidate fuzz check
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - gltf_import
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Install pinned nightly Rust
-        # Dated nightly toolchains use the action's explicit toolchain input path.
-        # glTF is not facade-admitted until the bootstrap backend no longer aborts under fuzz.
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_FUZZ_NIGHTLY }}
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
-
-      - name: Check fuzz target
-        run: cargo fuzz check "${{ matrix.target }}"
+        run: |
+          cargo fuzz run --sanitizer address "${{ matrix.target }}" -- -runs=256
+          git diff --exit-code -- fuzz/Cargo.lock

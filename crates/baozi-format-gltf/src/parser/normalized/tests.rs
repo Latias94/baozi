@@ -27,7 +27,7 @@ struct HandBuiltModel(FixtureFault);
 
 impl FormatImporter for HandBuiltModel {
     fn descriptor(&self) -> FormatDescriptor {
-        crate::format_descriptor_for_development()
+        crate::format_descriptor()
     }
 
     fn detect(

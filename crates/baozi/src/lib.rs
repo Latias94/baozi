@@ -15,6 +15,10 @@ mod importer;
 pub use error::{Error, Result};
 pub use importer::{Importer, ImporterBuilder};
 
+/// Explicit, controlled geometry operations on immutable validated Scenes.
+#[cfg(feature = "postprocess")]
+pub use baozi_postprocess as postprocess;
+
 pub use baozi_core::{
     Aabb, Color, FormatId, FormatIdError, Mat4, Quat, SceneGenerationId, Vec2, Vec3, Vec4,
 };

@@ -14,22 +14,21 @@ use baozi_import::authoring::FormatId;
 use baozi_import::{
     CapabilityStatus, DependencyRequirement, DependencyRoleId, DetectionOutcome, DetectionResult,
     DetectionScope, FormatCapability, FormatDescriptor, FormatEncoding, FormatImporter,
-    ParseResult, ParseScope, Probe, ReadHint, SceneDraft, TextBomPolicy, TextControlPolicy,
-    TextDecodingMode, TextHardCaps, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    ParseResult, ParseScope, Probe, ReadHint, RegistryBuilder, RegistryRegistrationError,
+    SceneDraft, TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps, TextLexicalMode,
+    TextNewline, TextProfile, TextSourceEncoding,
 };
 
-/// Stable identity used only by the internal development harness.
+/// Stable identity of the selected glTF 2.0 and GLB profile.
 pub const FORMAT_ID: &str = "org.baozi.gltf";
 const EXTERNAL_BUFFER_ROLE: &str = "external-buffer";
 const EXTERNAL_IMAGE_ROLE: &str = "external-image";
 
-/// Internal importer retained outside the admitted facade registry until U6.
-#[doc(hidden)]
+/// Imports the selected glTF 2.0 and GLB profile documented in `docs/formats/gltf.md`.
 pub struct GltfImporter;
 
-/// Describes the experimental parser without admitting it to public format sets.
-#[doc(hidden)]
-pub fn format_descriptor_for_development() -> FormatDescriptor {
+/// Describes the supported glTF profile and its explicit partial capabilities.
+pub fn format_descriptor() -> FormatDescriptor {
     FormatDescriptor::builder(
         FormatId::new(FORMAT_ID).expect("static glTF format id must be valid"),
         "glTF 2.0",
@@ -63,7 +62,7 @@ pub fn format_descriptor_for_development() -> FormatDescriptor {
         (external_buffer_role(), DependencyRequirement::Required),
         (external_image_role(), DependencyRequirement::Required),
     ])
-    .notes("internal glTF 2.0 development importer; not admitted to facade registries")
+    .notes("selected-scene glTF 2.0/GLB PBR, skin, morph, and TRS animation profile; see exact restrictions")
     .docs_path("docs/formats/gltf.md")
     .build()
     .expect("static glTF descriptor must be valid")
@@ -100,7 +99,7 @@ pub(crate) fn external_image_role() -> DependencyRoleId {
 
 impl FormatImporter for GltfImporter {
     fn descriptor(&self) -> FormatDescriptor {
-        format_descriptor_for_development()
+        format_descriptor()
     }
 
     fn detect(
@@ -117,13 +116,22 @@ impl FormatImporter for GltfImporter {
     }
 }
 
+/// Registers the selected glTF profile in a caller-owned registry proposal.
+#[allow(
+    clippy::result_large_err,
+    reason = "the shared registry contract owns the registration error representation"
+)]
+pub fn register(registry: &mut RegistryBuilder) -> Result<(), RegistryRegistrationError> {
+    registry.register(GltfImporter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn descriptor_is_qualified_and_external_resources_are_required() {
-        let descriptor = format_descriptor_for_development();
+        let descriptor = format_descriptor();
         assert_eq!(descriptor.id().as_str(), FORMAT_ID);
         assert!(descriptor.dependency_roles().any(|(role, requirement)| {
             role == &external_buffer_role() && requirement == DependencyRequirement::Required
@@ -143,7 +151,7 @@ mod tests {
 
     #[test]
     fn text_profile_matches_the_strict_gltf_baseline() {
-        let descriptor = format_descriptor_for_development();
+        let descriptor = format_descriptor();
         let profile = descriptor
             .text_profile()
             .expect("text-or-binary glTF must declare a text profile");
@@ -185,5 +193,10 @@ mod tests {
                 64 * 1024 * 1024,
             )
         );
+    }
+
+    #[test]
+    fn support_matrix_matches_format_descriptor() {
+        baozi_test_support::assert_support_matrix_row("baozi-format-gltf", &format_descriptor());
     }
 }

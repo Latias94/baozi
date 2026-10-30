@@ -4,12 +4,12 @@ Baozi is a Rust workspace for a model import library inspired by Assimp's breadt
 around Rust ownership, typed errors, explicit post-processing, and a source-preserving scene IR.
 
 Current status: experimental parser foundation. STL, OBJ/MTL, and PLY have owned parser paths with
-fixture and fuzz coverage. The glTF/GLB crate is an internal, non-admitted backend candidate: it has
-no facade feature, built-in registration, or first-party support entry until its baseline sanitizer
-and resource-admission gates pass.
+fixture and fuzz coverage. The glTF/GLB selected-scene PBR, skin, morph, and TRS animation profile
+is available through `format-gltf`; its [exact restrictions](docs/formats/gltf.md) apply.
 Scene nodes, geometry, materials, images, skins, morphs, and animation have borrowed typed readers.
-Concrete geometry postprocessing remains in development. Bounded snapshots are available separately
-for test and debug evidence.
+The optional `postprocess` feature provides explicit single-primitive triangulation. Normal
+generation, target-space conversion, and application vertex unification remain in development.
+Bounded snapshots are available separately for test and debug evidence.
 
 ## Goals
 
@@ -27,11 +27,11 @@ for test and debug evidence.
 | `baozi-core` | Scene IR, IDs, diagnostics, errors, math, materials |
 | `baozi-io` | Asset IO, URI/path policy, resource limits |
 | `baozi-import` | Format importer traits, registry, capability metadata |
-| `baozi-postprocess` | Owning canonical post-process compilation and outcome contracts; transformations are not yet admitted |
+| `baozi-postprocess` | Controlled geometry operations, transactional Scene edits, and retained Corner/Face remaps |
 | `baozi-format-stl` | STL importer |
 | `baozi-format-obj` | OBJ/MTL importer |
 | `baozi-format-ply` | PLY importer; admitted for source builds but not yet published |
-| `baozi-format-gltf` | Internal glTF/GLB backend candidate; not facade-admitted |
+| `baozi-format-gltf` | Selected glTF/GLB profile with a private maintained decoder; source-admitted |
 | `baozi-test-support` | Format maturity and generated fixture helpers |
 | `baozi-xtask` | Bounded repository conformance and architecture-support checks; ADR semantics remain human-reviewed |
 
@@ -79,15 +79,39 @@ cargo run --locked -p baozi --example wasm_memory
 ```
 
 Baozi requires the Rust standard library; `default-features = false` selects no built-in formats.
-The curated `default-formats` set contains STL and OBJ/MTL, while `all-formats` also enables PLY.
-Individual `format-stl`, `format-obj`, and `format-ply` features enable one parser each. Optional
-`tracing` adds import spans, and `mint` adds the current `Vec3` conversions. The examples and
+The curated `default-formats` set contains STL and OBJ/MTL, while `all-formats` also enables PLY and glTF/GLB.
+Individual `format-stl`, `format-obj`, `format-ply`, and `format-gltf` features enable one parser each. Optional
+`postprocess` exposes geometry operations as `baozi::postprocess`; `tracing` adds import and enabled
+postprocess spans, and `mint` adds the current `Vec3` conversions. The examples and
 benchmarks require `format-obj`.
 
 `Importer::new()` registers every enabled built-in format. Use
 `Importer::builder_with_builtin_formats()` or `ImporterBuilder::with_builtin_formats()` to extend
 that registry before freezing it; `Importer::builder()` starts an empty registry. Format authoring
 remains in the `baozi_import` extension API.
+
+With `format-obj` and `postprocess` enabled, explicitly triangulate a polygon primitive:
+
+```rust
+use baozi::{Importer, postprocess::{PostProcessControl, triangulate_primitive}};
+
+let import = Importer::new()?.read_bytes(
+    "quad.obj",
+    b"v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\n",
+)?;
+let (scene, import_evidence) = import.into_parts();
+let target = scene.meshes().next().unwrap().primitives().next().unwrap().id();
+let outcome = triangulate_primitive(scene, target, PostProcessControl::default())?;
+let (triangles, report) = outcome.into_parts();
+assert!(report.matches_scene(&triangles));
+```
+
+Import evidence retains its original generation; the postprocess report identifies the output.
+Failures return the original immutable Scene through `PostProcessRunFailure::into_parts()`.
+Triangulation preserves authored attributes through explicit origins and rejects malformed or
+numerically unresolved polygons. Its report owns the actual Corner/Face relation independently of
+either Scene. Triangles still retain separate attribute domains; this operation does not produce a
+unified application vertex buffer.
 
 Run the import benchmark harness without collecting measurements:
 

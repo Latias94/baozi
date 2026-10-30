@@ -732,7 +732,7 @@ impl NodeSceneLaneOutput {
         Self(output)
     }
 
-    pub(super) fn into_tables(self) -> NodeGeometryStorage {
+    pub(in crate::canonical_scene::store) fn into_tables(self) -> NodeGeometryStorage {
         self.0.tables
     }
 
@@ -746,6 +746,10 @@ impl NodeSceneLaneOutput {
 }
 
 impl NodeSceneEvidenceRecipe {
+    pub(super) const fn from_counts(records: RecordPlan, counts: SceneEvidenceCounts) -> Self {
+        Self { records, counts }
+    }
+
     /// Returns the exact retained evidence-table plan for this recipe.
     pub const fn record_plan(&self) -> RecordPlan {
         self.records

@@ -93,18 +93,18 @@ pub(super) struct CriticalPackage {
 pub(super) const CRITICAL_PACKAGES: &[CriticalPackage] = &[
     CriticalPackage {
         name: "cap-fs-ext",
-        version: "4.0.2",
-        checksum: "d78e5a3368ae89b7cb68186411452b4b9fac8b41be9c19bf3f47c2d2c8e36e6b",
+        version: "4.0.3",
+        checksum: "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f",
     },
     CriticalPackage {
         name: "cap-std",
-        version: "4.0.2",
-        checksum: "7281235d6e96d3544ca18bba9049be92f4190f8d923e3caef1b5f66cfa752608",
+        version: "4.0.3",
+        checksum: "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8",
     },
     CriticalPackage {
         name: "cap-primitives",
-        version: "4.0.2",
-        checksum: "cdadbd7c002d3a484b35243669abdae85a0ebaded5a61117169dc3400f9a7ff0",
+        version: "4.0.3",
+        checksum: "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18",
     },
     CriticalPackage {
         name: "rustix",

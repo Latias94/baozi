@@ -8,8 +8,8 @@
   "metadata_semantics": "cargo metadata --locked --filter-platform; repository-fs-candidate normal/build closure delta from the frozen runtime baseline",
   "package_identities": {
     "added": {
-      "cap-fs-ext@4.0.2": {
-        "checksum": "d78e5a3368ae89b7cb68186411452b4b9fac8b41be9c19bf3f47c2d2c8e36e6b",
+      "cap-fs-ext@4.0.3": {
+        "checksum": "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
       }
     },
@@ -20,29 +20,29 @@
     "freebsd": {
       "target": "x86_64-unknown-freebsd",
       "roots": {
-        "added": ["cap-fs-ext@4.0.2"],
+        "added": ["cap-fs-ext@4.0.3"],
         "removed": []
       },
       "full_package_keys": {
-        "added": ["cap-fs-ext@4.0.2"],
+        "added": ["cap-fs-ext@4.0.3"],
         "removed": []
       },
       "nodes": {
         "added": {
-          "cap-fs-ext@4.0.2": {
+          "cap-fs-ext@4.0.3": {
             "features": ["cap-std", "std"],
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.2",
-              "normal:cap_std=cap-std@4.0.2",
+              "normal:cap_primitives=cap-primitives@4.0.3",
+              "normal:cap_std=cap-std@4.0.3",
               "normal:io_lifetimes=io-lifetimes@3.0.1"
             ]
           }
         },
         "changed": {
-          "cap-std@4.0.2": {
+          "cap-std@4.0.3": {
             "features": ["default"],
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.2",
+              "normal:cap_primitives=cap-primitives@4.0.3",
               "normal:io_extras=io-extras@0.19.0",
               "normal:io_lifetimes=io-lifetimes@3.0.1",
               "normal:rustix=rustix@1.1.4"
@@ -55,29 +55,29 @@
     "linux": {
       "target": "x86_64-unknown-linux-gnu",
       "roots": {
-        "added": ["cap-fs-ext@4.0.2"],
+        "added": ["cap-fs-ext@4.0.3"],
         "removed": []
       },
       "full_package_keys": {
-        "added": ["cap-fs-ext@4.0.2"],
+        "added": ["cap-fs-ext@4.0.3"],
         "removed": []
       },
       "nodes": {
         "added": {
-          "cap-fs-ext@4.0.2": {
+          "cap-fs-ext@4.0.3": {
             "features": ["cap-std", "std"],
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.2",
-              "normal:cap_std=cap-std@4.0.2",
+              "normal:cap_primitives=cap-primitives@4.0.3",
+              "normal:cap_std=cap-std@4.0.3",
               "normal:io_lifetimes=io-lifetimes@3.0.1"
             ]
           }
         },
         "changed": {
-          "cap-std@4.0.2": {
+          "cap-std@4.0.3": {
             "features": ["default"],
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.2",
+              "normal:cap_primitives=cap-primitives@4.0.3",
               "normal:io_extras=io-extras@0.19.0",
               "normal:io_lifetimes=io-lifetimes@3.0.1",
               "normal:rustix=rustix@1.1.4"
@@ -90,29 +90,29 @@
     "macos": {
       "target": "aarch64-apple-darwin",
       "roots": {
-        "added": ["cap-fs-ext@4.0.2"],
+        "added": ["cap-fs-ext@4.0.3"],
         "removed": []
       },
       "full_package_keys": {
-        "added": ["cap-fs-ext@4.0.2"],
+        "added": ["cap-fs-ext@4.0.3"],
         "removed": []
       },
       "nodes": {
         "added": {
-          "cap-fs-ext@4.0.2": {
+          "cap-fs-ext@4.0.3": {
             "features": ["cap-std", "std"],
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.2",
-              "normal:cap_std=cap-std@4.0.2",
+              "normal:cap_primitives=cap-primitives@4.0.3",
+              "normal:cap_std=cap-std@4.0.3",
               "normal:io_lifetimes=io-lifetimes@3.0.1"
             ]
           }
         },
         "changed": {
-          "cap-std@4.0.2": {
+          "cap-std@4.0.3": {
             "features": ["default"],
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.2",
+              "normal:cap_primitives=cap-primitives@4.0.3",
               "normal:io_extras=io-extras@0.19.0",
               "normal:io_lifetimes=io-lifetimes@3.0.1",
               "normal:rustix=rustix@1.1.4"
@@ -125,30 +125,30 @@
     "windows-msvc": {
       "target": "x86_64-pc-windows-msvc",
       "roots": {
-        "added": ["cap-fs-ext@4.0.2"],
+        "added": ["cap-fs-ext@4.0.3"],
         "removed": []
       },
       "full_package_keys": {
-        "added": ["cap-fs-ext@4.0.2"],
+        "added": ["cap-fs-ext@4.0.3"],
         "removed": []
       },
       "nodes": {
         "added": {
-          "cap-fs-ext@4.0.2": {
+          "cap-fs-ext@4.0.3": {
             "features": ["cap-std", "std"],
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.2",
-              "normal:cap_std=cap-std@4.0.2",
+              "normal:cap_primitives=cap-primitives@4.0.3",
+              "normal:cap_std=cap-std@4.0.3",
               "normal:io_lifetimes=io-lifetimes@3.0.1",
               "normal:windows_sys=windows-sys@0.61.2"
             ]
           }
         },
         "changed": {
-          "cap-std@4.0.2": {
+          "cap-std@4.0.3": {
             "features": ["default"],
             "dependencies": [
-              "normal:cap_primitives=cap-primitives@4.0.2",
+              "normal:cap_primitives=cap-primitives@4.0.3",
               "normal:io_extras=io-extras@0.19.0",
               "normal:io_lifetimes=io-lifetimes@3.0.1"
             ]

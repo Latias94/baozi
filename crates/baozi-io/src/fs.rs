@@ -308,6 +308,28 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_when_the_link_target_ends_in_a_slash() {
+        let root = TempRoot::new("symlink-trailing-target-root");
+        let outside = TempRoot::new("symlink-trailing-target-outside");
+        fs::write(outside.path().join("secret.stl"), b"secret").expect("write fixture");
+        let link = root.path().join("escape");
+        let target = format!("{}/", outside.path().display());
+        create_file_symlink(Path::new(&target), &link)
+            .expect("candidate runner must create a trailing-slash directory symlink");
+
+        let capability =
+            NativeDirectoryCapability::open_ambient(root.path()).expect("open capability");
+        let io = FileSystemAssetIo::from_capability(capability);
+        let path = AssetPath::new("escape/secret.stl").expect("ordinary request path");
+
+        assert!(
+            io.open(&path).is_err(),
+            "symlink target must stay in the capability"
+        );
+    }
+
     #[test]
     fn follows_in_root_symlink_without_reopening_by_host_path() {
         let root = TempRoot::new("in-root-symlink");

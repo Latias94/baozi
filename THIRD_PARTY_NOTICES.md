@@ -25,6 +25,7 @@ Upstream: <https://github.com/gltf-rs/gltf>.
 The source is licensed `MIT OR Apache-2.0`. The original
 [MIT](vendor/gltf/LICENSE-MIT) and [Apache-2.0](vendor/gltf/LICENSE-APACHE)
 license texts are retained in each package. Baozi maintains distinct package
-identities and two JSON validation corrections. The complete changes are recorded
+identities, narrow JSON validation corrections, and explicit unsupported morph-payload retention.
+The complete changes are recorded
 in [reader maintenance](vendor/gltf/BAOZI_PATCHES.md) and
 [JSON maintenance](vendor/gltf-json/BAOZI_PATCHES.md).

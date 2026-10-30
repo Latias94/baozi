@@ -5,6 +5,9 @@ use baozi::{
 };
 
 mod custom_scene;
+mod gltf_scene;
+#[cfg(feature = "postprocess")]
+mod postprocess;
 
 const OBJ: &[u8] = b"o triangle\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
 const STL: &[u8] = b"solid part one\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid part one\n";
@@ -108,6 +111,17 @@ pub fn verify(expected: &[&str]) -> baozi::Result<()> {
     }
     if expected.contains(&"obj") {
         verify_sidecars(&importer)?;
+        #[cfg(feature = "postprocess")]
+        postprocess::verify(&importer)?;
+    }
+    if expected.contains(&"gltf") {
+        gltf_scene::verify_gltf(&importer)?;
+    } else {
+        assert!(
+            importer
+                .read_bytes("empty.gltf", br#"{"asset":{"version":"2.0"}}"#)
+                .is_err()
+        );
     }
     custom_scene::verify()?;
     Ok(())

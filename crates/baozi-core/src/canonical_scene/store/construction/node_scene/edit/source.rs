@@ -124,6 +124,9 @@ impl From<NodeSceneEditPlanError> for NodeTransformEditStartError {
             },
             NodeSceneEditPlanError::InvalidSource { reason } => Self::InvalidSource { reason },
             NodeSceneEditPlanError::SizeOverflow { quantity } => Self::SizeOverflow { quantity },
+            NodeSceneEditPlanError::Runtime(_) => Self::InvalidSource {
+                reason: "edit semantic planning was interrupted",
+            },
             NodeSceneEditPlanError::ValidationPlan(_) => Self::InvalidSource {
                 reason: "sealed output validation plan is inconsistent",
             },

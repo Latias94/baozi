@@ -324,10 +324,17 @@ fn import_with(
         let hash = Sha256::digest(bytes);
         let (resource, reason) = match ResourceIdentity::new(path) {
             Ok(resource) => (resource, SessionOpaqueReason::CallerLabel),
-            Err(_) => (
-                ResourceIdentity::new(format!("document/sha256/{hash:x}")).unwrap(),
-                SessionOpaqueReason::SessionFallback,
-            ),
+            Err(_) => {
+                use std::fmt::Write as _;
+                let mut identity = String::from("document/sha256/");
+                for byte in &hash {
+                    write!(identity, "{byte:02x}").unwrap();
+                }
+                (
+                    ResourceIdentity::new(identity).unwrap(),
+                    SessionOpaqueReason::SessionFallback,
+                )
+            }
         };
         ExpectedDocument {
             resource,

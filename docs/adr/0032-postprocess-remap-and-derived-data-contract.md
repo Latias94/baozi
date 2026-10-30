@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-07-27
+updated: 2026-10-30
 authors:
   - Codex
 decision_type: architecture
@@ -28,8 +28,8 @@ change several identity domains at once. Mutating vectors in place and validatin
 cannot tell callers which IDs survived, whether corner/face attributes followed topology, or which
 cached bounds and tangents became stale. It also risks publishing a partial scene after failure.
 
-ADR 0013 owns pipeline and preset policy. This ADR is authoritative for structural mutation,
-transactionality, remaps, and derived-data validity.
+ADR 0013 owns direct-operation, composition, and preset policy. This ADR is authoritative for
+structural mutation, transactionality, remaps, and derived-data validity.
 
 ADR 0047 remains the normative authority for `Attempted`, `Consumed`, live attribution with its
 peak, `CommittedCanonicalOutput`, and `PublishedOutcomeEvidence` accounting invariants. Import and
@@ -59,11 +59,14 @@ canonical/remap/report attribution only after that one reservation succeeds and 
 consumes the one reservation into one fresh collision-free `SceneGenerationId`, constructs the new
 `ValidatedScene`, and publishes the edit report/remaps. Branched edits from one input never share an
 output generation token.
-Failure, resource exhaustion, or cancellation drops the working set and publishes no scene.
+Failure, resource exhaustion, or cancellation publishes no candidate Scene. The direct operation's
+failure value returns the exact original immutable `ValidatedScene`. Verified candidate cleanup and
+ordinary failure evidence follow the existing operation protocol; uncertain retained ownership
+remains fatal containment rather than a clean fallback.
 
-Before a compiled postprocess plan opens `SceneEdit`, derived-operation start linearizes against the
-input Scene account's shared ADR 0044 poison/counter state. Poison-first returns typed
-`AccountPoisoned` before step work, attempted/consumed charging, share/refcount/range access, scratch,
+Before a direct operation or compiled postprocess plan opens `SceneEdit`, derived-operation start
+linearizes against the input Scene account's shared ADR 0044 poison/counter state. Poison-first
+returns typed `AccountPoisoned` before step work, attempted/consumed charging, share/refcount/range access, scratch,
 remap, diagnostic, or replacement allocation. If start or retain/share admission linearizes first and
 another account clone later poisons the account, admitted charge remains coupled, every later
 retain/share attempt rejects, and final publication eligibility returns
@@ -79,10 +82,10 @@ valid and no report/remap is published. ADR 0044 exclusively owns physical pair 
 pre-attribution containment, attribution coupling, cleanup evidence/precedence, and retained
 allocation membership; this ADR owns only the edit-visible input/output and report consequences.
 
-ADR 0013 decides whether a compiled postprocess plan requires a canonical write before opening a
-`SceneEdit`. `NotRequested` and successfully executed `Unchanged` outcomes do not publish an edit and
-therefore preserve the input proof, digest, and `SceneGenerationId`. `Changed` is the only successful
-postprocess outcome that publishes; every such handoff still consumes a distinct reserved generation,
+ADR 0013 decides whether a direct operation or compiled postprocess plan requires a canonical write
+before opening a `SceneEdit`. `NotRequested` and successfully executed `Unchanged` outcomes do not
+publish an edit and therefore preserve the input proof, digest, and `SceneGenerationId`. `Changed`
+is the only successful postprocess outcome that publishes; every such handoff still consumes a distinct reserved generation,
 including a value-only edit whose entity identities remain logically unchanged. A fresh generation is
 evidence of a new immutable state, not a side effect of merely invoking postprocess.
 
@@ -105,10 +108,12 @@ sequenceDiagram
     end
 ```
 
-ADR 0013 compiles postprocess requests into a typed plan before an edit begins. This ADR requires
-every operation descriptor consumed by that plan to declare entity/domain read sets, write sets,
-invalidation sets, remap obligations, and structural loss classes. `SceneEdit` accepts writes only
-through those declared effects and charges replacement/remap storage before constructing it.
+ADR 0013 permits a direct typed operation to derive its concrete plan before replacement construction;
+a general dependency compiler is needed only when implemented composition requires one. This ADR
+requires every operation to declare entity/domain read sets, write sets, invalidation sets, remap
+obligations, and structural loss classes. A concrete closed edit plan may carry those effects
+without a generic descriptor registry. `SceneEdit` accepts writes only through those declared
+effects and charges replacement/remap storage before constructing it.
 User-facing edit methods are typed adapters over the same effect descriptors; there is no raw
 mutable collection escape hatch that can omit remap or invalidation obligations.
 
@@ -120,9 +125,9 @@ neither a public generation nor a `ValidatedScene` proof; final preparation stil
 central validation for the complete plan. A step failure discards its candidate and prevents all
 later steps from running.
 
-Each passing immutable private step state uses a transaction-local typed step path/ordinal, not a
-generation nonce. Preparation seals those paths into report-branded `ReportStepStateId` values. A
-step-state ID is meaningful only inside its owning report: it cannot be compared across reports,
+In a multi-step edit, each passing immutable private step state uses a transaction-local typed step
+path/ordinal, not a generation nonce. Preparation seals those paths into report-branded
+`ReportStepStateId` values. A step-state ID is meaningful only inside its owning report: it cannot be compared across reports,
 persisted as Scene identity, converted into `SceneGenerationId`, used for Scene lookup, or used as a
 validation proof. The report brand plus typed path prevents staged per-step remap endpoints from being
 confused while avoiding public identities for states that never had a queryable Scene.
@@ -139,14 +144,66 @@ same burn-without-publication result. Final handoff converts the one reservation
 output generation, constructs the only new `ValidatedScene` proof, and atomically exposes the report.
 No API exposes a private candidate Scene or a partial generation identity.
 
+### First F Increment: Direct Single-Primitive Triangulation
+
+`triangulate_primitive` consumes an immutable input Scene and targets one generation- and
+logical-mesh-qualified `PrimitiveId`. It converts all faces of that `Polygons` primitive into a
+`TriangleList`; a triangle list or empty polygon returns the input as `Unchanged`. Other topologies
+are rejected in this increment. Repeated caller invocations may address other primitives using
+the preceding result's generation; no selection scheduler is required.
+
+Postprocess owns one same-account derived runtime, admitted scratch/origins, geometric preflight
+and independent postflight, and its report projection. Core extends the existing closed `SceneEdit`
+program and rebuilds the existing typed `GeometryStorage` owner. Unchanged nodes and other eligible
+storage are shared through existing retained-owner mechanisms. The current geometry owner is a
+whole table, so this increment does not promise primitive-granular sharing. It introduces no second
+Scene representation or roundtrip through fresh authoring.
+
+The report identifies `PostProcessOperation::Triangulate { target }` and its input/output
+generations directly. The removed empty request compiler, compiled-plan/step wrappers, separate
+coordinator ledger, and unused diagnostic/loss placeholders have no role in this edit boundary.
+`Unchanged` returns the input owner with real invocation evidence and no remap; failure returns the
+original input with the existing typed direct-operation cause and available real terminal evidence.
+
+The replacement keeps Vertex identity/order, primitive and mesh ownership slots, material binding,
+and unrelated primitive values. It remaps every present supported Corner/Face attribute through the
+actual origin relation, retaining dense/sparse shape, scalar kind and bits, and explicit sparse
+entries/defaults. Each affected primitive or attribute retains its own lineage parents; unrelated
+owners do not acquire a common fabricated parent set.
+
+Success evidence is one rooted four-member graph: the edit root, Scene-count child, flattened
+source-corner origins, and source-face output-triangle prefix offsets. The operation admits capacity
+for that complete graph before writing it. Ordinary rich failure still has its actual two-member
+root/count payload and absent origin references; a capacity bound does not change that failure
+schema or authorize partial successful remaps. Construction and validation work must cover the
+actual graph and origin sizes under the shared operation authority.
+
+Before publication, core compares the retained destination indices and attribute values against
+the exact source/origin relation and centrally validates the actual candidate and rooted evidence.
+The existing joint generation/freeze/handoff pairs the one output generation with that validated
+evidence. Describing an intended relation in a report is not a substitute for this comparison.
+
+This is the first operation increment of plan F. Flat/smooth normal generation, explicit
+coordinate/unit conversion, corner-to-application-vertex unification, general scheduling, and
+cross-invocation replay are not implemented by it. The direct triangulation increment passed its
+workspace, extracted-package consumer, native release, and WASI integration checks on 2026-10-30;
+the delivery progress record identifies their scope and evidence. This does not complete plan F.
+
+The operation reports published domain-evidence bytes separately from terminal ledger/fallback
+record counts. Each commitment uses the dimension with its own declared unit. Frozen live/evidence
+counters describe the terminal operation boundary; they are not dynamic measurements of later
+Scene or report teardown.
+
 ### Remap Contract
 
-Every successful structural operation records step-state-qualified private remaps for each affected
-entity and attribute domain. Successful final edit handoff publishes those ordered per-step remaps
-with report-scoped `ReportStepStateId` endpoints and separately publishes one composed
-generation-qualified input-to-final remap. It does not relabel intermediate step states as Scene
-generations. A value-only edit marks the corresponding identities unchanged while still reporting
-invalidation. An entity remap is a relation, not a one-to-one map:
+Every successful structural operation records private remaps for each affected entity and
+attribute domain. A direct operation owns its actual input-to-final relation without a synthetic
+report step, intermediate Scene identity, or general composition engine. For a multi-step edit,
+successful final handoff publishes ordered per-step remaps
+with report-scoped `ReportStepStateId` endpoints and one composed generation-qualified input-to-final
+remap. It does not relabel intermediate step states as Scene generations. A value-only edit marks
+the corresponding identities unchanged while still reporting invalidation. An entity remap is a
+relation, not a one-to-one map:
 
 - one old ID may map to zero IDs when deleted
 - one old ID may map to many ordered IDs when split
@@ -175,6 +232,19 @@ corner, and face endpoints additionally identify their owning primitive through 
 numeric index without the applicable report step state or public generation and complete required
 owner chain is not a remap endpoint.
 
+For direct triangulation, the changed report owns `TriangulationRemap`, backed by core's published
+`SceneGeometryEditEvidence`. The retained root owns the actual origin leaves, independently of both
+input and output Scene lifetimes. Borrowed relation views borrow that evidence owner, not either
+Scene or temporary kernel scratch. Dropping either Scene, or both Scenes, must leave the retained
+relation queryable; dropping the report/evidence releases its physical ownership through ADR 0044.
+
+Corner origins contain one input corner ordinal per output corner in triangle order, including
+repeated occurrences. Face offsets have one entry per source face plus the final endpoint and
+identify each face's contiguous output-triangle range. Complete `PrimitiveId` endpoints bind these
+ordinals to the input and final output. Foreign-generation/owner queries and out-of-range indices
+are rejected. The report's concrete operation identifies this relation directly; no generic step-ID
+allocator or inverse-map allocation is required.
+
 Replay evidence is invocation-local. An `Unchanged` replay publishes no generation, remap,
 provenance, derived-data producer, or committed-output change; its scene digest, proof, and producer
 records remain identical even when attempted work is non-zero. A replay that changes state creates a
@@ -182,9 +252,10 @@ fresh generation and fresh remaps from the immediately preceding input generatio
 are never copied under new endpoints; a cross-invocation relation exists only through explicit
 composition.
 
-Every executed step emits an invocation-local application record containing the full normalized
-operation identity (operation ID, semantic version, and normalized parameter digest), stamp-schema
-version, pre-write semantic-input stamp, post-write semantic-input stamp, and postcondition
+When an executor implements cross-invocation replay, every executed step emits an invocation-local
+application record containing the full normalized operation identity (operation ID, semantic version,
+and normalized parameter digest), stamp-schema version, pre-write semantic-input stamp,
+post-write semantic-input stamp, and postcondition
 version/result. The post-write stamp is recomputed over the same declared read set on the step's
 validated output; it equals the pre-write stamp for `Unchanged`. Cross-invocation replay compares the
 current pre-invocation stamp with the prior record's post-write stamp. The pre-write stamp records
@@ -206,7 +277,12 @@ history carrier for non-derived structural and value writes. Recomputed derived 
 same full producer identity plus their post-write input stamp; preserved derived values retain their
 producer while following the generation-rebinding rule below.
 
-An edit report contains both report-state-qualified ordered per-step remaps and one
+The direct first F operation reevaluates the live target instead of consulting prior application
+records. A triangle list or empty polygon has a live unchanged postcondition. History lookup,
+application-stamp machinery, and generic multi-step remap composition are not prerequisites for
+that behavior.
+
+A multi-step edit report contains both report-state-qualified ordered per-step remaps and one
 generation-qualified composed input-to-final remap for every affected kind/domain. Composition is
 relational in execution order: deletion terminates an old origin, split order remains stable, merges
 retain all ordered old origins, and generated elements remain originless while carrying typed
@@ -261,6 +337,15 @@ tangents are canonical attributes rather than hidden caches: when their dependen
 operation must prove preservation, remap or recompute them, or remove them with structured
 invalidation/loss evidence before final preparation. A validated scene never exposes an attribute marked
 invalid for ordinary reads.
+
+The first triangulation operation declares source-field preservation. Authored normals and tangents
+remain canonical attributes: Vertex values keep their identity/order, and Corner/Face values are
+copied through their exact origins with their supported encoding and scalar bits. This is not
+normal/tangent generation, normalization, or a claim that each triangle's geometric normal equals an
+authored value. A future producer-stamped derived field whose dependency contract cannot prove this
+preservation must be rejected, recomputed, or explicitly removed with evidence before publication.
+Affected bounds are reported as invalidated; the absence of a value-bearing bounds cache is not a
+new valid cache or an invented computed value.
 
 Postprocess success reports its `Unchanged` or `Changed` outcome, ordered steps, diagnostics, losses,
 resource statistics, entity remaps, domain remaps, and derived-data outcomes. `Unchanged` has no
@@ -327,14 +412,20 @@ tools. Chosen.
 | Reserved generation atomicity | exactly one final reservation is attempted; exhaustion consumes no nonce and fails before freeze; any later freeze/ledger/product-graph preparation failure, cancellation/caught-unwind/prepared drop may burn that one gap; no failed path publishes a generation/proof/remap | reservation and publication typestate probes |
 | Poisoned edit containment | all account/Scene clones reject new changed operations after poison; a pre-admitted invocation cannot publish when poison wins final eligibility | two-order start/retain/share/finalization barriers, work/evidence/refcount/allocator deltas, account snapshots, and no-bypass scans |
 | Retained failure isolation | failed startup accepts no edit invocation; a later retained builder panic publishes no fallback, generation, proof, report, or remap; the input remains unchanged | postprocess integration against ADR 0044 terminal outcomes and input-preservation probes |
-| Remap completeness | Per-step remaps cover every affected entity/domain with exact same-report step-state endpoints, and the composed remap has exact input/final generation endpoints | split/merge/delete/generate composition tests |
+| Remap completeness | A direct operation owns its complete input/final relation; multi-step remaps additionally cover exact same-report step-state endpoints and compose to exact input/final generations | direct Corner/Face relation and split/merge/delete/generate composition tests |
 | Operation-local complexity | Private candidate validation and remap composition are `O(affected entities + affected edges + affected cells + remap cells)` | deterministic per-step scale counters |
 | Publication validation complexity | Final central validation is `O(total graph edges + total entities + total references + total payload cells)` under ADR 0045 | deterministic full-validator work counters |
 
 ## Acceptance Criteria
 
 - Injected failure, cancellation, and budget exhaustion preserve the input generation and full-data
-  digest.
+  digest. Direct-operation failures return that original immutable Scene, including startup failure
+  and containment, without exposing candidate remaps.
+- Direct triangulation targets exactly one qualified polygon primitive. Triangle lists and empty
+  polygons return `Unchanged` without new generation, lineage, or fabricated remaps.
+- Published Corner/Face origins match the actual retained destination and remain queryable after
+  dropping the input and output Scenes in either order; final evidence drop releases its storage.
+  Relation queries reject foreign-generation/owner endpoints and out-of-range indices.
 - Poisoned-account tests force both linearization orders across sibling Scene/account clones.
   Poison-first changed-operation start returns typed `AccountPoisoned` with zero step, ledger,
   share/refcount/range, scratch/remap/diagnostic, and allocator effects. Start/retain-first keeps its
@@ -357,23 +448,26 @@ tools. Chosen.
 - Triangulation remaps face and corner attributes; vertex joining remaps vertex attributes and skin
   influences; split/merge publishes one-to-many/many-to-one entity relations.
 - Every operation with present unsupported domains fails before allocating its output replacement.
-- Coordinate/topology changes invalidate or recompute all dependent bounds, normals, and tangents.
+- Coordinate/topology changes prove source-field preservation, invalidate, or recompute affected
+  dependent values. Direct triangulation preserves authored normals/tangents through their exact
+  domain origins and reports bounds invalidation; it does not generate replacement normals.
 - Published derived fields are either `Absent` or generation/input-stamped `Valid`; no private dirty
   marker or stale normal/tangent survives commit.
 - Multi-step reports compose their input-to-final relation exactly, and sibling commits from one
   input use different output generation endpoints.
-- Private step/candidate remaps refer only to transaction-local typed paths. Final handoff publishes
-  ordered remaps with owning-report `ReportStepStateId` endpoints and one generation-qualified
-  composed input-to-final remap. Step-state API tests reject Scene lookup, persistence, cross-report
+- In multi-step edits, private step/candidate remaps refer only to transaction-local typed paths.
+  Final handoff publishes ordered remaps with owning-report `ReportStepStateId` endpoints and one
+  generation-qualified composed input-to-final remap. Step-state API tests reject Scene lookup, persistence, cross-report
   comparison/conversion, and proof construction; no intermediate state receives a generation.
-- A compiled plan cannot open an edit unless every operation descriptor covers its writes, remaps,
-  invalidation, and structural loss obligations.
-- A second state-idempotent invocation with equal operation identity, a current pre-invocation stamp
-  matching the prior record's post-write stamp, and a satisfied postcondition is `Unchanged` with
+- A direct or compiled plan cannot construct replacements unless its concrete operation effects
+  cover writes, remaps, invalidation, preservation, and structural loss obligations; no generic
+  scheduler or descriptor registry is needed for the one-operation case.
+- In a history-based executor, a second state-idempotent invocation with equal operation identity, a
+  current pre-invocation stamp matching the prior record's post-write stamp, and a satisfied postcondition is `Unchanged` with
   identical digest, proof, generation, provenance, and derived producers; changing parameters,
   semantic version, or declared input reevaluates the operation. Tests include an operation that
   changes its own read set so replay cannot accidentally compare against its prior pre-write stamp.
-- Prior-record lookup fixtures prove canonical traversal, equivalent-record collapse, and
+- History-based prior-record lookup fixtures prove canonical traversal, equivalent-record collapse, and
   reevaluation after carrier deletion, missing evidence, or conflicting matching records; detached
   reports and recency never authorize a skip.
 - Intentionally repeatable operations are not suppressed by prior history; when they change state,
@@ -382,6 +476,35 @@ tools. Chosen.
   generation reservation, preparation freeze, and handoff.
 
 ## Amendment History
+
+### 2026-10-30: Remove empty pipeline and synthetic report steps
+
+- Previous rule: the direct operation's report reused a compiled-plan/step facade maintained beside
+  the empty request coordinator and its separate resource/error model.
+- New rule: one concrete operation descriptor names the generation-qualified target. The existing
+  retained runtime, central publication, actual origin owner, and input-preserving failure boundary
+  supply all real operation evidence.
+- Compatibility impact: empty pipeline APIs, synthetic step outcomes, unused diagnostic/loss
+  placeholders, and the legacy coordinator ledger/error hierarchy are removed without adapters.
+- Required review: direct-operation generation binding, cancellation/deadline ownership, actual
+  remap and resource lifetime, thread transfer, and tracing result equivalence.
+- Rationale: direct edit evidence should describe the operation that actually executed.
+
+### 2026-10-30: Qualify direct triangulation and retained origin evidence
+
+- Previous rule: edit/remap text assumed general compiled execution, replay records, and multi-step
+  composition before any concrete postprocess operation could land.
+- New rule: a direct single-primitive operation uses the existing closed `SceneEdit` and central
+  publication boundary. Its one report-owned relation is also its composed input-to-final relation,
+  backed by the actual rooted origin storage independently of either Scene lifetime.
+- Compatibility impact: a pre-release clarification permits the first F increment without general
+  scheduling. Failures return the original immutable Scene, and authored normals/tangents are
+  preserved rather than generated. Space conversion and vertex unification remain unimplemented.
+- Required review: actual candidate correspondence, source-field preservation, four-member success
+  versus two-member ordinary failure evidence, independent relation lifetime, endpoint rejection,
+  and joint generation/freeze/handoff.
+- Rationale: direct geometry work needs complete domain and ownership semantics, while multi-step
+  scheduling and composition should follow demonstrated requirements.
 
 ### 2026-07-27: Follow retained physical-ownership authority supersession
 

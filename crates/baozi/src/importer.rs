@@ -75,6 +75,8 @@ impl ImporterBuilder {
         baozi_format_obj::register(&mut self.registry)?;
         #[cfg(feature = "format-ply")]
         baozi_format_ply::register(&mut self.registry)?;
+        #[cfg(feature = "format-gltf")]
+        baozi_format_gltf::register(&mut self.registry)?;
         Ok(())
     }
 }

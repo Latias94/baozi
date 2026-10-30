@@ -15,10 +15,12 @@ CASES: dict[str, tuple[list[str], str]] = {
     "obj": (["--no-default-features", "--features", "format-obj"], "obj"),
     "ply": (["--no-default-features", "--features", "format-ply"], "ply"),
     "stl": (["--no-default-features", "--features", "format-stl"], "stl"),
-    "all-formats": (["--no-default-features", "--features", "all-formats"], "obj,ply,stl"),
+    "gltf": (["--no-default-features", "--features", "format-gltf"], "gltf"),
+    "postprocess": (["--no-default-features", "--features", "format-obj,postprocess"], "obj"),
+    "all-formats": (["--no-default-features", "--features", "all-formats"], "gltf,obj,ply,stl"),
     "tracing": (["--no-default-features", "--features", "tracing"], ""),
     "mint": (["--no-default-features", "--features", "mint"], ""),
-    "all": (["--all-features"], "obj,ply,stl"),
+    "all": (["--all-features"], "gltf,obj,ply,stl"),
 }
 
 

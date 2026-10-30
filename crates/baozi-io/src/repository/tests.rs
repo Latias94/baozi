@@ -777,6 +777,38 @@ fn rejects_symlinks_in_roots_and_descendants() {
 
 #[cfg(unix)]
 #[test]
+fn rejects_trailing_slash_symlink_targets_during_root_and_child_traversal() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = TempRoot::new("symlink-trailing-target");
+    let repository_path = fixture.path().join("repo");
+    let outside = fixture.path().join("outside");
+    fs::create_dir_all(repository_path.join("scope")).expect("create repository scope");
+    fs::create_dir_all(outside.join("nested")).expect("create outside directories");
+    fs::write(outside.join("nested/secret.bin"), b"secret").expect("write outside file");
+    let outside_target = format!("{}/", outside.display());
+    symlink(&outside_target, fixture.path().join("root-escape"))
+        .expect("create trailing-slash root symlink");
+    symlink(&outside_target, repository_path.join("scope/escape"))
+        .expect("create trailing-slash descendant symlink");
+
+    let repository = RepositoryRoot::open_ambient(fixture.path()).expect("open repository root");
+    assert!(
+        repository
+            .capture(vec![tree_root("root-escape")], generous_limits())
+            .is_err(),
+        "trailing slash must not make a symlink root component followable"
+    );
+    assert!(
+        repository
+            .capture(vec![tree_root("repo")], generous_limits())
+            .is_err(),
+        "trailing slash must not let a descendant symlink leave its declared tree"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn unix_special_files_fail_closed_without_blocking() {
     use std::os::unix::net::UnixListener;
     use std::process::Command;
