@@ -40,14 +40,15 @@ pub use baozi_core::{
     SceneValidationDomain, SceneValidationError, SceneValidationLimit, TextureStrengthRequirement,
 };
 pub use baozi_core::{
-    AttributeData, AttributeDomain, AttributeRef, AttributeSemantic, AttributeSemanticKind,
-    AttributeSemanticRef, AuthoredTransform, AuthoredTransformError, AuthoredTransformKind, Axis,
-    CameraId, CameraProjection, CameraRef, CustomAttributeSemantic, FrontFaceWinding, Handedness,
-    ImageId, ImageRef, LightId, LightKind, LightRef, LogicalMeshId, LogicalMeshRef,
-    MaterialBindingRef, MaterialId, MaterialRef, MeshInstanceId, MeshInstanceRef, MipmapFilter,
-    NodeChildren, NodeId, NodeRef, PrimitiveId, PrimitiveRef, SamplerId, SamplerRef, SamplerState,
-    SceneEntityKind, SceneLookupError, SceneSpaceRef, TangentBasisRef, TangentEncodingRef,
-    TexelFilter, TextureAddressMode, TextureId, TextureRef, TopologyKind, TrsTransform, UvOrigin,
+    AttributeData, AttributeDomain, AttributeElement, AttributeRef, AttributeSemantic,
+    AttributeSemanticKind, AttributeSemanticRef, AuthoredTransform, AuthoredTransformError,
+    AuthoredTransformKind, Axis, CameraId, CameraProjection, CameraRef, CustomAttributeSemantic,
+    FrontFaceWinding, Handedness, ImageId, ImageRef, LightId, LightKind, LightRef, LogicalMeshId,
+    LogicalMeshRef, MaterialBindingRef, MaterialId, MaterialRef, MeshInstanceId, MeshInstanceRef,
+    MipmapFilter, NodeChildren, NodeId, NodeRef, PrimitiveId, PrimitiveRef, SamplerId, SamplerRef,
+    SamplerState, SceneEntityKind, SceneLookupError, SceneSpaceRef, TangentBasisRef,
+    TangentEncodingRef, TexelFilter, TextureAddressMode, TextureId, TextureRef, TopologyKind,
+    TrsTransform, UvOrigin,
 };
 pub use baozi_core::{
     CameraProjectionError, LightDefinition, LightEmissionError, LightError, LightKindCategory,

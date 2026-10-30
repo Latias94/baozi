@@ -12,6 +12,7 @@ mod scene_edit;
 mod space;
 mod triangulate;
 mod triangulation;
+mod vertices;
 
 #[cfg(test)]
 #[path = "../tests/common/mod.rs"]
@@ -27,7 +28,9 @@ pub use error::{
 pub use operation::{
     PostProcessCancellationToken, PostProcessControl, PostProcessResourceEvidence,
 };
-pub use remap::{PrimitiveCorner, PrimitiveFace, TriangulationRemap, TriangulationRemapError};
+pub use remap::{
+    PrimitiveCorner, PrimitiveFace, PrimitiveVertex, TriangulationRemap, TriangulationRemapError,
+};
 pub use report::{
     PostProcessOperation, PostProcessReport, PostProcessRunDisposition, PostProcessRunOutcome,
 };
@@ -41,4 +44,7 @@ pub use normals::{
 pub use space::{
     SpaceConversionCause, SpaceConversionFailure, SpaceConversionIssue, SpaceConversionOptions,
     SpaceConversionReport, convert_scene_space,
+};
+pub use vertices::{
+    TriangleVertex, TriangleVertices, VertexAttribute, VertexLayoutError, triangle_vertices,
 };

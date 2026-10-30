@@ -317,11 +317,15 @@ photometric emission is retained. Material thickness and signed displacement str
 positive unit ratio, with exact preservation of other fields and independent row/payload retention.
 Texture bindings use a direct UV set index; generated spatial coordinate variants without executable
 semantics are removed. Custom attributes still require explicit spatial semantics for numeric
-conversion. Application vertex unification remains required to complete F.
+conversion.
 
-Add an explicit helper or operation for unifying corner attributes into application vertex tuples.
-Do not assume triangles alone form a GPU-ready vertex/index layout. Lossy influence truncation and
-precision conversion require caller authorization and specific evidence.
+The explicit `triangle_vertices` helper now supplies one complete application tuple per draw Corner,
+with Vertex/Corner/Face fields, full influence rows, and primitive-qualified morph reads. It borrows
+the existing Scene without allocating an owned map or running another operation. `AttributeRef::element`
+provides typed dense/sparse element slices. Applications choose their concrete buffers and own their
+allocations and extraction loop; the common output index stream is `0..corner_count`. Equal tuples
+may repeat, and unreferenced source vertices stay in the Scene. Lossy influence truncation and
+precision conversion remain separate caller decisions requiring explicit authorization and evidence.
 
 **Acceptance:** independent input -> typed read -> triangulation -> normals -> target-space ->
 application-buffer workflow. Test winding, UV seams, smoothing boundaries, reflection/normal handling,

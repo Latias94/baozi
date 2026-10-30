@@ -6,6 +6,11 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Added allocation-free `AttributeRef::element` reads and `postprocess::triangle_vertices` for
+  building application buffers from complete draw-order tuples. Vertex/Corner/Face fields keep
+  their original keys, scalar types, sparse defaults, and Scene borrows; influences and morph
+  deltas follow the same source vertex. The helper preserves every draw corner without welding
+  or allocating a second Scene or owned map. Applications own buffer allocation and packing.
 - Extended whole-Scene unit conversion to material thickness and signed displacement strength,
   preserving all other factor bits, optional groups, and binding values. Appearance now has
   independently retained rows and immutable image/text pools, so changing material lengths copies

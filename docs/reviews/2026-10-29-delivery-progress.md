@@ -17,6 +17,7 @@ another toolchain is named. Commands use one Cargo build job and reuse `target`.
 | B resource work | Short reads reuse admitted byte credit across serial resources; EOF probes are bounded read work; payload ceilings and live buffer capacity are independent. Hashes use 64 KiB control boundaries and dependency snapshots retain one digest. Geometry caches group slot identities without prefix scans. | Core/import/PLY/STL integration ran 804 tests: 801 passed and three old error/test-fixture expectations failed; those were corrected. Import's full portion, public reader allocation tests, five geometry-cache tests, eleven hashing tests, and short-read cases passed. Final combined rerun remains the integration gate. |
 | C reading | One immutable Scene exposes borrowed nodes/roots, geometry, scalar payloads, placements, materials/bindings, encoded images/samplers/textures, space declarations, cameras/lights, and checked typed IDs. | Dense/sparse/presence/spatial tests passed, including zero counted allocations during repeated reads. Facade geometry and appearance tests passed in 182/182. Independent default OBJ/STL consumer passed outside workspace feature unification. |
 | C authoring/errors | Static plugins use a borrowed builder with metered default alignment and primary-document provenance. Node, geometry, appearance, deformation, animation, spatial, profile, and aggregate errors preserve bounded semantic detail through finalization. | Nine static-plugin and eight submission-error tests passed, including domain/rule/value cases, later terminal cancellation, nested material rules, and digest reuse. Required-dependency context retains the declaring origin, role, original reference, normalized path, and resolver-authorized target. Nested missing/denied/redirected/rejected-reference tests passed in the integrated workspace run. |
+| F application workflow | Triangulation, normal generation, complete admitted Scene-space conversion, and borrowed draw-order tuples compose without a second Scene model or owning layout runtime. Applications select their concrete fields and own the final buffers. | Six typed-element and nine public tuple tests pass. The independent consumer builds vertex/index buffers after the geometry operations, checks them after dropping the Scene, and executes in native debug/release, fresh packages, and WASI. See the final increment evidence below. |
 | G feature/modules | Empty `std` and unused tracing forwarding are removed. Facade errors and importer workflows have separate modules; compiled-in registration is named `builtin`. Typed readers have private domain modules. | Existing facade/tracing tests and the independent source feature matrix pass, including the selected glTF profile. Native candidate extraction and hidden integration bridge migration remain separate future cutovers. |
 
 ## Independent consumer
@@ -1039,6 +1040,63 @@ Logs are `target/review/f-material-workspace-final.log`, `f-material-retention-f
 `f-material-native-release-final.log`, `f-material-packaged-final.log`,
 `f-material-wasi-final.log`, and `f-material-browser-wasm-final.log`.
 
+## Borrowed Application Triangle Tuples (2026-10-31)
+
+`AttributeRef::element` now returns typed F32/F64/U32/I32 element slices borrowing the actual
+Scene. Dense selection is constant time; sparse selection uses its sorted explicit indices and
+borrows either the value or retained default. Logical bounds are checked before indexing, including
+`usize::MAX`. The original descriptor and dense/sparse representation remain available without an
+owned expansion, precision conversion, or scalar normalization.
+
+`postprocess::triangle_vertices` supplies one complete application tuple per draw Corner of an
+already validated TriangleList. Application index `c` uses source Corner `c`, source Face `c / 3`,
+and the source Vertex addressed by that corner, or implicit Vertex `c`. All Vertex/Corner/Face
+fields retain their complete semantic/domain keys and scalar types. Full-field iteration visits
+the descriptor sequence once per tuple rather than repeating keyed scans. Whole influence rows
+and requested morph deltas follow that same source Vertex. Morph targets resolve through the
+current primitive; generation/logical-mesh qualification and per-primitive stream differences
+remain intact. Skin palettes and effective morph weights remain instance choices.
+
+The layout, tuple, and field views have only Scene borrows and fixed-size coordinates. Their
+construction, checked selection, and full traversal allocate no heap storage. There is no new Scene,
+owned map, deduplication kernel, artifact runtime, invocation, or resource report. Equal tuples may
+repeat, and unreferenced source vertices remain untouched in the Scene. The application owns its
+buffer sizing, fallible allocation, extraction loop, selected fields, and index packing. This
+concrete reader satisfies tuple lowering without imposing a premature owning-artifact architecture.
+ADRs 0030/0032, Scene IR/read documentation, and the crate README describe the boundary.
+
+The independent consumer now completes import, typed reads, triangulation, normal generation,
+target-space conversion, and concrete application vertex/index buffer construction. It chooses
+position, normal, and UV source domains explicitly, then destroys the Scene and compares both
+owned buffers with their complete expected contents. The implicit application index stream is
+`0..corner_count`, without a claim of minimum vertex count, welding, truncation, or quantization.
+
+Six core element tests and nine public tuple tests passed. Coverage includes original scalar bits
+and backing addresses, complete semantic/domain order, UV seams, Face fields, simultaneous Vertex
+and Corner normals/UVs, all supported scalar and sparse cases, empty and implicit draws, repeated
+indices, degenerate faces, unreferenced source vertices, and qualified source endpoints. Deformer
+fixtures check different streams for two primitives of one logical target, complete influence rows,
+two instance palettes/weight overrides, and foreign-generation/mesh rejection. Borrowed elements,
+influences, and iterators survive temporary layout destruction. Full tuple/deformer traversal
+allocates zero bytes. Independent read-only reviews found no concrete P0–P2 fault in the reviewed
+source-ownership and domain-selection paths.
+
+The final all-feature workspace suite passed **2,421/2,421 tests**, including xtask, with four
+manual pilots skipped. Strict workspace all-target/all-feature Clippy, doctests, rustdoc with
+`-D warnings`, formatting, and diff checks passed. The all-format consumer executed on the ordinary
+Windows main stack in debug and release. It also built and executed from fresh archives in
+`target/package-check-719ag18s`, after README/license, normalized metadata, and extracted-only local
+dependency closure checks. The release WASI consumer executed the same final-buffer workflow under
+the existing checksum-qualified Wasmtime 50.0.0 installation; browser WASM passed compilation only.
+These checks establish the implemented F workflow, not sustained fuzz coverage or final H release
+qualification.
+
+Logs are `target/review/f-vertices-elements.log`, `f-vertices-layout-final.log`,
+`f-vertices-workspace-final.log`, `f-vertices-clippy-final.log`, `f-vertices-doctests-final.log`,
+`f-vertices-rustdoc-final.log`, `f-vertices-native-debug-final.log`,
+`f-vertices-native-release-final.log`, `f-vertices-packaged-final.log`,
+`f-vertices-wasi-final.log`, and `f-vertices-browser-wasm-final.log`.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
@@ -1052,11 +1110,10 @@ Logs are `target/review/f-material-workspace-final.log`, `f-material-retention-f
 - Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
 - Preserve F's triangulation, normal generation, and target-space conversion for geometry,
   authored nodes, skin matrices, morph deltas, animation curves, and camera/light definitions
-  and material lengths while closing application vertex lowering. Generated texture coordinates
+  and material lengths together with the borrowed application-buffer workflow. Generated texture coordinates
   without a sampling contract are removed, rather than treated as a pending conversion capability.
 - Finish G's remaining behavioral growth checks and H's current-stable/release package matrix,
   CI execution wiring, and native candidate acceptance. Dependency upgrades, package-content fixes,
   and the recorded fixed artifact matrix already have their distinct implementation/evidence above.
 
-No change here asserts exact RSS from ledger counters, sustained fuzz coverage, completion of
-the full geometry workflow, or publication readiness.
+No change here asserts exact RSS from ledger counters, sustained fuzz coverage, or publication readiness.

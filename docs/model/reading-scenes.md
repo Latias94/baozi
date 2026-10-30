@@ -28,6 +28,76 @@ indices, one explicit element per index, and one default element. `AttributeRef:
 implicit defaults. Applications must choose how to consume these representations; readers do not
 implicitly densify or reduce precision. In particular, F64 custom PLY data remains F64.
 
+`attribute.element(index: usize)` selects one logical element as
+`Option<AttributeElement<'scene>>`. `AttributeElement::F32`, `F64`, `U32`, and `I32` contain borrowed
+scalar slices of exactly the attribute's lane count. Dense selection is O(1); sparse selection is
+O(log explicit count), borrowing either the explicit value or the retained default. An out-of-range
+index returns `None`. F64 precision, integer values, signed zeros, and scalar bits are unchanged.
+The original `attribute.data()` remains available when source sparse representation matters; an
+element read does not create or retain a dense expansion.
+
+## Application triangle buffers
+
+Use `baozi::postprocess::triangle_vertices(primitive)` after any explicit triangulation, normal
+generation, and space conversion that the application needs. It returns
+`Result<TriangleVertices<'scene>, VertexLayoutError>` and accepts only `TriangleList` topology.
+Other topologies, even when empty, return `VertexLayoutError::UnsupportedTopology { topology }`.
+An empty TriangleList gives an empty layout. No transformation runs inside this helper.
+
+The layout and its tuple views are `Copy` and borrow the current primitive:
+
+| Layout method | Result |
+| --- | --- |
+| `primitive()` | The current borrowed `PrimitiveRef` |
+| `len()`, `is_empty()` | Application tuple count and emptiness; count equals source Corner count |
+| `vertex(index: usize)` | `Option<TriangleVertex>` with an out-of-range check |
+| `vertices()` | An independent exact-size, double-ended, cloneable iterator |
+| `indices()` | An allocation-free `Range<u32>` from zero to source Corner count |
+
+There is exactly one application tuple per draw Corner, including repeated source vertices. For
+tuple index `c`, Vertex fields sample the source index at `c` or implicit Vertex `c`, Corner fields
+sample `c`, and Face fields sample `c / 3`. Triangle order, winding, UV seams, Flat/Smooth normal
+values, and Face boundaries therefore follow the already processed primitive. Equal tuples are
+allowed to repeat: the helper performs no deduplication, welding, minimum-count optimization, or
+precision conversion. Unreferenced source vertices remain in the Scene and are not appended to
+the draw layout.
+
+`vertex.index()` is that application/Corner ordinal. `source_vertex()` returns
+`PrimitiveVertex { primitive: PrimitiveId, index: u32 }`; `source_corner()` and `source_face()` return
+the corresponding qualified endpoints. `vertex.primitive()` follows the exact current primitive.
+These sources refer to the current Scene; earlier edit reports own any relation to a prior Scene.
+
+`vertex.attributes()` iterates all primitive fields in retained order. For each `VertexAttribute`,
+`field.attribute()` returns the original `AttributeRef`, including semantic, source domain, and
+dense/sparse representation, while `field.element()` returns the selected borrowed `AttributeElement`.
+`vertex.attribute(semantic, domain)` selects one complete key in O(attribute count). Vertex and
+Corner normals or UVs with the same semantic remain separate; Face/custom fields are available
+without shadowing another domain. Full-field iteration visits each descriptor once per tuple
+instead of repeating keyed searches. No input-sized field inventory is allocated.
+
+`vertex.influences()` borrows the complete row at `source_vertex().index`, preserving absence, empty
+rows, every influence, weights, and source order. `vertex.morph_delta(target_id, semantic)` returns
+`Result<Option<Vec3>, SceneLookupError>` after resolving the target through the current primitive.
+A wrong generation or logical-mesh owner is an error. A missing semantic stream is `None`; an
+implicit zero in a present sparse stream is `Some(Vec3::ZERO)`. All repeated tuples of one source
+Vertex use that same Vertex for both base data and deformation. Skin palettes and effective morph
+weights still come from the mesh instance, so sharing a layout does not select one instance's skin
+or override vector. The original morph target/delta readers remain available for source presence
+and representation.
+
+Constructing and reading this layout allocates no heap storage, changes no Scene, and starts no
+operation invocation or account/resource report. Tuple element slices borrow the Scene, so they
+can outlive a temporary layout/iterator but cannot outlive that Scene. Application-owned buffers
+copied from them have their own lifetime.
+
+Allocate and size the application's concrete vertex/SoA buffers explicitly. A nonindexed draw can
+consume the tuples directly; an indexed consumer may collect `layout.indices()` into its own
+buffer. Buffer allocation, checked size products, fallible reservation, packing, field selection,
+and interruption of the extraction loop belong to application code and are outside library
+accounting. Repeated Corner data can produce larger buffers than a deduplicated layout; zero reader
+allocations do not imply small application buffers. The helper does not truncate influences,
+reduce precision, or authorize such losses.
+
 ## Hierarchy and spatial declarations
 
 `nodes()` and `node_count()` contain source nodes. `roots()` gives the ordered actual roots; it does

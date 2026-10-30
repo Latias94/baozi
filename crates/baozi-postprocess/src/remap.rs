@@ -3,6 +3,13 @@ use std::{fmt, ops::Range};
 use baozi_core::{PrimitiveId, scene::integration::SceneTriangulationEvidence};
 use thiserror::Error;
 
+/// A generation- and mesh-qualified source vertex endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrimitiveVertex {
+    pub primitive: PrimitiveId,
+    pub index: u32,
+}
+
 /// A generation- and mesh-qualified corner endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrimitiveCorner {

@@ -91,9 +91,10 @@ pub use canonical_scene::store::api::read::{
     AnimationChannelRef, AnimationClipRef, AnimationTarget,
 };
 pub use canonical_scene::store::api::read::{
-    AttributeData, AttributeRef, AttributeSemanticRef, CameraRef, ImageRef, LightRef,
-    LogicalMeshRef, MaterialBindingRef, MaterialRef, MeshInstanceRef, NodeChildren, NodeRef,
-    PrimitiveRef, SamplerRef, SceneSpaceRef, TangentBasisRef, TangentEncodingRef, TextureRef,
+    AttributeData, AttributeElement, AttributeRef, AttributeSemanticRef, CameraRef, ImageRef,
+    LightRef, LogicalMeshRef, MaterialBindingRef, MaterialRef, MeshInstanceRef, NodeChildren,
+    NodeRef, PrimitiveRef, SamplerRef, SceneSpaceRef, TangentBasisRef, TangentEncodingRef,
+    TextureRef,
 };
 pub use canonical_scene::store::api::read::{
     InfluenceRef, InfluenceRowRef, InfluenceRows, MorphDeltaData, MorphDeltaRef,

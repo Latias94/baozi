@@ -12,6 +12,9 @@ use crate::identity::{
     LogicalMeshId, MeshInstanceId, PrimitiveId, SceneEntityKind, SceneLookupError,
 };
 
+#[cfg(test)]
+mod tests;
+
 fn tables(scene: &ValidatedScene) -> NodeSceneGeometryTables<'_> {
     expect_validated(NodeSceneGeometryTables::try_new(
         scene.as_node_scene().read_geometry(),
@@ -72,6 +75,18 @@ pub enum AttributeData<'s> {
         values: &'s [i32],
         default: &'s [i32],
     },
+}
+
+/// One logical attribute element borrowed from its original scalar storage.
+///
+/// The slice contains exactly the attribute's lane count. Sparse elements borrow either their
+/// explicit values or the retained default without copying, converting, or normalizing scalars.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AttributeElement<'s> {
+    F32(&'s [f32]),
+    F64(&'s [f64]),
+    U32(&'s [u32]),
+    I32(&'s [i32]),
 }
 
 /// One primitive attribute, borrowing its descriptor and payload from the Scene.
@@ -178,6 +193,71 @@ impl<'s> AttributeRef<'s> {
     }
     pub const fn data(self) -> AttributeData<'s> {
         self.data
+    }
+
+    /// Borrows one logical element in O(1) for dense data or O(log explicit count) for sparse data.
+    ///
+    /// Returns `None` outside the logical element range. Sparse defaults and explicit values
+    /// retain their original source slices even when their scalar values are equal. Use
+    /// [`Self::data`] to inspect the authored dense/sparse representation and explicit indices.
+    pub fn element(self, index: usize) -> Option<AttributeElement<'s>> {
+        if index >= self.len() {
+            return None;
+        }
+        match self.data {
+            AttributeData::DenseF32 { lanes, values } => {
+                dense_element(values, lanes, index).map(AttributeElement::F32)
+            }
+            AttributeData::DenseF64 { lanes, values } => {
+                dense_element(values, lanes, index).map(AttributeElement::F64)
+            }
+            AttributeData::DenseU32 { lanes, values } => {
+                dense_element(values, lanes, index).map(AttributeElement::U32)
+            }
+            AttributeData::DenseI32 { lanes, values } => {
+                dense_element(values, lanes, index).map(AttributeElement::I32)
+            }
+            AttributeData::SparseF32 {
+                lanes,
+                indices,
+                values,
+                default,
+                ..
+            } => sparse_element(indices, values, default, lanes, index).map(AttributeElement::F32),
+            AttributeData::SparseU32 {
+                lanes,
+                indices,
+                values,
+                default,
+                ..
+            } => sparse_element(indices, values, default, lanes, index).map(AttributeElement::U32),
+            AttributeData::SparseI32 {
+                lanes,
+                indices,
+                values,
+                default,
+                ..
+            } => sparse_element(indices, values, default, lanes, index).map(AttributeElement::I32),
+        }
+    }
+}
+
+fn dense_element<T>(values: &[T], lanes: u8, index: usize) -> Option<&[T]> {
+    let lanes = usize::from(lanes);
+    let start = index.checked_mul(lanes)?;
+    values.get(start..start.checked_add(lanes)?)
+}
+
+fn sparse_element<'s, T>(
+    indices: &[u32],
+    values: &'s [T],
+    default: &'s [T],
+    lanes: u8,
+    index: usize,
+) -> Option<&'s [T]> {
+    match indices.binary_search(&u32::try_from(index).ok()?) {
+        Ok(explicit) => dense_element(values, lanes, explicit),
+        Err(_) => Some(default),
     }
 }
 

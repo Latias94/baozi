@@ -336,8 +336,47 @@ root. It creates no empty Corner/Face origin sequences. The common root schema i
 non-conversion evidence has zeroed conversion fields. Runtime success/failure capacity and work
 requirements cover the real schema. No independently cached decoded report facts are authoritative.
 
-Complete spatial conversion for the remaining domains and application vertex unification remain
-open F work. This conversion increment does not complete plan F.
+Application tuple extraction has a separate read-only ownership boundary from the coordinate
+conversion transaction. It does not require another canonical edit or retained output artifact.
+
+### Borrowed Triangle Application Layout
+
+`triangle_vertices(PrimitiveRef)` is a read-only helper over the exact current primitive, as defined
+by ADR 0030. `TriangleVertices` contains borrowed primitive/index access and a count; each
+`TriangleVertex` resolves one draw Corner's complete tuple. Unsupported topology is the constructor's
+typed `VertexLayoutError::UnsupportedTopology { topology }`. `TriangleList` order, winding, repeated
+corners, and degenerate triangles are retained. No geometry operation runs implicitly.
+
+The application relation is defined directly, with no stored map: application index `c` is source
+Corner `c`; source Face is `c / 3`; source Vertex is the source index at `c`, or `c` for an implicit
+stream. `indices()` yields `0..corner_count` without allocating. The helper does not deduplicate,
+minimize vertex count, merge source vertices, or compare tuple values. Canonical vertices that are
+not referenced by the draw stream remain untouched and do not appear in this application layout.
+
+Every attribute retains its complete semantic/source-domain key and scalar type. The tuple's
+source Vertex also determines its full influence row and each requested morph delta. Target lookup
+uses the current primitive, checking generation and logical-mesh ownership before resolving its
+projection. Skin palettes and effective morph weights remain mesh-instance choices. The same
+layout can be consumed for several instances without caching one instance's deformation state.
+
+All layout and tuple views borrow the Scene. They own no output arrays, scratch buffers, physical
+leases, retained relation, or report. Constructing, selecting, and iterating them allocates no heap
+storage. They create no operation invocation, accounting report, candidate validation transaction,
+generation reservation, derived-data invalidation, profile lineage, or prepared publication.
+Source endpoints are checked current-Scene observations rather than independently retained remap
+evidence. A borrowed tuple cannot outlive its Scene; application buffers copied from it can.
+
+Application code owns its vertex/SoA arrays and any collected index buffer, including sizing,
+fallible allocation, packing, and control of the extraction loop. That work is outside library
+resource accounting. Full tuple consumption visits the actual primitive fields; dense sampling
+is O(1) and sparse sampling is O(log explicit count). There is no library-owned all-Corner loop,
+sorting scratch, deduplication kernel, or artifact runtime to admit or publish. Precision reduction
+and influence truncation are not performed or implicitly authorized by this helper.
+
+The application-buffer workflow requires a consumer to create concrete owned buffers and verify
+their values independently of the borrowed Scene. Counts or endpoints alone are insufficient.
+This requirement does not turn the read-only helper into a Scene-edit operation or establish any
+executed-test result.
 
 ### Remap Contract
 
@@ -621,6 +660,22 @@ tools. Chosen.
   generation reservation, preparation freeze, and handoff.
 
 ## Amendment History
+
+### 2026-10-31: Separate borrowed triangle tuples from structural vertex edits
+
+- Previous rule: renderer/helper expansion was described together with structural remaps and
+  operation reports, leaving application tuple extraction coupled to owned edit artifacts.
+- New rule: `triangle_vertices` borrows one tuple per current TriangleList Corner with an implicit
+  `0..C` application index stream. It preserves complete fields and deformation alignment without
+  deduplication, a retained vertex map, or a new operation runtime. Canonical structural vertex
+  edits continue to require the existing transaction and remap contracts.
+- Compatibility impact: the helper introduces local application indices, not new Scene identities
+  or an alternative canonical representation. Existing Scene payloads and snapshots are unchanged.
+- Required review: source-domain selection, typed element precision and sparse defaults, source
+  endpoint qualification, instance-independent deformation reads, borrow lifetimes, and the zero
+  library-allocation boundary. This amendment records the design rather than qualification results.
+- Rationale: a common application index can be achieved by exact Corner expansion; tuple reuse and
+  compact buffers require a demonstrated optimization requirement before adding owned artifacts.
 
 ### 2026-10-31: Convert appearance lengths with independently shared payloads
 

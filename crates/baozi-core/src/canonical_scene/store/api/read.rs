@@ -20,8 +20,8 @@ pub use deformation::{
     MorphTargetDefinitionRef, MorphTargetRef, SkinRef,
 };
 pub use geometry::{
-    AttributeData, AttributeRef, AttributeSemanticRef, LogicalMeshRef, MeshInstanceRef,
-    PrimitiveRef,
+    AttributeData, AttributeElement, AttributeRef, AttributeSemanticRef, LogicalMeshRef,
+    MeshInstanceRef, PrimitiveRef,
 };
 pub use node::{NodeChildren, NodeRef};
 pub use spatial::{CameraRef, LightRef, SceneSpaceRef, TangentBasisRef, TangentEncodingRef};

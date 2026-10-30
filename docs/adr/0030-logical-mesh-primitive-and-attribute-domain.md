@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
@@ -189,10 +190,11 @@ For each morph target and primitive, at most one delta stream exists for each su
 A missing target/semantic stream means the all-zero delta defined by ADR 0031, not a second target
 identity or an unconstrained empty payload.
 
-Renderer views may expand corner attributes, triangulate, interleave streams, or lower integer
-formats, but those are explicit postprocess/helper outputs with remaps and loss reports. Canonical
-storage does not force fixed `Vertex`, fixed UV/color channel counts, or `f32` conversion of custom
-integer data.
+Renderer-oriented expansion, triangulation, interleaving, and numeric lowering remain explicit.
+A canonical structural edit owns the remaps and applicable loss evidence required by ADR 0032.
+A read-only application layout instead borrows existing values and exposes their source endpoints;
+it publishes no Scene or operation report. Canonical storage does not force fixed `Vertex`, fixed
+UV/color channel counts, or `f32` conversion of custom integer data.
 
 The current core authoring rail accepts dense namespaced custom `F64` attributes through
 `GeometryAttributeAuthoring::f64(semantic, domain, lanes, values)`. Primitive-owned Vertex, Corner,
@@ -210,6 +212,69 @@ value as eight little-endian bytes. Preview values use sixteen hexadecimal digit
 snapshot schema revisions remain 3: scalar tag 3 extends the existing discriminated payload union,
 without changing existing tag meanings, table layouts, or the transcripts of scenes without F64
 attributes. A nonzero F64 scalar total is also included in the preview summary.
+
+### Borrowed Triangle Application Layout
+
+`baozi-postprocess::triangle_vertices(PrimitiveRef)` returns
+`Result<TriangleVertices, VertexLayoutError>`. It accepts only `TopologyKind::TriangleList`;
+other topologies return `VertexLayoutError::UnsupportedTopology { topology }`, including empty
+non-triangle primitives. Empty triangle lists return an empty layout. No triangulation, normal
+generation, coordinate conversion, or numerical degeneracy test occurs inside this reader.
+
+The layout emits exactly one application tuple per source draw Corner, in draw order. With `C`
+corners, the application vertex count is `C` and the implicit application index stream is the
+allocation-free `Range<u32>` `0..C`. Equal tuples may be repeated. There is no deduplication,
+cross-source welding, epsilon comparison, minimal vertex-count guarantee, or owned vertex map.
+UV seams and Face boundaries therefore retain their distinct tuples without a tuple-equivalence
+policy. Shared source vertices still supply the same Vertex values, influences, and morph deltas.
+
+For application index `c`, the source-domain selection is:
+
+| Field domain | Source element |
+| --- | --- |
+| Vertex | `primitive.indices()[c]` when indexed, otherwise `c` |
+| Corner | `c` |
+| Face | `c / 3` |
+
+`TriangleVertices` and `TriangleVertex` are `Copy` borrowed views of the current primitive.
+`TriangleVertices` exposes `primitive()`, `len()`, `is_empty()`, checked `vertex(index: usize)`,
+`vertices()`, and `indices()`. The vertex iterator is exact-size, double-ended, and cloneable.
+`TriangleVertex::index()` is the current Corner ordinal; `source_vertex()`, `source_corner()`, and
+`source_face()` return generation- and primitive-qualified endpoints. In particular, a
+`PrimitiveVertex` contains `{ primitive: PrimitiveId, index: u32 }`. These endpoints describe the
+current Scene, not a new generation or an implicit remap to an earlier import.
+
+`TriangleVertex::attributes()` traverses every retained primitive attribute in order. Each
+`VertexAttribute` exposes its original `AttributeRef` through `attribute()` and its selected
+`AttributeElement` through `element()`. Keyed `attribute(semantic, domain)` lookup requires the
+complete key, preserving simultaneous Vertex and Corner normals or UVs and all Face/custom fields.
+Instance-domain fields belong to their mesh instance and are not primitive tuple fields.
+
+Core `AttributeRef::element(index: usize)` returns `Option<AttributeElement>` with borrowed F32,
+F64, U32, or I32 scalar slices. Dense selection is O(1); sparse selection is O(log explicit count)
+and borrows either the explicit element or the retained default. Out-of-range selection is `None`.
+Scalar kind, lane count, signed-zero bits, and full F64 precision are preserved without allocation,
+normalization, or implicit conversion. `AttributeRef::data()` retains the source dense/sparse
+representation, indices, and defaults; sampling an element does not rewrite that representation.
+
+`TriangleVertex::influences()` returns the complete source-Vertex row, retaining absence, empty rows,
+source order, weights, and palette-local joint indices. `morph_delta(target, semantic)` resolves the
+target through the same current primitive and returns `Result<Option<Vec3>, SceneLookupError>`.
+A foreign generation or logical-mesh owner fails lookup; a missing semantic stream is `None`, while
+an implicit sparse zero in a present stream is `Some(Vec3::ZERO)`. The primitive's other projections
+of the same logical target cannot supply its delta. Skin selection, palette interpretation, default
+morph weights, and instance overrides remain under ADR 0031; this view does not evaluate them.
+
+Construction, iteration, element selection, and source queries perform no heap allocation and
+leave source topology, payloads, sparse presence, unreferenced vertices, identity, and provenance
+unchanged. Tuple slices borrow the Scene rather than the temporary layout or iterator. The helper
+has no operation invocation, retained artifact, account/resource report, or publication step.
+Application-owned buffer allocation and optional index collection occur outside the library's
+ownership and accounting boundary. The application chooses checked sizing, fallible reservation,
+field selection, packing, and cancellation of its own extraction loop. Attribute iteration visits
+the actual descriptor sequence once per tuple; keyed lookup is O(attribute count). No full scan,
+sort, or tuple cache is performed at construction. Expanding a highly shared mesh can repeat data
+up to the draw-Corner count; the zero-allocation view does not promise compact application buffers.
 
 Primitive bounds are `Derived<Bounds>` in primitive-local space. Logical-mesh bounds are a separate
 `Derived<Bounds>` combining primitives under the declared morph-bounds policy; scene bounds are a
@@ -240,7 +305,8 @@ count. Chosen.
 
 - STL, OBJ, PLY, and glTF cut over to one model without a legacy single-primitive path.
 - OBJ may preserve corner-domain streams without importer-time vertex explosion.
-- Primitive split/merge and corner expansion must return explicit entity and domain remaps.
+- Canonical primitive split/merge and corner expansion must return explicit entity and domain
+  remaps. Borrowed triangle tuples expose current source endpoints without publishing a remap.
 - Convenience accessors can expose typed positions and triangle views, but they never redefine the
   canonical owner.
 
@@ -274,3 +340,7 @@ count. Chosen.
   packed encoding before publication.
 - Primitive split, merge, triangulation, and vertex join tests publish deterministic remaps for every
   affected domain.
+- Borrowed triangle-layout fixtures must cover UV seams, Face fields, complete semantic/domain keys,
+  dense/sparse and F64 values, indexed/implicit/empty streams, and source-Vertex-consistent influence
+  and morph reads without reader allocations or source mutation. These are acceptance requirements,
+  not a record of executed checks.

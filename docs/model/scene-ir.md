@@ -142,8 +142,21 @@ stream. Topology and the index/vertex counts determine vertex, corner, and face 
 consulting attribute payloads.
 
 Canonical storage does not silently triangulate polygons, expand independent corner indices, weld
-vertices, or force an interleaved renderer layout. Those transformations are explicit operations or
-views with loss evidence and remaps.
+vertices, or force an interleaved renderer layout. Canonical edits are explicit operations with
+applicable loss evidence and remaps. Read-only application views instead expose the current source
+relation without changing or republishing the Scene.
+
+`postprocess::triangle_vertices(PrimitiveRef)` is a zero-heap-allocation view over one TriangleList.
+It exposes one application tuple per draw Corner with an implicit `0..corner_count` index stream.
+Vertex fields use that Corner's source Vertex, Corner fields use the Corner itself, and Face fields
+use `corner / 3`. Every retained field remains available by its full semantic/source-domain key.
+Influences and primitive-specific morph deltas follow the same source Vertex; skin and morph-weight
+choices remain instance-owned. There is no deduplication, minimum vertex-count guarantee, owned
+map, retained artifact runtime, or operation/account report. Source storage, including unreferenced
+vertices, remains unchanged. The application allocates its own final buffers. See
+[the triangle-buffer reading guide](reading-scenes.md#application-triangle-buffers) and
+[ADR 0030](../adr/0030-logical-mesh-primitive-and-attribute-domain.md#borrowed-triangle-application-layout)
+for the complete API, lifetimes, and capability boundary.
 
 ## Attribute Domains
 
@@ -165,6 +178,11 @@ and same-format default. All count, cell, and byte products are checked before a
 0030. Skin influences are dedicated variable-length `InfluenceRows`, not a fixed-width generic
 attribute. Renderer-oriented expansion or numeric lowering is explicit and never redefines the raw
 canonical domain.
+
+`AttributeRef::element(index)` borrows one typed F32/F64/U32/I32 element, with O(1) dense selection
+or O(log explicit count) sparse selection and `None` outside the logical domain. It preserves lanes
+and scalar bits and borrows the retained default for a sparse omission. The complete source
+representation remains available through `AttributeRef::data()`; sampling allocates no dense copy.
 
 ## Materials and Image Resources
 
