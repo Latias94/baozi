@@ -28,5 +28,8 @@ source changes.
 The package identity and path-plus-version dependency in `baozi-gltf` ensure the
 same corrections reach the workspace, separate fuzz workspace, independent
 consumers, and packaged dependency manifests. The ordinary test suite does not
-establish Linux sanitizer admission; the format remains quarantined until that
-gate and the selected-profile consumer are executed.
+establish Linux sanitizer admission. The selected Baozi profile was source-admitted
+after the `2dc2fc8` Linux ASan and independent-consumer checks recorded in the
+[delivery progress](https://github.com/Latias94/baozi/blob/main/docs/reviews/2026-10-29-delivery-progress.md).
+That bounded result covers its recorded source state and does not imply sustained
+fuzzing, full glTF conformance, or package publication.

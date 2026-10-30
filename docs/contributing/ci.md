@@ -127,11 +127,12 @@ unpinned installer.
 
 ## Fuzz Gates
 
-Normal PR CI runs short Linux sanitizer smoke targets for `stl_import`, `obj_import`, and
-`ply_import`. Non-admitted candidate targets compile in a separate check-only job; `gltf_import`
-stays in that tier until the private `gltf-rs` bootstrap backend no longer aborts under fuzz panic
-settings. The scheduled/manual workflow follows the same split: admitted targets run Linux-only
-sanitizer campaigns, while non-admitted candidates run `cargo fuzz check` only.
+Normal PR CI runs short Linux AddressSanitizer smoke targets for `stl_import`, `obj_import`,
+`ply_import`, `gltf_import`, and `registry_detection`. The selected glTF profile uses the maintained
+backend corrections and passed its recorded baseline admission; it is no longer a check-only
+candidate. The scheduled/manual workflow runs bounded Linux sanitizer campaigns for the same five
+targets and retains their corpus and logs. A compile check alone does not establish sanitizer or
+format admission, and a historical successful source state does not prove a later revision.
 
 Windows fuzzing is useful for local parser work, but Windows sanitizer setup failures are toolchain
 evidence, not parser evidence. Linux GitHub Actions remains the promotion gate for sanitizer fuzz

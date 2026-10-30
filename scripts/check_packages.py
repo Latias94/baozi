@@ -138,6 +138,12 @@ def unpack(archive: Path, destination: Path, package: dict) -> Path:
         package["name"], package["version"]
     ):
         raise ValueError(f"Unexpected package identity in {archive}")
+    if manifest["package"].get("readme") != "README.md":
+        raise ValueError(f"Package {package['name']} must declare its own README.md")
+    for filename in ("README.md", "LICENSE-MIT", "LICENSE-APACHE"):
+        document = directory / filename
+        if not document.is_file() or document.stat().st_size == 0:
+            raise ValueError(f"Package {package['name']} is missing {filename}")
     return directory
 
 

@@ -121,8 +121,19 @@ complete PLY's publication evidence and publish it before `baozi`.
 
 CI packages both release-unit leaves, `baozi-operation` and `baozi-io`, before the canonical registry
 train. The dependent crates must be package-checked in publish order after their internal
-dependencies exist on crates.io at the matching version. U9 adds an extracted-package simulation for
-the complete release unit before any real publish command is allowed.
+dependencies exist on crates.io at the matching version. The existing
+[`check_packages.py`](../../scripts/check_packages.py) additionally validates the complete local
+production closure before registry publication: it creates `.crate` archives, unpacks them into a
+fresh directory, checks that Cargo resolves local dependencies only from those extracted artifacts,
+and builds and executes the maintained public consumer. It uses the unchanged consumer lockfile and
+fixed feature cases without generating Rust or substituting checkout sources.
+
+Run `python scripts/check_packages.py --toolchain 1.95.0` for all maintained cases, and use
+`--toolchain stable --release` for the current-stable release matrix. Local iteration deliberately
+uses `--allow-dirty --no-verify` while producing archives; the subsequent fresh consumer build is
+the artifact execution check. That simulation does not replace exact-tag packaging, registry
+ownership/authentication checks, or the real release commands above. Record the executed cases and
+targets rather than treating two selected cases as the entire publication matrix.
 
 ## Release Checklist
 

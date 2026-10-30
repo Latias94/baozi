@@ -6,9 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/baozi-import"
 authors.workspace = true
-description.workspace = true
+description = "Experimental importer registration, detection, sessions, and scene authoring for Baozi"
+readme = "README.md"
 
 [features]
 default = []

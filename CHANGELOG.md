@@ -6,6 +6,10 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Added package-local README and dual-license files to all ten production crates, with specific
+  descriptions and documentation links. Maintained glTF backend packages now identify their Baozi
+  role and preserve upstream authorship and licenses. The artifact-consumer checker verifies those
+  files in the extracted archives before building the fixed feature matrix.
 - Replaced the final appearance records with one retained typed owner for images, samplers,
   textures, bindings, and materials. Unchanged edits share the complete owner, validation allocates
   no appearance scratch, and public reads borrow actual payloads. Removed duplicate `*Kind` enums,

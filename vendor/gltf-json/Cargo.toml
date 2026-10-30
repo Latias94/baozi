@@ -2,13 +2,15 @@
 name = "baozi-gltf-json"
 version = "0.1.0"
 authors = ["David Harvey-Macaulay <alteous@outlook.com>"]
-description = "JSON parsing for the gltf crate"
-repository = "https://github.com/gltf-rs/gltf"
+description = "Baozi-maintained glTF 2.0 JSON model and validator"
+documentation = "https://docs.rs/baozi-gltf-json"
+repository = "https://github.com/Latias94/baozi"
+homepage = "https://github.com/Latias94/baozi"
 license = "MIT OR Apache-2.0"
 edition = "2021"
 rust-version = "1.61"
-readme = "BAOZI_PATCHES.md"
-include = ["src/**", "tests/**", "Cargo.toml", "BAOZI_PATCHES.md", "LICENSE-*"]
+readme = "README.md"
+include = ["src/**", "tests/**", "Cargo.toml", "README.md", "BAOZI_PATCHES.md", "LICENSE-*"]
 
 [lib]
 name = "gltf_json"

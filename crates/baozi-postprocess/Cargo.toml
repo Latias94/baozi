@@ -6,9 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/baozi-postprocess"
 authors.workspace = true
-description.workspace = true
+description = "Controlled triangulation, normal generation, and static scene-space conversion for Baozi"
+readme = "README.md"
 
 [features]
 default = []

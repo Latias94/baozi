@@ -233,6 +233,32 @@ The final all-feature release WASI consumer executed the same four-format and po
 under checksum-qualified Wasmtime 50.0.0. Browser WASM passed compilation only. Logs are
 `d2-appearance-wasi-final.log` and `d2-appearance-browser-wasm-final.log`.
 
+## Production package contents and fixed artifact matrix — 2026-10-31
+
+All ten self-owned production packages now include a local English README plus byte-identical
+copies of the root MIT and Apache-2.0 licenses. Each package declares that README explicitly and
+uses its own description and docs.rs URL. Repository/document links in package READMEs are absolute
+so the registry rendering does not depend on an unpacked workspace layout. The maintained glTF/JSON
+packages identify their Baozi package names, repository, and integration boundary while preserving
+upstream authors and original license files. Backend features do not expand Baozi's selected profile.
+
+`check_packages.py` checks the extracted normalized manifest's README declaration and all three
+nonempty documents before executing a consumer. It retains its one metadata resolution, exact
+archive identity, checked extraction, source-origin verification, unchanged consumer lockfile, and
+fresh build directory. No Rust source parser, generated consumer, or second release registry was
+introduced. Public documentation now describes this already-implemented simulation and the actual
+five-target sanitizer workflow, and OBJ's support description reflects owned encoded-image snapshots.
+
+The complete twelve-case Rust 1.95.0 debug artifact matrix passed under
+`target/package-check-t9xocm93`: empty, default, default-formats, each of OBJ/PLY/STL/glTF,
+postprocess, all-formats, tracing, mint, and all. All twelve extracted production packages, including
+both maintained dependencies, contained the declared README and both licenses. A later new archive
+closure under `target/package-check-_pgds135` again passed postprocess and glTF after the bounded
+opaque-image validation-work change. Logs are `target/review/d2-appearance-packaged-consumers.log`
+and `d2-appearance-packaged-final.log`. These results establish package content and the executed
+consumer cases; current-stable/release full matrices and native filesystem promotion remain separate
+acceptance, and no crate was uploaded or publication flag changed.
+
 ## Recovery integration and storage pilot
 
 The continuation after source session `01a1834e-5379-76b0-b412-01aa80c80fc6` reverified operation
@@ -784,7 +810,9 @@ artifact verification. No new sanitizer or sustained fuzz campaign is claimed by
 - Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
 - Preserve F's triangulation, normal generation, and static target-space conversion while closing
   the remaining spatial domains and application vertex lowering.
-- Finish G's behavioral governance cleanup and H's dependency, package, and executed-target proof.
+- Finish G's remaining behavioral growth checks and H's current-stable/release package matrix,
+  CI execution wiring, and native candidate acceptance. Dependency upgrades, package-content fixes,
+  and the recorded fixed artifact matrix already have their distinct implementation/evidence above.
 
 No change here asserts exact RSS from ledger counters, sustained fuzz coverage, completion of
 the full geometry workflow, or publication readiness.

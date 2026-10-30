@@ -1,104 +1,23 @@
-<h1 align="center">
-   gltf
-</h1>
-<p align="center">
-   <a href="https://crates.io/crates/gltf">
-      <img src="https://img.shields.io/crates/v/gltf.svg" alt="crates.io">
-   </a>
-   <a href="https://docs.rs/gltf">
-      <img src="https://docs.rs/gltf/badge.svg" alt="docs.rs">
-   </a>
-</p>
+# baozi-gltf
 
----
+Baozi's maintained reader backend based on `gltf-rs` 1.4.1. The package name is
+`baozi-gltf`; the Rust library name remains `gltf`. It depends on the maintained
+`baozi-gltf-json` package so the corrected validator is also used outside the Baozi
+workspace and in packaged consumers.
 
-This crate is intended to load [glTF 2.0](https://www.khronos.org/gltf), a file format designed for the efficient transmission of 3D assets.
+Applications should use the `baozi` facade and its `format-gltf` feature. The
+facade imports the explicitly selected glTF/GLB profile through Baozi's scoped IO,
+resource limits, central validation, and owned Scene API. Backend feature names
+do not expand that admitted format profile. See the
+[selected profile](https://github.com/Latias94/baozi/blob/main/docs/formats/gltf.md)
+and [repository](https://github.com/Latias94/baozi) for integration guidance.
 
-`rustc` version 1.61 or above is required.
+Baozi disables this backend's default features and supplies resource bytes through
+its own IO scope. The upstream optional `import` feature and examples remain backend
+utilities; they do not implement Baozi's import boundary.
 
-### Reference infographic
-
-![infographic](https://raw.githubusercontent.com/KhronosGroup/glTF/main/specification/2.0/figures/gltfOverview-2.0.0d.png)
-
-<p align="center">From <a href="https://github.com/javagl/gltfOverview">javagl/gltfOverview</a></p>
-<p align="center"><a href="https://www.khronos.org/files/gltf20-reference-guide.pdf">PDF version</a></p>
-
-### Usage
-
-See the [crate documentation](https://docs.rs/gltf) for example usage.
-
-### Features
-
-#### Extras and names
-
-By default, `gltf` ignores all `extras` and `names` included with glTF assets. You can negate this by enabling the `extras` and `names` features, respectively.
-
-```toml
-[dependencies.gltf]
-version = "1.4"
-features = ["extras", "names"]
-```
-
-#### glTF extensions
-
-The following glTF extensions are supported by the crate:
-
-- `KHR_lights_punctual`
-- `KHR_materials_pbrSpecularGlossiness`
-- `KHR_materials_unlit`
-- `KHR_texture_transform`
-- `KHR_materials_variants`
-- `KHR_materials_volume`
-- `KHR_materials_specular`
-- `KHR_materials_transmission`
-- `KHR_materials_ior`
-- `KHR_materials_emissive_strength `
-
-To use an extension, list its name in the `features` section.
-
-```toml
-[dependencies.gltf]
-features = ["KHR_materials_unlit"]
-```
-
-### Examples
-
-#### gltf-display
-
-Demonstrates how the glTF JSON is deserialized.
-
-```sh
-cargo run --example gltf-display path/to/asset.gltf
-```
-
-#### gltf-export
-
-Demonstrates how glTF JSON can be built and exported using the `gltf-json` crate.
-
-```sh
-cargo run --example gltf-export
-```
-
-#### gltf-roundtrip
-
-Deserializes and serializes the JSON part of a glTF asset.
-
-```sh
-cargo run --example gltf-roundtrip path/to/asset.gltf
-```
-
-#### gltf-tree
-
-Visualises the scene heirarchy of a glTF asset, which is a strict tree of nodes.
-
-```sh
-cargo run --example gltf-tree path/to/asset.gltf
-```
-
-### Tests
-
-Running tests locally requires to clone the [`glTF-Sample-Models`](https://github.com/KhronosGroup/glTF-Sample-Models) repository first.
-
-```sh
-git clone https://github.com/KhronosGroup/glTF-Sample-Models.git
-```
+[BAOZI_PATCHES.md](BAOZI_PATCHES.md) records the upstream revision, maintained
+dependency boundary, and source change policy. Upstream source attribution is
+retained. The package is available under either the MIT license in
+[LICENSE-MIT](LICENSE-MIT) or the Apache License 2.0 in
+[LICENSE-APACHE](LICENSE-APACHE).

@@ -19,7 +19,7 @@
 | Geometry | Supported | Imports static face meshes from `v`, `vt`, `vn`, and `f`, preserving independent Corner-domain UV/normal indices and negative indices without duplicating shared positions. | `crates/baozi-format-obj/tests/geometry.rs` |
 | Hierarchy and transforms | Partial | Preserves object/group changes by splitting mesh segments and attaching child nodes. OBJ has no general transform stack. | `geometry.rs`, facade tests |
 | Materials | Partial | Loads `newmtl`, `Kd`, `d`, `Tr`, `Ke`, `Ns`, `Ni`, `illum`, `Ka`, and `Ks` where the current IR can express or preserve them. | `materials.rs` |
-| Textures and sidecars | Partial | Resolves `mtllib` through `AssetIo`; records `map_Kd` as an external texture URI without decoding image bytes. | `materials.rs`, `crates/baozi/tests/obj_facade.rs` |
+| Textures and sidecars | Partial | Resolves `mtllib` and `map_Kd` through the origin-qualified dependency resolver; owns the snapshotted encoded image bytes without pixel decoding. | `materials.rs`, `crates/baozi/tests/obj_facade.rs` |
 | Cameras and lights | Unsupported | OBJ/MTL support does not expose camera or light data. | not applicable |
 | Animation | Unsupported | OBJ has no animation model in this importer slice. | not applicable |
 | Skinning | Unsupported | OBJ has no skinning model in this importer slice. | not applicable |

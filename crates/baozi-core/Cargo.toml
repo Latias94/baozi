@@ -6,9 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/baozi-core"
 authors.workspace = true
-description.workspace = true
+description = "Canonical scene model, borrowed typed readers, and validation for Baozi"
+readme = "README.md"
 
 [features]
 default = []

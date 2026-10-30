@@ -6,9 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/baozi-io"
 authors.workspace = true
-description.workspace = true
+description = "Asset IO contracts, logical paths, and memory-backed implementations for Baozi"
+readme = "README.md"
 
 [features]
 default = []

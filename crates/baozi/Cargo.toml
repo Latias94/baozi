@@ -6,9 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/baozi"
 authors.workspace = true
-description.workspace = true
+description = "Rust-native model import facade with typed scene readers and explicit postprocessing"
+readme = "README.md"
 
 [features]
 default = ["default-formats"]

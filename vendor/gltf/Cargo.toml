@@ -2,10 +2,10 @@
 name = "baozi-gltf"
 version = "0.1.0"
 authors = ["David Harvey-Macaulay <alteous@outlook.com>"]
-description = "glTF 2.0 loader"
-documentation = "https://docs.rs/gltf"
-repository = "https://github.com/gltf-rs/gltf"
-homepage = "https://github.com/gltf-rs/gltf"
+description = "Baozi-maintained glTF 2.0 reader backend"
+documentation = "https://docs.rs/baozi-gltf"
+repository = "https://github.com/Latias94/baozi"
+homepage = "https://github.com/Latias94/baozi"
 readme = "README.md"
 keywords = ["glTF", "3D", "asset", "model", "scene"]
 license = "MIT OR Apache-2.0"
