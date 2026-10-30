@@ -6,6 +6,13 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Added complete intrinsic `LocalAxes` to camera projections and light definitions. Camera/light
+  space conversion composes the discrete reference frame, scales distances/ranges, and preserves
+  hierarchy, attachments, and photometric emission. Replaced frame-free camera kind/tuple APIs
+  with typed projection payloads and light scalar readers with `LightDefinition`. Removed redundant
+  camera/light authoring wrappers and the separate retained light representation. Snapshot
+  encoding is revision 5 and includes all three intrinsic axes. Static plugin builders now accept
+  camera/light definitions with automatic document provenance.
 - Extended whole-Scene space conversion to skin inverse binds/corrections, dense/sparse morph
   deltas, and TRS animation values and cubic derivatives. One complete borrowed plan binds all
   domains to the exact input root and conversion; unchanged deformation/animation owners stay

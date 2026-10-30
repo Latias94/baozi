@@ -1,8 +1,8 @@
 use crate::admission::AdmittedSurfaces;
 use crate::{GltfFailure, admission, external_buffer_role, external_image_role};
 use baozi_import::authoring::{
-    AlphaMode, AttributeSemantic, AuthoredTransform, AuthoringRange, CameraAuthoring,
-    CameraLocalId, CameraProjection, Color, ColorInterpretation, ExtensionMediaType,
+    AlphaMode, AttributeSemantic, AuthoredTransform, AuthoringRange, CameraLocalId,
+    CameraProjection, Color, ColorInterpretation, ExtensionMediaType,
     GeometryMeshInstanceAuthoring, GeometryTopologyAuthoring, ImageLocalId, InfluenceAuthoring,
     LogicalMeshLocalId, Mat4, MaterialFactors, MaterialLocalId, MipmapFilter, NodeAuthoringNode,
     NodeLocalId, NodeParent, PbrMetallicRoughnessFactors, Presence, Quat, ResourceIdentityLocalId,
@@ -5751,6 +5751,7 @@ fn build_cameras<'scope>(
             match camera.projection() {
                 gltf::camera::Projection::Orthographic(orthographic) => {
                     CameraProjection::orthographic(
+                        baozi_import::authoring::LocalAxes::STANDARD,
                         orthographic.xmag(),
                         orthographic.ymag(),
                         orthographic.znear(),
@@ -5759,6 +5760,7 @@ fn build_cameras<'scope>(
                 }
                 gltf::camera::Projection::Perspective(perspective) => {
                     CameraProjection::perspective(
+                        baozi_import::authoring::LocalAxes::STANDARD,
                         perspective.yfov(),
                         perspective.aspect_ratio(),
                         perspective.znear(),
@@ -5787,9 +5789,7 @@ fn build_cameras<'scope>(
             storage.authored.len(),
             "gltf-authoring-camera-id",
         )?);
-        storage
-            .authored
-            .try_push_reserved(CameraAuthoring::new(projection))?;
+        storage.authored.try_push_reserved(projection)?;
         storage
             .names
             .try_push_reserved(owned_name(ctx, name, "gltf-normalized-camera-name")?)?;

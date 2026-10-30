@@ -1,4 +1,5 @@
 use super::*;
+use crate::LocalAxes;
 
 #[test]
 fn authored_transform_preserves_matrix_or_trs_without_conversion() {
@@ -68,24 +69,24 @@ fn authored_transform_rejects_invalid_matrix_and_trs_values() {
 #[test]
 fn camera_projection_rejects_invalid_frusta() {
     assert_eq!(
-        CameraProjection::perspective(0.0, None, 0.1, None),
+        CameraProjection::perspective(LocalAxes::STANDARD, 0.0, None, 0.1, None),
         Err(CameraProjectionError::VerticalFieldOfView)
     );
     assert_eq!(
-        CameraProjection::perspective(1.0, Some(0.0), 0.1, None),
+        CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(0.0), 0.1, None),
         Err(CameraProjectionError::AspectRatio)
     );
     assert_eq!(
-        CameraProjection::perspective(1.0, None, 0.0, None),
+        CameraProjection::perspective(LocalAxes::STANDARD, 1.0, None, 0.0, None),
         Err(CameraProjectionError::NearPlane)
     );
     assert_eq!(
-        CameraProjection::orthographic(1.0, 1.0, 2.0, 1.0),
+        CameraProjection::orthographic(LocalAxes::STANDARD, 1.0, 1.0, 2.0, 1.0),
         Err(CameraProjectionError::FarPlane)
     );
-    assert!(CameraProjection::orthographic(1.0, 1.0, 0.0, 1.0).is_ok());
+    assert!(CameraProjection::orthographic(LocalAxes::STANDARD, 1.0, 1.0, 0.0, 1.0).is_ok());
     assert_eq!(
-        CameraProjection::orthographic(1.0, 1.0, -f32::MIN_POSITIVE, 1.0),
+        CameraProjection::orthographic(LocalAxes::STANDARD, 1.0, 1.0, -f32::MIN_POSITIVE, 1.0),
         Err(CameraProjectionError::NearPlane)
     );
 }

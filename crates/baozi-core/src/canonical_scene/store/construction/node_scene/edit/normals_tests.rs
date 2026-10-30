@@ -1118,8 +1118,7 @@ fn space_conversion_rebinds_changed_deformation_and_curve_owners_with_exact_sele
     assert_valid_profile(profile, plan);
     let mut control = Control::default();
     assert!(space.validate_correspondence(tables, &mut control).unwrap());
-    // The one space-declaration action belongs to the outer transaction.
-    assert_eq!(control.0 + 1, space.correspondence_work());
+    assert_eq!(control.0, space.correspondence_work());
     assert!(std::ptr::eq(
         tables.appearance.as_ref(),
         source.scene.tables.appearance.as_ref()
@@ -1190,7 +1189,7 @@ fn winding_and_declaration_edits_share_populated_deformation_and_animation_witho
         assert_valid_profile(&tables.profile, plan);
         let mut control = Control::default();
         assert!(space.validate_correspondence(tables, &mut control).unwrap());
-        assert_eq!(control.0 + 1, space.correspondence_work());
+        assert_eq!(control.0, space.correspondence_work());
         drop(output);
         drop(source);
         assert!(!account.snapshot().poisoned());
@@ -1332,4 +1331,127 @@ fn interrupted_space_graph_releases_rebuilt_owners_and_preserves_the_source_acco
     drop(source);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn spatial_conversion_rebinds_camera_and_light_provenance_without_changing_node_layout() {
+    use crate::canonical_scene::store::construction::node_scene::edit::tests::build_populated_spatial_scene;
+    use crate::canonical_scene::store::typed_storage::edit::space::SceneSpacePlan;
+    use crate::space_conversion::{SpaceConversion, TargetSpace};
+    use crate::{Axis, FrontFaceWinding, Handedness, LocalAxes};
+
+    let factory = test_factory();
+    let account = test_account(&factory, 1_024);
+    let source = build_populated_spatial_scene(&account, &AtomicU64::new(1));
+    let conversion = SpaceConversion::try_new(
+        &SceneSpace::STANDARD_TARGET,
+        TargetSpace::try_new(
+            Handedness::Left,
+            Axis::PositiveZ,
+            Axis::PositiveY,
+            0.5,
+            FrontFaceWinding::CounterClockwise,
+        )
+        .unwrap(),
+        None,
+    )
+    .unwrap();
+    let space =
+        SceneSpacePlan::try_new(&source.scene.tables, conversion, &mut Control::default()).unwrap();
+    let pending = BoundPendingNodeSceneEdit::try_space_conversion(
+        &source.scene,
+        space,
+        OptionsDigest::sha256([50; 32]),
+        &mut || Ok(()),
+    )
+    .unwrap();
+    let plan = pending.counts.profile;
+    assert_eq!(
+        plan.selection_work, 0,
+        "fixed-size spatial rows use their existing owner action"
+    );
+    assert_eq!(
+        plan.target_count.as_u32(),
+        4,
+        "Scene, camera, light, and the node's reflected signed-zero components"
+    );
+    let output = retain_edit(pending);
+    let tables = output.output();
+    assert_eq!(
+        tables.nodes.as_ref().nodes.len(),
+        source.scene.read_nodes().nodes.len()
+    );
+    for (before, after) in source
+        .scene
+        .read_nodes()
+        .nodes
+        .iter()
+        .zip(&tables.nodes.as_ref().nodes)
+    {
+        assert_eq!(before.children, after.children);
+        assert_eq!(before.camera, after.camera);
+        assert_eq!(before.light, after.light);
+    }
+    let axes = LocalAxes::try_new(Axis::NegativeX, Axis::PositiveZ, Axis::PositiveY).unwrap();
+    assert_eq!(tables.spatial.as_ref().cameras[0].axes(), axes);
+    assert_eq!(tables.spatial.as_ref().lights[0].axes(), axes);
+    assert_eq!(
+        tables.spatial.as_ref().lights[0].kind().range(),
+        Some(100.0)
+    );
+    assert_eq!(
+        tables.spatial.as_ref().lights[0].intensity().to_bits(),
+        source.scene.tables.spatial.as_ref().lights[0]
+            .intensity()
+            .to_bits()
+    );
+    let expected = crate::AuthoredTransform::try_trs(
+        crate::Vec3::new(-0.0, -0.0, 0.0),
+        crate::Quat::from_xyzw(0.0, 0.0, -0.0, 1.0),
+        crate::Vec3::new(1.0, 1.0, 1.0),
+    )
+    .unwrap();
+    assert!(
+        tables.nodes.as_ref().nodes[1]
+            .transform
+            .authored()
+            .unwrap()
+            .has_same_authored_bits(expected)
+    );
+    let profile = &tables.profile;
+    let state = profile.state.as_ref();
+    let lineage = state.segments.last().unwrap().lineage.as_ref();
+    for owner in [
+        CanonicalProfileOwner::Node(1),
+        CanonicalProfileOwner::Camera(0),
+        CanonicalProfileOwner::Light(0),
+    ] {
+        let refs = attachments(profile, owner);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].segment() as usize, state.segments.len() - 1);
+        assert_eq!(
+            lineage.provenance[refs[0].local() as usize]
+                .parents
+                .get(&lineage.parents)
+                .unwrap(),
+            expected_parents(&source.scene, &[owner, CanonicalProfileOwner::Scene])
+        );
+    }
+    assert_eq!(
+        attachments(profile, CanonicalProfileOwner::SyntheticRoot),
+        attachments(
+            &source.scene.tables.profile,
+            CanonicalProfileOwner::SyntheticRoot
+        )
+    );
+    assert_valid_profile(profile, plan);
+    let mut control = Control::default();
+    assert!(space.validate_correspondence(tables, &mut control).unwrap());
+    assert_eq!(control.0, space.correspondence_work());
+    drop(source);
+    assert_valid_profile(&output.output().profile, plan);
+    drop(output);
+    assert!(!account.snapshot().poisoned());
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
 }

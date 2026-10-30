@@ -310,7 +310,10 @@ It preserves authored node form and dense/sparse attribute domains, with typed r
 spatial semantics it cannot yet convert. Skin matrices, dense/sparse morph deltas, and TRS animation
 values and derivatives now use one complete exact-source conversion plan. Unchanged deformation and
 animation owners remain shared, and each profile construction pass admits its complete selection
-work. Camera/light conversion and application vertex unification remain required to complete F.
+work. Camera/light conversion now composes complete intrinsic axes without generating nodes;
+clipping distances, orthographic extents, and finite light ranges follow unit conversion while
+photometric emission is retained. Material spatial semantics and application vertex unification
+remain required to complete F.
 
 Add an explicit helper or operation for unifying corner attributes into application vertex tuples.
 Do not assume triangles alone form a GPU-ready vertex/index layout. Lossy influence truncation and

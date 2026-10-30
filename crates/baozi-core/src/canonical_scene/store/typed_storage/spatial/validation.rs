@@ -1,5 +1,4 @@
 use crate::canonical_scene::store::typed_storage::validation::TypedStorageValidationControl;
-use crate::entity::{CameraProjectionKind, LightKindCategory, validate_canonical_light_emission};
 
 use super::*;
 
@@ -40,38 +39,9 @@ impl SpatialStorage {
 }
 
 fn valid_camera(camera: CameraProjection) -> bool {
-    match camera.kind() {
-        CameraProjectionKind::Perspective => {
-            let Some((fov, aspect, near, far)) = camera.perspective_parameters() else {
-                return false;
-            };
-            CameraProjection::perspective(fov, aspect, near, far).is_ok()
-        }
-        CameraProjectionKind::Orthographic => {
-            let Some((x, y, near, far)) = camera.orthographic_parameters() else {
-                return false;
-            };
-            near.to_bits() != (-0.0_f32).to_bits()
-                && CameraProjection::orthographic(x, y, near, far).is_ok()
-        }
-    }
+    camera.validate()
 }
 
-fn valid_light(light: StoredLight) -> bool {
-    let kind_valid = match light.kind.category() {
-        LightKindCategory::Directional => {
-            light.kind.range().is_none()
-                && light.kind.inner_cone_radians().is_none()
-                && light.kind.outer_cone_radians().is_none()
-        }
-        LightKindCategory::Point => LightKind::point(light.kind.range()).is_ok(),
-        LightKindCategory::Spot => match (
-            light.kind.inner_cone_radians(),
-            light.kind.outer_cone_radians(),
-        ) {
-            (Some(inner), Some(outer)) => LightKind::spot(light.kind.range(), inner, outer).is_ok(),
-            _ => false,
-        },
-    };
-    kind_valid && validate_canonical_light_emission(light.tint, light.intensity).is_ok()
+fn valid_light(light: LightDefinition) -> bool {
+    light.validate()
 }

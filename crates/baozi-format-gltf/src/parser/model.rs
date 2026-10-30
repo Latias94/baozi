@@ -254,7 +254,7 @@ pub(super) struct InstanceDeformationStorage<'scope> {
 }
 
 pub(super) struct CameraStorage<'scope> {
-    pub(super) authored: MeteredVec<'scope, CameraAuthoring>,
+    pub(super) authored: MeteredVec<'scope, CameraProjection>,
     pub(super) names: MeteredVec<'scope, Option<MeteredString<'scope>>>,
     pub(super) camera_ids: MeteredVec<'scope, Option<CameraLocalId>>,
 }

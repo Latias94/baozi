@@ -281,35 +281,72 @@ pub enum AuthoredTransformError {
     ScaleNotFinite,
 }
 
-/// The supported camera projection category.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CameraProjectionKind {
-    Perspective,
-    Orthographic,
+/// A validated perspective projection in an explicit intrinsic reference frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerspectiveProjection {
+    axes: crate::LocalAxes,
+    vertical_fov_radians: f32,
+    aspect_ratio: Option<f32>,
+    near: f32,
+    far: Option<f32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum CameraProjectionState {
-    Perspective {
-        vertical_fov_radians: f32,
-        aspect_ratio: Option<f32>,
-        near: f32,
-        far: Option<f32>,
-    },
-    Orthographic {
-        horizontal_magnification: f32,
-        vertical_magnification: f32,
-        near: f32,
-        far: f32,
-    },
+impl PerspectiveProjection {
+    pub const fn axes(self) -> crate::LocalAxes {
+        self.axes
+    }
+    pub const fn vertical_fov_radians(self) -> f32 {
+        self.vertical_fov_radians
+    }
+    pub const fn aspect_ratio(self) -> Option<f32> {
+        self.aspect_ratio
+    }
+    pub const fn near(self) -> f32 {
+        self.near
+    }
+    pub const fn far(self) -> Option<f32> {
+        self.far
+    }
 }
 
-/// A validated camera projection with no producerless unknown variant.
+/// A validated centered orthographic projection in an explicit intrinsic reference frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CameraProjection(CameraProjectionState);
+pub struct OrthographicProjection {
+    axes: crate::LocalAxes,
+    horizontal_magnification: f32,
+    vertical_magnification: f32,
+    near: f32,
+    far: f32,
+}
+
+impl OrthographicProjection {
+    pub const fn axes(self) -> crate::LocalAxes {
+        self.axes
+    }
+    pub const fn horizontal_magnification(self) -> f32 {
+        self.horizontal_magnification
+    }
+    pub const fn vertical_magnification(self) -> f32 {
+        self.vertical_magnification
+    }
+    pub const fn near(self) -> f32 {
+        self.near
+    }
+    pub const fn far(self) -> f32 {
+        self.far
+    }
+}
+
+/// One complete projection value. Match its variant to read parameters together with their frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CameraProjection {
+    Perspective(PerspectiveProjection),
+    Orthographic(OrthographicProjection),
+}
 
 impl CameraProjection {
     pub fn perspective(
+        axes: crate::LocalAxes,
         vertical_fov_radians: f32,
         aspect_ratio: Option<f32>,
         near: f32,
@@ -325,7 +362,8 @@ impl CameraProjection {
             return Err(CameraProjectionError::AspectRatio);
         }
         validate_perspective_depth_range(near, far)?;
-        Ok(Self(CameraProjectionState::Perspective {
+        Ok(Self::Perspective(PerspectiveProjection {
+            axes,
             vertical_fov_radians,
             aspect_ratio,
             near,
@@ -334,6 +372,7 @@ impl CameraProjection {
     }
 
     pub fn orthographic(
+        axes: crate::LocalAxes,
         horizontal_magnification: f32,
         vertical_magnification: f32,
         near: f32,
@@ -346,44 +385,45 @@ impl CameraProjection {
             return Err(CameraProjectionError::VerticalMagnification);
         }
         validate_orthographic_depth_range(near, far)?;
-        let near = canonical_positive_zero(near);
-        Ok(Self(CameraProjectionState::Orthographic {
+        Ok(Self::Orthographic(OrthographicProjection {
+            axes,
             horizontal_magnification,
             vertical_magnification,
-            near,
+            near: canonical_positive_zero(near),
             far,
         }))
     }
 
-    pub const fn kind(self) -> CameraProjectionKind {
-        match self.0 {
-            CameraProjectionState::Perspective { .. } => CameraProjectionKind::Perspective,
-            CameraProjectionState::Orthographic { .. } => CameraProjectionKind::Orthographic,
+    pub const fn axes(self) -> crate::LocalAxes {
+        match self {
+            Self::Perspective(p) => p.axes,
+            Self::Orthographic(p) => p.axes,
         }
     }
 
-    pub const fn perspective_parameters(self) -> Option<(f32, Option<f32>, f32, Option<f32>)> {
-        match self.0 {
-            CameraProjectionState::Perspective {
-                vertical_fov_radians,
-                aspect_ratio,
-                near,
-                far,
-            } => Some((vertical_fov_radians, aspect_ratio, near, far)),
-            CameraProjectionState::Orthographic { .. } => None,
-        }
-    }
-
-    pub const fn orthographic_parameters(self) -> Option<(f32, f32, f32, f32)> {
-        match self.0 {
-            CameraProjectionState::Orthographic {
-                horizontal_magnification,
-                vertical_magnification,
-                near,
-                far,
-            } => Some((horizontal_magnification, vertical_magnification, near, far)),
-            CameraProjectionState::Perspective { .. } => None,
-        }
+    pub(crate) fn validate(self) -> bool {
+        self.axes().validate().is_ok()
+            && match self {
+                Self::Perspective(p) => Self::perspective(
+                    p.axes,
+                    p.vertical_fov_radians,
+                    p.aspect_ratio,
+                    p.near,
+                    p.far,
+                )
+                .is_ok(),
+                Self::Orthographic(p) => {
+                    p.near.to_bits() != (-0.0_f32).to_bits()
+                        && Self::orthographic(
+                            p.axes,
+                            p.horizontal_magnification,
+                            p.vertical_magnification,
+                            p.near,
+                            p.far,
+                        )
+                        .is_ok()
+                }
+            }
     }
 }
 
@@ -612,6 +652,86 @@ impl LightEmission {
     }
 }
 
+/// A complete reusable light definition, independent of its placement node.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LightDefinition {
+    kind: LightKind,
+    axes: crate::LocalAxes,
+    emission: LightEmission,
+}
+
+impl LightDefinition {
+    /// Converts source linear-sRGB color/intensity into canonical photometric emission.
+    pub fn try_from_scaled_linear_srgb(
+        kind: LightKind,
+        axes: crate::LocalAxes,
+        color: Color,
+        intensity: f32,
+    ) -> Result<Self, LightEmissionError> {
+        Ok(Self::new(
+            kind,
+            axes,
+            LightEmission::try_from_scaled_linear_srgb(color, intensity)?,
+        ))
+    }
+
+    pub(crate) const fn new(
+        kind: LightKind,
+        axes: crate::LocalAxes,
+        emission: LightEmission,
+    ) -> Self {
+        Self {
+            kind,
+            axes,
+            emission,
+        }
+    }
+    pub const fn kind(self) -> LightKind {
+        self.kind
+    }
+    pub const fn axes(self) -> crate::LocalAxes {
+        self.axes
+    }
+    pub const fn tint(self) -> Vec3 {
+        self.emission.tint()
+    }
+    pub const fn intensity(self) -> f32 {
+        self.emission.intensity()
+    }
+    pub(crate) const fn emission(self) -> LightEmission {
+        self.emission
+    }
+
+    pub(crate) fn validate(self) -> bool {
+        let kind_valid = match self.kind.category() {
+            LightKindCategory::Directional => {
+                self.kind.range().is_none()
+                    && self.kind.inner_cone_radians().is_none()
+                    && self.kind.outer_cone_radians().is_none()
+            }
+            LightKindCategory::Point => LightKind::point(self.kind.range()).is_ok(),
+            LightKindCategory::Spot => match (
+                self.kind.inner_cone_radians(),
+                self.kind.outer_cone_radians(),
+            ) {
+                (Some(inner), Some(outer)) => {
+                    LightKind::spot(self.kind.range(), inner, outer).is_ok()
+                }
+                _ => false,
+            },
+        };
+        self.axes.validate().is_ok()
+            && kind_valid
+            && validate_canonical_light_emission(self.tint(), self.intensity()).is_ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn with_emission_parts_for_test(mut self, tint: Vec3, intensity: f32) -> Self {
+        self.emission = LightEmission { tint, intensity };
+        self
+    }
+}
+
 pub(crate) fn validate_canonical_light_emission(
     tint: Vec3,
     intensity: f32,
@@ -687,7 +807,7 @@ pub enum LightError {
 
 /// Why a light emission value was rejected.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LightEmissionError {
+pub enum LightEmissionError {
     #[error("light tint components must be finite and non-negative")]
     InvalidColor,
     #[error("light tint alpha must be exactly one")]

@@ -12,13 +12,14 @@ use thiserror::Error;
 use crate::canonical_scene::store::typed_storage::spatial::build::SpatialStoragePlan;
 
 use crate::entity::{
-    CameraProjectionKind, LightEmissionError, LightKindCategory, validate_canonical_light_emission,
+    CameraProjection, LightDefinition, LightEmissionError, LightKindCategory,
+    validate_canonical_light_emission,
 };
 use crate::scene_space::SceneSpaceValidationError;
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
 use super::super::control::CanonicalAuthoringControl;
-use super::super::input::spatial::{CameraAuthoring, LightAuthoring, SpatialAuthoringBatch};
+use super::super::input::spatial::SpatialAuthoringBatch;
 use super::super::input::{NodeAuthoringBatch, Presence};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,13 +200,13 @@ impl<'input, R> ValidatedSpatialBatch<'input, R> {
 
     pub(in crate::canonical_scene::store) fn cameras(
         &self,
-    ) -> impl ExactSizeIterator<Item = &CameraAuthoring> {
+    ) -> impl ExactSizeIterator<Item = &CameraProjection> {
         self.input.spatial.cameras().iter()
     }
 
     pub(in crate::canonical_scene::store) fn lights(
         &self,
-    ) -> impl ExactSizeIterator<Item = &LightAuthoring> {
+    ) -> impl ExactSizeIterator<Item = &LightDefinition> {
         self.input.spatial.lights().iter()
     }
 
@@ -489,28 +490,17 @@ where
 
     for (camera, authored) in input.cameras().iter().enumerate() {
         context.run_unit(SceneValidationWork::Entity, || {
-            let projection = authored.projection();
-            let optional_values = match projection.kind() {
-                CameraProjectionKind::Perspective => {
-                    let Some((_fov, aspect, _near, far)) = projection.perspective_parameters()
-                    else {
-                        return Err(SpatialAuthoringSemanticError::InvalidCameraProjection {
-                            camera,
-                        });
-                    };
-                    u64::from(aspect.is_some()) + u64::from(far.is_some())
+            if !authored.validate() {
+                return Err(SpatialAuthoringSemanticError::InvalidCameraProjection { camera });
+            }
+            let optional_values = match *authored {
+                CameraProjection::Perspective(p) => {
+                    u64::from(p.aspect_ratio().is_some()) + u64::from(p.far().is_some())
                 }
-                CameraProjectionKind::Orthographic => {
-                    if projection.orthographic_parameters().is_none() {
-                        return Err(SpatialAuthoringSemanticError::InvalidCameraProjection {
-                            camera,
-                        });
-                    }
-                    2
-                }
+                CameraProjection::Orthographic(_) => 2,
             };
             let final_semantic_cells = semantic_cells
-                .checked_add(4_u64.checked_add(optional_values).ok_or(
+                .checked_add(7_u64.checked_add(optional_values).ok_or(
                     SpatialAuthoringSemanticError::AccountingOverflow {
                         dimension: "camera semantic cells",
                     },
@@ -541,7 +531,7 @@ where
                 LightKindCategory::Spot => 2 + u64::from(kind.range().is_some()),
             };
             let final_semantic_cells = semantic_cells
-                .checked_add(6_u64.checked_add(optional_values).ok_or(
+                .checked_add(9_u64.checked_add(optional_values).ok_or(
                     SpatialAuthoringSemanticError::AccountingOverflow {
                         dimension: "light semantic cells",
                     },

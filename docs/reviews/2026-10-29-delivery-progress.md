@@ -904,6 +904,68 @@ Logs are `target/review/f-space-domains-workspace-final.log`,
 Camera/light local-frame conversion, material Scene-unit/spatial-texture behavior, and application
 vertex unification remain open F work. This increment does not complete the A–H plan.
 
+## Complete Camera/Light Values and Spatial Conversion (2026-10-31)
+
+Camera/light conversion now uses complete intrinsic `LocalAxes` rather than generated compensation
+nodes. The fixed optical reference remains right +X, up +Y, forward -Z, with reference-to-node
+matrix `B = [right, up, -forward]`. All 48 independent signed-axis frames, including reflections,
+are admitted. Conversion composes `B' = Q B` while node placement uses `H M H^-1`. Node counts,
+child order, attachments, geometry references, and animation targets remain structurally stable
+through repeated conversions. Source-local authored extrinsic poses still belong to nodes.
+ADR 0040 is revised with this distinction and its physical evaluation equation.
+
+`CameraProjection` now exposes typed Perspective/Orthographic payloads containing their axes and
+parameters. `LightDefinition` couples kind, axes, and canonical emission. Frame-free camera
+Kind/tuple getters and independent light scalar readers are removed; public light readers return
+the complete definition. Authoring and spatial storage use these same compact owned values,
+deleting `CameraAuthoring`, `LightAuthoring`, their error wrapper, and `StoredLight`. Static plugin
+builders accept camera/light slices and create document provenance for both, using the existing
+bounded builder and single central publication path.
+
+One source-bound `SpatialSpacePlan` replaces the declaration-only rewrite and separate spatial
+correspondence path. It scales all camera distances/orthographic half-extents and finite light
+ranges, preserves FOV/aspect/cutoff absence/cone angles and photometric emission bits, and rejects
+overflow, underflow, or rounded plane-order collapse before retained output admission. The complete
+Scene plan includes its fixed work and names; profile selection records actual Camera/Light
+changes with their own and Scene parents, using the existing fixed-size owner actions.
+
+Semantic snapshot encoding is revision 5. Three tagged axes follow each camera/light reference.
+Five hand-written transcript vectors change only the revision word and those declared fields;
+independent SHA-256 calculation verifies every new digest and reproduces its revision 4 predecessor
+after reversing precisely those bytes. The spatial vector is 1,322 bytes and 140 snapshot actions.
+The OBJ capability fixture independently restores its revision 4 transcript digest. Axis mutation
+tests cover all three axes for perspective, orthographic, and light definitions.
+
+The core suite passed 532/532 tests before the final additional retained-profile regression;
+that regression then passed independently. It checks unchanged node layout, actual Camera/Light
+parents, preserved emission bits, exact complete correspondence work, and final physical release.
+The 17 spatial-plan tests cover handwritten values, all 48 frames, actual-storage corruption,
+post-rounding numeric constraints, exact work, and interrupted/unwound buffer cleanup. Five public
+camera/light integration tests passed as part of the 103/103 postprocess suite: shared definitions,
+off-axis reference-point evaluation, repeated inverse conversion without node growth, eight typed
+numeric failures returning the original Scene, a 1 MiB caller stack, and host-unwind allocation
+cleanup. Independent read-only review found no concrete P0–P2 fault in the reviewed production paths.
+
+The integrated all-feature production workspace suite passed **2,317/2,317 tests**, with four manual
+scale pilots skipped. Strict workspace all-feature/all-target Clippy, doctests, rustdoc with
+`-D warnings`, and workspace/standalone-consumer formatting passed. The all-format consumer ran
+on the ordinary Windows main stack in debug and release. Its custom plugin uses the public static
+builder to publish and read complete camera/light definitions, executes the reflected/permuted
+unit conversion, and checks inverse axes and fixed node count.
+
+The same all-feature consumer built and executed from fresh `.crate` archives in
+`target/package-check-97rl88tx`; normalized metadata, README/licenses, and the extracted-only local
+dependency closure were checked before compilation. The release WASI consumer executed under the
+previously checksum-qualified Wasmtime 50.0.0 installation. Browser WASM passed compilation only.
+No sustained fuzz/sanitizer result, current-stable publication matrix, or remaining material/vertex
+workflow completion is inferred from these checks.
+
+Logs are `target/review/f-camera-workspace-final.log`, `f-camera-clippy-final.log`,
+`f-camera-core-final.log`, `f-camera-profile-check.log`, `f-camera-postprocess-final.log`,
+`f-camera-handwritten-goldens.txt`, `f-camera-doctests-final.log`, `f-camera-rustdoc-final.log`,
+`f-camera-native-debug-final.log`, `f-camera-native-release-final.log`,
+`f-camera-packaged-final.log`, `f-camera-wasi-final.log`, and `f-camera-browser-wasm-final.log`.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
@@ -916,8 +978,8 @@ vertex unification remain open F work. This increment does not complete the A–
   remaining postprocessing work; do not reintroduce retired record/projection paths.
 - Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
 - Preserve F's triangulation, normal generation, and target-space conversion for geometry,
-  authored nodes, skin matrices, morph deltas, and animation curves while closing camera/light
-  and material spatial semantics and application vertex lowering.
+  authored nodes, skin matrices, morph deltas, animation curves, and camera/light definitions
+  while closing material spatial semantics and application vertex lowering.
 - Finish G's remaining behavioral growth checks and H's current-stable/release package matrix,
   CI execution wiring, and native candidate acceptance. Dependency upgrades, package-content fixes,
   and the recorded fixed artifact matrix already have their distinct implementation/evidence above.

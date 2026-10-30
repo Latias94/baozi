@@ -100,9 +100,16 @@ except for the declared permutation, sign, and unit arithmetic. No normalization
 sign canonicalization occurs. Names, source order, f64 key times/time domains, and interpolation
 and extrapolation declarations remain unchanged.
 
-Conversion rejects coordinate or unit changes with camera or light definitions. It also rejects
-numeric conversion of custom attributes, spatial texture-coordinate sources, or nonzero Scene-unit material values
+Camera and light definitions carry complete intrinsic `LocalAxes`. With reference-to-node map
+`B = [right, up, -forward]`, conversion applies `B' = Q B`, preserving all 48 signed permutations
+and leaving the node hierarchy and attachments unchanged. Camera clipping distances and orthographic
+half-extents scale by `s`; point/spot ranges do likewise. FOV, aspect, cone angles, tint, and
+photometric intensity keep their bits. Projection ordering must remain valid after F32 rounding.
+
+Conversion still rejects numeric conversion of custom attributes, spatial texture-coordinate
+sources, or nonzero Scene-unit material values
 it cannot convert. Winding-only conversion can retain otherwise unaffected spatial domains.
 These typed rejections preserve the original Scene. Unrepresentable numeric output identifies the
-skin correction, inverse-bind matrix, morph delta/tuple, or animation channel/stream/key before
+skin correction, inverse-bind matrix, morph delta/tuple, animation channel/stream/key, or
+camera/light definition before
 retained output admission. Winding-only and declaration-only edits share deformation and animation storage.

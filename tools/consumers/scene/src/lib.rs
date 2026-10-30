@@ -17,12 +17,38 @@ const PLY: &[u8] = b"ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\n
 ///
 /// The expected set is deliberately not inferred from Cargo cfg or the registry itself.
 pub fn verify(expected: &[&str]) -> baozi::Result<()> {
-    let projection = baozi::CameraProjection::perspective(1.0, None, 0.1, None).unwrap();
-    assert_eq!(projection.kind(), baozi::CameraProjectionKind::Perspective);
+    let projection =
+        baozi::CameraProjection::perspective(baozi::LocalAxes::STANDARD, 1.0, None, 0.1, None)
+            .unwrap();
+    let baozi::CameraProjection::Perspective(projection) = projection else {
+        panic!("perspective projection expected");
+    };
+    assert_eq!(projection.axes(), baozi::LocalAxes::STANDARD);
+    assert_eq!(
+        projection.vertical_fov_radians().to_bits(),
+        1.0_f32.to_bits()
+    );
+    assert_eq!(projection.aspect_ratio(), None);
+    assert_eq!(projection.near().to_bits(), 0.1_f32.to_bits());
+    assert_eq!(projection.far(), None);
     assert_eq!(
         baozi::LightKind::directional().category(),
         baozi::LightKindCategory::Directional
     );
+    let light = baozi::LightDefinition::try_from_scaled_linear_srgb(
+        baozi::LightKind::directional(),
+        baozi::LocalAxes::STANDARD,
+        baozi::Color::WHITE,
+        f32::from_bits(1),
+    )
+    .expect("canonical subnormal light intensity remains representable");
+    assert_eq!(light.axes(), baozi::LocalAxes::STANDARD);
+    assert_eq!(
+        light.kind().category(),
+        baozi::LightKindCategory::Directional
+    );
+    assert_eq!(light.tint(), baozi::Vec3::new(1.0, 1.0, 1.0));
+    assert_eq!(light.intensity().to_bits(), 1);
     let importer = Importer::new()?;
     let mut expected_ids: Vec<_> = expected
         .iter()

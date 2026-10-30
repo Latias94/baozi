@@ -29,14 +29,12 @@ pub use super::super::production::input::metadata::{
     MetadataAuthoringBatch, MetadataAuthoringEntry,
 };
 pub use super::super::production::input::spatial::{
-    CameraAuthoring, CameraLocalId, LightAuthoring, LightAuthoringError, LightLocalId,
-    SpatialAuthoringBatch,
+    CameraLocalId, LightLocalId, SpatialAuthoringBatch,
 };
 pub use super::super::production::input::{
     NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent, Presence,
     ProfileAuthoringBatch, ResourceSnapshotAuthoring, SceneAuthoringBatch,
 };
-pub use crate::FormatId;
 pub use crate::animation::{AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain};
 pub use crate::appearance::{
     AlphaMode, AppearanceBuildError, ColorInterpretation, LegacyMaterialFactors, MaterialFactors,
@@ -47,7 +45,8 @@ pub use crate::appearance::{
 pub use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemantic};
 pub use crate::deform::{MorphDeltaSemantic, SkinMatrixSpaces};
 pub use crate::entity::{
-    AuthoredTransform, CameraProjection, EntityName, LightKind, MAX_ENTITY_NAME_BYTES,
+    AuthoredTransform, CameraProjection, EntityName, LightDefinition, LightEmissionError,
+    LightKind, MAX_ENTITY_NAME_BYTES,
 };
 pub use crate::extension::{ExtensionMediaType, ExtensionSchemaId, ExtensionValueRef};
 pub use crate::image::{MipmapFilter, SamplerState, TexelFilter, TextureAddressMode};
@@ -63,3 +62,4 @@ pub use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
     TangentHandednessEncoding, UvOrigin,
 };
+pub use crate::{FormatId, LocalAxes, LocalAxesError, LocalAxis};

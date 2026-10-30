@@ -261,8 +261,16 @@ impl SpatialBuildFault {
                 storage.space.tangent_handedness_encoding =
                     crate::TangentHandednessEncoding::SignInW;
             }
-            Self::NonFiniteLightTint => storage.lights[0].tint.x = f32::NAN,
-            Self::NonCanonicalZeroEmission => storage.lights[0].intensity = -0.0,
+            Self::NonFiniteLightTint => {
+                let light = storage.lights[0];
+                let mut tint = light.tint();
+                tint.x = f32::NAN;
+                storage.lights[0] = light.with_emission_parts_for_test(tint, light.intensity());
+            }
+            Self::NonCanonicalZeroEmission => {
+                let light = storage.lights[0];
+                storage.lights[0] = light.with_emission_parts_for_test(light.tint(), -0.0);
+            }
             _ => {}
         }
     }

@@ -9,8 +9,8 @@ is available through `format-gltf`; its [exact restrictions](docs/formats/gltf.m
 Scene nodes, geometry, materials, images, skins, morphs, and animation have borrowed typed readers.
 The optional `postprocess` feature provides explicit single-primitive triangulation, flat/smooth
 normal generation, and whole-Scene coordinate/unit conversion including skins, morph deltas,
-and TRS animation curves. Camera/light conversion and application vertex unification remain
-in development.
+TRS animation curves, camera projections, and light definitions. Application vertex unification
+remains in development.
 Bounded snapshots are available separately for test and debug evidence.
 
 ## Goals
@@ -137,8 +137,9 @@ normals, tangents, and authored Matrix/TRS transforms follow one basis conversio
 lanes move all Corner tuples with their indices. Inverse binds and skin corrections use matrix
 conjugation, morph positions follow unit-scaled basis conversion, and animation values and cubic
 derivatives follow their target semantics without normalization. The report retains source/target
-facts and actual
-assumptions after either Scene is dropped. Present semantics the current operation cannot convert
+facts and actual assumptions after either Scene is dropped. Camera/light intrinsic axes transform
+with the basis while node hierarchy stays fixed; projection distances and light ranges scale with
+units, and photometric intensity stays unchanged. Present semantics the current operation cannot convert
 return typed capability errors and the original Scene. See the
 [coordinate contract](docs/model/coordinate-and-render-conventions.md) for the current boundary.
 

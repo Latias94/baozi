@@ -38,9 +38,13 @@ use super::{
 const OBJ_POSITIONS: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
 const OBJ_TEXCOORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.5, 0.5]];
 const OBJ_NORMALS: [[f32; 3]; 2] = [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
-const KNOWN_OBJ_CAPABILITY_DIGEST: [u8; 32] = [
+const PREVIOUS_OBJ_CAPABILITY_DIGEST: [u8; 32] = [
     0x45, 0x12, 0x6f, 0x21, 0x0c, 0x1a, 0x56, 0x40, 0x0c, 0x33, 0xc3, 0x50, 0x2e, 0x64, 0xcd, 0xbc,
     0xd4, 0x0b, 0x56, 0x43, 0x0d, 0x9c, 0x63, 0xb5, 0x8d, 0x6f, 0xc4, 0x86, 0x70, 0x34, 0x19, 0xc2,
+];
+const KNOWN_OBJ_CAPABILITY_DIGEST: [u8; 32] = [
+    0x1b, 0x31, 0xf2, 0x40, 0xbe, 0x1f, 0x7e, 0xbc, 0xfe, 0x69, 0x6b, 0x3a, 0x3b, 0x8b, 0xe6, 0xb3,
+    0x2a, 0x7d, 0x8c, 0x99, 0x2b, 0x30, 0xf6, 0xb9, 0xd6, 0x8f, 0x20, 0x90, 0x25, 0x1d, 0x48, 0xdc,
 ];
 const OBJ_FACES: [ObjTriangle; 2] = [
     ObjTriangle {
@@ -894,24 +898,19 @@ fn normalized_obj_corner_fixture_closes_the_canonical_scene_path() {
     assert_eq!(canonical_shape.face_count, 2);
     let (full, bounded) = capture_obj_capability_snapshots_for_probe(&parts);
 
-    // Independently constrain the schema change: restoring only revision 3 and its unknown
-    // transform tag must reproduce the previously pinned complete fixture. No other payload,
-    // ordering, scalar, or provenance change is accepted by this derivation.
+    // This fixture contains no camera/light rows: only the revision word changes.
+    // Restoring revision 4 must reproduce the previous complete transcript digest;
+    // unrelated payload, ordering, scalar, and provenance changes remain excluded.
     let (_, transcript) =
         capture_node_scene_with_test_transcript(&parts.scene, snapshot_limits(8_192, 64), None)
             .expect("bounded complete OBJ transcript");
     assert!(transcript.complete);
     let mut previous = transcript.bytes;
-    assert_eq!(&previous[40..44], &4_u32.to_le_bytes());
-    previous[40..44].copy_from_slice(&3_u32.to_le_bytes());
-    previous.splice(76..76, [0xae, 0x00]);
+    assert_eq!(&previous[40..44], &5_u32.to_le_bytes());
+    previous[40..44].copy_from_slice(&4_u32.to_le_bytes());
     assert_eq!(
-        <[u8; 32]>::from(Sha256::digest(previous)),
-        [
-            0xd2, 0x46, 0x7b, 0xcb, 0x96, 0xef, 0x6b, 0x7d, 0x39, 0xf6, 0x2c, 0xab, 0xfa, 0x08,
-            0x9b, 0xf6, 0xb6, 0xe3, 0xb6, 0x15, 0xa2, 0xf4, 0xff, 0xd7, 0x24, 0x15, 0x10, 0xb4,
-            0xd0, 0x8b, 0x43, 0xda,
-        ]
+        <[u8; 32]>::from(Sha256::digest(&previous)),
+        PREVIOUS_OBJ_CAPABILITY_DIGEST
     );
     assert_eq!(full.digest, KNOWN_OBJ_CAPABILITY_DIGEST);
     assert_eq!(bounded.digest, full.digest);

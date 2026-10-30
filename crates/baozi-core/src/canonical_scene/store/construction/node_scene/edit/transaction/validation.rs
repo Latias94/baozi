@@ -75,10 +75,7 @@ impl SceneEditPostflight<'_> {
                         if Some(output.facts) == expected {
                             if let Some(counts) = validate_changed_root(session, evidence, &recipe)?
                             {
-                                if storage.validate_correspondence(&scene.tables, session)?
-                                    && self
-                                        .validate_spatial_correspondence(&scene.tables, session)?
-                                {
+                                if storage.validate_correspondence(&scene.tables, session)? {
                                     let mut scratch = scratch.metered_view();
                                     validate_node_scene_canonical_graph_metered(
                                         session,

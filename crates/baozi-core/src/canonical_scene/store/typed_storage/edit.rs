@@ -19,6 +19,7 @@ pub(in crate::canonical_scene::store) mod space_animation;
 pub(in crate::canonical_scene::store) mod space_deformation;
 pub(in crate::canonical_scene::store) mod space_geometry;
 pub(in crate::canonical_scene::store) mod space_nodes;
+pub(in crate::canonical_scene::store) mod space_spatial;
 
 type EditResult<T, E> = Result<T, TypedStorageBuildError<E>>;
 

@@ -268,15 +268,15 @@ Points and line streams retain their Corner order. Nonempty Polygons, TriangleSt
 TriangleFan require a separately implemented lowering before a conversion needing reversal.
 
 Node conversion preserves authored Matrix/TRS form, hierarchy, names, and attachments. The new
-spatial owner changes only the target's five facts; UV origin, tangent basis/encoding, and eligible
-camera/light definitions remain bit-preserved. Declaration-only and winding-only edits share
+spatial owner changes the target's five facts and converts complete camera/light definitions;
+UV origin and tangent basis/encoding remain preserved. Declaration-only and winding-only edits share
 unaffected typed tables. Scene provenance records the resolved conversion. Changed Node,
-Primitive, Attribute, Skin, MorphDelta, and AnimationChannel owners retain their own attachments
+Primitive, Attribute, Skin, MorphDelta, AnimationChannel, Camera, and Light owners retain their own attachments
 together with the input Scene's attachments as operation parents. Metadata descriptors and immutable payloads retain their owners
 and values. Central validation compares the actual replacement tables with the exact borrowed
 source plan, including preserved values, and validates all published conversion facts.
 
-One closed `SceneSpacePlan` constructs every domain plan against the same immutable `SceneTables`
+One closed `SceneSpacePlan` constructs node, geometry, deformation, animation, and spatial plans against the same immutable `SceneTables`
 and conversion. Its private fields prevent replacement of an individual domain plan; binding it
 to another Scene root fails before profile planning even when both Scenes have the same generation.
 Preflight covers every numeric payload before retained output admission. Its fixed correspondence
@@ -292,8 +292,15 @@ stopping after the first difference. Lineage and state construction each admit t
 selection pass. Winding-only and declaration-only edits bypass these selection scans while still
 checking actual shared-domain correspondence.
 
-This increment has an explicit capability boundary. Coordinate or unit changes reject actual
-cameras or lights until their local-frame rules are implemented.
+Camera/light intrinsic reference axes compose as `B' = Q B`, including reflections. Camera
+clipping distances and orthographic half-extents, and finite light ranges, scale with units.
+Node counts, hierarchy, attachments, and logical references remain unchanged, including through
+repeated conversions. FOV/aspect, cone angles, canonical tint, and photometric intensity retain
+their bits. Rounded camera planes must still satisfy their strict ordering. The same source-bound
+spatial plan preflights and checks actual correspondence; no separate declaration-only validator
+can approve an unconverted definition.
+
+The remaining capability boundary concerns material and unknown spatial semantics.
 Scene-unit thickness and displacement must be zero when units change; non-UV coordinate sources
 reject coordinate changes. Custom attributes reject numeric conversion because their spatial
 meaning is unknown; a winding-only conversion can retain and permute opaque Corner tuples.

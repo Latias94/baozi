@@ -70,6 +70,95 @@ fn axis(axis: Axis) -> [f32; 3] {
     }
 }
 
+#[test]
+fn intrinsic_frames_compose_on_the_left_keep_reflection_and_roundtrip_all_48_states() {
+    let mut frames = Vec::new();
+    for right in AXES {
+        for up in AXES {
+            for forward in AXES {
+                if let Ok(frame) = crate::LocalAxes::try_new(right, up, forward) {
+                    frames.push(frame);
+                }
+            }
+        }
+    }
+    assert_eq!(frames.len(), 48);
+    for target in all_bases() {
+        let target = with_units(target, 0.5);
+        let conversion =
+            SpaceConversion::try_new(&scene(TargetSpace::STANDARD), target, None).unwrap();
+        let inverse =
+            SpaceConversion::try_new(&scene(target), TargetSpace::STANDARD, None).unwrap();
+        let measured = allocation_counter::measure(|| {
+            for &frame in &frames {
+                let converted = conversion.local_axes(frame).unwrap();
+                assert_eq!(
+                    axis(converted.right()),
+                    conversion.direction(axis(frame.right())).unwrap()
+                );
+                assert_eq!(
+                    axis(converted.up()),
+                    conversion.direction(axis(frame.up())).unwrap()
+                );
+                assert_eq!(
+                    axis(converted.forward()),
+                    conversion.direction(axis(frame.forward())).unwrap()
+                );
+                assert_eq!(inverse.local_axes(converted), Some(frame));
+            }
+        });
+        assert_eq!(measured.count_total, 0);
+    }
+    let mirror = TargetSpace::try_new(
+        Handedness::Left,
+        Axis::PositiveY,
+        Axis::NegativeZ,
+        1.0,
+        FrontFaceWinding::CounterClockwise,
+    )
+    .unwrap();
+    let conversion = SpaceConversion::try_new(&scene(TargetSpace::STANDARD), mirror, None).unwrap();
+    assert_eq!(
+        conversion.local_axes(crate::LocalAxes::STANDARD),
+        Some(crate::LocalAxes::try_new(Axis::NegativeX, Axis::PositiveY, Axis::NegativeZ).unwrap()),
+        "reconstructing right from the other two axes would lose this reflection",
+    );
+}
+
+#[test]
+fn scene_unit_length_is_independent_of_basis_and_keeps_zero_sign_and_numeric_failures() {
+    let conversion = SpaceConversion::try_new(
+        &scene(TargetSpace::STANDARD),
+        reflection_target(FrontFaceWinding::CounterClockwise),
+        None,
+    )
+    .unwrap();
+    assert_eq!(conversion.length(3.0), Ok(6.0));
+    assert_eq!(conversion.length(-3.0), Ok(-6.0));
+    assert_eq!(
+        conversion.length(-0.0).unwrap().to_bits(),
+        (-0.0_f32).to_bits()
+    );
+    assert_eq!(
+        conversion.length(f32::MAX),
+        Err(NumericConversionError::NonFiniteOutput)
+    );
+    assert_eq!(
+        conversion.length(f32::NAN),
+        Err(NumericConversionError::NonFiniteOutput)
+    );
+    let half = SpaceConversion::try_new(
+        &scene(TargetSpace::STANDARD),
+        with_units(TargetSpace::STANDARD, 2.0),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        half.length(f32::from_bits(1)),
+        Err(NumericConversionError::UnderflowToZero)
+    );
+}
+
 fn bits(value: [f32; 3]) -> [u32; 3] {
     value.map(f32::to_bits)
 }

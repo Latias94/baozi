@@ -16,8 +16,8 @@ The [glTF/GLB restrictions](https://github.com/Latias94/baozi/blob/main/docs/for
 scene closure, limited topology and extension support, and encoded images without
 pixel decoding. Optional `postprocess` provides single-primitive triangulation,
 flat/smooth normals, and whole-Scene coordinate/unit conversion including skin
-matrices, morph deltas, and TRS animation curves. Camera and light conversion remains
-unsupported.
+matrices, morph deltas, TRS animation curves, camera projections, and light definitions.
+Camera/light reference frames include reflection without adding placement nodes.
 
 Use memory or custom asset IO for portable imports. `native-fs-candidate` is opt-in
 and limited to `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and

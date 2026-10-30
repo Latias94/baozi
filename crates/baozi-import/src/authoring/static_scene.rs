@@ -1,18 +1,18 @@
 //! Borrowed static Scene input with session-owned document provenance.
 
 use super::{
-    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, ContentDigest, DIGEST_LEN,
-    DeformationAuthoringBatch, FormatId, GeometryAttributeAuthoring, GeometryAuthoringBatch,
-    GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring,
-    ImageAuthoring, LineageAuthoringBatch, LogicalMorphAuthoring, MAX_RESOURCE_IDENTITY_LEN,
-    MaterialAuthoring, MaterialBindingAuthoring, MeshInstanceDeformationAuthoring,
-    MetadataAuthoringBatch, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
-    ObservedResourceAuthoring, OwnerProvenanceAuthoring, Presence, PrimitiveDeformationAuthoring,
-    ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
-    ResourceIdentity, ResourceIdentityError, ResourceIdentityLocalId, ResourceSnapshotAuthoring,
-    SamplerAuthoring, SceneAuthoringBatch, SceneSpace, SessionOpaqueReason,
-    SourceIdentityAuthoring, SourceIdentityLocalId, SourceObjectKind, SourceObjectLocator,
-    SpatialAuthoringBatch, TextureAuthoring,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, CameraProjection,
+    ContentDigest, DIGEST_LEN, DeformationAuthoringBatch, FormatId, GeometryAttributeAuthoring,
+    GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
+    GeometryPrimitiveAuthoring, ImageAuthoring, LightDefinition, LineageAuthoringBatch,
+    LogicalMorphAuthoring, MAX_RESOURCE_IDENTITY_LEN, MaterialAuthoring, MaterialBindingAuthoring,
+    MeshInstanceDeformationAuthoring, MetadataAuthoringBatch, NodeAuthoringBatch,
+    NodeAuthoringNode, NodeLocalId, ObservedResourceAuthoring, OwnerProvenanceAuthoring, Presence,
+    PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId,
+    ProvenanceNodeAuthoring, ResourceIdentity, ResourceIdentityError, ResourceIdentityLocalId,
+    ResourceSnapshotAuthoring, SamplerAuthoring, SceneAuthoringBatch, SceneSpace,
+    SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId, SourceObjectKind,
+    SourceObjectLocator, SpatialAuthoringBatch, TextureAuthoring,
 };
 use crate::metered_storage::capacity_plan_cause;
 use crate::{ImportStorageClass, ManifestDigest, MeteredOpaqueAllowance, ParseResult, ParseScope};
@@ -20,7 +20,7 @@ use baozi_operation::CapacityPlan;
 
 static UNKNOWN_SPACE: SceneSpace = SceneSpace::UNKNOWN;
 
-/// Borrowed node, geometry, and appearance input for a static Scene.
+/// Borrowed node, spatial, geometry, and appearance input for a static Scene.
 ///
 /// Construction allocates nothing. Space declarations default to unknown; geometry and
 /// appearance default to empty. Submission fills geometry-aligned empty deformation rows and
@@ -29,13 +29,15 @@ static UNKNOWN_SPACE: SceneSpace = SceneSpace::UNKNOWN;
 /// generated-operation provenance.
 ///
 /// Images may carry encoded bytes or reference primary-document resource zero. Importers that
-/// need other resource identities, metadata, cameras, lights, deformation, animation, or more
+/// need other resource identities, metadata, deformation, animation, or more
 /// precise provenance should use [`ParseScope::submit_scene`] with [`SceneAuthoringBatch`].
 /// All input still passes through the same central Scene validation and publication boundary.
 #[derive(Debug, Clone, Copy)]
 #[must_use = "submit borrowed static Scene input through ParseScope::submit_static_scene"]
 pub struct StaticSceneBuilder<'input> {
     scene_space: &'input SceneSpace,
+    cameras: &'input [CameraProjection],
+    lights: &'input [LightDefinition],
     roots: Presence<&'input [NodeLocalId]>,
     nodes: &'input [NodeAuthoringNode<'input>],
     logical_meshes: &'input [GeometryLogicalMeshAuthoring<'input>],
@@ -57,6 +59,8 @@ impl<'input> StaticSceneBuilder<'input> {
     ) -> Self {
         Self {
             scene_space: &UNKNOWN_SPACE,
+            cameras: &[],
+            lights: &[],
             roots,
             nodes,
             logical_meshes: &[],
@@ -74,6 +78,17 @@ impl<'input> StaticSceneBuilder<'input> {
     /// Uses explicit source space declarations without transforming any input.
     pub const fn with_scene_space(mut self, scene_space: &'input SceneSpace) -> Self {
         self.scene_space = scene_space;
+        self
+    }
+
+    /// Borrows complete camera/light definitions; placement remains node-owned.
+    pub const fn with_spatial_definitions(
+        mut self,
+        cameras: &'input [CameraProjection],
+        lights: &'input [LightDefinition],
+    ) -> Self {
+        self.cameras = cameras;
+        self.lights = lights;
         self
     }
 
@@ -158,10 +173,12 @@ pub(crate) fn submit(
     )?;
 
     type OwnerConstructor = fn(u32) -> ProfileOwner;
-    let owner_domains: [(usize, OwnerConstructor); 10] = [
+    let owner_domains: [(usize, OwnerConstructor); 12] = [
         (input.nodes.len(), |index| {
             ProfileOwner::Node(NodeLocalId::new(index))
         }),
+        (input.cameras.len(), ProfileOwner::Camera),
+        (input.lights.len(), ProfileOwner::Light),
         (input.images.len(), ProfileOwner::Image),
         (input.samplers.len(), ProfileOwner::Sampler),
         (input.textures.len(), ProfileOwner::Texture),
@@ -203,7 +220,7 @@ pub(crate) fn submit(
         scope.primary_bytes(),
     )];
     scope.submit_scene(SceneAuthoringBatch::new(
-        SpatialAuthoringBatch::new(input.scene_space, &[], &[]),
+        SpatialAuthoringBatch::new(input.scene_space, input.cameras, input.lights),
         NodeAuthoringBatch::new(input.roots, input.nodes),
         AppearanceAuthoringBatch::new(
             input.images,

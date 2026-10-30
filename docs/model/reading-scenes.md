@@ -43,6 +43,17 @@ Node camera/light attachments follow to scene-owned definitions. `scene.space()`
 axes, units, winding, UV origin, and tangent conventions. Reading never assigns missing units or
 performs an implicit coordinate conversion.
 
+Match `camera.projection()` as `CameraProjection::Perspective(parameters)` or
+`CameraProjection::Orthographic(parameters)`. Each payload includes its complete `axes()` alongside
+FOV/aspect or half-extents and clipping distances. `light.definition()` returns the complete
+`LightDefinition`, including kind, axes, canonical tint, and photometric intensity.
+The old frame-free kind/tuple and light scalar getters are removed.
+
+`LocalAxes::basis_matrix()` maps the fixed optical reference coordinates (+X right, +Y up,
+-Z forward) into the attached node's local coordinates. Apply the node's evaluated placement
+after this basis. All three signed axes are independent, so reflected frames remain reflected.
+Coordinate conversion composes this intrinsic basis without adding nodes or changing attachments.
+
 ## Materials and images
 
 `primitive.material()` follows its optional material. A material exposes its authored name, shading

@@ -67,9 +67,7 @@ pub(super) use input::lineage::{
 #[cfg(test)]
 pub(super) use input::metadata::{MetadataAuthoringBatch, MetadataAuthoringEntry};
 #[cfg(test)]
-pub(super) use input::spatial::{
-    CameraAuthoring, CameraLocalId, LightAuthoring, LightLocalId, SpatialAuthoringBatch,
-};
+pub(super) use input::spatial::{CameraLocalId, LightLocalId, SpatialAuthoringBatch};
 #[cfg(test)]
 pub(super) use input::{NodeAuthoringNode, NodeLocalId, NodeParent};
 pub(super) use input::{Presence, SceneAuthoringBatch};

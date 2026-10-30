@@ -1,4 +1,4 @@
-use crate::entity::{CameraProjectionKind, LightKindCategory};
+use crate::entity::{CameraProjection, LightKindCategory};
 use crate::scene_space::{Axis, FrontFaceWinding, Handedness, UvOrigin};
 
 use super::super::semantic::{
@@ -43,6 +43,9 @@ pub(super) const TAG_CAMERA_ATTACHMENT: u8 = 196;
 pub(super) const TAG_LIGHT_ATTACHMENT: u8 = 197;
 const TAG_F64_BITS: u8 = 198;
 const TAG_F32_BITS: u8 = 199;
+const TAG_RIGHT_AXIS: u8 = 200;
+const TAG_LOCAL_UP_AXIS: u8 = 201;
+const TAG_FORWARD_AXIS: u8 = 202;
 
 const HANDEDNESS_UNKNOWN: u8 = 0;
 const HANDEDNESS_RIGHT: u8 = 1;
@@ -112,13 +115,15 @@ pub(super) fn write_spatial(
         transcript.tagged_usize(TAG_REFERENCE, camera.source_index())?;
         let render = preview.begin_geometry_item("camera", source_index)?;
         let projection = camera.projection();
-        match projection.kind() {
-            CameraProjectionKind::Perspective => {
-                let (primary, secondary, near, far) = projection.perspective_parameters().ok_or(
-                    NodeSceneSnapshotError::InconsistentView {
-                        reason: "perspective camera lost its canonical parameters",
-                    },
-                )?;
+        write_axes(projection.axes(), transcript, preview, work, render)?;
+        match projection {
+            CameraProjection::Perspective(parameters) => {
+                let (primary, secondary, near, far) = (
+                    parameters.vertical_fov_radians(),
+                    parameters.aspect_ratio(),
+                    parameters.near(),
+                    parameters.far(),
+                );
                 transcript.tagged_u8(TAG_PROJECTION, CAMERA_PERSPECTIVE)?;
                 preview.geometry_field_word(render, "projection", "perspective");
                 write_f32(
@@ -150,12 +155,13 @@ pub(super) fn write_spatial(
                 )?;
                 write_optional_f32(TAG_FAR, far, transcript, preview, work, render, "far_plane")?;
             }
-            CameraProjectionKind::Orthographic => {
-                let (primary, secondary, near, far) = projection.orthographic_parameters().ok_or(
-                    NodeSceneSnapshotError::InconsistentView {
-                        reason: "orthographic camera lost its canonical parameters",
-                    },
-                )?;
+            CameraProjection::Orthographic(parameters) => {
+                let (primary, secondary, near, far) = (
+                    parameters.horizontal_magnification(),
+                    parameters.vertical_magnification(),
+                    parameters.near(),
+                    parameters.far(),
+                );
                 transcript.tagged_u8(TAG_PROJECTION, CAMERA_ORTHOGRAPHIC)?;
                 preview.geometry_field_word(render, "projection", "orthographic");
                 write_f32(
@@ -215,7 +221,9 @@ pub(super) fn write_spatial(
         transcript.write_tag(TAG_LIGHT)?;
         transcript.tagged_usize(TAG_REFERENCE, light.source_index())?;
         let render = preview.begin_geometry_item("light", source_index)?;
-        let light_kind = light.kind();
+        let definition = light.definition();
+        write_axes(definition.axes(), transcript, preview, work, render)?;
+        let light_kind = definition.kind();
         let (kind, range, inner, outer, kind_name) = match light_kind.category() {
             LightKindCategory::Directional => (LIGHT_DIRECTIONAL, None, None, None, "directional"),
             LightKindCategory::Point => (LIGHT_POINT, light_kind.range(), None, None, "point"),
@@ -248,7 +256,7 @@ pub(super) fn write_spatial(
             render,
             "outer_cone",
         )?;
-        let tint = light.tint();
+        let tint = definition.tint();
         write_f32(
             TAG_TINT_RED,
             tint.x,
@@ -278,7 +286,7 @@ pub(super) fn write_spatial(
         )?;
         write_f32(
             TAG_INTENSITY,
-            light.intensity(),
+            definition.intensity(),
             transcript,
             preview,
             work,
@@ -289,6 +297,25 @@ pub(super) fn write_spatial(
     }
     transcript.tagged_usize(TAG_COLLECTION_TOTAL, counts.lights)?;
     preview.push_str("spatial_end\n");
+    Ok(())
+}
+
+fn write_axes(
+    axes: crate::LocalAxes,
+    transcript: &mut CanonicalDigestEncoder,
+    preview: &mut PreviewSink,
+    work: &mut SnapshotWorkMeter<'_>,
+    render: bool,
+) -> Result<(), NodeSceneSnapshotError> {
+    for (tag, name, axis) in [
+        (TAG_RIGHT_AXIS, "right_axis", axes.right()),
+        (TAG_LOCAL_UP_AXIS, "up_axis", axes.up()),
+        (TAG_FORWARD_AXIS, "forward_axis", axes.forward()),
+    ] {
+        work.observe()?;
+        transcript.tagged_u8(tag, encode_axis(axis))?;
+        preview.geometry_field_word(render, name, axis_name(axis));
+    }
     Ok(())
 }
 

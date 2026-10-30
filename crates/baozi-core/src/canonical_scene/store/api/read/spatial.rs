@@ -5,9 +5,8 @@ use super::super::super::construction::node_scene::semantic::{
     NodeSceneSpatialTangentBasis, NodeSceneSpatialTangentEncoding,
 };
 use super::{ValidatedScene, checked_index, expect_validated};
-use crate::entity::{CameraProjection, LightKind};
+use crate::entity::{CameraProjection, LightDefinition};
 use crate::identity::{CameraId, LightId, SceneEntityKind, SceneLookupError};
-use crate::math::Vec3;
 use crate::scene_space::{Axis, FrontFaceWinding, Handedness, UvOrigin};
 
 /// The authored tangent basis, including allocation-free borrowed extension identity.
@@ -76,23 +75,13 @@ impl<'s> LightRef<'s> {
     pub fn id(self) -> LightId {
         LightId::new(self.scene.generation(), self.index as u32)
     }
-    fn read(
-        self,
-    ) -> super::super::super::construction::node_scene::semantic::spatial::NodeSceneSpatialLight
-    {
+    /// Returns the complete definition, including its intrinsic axes and emission.
+    pub fn definition(self) -> LightDefinition {
         expect_validated(
             expect_validated(self.scene.as_node_scene().semantic_view()).light_at(self.index),
         )
         .expect("validated light row is absent")
-    }
-    pub fn kind(self) -> LightKind {
-        self.read().kind()
-    }
-    pub fn tint(self) -> Vec3 {
-        self.read().tint()
-    }
-    pub fn intensity(self) -> f32 {
-        self.read().intensity()
+        .definition()
     }
 }
 

@@ -119,10 +119,21 @@ pub enum SceneSpaceConversionIssue {
         key: usize,
         source: NumericConversionError,
     },
-    #[error("camera {camera} requires local-frame conversion")]
-    Camera { camera: u32 },
-    #[error("light {light} requires local-frame conversion")]
-    Light { light: u32 },
+    #[error("camera {camera} cannot be converted: {source}")]
+    NumericCamera {
+        camera: usize,
+        source: NumericConversionError,
+    },
+    #[error("camera {camera} projection cannot retain its constraints after conversion: {source}")]
+    CameraProjection {
+        camera: usize,
+        source: crate::CameraProjectionError,
+    },
+    #[error("light {light} cannot be converted: {source}")]
+    NumericLight {
+        light: usize,
+        source: NumericConversionError,
+    },
     #[error("material {material} has a nonzero scene-unit thickness")]
     MaterialThickness { material: u32 },
     #[error("material {material} binding {binding} has a nonzero scene-unit displacement strength")]
@@ -176,16 +187,6 @@ pub(super) fn check_capabilities<
     let conversion = resolved.conversion;
     if conversion.changes_coordinates() {
         let counts = control.run_unit(|| input.as_node_scene().proof.counts())?;
-        let unsupported = if counts.camera_count != 0 {
-            Some(SceneSpaceConversionIssue::Camera { camera: 0 })
-        } else if counts.light_count != 0 {
-            Some(SceneSpaceConversionIssue::Light { light: 0 })
-        } else {
-            None
-        };
-        if let Some(issue) = unsupported {
-            return Err(issue.into());
-        }
         for material_index in 0..counts.material_count {
             let material = control
                 .run_unit(|| {
@@ -272,59 +273,4 @@ pub(super) fn tangent_requires_encoding(input: &ValidatedScene, attribute: usize
             .tangent_handedness_encoding,
         TangentHandednessEncoding::SignInW
     )
-}
-
-impl super::SceneEditPostflight<'_> {
-    pub(super) fn validate_spatial_correspondence<
-        C: crate::canonical_scene::store::typed_storage::validation::TypedStorageValidationControl,
-    >(
-        &self,
-        actual: &crate::canonical_scene::store::typed_storage::SceneTables,
-        control: &mut C,
-    ) -> Result<bool, C::Error> {
-        let super::EditRequest::ConvertSpace(resolved) = self.replacement else {
-            return Ok(true);
-        };
-        let source = self.input.as_node_scene().tables.spatial.as_ref();
-        let actual = actual.spatial.as_ref();
-        if source.cameras.len() != actual.cameras.len()
-            || source.lights.len() != actual.lights.len()
-        {
-            return Ok(false);
-        }
-        if control.run_unit(|| {
-            let target = resolved.target();
-            let mut expected = source.space.clone();
-            expected.handedness = target.handedness();
-            expected.up_axis = target.up_axis();
-            expected.front_axis = target.front_axis();
-            expected.unit_scale_to_meters = Some(target.unit_scale_to_meters());
-            expected.front_face_winding = target.front_face_winding();
-            actual.space == expected
-                && actual.space.unit_scale_to_meters.map(f64::to_bits)
-                    == expected.unit_scale_to_meters.map(f64::to_bits)
-        })? != Some(true)
-        {
-            return Ok(false);
-        }
-        for (source, actual) in source.cameras.iter().zip(&actual.cameras) {
-            // Canonical projections contain finite parameters and canonical positive zero.
-            if control.run_unit(|| source == actual)? != Some(true) {
-                return Ok(false);
-            }
-        }
-        for (source, actual) in source.lights.iter().zip(&actual.lights) {
-            if control.run_unit(|| {
-                source.kind == actual.kind
-                    && source.tint.x.to_bits() == actual.tint.x.to_bits()
-                    && source.tint.y.to_bits() == actual.tint.y.to_bits()
-                    && source.tint.z.to_bits() == actual.tint.z.to_bits()
-                    && source.intensity.to_bits() == actual.intensity.to_bits()
-            })? != Some(true)
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
 }

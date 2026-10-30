@@ -157,6 +157,13 @@ Quaternion derivatives remain arbitrary finite Vec4 values, including zero/nonun
 neither samples nor derivatives receive sign canonicalization or normalization. Key times and
 time-domain rates are unchanged.
 
+Camera/light reference coordinates retain a complete `LocalAxes` signed permutation, with
+reference-to-node matrix `B = [right, up, -forward]`. Conversion composes `B' = Q B` while nodes
+continue to use `H M H^-1`. It does not append compensation nodes or derive one intrinsic axis
+from a fixed-handedness cross product. Camera lengths and finite light ranges scale by `s`;
+photometric intensity remains independent of Scene length units. ADR 0040 owns the complete
+projection/emission reference contract and post-rounding plane constraints.
+
 Triangle lanes reverse exactly when `(det(Q) < 0) XOR (source_winding != target_winding)`.
 Index and every Corner tuple follow the same `[0, 2, 1]` permutation. A winding-only change does
 not multiply tangent `w` again. Transported normals retain their physical direction; independently

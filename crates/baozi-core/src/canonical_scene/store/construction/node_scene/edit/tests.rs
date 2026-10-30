@@ -5,13 +5,11 @@ use baozi_operation::{
     StorePreparationFailureClass, StoreTerminalCause,
 };
 
-use crate::SceneValidationLimits;
 use crate::canonical_scene::store::api::scene::ValidatedScene;
 use crate::canonical_scene::store::production::{
-    AnimationAuthoringBatch, AppearanceAuthoringBatch, CameraAuthoring, CameraLocalId,
-    DeformationAuthoringBatch, GeometryAuthoringBatch, LightAuthoring, LightLocalId,
-    NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence, SceneAuthoringBatch,
-    SpatialAuthoringBatch,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, CameraLocalId, DeformationAuthoringBatch,
+    GeometryAuthoringBatch, LightLocalId, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
+    Presence, SceneAuthoringBatch, SpatialAuthoringBatch,
 };
 use crate::canonical_scene::store::profile_provenance::{
     corrupt_profile_reference_for_test, issued_profile_segment_nonce_count_for_test,
@@ -19,13 +17,16 @@ use crate::canonical_scene::store::profile_provenance::{
 use crate::canonical_scene::store::typed_storage::profile::{
     StoredOperationKind, StoredProvenanceKind,
 };
-use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
+use crate::entity::{
+    AuthoredTransform, CameraProjection, LightDefinition, LightEmission, LightKind,
+};
 use crate::identity::{
     NodeId, SceneEntityKind, SceneGenerationError, SceneGenerationId, SceneLookupError,
 };
 use crate::math::{Color, Mat4, Quat, Vec3};
 use crate::provenance::{DIGEST_LEN, OptionsDigest};
 use crate::scene_space::SceneSpace;
+use crate::{LocalAxes, SceneValidationLimits};
 
 use super::super::tests::{
     build_gltf_capability_scene_for_probe, profile_fixture, single_trs_batch, test_account,
@@ -125,8 +126,12 @@ fn build_spatial_scene(
         Presence::Present(CameraLocalId::new(0)),
         Presence::Present(LightLocalId::new(0)),
     )];
-    let cameras = [CameraAuthoring::new(projection)];
-    let lights = [LightAuthoring::new(light_kind, emission)];
+    let cameras = [projection];
+    let lights = [LightDefinition::new(
+        light_kind,
+        LocalAxes::STANDARD,
+        emission,
+    )];
     let spatial = SpatialAuthoringBatch::new(&scene_space, &cameras, &lights);
     let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
     let appearance = AppearanceAuthoringBatch::empty();
@@ -172,7 +177,7 @@ fn build_spatial_scene(
 
 fn spatial_fixture_values() -> (CameraProjection, LightKind, LightEmission) {
     (
-        CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
+        CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.1, Some(100.0))
             .expect("spatial edit camera"),
         LightKind::point(Some(50.0)).expect("spatial edit point light"),
         LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 10.0)
@@ -194,10 +199,11 @@ fn assert_populated_spatial_scene(scene: &SceneStorage) {
     assert_eq!(storage.space, SceneSpace::STANDARD_TARGET);
     assert_eq!(storage.cameras.as_slice(), &[projection]);
     assert_eq!(storage.lights.len(), 1);
-    assert_eq!(storage.lights[0].kind, light_kind);
-    assert_eq!(storage.lights[0].tint, emission.tint());
+    assert_eq!(storage.lights[0].kind(), light_kind);
+    assert_eq!(storage.lights[0].axes(), LocalAxes::STANDARD);
+    assert_eq!(storage.lights[0].tint(), emission.tint());
     assert_eq!(
-        storage.lights[0].intensity.to_bits(),
+        storage.lights[0].intensity().to_bits(),
         emission.intensity().to_bits()
     );
 
@@ -220,8 +226,10 @@ fn assert_populated_spatial_scene(scene: &SceneStorage) {
     let light = view
         .light_at(0)
         .expect("surviving light read")
-        .expect("surviving light zero");
+        .expect("surviving light zero")
+        .definition();
     assert_eq!(light.kind(), light_kind);
+    assert_eq!(light.axes(), LocalAxes::STANDARD);
     assert_eq!(light.tint(), emission.tint());
     assert_eq!(light.intensity().to_bits(), emission.intensity().to_bits());
 }
@@ -1020,8 +1028,10 @@ fn shape_changing_edit_preserves_spatial_values_and_attachment_closure() {
     let light = view
         .light_at(0)
         .expect("edited light view")
-        .expect("edited light zero");
+        .expect("edited light zero")
+        .definition();
     assert_eq!(light.kind(), light_kind);
+    assert_eq!(light.axes(), LocalAxes::STANDARD);
     assert_eq!(light.tint(), emission.tint());
     assert_eq!(light.intensity().to_bits(), emission.intensity().to_bits());
 

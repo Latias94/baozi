@@ -2,9 +2,10 @@
 
 use baozi::{AttributeData, AuthoredTransformKind, Importer, Mat4, SceneValidationError};
 use baozi_import::authoring::{
-    AttributeDomain, AttributeSemantic, AuthoredTransform, AuthoringRange,
-    GeometryAttributeAuthoring, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
-    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LogicalMeshLocalId, NodeAuthoringNode,
+    AttributeDomain, AttributeSemantic, AuthoredTransform, AuthoringRange, CameraLocalId,
+    CameraProjection, Color, GeometryAttributeAuthoring, GeometryLogicalMeshAuthoring,
+    GeometryMeshInstanceAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
+    LightDefinition, LightKind, LightLocalId, LocalAxes, LogicalMeshLocalId, NodeAuthoringNode,
     NodeLocalId, NodeParent, Presence, StaticSceneBuilder,
 };
 use baozi_import::{
@@ -55,8 +56,8 @@ impl FormatImporter for CustomScene {
             NodeAuthoringNode::new(
                 Presence::Present(NodeParent::new(NodeLocalId::new(parent), 0)),
                 AuthoredTransform::identity_trs(),
-                Presence::Absent,
-                Presence::Absent,
+                Presence::Present(CameraLocalId::new(0)),
+                Presence::Present(LightLocalId::new(0)),
             ),
             NodeAuthoringNode::new(
                 Presence::Absent,
@@ -105,13 +106,20 @@ impl FormatImporter for CustomScene {
             NodeLocalId::new(1),
             LogicalMeshLocalId::new(0),
         )];
+        let cameras =
+            [CameraProjection::orthographic(LocalAxes::STANDARD, 2.0, 3.0, 0.0, 10.0).unwrap()];
+        let lights = [LightDefinition::try_from_scaled_linear_srgb(
+            LightKind::spot(Some(5.0), 0.25, 0.5).unwrap(),
+            LocalAxes::STANDARD,
+            Color::WHITE,
+            7.0,
+        )
+        .unwrap()];
         scope.submit_static_scene(
-            StaticSceneBuilder::new(Presence::Present(&roots), &nodes).with_geometry(
-                &meshes,
-                &primitives,
-                &attributes,
-                &instances,
-            ),
+            StaticSceneBuilder::new(Presence::Present(&roots), &nodes)
+                .with_scene_space(&baozi::SceneSpace::STANDARD_TARGET)
+                .with_spatial_definitions(&cameras, &lights)
+                .with_geometry(&meshes, &primitives, &attributes, &instances),
         )
     }
 }
@@ -172,6 +180,23 @@ pub(super) fn verify() -> baozi::Result<()> {
     assert_eq!(indices, &[1]);
     assert_eq!(values, &[0.0, 0.0, 1.0]);
     assert_eq!(default, &[0.0, 0.0, 0.0]);
+    let CameraProjection::Orthographic(camera) = child.camera().unwrap().projection() else {
+        panic!("custom orthographic camera");
+    };
+    assert_eq!(camera.axes(), LocalAxes::STANDARD);
+    assert_eq!(camera.horizontal_magnification(), 2.0);
+    assert_eq!(
+        child.light().unwrap().definition().kind().range(),
+        Some(5.0)
+    );
+
+    #[cfg(feature = "postprocess")]
+    verify_spatial_conversion(
+        importer
+            .read_bytes("spatial.custom", b"valid")?
+            .into_parts()
+            .0,
+    );
 
     for (bytes, expected) in [
         (
@@ -200,4 +225,67 @@ pub(super) fn verify() -> baozi::Result<()> {
         assert_eq!(failure.source_identity().as_str(), "invalid.custom");
     }
     Ok(())
+}
+
+#[cfg(feature = "postprocess")]
+fn verify_spatial_conversion(scene: baozi::ValidatedScene) {
+    use baozi::{
+        Axis, FrontFaceWinding, Handedness, TargetSpace,
+        postprocess::{PostProcessControl, SpaceConversionOptions, convert_scene_space},
+    };
+    let count = scene.node_count();
+    // Q(x,y,z)=(-x,-z,y), s=2; the optical reference frame changes, hierarchy does not.
+    let target = TargetSpace::try_new(
+        Handedness::Left,
+        Axis::PositiveZ,
+        Axis::PositiveY,
+        0.5,
+        FrontFaceWinding::CounterClockwise,
+    )
+    .unwrap();
+    let (scene, report) = convert_scene_space(
+        scene,
+        SpaceConversionOptions {
+            target,
+            source_assumptions: None,
+        },
+        PostProcessControl::default(),
+    )
+    .unwrap()
+    .into_parts();
+    assert!(report.matches_scene(&scene));
+    assert_eq!(scene.node_count(), count);
+    let child = scene.roots().nth(1).unwrap().children().next().unwrap();
+    let axes = LocalAxes::try_new(Axis::NegativeX, Axis::PositiveZ, Axis::PositiveY).unwrap();
+    let CameraProjection::Orthographic(camera) = child.camera().unwrap().projection() else {
+        panic!("converted orthographic camera");
+    };
+    assert_eq!(camera.axes(), axes);
+    assert_eq!(camera.horizontal_magnification(), 4.0);
+    assert_eq!(camera.vertical_magnification(), 6.0);
+    assert_eq!(camera.near(), 0.0);
+    assert_eq!(camera.far(), 20.0);
+    let light = child.light().unwrap().definition();
+    assert_eq!(light.axes(), axes);
+    assert_eq!(light.kind().range(), Some(10.0));
+    assert_eq!(light.kind().inner_cone_radians(), Some(0.25));
+    assert_eq!(light.kind().outer_cone_radians(), Some(0.5));
+    assert_eq!(light.intensity(), 7.0);
+    let (scene, inverse) = convert_scene_space(
+        scene,
+        SpaceConversionOptions::default(),
+        PostProcessControl::default(),
+    )
+    .unwrap()
+    .into_parts();
+    assert!(inverse.matches_scene(&scene));
+    assert_eq!(scene.node_count(), count);
+    assert_eq!(
+        scene.cameras().next().unwrap().projection().axes(),
+        LocalAxes::STANDARD
+    );
+    assert_eq!(
+        scene.lights().next().unwrap().definition().axes(),
+        LocalAxes::STANDARD
+    );
 }

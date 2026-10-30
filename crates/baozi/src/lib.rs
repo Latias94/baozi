@@ -49,7 +49,10 @@ pub use baozi_core::{
     SceneEntityKind, SceneLookupError, SceneSpaceRef, TangentBasisRef, TangentEncodingRef,
     TexelFilter, TextureAddressMode, TextureId, TextureRef, TopologyKind, TrsTransform, UvOrigin,
 };
-pub use baozi_core::{CameraProjectionError, CameraProjectionKind, LightError, LightKindCategory};
+pub use baozi_core::{
+    CameraProjectionError, LightDefinition, LightEmissionError, LightError, LightKindCategory,
+    LocalAxes, LocalAxesError, LocalAxis, OrthographicProjection, PerspectiveProjection,
+};
 pub use baozi_core::{
     ConventionValue, NumericConversionError, SceneSpace, SceneSpaceField,
     SceneSpaceValidationError, SourceSpaceError, TangentBasisConvention, TangentHandednessEncoding,

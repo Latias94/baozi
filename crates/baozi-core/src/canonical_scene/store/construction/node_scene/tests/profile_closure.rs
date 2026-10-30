@@ -2,7 +2,6 @@ use std::sync::atomic::AtomicU64;
 
 use baozi_operation::{PhysicalStorageAccount, PhysicalStorageAccountSnapshot, StoreRuntimeError};
 
-use crate::SceneValidationLimits;
 use crate::canonical_scene::store::construction::node_scene::semantic::{
     NodeSceneProfileMetadataValue, NodeSceneProfileProvenanceKind,
     NodeSceneProfileResourceStability, NodeSceneProfileSourceLocator, NodeSceneProfileStep,
@@ -17,16 +16,18 @@ use crate::canonical_scene::store::construction::node_scene::{
 };
 use crate::canonical_scene::store::construction::{STORE_DIMENSION, SceneConstructionError};
 use crate::canonical_scene::store::production::{
-    AnimationAuthoringBatch, AppearanceAuthoringBatch, CameraAuthoring, CameraLocalId,
-    CanonicalProfileOwner, DeformationAuthoringBatch, GeometryAuthoringBatch, LightAuthoring,
-    LightLocalId, MetadataAuthoringBatch, MetadataAuthoringEntry, NodeAuthoringBatch,
-    NodeAuthoringNode, NodeLocalId, OwnerProvenanceAuthoring, Presence, ProfileAuthoringFailure,
-    ProfileAuthoringLimit, ProfileAuthoringSemanticError, ProfileOwner, ProvenanceLocalId,
-    ProvenanceNodeAuthoring, ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason,
-    SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch, SpatialAuthoringFailure,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, CameraLocalId, CanonicalProfileOwner,
+    DeformationAuthoringBatch, GeometryAuthoringBatch, LightLocalId, MetadataAuthoringBatch,
+    MetadataAuthoringEntry, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId,
+    OwnerProvenanceAuthoring, Presence, ProfileAuthoringFailure, ProfileAuthoringLimit,
+    ProfileAuthoringSemanticError, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
+    ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason, SourceIdentityAuthoring,
+    SourceIdentityLocalId, SpatialAuthoringBatch, SpatialAuthoringFailure,
     SpatialAuthoringSemanticError,
 };
-use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
+use crate::entity::{
+    AuthoredTransform, CameraProjection, LightDefinition, LightEmission, LightKind,
+};
 use crate::extension::{ExtensionMediaType, ExtensionSchemaId, ExtensionValueRef};
 use crate::identity::SceneGenerationId;
 use crate::math::Color;
@@ -36,6 +37,7 @@ use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
     TangentHandednessEncoding, UvOrigin,
 };
+use crate::{LocalAxes, SceneValidationLimits};
 
 use super::{profile_fixture, terminal_failure_class, terminal_failure_code, test_limits};
 
@@ -292,13 +294,19 @@ fn with_profile_closure_input_variant<R>(
         Presence::Present(variant.camera()),
         Presence::Present(variant.light()),
     )];
-    let camera_projection = CameraProjection::perspective(0.75, Some(16.0 / 9.0), 0.1, Some(500.0))
-        .expect("profile-closure camera projection");
-    let cameras = [CameraAuthoring::new(camera_projection)];
+    let camera_projection = CameraProjection::perspective(
+        LocalAxes::STANDARD,
+        0.75,
+        Some(16.0 / 9.0),
+        0.1,
+        Some(500.0),
+    )
+    .expect("profile-closure camera projection");
+    let cameras = [camera_projection];
     let light = LightKind::point(Some(25.0)).expect("profile-closure point light");
     let emission = LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 4.0)
         .expect("profile-closure light emission");
-    let lights = [LightAuthoring::new(light, emission)];
+    let lights = [LightDefinition::new(light, LocalAxes::STANDARD, emission)];
     let scene_space = profile_scene_space(variant);
     let spatial = SpatialAuthoringBatch::new(&scene_space, &cameras, &lights);
     let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);

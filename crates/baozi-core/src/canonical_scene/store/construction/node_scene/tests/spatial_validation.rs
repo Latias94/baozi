@@ -1,11 +1,10 @@
 use super::*;
-use crate::canonical_scene::store::production::{
-    CameraAuthoring, CameraLocalId, LightAuthoring, LightLocalId,
-};
+use crate::LocalAxes;
+use crate::canonical_scene::store::production::{CameraLocalId, LightLocalId};
 use crate::canonical_scene::store::schema::{
     NODE_SCENE_EVIDENCE_FIELD_COUNT, SCENE_SCHEMA_REVISION, node_scene_evidence_field,
 };
-use crate::entity::{CameraProjection, LightEmission, LightKind};
+use crate::entity::{CameraProjection, LightDefinition, LightEmission, LightKind};
 use crate::math::Color;
 
 use super::super::test_support::SpatialBuildFault;
@@ -23,11 +22,11 @@ fn central_validation_rejects_corrupted_spatial_storage_and_placement_closure() 
             Presence::Present(CameraLocalId::new(0)),
             Presence::Present(LightLocalId::new(0)),
         )];
-        let cameras = [CameraAuthoring::new(
-            CameraProjection::perspective(1.0, None, 0.125, None).unwrap(),
-        )];
-        let lights = [LightAuthoring::new(
+        let cameras =
+            [CameraProjection::perspective(LocalAxes::STANDARD, 1.0, None, 0.125, None).unwrap()];
+        let lights = [LightDefinition::new(
             LightKind::spot(Some(32.0), 0.125, 0.75).unwrap(),
+            LocalAxes::STANDARD,
             LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 2.0).unwrap(),
         )];
         let spatial = SpatialAuthoringBatch::new(&SceneSpace::STANDARD_TARGET, &cameras, &lights);

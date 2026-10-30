@@ -7,7 +7,6 @@ mod public_deformation;
 mod public_read;
 
 use crate::FormatId;
-use crate::SceneValidationLimits;
 use crate::appearance::{AlphaMode, MaterialFactors, MaterialSemantics, ShadingModel};
 use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemantic};
 use crate::canonical_scene::store::construction::SceneConstructionLimits;
@@ -19,12 +18,12 @@ use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionTerminal, NodeSceneSuccessParts, NodeSceneTestTransaction, SceneStorage,
 };
 use crate::canonical_scene::store::production::{
-    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, CameraAuthoring,
-    CameraLocalId, CanonicalProfileOwner, DeformationAuthoringBatch, GeometryAttributeAuthoring,
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, CameraLocalId,
+    CanonicalProfileOwner, DeformationAuthoringBatch, GeometryAttributeAuthoring,
     GeometryAuthoringBatch, GeometryLogicalMeshAuthoring, GeometryMeshInstanceAuthoring,
-    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, ImageAuthoring, LightAuthoring,
-    LightLocalId, LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring,
-    MaterialAuthoring, MaterialLocalId, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, ImageAuthoring, LightLocalId,
+    LineageAuthoringBatch, LogicalMeshLocalId, LogicalMorphAuthoring, MaterialAuthoring,
+    MaterialLocalId, MeshInstanceDeformationAuthoring, MetadataAuthoringBatch,
     MetadataAuthoringEntry, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent,
     ObservedResourceAuthoring, OwnerProvenanceAuthoring, Presence, PrimitiveDeformationAuthoring,
     ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
@@ -32,7 +31,9 @@ use crate::canonical_scene::store::production::{
     SceneAuthoringBatch, SessionOpaqueReason, SourceIdentityAuthoring, SourceIdentityLocalId,
     SpatialAuthoringBatch,
 };
-use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
+use crate::entity::{
+    AuthoredTransform, CameraProjection, LightDefinition, LightEmission, LightKind,
+};
 use crate::extension::{
     ExtensionArrayRef, ExtensionMediaType, ExtensionSchemaId, ExtensionValueRef,
 };
@@ -46,6 +47,7 @@ use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, TangentBasisConvention,
     TangentHandednessEncoding, UvOrigin,
 };
+use crate::{LocalAxes, SceneValidationLimits};
 
 use super::super::edit::{
     NodeSceneEditTerminal, NodeTransformEditStart, try_begin_node_transform_edit,
@@ -57,49 +59,48 @@ use super::{
     NodeSceneSnapshotLimits, SnapshotWorkMeter, capture_node_scene_with_test_transcript,
 };
 
-// Revision 4 derives from the revision 3 handwritten transcripts by changing the
-// little-endian revision word at bytes 40..44 from 3 to 4 and removing the two
-// bytes for tag 0xae and its value. The spatial vector removes ae01 at byte 85;
-// the other vectors remove ae00 at byte 76. All other bytes remain unchanged.
-// Each digest is SHA-256 of the complete expected transcript below, independently
-// recomputed after verifying its revision 3 predecessor against the old digest.
+// Revision 5 changes the little-endian revision word at bytes 40..44 from 4 to 5.
+// Camera and light references now precede tagged right/up/forward axes:
+// c8 01 c9 03 ca 06 for the standard frame. Other transcript bytes are unchanged.
+// Each digest is independently SHA-256 checked over the handwritten revision 5
+// transcript. Reverting only the declared revision/frame bytes reproduces its prior vector.
 const KNOWN_SINGLE_TRS_DIGEST: [u8; 32] = [
-    0x88, 0x1b, 0xbe, 0x65, 0x9a, 0xb6, 0xfa, 0x88, 0xae, 0x84, 0xb7, 0x41, 0xc4, 0x22, 0x62, 0xa9,
-    0x64, 0xfb, 0x8a, 0x92, 0xfa, 0x2c, 0xe8, 0x62, 0x70, 0x4d, 0xb9, 0xc6, 0xe1, 0x6c, 0x67, 0x82,
+    0xd8, 0xab, 0xc9, 0x4d, 0xf2, 0x6a, 0x46, 0x40, 0xf7, 0xb2, 0xea, 0x0d, 0xb3, 0x57, 0xd3, 0xf1,
+    0x8c, 0x10, 0x1f, 0xe4, 0x7e, 0x49, 0xfc, 0x30, 0x5b, 0x69, 0x73, 0xe5, 0xfa, 0xfb, 0x8d, 0xe4,
 ];
 const KNOWN_GENERIC_METADATA_DIGEST: [u8; 32] = [
-    0x9a, 0x0d, 0x7c, 0x93, 0x84, 0xbd, 0xda, 0xe1, 0x16, 0xb5, 0x1d, 0x6b, 0x4a, 0x7f, 0x62, 0x9a,
-    0xda, 0x9a, 0xd5, 0x53, 0x47, 0x96, 0xa3, 0x8a, 0x48, 0x2f, 0x88, 0xbb, 0xd5, 0x75, 0xc1, 0x3d,
+    0xc9, 0xf3, 0x4e, 0x2d, 0x0c, 0xf5, 0x74, 0xab, 0x28, 0x2d, 0xb7, 0xbc, 0x1b, 0xfa, 0xb1, 0x0d,
+    0xd5, 0xa1, 0x81, 0x7f, 0xb6, 0xfc, 0x0a, 0xd9, 0xd1, 0xc0, 0x0c, 0xfa, 0x2c, 0x68, 0x03, 0x6e,
 ];
 // Known vectors are factored at canonical domain and owner-row boundaries, but every
 // assertion still compares the complete transcript byte for byte.
 const KNOWN_SINGLE_TRS_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740204000000030600",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740205000000030600",
     "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c010b0000000000000000",
     "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d0000000000000000",
     "0a020e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f",
     "0e0000803f0b0a00000000000000da0c00c40c00c50c00070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_DIGEST: [u8; 32] = [
-    0x76, 0x34, 0x87, 0x06, 0xfe, 0x9e, 0x03, 0x5a, 0xc6, 0x6e, 0xff, 0x63, 0x72, 0xc9, 0x94, 0x14,
-    0xbe, 0x83, 0x65, 0xef, 0x1d, 0x2b, 0xc1, 0xe9, 0xbb, 0x20, 0x8b, 0x93, 0xa7, 0xad, 0x5c, 0x5a,
+    0x31, 0x9a, 0x4c, 0x64, 0x7f, 0xcc, 0x7b, 0x12, 0xd1, 0xcc, 0x48, 0x1c, 0x5b, 0x2e, 0x75, 0x35,
+    0x9f, 0x9d, 0x7f, 0x0c, 0x37, 0xee, 0xbe, 0x4d, 0x45, 0x98, 0x2d, 0xb8, 0x32, 0x63, 0xb8, 0x15,
 ];
 const KNOWN_SPATIAL_DIGEST: [u8; 32] = [
-    0xf8, 0xc8, 0x6d, 0x02, 0xd8, 0x8d, 0xda, 0x2a, 0xcd, 0x3a, 0x25, 0x8f, 0x87, 0x1a, 0x27, 0x7b,
-    0x84, 0x8c, 0x2e, 0xef, 0x0b, 0x82, 0xd7, 0xbc, 0x10, 0xaa, 0x10, 0xb2, 0xd3, 0x76, 0x43, 0x21,
+    0x4e, 0x81, 0x54, 0xf4, 0xf0, 0x61, 0x8f, 0x86, 0x47, 0xc3, 0xf0, 0x1b, 0x3f, 0x8d, 0x65, 0xe7,
+    0x11, 0xa9, 0xb2, 0x46, 0x43, 0xca, 0x0f, 0x71, 0x48, 0x8d, 0xf6, 0xff, 0xdd, 0x08, 0x3d, 0xd9,
 ];
 const KNOWN_SPATIAL_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020400000003060000000000000073",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003060000000000000073",
     "6861323536a60c01a7a802a904aa05ab0c01c67b14ae47e17a843fac01ad02af02b015000000000000006578616d706c653a7461",
     "6e67656e742d6261736973b102000000b202b014000000000000006578616d706c653a74616e67656e742d7369676eb103000000b30c",
-    "01b40d0000000000000000b500b6c70000803fb70c01c70000c03fb8c7cdcccc3db90c01c70000c8420b0100000000000000ba0c01bb",
-    "0d0000000000000000bc02bd0c01c700004842be0c01c70000803ebf0c01c70000403fc0c70000803fc1c70000803fc2c70000803fc3",
+    "01b40d0000000000000000c801c903ca06b500b6c70000803fb70c01c70000c03fb8c7cdcccc3db90c01c70000c8420b0100000000000000ba0c01bb",
+    "0d0000000000000000c801c903ca06bc02bd0c01c700004842be0c01c70000803ebf0c01c70000403fc0c70000803fc1c70000803fc2c70000803fc3",
     "c7000020410b0100000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a020e0000",
     "00000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000803f0b0a0000000000",
     "0000da0c00c40c010d0000000000000000c50c010d0000000000000000070c010b00000000000000000b0100000000000000",
 );
 const KNOWN_MATRIX_CHILD_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020400000003",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003",
     "0600000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c01",
     "0b0000000000000000ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000",
     "000000000a010e0000803f0e000000000e000000000e000000000e000000000e0000803f0e000000000e000000",
@@ -117,7 +118,7 @@ const EMPTY_PRE_PROFILE_DOMAINS_TRANSCRIPT_HEX: &str = concat!(
     "00780c01790c010b00000000000000007f0c010b0000000000000000",
 );
 const EMPTY_SCENE_TRANSCRIPT_PREFIX_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740204000000030600",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f740205000000030600",
     "000000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c010b0000000000000000",
     "ba0c010b0000000000000000040c010b0000000000000000050c010b0000000000000000",
 );
@@ -228,11 +229,11 @@ const KNOWN_GENERIC_METADATA_TRANSCRIPT_HEX: &str = concat!(
     "cb03d00bcb04d005cb05d20000000000000000cb08d005cb06ce01cf0000000000000000",
 );
 const KNOWN_POINT_GEOMETRY_DIGEST: [u8; 32] = [
-    0x8d, 0x7c, 0x0b, 0x17, 0x70, 0x28, 0x42, 0x09, 0xca, 0x0e, 0x1f, 0xc4, 0x21, 0x28, 0xff, 0xf9,
-    0x89, 0xd4, 0xe2, 0x7b, 0x5a, 0x7d, 0x3b, 0x3d, 0x34, 0xac, 0x09, 0xf6, 0x44, 0xc0, 0xfb, 0xb3,
+    0xe8, 0x2b, 0xe9, 0x91, 0xb1, 0x66, 0x79, 0xc7, 0x07, 0x6c, 0xeb, 0xdf, 0x01, 0x30, 0xaf, 0x94,
+    0xb6, 0xee, 0x19, 0x7d, 0xc2, 0x3b, 0xe9, 0x92, 0xe1, 0x06, 0xfa, 0x4b, 0x59, 0x04, 0x0d, 0x1b,
 ];
 const KNOWN_POINT_GEOMETRY_TRANSCRIPT_HEX: &str = concat!(
-    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020400000003060000",
+    "011e0000000000000062616f7a692e63616e6f6e6963616c2d7363656e652e736e617073686f74020500000003060000",
     "0000000000736861323536a60c01a7a800a900aa00ab0c00ac00ad00af00b200b30c010b0000000000000000",
     "ba0c010b0000000000000000040c01080d00000000000000000b0100000000000000050c01060d00000000000000000a02",
     "0e000000000e000000000e000000000e000000000e000000000e000000000e0000803f0e0000803f0e0000803f0e0000",
@@ -625,8 +626,8 @@ fn capture_spatial_scene(
     roots: &[NodeLocalId],
     nodes: &[NodeAuthoringNode],
     scene_space: &SceneSpace,
-    cameras: &[CameraAuthoring],
-    lights: &[LightAuthoring],
+    cameras: &[CameraProjection],
+    lights: &[LightDefinition],
 ) -> NodeSceneSnapshot {
     let parts = build_scene_with_spatial_appearance_and_geometry(
         account,
@@ -654,8 +655,12 @@ fn capture_single_spatial_digest(
         Presence::Present(CameraLocalId::new(0)),
         Presence::Present(LightLocalId::new(0)),
     )];
-    let cameras = [CameraAuthoring::new(projection)];
-    let lights = [LightAuthoring::new(light_kind, emission)];
+    let cameras = [projection];
+    let lights = [LightDefinition::new(
+        light_kind,
+        LocalAxes::STANDARD,
+        emission,
+    )];
     capture_spatial_scene(account, &roots, &nodes, scene_space, &cameras, &lights).digest
 }
 
@@ -1055,7 +1060,7 @@ fn known_vector_is_stable_and_human_reviewable() {
             .expect("known Scene snapshot");
 
     assert_eq!(snapshot.domain, "baozi.canonical-scene.snapshot");
-    assert_eq!(snapshot.schema_revision, 4);
+    assert_eq!(snapshot.schema_revision, 5);
     assert_eq!(snapshot.algorithm, NodeSceneSnapshotAlgorithm::Sha256);
     assert_eq!(snapshot.digest, KNOWN_SINGLE_TRS_DIGEST);
     assert!(transcript.complete);
@@ -2308,13 +2313,18 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
         Presence::Present(LightLocalId::new(0)),
     )];
     let scene_space = namespaced_scene_space();
-    let projection = CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
-        .expect("spatial known-vector camera");
-    let cameras = [CameraAuthoring::new(projection)];
+    let projection =
+        CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.1, Some(100.0))
+            .expect("spatial known-vector camera");
+    let cameras = [projection];
     let light_kind =
         LightKind::spot(Some(50.0), 0.25, 0.75).expect("spatial known-vector spot light");
     let emission = white_emission(10.0);
-    let lights = [LightAuthoring::new(light_kind, emission)];
+    let lights = [LightDefinition::new(
+        light_kind,
+        LocalAxes::STANDARD,
+        emission,
+    )];
     let parts = build_scene_with_spatial_appearance_and_geometry(
         &account,
         &roots,
@@ -2340,6 +2350,7 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
         view.light_at(0)
             .expect("light view")
             .expect("light zero")
+            .definition()
             .kind(),
         light_kind
     );
@@ -2406,8 +2417,8 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
             EMPTY_PROFILE_METADATA_TRANSCRIPT_HEX,
         ],
     );
-    assert_eq!(snapshot.totals.transcript_bytes, 1_310);
-    assert_eq!(snapshot.totals.work_units, 134);
+    assert_eq!(snapshot.totals.transcript_bytes, 1_322);
+    assert_eq!(snapshot.totals.work_units, 140);
     assert_eq!(snapshot.totals.camera_count, 1);
     assert_eq!(snapshot.totals.light_count, 1);
     assert_eq!(snapshot.totals.camera_attachment_count, 1);
@@ -2422,11 +2433,13 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
         "tangent_handedness_encoding_schema_version=3\n",
     )));
     assert!(snapshot.preview.text.contains(concat!(
-        "camera[0] projection=perspective vertical_fov=0x3f800000 ",
+        "camera[0] right_axis=positive_x up_axis=positive_y forward_axis=negative_z ",
+        "projection=perspective vertical_fov=0x3f800000 ",
         "aspect_ratio=0x3fc00000 near_plane=0x3dcccccd far_plane=0x42c80000",
     )));
     assert!(snapshot.preview.text.contains(concat!(
-        "light[0] kind=spot range=0x42480000 inner_cone=0x3e800000 ",
+        "light[0] right_axis=positive_x up_axis=positive_y forward_axis=negative_z ",
+        "kind=spot range=0x42480000 inner_cone=0x3e800000 ",
         "outer_cone=0x3f400000 tint_r=0x3f800000 tint_g=0x3f800000 ",
         "tint_b=0x3f800000 intensity=0x41200000",
     )));
@@ -2440,8 +2453,9 @@ fn scene_space_field_mutation_vectors_are_digest_visible() {
     let factory = factory();
     let account = account(&factory);
     let baseline = namespaced_scene_space();
-    let projection = CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
-        .expect("SceneSpace mutation camera");
+    let projection =
+        CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.1, Some(100.0))
+            .expect("SceneSpace mutation camera");
     let light_kind = LightKind::spot(Some(50.0), 0.25, 0.75).expect("SceneSpace mutation light");
     let emission = white_emission(10.0);
     let digest = |scene_space: &SceneSpace| {
@@ -2575,8 +2589,9 @@ fn camera_and_light_field_mutation_vectors_are_digest_visible() {
     let factory = factory();
     let account = account(&factory);
     let scene_space = namespaced_scene_space();
-    let baseline_projection = CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
-        .expect("camera mutation baseline");
+    let baseline_projection =
+        CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.1, Some(100.0))
+            .expect("camera mutation baseline");
     let baseline_kind = LightKind::spot(Some(50.0), 0.25, 0.75).expect("light mutation baseline");
     let baseline_emission = white_emission(10.0);
     let camera_digest = |projection| {
@@ -2589,40 +2604,59 @@ fn camera_and_light_field_mutation_vectors_are_digest_visible() {
         )
     };
     let camera_baseline_digest = camera_digest(baseline_projection);
+    let axis_mutations = [
+        (
+            "right axis",
+            LocalAxes::try_new(Axis::NegativeX, Axis::PositiveY, Axis::NegativeZ).unwrap(),
+        ),
+        (
+            "up axis",
+            LocalAxes::try_new(Axis::PositiveX, Axis::NegativeY, Axis::NegativeZ).unwrap(),
+        ),
+        (
+            "forward axis",
+            LocalAxes::try_new(Axis::PositiveX, Axis::PositiveY, Axis::PositiveZ).unwrap(),
+        ),
+    ];
+    for (label, axes) in axis_mutations {
+        let projection = CameraProjection::perspective(axes, 1.0, Some(1.5), 0.1, Some(100.0))
+            .expect("camera-axis mutation keeps projection parameters unchanged");
+        assert_digest_mutation(label, camera_baseline_digest, camera_digest(projection));
+    }
     let camera_mutations = [
         (
             "camera projection kind",
-            CameraProjection::orthographic(1.0, 1.5, 0.1, 100.0)
+            CameraProjection::orthographic(LocalAxes::STANDARD, 1.0, 1.5, 0.1, 100.0)
                 .expect("orthographic projection-kind mutation"),
         ),
         (
             "camera vertical field of view",
-            CameraProjection::perspective(1.1, Some(1.5), 0.1, Some(100.0))
+            CameraProjection::perspective(LocalAxes::STANDARD, 1.1, Some(1.5), 0.1, Some(100.0))
                 .expect("vertical-field-of-view mutation"),
         ),
         (
             "camera aspect-ratio bits",
-            CameraProjection::perspective(1.0, Some(1.6), 0.1, Some(100.0))
+            CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.6), 0.1, Some(100.0))
                 .expect("aspect-ratio bits mutation"),
         ),
         (
             "camera aspect-ratio presence",
-            CameraProjection::perspective(1.0, None, 0.1, Some(100.0))
+            CameraProjection::perspective(LocalAxes::STANDARD, 1.0, None, 0.1, Some(100.0))
                 .expect("aspect-ratio presence mutation"),
         ),
         (
             "camera near plane",
-            CameraProjection::perspective(1.0, Some(1.5), 0.2, Some(100.0))
+            CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.2, Some(100.0))
                 .expect("near-plane mutation"),
         ),
         (
             "camera far-plane bits",
-            CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(101.0))
+            CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.1, Some(101.0))
                 .expect("far-plane bits mutation"),
         ),
         (
             "camera far-plane presence",
-            CameraProjection::perspective(1.0, Some(1.5), 0.1, None)
+            CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.1, None)
                 .expect("far-plane presence mutation"),
         ),
     ];
@@ -2630,28 +2664,37 @@ fn camera_and_light_field_mutation_vectors_are_digest_visible() {
         assert_digest_mutation(label, camera_baseline_digest, camera_digest(mutation));
     }
 
-    let orthographic =
-        CameraProjection::orthographic(2.0, 3.0, 0.0, 100.0).expect("orthographic preview camera");
+    let orthographic = CameraProjection::orthographic(LocalAxes::STANDARD, 2.0, 3.0, 0.0, 100.0)
+        .expect("orthographic preview camera");
     let orthographic_baseline_digest = camera_digest(orthographic);
+    for (label, axes) in axis_mutations {
+        let projection = CameraProjection::orthographic(axes, 2.0, 3.0, 0.0, 100.0)
+            .expect("camera-axis mutation keeps orthographic parameters unchanged");
+        assert_digest_mutation(
+            label,
+            orthographic_baseline_digest,
+            camera_digest(projection),
+        );
+    }
     for (label, mutation) in [
         (
             "camera horizontal half extent",
-            CameraProjection::orthographic(2.5, 3.0, 0.0, 100.0)
+            CameraProjection::orthographic(LocalAxes::STANDARD, 2.5, 3.0, 0.0, 100.0)
                 .expect("horizontal-half-extent mutation"),
         ),
         (
             "camera vertical half extent",
-            CameraProjection::orthographic(2.0, 3.5, 0.0, 100.0)
+            CameraProjection::orthographic(LocalAxes::STANDARD, 2.0, 3.5, 0.0, 100.0)
                 .expect("vertical-half-extent mutation"),
         ),
         (
             "orthographic camera near plane",
-            CameraProjection::orthographic(2.0, 3.0, 0.1, 100.0)
+            CameraProjection::orthographic(LocalAxes::STANDARD, 2.0, 3.0, 0.1, 100.0)
                 .expect("orthographic near-plane mutation"),
         ),
         (
             "orthographic camera far plane",
-            CameraProjection::orthographic(2.0, 3.0, 0.0, 101.0)
+            CameraProjection::orthographic(LocalAxes::STANDARD, 2.0, 3.0, 0.0, 101.0)
                 .expect("orthographic far-plane mutation"),
         ),
     ] {
@@ -2664,12 +2707,17 @@ fn camera_and_light_field_mutation_vectors_are_digest_visible() {
         Presence::Present(CameraLocalId::new(0)),
         Presence::Present(LightLocalId::new(0)),
     )];
-    let cameras = [CameraAuthoring::new(orthographic)];
-    let lights = [LightAuthoring::new(baseline_kind, baseline_emission)];
+    let cameras = [orthographic];
+    let lights = [LightDefinition::new(
+        baseline_kind,
+        LocalAxes::STANDARD,
+        baseline_emission,
+    )];
     let orthographic_snapshot =
         capture_spatial_scene(&account, &roots, &nodes, &scene_space, &cameras, &lights);
     assert!(orthographic_snapshot.preview.text.contains(concat!(
-        "camera[0] projection=orthographic horizontal_half_extent=0x40000000 ",
+        "camera[0] right_axis=positive_x up_axis=positive_y forward_axis=negative_z ",
+        "projection=orthographic horizontal_half_extent=0x40000000 ",
         "vertical_half_extent=0x40400000 near_plane=0x00000000 ",
         "far_plane=0x42c80000",
     )));
@@ -2678,6 +2726,13 @@ fn camera_and_light_field_mutation_vectors_are_digest_visible() {
         capture_single_spatial_digest(&account, &scene_space, baseline_projection, kind, emission)
     };
     let light_baseline_digest = light_digest(baseline_kind, baseline_emission);
+    let cameras = [baseline_projection];
+    for (label, axes) in axis_mutations {
+        let lights = [LightDefinition::new(baseline_kind, axes, baseline_emission)];
+        let snapshot =
+            capture_spatial_scene(&account, &roots, &nodes, &scene_space, &cameras, &lights);
+        assert_digest_mutation(label, light_baseline_digest, snapshot.digest);
+    }
     for (label, mutation) in [
         (
             "light range bits",
@@ -2742,13 +2797,18 @@ fn spatial_attachment_presence_and_reference_mutations_are_digest_visible() {
     let factory = factory();
     let account = account(&factory);
     let scene_space = namespaced_scene_space();
-    let projection = CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
-        .expect("attachment mutation camera");
+    let projection =
+        CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(1.5), 0.1, Some(100.0))
+            .expect("attachment mutation camera");
     let light_kind = LightKind::spot(Some(50.0), 0.25, 0.75).expect("attachment mutation light");
     let emission = white_emission(10.0);
     let roots = [NodeLocalId::new(0), NodeLocalId::new(1)];
-    let cameras = [CameraAuthoring::new(projection)];
-    let lights = [LightAuthoring::new(light_kind, emission)];
+    let cameras = [projection];
+    let lights = [LightDefinition::new(
+        light_kind,
+        LocalAxes::STANDARD,
+        emission,
+    )];
     let both_attached = [
         NodeAuthoringNode::new(
             Presence::Absent,
@@ -2817,13 +2877,10 @@ fn spatial_attachment_presence_and_reference_mutations_are_digest_visible() {
         .digest,
     );
 
-    let two_cameras = [
-        CameraAuthoring::new(projection),
-        CameraAuthoring::new(projection),
-    ];
+    let two_cameras = [projection, projection];
     let two_lights = [
-        LightAuthoring::new(light_kind, emission),
-        LightAuthoring::new(light_kind, emission),
+        LightDefinition::new(light_kind, LocalAxes::STANDARD, emission),
+        LightDefinition::new(light_kind, LocalAxes::STANDARD, emission),
     ];
     let reference_baseline_nodes = [
         NodeAuthoringNode::new(

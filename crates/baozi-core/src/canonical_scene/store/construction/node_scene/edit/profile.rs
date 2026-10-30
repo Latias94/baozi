@@ -96,6 +96,20 @@ impl ProfileEditTargets {
         }
         let geometry = input.read_geometry();
         Ok(match (self, owner) {
+            (Self::Space(conversion), CanonicalProfileOwner::Camera(index)) => {
+                crate::canonical_scene::store::typed_storage::edit::space_spatial::camera_changes(
+                    input.tables.spatial.as_ref(),
+                    index as usize,
+                    conversion,
+                )
+            }
+            (Self::Space(conversion), CanonicalProfileOwner::Light(index)) => {
+                crate::canonical_scene::store::typed_storage::edit::space_spatial::light_changes(
+                    input.tables.spatial.as_ref(),
+                    index as usize,
+                    conversion,
+                )
+            }
             (Self::Space(_), CanonicalProfileOwner::Scene) => true,
             (Self::Space(conversion), CanonicalProfileOwner::Node(index)) => {
                 conversion.changes_coordinates()

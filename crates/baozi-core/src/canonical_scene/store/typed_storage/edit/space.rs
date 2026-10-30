@@ -10,12 +10,12 @@ use crate::space_conversion::SpaceConversion;
 
 use super::super::SceneTables;
 use super::super::build::TypedStorageBuildControl;
-use super::super::spatial::build::SpatialStoragePlan;
 use super::super::validation::TypedStorageValidationControl;
 use super::space_animation::{AnimationSpacePlan, AnimationSpacePlanError};
 use super::space_deformation::{DeformationSpacePlan, DeformationSpacePlanError};
 use super::space_geometry::{GeometrySpacePlan, GeometrySpacePlanError};
 use super::space_nodes::{NodeSpacePlan, NodeSpacePlanError};
+use super::space_spatial::{SpatialSpacePlan, SpatialSpacePlanError};
 
 #[derive(Debug)]
 pub(in crate::canonical_scene::store) enum SceneSpacePlanError<E> {
@@ -23,6 +23,7 @@ pub(in crate::canonical_scene::store) enum SceneSpacePlanError<E> {
     Geometry(GeometrySpacePlanError<E>),
     Deformation(DeformationSpacePlanError<E>),
     Animation(AnimationSpacePlanError<E>),
+    Spatial(SpatialSpacePlanError<E>),
     Plan(StorePlanError),
 }
 
@@ -34,6 +35,7 @@ pub(in crate::canonical_scene::store) struct SceneSpacePlan<'a> {
     geometry: GeometrySpacePlan<'a>,
     deformation: DeformationSpacePlan<'a>,
     animation: AnimationSpacePlan<'a>,
+    spatial: SpatialSpacePlan<'a>,
     correspondence: u64,
     name_bytes: usize,
 }
@@ -53,18 +55,15 @@ impl<'a> SceneSpacePlan<'a> {
                 .map_err(SceneSpacePlanError::Deformation)?;
         let animation = AnimationSpacePlan::try_new(source.animation.as_ref(), conversion, control)
             .map_err(SceneSpacePlanError::Animation)?;
-        let spatial = SpatialStoragePlan::for_storage(source.spatial.as_ref())
-            .map_err(SceneSpacePlanError::Plan)?;
+        let spatial = SpatialSpacePlan::try_new(source.spatial.as_ref(), conversion, control)
+            .map_err(SceneSpacePlanError::Spatial)?;
         let overflow = || SceneSpacePlanError::Plan(StorePlanError::SizeOverflow);
-        // The transaction separately checks the space declaration and each camera/light row.
         let correspondence = nodes
             .correspondence_work()
             .checked_add(geometry.correspondence_work())
             .and_then(|work| work.checked_add(deformation.correspondence_work()))
             .and_then(|work| work.checked_add(animation.correspondence_work()))
-            .and_then(|work| work.checked_add(1))
-            .and_then(|work| work.checked_add(u64::from(spatial.camera_count())))
-            .and_then(|work| work.checked_add(u64::from(spatial.light_count())))
+            .and_then(|work| work.checked_add(spatial.correspondence_work()))
             .ok_or_else(overflow)?;
         let name_bytes = spatial
             .name_bytes()
@@ -102,6 +101,7 @@ impl<'a> SceneSpacePlan<'a> {
             geometry,
             deformation,
             animation,
+            spatial,
             correspondence,
             name_bytes,
         })
@@ -131,6 +131,10 @@ impl<'a> SceneSpacePlan<'a> {
         self.animation
     }
 
+    pub(in crate::canonical_scene::store) const fn spatial(self) -> SpatialSpacePlan<'a> {
+        self.spatial
+    }
+
     pub(in crate::canonical_scene::store) const fn correspondence_work(self) -> u64 {
         self.correspondence
     }
@@ -158,6 +162,9 @@ impl<'a> SceneSpacePlan<'a> {
                 .validate_correspondence(actual.deformation.as_ref(), control)?
             && self
                 .animation
-                .validate_correspondence(actual.animation.as_ref(), control)?)
+                .validate_correspondence(actual.animation.as_ref(), control)?
+            && self
+                .spatial
+                .validate_correspondence(actual.spatial.as_ref(), control)?)
     }
 }

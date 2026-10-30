@@ -2,9 +2,8 @@ use std::num::NonZeroU32;
 
 use crate::canonical_scene::store::typed_storage::spatial::{SpatialStorage, schema_name_bytes};
 use crate::canonical_scene::store::validation::NodeSceneValidationProof;
-use crate::entity::{CameraProjection, LightKind};
+use crate::entity::{CameraProjection, LightDefinition};
 use crate::extension::ExtensionSchemaId;
-use crate::math::Vec3;
 use crate::scene_space::{
     Axis, FrontFaceWinding, Handedness, TangentBasisConvention, TangentHandednessEncoding, UvOrigin,
 };
@@ -88,9 +87,7 @@ impl<'scene> NodeSceneSpatialTables<'scene> {
             .get(source_index)
             .map(|light| NodeSceneSpatialLight {
                 source_index,
-                kind: light.kind,
-                tint: light.tint,
-                intensity: light.intensity,
+                definition: *light,
             }))
     }
 }
@@ -186,23 +183,15 @@ impl NodeSceneSpatialCamera {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::canonical_scene::store) struct NodeSceneSpatialLight {
     source_index: usize,
-    kind: LightKind,
-    tint: Vec3,
-    intensity: f32,
+    definition: LightDefinition,
 }
 
 impl NodeSceneSpatialLight {
     pub(in crate::canonical_scene::store) const fn source_index(self) -> usize {
         self.source_index
     }
-    pub(in crate::canonical_scene::store) const fn kind(self) -> LightKind {
-        self.kind
-    }
-    pub(in crate::canonical_scene::store) const fn tint(self) -> Vec3 {
-        self.tint
-    }
-    pub(in crate::canonical_scene::store) const fn intensity(self) -> f32 {
-        self.intensity
+    pub(in crate::canonical_scene::store) const fn definition(self) -> LightDefinition {
+        self.definition
     }
 }
 

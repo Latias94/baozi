@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-13
-updated: 2026-10-30
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
@@ -32,7 +32,11 @@ conflations.
 ## Decision
 
 One scene-owned Camera or Light is a reusable semantic entity. A node attachment supplies its
-placement; the entity does not own a second position, orientation, node name, or world transform.
+placement; the entity does not own a second position, authored extrinsic pose, node name, or world
+transform. Each definition carries a complete discrete `LocalAxes` intrinsic reference map. This
+map describes how projection/emission reference coordinates are expressed in node-local coordinates;
+it is not another placement pose. All three signed cardinal axes are retained independently,
+including reflected frames. No right-handed cross-product rule reconstructs a missing axis.
 Names are bounded display text, never attachment identity. A node may attach at most one camera and
 one light, while one entity may be attached by multiple nodes. Every retained entity has at least one
 attachment inside ADR 0039's selected structural closure; an orphan camera or light is invalid. A
@@ -85,8 +89,12 @@ source full horizontal FOV converts only with known positive aspect by
 `vertical_fov = 2 * atan(tan(horizontal_fov / 2) / aspect)`. Each adapter proves whether its source
 value is full or half and horizontal, vertical, or diagonal; a backend field name is not proof.
 
-The camera's local viewing convention is forward `-Z` and up `+Y`. Its attached node transforms that
-frame into scene space. Adapters convert focal length/sensor size, source view matrices, or different
+The fixed projection reference convention is forward `-Z`, up `+Y`, and right `+X`. `LocalAxes`
+maps those directions into the attached node's coordinates. Its reference-to-node matrix is
+`B = [right, up, -forward]`; the standard value is identity. The attached node then supplies the
+placement in Scene space. Projection parameters and axes form one complete typed value: consumers
+match Perspective/Orthographic payloads, including their axes, rather than reading a kind tag and a
+frame-free tuple. Adapters convert focal length/sensor size, source view matrices, or different
 local axes only when the source contract makes the conversion exact. Off-axis frusta, lens shift,
 oblique projection, panorama/fisheye projection, and an unknown FOV convention are unrepresentable in
 canonical v1. The adapter preserves original facts in provenance and follows the outcome matrix below
@@ -98,7 +106,10 @@ aspect ratio remains absent so a consumer may supply its viewport deliberately.
 ### Light Emission
 
 Canonical v1 supports directional, point, and spot lights. Directional and spot emission axes are
-local `-Z`; local `+Y` is the reference up axis. Ambient, area, image-based, photometric-profile, and
+reference `-Z`; reference `+Y` is up. The light definition's `LocalAxes` maps that reference into
+node-local coordinates. Complete light values couple kind, axes, and canonical emission; public
+readers return that value instead of independently projecting away its frame. Ambient, area,
+image-based, photometric-profile, and
 arbitrary source light categories are not mislabeled as those three.
 
 Every light has one unique emission representation: nonnegative finite linear-sRGB/Rec.709 D65 tint
@@ -159,9 +170,18 @@ A spot light's inner and outer half-cone angles are radians satisfying
 cone. Between cones, with `c = cos(theta)`, its angular factor is
 `clamp((c - cos(outer)) / (cos(inner) - cos(outer)), 0, 1)^2`; equal cone angles use a hard step.
 
-Basis conversion changes placement node transforms rather than rotating a direction field that the
-entity does not own. Unit conversion scales orthographic half-extents and finite light ranges, but
-does not scale photometric intensity merely because the asset length unit changes.
+Basis conversion conjugates placement node transforms by `H = diag(sQ, 1)` and composes intrinsic
+frames on the left, `B' = Q B`. It neither adds compensation nodes nor grows hierarchy across
+repeated conversions. The complete set of 48 signed permutations is closed under composition,
+so inverse basis conversion restores the exact original axes. Source node identities, child order,
+attachments, geometry, and animation targets retain their structural correspondence.
+
+For any placement `W`, the converted reference-to-Scene map satisfies
+`(H W H^-1) diag(B',1) diag(sI,1) = H W diag(B,1)`. This also permits one definition to remain shared
+by multiple placements. Unit conversion scales perspective near/far distances, orthographic
+half-extents and near/far distances, and finite point/spot light ranges. FOV/aspect, cone angles,
+cutoff absence, tint, and photometric intensity keep their bits. A finite numeric overflow,
+underflow to zero, or collapsed strict near/far ordering rejects before retained output admission.
 
 ### Preservation, Validation, and Loss
 

@@ -1,23 +1,23 @@
-use crate::SceneValidationLimits;
 use crate::canonical_scene::store::production::plan::spatial::{
     SpatialAuthoringFailure, SpatialAuthoringSemanticError, validate_spatial_batch_with_control,
 };
 use crate::canonical_scene::store::production::scene::node_limits_after_spatial;
 use crate::canonical_scene::store::production::{
-    CameraAuthoring, CameraLocalId, LightAuthoring, LightLocalId, NodeAuthoringBatch,
-    NodeAuthoringNode, NodeLocalId, NodeParent, Presence, SpatialAuthoringBatch,
+    CameraLocalId, LightLocalId, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, NodeParent,
+    Presence, SpatialAuthoringBatch,
 };
-use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
+use crate::entity::{
+    AuthoredTransform, CameraProjection, LightDefinition, LightEmission, LightKind,
+};
 use crate::math::Color;
 use crate::scene_space::SceneSpace;
+use crate::{LocalAxes, SceneValidationLimits};
 
 use super::TestControl;
 
-fn camera() -> CameraAuthoring {
-    CameraAuthoring::new(
-        CameraProjection::perspective(1.0, Some(16.0 / 9.0), 0.1, Some(100.0))
-            .expect("test perspective projection"),
-    )
+fn camera() -> CameraProjection {
+    CameraProjection::perspective(LocalAxes::STANDARD, 1.0, Some(16.0 / 9.0), 0.1, Some(100.0))
+        .expect("test perspective projection")
 }
 
 fn emission() -> LightEmission {
@@ -64,8 +64,9 @@ fn multiple_node_placements_are_preserved_for_each_spatial_object() {
         ),
     ];
     let cameras = [camera()];
-    let lights = [LightAuthoring::new(
+    let lights = [LightDefinition::new(
         LightKind::point(Some(25.0)).expect("test point light"),
+        LocalAxes::STANDARD,
         emission(),
     )];
     let mut control = TestControl::default();
@@ -82,6 +83,7 @@ fn multiple_node_placements_are_preserved_for_each_spatial_object() {
     assert_eq!(validated.light_count(), 1);
     assert_eq!(validated.edge_count(), 4);
     assert_eq!(validated.reference_count(), 4);
+    assert_eq!(validated.semantic_cell_count(), 37);
 }
 
 #[test]
@@ -208,7 +210,11 @@ fn orphan_camera_is_rejected_before_materialization() {
 
 #[test]
 fn orphan_light_is_rejected_before_materialization() {
-    let lights = [LightAuthoring::new(LightKind::directional(), emission())];
+    let lights = [LightDefinition::new(
+        LightKind::directional(),
+        LocalAxes::STANDARD,
+        emission(),
+    )];
     let mut control = TestControl::default();
     let error = semantic_error(validate_spatial_batch_with_control(
         SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &lights),
@@ -258,7 +264,11 @@ fn out_of_range_light_attachment_is_rejected() {
         Presence::Absent,
         Presence::Present(LightLocalId::new(1)),
     )];
-    let lights = [LightAuthoring::new(LightKind::directional(), emission())];
+    let lights = [LightDefinition::new(
+        LightKind::directional(),
+        LocalAxes::STANDARD,
+        emission(),
+    )];
     let mut control = TestControl::default();
     let error = semantic_error(validate_spatial_batch_with_control(
         SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &lights),

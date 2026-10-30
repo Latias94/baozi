@@ -70,6 +70,7 @@ use crate::canonical_scene::store::typed_storage::edit::space_deformation::{
 };
 use crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlanError;
 use crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlanError;
+use crate::canonical_scene::store::typed_storage::edit::space_spatial::SpatialSpacePlanError;
 use crate::canonical_scene::store::typed_storage::edit::{
     GeometryTriangulationPlan, TriangulationOrigins,
 };
@@ -452,7 +453,25 @@ fn map_space(error: SceneSpacePlanError<StoreRuntimeError>) -> SceneEditRejectio
         SceneSpacePlanError::Geometry(error) => map_geometry_space(error),
         SceneSpacePlanError::Deformation(error) => map_deformation_space(error),
         SceneSpacePlanError::Animation(error) => map_animation_space(error),
+        SceneSpacePlanError::Spatial(error) => map_spatial_space(error),
         SceneSpacePlanError::Plan(error) => StoreRuntimeError::Plan(error).into(),
+    }
+}
+
+fn map_spatial_space(error: SpatialSpacePlanError<StoreRuntimeError>) -> SceneEditRejection {
+    match error {
+        SpatialSpacePlanError::Control(error) => error.into(),
+        SpatialSpacePlanError::NumericCamera { camera, source } => {
+            SceneSpaceConversionIssue::NumericCamera { camera, source }.into()
+        }
+        SpatialSpacePlanError::CameraProjection { camera, source } => {
+            SceneSpaceConversionIssue::CameraProjection { camera, source }.into()
+        }
+        SpatialSpacePlanError::NumericLight { light, source } => {
+            SceneSpaceConversionIssue::NumericLight { light, source }.into()
+        }
+        SpatialSpacePlanError::Plan(error) => StoreRuntimeError::Plan(error).into(),
+        SpatialSpacePlanError::Invariant => SceneEditRejection::construction_invariant(),
     }
 }
 
@@ -1081,9 +1100,22 @@ mod tests {
             SceneEditTarget::WholeScene(first_scene.generation())
         );
         let mut control = Control::default();
+        let storage = SceneSpacePlan::try_new(
+            &first_scene.as_node_scene().tables,
+            resolved.unwrap().conversion,
+            &mut control,
+        )
+        .unwrap();
+        assert!(storage.matches_source(&first_scene.as_node_scene().tables));
+        assert!(!storage.matches_source(&second_scene.as_node_scene().tables));
+        control.0 = 0;
         assert!(
-            postflight
-                .validate_spatial_correspondence(&first_scene.as_node_scene().tables, &mut control)
+            storage
+                .spatial()
+                .validate_correspondence(
+                    first_scene.as_node_scene().tables.spatial.as_ref(),
+                    &mut control,
+                )
                 .unwrap()
         );
         assert_eq!(
@@ -1235,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_conversion_rejects_camera_frames_but_winding_only_keeps_definitions() {
+    fn numeric_conversion_admits_camera_frames_and_winding_only_preserves_values() {
         let factory = test_factory();
         let account = test_account(&factory, 1_024);
         let source = build_populated_spatial_scene(&account, &AtomicU64::new(1));
@@ -1249,12 +1281,23 @@ mod tests {
         )
         .unwrap();
         let numeric = resolve_scene_space_conversion(&scene, scale, None).unwrap();
-        assert!(matches!(
-            space::check_capabilities(numeric, &mut Control::default()),
-            Err(SceneEditRejection::Space(
-                SceneSpaceConversionIssue::Camera { camera: 0 }
-            ))
-        ));
+        space::check_capabilities(numeric, &mut Control::default()).unwrap();
+        let plan = SceneSpacePlan::try_new(
+            &scene.as_node_scene().tables,
+            numeric.conversion,
+            &mut Control::default(),
+        )
+        .unwrap();
+        assert!(
+            !plan
+                .spatial()
+                .validate_correspondence(
+                    scene.as_node_scene().tables.spatial.as_ref(),
+                    &mut Control::default(),
+                )
+                .unwrap(),
+            "valid input data does not prove scaled output"
+        );
         let winding = TargetSpace::try_new(
             Handedness::Right,
             Axis::PositiveY,
@@ -1267,18 +1310,21 @@ mod tests {
         assert!(!winding.changes_coordinates());
         assert!(winding.reverses_winding());
         space::check_capabilities(winding, &mut Control::default()).unwrap();
-        let (_, _, admission) = SceneEditBootstrap::try_new().unwrap().into_parts();
-        let postflight = admission
-            .into_space_transaction(winding, SceneValidationLimits::default())
-            .finish();
+        let plan = SceneSpacePlan::try_new(
+            &scene.as_node_scene().tables,
+            winding.conversion,
+            &mut Control::default(),
+        )
+        .unwrap();
         assert!(
-            !postflight
-                .validate_spatial_correspondence(
-                    &scene.as_node_scene().tables,
-                    &mut Control::default()
+            !plan
+                .spatial()
+                .validate_correspondence(
+                    scene.as_node_scene().tables.spatial.as_ref(),
+                    &mut Control::default(),
                 )
                 .unwrap(),
-            "generic validity is insufficient when the target declaration was not rewritten"
+            "valid storage without the target declaration is not a converted Scene"
         );
         drop(scene);
         drop(source.report);

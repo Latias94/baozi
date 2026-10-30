@@ -13,7 +13,8 @@ normals by default. Application vertex unification is not implemented.
 
 Scene-space conversion covers geometry, node transforms, skin inverse binds and
 corrections, dense/sparse morph deltas, and TRS animation values and cubic derivatives.
-Camera and light conversion remains outside the supported profile.
+Camera/light intrinsic axes compose with the target basis; camera distances and light
+ranges scale with units while photometric emission stays unchanged.
 Missing source conventions require explicit assumptions. UV-origin changes and
 tangent generation are not part of this conversion.
 

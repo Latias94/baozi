@@ -283,10 +283,12 @@ fn spatial_readers_follow_node_attachments_and_preserve_unknowns() {
         Presence::Present(CameraLocalId::new(0)),
         Presence::Present(LightLocalId::new(0)),
     )];
-    let projection = CameraProjection::perspective(1.0, None, 0.1, None).unwrap();
-    let cameras = [CameraAuthoring::new(projection)];
-    let lights = [LightAuthoring::new(
+    let projection =
+        CameraProjection::perspective(LocalAxes::STANDARD, 1.0, None, 0.1, None).unwrap();
+    let cameras = [projection];
+    let lights = [LightDefinition::new(
         LightKind::directional(),
+        LocalAxes::STANDARD,
         white_emission(2.0),
     )];
     let parts = build_scene_with_spatial_appearance_and_geometry(
@@ -308,21 +310,25 @@ fn spatial_readers_follow_node_attachments_and_preserve_unknowns() {
         matrix(3.0).authored_matrix()
     );
     let camera = node.camera().unwrap();
+    let CameraProjection::Perspective(projection) = camera.projection() else {
+        panic!("perspective projection expected");
+    };
+    assert_eq!(projection.axes(), LocalAxes::STANDARD);
     assert_eq!(
-        camera.projection().kind(),
-        crate::CameraProjectionKind::Perspective
+        projection.vertical_fov_radians().to_bits(),
+        1.0_f32.to_bits()
     );
-    assert_eq!(
-        camera.projection().perspective_parameters(),
-        Some((1.0, None, 0.1, None))
-    );
+    assert_eq!(projection.aspect_ratio(), None);
+    assert_eq!(projection.near().to_bits(), 0.1_f32.to_bits());
+    assert_eq!(projection.far(), None);
     assert_eq!(scene.camera(camera.id()).unwrap().id(), camera.id());
     let light = node.light().unwrap();
     assert_eq!(
-        light.kind().category(),
+        light.definition().kind().category(),
         crate::LightKindCategory::Directional
     );
-    assert_eq!(light.intensity(), 2.0);
+    assert_eq!(light.definition().axes(), LocalAxes::STANDARD);
+    assert_eq!(light.definition().intensity().to_bits(), 2.0_f32.to_bits());
     assert_eq!(scene.light(light.id()).unwrap().id(), light.id());
     assert_eq!(scene.space().handedness, Handedness::Unknown);
     assert_eq!(scene.space().unit_scale_to_meters, None);
@@ -336,14 +342,23 @@ fn spatial_readers_follow_node_attachments_and_preserve_unknowns() {
 fn spatial_readers_borrow_retained_values_after_authoring_storage_is_dropped() {
     let factory = factory();
     let account = account(&factory);
+    let reflected_axes =
+        LocalAxes::try_new(Axis::NegativeX, Axis::PositiveY, Axis::NegativeZ).unwrap();
+    let rotated_axes =
+        LocalAxes::try_new(Axis::PositiveZ, Axis::PositiveX, Axis::NegativeY).unwrap();
     let projections = [
-        CameraProjection::perspective(0.75, None, 0.125, None).unwrap(),
-        CameraProjection::orthographic(2.5, 1.25, 0.25, 1024.0).unwrap(),
+        CameraProjection::perspective(LocalAxes::STANDARD, 0.75, None, 0.125, None).unwrap(),
+        CameraProjection::orthographic(reflected_axes, 2.5, 1.25, 0.25, 1024.0).unwrap(),
     ];
     let light_kinds = [
         LightKind::directional(),
         LightKind::point(None).unwrap(),
         LightKind::spot(Some(32.0), 0.125, 0.75).unwrap(),
+    ];
+    let light_definitions = [
+        LightDefinition::new(light_kinds[0], rotated_axes, white_emission(2.0)),
+        LightDefinition::new(light_kinds[1], reflected_axes, white_emission(2.0)),
+        LightDefinition::new(light_kinds[2], LocalAxes::STANDARD, white_emission(2.0)),
     ];
     let parts = {
         let roots = [
@@ -360,8 +375,8 @@ fn spatial_readers_borrow_retained_values_after_authoring_storage_is_dropped() {
             )
         });
         let space = namespaced_scene_space();
-        let cameras = projections.map(CameraAuthoring::new);
-        let lights = light_kinds.map(|kind| LightAuthoring::new(kind, white_emission(2.0)));
+        let cameras = projections;
+        let lights = light_definitions;
         build_scene_with_spatial_appearance_and_geometry(
             &account,
             &roots,
@@ -399,16 +414,18 @@ fn spatial_readers_borrow_retained_values_after_authoring_storage_is_dropped() {
             assert_eq!(camera.projection(), expected);
             assert_eq!(scene.camera(camera.id()).unwrap().projection(), expected);
         }
-        assert_eq!(scene.lights().len(), light_kinds.len());
-        for (light, expected) in scene.lights().zip(light_kinds) {
-            assert_eq!(light.kind(), expected);
-            assert_eq!(light.tint(), Vec3::new(1.0, 1.0, 1.0));
-            assert_eq!(light.intensity().to_bits(), 2.0_f32.to_bits());
-            assert_eq!(scene.light(light.id()).unwrap().kind(), expected);
+        assert_eq!(scene.lights().len(), light_definitions.len());
+        for (light, expected) in scene.lights().zip(light_definitions) {
+            let definition = light.definition();
+            assert_eq!(definition, expected);
+            assert_eq!(definition.axes(), expected.axes());
+            assert_eq!(definition.tint(), Vec3::new(1.0, 1.0, 1.0));
+            assert_eq!(definition.intensity().to_bits(), 2.0_f32.to_bits());
+            assert_eq!(scene.light(light.id()).unwrap().definition(), expected);
         }
         for (index, node) in scene.nodes().enumerate() {
             assert_eq!(node.camera().unwrap().projection(), projections[index % 2]);
-            assert_eq!(node.light().unwrap().kind(), light_kinds[index]);
+            assert_eq!(node.light().unwrap().definition(), light_definitions[index]);
         }
         let first = scene.nodes().next().unwrap().camera().unwrap();
         let repeated = scene.nodes().nth(2).unwrap().camera().unwrap();

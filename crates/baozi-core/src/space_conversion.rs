@@ -333,10 +333,48 @@ impl SpaceConversion {
     pub(crate) fn point(&self, value: [f32; 3]) -> Result<[f32; 3], NumericConversionError> {
         let mut output = self.direction(value)?;
         for component in &mut output {
-            *component =
-                round_component(f64::from(*component) * self.unit_ratio, *component != 0.0)?;
+            *component = self.length(*component)?;
         }
         Ok(output)
+    }
+
+    /// Scales one Scene-unit distance without changing its coordinate axis or zero sign.
+    pub(crate) fn length(&self, value: f32) -> Result<f32, NumericConversionError> {
+        if !value.is_finite() {
+            return Err(NumericConversionError::NonFiniteOutput);
+        }
+        round_component(f64::from(value) * self.unit_ratio, value != 0.0)
+    }
+
+    /// Composes the intrinsic reference map on the left: B' = Q B.
+    /// Reflected frames keep all three axes rather than reconstructing one by cross product.
+    pub(crate) fn local_axes(&self, value: crate::LocalAxes) -> Option<crate::LocalAxes> {
+        let transform = |axis| {
+            let source = axis_vector(axis);
+            let target: [i8; 3] = std::array::from_fn(|row| {
+                let component = source[self.source_axes[row]];
+                if self.negative[row] {
+                    -component
+                } else {
+                    component
+                }
+            });
+            match target {
+                [1, 0, 0] => Some(Axis::PositiveX),
+                [-1, 0, 0] => Some(Axis::NegativeX),
+                [0, 1, 0] => Some(Axis::PositiveY),
+                [0, -1, 0] => Some(Axis::NegativeY),
+                [0, 0, 1] => Some(Axis::PositiveZ),
+                [0, 0, -1] => Some(Axis::NegativeZ),
+                _ => None,
+            }
+        };
+        crate::LocalAxes::try_new(
+            transform(value.right())?,
+            transform(value.up())?,
+            transform(value.forward())?,
+        )
+        .ok()
     }
 
     /// Applies only Q. Finite components are copied or sign-flipped without normalization.

@@ -65,6 +65,12 @@ Preserve winding and attribute-domain remaps, authorize loss, and retain the inp
 Deliver the first concrete operation without requiring an extensible scheduling/replay framework.
 Add corner-to-application-vertex lowering so consumers can build actual vertex/index buffers.
 
+Whole-Scene space conversion now covers geometry, authored nodes, skin matrices, morph deltas,
+TRS curves and derivatives, and camera/light definitions. Complete intrinsic camera/light axes
+compose without changing node hierarchy. Material spatial behavior and application vertex
+lowering remain open; verified increments and target/profile evidence are recorded in the
+[delivery progress](reviews/2026-10-29-delivery-progress.md).
+
 The node/geometry storage cutover enables the first processing operation. Other domain migrations
 must not force every product increment to wait for a whole-library rewrite.
 

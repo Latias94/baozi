@@ -1,7 +1,5 @@
-use crate::entity::{CameraProjection, LightEmission, LightEmissionError, LightKind};
-use crate::math::Color;
+use crate::entity::{CameraProjection, LightDefinition};
 use crate::scene_space::SceneSpace;
-use thiserror::Error;
 
 /// Dense camera identity within one source-shaped authoring batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -43,61 +41,6 @@ impl From<u32> for LightLocalId {
     }
 }
 
-/// One scene-owned camera before retained materialization.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CameraAuthoring {
-    projection: CameraProjection,
-}
-
-impl CameraAuthoring {
-    pub const fn new(projection: CameraProjection) -> Self {
-        Self { projection }
-    }
-
-    pub(in crate::canonical_scene::store) const fn projection(self) -> CameraProjection {
-        self.projection
-    }
-}
-
-/// One scene-owned light before retained materialization.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LightAuthoring {
-    kind: LightKind,
-    emission: LightEmission,
-}
-
-/// Why source light color and intensity could not be normalized for canonical authoring.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-#[error(transparent)]
-pub struct LightAuthoringError(#[from] LightEmissionError);
-
-impl LightAuthoring {
-    /// Converts source linear-sRGB color and scalar intensity into canonical emission.
-    pub fn try_from_scaled_linear_srgb(
-        kind: LightKind,
-        color: Color,
-        intensity: f32,
-    ) -> Result<Self, LightAuthoringError> {
-        let emission = LightEmission::try_from_scaled_linear_srgb(color, intensity)?;
-        Ok(Self::new(kind, emission))
-    }
-
-    pub(in crate::canonical_scene::store) const fn new(
-        kind: LightKind,
-        emission: LightEmission,
-    ) -> Self {
-        Self { kind, emission }
-    }
-
-    pub(in crate::canonical_scene::store) const fn kind(self) -> LightKind {
-        self.kind
-    }
-
-    pub(in crate::canonical_scene::store) const fn emission(self) -> LightEmission {
-        self.emission
-    }
-}
-
 /// Borrowed Scene-space, camera, and light input supplied by a format producer.
 ///
 /// Camera and light identities are their dense positions in the corresponding
@@ -105,15 +48,15 @@ impl LightAuthoring {
 #[derive(Debug, Clone, Copy)]
 pub struct SpatialAuthoringBatch<'a> {
     scene_space: &'a SceneSpace,
-    cameras: &'a [CameraAuthoring],
-    lights: &'a [LightAuthoring],
+    cameras: &'a [CameraProjection],
+    lights: &'a [LightDefinition],
 }
 
 impl<'a> SpatialAuthoringBatch<'a> {
     pub const fn new(
         scene_space: &'a SceneSpace,
-        cameras: &'a [CameraAuthoring],
-        lights: &'a [LightAuthoring],
+        cameras: &'a [CameraProjection],
+        lights: &'a [LightDefinition],
     ) -> Self {
         Self {
             scene_space,
@@ -126,11 +69,11 @@ impl<'a> SpatialAuthoringBatch<'a> {
         self.scene_space
     }
 
-    pub(in crate::canonical_scene::store) const fn cameras(self) -> &'a [CameraAuthoring] {
+    pub(in crate::canonical_scene::store) const fn cameras(self) -> &'a [CameraProjection] {
         self.cameras
     }
 
-    pub(in crate::canonical_scene::store) const fn lights(self) -> &'a [LightAuthoring] {
+    pub(in crate::canonical_scene::store) const fn lights(self) -> &'a [LightDefinition] {
         self.lights
     }
 }

@@ -33,19 +33,20 @@ use crate::canonical_scene::store::production::plan::{
 use crate::canonical_scene::store::production::{
     AnimationAuthoringBatch, AnimationChannelAuthoring, AnimationClipAuthoring,
     AnimationExtrapolation, AnimationInterpolation, AnimationTargetAuthoring, AnimationTimeDomain,
-    AppearanceAuthoringBatch, AuthoringRange, CameraAuthoring, CameraLocalId,
-    DeformationAuthoringBatch, GeometryAttributeAuthoring, GeometryAuthoringBatch,
-    GeometryLogicalMeshAuthoring, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
-    ImageAuthoring, ImageLocalId, LightAuthoring, LightLocalId, NodeAuthoringBatch,
-    NodeAuthoringNode, NodeLocalId, Presence, SamplerAuthoring, SamplerLocalId, SkinAuthoring,
-    SpatialAuthoringBatch, TextureAuthoring,
+    AppearanceAuthoringBatch, AuthoringRange, CameraLocalId, DeformationAuthoringBatch,
+    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, ImageAuthoring, ImageLocalId,
+    LightLocalId, NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence, SamplerAuthoring,
+    SamplerLocalId, SkinAuthoring, SpatialAuthoringBatch, TextureAuthoring,
 };
 use crate::deform::SkinMatrixSpaces;
-use crate::entity::{AuthoredTransform, CameraProjection, LightEmission, LightKind};
+use crate::entity::{
+    AuthoredTransform, CameraProjection, LightDefinition, LightEmission, LightKind,
+};
 use crate::image::SamplerState;
 use crate::math::{Color, Mat4};
 use crate::scene_space::SceneSpace;
-use crate::{SceneValidationLimits, SceneValidationWork};
+use crate::{LocalAxes, SceneValidationLimits, SceneValidationWork};
 
 use super::{TestControl, parent, profile_fixture, trs, validate};
 
@@ -491,12 +492,17 @@ fn spatial_relation_limit_failures_preserve_the_exact_completed_prefix() {
         Presence::Present(CameraLocalId::new(0)),
         Presence::Present(LightLocalId::new(0)),
     )];
-    let cameras = [CameraAuthoring::new(
-        CameraProjection::perspective(1.0, Some(16.0 / 9.0), 0.1, Some(100.0))
-            .expect("the test camera projection must be valid"),
-    )];
-    let lights = [LightAuthoring::new(
+    let cameras = [CameraProjection::perspective(
+        LocalAxes::STANDARD,
+        1.0,
+        Some(16.0 / 9.0),
+        0.1,
+        Some(100.0),
+    )
+    .expect("the test camera projection must be valid")];
+    let lights = [LightDefinition::new(
         LightKind::directional(),
+        LocalAxes::STANDARD,
         LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 10.0)
             .expect("the test light emission must be valid"),
     )];

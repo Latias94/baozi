@@ -1,7 +1,8 @@
 use super::build::SpatialStoragePlan;
-use super::{SpatialStorage, StoredLight, schema_name_bytes};
+use super::{SpatialStorage, schema_name_bytes};
+use crate::LocalAxes;
 use crate::canonical_scene::store::typed_storage::validation::TypedStorageValidationControl;
-use crate::entity::{CameraProjection, LightEmission, LightKind};
+use crate::entity::{CameraProjection, LightDefinition, LightEmission, LightKind};
 use crate::extension::ExtensionSchemaId;
 use crate::math::{Color, Vec3};
 use crate::namespaced::MAX_NAMESPACED_NAME_LEN;
@@ -50,29 +51,34 @@ fn named_space() -> SceneSpace {
 }
 
 fn storage() -> SpatialStorage {
-    let white = Vec3::new(1.0, 1.0, 1.0);
+    let white =
+        |intensity| LightEmission::try_from_scaled_linear_srgb(Color::WHITE, intensity).unwrap();
     SpatialStorage {
         space: named_space(),
         cameras: vec![
-            CameraProjection::perspective(1.0, None, f32::from_bits(1), None).unwrap(),
-            CameraProjection::orthographic(f32::from_bits(1), f32::MAX, -0.0, f32::MAX).unwrap(),
+            CameraProjection::perspective(LocalAxes::STANDARD, 1.0, None, f32::from_bits(1), None)
+                .unwrap(),
+            CameraProjection::orthographic(
+                LocalAxes::STANDARD,
+                f32::from_bits(1),
+                f32::MAX,
+                -0.0,
+                f32::MAX,
+            )
+            .unwrap(),
         ],
         lights: vec![
-            StoredLight {
-                kind: LightKind::directional(),
-                tint: white,
-                intensity: 0.0,
-            },
-            StoredLight {
-                kind: LightKind::point(Some(f32::from_bits(1))).unwrap(),
-                tint: white,
-                intensity: f32::from_bits(1),
-            },
-            StoredLight {
-                kind: LightKind::spot(None, -0.0, std::f32::consts::FRAC_PI_2).unwrap(),
-                tint: white,
-                intensity: f32::MAX,
-            },
+            LightDefinition::new(LightKind::directional(), LocalAxes::STANDARD, white(0.0)),
+            LightDefinition::new(
+                LightKind::point(Some(f32::from_bits(1))).unwrap(),
+                LocalAxes::STANDARD,
+                white(f32::from_bits(1)),
+            ),
+            LightDefinition::new(
+                LightKind::spot(None, -0.0, std::f32::consts::FRAC_PI_2).unwrap(),
+                LocalAxes::STANDARD,
+                white(f32::MAX),
+            ),
         ],
     }
 }
@@ -100,17 +106,20 @@ fn actual_closed_storage_validates_inline_names_and_numeric_boundaries_without_a
     assert_eq!(storage.lights, before_lights);
     assert_eq!(storage.cameras.as_ptr(), camera_ptr);
     assert_eq!(storage.lights.as_ptr(), light_ptr);
+    let CameraProjection::Orthographic(projection) = storage.cameras[1] else {
+        panic!("orthographic projection expected");
+    };
+    assert_eq!(projection.axes(), LocalAxes::STANDARD);
+    assert_eq!(projection.near().to_bits(), 0);
+    assert_eq!(projection.horizontal_magnification().to_bits(), 1);
     assert_eq!(
-        storage.cameras[1]
-            .orthographic_parameters()
-            .unwrap()
-            .2
-            .to_bits(),
-        0,
+        projection.vertical_magnification().to_bits(),
+        f32::MAX.to_bits()
     );
+    assert_eq!(projection.far().to_bits(), f32::MAX.to_bits());
     assert_eq!(
         storage.lights[2]
-            .kind
+            .kind()
             .inner_cone_radians()
             .unwrap()
             .to_bits(),
@@ -230,11 +239,11 @@ fn actual_light_rows_reject_invalid_emission_without_recanonicalizing_it() {
         10.0,
     )
     .unwrap();
-    let canonical = StoredLight {
-        kind: LightKind::point(None).unwrap(),
-        tint: emission.tint(),
-        intensity: emission.intensity(),
-    };
+    let canonical = LightDefinition::new(
+        LightKind::point(None).unwrap(),
+        LocalAxes::STANDARD,
+        emission,
+    );
     let mut storage = SpatialStorage {
         space: SceneSpace::UNKNOWN,
         cameras: vec![],
@@ -250,15 +259,11 @@ fn actual_light_rows_reject_invalid_emission_without_recanonicalizing_it() {
         (Vec3::ZERO, 0.0),
         (Vec3::new(2.0, 2.0, 2.0), 1.0),
         (
-            Vec3::new(-0.0, canonical.tint.y, canonical.tint.z),
-            canonical.intensity,
+            Vec3::new(-0.0, canonical.tint().y, canonical.tint().z),
+            canonical.intensity(),
         ),
     ] {
-        storage.lights[1] = StoredLight {
-            kind: canonical.kind,
-            tint,
-            intensity,
-        };
+        storage.lights[1] = canonical.with_emission_parts_for_test(tint, intensity);
         let mut control = Control::default();
         assert_eq!(storage.validate(&mut control, 0, 2, 0), Ok(false));
         assert_eq!(control.attempted, 3);

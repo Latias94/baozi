@@ -26,7 +26,8 @@ mod geometry;
 )]
 mod identity;
 mod image;
-pub mod math;
+pub mod local_axes;
+mod math;
 #[allow(
     dead_code,
     reason = "canonical domain implementation is exposed through sealed views"
@@ -115,8 +116,8 @@ pub use deform::{
 pub use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticSeverity, SourceLocation};
 pub use entity::{
     AuthoredTransform, AuthoredTransformError, AuthoredTransformKind, CameraProjection,
-    CameraProjectionError, CameraProjectionKind, LightError, LightKind, LightKindCategory,
-    TrsTransform,
+    CameraProjectionError, LightDefinition, LightEmissionError, LightError, LightKind,
+    LightKindCategory, OrthographicProjection, PerspectiveProjection, TrsTransform,
 };
 pub use extension::{ExtensionSchemaId, ExtensionSchemaIdError};
 pub use format_id::{FormatId, FormatIdError, MAX_FORMAT_ID_LEN};
@@ -129,6 +130,7 @@ pub use identity::{
 };
 pub use identity::{MorphTargetId, SkinId};
 pub use image::{MipmapFilter, SamplerState, TexelFilter, TextureAddressMode};
+pub use local_axes::{LocalAxes, LocalAxesError, LocalAxis};
 pub use math::{Aabb, Color, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use namespaced::{NamespacedName, NamespacedNameError};
 pub use ordered_map::{

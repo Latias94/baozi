@@ -107,18 +107,12 @@ where
         &pending.operation,
     )?;
     let spatial = if let NodeSceneEditProgram::ConvertSpace(plan) = &pending.program {
-        let plan_target = plan.conversion().target();
-        let source = pending.input.tables.spatial.as_ref();
-        let plan = crate::canonical_scene::store::typed_storage::spatial::build::SpatialStoragePlan::for_storage(source)
-            .map_err(StoreRuntimeError::Plan)?;
+        let spatial = plan.spatial();
         lane.try_retain_storage(
-            plan.capacities(),
-            plan.work().map_err(StoreRuntimeError::Plan)?,
-            plan.name_bytes() as u64,
-            |control| {
-                plan.rewrite_space(source, plan_target, control)
-                    .map_err(map_build)
-            },
+            spatial.capacities(),
+            spatial.work(),
+            spatial.name_bytes() as u64,
+            |control| spatial.materialize(control).map_err(map_build),
         )?
     } else {
         lane.try_share_storage(&pending.input.tables.spatial)?
