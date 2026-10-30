@@ -15,8 +15,9 @@ assigned Baozi maturity; enabling a feature does not imply full format coverage.
 The [glTF/GLB restrictions](https://github.com/Latias94/baozi/blob/main/docs/formats/gltf.md) apply, including selected
 scene closure, limited topology and extension support, and encoded images without
 pixel decoding. Optional `postprocess` provides single-primitive triangulation,
-flat/smooth normals, and whole-Scene static coordinate/unit conversion; spatial
-conversion of deformation, animation, cameras, and lights remains unsupported.
+flat/smooth normals, and whole-Scene coordinate/unit conversion including skin
+matrices, morph deltas, and TRS animation curves. Camera and light conversion remains
+unsupported.
 
 Use memory or custom asset IO for portable imports. `native-fs-candidate` is opt-in
 and limited to `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and

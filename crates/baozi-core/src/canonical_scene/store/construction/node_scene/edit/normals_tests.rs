@@ -361,10 +361,18 @@ impl<'scene> CanonicalActivationDescription for EditActivation<'scene> {
 /// Uses the production graph/profile retention adapters and the existing same-account lane.
 /// Publication and postprocess orchestration are covered by their own transaction tests.
 fn retain_edit(pending: BoundPendingNodeSceneEdit<'_>) -> RetainedEdit {
+    retain_controlled_edit(pending, OperationControl::default())
+        .expect("valid profile must reach a retained candidate")
+}
+
+fn retain_controlled_edit(
+    pending: BoundPendingNodeSceneEdit<'_>,
+    control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
+) -> Option<RetainedEdit> {
     let counts = pending.counts;
     let start = try_plan_scene_operation(
         test_limits(),
-        OperationControl::default(),
+        control,
         counts.canonical_attribution_slots.as_usize().max(2),
         SceneFailureEvidenceWork::exact_single_record(NODE_SCENE_EVIDENCE_FIELD_COUNT),
     )
@@ -388,6 +396,10 @@ fn retain_edit(pending: BoundPendingNodeSceneEdit<'_>) -> RetainedEdit {
         .expect("normals session owner");
     let (brand, request) =
         ConstructionBrand::reserve_with_activation_request().expect("normals activation identity");
+    let name_bytes = match &pending.program {
+        super::super::plan::NodeSceneEditProgram::ConvertSpace(plan) => plan.name_bytes(),
+        _ => pending.input.read_geometry().names.len(),
+    };
     let total = counts.canonical_blocks.as_usize();
     let requirements = CanonicalSuccessRequirements::new(
         CanonicalTableShape::new(total, total).expect("normals canonical shape"),
@@ -397,7 +409,7 @@ fn retain_edit(pending: BoundPendingNodeSceneEdit<'_>) -> RetainedEdit {
     )
     .expect("normals success envelope")
     .with_request_identity(brand.activation_request_identity())
-    .with_semantic_bytes(pending.input.read_geometry().names.len() as u64);
+    .with_semantic_bytes(name_bytes as u64);
     let mut description = Some(EditActivation {
         request,
         requirements,
@@ -435,10 +447,10 @@ fn retain_edit(pending: BoundPendingNodeSceneEdit<'_>) -> RetainedEdit {
                 },
             )
         })
-        .expect("normals scoped retention");
+        .ok()?;
     match outcome {
-        CanonicalActivationOutcome::Activated(activated) => activated,
-        _ => panic!("valid normals profile must reach a retained candidate"),
+        CanonicalActivationOutcome::Activated(activated) => Some(activated),
+        _ => None,
     }
 }
 
@@ -884,8 +896,7 @@ fn flat_replacement_excludes_smoothing_group_and_unrelated_attribute_provenance(
 
 #[test]
 fn winding_conversion_keeps_owner_indices_and_unions_each_owners_scene_parents() {
-    use crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlan;
-    use crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlan;
+    use crate::canonical_scene::store::typed_storage::edit::space::SceneSpacePlan;
     use crate::scene_space::{Axis, FrontFaceWinding, Handedness};
     use crate::space_conversion::{SpaceConversion, TargetSpace};
     let factory = test_factory();
@@ -902,28 +913,15 @@ fn winding_conversion_keeps_owner_indices_and_unions_each_owners_scene_parents()
     let conversion =
         SpaceConversion::try_new(&SceneSpace::UNKNOWN, target, Some(TargetSpace::STANDARD))
             .unwrap();
-    let nodes = NodeSpacePlan::try_new(
-        source.scene.read_nodes(),
-        conversion,
-        &mut Control::default(),
-    )
-    .unwrap();
-    let geometry = GeometrySpacePlan::try_new(
-        source.scene.read_geometry(),
-        conversion,
-        &mut Control::default(),
-    )
-    .unwrap();
+    let space =
+        SceneSpacePlan::try_new(&source.scene.tables, conversion, &mut Control::default()).unwrap();
+    let geometry = space.geometry();
     let options = OptionsDigest::sha256([44; 32]);
-    let pending = BoundPendingNodeSceneEdit::try_space_conversion(
-        &source.scene,
-        nodes,
-        geometry,
-        conversion,
-        options,
-        &mut || Ok(()),
-    )
-    .unwrap();
+    let pending =
+        BoundPendingNodeSceneEdit::try_space_conversion(&source.scene, space, options, &mut || {
+            Ok(())
+        })
+        .unwrap();
     let plan = pending.counts.profile;
     let selected = [
         CanonicalProfileOwner::Scene,
@@ -985,8 +983,7 @@ fn winding_conversion_keeps_owner_indices_and_unions_each_owners_scene_parents()
 
 #[test]
 fn declaration_only_conversion_shares_node_geometry_and_metadata_owners() {
-    use crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlan;
-    use crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlan;
+    use crate::canonical_scene::store::typed_storage::edit::space::SceneSpacePlan;
     use crate::space_conversion::{SpaceConversion, TargetSpace};
     let factory = test_factory();
     let account = test_account(&factory, 1_024);
@@ -997,23 +994,11 @@ fn declaration_only_conversion_shares_node_geometry_and_metadata_owners() {
         Some(TargetSpace::STANDARD),
     )
     .unwrap();
-    let nodes = NodeSpacePlan::try_new(
-        source.scene.read_nodes(),
-        conversion,
-        &mut Control::default(),
-    )
-    .unwrap();
-    let geometry = GeometrySpacePlan::try_new(
-        source.scene.read_geometry(),
-        conversion,
-        &mut Control::default(),
-    )
-    .unwrap();
+    let space =
+        SceneSpacePlan::try_new(&source.scene.tables, conversion, &mut Control::default()).unwrap();
     let pending = BoundPendingNodeSceneEdit::try_space_conversion(
         &source.scene,
-        nodes,
-        geometry,
-        conversion,
+        space,
         OptionsDigest::sha256([45; 32]),
         &mut || Ok(()),
     )
@@ -1048,4 +1033,303 @@ fn declaration_only_conversion_shares_node_geometry_and_metadata_owners() {
     drop(source);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn space_conversion_rebinds_changed_deformation_and_curve_owners_with_exact_selection_work() {
+    use crate::canonical_scene::store::construction::node_scene::tests::build_gltf_capability_scene_for_probe;
+    use crate::canonical_scene::store::typed_storage::edit::space::SceneSpacePlan;
+    use crate::scene_space::{Axis, FrontFaceWinding, Handedness};
+    use crate::space_conversion::{SpaceConversion, TargetSpace};
+
+    let factory = test_factory();
+    let account = test_account(&factory, 1_024);
+    let source = build_gltf_capability_scene_for_probe(&account, &AtomicU64::new(1));
+    let conversion = SpaceConversion::try_new(
+        &SceneSpace::UNKNOWN,
+        TargetSpace::try_new(
+            Handedness::Right,
+            Axis::PositiveY,
+            Axis::NegativeZ,
+            0.5,
+            FrontFaceWinding::CounterClockwise,
+        )
+        .unwrap(),
+        Some(TargetSpace::STANDARD),
+    )
+    .unwrap();
+    let space =
+        SceneSpacePlan::try_new(&source.scene.tables, conversion, &mut Control::default()).unwrap();
+    assert!(space.deformation().changes_storage());
+    assert!(space.animation().changes_storage());
+    let options = OptionsDigest::sha256([46; 32]);
+    let pending =
+        BoundPendingNodeSceneEdit::try_space_conversion(&source.scene, space, options, &mut || {
+            Ok(())
+        })
+        .unwrap();
+    let plan = pending.counts.profile;
+    // 1 skin + 2 bind matrices + 4 deltas + 8 xyz tuples;
+    // 3 channels + 18 values + 4 in derivatives + 4 out derivatives.
+    assert_eq!(plan.selection_work, 44);
+    let output = retain_edit(pending);
+    let tables = output.output();
+    assert!(!std::ptr::eq(
+        tables.deformation.as_ref(),
+        source.scene.read_deformation()
+    ));
+    assert!(!std::ptr::eq(
+        tables.animation.as_ref(),
+        source.scene.read_animation()
+    ));
+    let profile = &tables.profile;
+    let state = profile.state.as_ref();
+    let segment = state.segments.last().unwrap();
+    let lineage = segment.lineage.as_ref();
+    for owner in [
+        CanonicalProfileOwner::Skin(0),
+        CanonicalProfileOwner::MorphDelta(0),
+        CanonicalProfileOwner::MorphDelta(1),
+        CanonicalProfileOwner::MorphDelta(2),
+        CanonicalProfileOwner::MorphDelta(3),
+        CanonicalProfileOwner::AnimationChannel(0),
+    ] {
+        let refs = attachments(profile, owner);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].segment() as usize, state.segments.len() - 1);
+        let node = &lineage.provenance[refs[0].local() as usize];
+        assert_eq!(
+            node.parents.get(&lineage.parents).unwrap(),
+            expected_parents(&source.scene, &[owner, CanonicalProfileOwner::Scene])
+        );
+    }
+    for owner in [
+        CanonicalProfileOwner::AnimationChannel(1),
+        CanonicalProfileOwner::AnimationChannel(2),
+        CanonicalProfileOwner::AnimationClip(0),
+        CanonicalProfileOwner::MorphDefinition(0),
+        CanonicalProfileOwner::MeshInstance(0),
+    ] {
+        assert_eq!(
+            attachments(profile, owner),
+            attachments(&source.scene.tables.profile, owner)
+        );
+    }
+    assert_valid_profile(profile, plan);
+    let mut control = Control::default();
+    assert!(space.validate_correspondence(tables, &mut control).unwrap());
+    // The one space-declaration action belongs to the outer transaction.
+    assert_eq!(control.0 + 1, space.correspondence_work());
+    assert!(std::ptr::eq(
+        tables.appearance.as_ref(),
+        source.scene.tables.appearance.as_ref()
+    ));
+    drop(source);
+    assert_valid_profile(&output.output().profile, plan);
+    drop(output);
+    assert!(!account.snapshot().poisoned());
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn winding_and_declaration_edits_share_populated_deformation_and_animation_without_selection() {
+    use crate::canonical_scene::store::construction::node_scene::tests::build_gltf_capability_scene_for_probe;
+    use crate::canonical_scene::store::typed_storage::edit::space::SceneSpacePlan;
+    use crate::scene_space::{Axis, FrontFaceWinding, Handedness};
+    use crate::space_conversion::{SpaceConversion, TargetSpace};
+
+    for winding in [
+        FrontFaceWinding::CounterClockwise,
+        FrontFaceWinding::Clockwise,
+    ] {
+        let factory = test_factory();
+        let account = test_account(&factory, 1_024);
+        let source = build_gltf_capability_scene_for_probe(&account, &AtomicU64::new(1));
+        let conversion = SpaceConversion::try_new(
+            &SceneSpace::UNKNOWN,
+            TargetSpace::try_new(
+                Handedness::Right,
+                Axis::PositiveY,
+                Axis::NegativeZ,
+                1.0,
+                winding,
+            )
+            .unwrap(),
+            Some(TargetSpace::STANDARD),
+        )
+        .unwrap();
+        let space =
+            SceneSpacePlan::try_new(&source.scene.tables, conversion, &mut Control::default())
+                .unwrap();
+        assert!(!space.deformation().changes_storage());
+        assert!(!space.animation().changes_storage());
+        let pending = BoundPendingNodeSceneEdit::try_space_conversion(
+            &source.scene,
+            space,
+            OptionsDigest::sha256([47; 32]),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let plan = pending.counts.profile;
+        assert_eq!(plan.selection_work, 0);
+        let output = retain_edit(pending);
+        let tables = output.output();
+        assert!(std::ptr::eq(
+            tables.deformation.as_ref(),
+            source.scene.read_deformation()
+        ));
+        assert!(std::ptr::eq(
+            tables.animation.as_ref(),
+            source.scene.read_animation()
+        ));
+        assert!(std::ptr::eq(
+            tables.nodes.as_ref(),
+            source.scene.read_nodes()
+        ));
+        assert_valid_profile(&tables.profile, plan);
+        let mut control = Control::default();
+        assert!(space.validate_correspondence(tables, &mut control).unwrap());
+        assert_eq!(control.0 + 1, space.correspondence_work());
+        drop(output);
+        drop(source);
+        assert!(!account.snapshot().poisoned());
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    }
+}
+
+#[test]
+fn complete_space_plan_rejects_a_same_generation_sibling_before_profile_work() {
+    use crate::canonical_scene::store::typed_storage::edit::space::SceneSpacePlan;
+    use crate::space_conversion::{SpaceConversion, TargetSpace};
+
+    let factory = test_factory();
+    let account = test_account(&factory, 1_024);
+    let source = source_scene(&account, &AtomicU64::new(1), false, false);
+    let sibling = source_scene(&account, &AtomicU64::new(1), false, false);
+    assert_eq!(source.scene.generation(), sibling.scene.generation());
+    let conversion = SpaceConversion::try_new(
+        &SceneSpace::UNKNOWN,
+        TargetSpace::STANDARD,
+        Some(TargetSpace::STANDARD),
+    )
+    .unwrap();
+    let space =
+        SceneSpacePlan::try_new(&source.scene.tables, conversion, &mut Control::default()).unwrap();
+    let mut polls = 0;
+    let result = BoundPendingNodeSceneEdit::try_space_conversion(
+        &sibling.scene,
+        space,
+        OptionsDigest::sha256([48; 32]),
+        &mut || {
+            polls += 1;
+            Ok(())
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(super::super::plan::NodeSceneEditPlanError::InvalidSource { .. })
+    ));
+    assert_eq!(polls, 0);
+    drop(source);
+    drop(sibling);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+}
+
+#[test]
+fn interrupted_space_graph_releases_rebuilt_owners_and_preserves_the_source_account() {
+    use crate::canonical_scene::store::construction::node_scene::tests::build_gltf_capability_scene_for_probe;
+    use crate::canonical_scene::store::typed_storage::edit::space::SceneSpacePlan;
+    use crate::scene_space::{Axis, FrontFaceWinding, Handedness};
+    use crate::space_conversion::{SpaceConversion, TargetSpace};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Stop {
+        polls: Arc<AtomicUsize>,
+        at: usize,
+    }
+    impl baozi_operation::CancellationSignal for Stop {
+        fn is_cancelled(&self) -> bool {
+            self.polls.fetch_add(1, Ordering::Relaxed) >= self.at
+        }
+    }
+
+    let factory = test_factory();
+    let account = test_account(&factory, 1_024);
+    let source = build_gltf_capability_scene_for_probe(&account, &AtomicU64::new(1));
+    let conversion = SpaceConversion::try_new(
+        &SceneSpace::UNKNOWN,
+        TargetSpace::try_new(
+            Handedness::Left,
+            Axis::PositiveZ,
+            Axis::PositiveY,
+            0.5,
+            FrontFaceWinding::CounterClockwise,
+        )
+        .unwrap(),
+        Some(TargetSpace::STANDARD),
+    )
+    .unwrap();
+    let baseline = account.snapshot();
+    let run = |at| {
+        let plan =
+            SceneSpacePlan::try_new(&source.scene.tables, conversion, &mut Control::default())
+                .unwrap();
+        let pending = BoundPendingNodeSceneEdit::try_space_conversion(
+            &source.scene,
+            plan,
+            OptionsDigest::sha256([49; 32]),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let result = retain_controlled_edit(
+            pending,
+            OperationControl::default().with_cancellation(Stop {
+                polls: polls.clone(),
+                at,
+            }),
+        );
+        if at == usize::MAX {
+            let output = result.expect("the complete retained graph must fit its exact work");
+            assert!(!std::ptr::eq(
+                output.output().deformation.as_ref(),
+                source.scene.read_deformation()
+            ));
+            assert!(!std::ptr::eq(
+                output.output().animation.as_ref(),
+                source.scene.read_animation()
+            ));
+            drop(output);
+        } else {
+            assert!(result.is_none(), "the selected poll {at} must interrupt");
+        }
+        assert!(!account.snapshot().poisoned());
+        assert_eq!(
+            account.snapshot().live_retained_allocations(),
+            baseline.live_retained_allocations()
+        );
+        assert_eq!(
+            account.snapshot().live_retained_bytes(),
+            baseline.live_retained_bytes()
+        );
+        polls.load(Ordering::Relaxed)
+    };
+    let polls = run(usize::MAX);
+    // Cancellation polls occur at retention checkpoints and bounded work intervals;
+    // they are not one poll per charged scalar. Four distinct late checkpoints suffice here.
+    assert!(
+        polls > 8,
+        "expected distinct retained checkpoints, got {polls}"
+    );
+    for at in [polls / 2, polls * 3 / 4, polls * 7 / 8, polls - 1] {
+        run(at);
+    }
+    drop(source);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
 }

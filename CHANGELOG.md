@@ -6,6 +6,11 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Extended whole-Scene space conversion to skin inverse binds/corrections, dense/sparse morph
+  deltas, and TRS animation values and cubic derivatives. One complete borrowed plan binds all
+  domains to the exact input root and conversion; unchanged deformation/animation owners stay
+  shared. Quaternion signs, zero/nonunit derivatives, source identities, times, and sparse presence
+  remain preserved. Numeric failures carry precise locations and return the original Scene.
 - Made appearance authoring own compact material and binding behavior values directly. Constructor
   lifetimes now apply only to optional material names and descriptive source keys; small enum and
   swizzle temporaries no longer need caller-owned reference scaffolding.

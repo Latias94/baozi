@@ -307,8 +307,10 @@ The [delivery progress](../reviews/2026-10-29-delivery-progress.md) records nume
 cancellation, package, and target verification. Direct whole-Scene static coordinate/unit conversion
 now uses that same transaction, complete validated target facts, and explicit source assumptions.
 It preserves authored node form and dense/sparse attribute domains, with typed rejection of present
-spatial semantics it cannot yet convert. Deformation/animation/camera/light conversion and application
-vertex unification remain required to complete F; the static conversion is a bounded increment.
+spatial semantics it cannot yet convert. Skin matrices, dense/sparse morph deltas, and TRS animation
+values and derivatives now use one complete exact-source conversion plan. Unchanged deformation and
+animation owners remain shared, and each profile construction pass admits its complete selection
+work. Camera/light conversion and application vertex unification remain required to complete F.
 
 Add an explicit helper or operation for unifying corner attributes into application vertex tuples.
 Do not assume triangles alone form a GPU-ready vertex/index layout. Lossy influence truncation and

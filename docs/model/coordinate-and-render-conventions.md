@@ -89,8 +89,20 @@ Coordinate normalization must apply consistently to:
 
 If a post-process step cannot update a feature correctly, it must diagnose or reject that scene rather than silently producing inconsistent output.
 
-The current static conversion rejects coordinate or unit changes with actual skins, morph deltas,
-animation channels, camera definitions, or light definitions. It also rejects numeric conversion
-of custom attributes, spatial texture-coordinate sources, or nonzero Scene-unit material values
+Skin inverse binds and optional corrections use `H M H^-1`, with `H = diag(sQ, 1)`.
+Dense and sparse Position morph deltas use `sQ`; Normal and Tangent deltas use `Q`.
+Sparse omissions, explicit entries, target identities, influence rows, and morph weights remain unchanged.
+
+Animation translation values and cubic derivatives use `sQ`. Scale values and derivatives
+permute axes without sign changes. Quaternion samples and arbitrary cubic derivatives use
+`(det(Q) Q xyz, w)`. This linear map preserves `q/-q`, zero/nonunit derivatives, and scalar bits
+except for the declared permutation, sign, and unit arithmetic. No normalization or quaternion
+sign canonicalization occurs. Names, source order, f64 key times/time domains, and interpolation
+and extrapolation declarations remain unchanged.
+
+Conversion rejects coordinate or unit changes with camera or light definitions. It also rejects
+numeric conversion of custom attributes, spatial texture-coordinate sources, or nonzero Scene-unit material values
 it cannot convert. Winding-only conversion can retain otherwise unaffected spatial domains.
-These typed rejections preserve the original Scene; support for those conversions remains open.
+These typed rejections preserve the original Scene. Unrepresentable numeric output identifies the
+skin correction, inverse-bind matrix, morph delta/tuple, or animation channel/stream/key before
+retained output admission. Winding-only and declaration-only edits share deformation and animation storage.

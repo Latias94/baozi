@@ -53,9 +53,49 @@ pub(super) enum ProfileEditTargets {
 }
 
 impl ProfileEditTargets {
-    fn selects(self, owner: CanonicalProfileOwner, input: &SceneStorage) -> bool {
+    fn selects<C: TypedStorageBuildControl>(
+        self,
+        owner: CanonicalProfileOwner,
+        input: &SceneStorage,
+        control: &mut C,
+    ) -> Result<bool, C::Error> {
+        if let Self::Space(conversion) = self
+            && conversion.changes_coordinates()
+        {
+            use crate::canonical_scene::store::typed_storage::edit::{
+                space_animation::channel_changes,
+                space_deformation::{morph_delta_changes, skin_changes},
+            };
+            match owner {
+                CanonicalProfileOwner::Skin(index) => {
+                    return skin_changes(
+                        input.read_deformation(),
+                        index as usize,
+                        conversion,
+                        control,
+                    );
+                }
+                CanonicalProfileOwner::MorphDelta(index) => {
+                    return morph_delta_changes(
+                        input.read_deformation(),
+                        index as usize,
+                        conversion,
+                        control,
+                    );
+                }
+                CanonicalProfileOwner::AnimationChannel(index) => {
+                    return channel_changes(
+                        input.read_animation(),
+                        index as usize,
+                        conversion,
+                        control,
+                    );
+                }
+                _ => {}
+            }
+        }
         let geometry = input.read_geometry();
-        match (self, owner) {
+        Ok(match (self, owner) {
             (Self::Space(_), CanonicalProfileOwner::Scene) => true,
             (Self::Space(conversion), CanonicalProfileOwner::Node(index)) => {
                 conversion.changes_coordinates()
@@ -81,14 +121,14 @@ impl ProfileEditTargets {
                 }),
             (Self::Space(conversion), CanonicalProfileOwner::Attribute(index)) => {
                 let Some(attribute) = geometry.attributes.get(index as usize) else {
-                    return false;
+                    return Ok(false);
                 };
                 if conversion.changes_coordinates() && matches!(attribute.semantic,
                     crate::canonical_scene::store::typed_storage::StoredAttributeSemantic::Position
                     | crate::canonical_scene::store::typed_storage::StoredAttributeSemantic::Normal
-                    | crate::canonical_scene::store::typed_storage::StoredAttributeSemantic::Tangent) { return true; }
+                    | crate::canonical_scene::store::typed_storage::StoredAttributeSemantic::Tangent) { return Ok(true); }
                 if !conversion.reverse_winding() || attribute.domain != AttributeDomain::Corner {
-                    return false;
+                    return Ok(false);
                 }
                 // Validated u32 cardinalities bound this binary lookup to 32 comparisons.
                 let primitive = geometry
@@ -131,7 +171,36 @@ impl ProfileEditTargets {
                 index == attributes.normal_attribute()
             }
             _ => false,
+        })
+    }
+
+    /// Every payload-owner selector exhausts its own actual matrix/curve/delta range.
+    /// Source central validation proves those ranges partition the corresponding pools.
+    /// These are the additional controlled actions beyond the existing per-owner visits.
+    fn selection_work(self, input: &SceneStorage) -> Result<u64, StorePlanError> {
+        let Self::Space(conversion) = self else {
+            return Ok(0);
+        };
+        if !conversion.changes_coordinates() {
+            return Ok(0);
         }
+        let deformation = input.read_deformation();
+        let animation = input.read_animation();
+        [
+            deformation.skins.len(),
+            deformation.inverse_bind_matrices.len(),
+            deformation.morph_deltas.len(),
+            deformation.morph_values.len() / 3,
+            animation.channels.len(),
+            animation.values.len(),
+            animation.in_tangents.len(),
+            animation.out_tangents.len(),
+        ]
+        .into_iter()
+        .try_fold(0_u64, |work, count| {
+            work.checked_add(count as u64)
+                .ok_or(StorePlanError::SizeOverflow)
+        })
     }
 
     fn source_owner(self, output: CanonicalProfileOwner) -> Option<CanonicalProfileOwner> {
@@ -282,6 +351,7 @@ pub(super) struct NodeSceneEditProfilePlan {
     lineage: [CapacityPlan; 3],
     state: ProfileStatePlan,
     metadata: MetadataEditPlan,
+    selection_work: u64,
     pub(super) source_segment_count: CheckedCount,
     pub(super) target_count: CheckedCount,
     pub(super) target_attachment_count: CheckedCount,
@@ -323,7 +393,7 @@ impl NodeSceneEditProfilePlan {
         for ordinal in 0..output_layout.owner_count() {
             poll()?;
             let owner = output_layout.owner_at(ordinal).ok_or_else(invalid)?;
-            let count = if targets.selects(owner, input) {
+            let count = if targets.selects(owner, input, &mut ProfilePlanningControl(poll))? {
                 let sources =
                     owner_parents(input, source_layout, targets, owner).ok_or_else(invalid)?;
                 let mut source_count = 0_u32;
@@ -394,6 +464,7 @@ impl NodeSceneEditProfilePlan {
             output_layout,
             targets,
             metadata,
+            selection_work: targets.selection_work(input)?,
             lineage: [
                 capacity::<StoredProvenance>(u64::from(targets_count))?,
                 capacity::<StoredOperation>(u64::from(targets_count))?,
@@ -435,6 +506,7 @@ impl NodeSceneEditProfilePlan {
     fn lineage_work(self) -> Result<u64, StorePlanError> {
         count_work(self.lineage)?
             .checked_add(self.output_layout.owner_count())
+            .and_then(|work| work.checked_add(self.selection_work))
             .ok_or(StorePlanError::SizeOverflow)
     }
 
@@ -442,6 +514,7 @@ impl NodeSceneEditProfilePlan {
         self.state
             .work()?
             .checked_add(input.tables.profile.state.as_ref().metadata_entries.len() as u64)
+            .and_then(|work| work.checked_add(self.selection_work))
             .ok_or(StorePlanError::SizeOverflow)
     }
 
@@ -466,7 +539,11 @@ impl NodeSceneEditProfilePlan {
                 .run_unit(|| self.output_layout.owner_at(ordinal))
                 .map_err(TypedStorageBuildError::Control)?
                 .ok_or(TypedStorageBuildError::Invariant)?;
-            if !self.targets.selects(owner, input) {
+            if !self
+                .targets
+                .selects(owner, input, control)
+                .map_err(TypedStorageBuildError::Control)?
+            {
                 continue;
             }
             let sources = owner_parents(input, self.source_layout, self.targets, owner)
@@ -553,7 +630,11 @@ impl NodeSceneEditProfilePlan {
                 .owner_at(ordinal)
                 .ok_or(TypedStorageBuildError::Invariant)?;
             let start = attachments.len();
-            let maximum_depth = if self.targets.selects(owner, input) {
+            let maximum_depth = if self
+                .targets
+                .selects(owner, input, control)
+                .map_err(TypedStorageBuildError::Control)?
+            {
                 let reference = domain
                     .reference(local)
                     .ok_or(TypedStorageBuildError::Invariant)?;

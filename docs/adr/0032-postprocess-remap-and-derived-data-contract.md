@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-10-30
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
@@ -257,7 +257,7 @@ the plan. No transaction API accepts an independently replaceable input alongsid
 value. Its closed program extends the existing transaction, central validation, fallback,
 generation, and publication path rather than defining a second edit protocol.
 
-The static conversion transports every F32 Position, Normal, and Tangent across every authored
+The conversion transports every F32 Position, Normal, and Tangent across every authored
 domain, including sparse defaults and explicit entries. ADR 0008 supplies the arithmetic. Dense
 and sparse Corner attributes follow triangle index-lane reversal; sparse indices remain sorted
 without input-sized sorting scratch. A nonindexed triangle gains explicit indices so Vertex
@@ -271,14 +271,29 @@ Node conversion preserves authored Matrix/TRS form, hierarchy, names, and attach
 spatial owner changes only the target's five facts; UV origin, tangent basis/encoding, and eligible
 camera/light definitions remain bit-preserved. Declaration-only and winding-only edits share
 unaffected typed tables. Scene provenance records the resolved conversion. Changed Node,
-Primitive, and Attribute owners retain their own attachments together with the input Scene's
-attachments as operation parents. Metadata descriptors and immutable payloads retain their owners
+Primitive, Attribute, Skin, MorphDelta, and AnimationChannel owners retain their own attachments
+together with the input Scene's attachments as operation parents. Metadata descriptors and immutable payloads retain their owners
 and values. Central validation compares the actual replacement tables with the exact borrowed
 source plan, including preserved values, and validates all published conversion facts.
 
+One closed `SceneSpacePlan` constructs every domain plan against the same immutable `SceneTables`
+and conversion. Its private fields prevent replacement of an individual domain plan; binding it
+to another Scene root fails before profile planning even when both Scenes have the same generation.
+Preflight covers every numeric payload before retained output admission. Its fixed correspondence
+and rebuilt-name costs are reused by execution and validation rather than reconstructed later.
+Inverse binds and skin corrections use matrix conjugation, morph deltas follow their semantic
+linear map, and animation values and cubic derivatives follow their target map under ADR 0008.
+Quaternion signs, zero/nonunit derivatives, names, f64 times/rates, source order, sparse presence,
+influence rows, and morph weights are preserved.
+
+Unchanged deformation and animation bits share their complete retained owners. Profile selection
+exhausts each relevant skin/morph/channel payload, including unchanged curve streams, without
+stopping after the first difference. Lineage and state construction each admit their own complete
+selection pass. Winding-only and declaration-only edits bypass these selection scans while still
+checking actual shared-domain correspondence.
+
 This increment has an explicit capability boundary. Coordinate or unit changes reject actual
-skins, morph deltas, animation channels, cameras, or lights until their spatial rules are
-implemented. Empty deformation alignment rows are not treated as present deformation data.
+cameras or lights until their local-frame rules are implemented.
 Scene-unit thickness and displacement must be zero when units change; non-UV coordinate sources
 reject coordinate changes. Custom attributes reject numeric conversion because their spatial
 meaning is unknown; a winding-only conversion can retain and permute opaque Corner tuples.
@@ -292,7 +307,7 @@ non-conversion evidence has zeroed conversion fields. Runtime success/failure ca
 requirements cover the real schema. No independently cached decoded report facts are authoritative.
 
 Complete spatial conversion for the remaining domains and application vertex unification remain
-open F work. The static conversion does not complete plan F.
+open F work. This conversion increment does not complete plan F.
 
 ### Remap Contract
 

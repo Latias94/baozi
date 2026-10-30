@@ -48,6 +48,8 @@ impl Default for SpaceConversionOptions {
 /// Positions use a signed-axis permutation and a positive uniform unit ratio. Nodes retain their
 /// authored Matrix/TRS form. Existing normals retain their physical direction, tangents transport
 /// their direction and handedness, and triangle winding changes together with Corner attributes.
+/// Skin matrices use conjugation; morph deltas and animation values and cubic derivatives follow
+/// their Position, direction, scale, or quaternion semantics without normalization.
 /// Unhandled present spatial semantics return a typed capability error before publication.
 /// This operation does not change UV origin, generate tangents, or infer missing source units.
 #[allow(

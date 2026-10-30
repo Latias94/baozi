@@ -1,4 +1,4 @@
-//! Exact-source resolution and the static conversion capability boundary.
+//! Exact-source resolution and the Scene conversion capability boundary.
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -76,7 +76,7 @@ pub fn resolve_scene_space_conversion(
     })
 }
 
-/// A present domain whose spatial semantics are not yet converted by this operation.
+/// A numeric failure or present spatial semantic that this conversion cannot represent.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum SceneSpaceConversionIssue {
     #[error("node {node} cannot be converted: {source}")]
@@ -96,12 +96,29 @@ pub enum SceneSpaceConversionIssue {
     },
     #[error("custom attribute {attribute} has no spatial conversion contract")]
     CustomAttribute { attribute: usize },
-    #[error("skin {skin} requires bind-space conversion")]
-    Skin { skin: u32 },
-    #[error("morph delta {delta} requires spatial conversion")]
-    MorphDelta { delta: u32 },
-    #[error("animation channel {channel} requires spatial conversion")]
-    AnimationChannel { channel: u32 },
+    #[error("skin {skin} correction cannot be converted: {source}")]
+    NumericSkinCorrection {
+        skin: usize,
+        source: NumericConversionError,
+    },
+    #[error("inverse-bind matrix {matrix} cannot be converted: {source}")]
+    NumericInverseBind {
+        matrix: usize,
+        source: NumericConversionError,
+    },
+    #[error("morph delta {delta} tuple {tuple} cannot be converted: {source}")]
+    NumericMorphDelta {
+        delta: usize,
+        tuple: usize,
+        source: NumericConversionError,
+    },
+    #[error("animation channel {channel} {part:?} key {key} cannot be converted: {source}")]
+    NumericAnimation {
+        channel: usize,
+        part: crate::SceneAnimationSamplePart,
+        key: usize,
+        source: NumericConversionError,
+    },
     #[error("camera {camera} requires local-frame conversion")]
     Camera { camera: u32 },
     #[error("light {light} requires local-frame conversion")]
@@ -159,13 +176,7 @@ pub(super) fn check_capabilities<
     let conversion = resolved.conversion;
     if conversion.changes_coordinates() {
         let counts = control.run_unit(|| input.as_node_scene().proof.counts())?;
-        let unsupported = if counts.skin_count != 0 {
-            Some(SceneSpaceConversionIssue::Skin { skin: 0 })
-        } else if counts.morph_delta_count != 0 {
-            Some(SceneSpaceConversionIssue::MorphDelta { delta: 0 })
-        } else if counts.animation_channel_count != 0 {
-            Some(SceneSpaceConversionIssue::AnimationChannel { channel: 0 })
-        } else if counts.camera_count != 0 {
+        let unsupported = if counts.camera_count != 0 {
             Some(SceneSpaceConversionIssue::Camera { camera: 0 })
         } else if counts.light_count != 0 {
             Some(SceneSpaceConversionIssue::Light { light: 0 })

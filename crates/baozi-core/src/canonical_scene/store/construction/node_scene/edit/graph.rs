@@ -73,11 +73,10 @@ where
             )?;
             (nodes, geometry)
         }
-        NodeSceneEditProgram::ConvertSpace {
-            nodes,
-            geometry,
-            conversion,
-        } => {
+        NodeSceneEditProgram::ConvertSpace(plan) => {
+            let conversion = plan.conversion();
+            let nodes = plan.nodes();
+            let geometry = plan.geometry();
             let nodes = if conversion.changes_coordinates() {
                 lane.try_retain_storage(
                     nodes.capacities(),
@@ -107,7 +106,8 @@ where
         pending.counts.profile,
         &pending.operation,
     )?;
-    let spatial = if let NodeSceneEditProgram::ConvertSpace { conversion, .. } = &pending.program {
+    let spatial = if let NodeSceneEditProgram::ConvertSpace(plan) = &pending.program {
+        let plan_target = plan.conversion().target();
         let source = pending.input.tables.spatial.as_ref();
         let plan = crate::canonical_scene::store::typed_storage::spatial::build::SpatialStoragePlan::for_storage(source)
             .map_err(StoreRuntimeError::Plan)?;
@@ -116,7 +116,7 @@ where
             plan.work().map_err(StoreRuntimeError::Plan)?,
             plan.name_bytes() as u64,
             |control| {
-                plan.rewrite_space(source, conversion.target(), control)
+                plan.rewrite_space(source, plan_target, control)
                     .map_err(map_build)
             },
         )?
@@ -124,8 +124,32 @@ where
         lane.try_share_storage(&pending.input.tables.spatial)?
     };
     let appearance = lane.try_share_storage(&pending.input.tables.appearance)?;
-    let deformation = lane.try_share_storage(&pending.input.tables.deformation)?;
-    let animation = lane.try_share_storage(&pending.input.tables.animation)?;
+    let deformation = if let NodeSceneEditProgram::ConvertSpace(plan) = &pending.program
+        && plan.deformation().changes_storage()
+    {
+        let deformation = plan.deformation();
+        lane.try_retain_storage(
+            deformation.capacities().map_err(StoreRuntimeError::Plan)?,
+            deformation.work(),
+            deformation.name_bytes() as u64,
+            |control| deformation.materialize(control).map_err(map_build),
+        )?
+    } else {
+        lane.try_share_storage(&pending.input.tables.deformation)?
+    };
+    let animation = if let NodeSceneEditProgram::ConvertSpace(plan) = &pending.program
+        && plan.animation().changes_storage()
+    {
+        let animation = plan.animation();
+        lane.try_retain_storage(
+            animation.capacities().map_err(StoreRuntimeError::Plan)?,
+            animation.work(),
+            animation.name_bytes() as u64,
+            |control| animation.materialize(control).map_err(map_build),
+        )?
+    } else {
+        lane.try_share_storage(&pending.input.tables.animation)?
+    };
     let directory = rewrite_directory_with_shape(lane, pending)?;
 
     Ok(RewrittenNodeSceneGraph {

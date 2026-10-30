@@ -66,8 +66,8 @@ impl SceneEditPostflight<'_> {
                     && scene.draft.brand == self.brand
                     && output.source_generation == self.input.generation()
                 {
-                    if let Some(geometry) = self.geometry {
-                        let expected = geometry.facts(
+                    if let Some(storage) = self.storage {
+                        let expected = storage.facts(
                             self.input.as_node_scene(),
                             self.replacement,
                             scene.evidence_counts,
@@ -75,7 +75,7 @@ impl SceneEditPostflight<'_> {
                         if Some(output.facts) == expected {
                             if let Some(counts) = validate_changed_root(session, evidence, &recipe)?
                             {
-                                if geometry.validate_correspondence(&scene.tables, session)?
+                                if storage.validate_correspondence(&scene.tables, session)?
                                     && self
                                         .validate_spatial_correspondence(&scene.tables, session)?
                                 {

@@ -843,6 +843,67 @@ unchanged PE stack reservation are retained as `f-space-stack-trace.log`,
 remains in `f-space-packaged-consumers.log` to distinguish the discovered defect from the repaired
 artifact verification. No new sanitizer or sustained fuzz campaign is claimed by this increment.
 
+## Deformation and Animation Space Conversion (2026-10-31)
+
+Whole-Scene conversion now includes skin inverse binds/corrections, dense and sparse morph
+Position/Normal/Tangent deltas, and translation/rotation/scale animation values and cubic
+derivatives. The former separate domain-plan argument list is replaced by one closed
+`SceneSpacePlan`. It binds all four domain recipes to the exact same `SceneTables` and conversion,
+performs complete numeric preflight, and retains only borrowed plans and fixed costs.
+Materialization and correspondence use that same plan. Same-generation sibling roots are
+rejected before profile traversal; individual domain plans cannot be replaced independently.
+
+Inverse binds and corrections use `H M H^-1`; morph positions and translation curves/derivatives
+use `sQ`, morph directions use `Q`, scale curves permute unsigned axes, and quaternion values and
+arbitrary derivatives use `(det(Q) Q xyz, w)`. Source order, f64 times/rates, interpolation and
+extrapolation, names, sparse presence/indices, influences, and weights are preserved. The operation
+does not normalize quaternion derivatives or choose a canonical quaternion sign.
+Numeric overflow/underflow reports skin-correction, inverse-bind, morph tuple, or channel/stream/key
+coordinates before admitting retained output. Failure returns the original immutable Scene.
+
+Only deformation/animation owners with changed scalar bits are rebuilt. Winding-only and
+declaration-only edits share populated owners. Changed Skin, MorphDelta, and AnimationChannel
+owners derive their lineage from their own attachments plus the input Scene's attachments.
+Lineage and state construction each admit their own complete selection pass. The selected glTF
+shape exercises exactly 44 additional actions per pass; unchanged weights and curves are still
+visited, and a first change never short-circuits the remaining work.
+
+Local plan tests check exact construction/correspondence work, every interrupted action, caught
+unwind cleanup, actual-table corruption, and late numeric failures. Retained-graph tests check
+source binding, changed-owner parent unions, actual sharing, exact correspondence, and interrupted
+candidate cleanup back to the source account's live-byte/allocation baseline. Six public
+integration tests read handwritten matrix/morph/curve expectations, preserve q/-q and signed-zero
+bits, reject seven numeric failure cases, run populated conversion on a 1 MiB stack, and measure
+zero net allocations/bytes after an ordinary host unwind through published Scene/report owners.
+The postprocess suite passed 98/98 tests after correcting an incomplete tangent declaration in the
+new test fixture. Independent read-only correctness review found no additional concrete defect
+in exact-source binding, selection work, conditional rebuilding, or shared-owner correspondence.
+
+The complete all-feature production workspace suite passed **2,290/2,290 tests**, with four
+manual scale pilots skipped. Strict all-feature/all-target workspace Clippy, workspace doctests,
+rustdoc with `-D warnings`, and workspace/standalone-consumer formatting passed. The full Windows
+all-format consumer executed in both debug and release on the ordinary main stack, including new
+handwritten assertions over the admitted glTF Scene's converted binds, morphs, animation values,
+and cubic derivatives.
+
+A fresh all-feature archive consumer built and executed from
+`target/package-check-dc2zfq27`, with its local dependency closure verified to resolve only to
+newly extracted `.crate` artifacts. The checker also verified package README/license content.
+The release WASI all-format consumer executed the same workflows under the previously
+checksum-qualified Wasmtime 50.0.0 installation. Browser WASM passed compilation only.
+These results do not establish a new sustained fuzz/sanitizer campaign or final current-stable
+publication matrix.
+
+Logs are `target/review/f-space-domains-workspace-final.log`,
+`f-space-domains-clippy-final.log`, `f-space-domains-doctests.log`,
+`f-space-domains-rustdoc.log`, `f-space-domains-postprocess-final.log`,
+`f-space-graph-cancel.log`, `f-space-domains-native-debug-final.log`,
+`f-space-domains-native-release-final.log`, `f-space-domains-packaged-final.log`,
+`f-space-domains-wasi-final.log`, and `f-space-domains-browser-wasm-final.log`.
+
+Camera/light local-frame conversion, material Scene-unit/spatial-texture behavior, and application
+vertex unification remain open F work. This increment does not complete the A–H plan.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
@@ -854,8 +915,9 @@ artifact verification. No new sanitizer or sustained fuzz campaign is claimed by
   attribute-owner mapping. Keep validation borrowed and unchanged owner sharing intact through the
   remaining postprocessing work; do not reintroduce retired record/projection paths.
 - Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
-- Preserve F's triangulation, normal generation, and static target-space conversion while closing
-  the remaining spatial domains and application vertex lowering.
+- Preserve F's triangulation, normal generation, and target-space conversion for geometry,
+  authored nodes, skin matrices, morph deltas, and animation curves while closing camera/light
+  and material spatial semantics and application vertex lowering.
 - Finish G's remaining behavioral growth checks and H's current-stable/release package matrix,
   CI execution wiring, and native candidate acceptance. Dependency upgrades, package-content fixes,
   and the recorded fixed artifact matrix already have their distinct implementation/evidence above.

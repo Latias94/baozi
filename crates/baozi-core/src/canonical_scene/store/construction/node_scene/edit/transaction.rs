@@ -61,20 +61,21 @@ use crate::canonical_scene::store::typed_storage::build::TypedStorageBuildContro
 use crate::canonical_scene::store::typed_storage::edit::normals::{
     GeometryNormalsPlan, NormalWritePolicy, TangentPolicy,
 };
-use crate::canonical_scene::store::typed_storage::edit::space_geometry::{
-    GeometrySpacePlan, GeometrySpacePlanError,
+use crate::canonical_scene::store::typed_storage::edit::space::{
+    SceneSpacePlan, SceneSpacePlanError,
 };
-use crate::canonical_scene::store::typed_storage::edit::space_nodes::{
-    NodeSpacePlan, NodeSpacePlanError,
+use crate::canonical_scene::store::typed_storage::edit::space_animation::AnimationSpacePlanError;
+use crate::canonical_scene::store::typed_storage::edit::space_deformation::{
+    DeformationSpaceNumericLocation, DeformationSpacePlanError,
 };
+use crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlanError;
+use crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlanError;
 use crate::canonical_scene::store::typed_storage::edit::{
     GeometryTriangulationPlan, TriangulationOrigins,
 };
-use crate::canonical_scene::store::typed_storage::spatial::build::SpatialStoragePlan;
 use crate::geometry::TopologyKind;
 use crate::identity::{PrimitiveId, SceneGenerationId};
 use crate::provenance::OptionsDigest;
-use crate::space_conversion::SpaceConversion;
 
 use super::SceneEditCompileError;
 
@@ -249,7 +250,7 @@ impl SceneEditAdmission {
             limits,
             evidence: self.evidence,
             brand: self.brand,
-            geometry: None,
+            storage: None,
             execution: Some(self),
         }
     }
@@ -388,12 +389,7 @@ impl<'a> EditRequest<'a> {
 enum EditStoragePlan<'a> {
     Triangulation(GeometryTriangulationPlan<'a>),
     Normals(GeometryNormalsPlan<'a>),
-    ConvertSpace {
-        nodes: NodeSpacePlan<'a>,
-        geometry: GeometrySpacePlan<'a>,
-        correspondence: u64,
-        name_bytes: usize,
-    },
+    ConvertSpace(SceneSpacePlan<'a>),
 }
 
 impl EditStoragePlan<'_> {
@@ -401,14 +397,14 @@ impl EditStoragePlan<'_> {
         match self {
             Self::Triangulation(v) => v.correspondence_work(),
             Self::Normals(v) => v.correspondence_work(),
-            Self::ConvertSpace { correspondence, .. } => correspondence,
+            Self::ConvertSpace(plan) => plan.correspondence_work(),
         }
     }
     fn name_bytes(self) -> usize {
         match self {
             Self::Triangulation(v) => v.name_bytes(),
             Self::Normals(v) => v.name_bytes(),
-            Self::ConvertSpace { name_bytes, .. } => name_bytes,
+            Self::ConvertSpace(plan) => plan.name_bytes(),
         }
     }
     fn facts(
@@ -424,9 +420,10 @@ impl EditStoragePlan<'_> {
             (Self::Normals(plan), EditRequest::Normals(replacement)) => {
                 evidence::SceneEditFacts::normals(input, replacement, &plan, counts)
             }
-            (Self::ConvertSpace { nodes, .. }, EditRequest::ConvertSpace(resolved)) => {
+            (Self::ConvertSpace(plan), EditRequest::ConvertSpace(resolved)) => {
                 (std::ptr::eq(input, resolved.input.as_node_scene())
-                    && nodes.conversion() == resolved.conversion)
+                    && plan.matches_source(&input.tables)
+                    && plan.conversion() == resolved.conversion)
                     .then(|| evidence::SceneEditFacts::space(resolved))
             }
             _ => None,
@@ -444,53 +441,18 @@ impl EditStoragePlan<'_> {
                 plan.validate_correspondence(actual.geometry.as_ref(), control)
             }
             Self::Normals(plan) => plan.validate_correspondence(actual.geometry.as_ref(), control),
-            Self::ConvertSpace {
-                nodes, geometry, ..
-            } => Ok(
-                nodes.validate_correspondence(actual.nodes.as_ref(), control)?
-                    && geometry.validate_correspondence(actual.geometry.as_ref(), control)?,
-            ),
+            Self::ConvertSpace(plan) => plan.validate_correspondence(actual, control),
         }
     }
 }
 
-impl<'a> EditStoragePlan<'a> {
-    fn space(
-        input: &super::super::SceneStorage,
-        nodes: NodeSpacePlan<'a>,
-        geometry: GeometrySpacePlan<'a>,
-        conversion: SpaceConversion,
-    ) -> Result<Self, SceneEditRejection> {
-        let spatial = SpatialStoragePlan::for_storage(input.tables.spatial.as_ref())
-            .map_err(StoreRuntimeError::Plan)?;
-        let correspondence = nodes
-            .correspondence_work()
-            .checked_add(geometry.correspondence_work())
-            .and_then(|work| work.checked_add(1))
-            .and_then(|work| work.checked_add(u64::from(spatial.camera_count())))
-            .and_then(|work| work.checked_add(u64::from(spatial.light_count())))
-            .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
-        let name_bytes = spatial
-            .name_bytes()
-            .checked_add(if conversion.changes_coordinates() {
-                nodes.name_bytes()
-            } else {
-                0
-            })
-            .and_then(|bytes| {
-                bytes.checked_add(if conversion.is_identity() {
-                    0
-                } else {
-                    geometry.name_bytes()
-                })
-            })
-            .ok_or(StoreRuntimeError::Plan(StorePlanError::SizeOverflow))?;
-        Ok(Self::ConvertSpace {
-            nodes,
-            geometry,
-            correspondence,
-            name_bytes,
-        })
+fn map_space(error: SceneSpacePlanError<StoreRuntimeError>) -> SceneEditRejection {
+    match error {
+        SceneSpacePlanError::Nodes(error) => map_node_space(error),
+        SceneSpacePlanError::Geometry(error) => map_geometry_space(error),
+        SceneSpacePlanError::Deformation(error) => map_deformation_space(error),
+        SceneSpacePlanError::Animation(error) => map_animation_space(error),
+        SceneSpacePlanError::Plan(error) => StoreRuntimeError::Plan(error).into(),
     }
 }
 
@@ -527,6 +489,52 @@ fn map_geometry_space(error: GeometrySpacePlanError<StoreRuntimeError>) -> Scene
     }
 }
 
+fn map_deformation_space(
+    error: DeformationSpacePlanError<StoreRuntimeError>,
+) -> SceneEditRejection {
+    match error {
+        DeformationSpacePlanError::Control(error) => error.into(),
+        DeformationSpacePlanError::Numeric { location, source } => match location {
+            DeformationSpaceNumericLocation::SkinCorrection { skin } => {
+                SceneSpaceConversionIssue::NumericSkinCorrection { skin, source }
+            }
+            DeformationSpaceNumericLocation::InverseBind { matrix } => {
+                SceneSpaceConversionIssue::NumericInverseBind { matrix, source }
+            }
+            DeformationSpaceNumericLocation::MorphDelta { delta, tuple } => {
+                SceneSpaceConversionIssue::NumericMorphDelta {
+                    delta,
+                    tuple,
+                    source,
+                }
+            }
+        }
+        .into(),
+        DeformationSpacePlanError::Plan(error) => StoreRuntimeError::Plan(error).into(),
+        DeformationSpacePlanError::Invariant => SceneEditRejection::construction_invariant(),
+    }
+}
+
+fn map_animation_space(error: AnimationSpacePlanError<StoreRuntimeError>) -> SceneEditRejection {
+    match error {
+        AnimationSpacePlanError::Control(error) => error.into(),
+        AnimationSpacePlanError::Numeric {
+            channel,
+            part,
+            key,
+            source,
+        } => SceneSpaceConversionIssue::NumericAnimation {
+            channel,
+            part,
+            key,
+            source,
+        }
+        .into(),
+        AnimationSpacePlanError::Plan(error) => StoreRuntimeError::Plan(error).into(),
+        AnimationSpacePlanError::Invariant => SceneEditRejection::construction_invariant(),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum SceneEditRejection {
     #[error("space conversion is unsupported: {0}")]
@@ -551,7 +559,7 @@ pub struct SceneEditTransaction<'a> {
     evidence: SceneEditFailureEvidence,
     execution: Option<SceneEditAdmission>,
     brand: ConstructionBrand,
-    geometry: Option<EditStoragePlan<'a>>,
+    storage: Option<EditStoragePlan<'a>>,
 }
 
 /// Borrowed postflight description, independent of the operation and its scoped scratch owner.
@@ -564,7 +572,7 @@ pub struct SceneEditPostflight<'a> {
     limits: SceneValidationLimits,
     evidence: SceneEditFailureEvidence,
     brand: ConstructionBrand,
-    geometry: Option<EditStoragePlan<'a>>,
+    storage: Option<EditStoragePlan<'a>>,
 }
 
 impl SceneEditPostflight<'_> {
@@ -600,7 +608,7 @@ impl<'a> SceneEditTransaction<'a> {
             limits: self.limits,
             evidence: self.evidence,
             brand: self.brand,
-            geometry: self.geometry,
+            storage: self.storage,
         }
     }
 
@@ -752,29 +760,15 @@ impl<'a> SceneEditTransaction<'a> {
             }
             EditRequest::ConvertSpace(resolved) => {
                 space::check_capabilities(resolved, semantic)?;
-                let nodes = NodeSpacePlan::try_new(
-                    input.as_node_scene().read_nodes(),
+                let plan = SceneSpacePlan::try_new(
+                    &input.as_node_scene().tables,
                     resolved.conversion,
                     semantic,
                 )
-                .map_err(map_node_space)?;
-                let geometry = GeometrySpacePlan::try_new(
-                    input.as_node_scene().read_geometry(),
-                    resolved.conversion,
-                    semantic,
-                )
-                .map_err(map_geometry_space)?;
-                let plan = EditStoragePlan::space(
-                    input.as_node_scene(),
-                    nodes,
-                    geometry,
-                    resolved.conversion,
-                )?;
+                .map_err(map_space)?;
                 let pending = BoundPendingNodeSceneEdit::try_space_conversion(
                     input.as_node_scene(),
-                    nodes,
-                    geometry,
-                    resolved.conversion,
+                    plan,
                     resolved.options_digest(),
                     &mut || {
                         semantic
@@ -783,7 +777,7 @@ impl<'a> SceneEditTransaction<'a> {
                     },
                 )
                 .map_err(map_plan)?;
-                (plan, pending)
+                (EditStoragePlan::ConvertSpace(plan), pending)
             }
         };
         if u64::from(pending.counts.profile.maximum_depth) > self.limits.max_provenance_depth() {
@@ -828,7 +822,7 @@ impl<'a> SceneEditTransaction<'a> {
         .map_err(StoreRuntimeError::Plan)?
         .with_request_identity(admission.brand.activation_request_identity())
         .with_semantic_bytes(plan.name_bytes() as u64);
-        self.geometry = Some(plan);
+        self.storage = Some(plan);
         sealed.push(pending);
         Ok(SceneEditPlan {
             admission,
@@ -934,17 +928,7 @@ impl<O: OperationOwner> SceneEditExecutionPlan<'_, '_, O> {
             NodeSceneEditProgram::GenerateNormals { geometry, .. } => {
                 EditStoragePlan::Normals(*geometry)
             }
-            NodeSceneEditProgram::ConvertSpace {
-                nodes,
-                geometry,
-                conversion,
-            } => match EditStoragePlan::space(pending.input, *nodes, *geometry, *conversion) {
-                Ok(plan) => plan,
-                Err(rejection) => {
-                    let code = rejection.stable_code();
-                    return lane.reject(rejection, code);
-                }
-            },
+            NodeSceneEditProgram::ConvertSpace(plan) => EditStoragePlan::ConvertSpace(*plan),
             _ => {
                 let rejection = SceneEditRejection::construction_invariant();
                 let code = rejection.stable_code();
@@ -1196,16 +1180,11 @@ mod tests {
         assert!(!resolved.is_unchanged());
         let input = scene.as_node_scene();
         let mut control = Control::default();
-        let nodes =
-            NodeSpacePlan::try_new(input.read_nodes(), resolved.conversion, &mut control).unwrap();
-        let geometry =
-            GeometrySpacePlan::try_new(input.read_geometry(), resolved.conversion, &mut control)
-                .unwrap();
+        let plan =
+            SceneSpacePlan::try_new(&input.tables, resolved.conversion, &mut control).unwrap();
         let pending = BoundPendingNodeSceneEdit::try_space_conversion(
             input,
-            nodes,
-            geometry,
-            resolved.conversion,
+            plan,
             resolved.options_digest(),
             &mut || Ok(()),
         )

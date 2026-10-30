@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-10-30
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
@@ -147,6 +147,15 @@ directions use `Q`, tangent `w` uses `det(Q)`, and a local-to-parent matrix uses
 `H * M * inverse(H)` with `H = diag(s * Q, 1)`. TRS scale components are permuted without the
 basis signs or unit factor; quaternion vector components use `det(Q) * Q` and retain `w`.
 Matrix/TRS authored form is preserved, including shear and singular affine matrices.
+
+Inverse binds and optional skin corrections use the same `H * M * inverse(H)` map without
+changing their declared source/destination spaces. Position morph deltas use `s * Q`; Normal
+and Tangent morph deltas use `Q`. Sparse omissions and explicit entries keep their representation.
+Animation values and cubic derivatives use the linear map of their target: `s * Q` for translation,
+unsigned axis permutation for scale, and `(det(Q) * Q * xyz, w)` for quaternion components.
+Quaternion derivatives remain arbitrary finite Vec4 values, including zero/nonunit derivatives;
+neither samples nor derivatives receive sign canonicalization or normalization. Key times and
+time-domain rates are unchanged.
 
 Triangle lanes reverse exactly when `(det(Q) < 0) XOR (source_winding != target_winding)`.
 Index and every Corner tuple follow the same `[0, 2, 1]` permutation. A winding-only change does

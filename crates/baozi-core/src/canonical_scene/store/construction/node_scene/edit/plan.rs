@@ -10,6 +10,7 @@ use super::super::scratch::NodeSceneCentralValidationPlan;
 use super::super::{SceneEvidenceCounts, SceneStorage};
 use super::profile::{NodeSceneEditProfilePlan, ProfileEditTargets};
 use super::report::CanonicalInvalidations;
+use crate::canonical_scene::store::typed_storage::edit::space::SceneSpacePlan;
 
 /// A count proven to fit both retained-store plans and canonical `u32` fields.
 #[derive(Debug, Clone, Copy)]
@@ -105,15 +106,7 @@ pub(super) enum NodeSceneEditProgram<'scene> {
         >,
         smooth: bool,
     },
-    ConvertSpace {
-        nodes:
-            crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlan<'scene>,
-        geometry:
-            crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlan<
-                'scene,
-            >,
-        conversion: crate::space_conversion::SpaceConversion,
-    },
+    ConvertSpace(SceneSpacePlan<'scene>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -155,7 +148,7 @@ impl NodeSceneEditProgram<'_> {
             Self::NodeTransform(_) => OperationKind::Transform,
             Self::TriangulatePrimitive(_) => OperationKind::Split,
             Self::GenerateNormals { .. } => OperationKind::Generated,
-            Self::ConvertSpace { .. } => OperationKind::Transform,
+            Self::ConvertSpace(_) => OperationKind::Transform,
         }
     }
 }
@@ -224,8 +217,8 @@ impl NodeSceneEditFixedCounts {
                     smooth: *smooth,
                 }
             }
-            NodeSceneEditProgram::ConvertSpace { conversion, .. } => {
-                ProfileEditTargets::Space(*conversion)
+            NodeSceneEditProgram::ConvertSpace(plan) => {
+                ProfileEditTargets::Space(plan.conversion())
             }
         };
         let source_evidence = input.proof.counts();
@@ -257,7 +250,7 @@ impl NodeSceneEditFixedCounts {
             NodeSceneEditProgram::GenerateNormals { geometry, .. } => {
                 Some(geometry.validation_work())
             }
-            NodeSceneEditProgram::ConvertSpace { geometry, .. } => Some(geometry.validation_work()),
+            NodeSceneEditProgram::ConvertSpace(plan) => Some(plan.geometry().validation_work()),
         };
         if let Some(work) = geometry_work {
             central_validation_plan = central_validation_plan.try_rebind_geometry(
@@ -465,19 +458,16 @@ impl PendingNodeSceneEdit {
 impl<'scene> BoundPendingNodeSceneEdit<'scene> {
     pub(super) fn try_space_conversion(
         input: &'scene SceneStorage,
-        nodes: crate::canonical_scene::store::typed_storage::edit::space_nodes::NodeSpacePlan<
-            'scene,
-        >,
-        geometry: crate::canonical_scene::store::typed_storage::edit::space_geometry::GeometrySpacePlan<'scene>,
-        conversion: crate::space_conversion::SpaceConversion,
+        plan: SceneSpacePlan<'scene>,
         options: crate::provenance::OptionsDigest,
         poll: &mut impl FnMut() -> Result<(), NodeSceneEditPlanError>,
     ) -> Result<Self, NodeSceneEditPlanError> {
-        let program = NodeSceneEditProgram::ConvertSpace {
-            nodes,
-            geometry,
-            conversion,
-        };
+        if !plan.matches_source(&input.tables) {
+            return Err(NodeSceneEditPlanError::InvalidSource {
+                reason: "space conversion plan belongs to another Scene root",
+            });
+        }
+        let program = NodeSceneEditProgram::ConvertSpace(plan);
         let proof = input.proof;
         let counts = NodeSceneEditFixedCounts::try_new_for_program(
             input,

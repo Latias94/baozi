@@ -6,13 +6,14 @@ Controlled operations on immutable validated Scenes, exposed to applications as
 operation evidence on success, or the original Scene on ordinary failure.
 
 Current operations triangulate one polygon primitive, generate flat or smooth
-Corner normals on one triangle-list primitive, and convert a whole static Scene's
+Corner normals on one triangle-list primitive, and convert a whole Scene's
 coordinate basis and units. Triangulation requires simple planar rings without
 holes and retains Corner/Face origins. Normal generation preserves authored
 normals by default. Application vertex unification is not implemented.
 
-Scene-space conversion covers static geometry and node transforms; conversion of
-deformation, animation, cameras, and lights remains outside the supported profile.
+Scene-space conversion covers geometry, node transforms, skin inverse binds and
+corrections, dense/sparse morph deltas, and TRS animation values and cubic derivatives.
+Camera and light conversion remains outside the supported profile.
 Missing source conventions require explicit assumptions. UV-origin changes and
 tangent generation are not part of this conversion.
 

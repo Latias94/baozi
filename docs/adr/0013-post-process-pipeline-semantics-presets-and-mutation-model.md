@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-10-30
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
@@ -189,7 +189,8 @@ its own concrete report requirements alongside its implementation.
 `convert_scene_space` is a direct whole-Scene operation. Its descriptor contains the exact input
 generation and `SpaceConversionOptions`; it does not manufacture a single-primitive target. Known
 source declarations and explicit assumptions resolve before collection traversal. The same closed
-Scene-edit transaction then plans nodes, geometry, spatial declarations, and owner provenance.
+Scene-edit transaction then prepares one exact-source plan for nodes, geometry, deformation,
+animation, spatial declarations, and owner provenance.
 The changed report owns centrally validated source/target facts, actual assumption fields, and
 triangle-lane reversal evidence independently of either Scene. An already satisfied target with no
 assumed source fields is `Unchanged`; filling unknown declarations is a canonical change even when

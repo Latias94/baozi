@@ -164,7 +164,6 @@ impl DeformationStoragePlan {
         Ok(plan)
     }
 
-    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn for_storage(
         storage: &DeformationStorage,
     ) -> Result<Self, StorePlanError> {
@@ -689,7 +688,6 @@ impl DeformationStorageBuilder {
     }
 }
 
-#[cfg(test)]
 fn lengths<const N: usize>(counts: [usize; N]) -> Result<[u64; N], StorePlanError> {
     let mut lengths = [0; N];
     for (index, count) in counts.into_iter().enumerate() {

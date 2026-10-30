@@ -87,10 +87,6 @@ impl<'a> NodeSpacePlan<'a> {
         self.shape.name_bytes()
     }
 
-    pub(in crate::canonical_scene::store) const fn conversion(self) -> SpaceConversion {
-        self.conversion
-    }
-
     pub(in crate::canonical_scene::store) fn materialize<C: TypedStorageBuildControl>(
         self,
         control: &mut C,

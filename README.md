@@ -8,8 +8,9 @@ fixture and fuzz coverage. The glTF/GLB selected-scene PBR, skin, morph, and TRS
 is available through `format-gltf`; its [exact restrictions](docs/formats/gltf.md) apply.
 Scene nodes, geometry, materials, images, skins, morphs, and animation have borrowed typed readers.
 The optional `postprocess` feature provides explicit single-primitive triangulation, flat/smooth
-normal generation, and whole-Scene static coordinate/unit conversion. Spatial conversion of
-deformation, animation, cameras, and lights and application vertex unification remain in development.
+normal generation, and whole-Scene coordinate/unit conversion including skins, morph deltas,
+and TRS animation curves. Camera/light conversion and application vertex unification remain
+in development.
 Bounded snapshots are available separately for test and debug evidence.
 
 ## Goals
@@ -128,12 +129,15 @@ smoothing groups; group zero is hard per face, and UV seams do not split a share
 Attribute lookup requires both semantic and domain, so `normals(AttributeDomain::Corner)` and
 `texcoords(set, AttributeDomain::Vertex)` select the intended stream explicitly.
 
-`convert_scene_space(scene, options, control)` converts an entire static Scene to a validated
+`convert_scene_space(scene, options, control)` converts an entire Scene to a validated
 `TargetSpace`. The target contains handedness, signed up/front axes, meters per unit, and front-face
 winding. Unknown source facts need explicit `source_assumptions`; an assumption conflicting with
 a known declaration fails. UV origin and tangent-generation declarations are preserved. Positions,
 normals, tangents, and authored Matrix/TRS transforms follow one basis conversion; reversed triangle
-lanes move all Corner tuples with their indices. The report retains source/target facts and actual
+lanes move all Corner tuples with their indices. Inverse binds and skin corrections use matrix
+conjugation, morph positions follow unit-scaled basis conversion, and animation values and cubic
+derivatives follow their target semantics without normalization. The report retains source/target
+facts and actual
 assumptions after either Scene is dropped. Present semantics the current operation cannot convert
 return typed capability errors and the original Scene. See the
 [coordinate contract](docs/model/coordinate-and-render-conventions.md) for the current boundary.
