@@ -32,16 +32,19 @@ use super::{NODE_SCENE_STORAGE_REJECTION_CODE, SceneEvidenceCounts};
 pub(in crate::canonical_scene::store) struct NodeSceneCentralValidationPlan {
     scratch: NodeSceneValidationScratchPlan,
     work: NonZeroU64,
+    spatial_name_bytes: usize,
 }
 
 impl NodeSceneCentralValidationPlan {
     pub(super) fn try_new(
         scratch: NodeSceneValidationScratchPlan,
         work: u64,
+        spatial_name_bytes: usize,
     ) -> Result<Self, StorePlanError> {
         Ok(Self {
             scratch,
             work: NonZeroU64::new(work).ok_or(StorePlanError::InvalidBlockTable)?,
+            spatial_name_bytes,
         })
     }
 
@@ -55,6 +58,10 @@ impl NodeSceneCentralValidationPlan {
         self.work
     }
 
+    pub(in crate::canonical_scene::store) const fn spatial_name_bytes(&self) -> usize {
+        self.spatial_name_bytes
+    }
+
     pub(super) fn try_rebind_geometry(
         self,
         source_work: u64,
@@ -66,7 +73,7 @@ impl NodeSceneCentralValidationPlan {
             .checked_sub(source_work)
             .and_then(|work| work.checked_add(output_work))
             .ok_or(StorePlanError::SizeOverflow)?;
-        Self::try_new(self.scratch, work)
+        Self::try_new(self.scratch, work, self.spatial_name_bytes)
     }
 
     pub(super) fn try_rebind_profile_edit(
@@ -95,7 +102,7 @@ impl NodeSceneCentralValidationPlan {
             .checked_sub(source_profile_work)
             .and_then(|work| work.checked_add(output_profile_work))
             .ok_or(StorePlanError::SizeOverflow)?;
-        Self::try_new(scratch, output_work)
+        Self::try_new(scratch, output_work, self.spatial_name_bytes)
     }
 }
 

@@ -50,6 +50,32 @@ pub(in crate::canonical_scene::store) struct NodeStoragePlan {
 }
 
 impl NodeStoragePlan {
+    /// Initialized header, node rows, child indices, and name bytes for the target ABI.
+    /// Inline Matrix/TRS variants occupy the same row; retained-owner overhead and spare
+    /// allocation capacity are admitted separately.
+    pub(in crate::canonical_scene::store) fn canonical_bytes_for_shape(
+        canonical_nodes: u64,
+        children: u64,
+        name_bytes: u64,
+    ) -> Result<u64, StorePlanError> {
+        if canonical_nodes.checked_sub(1) != Some(children) {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
+        initialized_storage_bytes::<NodeStorage, 3>([
+            (canonical_nodes, std::mem::size_of::<StoredNode>()),
+            (children, std::mem::size_of::<StoredNodeIndex>()),
+            (name_bytes, std::mem::size_of::<u8>()),
+        ])
+    }
+
+    pub(in crate::canonical_scene::store) fn canonical_bytes(self) -> Result<u64, StorePlanError> {
+        Self::canonical_bytes_for_shape(
+            self.nodes.desired_capacity() as u64,
+            self.children.desired_capacity() as u64,
+            self.names.desired_capacity() as u64,
+        )
+    }
+
     pub(in crate::canonical_scene::store) fn for_storage(
         source: &NodeStorage,
     ) -> Result<Self, StorePlanError> {
@@ -118,11 +144,15 @@ impl NodeStoragePlan {
     pub(in crate::canonical_scene::store) fn new<R>(
         batch: &ValidatedNodeBatch<'_, R>,
     ) -> Result<Self, StorePlanError> {
-        Ok(Self {
+        let plan = Self {
             nodes: capacity::<StoredNode>(batch.canonical_node_count())?,
             children: capacity::<StoredNodeIndex>(batch.authored_node_count() as u64)?,
             names: capacity::<u8>(batch.node_name_byte_count())?,
-        })
+        };
+        if plan.canonical_bytes()? != batch.canonical_bytes() {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
+        Ok(plan)
     }
 
     pub(in crate::canonical_scene::store) const fn capacities(self) -> [CapacityPlan; 3] {
@@ -239,13 +269,51 @@ pub(in crate::canonical_scene::store) struct GeometryStoragePlan {
 }
 
 impl GeometryStoragePlan {
+    /// Used row counts are logical meshes, primitives, attributes, and mesh instances.
+    /// Scalar pools are F32, F64, U32, and I32, including sparse defaults/explicit values/indices.
+    pub(in crate::canonical_scene::store) fn canonical_bytes_for_shape(
+        rows: [u64; 4],
+        name_bytes: u64,
+        scalar_pools: [u64; 4],
+    ) -> Result<u64, StorePlanError> {
+        initialized_storage_bytes::<GeometryStorage, 9>([
+            (rows[0], std::mem::size_of::<StoredLogicalMesh>()),
+            (rows[1], std::mem::size_of::<StoredPrimitive>()),
+            (rows[2], std::mem::size_of::<StoredAttribute>()),
+            (rows[3], std::mem::size_of::<StoredMeshInstance>()),
+            (name_bytes, std::mem::size_of::<u8>()),
+            (scalar_pools[0], std::mem::size_of::<f32>()),
+            (scalar_pools[1], std::mem::size_of::<f64>()),
+            (scalar_pools[2], std::mem::size_of::<u32>()),
+            (scalar_pools[3], std::mem::size_of::<i32>()),
+        ])
+    }
+
+    pub(in crate::canonical_scene::store) fn canonical_bytes(self) -> Result<u64, StorePlanError> {
+        Self::canonical_bytes_for_shape(
+            [
+                self.logical_meshes.desired_capacity() as u64,
+                self.primitives.desired_capacity() as u64,
+                self.attributes.desired_capacity() as u64,
+                self.mesh_instances.desired_capacity() as u64,
+            ],
+            self.names.desired_capacity() as u64,
+            [
+                self.f32_values.desired_capacity() as u64,
+                self.f64_values.desired_capacity() as u64,
+                self.u32_values.desired_capacity() as u64,
+                self.i32_values.desired_capacity() as u64,
+            ],
+        )
+    }
+
     pub(in crate::canonical_scene::store) fn new<R>(
         batch: &ValidatedGeometryBatch<'_, R>,
     ) -> Result<Self, StorePlanError> {
         let name_bytes = u64::from(batch.logical_mesh_name_byte_count())
             .checked_add(u64::from(batch.attribute_semantic_name_byte_count()))
             .ok_or(StorePlanError::SizeOverflow)?;
-        Ok(Self {
+        let plan = Self {
             logical_meshes: capacity::<StoredLogicalMesh>(u64::from(batch.logical_mesh_count()))?,
             primitives: capacity::<StoredPrimitive>(u64::from(batch.primitive_count()))?,
             attributes: capacity::<StoredAttribute>(u64::from(batch.attribute_count()))?,
@@ -261,7 +329,11 @@ impl GeometryStoragePlan {
                 .and_then(|count| count.checked_add(batch.u32_scalar_count()))
                 .and_then(|count| count.checked_add(batch.i32_scalar_count()))
                 .ok_or(StorePlanError::SizeOverflow)?,
-        })
+        };
+        if plan.canonical_bytes()? != batch.canonical_bytes() {
+            return Err(StorePlanError::InvalidBlockTable);
+        }
+        Ok(plan)
     }
 
     pub(in crate::canonical_scene::store) const fn capacities(self) -> [CapacityPlan; 9] {
@@ -539,6 +611,22 @@ impl GeometryStoragePlan {
             },
         })
     }
+}
+
+/// Initialized bytes only; capacity qualification remains in the allocation plans.
+fn initialized_storage_bytes<T, const N: usize>(
+    tables: [(u64, usize); N],
+) -> Result<u64, StorePlanError> {
+    tables.into_iter().try_fold(
+        u64::try_from(std::mem::size_of::<T>()).map_err(|_| StorePlanError::SizeOverflow)?,
+        |sum, (count, size)| {
+            let width = u64::try_from(size).map_err(|_| StorePlanError::SizeOverflow)?;
+            count
+                .checked_mul(width)
+                .and_then(|bytes| sum.checked_add(bytes))
+                .ok_or(StorePlanError::SizeOverflow)
+        },
+    )
 }
 
 pub(in crate::canonical_scene::store) fn capacity<T>(

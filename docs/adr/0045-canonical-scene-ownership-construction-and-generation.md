@@ -18,6 +18,7 @@ evidence:
   - docs/plans/2026-10-29-001-refactor-library-delivery-plan.md
   - crates/baozi-core/src/canonical_scene/store/typed_storage.rs
   - crates/baozi-core/src/canonical_scene/store/typed_storage/profile.rs
+  - crates/baozi-core/src/canonical_scene/store/typed_storage/spatial.rs
 related:
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
@@ -124,41 +125,55 @@ hold. ADR 0032 owns operation-specific remaps, invalidation, and reports.
 
 ### Private Typed Storage
 
-The private `SceneStorage` root owns `SceneTables`, containing the actual node, geometry, and profile
-owners. Node rows retain an
-explicit synthetic/Matrix/TRS transform, ordered child ranges, optional name ranges, and optional
+The private `SceneStorage` root owns `SceneTables`, containing the actual node, geometry, profile,
+and spatial owners. Node rows retain an explicit synthetic/Matrix/TRS transform, ordered child
+ranges, optional name ranges, and optional
 spatial attachments. Geometry rows retain typed logical indices and ranges into contiguous scalar
 pools. A row does not carry a publication-local concrete-store slot for another typed row or pool.
 Dense F32/F64/U32/I32 values, sparse indices and defaults, and Vertex/Corner/Face cardinalities remain
-explicit. Public borrowed views project these actual tables without allocating another model.
+explicit. Spatial storage owns an inline `SceneSpace`, typed camera projections, and typed light
+definitions. The existing bounded extension identities remain inline values; no second schema-name
+pool, offset codec, or publication-local spatial reference is needed. Public borrowed views project
+these actual tables without allocating another model.
 
 Core defines the row layout and exact `CapacityPlan` values. Operation owns admission, the physical
 account, retained leases, shared ownership, and storage-first release. A core builder runs only inside
 that central admission. It verifies the observed Vec capacities before returning its complete owner.
 Core must not create an independent allocator, lease, or ledger protocol.
 
+Canonical-byte admission for migrated domains counts their initialized typed storage header, rows,
+and used scalar/name elements under the target ABI. Matrix and TRS variants occupy the same node
+row width; sparse payloads count their retained indices, explicit values, and defaults. Inline
+extension names and digests are included once. The remaining Scene record directory contributes
+its current encoding once, independently of node and geometry. Retired record/reference/transform
+leaf formulas and an empty-geometry-directory placeholder have no role in typed domain limits.
+Unused capacity and retained-owner infrastructure remain in operation's separate physical admission.
+These canonical-byte counters do not describe allocator overhead or process RSS.
+
 Typed table owners use operation's final-owner-backed `SharedRetainedStorage<T>`, with one centrally
 admitted and charged shared header per table owner; inline evidence and path storage retain their
 existing `RetainedStorage<T>` owner without a separate header per path.
 
 Central validation borrows the actual immutable tables and scalar pools. It allocates only mutable
-marks, traversal state, and caches required by an algorithm; immutable node or geometry rows are not
-copied into a second validation projection. Reads and semantic validation remain cancellable and
-metered. Complete owner coverage, topology, payload shape, finite values, range bounds, sparse index
-order, and cross-domain references remain mandatory before generation reservation.
+marks, traversal state, and caches required by an algorithm; immutable node, geometry, or spatial
+rows are not copied into a second validation projection. Reads and semantic validation remain
+cancellable and metered. Complete owner coverage, topology, payload shape, finite values, range
+bounds, sparse index order, and cross-domain references remain mandatory before generation reservation.
 
-A node-transform edit replaces its node table and shares the unchanged geometry owner. Geometry
-tables and their payload pools retain their original addresses and one physical charge across source
-and destination generations. No generic geometry-record rebuild or dynamic payload-slot scan is part
-of that edit. A Matrix/TRS width change does not change the node table layout.
+A node-transform edit replaces its node table and shares the unchanged geometry and spatial owners.
+Geometry tables and their payload pools retain their original addresses and one physical charge
+across source and destination generations. No generic geometry-record rebuild or dynamic payload-slot scan is part
+of that edit. Spatial declarations and camera/light definitions retain their original owner while
+node placement references remain centrally checked. A Matrix/TRS width change does not change the
+node table layout.
 
 Typed owners follow the same rejection, publication, and ordinary host-unwind lifecycle as the
-directory-backed domains. Dropping either generation first leaves shared geometry available to the
-survivor; the final generation releases the storage before its charge. A refused build action drops
-partially initialized vectors before the central admission is released. Retained rows, scalar pools,
-and their charge never escape as independently movable parts.
+directory-backed domains. Dropping either generation first leaves shared geometry and spatial data
+available to the survivor; the final generation releases the storage before its charge. A refused
+build action drops partially initialized vectors before the central admission is released. Retained
+rows, scalar pools, and their charge never escape as independently movable parts.
 
-During the domain cutover, appearance, deformation, animation, and spatial storage may
+During the domain cutover, appearance, deformation, and animation storage may
 remain in the existing retained owner under the same Scene root. Their node/geometry dependency
 checks borrow the actual typed tables. This is a migration boundary between domains, not a second
 Scene representation or a permanent compatibility adapter. Each subsequent domain cutover deletes

@@ -17,6 +17,33 @@ use crate::geometry::TopologyKind;
 
 use super::{TestControl, TestControlError, TestReservation};
 
+fn expected_geometry_bytes(rows: [usize; 4], scalars: [usize; 4], name_bytes: usize) -> u64 {
+    use crate::canonical_scene::store::typed_storage::{
+        GeometryStorage, StoredAttribute, StoredLogicalMesh, StoredMeshInstance, StoredPrimitive,
+    };
+    let row_bytes: usize = rows
+        .into_iter()
+        .zip([
+            std::mem::size_of::<StoredLogicalMesh>(),
+            std::mem::size_of::<StoredPrimitive>(),
+            std::mem::size_of::<StoredAttribute>(),
+            std::mem::size_of::<StoredMeshInstance>(),
+        ])
+        .map(|(count, size)| count * size)
+        .sum();
+    let scalar_bytes: usize = scalars
+        .into_iter()
+        .zip([
+            std::mem::size_of::<f32>(),
+            std::mem::size_of::<f64>(),
+            std::mem::size_of::<u32>(),
+            std::mem::size_of::<i32>(),
+        ])
+        .map(|(count, size)| count * size)
+        .sum();
+    (std::mem::size_of::<GeometryStorage>() + row_bytes + scalar_bytes + name_bytes) as u64
+}
+
 fn expect_semantic(
     result: Result<
         ValidatedGeometryBatch<'_, TestReservation>,
@@ -46,6 +73,39 @@ fn reject_geometry(
     ));
     assert_eq!(control.live.get(), 0);
     error
+}
+
+#[test]
+fn empty_geometry_charges_its_initialized_header_at_the_exact_limit() {
+    let expected = expected_geometry_bytes([0; 4], [0; 4], 0);
+    let mut control = TestControl::default();
+    let limits = SceneValidationLimits::default().with_max_canonical_bytes(expected);
+    let batch = validate_geometry_batch_with_control(
+        GeometryAuthoringBatch::empty(),
+        0,
+        0,
+        limits,
+        &mut control,
+    )
+    .unwrap();
+    assert_eq!(batch.canonical_bytes(), expected);
+    assert_eq!(batch.attribute_count(), 0);
+    assert_eq!(batch.primitive_count(), 0);
+    drop(batch);
+    assert_eq!(control.live.get(), 0);
+    assert!(matches!(
+        expect_semantic(validate_geometry_batch_with_control(
+            GeometryAuthoringBatch::empty(),
+            0,
+            0,
+            limits.with_max_canonical_bytes(expected - 1),
+            &mut control,
+        )),
+        GeometryAuthoringSemanticError::LimitExceeded {
+            limit: GeometryAuthoringLimit::CanonicalBytes, actual, maximum,
+        } if actual == expected && maximum + 1 == expected
+    ));
+    assert_eq!(control.live.get(), 0);
 }
 
 #[test]
@@ -409,9 +469,12 @@ fn obj_corner_domains_preserve_shared_positions_without_tuple_vertex_expansion()
     assert_eq!(validated.f32_scalar_count(), 39);
     assert_eq!(validated.u32_scalar_count(), 8);
     assert_eq!(validated.payload_block_count(), 5);
-    assert_eq!(validated.canonical_bytes(), 510);
-    assert_eq!(validated.validation_work(), 78);
-    assert_eq!(control.work, 78);
+    assert_eq!(
+        validated.canonical_bytes(),
+        expected_geometry_bytes([1, 1, 4, 1], [39, 0, 8, 0], 0)
+    );
+    assert_eq!(validated.validation_work(), 73);
+    assert_eq!(control.work, 73);
 
     let primitive = validated
         .primitive(0)
@@ -508,9 +571,12 @@ fn custom_dense_and_sparse_i32_attributes_preserve_signed_values_and_exact_accou
     assert_eq!(validated.u32_scalar_count(), 1);
     assert_eq!(validated.payload_block_count(), 6);
     assert_eq!(validated.semantic_cell_count(), 48);
-    assert_eq!(validated.canonical_bytes(), 359);
-    assert_eq!(validated.validation_work(), 73);
-    assert_eq!(control.work, 73);
+    assert_eq!(
+        validated.canonical_bytes(),
+        expected_geometry_bytes([1, 1, 3, 0], [9, 0, 1, 5], 33)
+    );
+    assert_eq!(validated.validation_work(), 69);
+    assert_eq!(control.work, 69);
 
     let primitive = validated.primitive(0).expect("validated primitive");
     let dense = primitive.attribute(1).expect("dense I32 attribute");
@@ -588,6 +654,7 @@ fn absent_and_present_empty_index_streams_remain_distinct() {
     assert_eq!(empty_primitive.corner_count(), 0);
     assert_eq!(empty_primitive.face_count(), 0);
     assert_eq!(present_empty.payload_block_count(), 1);
+    assert_eq!(present_empty.canonical_bytes(), absent.canonical_bytes());
 }
 
 #[test]
@@ -635,7 +702,10 @@ fn sparse_attribute_counts_indices_values_and_default_without_dense_expansion() 
     assert_eq!(validated.f32_scalar_count(), 12);
     assert_eq!(validated.u32_scalar_count(), 1);
     assert_eq!(validated.payload_block_count(), 4);
-    assert_eq!(validated.canonical_bytes(), 264);
+    assert_eq!(
+        validated.canonical_bytes(),
+        expected_geometry_bytes([1, 1, 2, 0], [12, 0, 1, 0], 0)
+    );
     let primitive = validated.primitive(0).expect("sparse primitive plan");
     let color = primitive.attribute(1).expect("sparse color plan");
     assert_eq!(color.source_element_count(), 1);
@@ -1091,7 +1161,7 @@ fn zero_work_rejects_before_geometry_scratch_allocation() {
 }
 
 #[test]
-fn empty_primitive_structural_scan_polls_before_scratch_allocation() {
+fn empty_primitive_validation_polls_with_bounded_scratch() {
     const PRIMITIVE_COUNT: usize = 300;
 
     let primitives = (0..PRIMITIVE_COUNT)
@@ -1127,14 +1197,14 @@ fn empty_primitive_structural_scan_polls_before_scratch_allocation() {
     ));
     assert_eq!(control.polls, 2);
     assert_eq!(control.work, 256);
-    assert_eq!(control.reserves, 0);
+    assert_eq!(control.reserves, 1);
+    assert!(control.peak_bytes() > 0);
     assert_eq!(control.live.get(), 0);
 }
 
 #[test]
 fn empty_attribute_semantic_pass_is_work_bounded_and_cancellable() {
     const ATTRIBUTE_COUNT: usize = 300;
-    const WORK_BEFORE_SEMANTIC_PASS: u64 = 1_205;
 
     let empty_values = [];
     let attributes = (0..ATTRIBUTE_COUNT)
@@ -1162,27 +1232,48 @@ fn empty_attribute_semantic_pass_is_work_bounded_and_cancellable() {
     let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
     let input = || GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]);
 
+    let mut baseline = TestControl::default();
+    let validated = validate_geometry_batch_with_control(
+        input(),
+        0,
+        0,
+        SceneValidationLimits::default(),
+        &mut baseline,
+    )
+    .unwrap();
+    let complete_work = validated.validation_work();
+    assert_eq!(complete_work, baseline.work);
+    drop(validated);
+    assert_eq!(baseline.live.get(), 0);
+    // Stop halfway through the final cardinality pass over the empty attributes.
+    let allowed_work = complete_work - ATTRIBUTE_COUNT as u64 / 2;
+
     let mut bounded = TestControl::default();
     assert!(matches!(
         expect_semantic(validate_geometry_batch_with_control(
             input(),
             0,
             0,
-            SceneValidationLimits::default().with_max_work(WORK_BEFORE_SEMANTIC_PASS),
+            SceneValidationLimits::default().with_max_work(allowed_work),
             &mut bounded,
         )),
         GeometryAuthoringSemanticError::LimitExceeded {
             limit: GeometryAuthoringLimit::Work,
-            actual: 1_206,
-            maximum: WORK_BEFORE_SEMANTIC_PASS,
-        }
+            actual,
+            maximum,
+        } if actual == allowed_work + 1 && maximum == allowed_work
     ));
-    assert_eq!(bounded.work, WORK_BEFORE_SEMANTIC_PASS);
+    assert_eq!(bounded.work, allowed_work);
+    assert_eq!(
+        bounded.last_work(),
+        Some(crate::SceneValidationWork::Traversal)
+    );
     assert_eq!(bounded.reserves, 1);
     assert_eq!(bounded.live.get(), 0);
 
+    let last_periodic_poll = 1 + complete_work / crate::SCENE_VALIDATION_POLL_INTERVAL;
     let mut cancelled = TestControl {
-        cancel_on_poll: Some(6),
+        cancel_on_poll: Some(last_periodic_poll),
         ..TestControl::default()
     };
     assert!(matches!(
@@ -1197,8 +1288,12 @@ fn empty_attribute_semantic_pass_is_work_bounded_and_cancellable() {
             TestControlError::Cancelled
         ))
     ));
-    assert_eq!(cancelled.polls, 6);
-    assert_eq!(cancelled.work, 1_280);
+    assert_eq!(cancelled.polls, last_periodic_poll);
+    assert_eq!(
+        cancelled.work,
+        (last_periodic_poll - 1) * crate::SCENE_VALIDATION_POLL_INTERVAL
+    );
+    assert!(cancelled.work < complete_work);
     assert_eq!(cancelled.reserves, 1);
     assert_eq!(cancelled.live.get(), 0);
 }

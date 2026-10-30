@@ -64,6 +64,10 @@ where
                 }
                 faults.alter_first_authored_transform = false;
             }
+            #[cfg(test)]
+            if let Some(fault) = faults.spatial {
+                fault.corrupt_nodes(&mut storage);
+            }
             Ok(storage)
         },
     )

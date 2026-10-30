@@ -188,7 +188,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
                 "typed node storage disagrees with central validation proof",
             ));
         }
-        let spatial = spatial::NodeSceneSpatialTables::try_new(&scene.canonical, proof)?;
+        let spatial = spatial::NodeSceneSpatialTables::try_new(scene.read_spatial(), proof)?;
         let appearance = appearance::NodeSceneAppearanceTables::try_new(&scene.canonical, proof)?;
         let geometry = geometry::NodeSceneGeometryTables::try_new(scene.read_geometry(), proof)?;
         let deformation =

@@ -139,8 +139,9 @@ fn scene_envelope_accounts_for_the_complete_scene_shape() {
     let empty_input = empty_scene_input(Presence::Present(&empty_roots), &empty_nodes);
     let empty = SceneInputEnvelope::try_new(empty_input.batch(), SceneValidationLimits::default())
         .expect("the empty Scene shape is representable");
-    // Node, geometry, and profile use typed retained owners outside the record-store table.
-    assert_eq!(empty.terminal_attribution_slots(), 8);
+    // Node, geometry, profile, and spatial use typed owners outside the record-store table.
+    // The remaining Scene/appearance/deformation/animation roots and terminal slot need five.
+    assert_eq!(empty.terminal_attribution_slots(), 5);
 
     let roots = [NodeLocalId::new(0)];
     let nodes = [trs(Presence::Absent)];
@@ -232,7 +233,7 @@ fn scene_envelope_reserves_nested_worst_case_without_deep_validation() {
         .expect("the envelope must not inspect invalid nested animation semantics");
 
     // One channel conservatively admits its table and all four possible payload blocks.
-    assert_eq!(envelope.terminal_attribution_slots(), 13);
+    assert_eq!(envelope.terminal_attribution_slots(), 10);
 }
 
 #[test]
@@ -294,7 +295,7 @@ fn scene_envelope_reserves_complete_appearance_payload_envelope() {
 
     // Binding semantics, optional source keys, material factors, and material names each own an
     // independently attributable aggregate payload block.
-    assert_eq!(envelope.terminal_attribution_slots(), 14);
+    assert_eq!(envelope.terminal_attribution_slots(), 11);
 }
 
 #[test]
@@ -417,10 +418,9 @@ fn scene_aggregate_accepts_exact_limits_and_rejects_each_one_short() {
         profile_batch.validation_work(),
     ]);
     let canonical_bytes = checked_total([
+        crate::canonical_scene::store::schema::SCENE_DIRECTORY_CANONICAL_BYTES,
         spatial_batch.canonical_bytes(),
-        node_batch
-            .canonical_non_geometry_bytes()
-            .expect("test node canonical bytes are representable"),
+        node_batch.canonical_bytes(),
         appearance_batch.canonical_bytes(),
         geometry_batch.canonical_bytes(),
         deformation_batch.canonical_bytes(),

@@ -20,26 +20,12 @@ use crate::entity::{AuthoredTransformKind, EntityNameError, validate_entity_name
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
 
 use super::super::schema::{NODE_SCENE_MATRIX_SCALAR_COUNT, NODE_SCENE_TRS_SCALAR_COUNT};
+use super::super::typed_storage::build::NodeStoragePlan;
 use super::control::CanonicalAuthoringControl;
 use super::input::{NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence};
 
 const MATRIX_SCALARS_PER_NODE: u64 = NODE_SCENE_MATRIX_SCALAR_COUNT as u64;
 const TRS_SCALARS_PER_NODE: u64 = NODE_SCENE_TRS_SCALAR_COUNT as u64;
-const LOGICAL_U8_BYTES: u64 = 1;
-const LOGICAL_U32_BYTES: u64 = 4;
-const LOGICAL_F32_BYTES: u64 = 4;
-const LOGICAL_REFERENCE_BYTES: u64 = 4;
-
-// This is the schema-owned logical representation, not a retained allocation envelope. It counts
-// stable scalar widths and one logical identity width per reachable reference while excluding table
-// capacity, slot ordinals, alignment, and allocator metadata.
-const SCENE_DIRECTORY_BASE_BYTES: u64 =
-    (6 * LOGICAL_U32_BYTES) + (2 * LOGICAL_U8_BYTES) + (2 * LOGICAL_REFERENCE_BYTES);
-const SCENE_DIRECTORY_EMPTY_OPTION_BYTES: u64 = 2 * LOGICAL_U8_BYTES;
-const SCENE_DIRECTORY_POPULATED_REFERENCE_BYTES: u64 = 2 * LOGICAL_REFERENCE_BYTES;
-pub(super) const EMPTY_GEOMETRY_DIRECTORY_BYTES: u64 =
-    LOGICAL_U32_BYTES + (5 * (LOGICAL_U32_BYTES + LOGICAL_U8_BYTES));
-
 #[derive(Clone, Copy)]
 pub(super) struct NodeShapeScratchEnvelope {
     peak_bytes: u64,
@@ -124,12 +110,6 @@ pub(super) fn node_shape_scratch_envelope(
         retained_bytes,
     })
 }
-const NODE_SCENE_NODE_BASE_BYTES: u64 = (7 * LOGICAL_U32_BYTES) + (3 * LOGICAL_U8_BYTES);
-const NODE_SCENE_SYNTHETIC_TRANSFORM_SLOT_BYTES: u64 = LOGICAL_U8_BYTES;
-const NODE_SCENE_NODE_TRANSFORM_REFERENCE_BYTES: u64 = LOGICAL_REFERENCE_BYTES;
-const NODE_SCENE_SYNTHETIC_NAME_SLOT_BYTES: u64 = LOGICAL_U8_BYTES;
-const NODE_SCENE_REFERENCE_BYTES: u64 = 2 * LOGICAL_U32_BYTES;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) enum NodeAuthoringLimit {
     Nodes,
@@ -311,12 +291,6 @@ impl<'input, R> ValidatedNodeBatch<'input, R> {
 
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
         self.compiled.canonical_bytes
-    }
-
-    pub(super) const fn canonical_non_geometry_bytes(&self) -> Option<u64> {
-        self.compiled
-            .canonical_bytes
-            .checked_sub(EMPTY_GEOMETRY_DIRECTORY_BYTES)
     }
 
     pub(in crate::canonical_scene::store) const fn semantic_cell_count(&self) -> u64 {
@@ -973,19 +947,20 @@ where
 
     compile_canonical_breadth_first_order(nodes, roots, &mut storage, &mut context)?;
 
-    let transform_scalar_count = context
+    context
         .matrix_scalars
         .checked_add(context.trs_scalars)
         .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
             dimension: "canonical transform scalars",
         })?;
-    let canonical_bytes = node_scene_logical_bytes(
+    let canonical_bytes = NodeStoragePlan::canonical_bytes_for_shape(
         canonical_node_count,
         context.references,
-        transform_scalar_count,
         node_name_byte_count,
-        node_name_reference_count,
-    )?;
+    )
+    .map_err(|_| NodeAuthoringSemanticError::AccountingOverflow {
+        dimension: "initialized typed node footprint",
+    })?;
     enforce_limit::<C::Error>(
         NodeAuthoringLimit::CanonicalBytes,
         canonical_bytes,
@@ -1251,90 +1226,6 @@ where
         .into());
     }
     Ok(())
-}
-
-fn node_scene_logical_bytes(
-    canonical_node_count: u64,
-    reference_count: u64,
-    transform_scalar_count: u64,
-    node_name_byte_count: u64,
-    node_name_reference_count: u64,
-) -> Result<u64, NodeAuthoringSemanticError> {
-    let source_node_count = canonical_node_count.checked_sub(1).ok_or(
-        NodeAuthoringSemanticError::AccountingOverflow {
-            dimension: "canonical source nodes",
-        },
-    )?;
-    if reference_count != source_node_count {
-        return Err(NodeAuthoringSemanticError::AccountingOverflow {
-            dimension: "canonical parent references",
-        });
-    }
-    let absent_node_name_count = source_node_count
-        .checked_sub(node_name_reference_count)
-        .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-            dimension: "node name references",
-        })?;
-
-    let directory_bytes = if source_node_count == 0 {
-        SCENE_DIRECTORY_BASE_BYTES
-            .checked_add(SCENE_DIRECTORY_EMPTY_OPTION_BYTES)
-            .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical directory",
-            })?
-    } else {
-        SCENE_DIRECTORY_BASE_BYTES
-            .checked_add(SCENE_DIRECTORY_POPULATED_REFERENCE_BYTES)
-            .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical directory",
-            })?
-    };
-    let source_node_bytes = NODE_SCENE_NODE_BASE_BYTES
-        .checked_add(NODE_SCENE_NODE_TRANSFORM_REFERENCE_BYTES)
-        .and_then(|bytes| bytes.checked_mul(source_node_count))
-        .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-            dimension: "canonical node records",
-        })?;
-    let node_bytes = NODE_SCENE_NODE_BASE_BYTES
-        .checked_add(NODE_SCENE_SYNTHETIC_TRANSFORM_SLOT_BYTES)
-        .and_then(|bytes| bytes.checked_add(NODE_SCENE_SYNTHETIC_NAME_SLOT_BYTES))
-        .and_then(|bytes| bytes.checked_add(source_node_bytes))
-        .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-            dimension: "canonical node records",
-        })?;
-    let reference_bytes = reference_count
-        .checked_mul(NODE_SCENE_REFERENCE_BYTES)
-        .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-            dimension: "canonical reference records",
-        })?;
-    let transform_bytes = transform_scalar_count
-        .checked_mul(LOGICAL_F32_BYTES)
-        .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-            dimension: "canonical transform values",
-        })?;
-    let node_name_reference_bytes = node_name_reference_count
-        .checked_mul(LOGICAL_REFERENCE_BYTES)
-        .and_then(|bytes| {
-            absent_node_name_count
-                .checked_mul(LOGICAL_U8_BYTES)
-                .and_then(|absent| bytes.checked_add(absent))
-        })
-        .ok_or(NodeAuthoringSemanticError::AccountingOverflow {
-            dimension: "canonical node name references",
-        })?;
-
-    checked_sum_bytes(
-        [
-            directory_bytes,
-            EMPTY_GEOMETRY_DIRECTORY_BYTES,
-            node_bytes,
-            reference_bytes,
-            transform_bytes,
-            node_name_reference_bytes,
-            node_name_byte_count,
-        ],
-        "canonical logical footprint",
-    )
 }
 
 fn scratch_envelope(

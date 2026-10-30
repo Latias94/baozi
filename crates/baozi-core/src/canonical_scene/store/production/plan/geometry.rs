@@ -11,6 +11,7 @@ use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
 use crate::attribute::{AttributeDomain, AttributeSemantic, AttributeSemanticKind};
+use crate::canonical_scene::store::typed_storage::build::GeometryStoragePlan;
 use crate::entity::validate_entity_name_str;
 use crate::geometry::TopologyKind;
 use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidationWork};
@@ -22,22 +23,6 @@ use super::super::input::geometry::{
     AuthoringRange, GeometryAttributeAuthoring, GeometryAttributePayloadAuthoring,
     GeometryAuthoringBatch, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
 };
-
-const LOGICAL_U8_BYTES: u64 = 1;
-const LOGICAL_U32_BYTES: u64 = 4;
-const LOGICAL_U64_BYTES: u64 = 8;
-const LOGICAL_F32_BYTES: u64 = 4;
-const LOGICAL_F64_BYTES: u64 = 8;
-const LOGICAL_I32_BYTES: u64 = 4;
-const LOGICAL_REFERENCE_BYTES: u64 = 4;
-
-const GEOMETRY_DIRECTORY_FIXED_BYTES: u64 = 7 * LOGICAL_U32_BYTES;
-const LOGICAL_MESH_ROW_BYTES: u64 =
-    5 * LOGICAL_U32_BYTES + LOGICAL_U8_BYTES + LOGICAL_REFERENCE_BYTES;
-const MESH_INSTANCE_ROW_BYTES: u64 = 3 * LOGICAL_U32_BYTES + 2 * LOGICAL_REFERENCE_BYTES;
-const PRIMITIVE_FIXED_BYTES: u64 = 9 * LOGICAL_U32_BYTES + 4 * LOGICAL_U8_BYTES;
-const ATTRIBUTE_FIXED_BYTES: u64 =
-    (6 * LOGICAL_U32_BYTES) + LOGICAL_U64_BYTES + (6 * LOGICAL_U8_BYTES);
 
 pub(in crate::canonical_scene::store) fn geometry_shape_scratch_envelope(
     input: GeometryAuthoringBatch<'_>,
@@ -758,6 +743,8 @@ struct GeometryValidationContext<'control, C: CanonicalAuthoringControl> {
     i32_scalars: u64,
     payload_blocks: u32,
     canonical_bytes: u64,
+    rows: [u64; 4],
+    name_bytes: u64,
 }
 
 impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control, C> {
@@ -776,6 +763,8 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
             i32_scalars: 0,
             payload_blocks: 0,
             canonical_bytes: 0,
+            rows: [0; 4],
+            name_bytes: 0,
         }
     }
 
@@ -906,36 +895,14 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
                 dimension: "payload block count",
             },
         )?;
-        let added_bytes = checked_sum_bytes(
-            [
-                checked_bytes(
-                    f32_scalars,
-                    LOGICAL_F32_BYTES,
-                    "canonical f32 scalar payload",
-                )?,
-                checked_bytes(
-                    f64_scalars,
-                    LOGICAL_F64_BYTES,
-                    "canonical f64 scalar payload",
-                )?,
-                checked_bytes(
-                    u32_scalars,
-                    LOGICAL_U32_BYTES,
-                    "canonical u32 scalar payload",
-                )?,
-                checked_bytes(
-                    i32_scalars,
-                    LOGICAL_I32_BYTES,
-                    "canonical i32 scalar payload",
-                )?,
-            ],
-            "canonical scalar payload",
-        )?;
-        let final_canonical_bytes = self.canonical_bytes.checked_add(added_bytes).ok_or(
-            GeometryAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical geometry logical footprint",
-            },
-        )?;
+        let final_canonical_bytes = GeometryStoragePlan::canonical_bytes_for_shape(
+            self.rows,
+            self.name_bytes,
+            [final_f32, final_f64, final_u32, final_i32],
+        )
+        .map_err(|_| GeometryAuthoringSemanticError::AccountingOverflow {
+            dimension: "initialized typed geometry footprint",
+        })?;
         enforce_limit::<C::Error>(
             GeometryAuthoringLimit::SemanticCells,
             final_cells,
@@ -963,11 +930,24 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
                 dimension: "semantic cells",
             },
         )?;
-        let final_canonical_bytes = self.canonical_bytes.checked_add(bytes).ok_or(
+        let final_name_bytes = self.name_bytes.checked_add(bytes).ok_or(
             GeometryAuthoringSemanticError::AccountingOverflow {
-                dimension: "canonical geometry logical footprint",
+                dimension: "geometry name bytes",
             },
         )?;
+        let final_canonical_bytes = GeometryStoragePlan::canonical_bytes_for_shape(
+            self.rows,
+            final_name_bytes,
+            [
+                self.f32_scalars,
+                self.f64_scalars,
+                self.u32_scalars,
+                self.i32_scalars,
+            ],
+        )
+        .map_err(|_| GeometryAuthoringSemanticError::AccountingOverflow {
+            dimension: "initialized typed geometry footprint",
+        })?;
         enforce_limit::<C::Error>(
             GeometryAuthoringLimit::SemanticCells,
             final_cells,
@@ -980,6 +960,7 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         )?;
         self.semantic_cells = final_cells;
         self.canonical_bytes = final_canonical_bytes;
+        self.name_bytes = final_name_bytes;
         Ok(())
     }
 
@@ -992,13 +973,20 @@ impl<'control, C: CanonicalAuthoringControl> GeometryValidationContext<'control,
         Ok(())
     }
 
-    fn set_structural_bytes(&mut self, bytes: u64) -> GeometryValidationResult<(), C> {
+    fn set_shape(&mut self, rows: [u64; 4]) -> GeometryValidationResult<(), C> {
+        let bytes =
+            GeometryStoragePlan::canonical_bytes_for_shape(rows, 0, [0; 4]).map_err(|_| {
+                GeometryAuthoringSemanticError::AccountingOverflow {
+                    dimension: "initialized typed geometry rows",
+                }
+            })?;
         enforce_limit::<C::Error>(
             GeometryAuthoringLimit::CanonicalBytes,
             bytes,
             self.limits.max_canonical_bytes(),
         )?;
         self.canonical_bytes = bytes;
+        self.rows = rows;
         Ok(())
     }
 
@@ -1092,10 +1080,17 @@ where
     let mut context = GeometryValidationContext::new(limits, control);
     context.poll_now()?;
 
-    let logical_mesh_count = collection_count(input.logical_meshes().len(), "logical meshes")?;
-    let primitive_count = collection_count(input.primitives().len(), "primitives")?;
-    let attribute_count = collection_count(input.attributes().len(), "attributes")?;
-    let mesh_instance_count = collection_count(input.mesh_instances().len(), "mesh instances")?;
+    // Admit observation of the fixed top-level shape before reserving input-sized scratch.
+    // The typed footprint needs these lengths; it does not need a second descriptor scan.
+    let (logical_mesh_count, primitive_count, attribute_count, mesh_instance_count) = context
+        .run_unit(SceneValidationWork::Traversal, || {
+            Ok::<_, GeometryAuthoringSemanticError>((
+                collection_count(input.logical_meshes().len(), "logical meshes")?,
+                collection_count(input.primitives().len(), "primitives")?,
+                collection_count(input.attributes().len(), "attributes")?,
+                collection_count(input.mesh_instances().len(), "mesh instances")?,
+            ))
+        })??;
     let entity_count = checked_sum(
         [
             u64::from(logical_mesh_count),
@@ -1110,8 +1105,12 @@ where
         entity_count,
         limits.max_entities(),
     )?;
-    let structural_bytes = geometry_structural_bytes(input, &mut context)?;
-    context.set_structural_bytes(structural_bytes)?;
+    context.set_shape([
+        u64::from(logical_mesh_count),
+        u64::from(primitive_count),
+        u64::from(attribute_count),
+        u64::from(mesh_instance_count),
+    ])?;
 
     let primitive_plan = context.scratch_plan::<ValidatedGeometryPrimitivePlan>(
         input.primitives().len(),
@@ -2619,194 +2618,6 @@ fn checked_scalar_count(
         })
 }
 
-fn geometry_structural_bytes<C>(
-    input: GeometryAuthoringBatch<'_>,
-    context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<u64, C>
-where
-    C: CanonicalAuthoringControl,
-{
-    let logical_mesh_count = collection_count(input.logical_meshes().len(), "logical meshes")?;
-    let primitive_count = collection_count(input.primitives().len(), "primitives")?;
-    let attribute_count = collection_count(input.attributes().len(), "attributes")?;
-    let mesh_instance_count = collection_count(input.mesh_instances().len(), "mesh instances")?;
-    let mut logical_mesh_name_bytes = 0_u64;
-    let mut logical_mesh_rows = 0_u64;
-    for logical_mesh in input.logical_meshes() {
-        logical_mesh_rows = context.run_unit(SceneValidationWork::Traversal, || {
-            let name_count = match logical_mesh.name() {
-                Presence::Absent => 0,
-                Presence::Present(name) => usize_to_u64(name.len(), "logical mesh name bytes")?,
-            };
-            logical_mesh_name_bytes = logical_mesh_name_bytes.checked_add(name_count).ok_or(
-                GeometryAuthoringSemanticError::AccountingOverflow {
-                    dimension: "logical mesh name bytes",
-                },
-            )?;
-            logical_mesh_rows
-                .checked_add(LOGICAL_MESH_ROW_BYTES)
-                .and_then(|bytes| bytes.checked_add(reference_slot_bytes(name_count != 0)))
-                .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
-                    dimension: "canonical logical mesh records",
-                })
-        })??;
-    }
-    let mut primitive_bytes = 0_u64;
-    for primitive in input.primitives() {
-        primitive_bytes = context.run_unit(SceneValidationWork::Traversal, || {
-            let boundary_block = matches!(
-                primitive.topology(),
-                GeometryTopologyAuthoring::Polygons(boundaries) if !boundaries.is_empty()
-            );
-            let index_block = matches!(
-                primitive.indices(),
-                Presence::Present(indices) if !indices.is_empty()
-            );
-            let reference_bytes = checked_sum_bytes(
-                [
-                    reference_slot_bytes(boundary_block),
-                    reference_slot_bytes(index_block),
-                    reference_slot_bytes(matches!(primitive.material(), Presence::Present(_))),
-                    reference_slot_bytes(primitive.attributes().count() != 0),
-                ],
-                "canonical primitive references",
-            )?;
-            primitive_bytes
-                .checked_add(PRIMITIVE_FIXED_BYTES)
-                .and_then(|bytes| bytes.checked_add(reference_bytes))
-                .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
-                    dimension: "canonical primitive records",
-                })
-        })??;
-    }
-    let mut attribute_bytes = 0_u64;
-    let mut attribute_semantic_name_bytes = 0_u64;
-    for attribute in input.attributes() {
-        attribute_bytes = context.run_unit(SceneValidationWork::Traversal, || {
-            let semantic_name_count = match attribute.semantic() {
-                AttributeSemantic::Custom(custom) => {
-                    usize_to_u64(custom.as_str().len(), "attribute semantic name bytes")?
-                }
-                _ => 0,
-            };
-            attribute_semantic_name_bytes = attribute_semantic_name_bytes
-                .checked_add(semantic_name_count)
-                .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
-                    dimension: "attribute semantic name bytes",
-                })?;
-            let (values, sparse_indices, sparse_default) = match attribute.payload() {
-                GeometryAttributePayloadAuthoring::DenseF32 {
-                    source_values,
-                    source_indices,
-                    ..
-                } => (
-                    match source_indices {
-                        Presence::Absent => !source_values.is_empty(),
-                        Presence::Present(indices) => !indices.is_empty(),
-                    },
-                    false,
-                    false,
-                ),
-                GeometryAttributePayloadAuthoring::DenseF64 { values, .. } => {
-                    (!values.is_empty(), false, false)
-                }
-                GeometryAttributePayloadAuthoring::DenseU32 { values, .. } => {
-                    (!values.is_empty(), false, false)
-                }
-                GeometryAttributePayloadAuthoring::DenseI32 { values, .. } => {
-                    (!values.is_empty(), false, false)
-                }
-                GeometryAttributePayloadAuthoring::SparseF32 {
-                    indices,
-                    values,
-                    default,
-                    ..
-                } => (!values.is_empty(), !indices.is_empty(), !default.is_empty()),
-                GeometryAttributePayloadAuthoring::SparseU32 {
-                    indices,
-                    values,
-                    default,
-                    ..
-                } => (!values.is_empty(), !indices.is_empty(), !default.is_empty()),
-                GeometryAttributePayloadAuthoring::SparseI32 {
-                    indices,
-                    values,
-                    default,
-                    ..
-                } => (!values.is_empty(), !indices.is_empty(), !default.is_empty()),
-            };
-            let reference_bytes = checked_sum_bytes(
-                [
-                    reference_slot_bytes(values),
-                    reference_slot_bytes(sparse_indices),
-                    reference_slot_bytes(sparse_default),
-                    reference_slot_bytes(semantic_name_count != 0),
-                ],
-                "canonical attribute references",
-            )?;
-            attribute_bytes
-                .checked_add(ATTRIBUTE_FIXED_BYTES)
-                .and_then(|bytes| bytes.checked_add(reference_bytes))
-                .ok_or(GeometryAuthoringSemanticError::AccountingOverflow {
-                    dimension: "canonical attribute records",
-                })
-        })??;
-    }
-    let directory_reference_bytes = checked_sum_bytes(
-        [
-            reference_slot_bytes(logical_mesh_count != 0),
-            reference_slot_bytes(primitive_count != 0),
-            reference_slot_bytes(attribute_count != 0),
-            reference_slot_bytes(mesh_instance_count != 0),
-            reference_slot_bytes(logical_mesh_name_bytes != 0),
-            reference_slot_bytes(attribute_semantic_name_bytes != 0),
-        ],
-        "canonical geometry directory references",
-    )?;
-    let structural_bytes = checked_sum_bytes(
-        [
-            GEOMETRY_DIRECTORY_FIXED_BYTES,
-            directory_reference_bytes,
-            logical_mesh_rows,
-            primitive_bytes,
-            checked_bytes(
-                u64::from(mesh_instance_count),
-                MESH_INSTANCE_ROW_BYTES,
-                "canonical mesh instance records",
-            )?,
-            attribute_bytes,
-        ],
-        "canonical geometry structural footprint",
-    )?;
-    Ok(structural_bytes)
-}
-
-const fn reference_slot_bytes(has_reference: bool) -> u64 {
-    if has_reference {
-        LOGICAL_REFERENCE_BYTES
-    } else {
-        LOGICAL_U8_BYTES
-    }
-}
-
-fn checked_bytes(
-    count: u64,
-    width: u64,
-    dimension: &'static str,
-) -> Result<u64, GeometryAuthoringSemanticError> {
-    count
-        .checked_mul(width)
-        .ok_or(GeometryAuthoringSemanticError::AccountingOverflow { dimension })
-}
-
-fn scratch_envelope(
-    plan: CapacityPlan,
-    resource: &'static str,
-) -> Result<u64, GeometryAuthoringSemanticError> {
-    plan.envelope_delta_bytes()
-        .map_err(|cause| GeometryAuthoringSemanticError::ScratchCapacity { resource, cause })
-}
-
 fn checked_sum<const N: usize>(
     values: [u64; N],
     dimension: &'static str,
@@ -2816,6 +2627,14 @@ fn checked_sum<const N: usize>(
             .checked_add(value)
             .ok_or(GeometryAuthoringSemanticError::AccountingOverflow { dimension })
     })
+}
+
+fn scratch_envelope(
+    plan: CapacityPlan,
+    resource: &'static str,
+) -> Result<u64, GeometryAuthoringSemanticError> {
+    plan.envelope_delta_bytes()
+        .map_err(|cause| GeometryAuthoringSemanticError::ScratchCapacity { resource, cause })
 }
 
 fn checked_sum_bytes<const N: usize>(

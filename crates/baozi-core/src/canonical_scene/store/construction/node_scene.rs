@@ -157,6 +157,7 @@ fn optional_utf8_validation_work(plan: Option<Utf8Plan>) -> Result<u64, StorePla
 struct NodeSceneBuildFaults {
     alter_first_authored_transform: bool,
     alter_first_geometry_f32: bool,
+    spatial: Option<test_support::SpatialBuildFault>,
     profile: profile::ProfileBuildFault,
     planning: Option<materialization::NodeScenePlanningFault>,
     panic_central_validator: bool,
@@ -168,6 +169,7 @@ impl NodeSceneBuildFaults {
         Self {
             alter_first_authored_transform: false,
             alter_first_geometry_f32: false,
+            spatial: None,
             profile: profile::ProfileBuildFault::none(),
             planning: None,
             panic_central_validator: false,
@@ -191,6 +193,13 @@ impl NodeSceneBuildFaults {
     const fn altered_profile(fault: profile::ProfileBuildFault) -> Self {
         Self {
             profile: fault,
+            ..Self::none()
+        }
+    }
+
+    const fn altered_spatial(fault: test_support::SpatialBuildFault) -> Self {
+        Self {
+            spatial: Some(fault),
             ..Self::none()
         }
     }
@@ -551,6 +560,12 @@ impl SceneStorage {
         &self,
     ) -> &super::super::typed_storage::NodeStorage {
         self.tables.nodes.as_ref()
+    }
+
+    pub(in crate::canonical_scene::store) fn read_spatial(
+        &self,
+    ) -> &super::super::typed_storage::spatial::SpatialStorage {
+        self.tables.spatial.as_ref()
     }
 
     pub(in crate::canonical_scene::store) fn read_geometry(

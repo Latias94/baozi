@@ -6,6 +6,12 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Replaced spatial records and scalar codecs with a retained typed owner for inline `SceneSpace`,
+  camera projections, and light definitions. Edits share unchanged spatial storage; central
+  validation borrows its actual values and checks placement closure.
+- Aligned node and geometry canonical-byte admission with initialized typed headers, rows, and used
+  payloads. Matrix/TRS variants share one row footprint, sparse storage stays sparse, and the Scene
+  directory is counted independently once.
 - Added direct flat/smooth `generate_normals` operations with area-weighted smoothing by vertex
   identity and Face smoothing groups. Authored normals are preserved unless replacement is explicit;
   invalidated tangents and their owner-local metadata require explicit removal. Changed reports own

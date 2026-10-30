@@ -9,6 +9,8 @@ use std::fmt;
 use baozi_operation::{CapacityPlan, CapacityPlanError};
 use thiserror::Error;
 
+use crate::canonical_scene::store::typed_storage::spatial::build::SpatialStoragePlan;
+
 use crate::entity::{
     CameraProjectionKind, LightEmissionError, LightKindCategory, validate_canonical_light_emission,
 };
@@ -18,22 +20,6 @@ use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidati
 use super::super::control::CanonicalAuthoringControl;
 use super::super::input::spatial::{CameraAuthoring, LightAuthoring, SpatialAuthoringBatch};
 use super::super::input::{NodeAuthoringBatch, Presence};
-
-const LOGICAL_U8_BYTES: u64 = 1;
-const LOGICAL_U32_BYTES: u64 = 4;
-const LOGICAL_F32_BYTES: u64 = 4;
-const LOGICAL_F64_BYTES: u64 = 8;
-const LOGICAL_REFERENCE_BYTES: u64 = 4;
-
-// The fixed directory shape excludes optional unit/name payloads but includes
-// every presence/count/version cell and collection reference slot.
-const SPATIAL_DIRECTORY_FIXED_BYTES: u64 =
-    (7 * LOGICAL_U32_BYTES) + (11 * LOGICAL_U8_BYTES) + (4 * LOGICAL_REFERENCE_BYTES);
-const CAMERA_ROW_FIXED_BYTES: u64 =
-    LOGICAL_U32_BYTES + LOGICAL_U8_BYTES + (2 * LOGICAL_U8_BYTES) + (2 * LOGICAL_F32_BYTES);
-const LIGHT_ROW_FIXED_BYTES: u64 =
-    LOGICAL_U32_BYTES + LOGICAL_U8_BYTES + (3 * LOGICAL_U8_BYTES) + (4 * LOGICAL_F32_BYTES);
-const SYNTHETIC_NODE_ATTACHMENT_BYTES: u64 = 6 * LOGICAL_U8_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) enum SpatialAuthoringLimit {
@@ -149,10 +135,6 @@ impl<'input, R> ValidatedSpatialBatch<'input, R> {
         }
     }
 
-    pub(in crate::canonical_scene::store) const fn input(&self) -> SpatialAuthoringBatch<'input> {
-        self.input.spatial
-    }
-
     pub(in crate::canonical_scene::store) const fn node_input(&self) -> NodeAuthoringBatch<'input> {
         self.input.nodes
     }
@@ -213,17 +195,6 @@ impl<'input, R> ValidatedSpatialBatch<'input, R> {
         &self,
     ) -> u32 {
         self.compiled.tangent_encoding_schema_name_bytes
-    }
-
-    pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
-        let mut count = 0;
-        if self.compiled.tangent_basis_schema_name_bytes != 0 {
-            count += 1;
-        }
-        if self.compiled.tangent_encoding_schema_name_bytes != 0 {
-            count += 1;
-        }
-        count
     }
 
     pub(in crate::canonical_scene::store) fn cameras(
@@ -453,39 +424,6 @@ where
     context.resize_scratch(&mut reservation, allocated_scratch_bytes)?;
 
     let mut semantic_cells = 9_u64;
-    let directory_reference_bytes = [
-        tangent_schema_reference_bytes(input.scene_space().tangent_basis.schema_id().is_some()),
-        tangent_schema_reference_bytes(
-            input
-                .scene_space()
-                .tangent_handedness_encoding
-                .schema_id()
-                .is_some(),
-        ),
-        tangent_schema_reference_bytes(camera_count != 0),
-        tangent_schema_reference_bytes(light_count != 0),
-    ]
-    .into_iter()
-    .try_fold(0_u64, u64::checked_add)
-    .ok_or(SpatialAuthoringSemanticError::AccountingOverflow {
-        dimension: "spatial directory references",
-    })?;
-    let mut canonical_bytes = SPATIAL_DIRECTORY_FIXED_BYTES
-        .checked_sub(4 * LOGICAL_REFERENCE_BYTES)
-        .and_then(|bytes| bytes.checked_add(directory_reference_bytes))
-        .and_then(|bytes| bytes.checked_add(LOGICAL_REFERENCE_BYTES))
-        .and_then(|bytes| bytes.checked_add(SYNTHETIC_NODE_ATTACHMENT_BYTES))
-        .ok_or(SpatialAuthoringSemanticError::AccountingOverflow {
-            dimension: "spatial fixed canonical footprint",
-        })?;
-    canonical_bytes = canonical_bytes
-        .checked_add(optional_scalar_slot_bytes(
-            input.scene_space().unit_scale_to_meters.is_some(),
-            LOGICAL_F64_BYTES,
-        ))
-        .ok_or(SpatialAuthoringSemanticError::AccountingOverflow {
-            dimension: "SceneSpace unit-scale slot",
-        })?;
     if input.scene_space().unit_scale_to_meters.is_some() {
         semantic_cells = semantic_cells.checked_add(1).ok_or(
             SpatialAuthoringSemanticError::AccountingOverflow {
@@ -512,12 +450,13 @@ where
             dimension: "SceneSpace schema-name semantic cells",
         },
     )?;
-    canonical_bytes = canonical_bytes.checked_add(schema_name_bytes).ok_or(
-        SpatialAuthoringSemanticError::AccountingOverflow {
-            dimension: "SceneSpace schema-name bytes",
-        },
-    )?;
-    // The fixed directory and schema extents are shape facts available before
+    let canonical_bytes =
+        SpatialStoragePlan::for_shape(camera_count, light_count, schema_name_bytes)
+            .and_then(SpatialStoragePlan::canonical_bytes)
+            .map_err(|_| SpatialAuthoringSemanticError::AccountingOverflow {
+                dimension: "typed spatial footprint",
+            })?;
+    // Typed row and schema extents are shape facts available before
     // payload traversal. Admit that envelope once; subsequent authored facts
     // enforce their incremental limits inside the action that observes them.
     enforce_limit::<C::Error>(
@@ -551,7 +490,7 @@ where
     for (camera, authored) in input.cameras().iter().enumerate() {
         context.run_unit(SceneValidationWork::Entity, || {
             let projection = authored.projection();
-            let (optional_values, optional_slot_bytes) = match projection.kind() {
+            let optional_values = match projection.kind() {
                 CameraProjectionKind::Perspective => {
                     let Some((_fov, aspect, _near, far)) = projection.perspective_parameters()
                     else {
@@ -559,11 +498,7 @@ where
                             camera,
                         });
                     };
-                    (
-                        u64::from(aspect.is_some()) + u64::from(far.is_some()),
-                        optional_scalar_slot_bytes(aspect.is_some(), LOGICAL_F32_BYTES)
-                            + optional_scalar_slot_bytes(far.is_some(), LOGICAL_F32_BYTES),
-                    )
+                    u64::from(aspect.is_some()) + u64::from(far.is_some())
                 }
                 CameraProjectionKind::Orthographic => {
                     if projection.orthographic_parameters().is_none() {
@@ -571,7 +506,7 @@ where
                             camera,
                         });
                     }
-                    (2, 2 * LOGICAL_F32_BYTES)
+                    2
                 }
             };
             let final_semantic_cells = semantic_cells
@@ -583,24 +518,12 @@ where
                 .ok_or(SpatialAuthoringSemanticError::AccountingOverflow {
                     dimension: "camera semantic cells",
                 })?;
-            let final_canonical_bytes = canonical_bytes
-                .checked_add(CAMERA_ROW_FIXED_BYTES)
-                .and_then(|bytes| bytes.checked_add(optional_slot_bytes))
-                .ok_or(SpatialAuthoringSemanticError::AccountingOverflow {
-                    dimension: "camera canonical footprint",
-                })?;
             enforce_semantic_limit(
                 SpatialAuthoringLimit::SemanticCells,
                 final_semantic_cells,
                 limits.max_payload_cells(),
             )?;
-            enforce_semantic_limit(
-                SpatialAuthoringLimit::CanonicalBytes,
-                final_canonical_bytes,
-                limits.max_canonical_bytes(),
-            )?;
             semantic_cells = final_semantic_cells;
-            canonical_bytes = final_canonical_bytes;
             Ok::<(), SpatialAuthoringSemanticError>(())
         })??;
     }
@@ -626,33 +549,12 @@ where
                 .ok_or(SpatialAuthoringSemanticError::AccountingOverflow {
                     dimension: "light semantic cells",
                 })?;
-            let optional_slot_bytes = match kind.category() {
-                LightKindCategory::Directional => 3 * LOGICAL_U8_BYTES,
-                LightKindCategory::Point => {
-                    tangent_schema_reference_bytes(kind.range().is_some()) + (2 * LOGICAL_U8_BYTES)
-                }
-                LightKindCategory::Spot => {
-                    tangent_schema_reference_bytes(kind.range().is_some()) + (2 * LOGICAL_F32_BYTES)
-                }
-            };
-            let final_canonical_bytes = canonical_bytes
-                .checked_add(LIGHT_ROW_FIXED_BYTES)
-                .and_then(|bytes| bytes.checked_add(optional_slot_bytes))
-                .ok_or(SpatialAuthoringSemanticError::AccountingOverflow {
-                    dimension: "light canonical footprint",
-                })?;
             enforce_semantic_limit(
                 SpatialAuthoringLimit::SemanticCells,
                 final_semantic_cells,
                 limits.max_payload_cells(),
             )?;
-            enforce_semantic_limit(
-                SpatialAuthoringLimit::CanonicalBytes,
-                final_canonical_bytes,
-                limits.max_canonical_bytes(),
-            )?;
             semantic_cells = final_semantic_cells;
-            canonical_bytes = final_canonical_bytes;
             Ok::<(), SpatialAuthoringSemanticError>(())
         })??;
     }
@@ -661,12 +563,6 @@ where
     let mut reference_count = 0_u64;
     for (node, authored) in nodes.nodes().iter().enumerate() {
         context.run_unit(SceneValidationWork::Traversal, || {
-            let final_canonical_bytes = canonical_bytes
-                .checked_add(node_attachment_bytes(authored.camera()))
-                .and_then(|bytes| bytes.checked_add(node_attachment_bytes(authored.light())))
-                .ok_or(SpatialAuthoringSemanticError::AccountingOverflow {
-                    dimension: "node spatial attachments",
-                })?;
             let final_semantic_cells = semantic_cells.checked_add(2).ok_or(
                 SpatialAuthoringSemanticError::AccountingOverflow {
                     dimension: "node attachment semantic cells",
@@ -677,13 +573,7 @@ where
                 final_semantic_cells,
                 limits.max_payload_cells(),
             )?;
-            enforce_semantic_limit(
-                SpatialAuthoringLimit::CanonicalBytes,
-                final_canonical_bytes,
-                limits.max_canonical_bytes(),
-            )?;
             semantic_cells = final_semantic_cells;
-            canonical_bytes = final_canonical_bytes;
             Ok::<(), SpatialAuthoringSemanticError>(())
         })??;
         if let Presence::Present(camera_id) = authored.camera() {
@@ -905,29 +795,6 @@ fn allocate_scratch<T>(
         .finish(values.len(), values.capacity())
         .map_err(|cause| SpatialAuthoringSemanticError::ScratchCapacity { resource, cause })?;
     Ok((values, bytes))
-}
-
-fn node_attachment_bytes<T>(attachment: Presence<T>) -> u64 {
-    match attachment {
-        Presence::Absent => 3 * LOGICAL_U8_BYTES,
-        Presence::Present(_) => LOGICAL_U8_BYTES + LOGICAL_U32_BYTES + LOGICAL_REFERENCE_BYTES,
-    }
-}
-
-const fn tangent_schema_reference_bytes(present: bool) -> u64 {
-    if present {
-        LOGICAL_REFERENCE_BYTES
-    } else {
-        LOGICAL_U8_BYTES
-    }
-}
-
-const fn optional_scalar_slot_bytes(present: bool, scalar_bytes: u64) -> u64 {
-    if present {
-        scalar_bytes
-    } else {
-        LOGICAL_U8_BYTES
-    }
 }
 
 fn enforce_limit<E>(

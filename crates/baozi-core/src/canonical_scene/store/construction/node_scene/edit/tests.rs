@@ -170,6 +170,62 @@ fn build_spatial_scene(
     }
 }
 
+fn spatial_fixture_values() -> (CameraProjection, LightKind, LightEmission) {
+    (
+        CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
+            .expect("spatial edit camera"),
+        LightKind::point(Some(50.0)).expect("spatial edit point light"),
+        LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 10.0)
+            .expect("spatial edit emission"),
+    )
+}
+
+fn build_populated_spatial_scene(
+    account: &PhysicalStorageAccount,
+    generation_source: &AtomicU64,
+) -> NodeSceneSuccessParts {
+    let (projection, light_kind, emission) = spatial_fixture_values();
+    build_spatial_scene(account, generation_source, projection, light_kind, emission)
+}
+
+fn assert_populated_spatial_scene(scene: &SceneStorage) {
+    let (projection, light_kind, emission) = spatial_fixture_values();
+    let storage = scene.tables.spatial.as_ref();
+    assert_eq!(storage.space, SceneSpace::STANDARD_TARGET);
+    assert_eq!(storage.cameras.as_slice(), &[projection]);
+    assert_eq!(storage.lights.len(), 1);
+    assert_eq!(storage.lights[0].kind, light_kind);
+    assert_eq!(storage.lights[0].tint, emission.tint());
+    assert_eq!(
+        storage.lights[0].intensity.to_bits(),
+        emission.intensity().to_bits()
+    );
+
+    let view = scene
+        .semantic_view()
+        .expect("surviving spatial semantic view");
+    assert_eq!(view.camera_count(), 1);
+    assert_eq!(view.light_count(), 1);
+    assert_eq!(
+        view.scene_space().expect("surviving SceneSpace").up_axis(),
+        crate::scene_space::Axis::PositiveY,
+    );
+    assert_eq!(
+        view.camera_at(0)
+            .expect("surviving camera read")
+            .expect("surviving camera zero")
+            .projection(),
+        projection,
+    );
+    let light = view
+        .light_at(0)
+        .expect("surviving light read")
+        .expect("surviving light zero");
+    assert_eq!(light.kind(), light_kind);
+    assert_eq!(light.tint(), emission.tint());
+    assert_eq!(light.intensity().to_bits(), emission.intensity().to_bits());
+}
+
 fn changed_trs(translation_x: f32) -> AuthoredTransform {
     AuthoredTransform::try_trs(
         Vec3::new(translation_x, 0.0, 0.0),
@@ -460,6 +516,13 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         std::ptr::eq(source.read_geometry(), output.scene.read_geometry()),
         "a transform edit must share the complete geometry owner and all of its scalar pools",
     );
+    assert!(
+        std::ptr::eq(
+            source.tables.spatial.as_ref(),
+            output.scene.tables.spatial.as_ref(),
+        ),
+        "a transform edit must share the actual spatial owner",
+    );
     let first_geometry_scalar = source.read_geometry().f32_values.first().copied();
     let source_central_validation = source.proof.central_validation_plan();
     let output_central_validation = output.scene.proof.central_validation_plan();
@@ -574,49 +637,62 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
 }
 
 #[test]
-fn host_unwind_releases_edited_tables_and_preserves_shared_source_geometry() {
+fn host_unwind_releases_edited_tables_and_preserves_shared_source_geometry_and_spatial() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
-    let original = build_gltf_capability_scene_for_probe(&account, &generation_source);
-    let source_snapshot = account.snapshot();
-    let node = NodeId::new(original.scene.generation(), 0);
-    let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
-        &original.scene,
-        node,
-        changed_trs(29.0),
-        edit_options_digest(29),
-    )
-    .expect("unwind edit plan") else {
-        panic!("the unwind fixture must change the transform");
-    };
-    let prepared = pending
-        .prepare_with_generation_source(&original.scene, test_limits(), || {
-            SceneGenerationId::reserve_from(&generation_source)
-        })
-        .expect("unwind edit preparation");
-    let super::NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
-        panic!("the unwind fixture must publish the edit");
-    };
-    assert!(std::ptr::eq(
-        original.scene.read_geometry(),
-        edited.scene.read_geometry(),
-    ));
-    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let _edited = edited;
-        panic!("ordinary host unwind with a shared geometry owner");
-    }));
-    assert!(caught.is_err());
-    drop(caught);
-    assert_no_live_storage_change(source_snapshot, &account);
-    assert!(!account.snapshot().poisoned());
-    assert!(
-        authored_transform_at(&original.scene, 0, "source after edited owner unwind")
-            .has_same_authored_bits(AuthoredTransform::identity_trs()),
-    );
-    drop(original);
-    assert_eq!(account.snapshot().live_retained_bytes(), 0);
-    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    for populated_spatial in [false, true] {
+        let original = if populated_spatial {
+            build_populated_spatial_scene(&account, &generation_source)
+        } else {
+            build_gltf_capability_scene_for_probe(&account, &generation_source)
+        };
+        let source_snapshot = account.snapshot();
+        let node = NodeId::new(original.scene.generation(), 0);
+        let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
+            &original.scene,
+            node,
+            changed_trs(29.0),
+            edit_options_digest(29),
+        )
+        .expect("unwind edit plan") else {
+            panic!("the unwind fixture must change the transform");
+        };
+        let prepared = pending
+            .prepare_with_generation_source(&original.scene, test_limits(), || {
+                SceneGenerationId::reserve_from(&generation_source)
+            })
+            .expect("unwind edit preparation");
+        let super::NodeSceneEditTerminal::Success(edited) = prepared.handoff() else {
+            panic!("the unwind fixture must publish the edit");
+        };
+        assert!(std::ptr::eq(
+            original.scene.read_geometry(),
+            edited.scene.read_geometry(),
+        ));
+        assert!(std::ptr::eq(
+            original.scene.tables.spatial.as_ref(),
+            edited.scene.tables.spatial.as_ref(),
+        ));
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _edited = edited;
+            panic!("ordinary host unwind with shared Scene tables");
+        }));
+        assert!(caught.is_err());
+        drop(caught);
+        assert_no_live_storage_change(source_snapshot, &account);
+        assert!(!account.snapshot().poisoned());
+        assert!(
+            authored_transform_at(&original.scene, 0, "source after edited owner unwind")
+                .has_same_authored_bits(AuthoredTransform::identity_trs()),
+        );
+        if populated_spatial {
+            assert_populated_spatial_scene(&original.scene);
+        }
+        drop(original);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    }
 }
 
 #[test]
@@ -868,11 +944,7 @@ fn shape_changing_edit_preserves_spatial_values_and_attachment_closure() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
-    let projection = CameraProjection::perspective(1.0, Some(1.5), 0.1, Some(100.0))
-        .expect("spatial edit camera");
-    let light_kind = LightKind::point(Some(50.0)).expect("spatial edit point light");
-    let emission = LightEmission::try_from_scaled_linear_srgb(Color::WHITE, 10.0)
-        .expect("spatial edit emission");
+    let (projection, light_kind, emission) = spatial_fixture_values();
     let parts = build_spatial_scene(
         &account,
         &generation_source,
@@ -900,6 +972,10 @@ fn shape_changing_edit_preserves_spatial_values_and_attachment_closure() {
     };
 
     assert_ne!(output.scene.generation(), input_generation);
+    assert!(std::ptr::eq(
+        source.tables.spatial.as_ref(),
+        output.scene.tables.spatial.as_ref(),
+    ));
     let view = output
         .scene
         .semantic_view()
@@ -1346,7 +1422,7 @@ fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
-    let parts = build_gltf_capability_scene_for_probe(&account, &generation_source);
+    let parts = build_populated_spatial_scene(&account, &generation_source);
     let node = NodeId::new(parts.scene.generation(), 0);
     let replacement = changed_trs(31.0);
     let NodeTransformEditStart::Changed(pending) =
@@ -1364,7 +1440,12 @@ fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
         panic!("input-first release transform edit must publish success");
     };
 
+    assert!(std::ptr::eq(
+        parts.scene.tables.spatial.as_ref(),
+        output.scene.tables.spatial.as_ref(),
+    ));
     drop(parts);
+    assert_populated_spatial_scene(&output.scene);
     assert!(
         authored_transform_at(&output.scene, 0, "derived transform after input release")
             .has_same_authored_bits(replacement),
@@ -1372,6 +1453,7 @@ fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
     assert_eq!(output.report.outcome_evidence_block_count(), 1);
     let super::publication::NodeSceneEditSuccessParts { scene, report } = output;
     drop(report);
+    assert_populated_spatial_scene(&scene);
     assert!(
         authored_transform_at(&scene, 0, "derived transform after report release")
             .has_same_authored_bits(replacement),
@@ -1379,6 +1461,7 @@ fn dropping_input_first_keeps_the_derived_scene_and_report_readable() {
     drop(scene);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert!(!account.snapshot().poisoned());
 }
 
 #[test]
@@ -1386,7 +1469,7 @@ fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
-    let parts = build_gltf_capability_scene_for_probe(&account, &generation_source);
+    let parts = build_populated_spatial_scene(&account, &generation_source);
     let node = NodeId::new(parts.scene.generation(), 0);
     let NodeTransformEditStart::Changed(pending) = try_begin_node_transform_edit(
         &parts.scene,
@@ -1405,9 +1488,14 @@ fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
     let super::NodeSceneEditTerminal::Success(output) = prepared.handoff() else {
         panic!("output-first release transform edit must publish success");
     };
+    assert!(std::ptr::eq(
+        parts.scene.tables.spatial.as_ref(),
+        output.scene.tables.spatial.as_ref(),
+    ));
     let super::publication::NodeSceneEditSuccessParts { scene, report } = output;
 
     drop(scene);
+    assert_populated_spatial_scene(&parts.scene);
     assert!(
         authored_transform_at(
             &parts.scene,
@@ -1426,6 +1514,7 @@ fn dropping_derived_scene_first_keeps_the_input_and_report_readable() {
     drop(report);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
     assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    assert!(!account.snapshot().poisoned());
 }
 
 #[test]

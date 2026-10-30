@@ -17,6 +17,7 @@ use crate::math::{Mat4, Quat, Vec3};
 pub(super) mod build;
 pub(super) mod edit;
 pub(super) mod profile;
+pub(super) mod spatial;
 #[cfg(test)]
 mod tests;
 pub(super) mod validation;
@@ -24,6 +25,7 @@ pub(super) mod validation;
 /// The same actual table owners move from materialization through proof into the Scene root.
 pub(super) struct SceneTables {
     pub(super) nodes: RetainedStorage<NodeStorage>,
+    pub(super) spatial: RetainedStorage<spatial::SpatialStorage>,
     pub(super) geometry: RetainedStorage<GeometryStorage>,
     pub(super) profile: profile::ProfileStorage,
 }

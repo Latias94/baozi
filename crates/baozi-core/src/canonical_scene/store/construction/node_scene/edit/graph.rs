@@ -13,7 +13,6 @@ use super::super::deformation::{
     DeformationPayloadRefs, DeformationTableRefs, RetainedDeformationRefs,
 };
 use super::super::geometry::map_build;
-use super::super::materialization::RetainedSpatialRefs;
 use super::super::{NodeSceneMaterializedRefs, SceneStorage};
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditProgram};
 use super::profile::retain_edited_profile;
@@ -31,10 +30,6 @@ use crate::canonical_scene::store::schema::deformation::{
     DeformationMorphDeltaTableSchema, DeformationMorphTargetTableSchema,
     DeformationPrimitiveTableSchema, DeformationSkinTableSchema,
 };
-use crate::canonical_scene::store::schema::spatial::{
-    SpatialCameraTableSchema, SpatialDirectorySchema, SpatialLightTableSchema,
-    SpatialTangentBasisSchemaNameSchema, SpatialTangentEncodingSchemaNameSchema,
-};
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, CanonicalSchema, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
     SceneDirectorySchema,
@@ -49,8 +44,6 @@ pub(super) struct RewrittenNodeSceneGraph {
 
 #[derive(Clone, Copy)]
 struct InheritedNodeSceneLeafRefs {
-    tangent_basis_schema_name: Option<CanonicalBlockRef<SpatialTangentBasisSchemaNameSchema>>,
-    tangent_encoding_schema_name: Option<CanonicalBlockRef<SpatialTangentEncodingSchemaNameSchema>>,
     appearance: AppearancePayloadRefs,
     deformation: DeformationPayloadRefs,
     animation: AnimationPayloadRefs,
@@ -119,7 +112,7 @@ where
         &pending.operation,
     )?;
     let inherited = inherit_unchanged_evidence_leaves(lane, pending)?;
-    let spatial = rewrite_spatial(lane, pending, inherited)?;
+    let spatial = lane.try_share_storage(&pending.input.tables.spatial)?;
     let appearance = rewrite_appearance(lane, pending, inherited.appearance)?;
     let deformation = rewrite_deformation(lane, pending, inherited.deformation)?;
     let animation = rewrite_animation(lane, pending, inherited.animation)?;
@@ -127,7 +120,6 @@ where
         lane,
         pending,
         NodeSceneDirectoryRefs {
-            spatial: spatial.directory,
             appearance: appearance.directory,
             deformation: deformation.directory,
             animation: animation.directory,
@@ -138,12 +130,12 @@ where
         directory,
         tables: SceneTables {
             nodes,
+            spatial,
             geometry,
             profile,
         },
         refs: NodeSceneMaterializedRefs {
             directory,
-            spatial,
             appearance,
             deformation,
             animation,
@@ -153,7 +145,6 @@ where
 
 #[derive(Clone, Copy)]
 struct NodeSceneDirectoryRefs {
-    spatial: CanonicalBlockRef<SpatialDirectorySchema>,
     appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
     deformation: CanonicalBlockRef<DeformationDirectorySchema>,
     animation: CanonicalBlockRef<AnimationDirectorySchema>,
@@ -189,7 +180,6 @@ where
                 row.write_scalar(pending.counts.primitives.as_u32())?;
                 row.write_scalar(pending.counts.attributes.as_u32())?;
                 row.write_scalar(pending.counts.mesh_instances.as_u32())?;
-                row.write_record_ref(refs.spatial.into_store())?;
                 row.write_record_ref(refs.appearance.into_store())?;
                 row.write_record_ref(refs.deformation.into_store())?;
                 row.write_record_ref(refs.animation.into_store())
@@ -210,19 +200,6 @@ where
 {
     let proof = pending.input.proof;
     let mut inherited = 0_usize;
-
-    let tangent_basis_schema_name = inherit_optional_leaf(
-        lane,
-        pending.input,
-        proof.tangent_basis_schema_name(),
-        &mut inherited,
-    )?;
-    let tangent_encoding_schema_name = inherit_optional_leaf(
-        lane,
-        pending.input,
-        proof.tangent_encoding_schema_name(),
-        &mut inherited,
-    )?;
 
     let appearance = AppearancePayloadRefs {
         image_payloads: inherit_optional_leaf(
@@ -376,53 +353,9 @@ where
         return Err(StoreRuntimeError::InvalidSourceSlot);
     }
     Ok(InheritedNodeSceneLeafRefs {
-        tangent_basis_schema_name,
-        tangent_encoding_schema_name,
         appearance,
         deformation,
         animation,
-    })
-}
-
-fn rewrite_spatial<'lane, O, PP, U>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-    pending: &BoundPendingNodeSceneEdit<'_>,
-    inherited: InheritedNodeSceneLeafRefs,
-) -> Result<RetainedSpatialRefs, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let input = pending.input;
-    let proof = input.proof;
-    let cameras = rewrite_optional_record(
-        lane,
-        input,
-        proof.cameras(),
-        pending.counts.cameras.as_usize(),
-        SpatialCameraTableSchema,
-    )?;
-    let lights = rewrite_optional_record(
-        lane,
-        input,
-        proof.lights(),
-        pending.counts.lights.as_usize(),
-        SpatialLightTableSchema,
-    )?;
-    let directory = rewrite_required_record(
-        lane,
-        input,
-        proof.spatial_directory(),
-        1,
-        SpatialDirectorySchema,
-    )?;
-    Ok(RetainedSpatialRefs {
-        directory,
-        cameras,
-        lights,
-        tangent_basis_schema_name: inherited.tangent_basis_schema_name,
-        tangent_encoding_schema_name: inherited.tangent_encoding_schema_name,
     })
 }
 

@@ -411,6 +411,69 @@ Logs are `target/review/f-normals-workspace-final.log`, `f-normals-numerical-fin
 `f-normals-wasi-consumer.log`, and `f-normals-browser-wasm-check.log`. This increment provides no
 new sanitizer/fuzz campaign, target-space conversion, or application vertex lowering.
 
+## Typed Spatial Storage and Initialized Footprint Admission (2026-10-30)
+
+`SceneTables` now owns spatial storage through the existing retained owner. It contains the actual
+inline `SceneSpace`, camera projections, and typed light definitions. `NamespacedName` and
+`ExtensionSchemaId` already store their bounded names inline, so the cutover needs no name pool,
+range descriptors, duplicate convention enums, or scalar codec. Fresh construction admits both row
+capacities before building. Node-transform, triangulation, and normal edits share the existing
+spatial owner and leave declarations and reusable camera/light definitions intact.
+
+Central validation borrows actual values, checks exact row and inline-name extents, and reuses the
+existing node placement scratch for dangling references and orphan detection. The root directory
+revision is five with ten fields; spatial is no longer a record reference. Its old schema,
+materializer, validator/decoder, edit rewrites, and inherited name leaves have been deleted. The
+remaining record-store ceiling and terminal attribution envelope exclude spatial rows and names.
+The independent spatial snapshot transcript and golden digests retain their semantic encoding.
+
+The integration regression corrupts twelve real stored components after construction: row counts,
+units/axes/tangent declaration, inline-name extent, light tint/zero emission, dangling node
+attachments, and orphaned definitions. Every case reaches a build-invariant rich failure, reserves
+no generation, commits no canonical output, and releases all storage. Invalid raw tags and
+incompatible category/payload combinations disappeared with the codec because the closed domain
+types cannot represent them. Public reads cover both camera projections, all light kinds,
+namespaced conventions, and shared placements after authoring input destruction without allocating.
+Edit tests check actual owner identity, either generation's first release, and ordinary unwind.
+
+The review also found that node and geometry canonical-byte limits still used retired record,
+reference-row, and transform-leaf formulas. Those formulas and the empty-geometry-directory
+placeholder are deleted. All migrated domains now count initialized typed headers, rows, and used
+scalar/name pools under the target ABI. Matrix/TRS variants occupy the same node row; sparse
+defaults and explicit values/indices are counted once without expansion. Fresh capacity plans
+check the same sealed footprint. The current Scene directory contributes forty logical bytes
+independently once; remaining record domains retain their current representation until their D2
+cutovers. Physical capacity, retained-owner infrastructure, and process RSS remain separate concepts.
+
+Geometry footprint planning reads only top-level lengths before scratch admission, then accumulates
+actual payload/name counts during existing semantic traversal. The first shape read is a controlled
+action, preserving zero-work rejection before scratch allocation. Removing the old descriptor
+prepass reduces ordinary work; cancellation tests use actual action baselines and preserve bounded
+polling, rejected-prefix accounting, and storage-first cleanup. The focused core suite passed
+**354/354 tests**. The complete all-feature workspace suite passed **2,179/2,179 tests**, with three
+manual scale tests skipped in that invocation. Strict all-target/all-feature Clippy, doctests,
+rustdoc with `-D warnings`, and workspace/consumer formatting passed.
+
+All three scale tests passed separately. The node edit's allocator-request peak was **19,732 bytes**
+for both 10,000 and 100,000 four-influence vertices, at both 1 MiB and 8 MiB metadata sizes; the
+preceding profile checkpoint recorded 21,284 bytes. Independent buffers at 256/1,024/4,096 and
+shared-payload edits at 1,000/10,000 nodes passed their existing work, sharing, and release assertions.
+These are observed requested-allocation and ledger results, not process-RSS measurements.
+
+The Windows release all-feature consumer passed glTF/OBJ/PLY/STL workflows on the ordinary main
+stack. Freshly unpacked `.crate` dependencies built and executed postprocess and selected glTF
+consumers without checkout-path substitution. The release WASI all-feature consumer passed the
+same format workflows under Wasmtime 50.0.0. Browser WASM passed compilation only. Read-only review
+identified the canonical-byte inconsistency and missing initial work admission described above;
+both fixes have executed regressions, and the follow-up review found no additional concrete P0-P2
+issue in the reviewed scope. No new sanitizer/fuzz campaign or coordinate-conversion result is claimed.
+
+Logs are `target/review/d2-spatial-workspace-nextest.log`, `d2-spatial-footprint-core-final.log`,
+`d2-spatial-storage-scale.log`, `d2-spatial-workspace-clippy.log`,
+`d2-spatial-workspace-doctests.log`, `d2-spatial-workspace-rustdoc.log`,
+`d2-spatial-native-consumer.log`, `d2-spatial-packaged-consumers.log`,
+`d2-spatial-wasi-consumer.log`, and `d2-spatial-browser-wasm-check.log`.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
@@ -418,8 +481,8 @@ new sanitizer/fuzz campaign, target-space conversion, or application vertex lowe
 - Preserve B's verified retained manifest/evidence ownership and fidelity behavior through the
   remaining storage and postprocessing cutovers.
 - Preserve C's verified typed reads and required-dependency context through the storage cutover; retain the single Scene owner.
-- Continue D2 through appearance, deformation/animation, and spatial storage. Preserve the completed
-  node/geometry/profile ownership cutovers and normal generation's concrete attribute-owner mapping.
+- Continue D2 through appearance and deformation/animation storage. Preserve the completed
+  node/geometry/profile/spatial ownership cutovers and normal generation's concrete attribute-owner mapping.
   Delete each replaced record/projection path.
 - Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
 - Preserve F's triangulation and normal generation while delivering target-space conversion and

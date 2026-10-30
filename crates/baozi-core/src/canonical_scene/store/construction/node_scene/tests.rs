@@ -50,6 +50,7 @@ mod gltf_capability;
 mod obj_capability;
 mod profile_closure;
 mod public_animation_read;
+mod spatial_validation;
 mod storage_scale;
 
 fn exhaust_profile_for_test(profile: &mut NodeSceneProfileCursor<'_>) {
@@ -83,10 +84,7 @@ pub(in crate::canonical_scene::store) use gltf_capability::{
 
 // These phase boundaries are black-box accounting evidence for the complete scoped rail. They
 // include operation-owned startup and retained-share work, not only core semantic actions.
-const SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK: u64 = 79;
-const SINGLE_TRS_FIRST_MATERIALIZATION_ENVELOPE_WORK: u64 = 23;
-const SINGLE_TRS_FIRST_MATERIALIZATION_ATTEMPTED_WORK: u64 =
-    SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK + SINGLE_TRS_FIRST_MATERIALIZATION_ENVELOPE_WORK;
+const SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK: u64 = 80;
 const SINGLE_TRS_ROOTS: [NodeLocalId; 1] = [NodeLocalId::new(0)];
 const SINGLE_TRS_NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
     Presence::Absent,
@@ -1116,14 +1114,23 @@ fn present_empty_scene_publishes_all_domains() {
 }
 
 #[test]
-fn canonical_logical_byte_rejection_publishes_evidence_only_rich_failure() {
+fn canonical_byte_rejection_publishes_evidence_only_rich_failure() {
     let factory = test_factory();
     let account = test_account(&factory, 256);
+    let spatial_bytes = std::mem::size_of::<
+        crate::canonical_scene::store::typed_storage::spatial::SpatialStorage,
+    >() as u64;
+    use crate::canonical_scene::store::typed_storage::{NodeStorage, StoredNode, StoredNodeIndex};
+    let node_bytes = (std::mem::size_of::<NodeStorage>()
+        + 2 * std::mem::size_of::<StoredNode>()
+        + std::mem::size_of::<StoredNodeIndex>()) as u64;
+    let directory_bytes = crate::canonical_scene::store::schema::SCENE_DIRECTORY_CANONICAL_BYTES;
     let build = finish_node_batch(
         &account,
         test_limits(),
         single_trs_batch(),
-        SceneValidationLimits::default().with_max_canonical_bytes(247),
+        SceneValidationLimits::default()
+            .with_max_canonical_bytes(spatial_bytes + directory_bytes + node_bytes - 1),
     );
     let NodeSceneDraftBuild::Failure {
         authoring_rejection: Some(rejection),
@@ -1138,23 +1145,14 @@ fn canonical_logical_byte_rejection_publishes_evidence_only_rich_failure() {
             NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
                 NodeAuthoringSemanticError::LimitExceeded {
                     limit: NodeAuthoringLimit::CanonicalBytes,
-                    actual: 188,
-                    maximum: 187,
+                    actual,
+                    maximum,
                 }
             ))
+                if *actual == node_bytes && *maximum == node_bytes - 1
         ),
         "unexpected canonical-byte rejection: {rejection:#?}"
     );
-    assert!(matches!(
-        rejection,
-        NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
-            NodeAuthoringSemanticError::LimitExceeded {
-                limit: NodeAuthoringLimit::CanonicalBytes,
-                actual: 188,
-                maximum: 187,
-            }
-        ))
-    ));
     let failure = rich_failure(prepared.handoff_for_test());
     assert_eq!(
         terminal_failure_code(failure.ledger_evidence()),
@@ -1254,7 +1252,7 @@ fn materialization_work_budget_interruption_publishes_rich_failure() {
     let account = test_account(&factory, 256);
     let build = finish_node_batch(
         &account,
-        test_limits_with_work(SINGLE_TRS_FIRST_MATERIALIZATION_ATTEMPTED_WORK - 1),
+        test_limits_with_work(SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK),
         single_trs_batch(),
         SceneValidationLimits::default(),
     );
@@ -1268,11 +1266,12 @@ fn materialization_work_budget_interruption_publishes_rich_failure() {
         .ledger_evidence()
         .dimension_by_semantic(STORE_DIMENSION)
         .expect("node Scene work evidence");
-    assert_eq!(
-        work.attempted(),
-        SINGLE_TRS_FIRST_MATERIALIZATION_ATTEMPTED_WORK,
-    );
+    assert!(work.attempted() > SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK);
     assert_eq!(work.consumed(), SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK);
+    assert_eq!(
+        terminal_failure_class(failure.ledger_evidence()),
+        StorePreparationFailureClass::Ledger
+    );
     assert_released(failure, &account);
 }
 

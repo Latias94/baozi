@@ -98,6 +98,9 @@ impl SceneValidationLimits {
         self
     }
 
+    /// Bounds the initialized canonical representation, including typed headers, rows, and used
+    /// scalar/name storage under the target ABI. Inline values are counted once. This excludes
+    /// allocator spare capacity and retained-owner infrastructure, which have separate admission.
     pub const fn with_max_canonical_bytes(mut self, value: u64) -> Self {
         self.max_canonical_bytes = value;
         self

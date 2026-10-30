@@ -193,7 +193,7 @@ distinct-buffer/large-attribute workloads from B. Confirm the typed design reduc
 unnecessary record rebuilding, or scratch duplication for a concrete target cost, without unacceptable
 regression in the other measures. A already closes the stack failure; D need not improve every metric.
 
-**D2: additional domain increments.** Migrate appearance, deformation/animation, and profile ownership
+**D2: additional domain increments.** Migrate spatial, appearance, deformation/animation, and profile ownership
 according to the consumer and measured pilot results. Keep
 central validation and source semantics. Use typed access internally and share unchanged tables or
 pages where justified. Delete each replaced record/projection/conversion rail in the same cutover.
@@ -215,9 +215,13 @@ Its behavior and allocation evidence are recorded in the
 Normal generation now supplies its concrete added/deleted/reindexed attribute-owner mapping,
 including lineage unions and Tangent metadata removal. Other structural edits must supply their
 own concrete mappings from the final layout.
-Appearance, deformation/animation, and spatial storage remain subsequent D2 domain cutovers.
+The spatial increment stores the existing inline `SceneSpace` and typed camera/light definitions
+under one retained owner. Its bounded extension identities need no extra name pool or scalar codec.
+Fresh construction and central validation use the actual storage; unchanged edits share its owner.
+Delete the replaced spatial directory, row schemas, decoder, writer, and edit-rewrite path before
+adding coordinate conversion. Appearance and deformation/animation remain subsequent D2 cutovers.
 
-The private root becomes `SceneTables`, retaining node, geometry, and profile owners through the
+The private root becomes `SceneTables`, retaining node, geometry, profile, and spatial owners through the
 existing storage-first release mechanism. Profile state owns typed owner/attachment and metadata
 descriptors; immutable lineage segments and metadata payloads have independent retained owners.
 Store operation digests as typed values, not offset/length rows. A provenance link identifies

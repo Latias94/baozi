@@ -25,6 +25,14 @@ mod spatial;
 
 const PROFILE_SOURCE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(0)];
 
+fn expected_node_bytes(authored_nodes: usize, name_bytes: usize) -> u64 {
+    use crate::canonical_scene::store::typed_storage::{NodeStorage, StoredNode, StoredNodeIndex};
+    (std::mem::size_of::<NodeStorage>()
+        + (authored_nodes + 1) * std::mem::size_of::<StoredNode>()
+        + authored_nodes * std::mem::size_of::<StoredNodeIndex>()
+        + name_bytes) as u64
+}
+
 struct ProfileFixtureVocabulary {
     resource: ResourceIdentity,
     format: FormatId,
@@ -442,7 +450,7 @@ fn valid_forest_compiles_parent_before_child_order_and_counts() {
     assert_eq!(batch.reference_count(), 5);
     assert_eq!(batch.matrix_scalar_count(), 32);
     assert_eq!(batch.trs_scalar_count(), 30);
-    assert_eq!(batch.canonical_bytes(), 572);
+    assert_eq!(batch.canonical_bytes(), expected_node_bytes(5, 0));
     assert_eq!(batch.canonical_order(), &[2, 0, 3, 1, 4]);
     assert_eq!(batch.canonical_index_by_local(), &[2, 4, 1, 3, 5]);
     assert_eq!(control.live.get(), 1);
@@ -568,6 +576,42 @@ fn invalid_child_ordinals_are_rejected_before_materialization() {
 }
 
 #[test]
+fn matrix_and_trs_variants_use_the_same_initialized_node_footprint() {
+    let roots = [NodeLocalId::new(0)];
+    let trs_nodes = [trs(Presence::Absent)];
+    let matrix_nodes = [matrix(Presence::Absent)];
+    let expected = expected_node_bytes(1, 0);
+    let limits = SceneValidationLimits::default().with_max_canonical_bytes(expected);
+    let mut control = TestControl::default();
+    let trs_batch = validate(Presence::Present(&roots), &trs_nodes, limits, &mut control).unwrap();
+    let matrix_batch = validate(
+        Presence::Present(&roots),
+        &matrix_nodes,
+        limits,
+        &mut control,
+    )
+    .unwrap();
+    assert_eq!(trs_batch.canonical_bytes(), expected);
+    assert_eq!(matrix_batch.canonical_bytes(), expected);
+    assert_eq!(trs_batch.trs_scalar_count(), 10);
+    assert_eq!(matrix_batch.matrix_scalar_count(), 16);
+    drop((trs_batch, matrix_batch));
+    assert_eq!(control.live.get(), 0);
+    assert!(matches!(
+        expect_semantic(validate(
+            Presence::Present(&roots),
+            &matrix_nodes,
+            limits.with_max_canonical_bytes(expected - 1),
+            &mut control,
+        )),
+        NodeAuthoringSemanticError::LimitExceeded {
+            limit: NodeAuthoringLimit::CanonicalBytes, actual, maximum,
+        } if actual == expected && maximum + 1 == expected
+    ));
+    assert_eq!(control.live.get(), 0);
+}
+
+#[test]
 fn present_empty_is_valid_and_absent_is_not() {
     let roots = [];
     let nodes = [];
@@ -576,7 +620,7 @@ fn present_empty_is_valid_and_absent_is_not() {
     let batch = validate(
         Presence::Present(&roots),
         &nodes,
-        SceneValidationLimits::default().with_max_canonical_bytes(98),
+        SceneValidationLimits::default().with_max_canonical_bytes(expected_node_bytes(0, 0)),
         &mut control,
     )
     .expect("present empty forest");
@@ -584,7 +628,7 @@ fn present_empty_is_valid_and_absent_is_not() {
     assert_eq!(batch.reference_count(), 0);
     assert_eq!(batch.matrix_scalar_count(), 0);
     assert_eq!(batch.trs_scalar_count(), 0);
-    assert_eq!(batch.canonical_bytes(), 98);
+    assert_eq!(batch.canonical_bytes(), expected_node_bytes(0, 0));
     assert!(batch.canonical_order().is_empty());
     assert!(batch.canonical_index_by_local().is_empty());
     drop(batch);
@@ -817,7 +861,8 @@ fn node_edge_semantic_reference_scratch_and_work_limits_are_typed() {
         (
             Presence::Present(roots.as_slice()),
             nodes.as_slice(),
-            SceneValidationLimits::default().with_max_canonical_bytes(167),
+            SceneValidationLimits::default()
+                .with_max_canonical_bytes(expected_node_bytes(1, 0) - 1),
             NodeAuthoringLimit::CanonicalBytes,
         ),
         (

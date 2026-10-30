@@ -1,162 +1,67 @@
 use std::num::NonZeroU32;
 
-use baozi_operation::{CanonicalRecordView, PublishedCanonicalStore, RecordBlock};
-
-use crate::canonical_scene::store::schema::spatial::{
-    SPATIAL_AXIS_NEGATIVE_X, SPATIAL_AXIS_NEGATIVE_Y, SPATIAL_AXIS_NEGATIVE_Z,
-    SPATIAL_AXIS_POSITIVE_X, SPATIAL_AXIS_POSITIVE_Y, SPATIAL_AXIS_POSITIVE_Z,
-    SPATIAL_AXIS_UNKNOWN, SPATIAL_CAMERA_FIELD_COUNT, SPATIAL_CAMERA_ORTHOGRAPHIC,
-    SPATIAL_CAMERA_PERSPECTIVE, SPATIAL_DIRECTORY_FIELD_COUNT, SPATIAL_HANDEDNESS_LEFT,
-    SPATIAL_HANDEDNESS_RIGHT, SPATIAL_HANDEDNESS_UNKNOWN, SPATIAL_LIGHT_DIRECTIONAL,
-    SPATIAL_LIGHT_FIELD_COUNT, SPATIAL_LIGHT_POINT, SPATIAL_LIGHT_SPOT,
-    SPATIAL_TANGENT_BASIS_MIKKTSPACE, SPATIAL_TANGENT_BASIS_NAMESPACED,
-    SPATIAL_TANGENT_BASIS_UNKNOWN, SPATIAL_TANGENT_ENCODING_NAMESPACED,
-    SPATIAL_TANGENT_ENCODING_SIGN_IN_W, SPATIAL_TANGENT_ENCODING_UNKNOWN,
-    SPATIAL_TRANSFORM_COLUMN_VECTOR_LOCAL_TO_PARENT, SPATIAL_TRANSFORM_UNKNOWN,
-    SPATIAL_UV_ORIGIN_LOWER_LEFT, SPATIAL_UV_ORIGIN_UNKNOWN, SPATIAL_UV_ORIGIN_UPPER_LEFT,
-    SPATIAL_WINDING_CLOCKWISE, SPATIAL_WINDING_COUNTER_CLOCKWISE, SPATIAL_WINDING_UNKNOWN,
-    spatial_camera_field, spatial_directory_field, spatial_light_field,
-};
-use crate::canonical_scene::store::schema::{
-    PRESENCE_ABSENT, PRESENCE_PRESENT, SceneDirectorySchema,
-};
+use crate::canonical_scene::store::typed_storage::spatial::{SpatialStorage, schema_name_bytes};
 use crate::canonical_scene::store::validation::NodeSceneValidationProof;
 use crate::entity::{CameraProjection, LightKind};
+use crate::extension::ExtensionSchemaId;
 use crate::math::Vec3;
-use crate::scene_space::{Axis, FrontFaceWinding, Handedness, TransformConvention, UvOrigin};
+use crate::scene_space::{
+    Axis, FrontFaceWinding, Handedness, TangentBasisConvention, TangentHandednessEncoding,
+    TransformConvention, UvOrigin,
+};
 
-use super::{NodeSceneSemanticResult, invariant, read_scalar, read_u32_as_usize};
-
-type SceneCanonicalStore = PublishedCanonicalStore<RecordBlock, SceneDirectorySchema>;
+use super::{NodeSceneSemanticResult, invariant};
 
 pub(super) struct NodeSceneSpatialTables<'scene> {
-    directory: CanonicalRecordView<'scene>,
-    cameras: Option<CanonicalRecordView<'scene>>,
-    lights: Option<CanonicalRecordView<'scene>>,
-    tangent_basis_schema_name: Option<&'scene str>,
-    tangent_encoding_schema_name: Option<&'scene str>,
+    storage: &'scene SpatialStorage,
 }
 
 impl<'scene> NodeSceneSpatialTables<'scene> {
     pub(super) fn try_new(
-        canonical: &'scene SceneCanonicalStore,
+        storage: &'scene SpatialStorage,
         proof: NodeSceneValidationProof,
     ) -> NodeSceneSemanticResult<Self> {
-        let directory = canonical
-            .records(proof.spatial_directory().into_store())
-            .ok_or_else(|| invariant("validated spatial directory is unavailable or mistyped"))?;
-        if directory.rows() != 1 || directory.fields() != SPATIAL_DIRECTORY_FIELD_COUNT {
+        if storage.cameras.len() != proof.camera_count()
+            || storage.lights.len() != proof.light_count()
+            || schema_name_bytes(&storage.space) != proof.spatial_name_bytes()
+        {
             return Err(invariant(
-                "validated spatial directory layout disagrees with validation proof",
+                "typed spatial storage disagrees with central validation proof",
             ));
         }
-        let tangent_basis_schema_name = resolve_schema_name(
-            canonical,
-            proof.tangent_basis_schema_name(),
-            "validated tangent-basis schema name is unavailable or mistyped",
-        )?;
-        let tangent_encoding_schema_name = resolve_schema_name(
-            canonical,
-            proof.tangent_encoding_schema_name(),
-            "validated tangent-encoding schema name is unavailable or mistyped",
-        )?;
-        Ok(Self {
-            directory,
-            cameras: resolve_table(
-                canonical,
-                proof.cameras(),
-                proof.camera_count(),
-                SPATIAL_CAMERA_FIELD_COUNT,
-                "validated camera table is unavailable or mistyped",
-                "validated camera table presence disagrees with validation proof",
-                "validated camera table layout disagrees with validation proof",
-            )?,
-            lights: resolve_table(
-                canonical,
-                proof.lights(),
-                proof.light_count(),
-                SPATIAL_LIGHT_FIELD_COUNT,
-                "validated light table is unavailable or mistyped",
-                "validated light table presence disagrees with validation proof",
-                "validated light table layout disagrees with validation proof",
-            )?,
-            tangent_basis_schema_name,
-            tangent_encoding_schema_name,
-        })
+        Ok(Self { storage })
     }
 
     pub(super) fn scene_space(
         &self,
     ) -> NodeSceneSemanticResult<NodeSceneSpatialSceneSpace<'scene>> {
-        let tangent_basis = decode_tangent_basis(
-            read_scalar::<u8>(
-                self.directory,
-                0,
-                spatial_directory_field::TANGENT_BASIS,
-                "validated tangent-basis code is unreadable",
-            )?,
-            self.tangent_basis_schema(
-                spatial_directory_field::TANGENT_BASIS_SCHEMA_VERSION,
-                "validated tangent-basis schema version is unreadable",
-            )?,
-        )?;
-        let tangent_encoding = decode_tangent_encoding(
-            read_scalar::<u8>(
-                self.directory,
-                0,
-                spatial_directory_field::TANGENT_ENCODING,
-                "validated tangent-encoding code is unreadable",
-            )?,
-            self.tangent_encoding_schema(
-                spatial_directory_field::TANGENT_ENCODING_SCHEMA_VERSION,
-                "validated tangent-encoding schema version is unreadable",
-            )?,
-        )?;
+        let space = &self.storage.space;
+        let schema = |schema: &'scene ExtensionSchemaId| NodeSceneSpatialSchemaRef {
+            name: schema.name().as_str(),
+            version: schema.version(),
+        };
         Ok(NodeSceneSpatialSceneSpace {
-            handedness: decode_handedness(read_scalar::<u8>(
-                self.directory,
-                0,
-                spatial_directory_field::HANDEDNESS,
-                "validated handedness code is unreadable",
-            )?)?,
-            up_axis: decode_axis(read_scalar::<u8>(
-                self.directory,
-                0,
-                spatial_directory_field::UP_AXIS,
-                "validated up-axis code is unreadable",
-            )?)?,
-            front_axis: decode_axis(read_scalar::<u8>(
-                self.directory,
-                0,
-                spatial_directory_field::FRONT_AXIS,
-                "validated front-axis code is unreadable",
-            )?)?,
-            unit_scale_to_meters: read_optional_f64(
-                self.directory,
-                spatial_directory_field::UNIT_SCALE_PRESENCE,
-                spatial_directory_field::UNIT_SCALE_TO_METERS,
-                "validated unit scale is unreadable",
-            )?,
-            front_face_winding: decode_winding(read_scalar::<u8>(
-                self.directory,
-                0,
-                spatial_directory_field::FRONT_FACE_WINDING,
-                "validated front-face winding code is unreadable",
-            )?)?,
-            uv_origin: decode_uv_origin(read_scalar::<u8>(
-                self.directory,
-                0,
-                spatial_directory_field::UV_ORIGIN,
-                "validated UV-origin code is unreadable",
-            )?)?,
-            transform_convention: decode_transform_convention(read_scalar::<u8>(
-                self.directory,
-                0,
-                spatial_directory_field::TRANSFORM_CONVENTION,
-                "validated transform-convention code is unreadable",
-            )?)?,
-            tangent_basis,
-            tangent_encoding,
+            handedness: space.handedness,
+            up_axis: space.up_axis,
+            front_axis: space.front_axis,
+            unit_scale_to_meters: space.unit_scale_to_meters,
+            front_face_winding: space.front_face_winding,
+            uv_origin: space.uv_origin,
+            transform_convention: space.transform_convention,
+            tangent_basis: match &space.tangent_basis {
+                TangentBasisConvention::Unknown => NodeSceneSpatialTangentBasis::Unknown,
+                TangentBasisConvention::MikkTspace => NodeSceneSpatialTangentBasis::MikkTspace,
+                TangentBasisConvention::Namespaced { schema_id } => {
+                    NodeSceneSpatialTangentBasis::Namespaced(schema(schema_id))
+                }
+            },
+            tangent_encoding: match &space.tangent_handedness_encoding {
+                TangentHandednessEncoding::Unknown => NodeSceneSpatialTangentEncoding::Unknown,
+                TangentHandednessEncoding::SignInW => NodeSceneSpatialTangentEncoding::SignInW,
+                TangentHandednessEncoding::Namespaced { schema_id } => {
+                    NodeSceneSpatialTangentEncoding::Namespaced(schema(schema_id))
+                }
+            },
         })
     }
 
@@ -164,188 +69,31 @@ impl<'scene> NodeSceneSpatialTables<'scene> {
         &self,
         source_index: usize,
     ) -> NodeSceneSemanticResult<Option<NodeSceneSpatialCamera>> {
-        let Some(table) = self.cameras else {
-            return Ok(None);
-        };
-        if source_index >= table.rows() {
-            return Ok(None);
-        }
-        if read_u32_as_usize(
-            table,
-            source_index,
-            spatial_camera_field::CAMERA,
-            "validated camera identity is unreadable",
-        )? != source_index
-        {
-            return Err(invariant("validated camera identity is not dense"));
-        }
-        let primary = read_scalar::<f32>(
-            table,
-            source_index,
-            spatial_camera_field::PRIMARY,
-            "validated camera primary parameter is unreadable",
-        )?;
-        let secondary = read_optional_f32(
-            table,
-            source_index,
-            spatial_camera_field::SECONDARY_PRESENCE,
-            spatial_camera_field::SECONDARY,
-            "validated camera secondary parameter is unreadable",
-        )?;
-        let near = read_scalar::<f32>(
-            table,
-            source_index,
-            spatial_camera_field::NEAR,
-            "validated camera near plane is unreadable",
-        )?;
-        let far = read_optional_f32(
-            table,
-            source_index,
-            spatial_camera_field::FAR_PRESENCE,
-            spatial_camera_field::FAR,
-            "validated camera far plane is unreadable",
-        )?;
-        let projection = match read_scalar::<u8>(
-            table,
-            source_index,
-            spatial_camera_field::PROJECTION,
-            "validated camera projection code is unreadable",
-        )? {
-            SPATIAL_CAMERA_PERSPECTIVE => {
-                CameraProjection::perspective(primary, secondary, near, far)
-            }
-            SPATIAL_CAMERA_ORTHOGRAPHIC => CameraProjection::orthographic(
-                primary,
-                secondary.ok_or_else(|| {
-                    invariant("validated orthographic camera is missing vertical magnification")
-                })?,
-                near,
-                far.ok_or_else(|| invariant("validated orthographic camera is missing far plane"))?,
-            ),
-            _ => return Err(invariant("validated camera projection code is unknown")),
-        }
-        .map_err(|_| invariant("validated camera projection is not canonical"))?;
-        Ok(Some(NodeSceneSpatialCamera {
-            source_index,
-            projection,
-        }))
+        Ok(self
+            .storage
+            .cameras
+            .get(source_index)
+            .copied()
+            .map(|projection| NodeSceneSpatialCamera {
+                source_index,
+                projection,
+            }))
     }
 
     pub(super) fn light_at(
         &self,
         source_index: usize,
     ) -> NodeSceneSemanticResult<Option<NodeSceneSpatialLight>> {
-        let Some(table) = self.lights else {
-            return Ok(None);
-        };
-        if source_index >= table.rows() {
-            return Ok(None);
-        }
-        if read_u32_as_usize(
-            table,
-            source_index,
-            spatial_light_field::LIGHT,
-            "validated light identity is unreadable",
-        )? != source_index
-        {
-            return Err(invariant("validated light identity is not dense"));
-        }
-        let range = read_optional_f32(
-            table,
-            source_index,
-            spatial_light_field::RANGE_PRESENCE,
-            spatial_light_field::RANGE,
-            "validated light range is unreadable",
-        )?;
-        let inner = read_optional_f32(
-            table,
-            source_index,
-            spatial_light_field::INNER_CONE_PRESENCE,
-            spatial_light_field::INNER_CONE,
-            "validated light inner cone is unreadable",
-        )?;
-        let outer = read_optional_f32(
-            table,
-            source_index,
-            spatial_light_field::OUTER_CONE_PRESENCE,
-            spatial_light_field::OUTER_CONE,
-            "validated light outer cone is unreadable",
-        )?;
-        let kind = match read_scalar::<u8>(
-            table,
-            source_index,
-            spatial_light_field::KIND,
-            "validated light-kind code is unreadable",
-        )? {
-            SPATIAL_LIGHT_DIRECTIONAL if range.is_none() && inner.is_none() && outer.is_none() => {
-                LightKind::directional()
-            }
-            SPATIAL_LIGHT_POINT if inner.is_none() && outer.is_none() => LightKind::point(range)
-                .map_err(|_| invariant("validated point-light kind is not canonical"))?,
-            SPATIAL_LIGHT_SPOT => LightKind::spot(
-                range,
-                inner.ok_or_else(|| invariant("validated spot light is missing inner cone"))?,
-                outer.ok_or_else(|| invariant("validated spot light is missing outer cone"))?,
-            )
-            .map_err(|_| invariant("validated spot-light kind is not canonical"))?,
-            _ => return Err(invariant("validated light-kind fields are inconsistent")),
-        };
-        Ok(Some(NodeSceneSpatialLight {
-            source_index,
-            kind,
-            tint: Vec3::new(
-                read_scalar::<f32>(
-                    table,
-                    source_index,
-                    spatial_light_field::TINT_RED,
-                    "validated light red tint is unreadable",
-                )?,
-                read_scalar::<f32>(
-                    table,
-                    source_index,
-                    spatial_light_field::TINT_GREEN,
-                    "validated light green tint is unreadable",
-                )?,
-                read_scalar::<f32>(
-                    table,
-                    source_index,
-                    spatial_light_field::TINT_BLUE,
-                    "validated light blue tint is unreadable",
-                )?,
-            ),
-            intensity: read_scalar::<f32>(
-                table,
+        Ok(self
+            .storage
+            .lights
+            .get(source_index)
+            .map(|light| NodeSceneSpatialLight {
                 source_index,
-                spatial_light_field::INTENSITY,
-                "validated light intensity is unreadable",
-            )?,
-        }))
-    }
-
-    fn tangent_basis_schema(
-        &self,
-        version_field: usize,
-        reason: &'static str,
-    ) -> NodeSceneSemanticResult<Option<NodeSceneSpatialSchemaRef<'scene>>> {
-        schema_ref(
-            self.tangent_basis_schema_name,
-            self.directory,
-            version_field,
-            reason,
-        )
-    }
-
-    fn tangent_encoding_schema(
-        &self,
-        version_field: usize,
-        reason: &'static str,
-    ) -> NodeSceneSemanticResult<Option<NodeSceneSpatialSchemaRef<'scene>>> {
-        schema_ref(
-            self.tangent_encoding_schema_name,
-            self.directory,
-            version_field,
-            reason,
-        )
+                kind: light.kind,
+                tint: light.tint,
+                intensity: light.intensity,
+            }))
     }
 }
 
@@ -610,173 +358,5 @@ impl<'scene> NodeSceneSpatialPlacementCursor<'scene> {
 
     pub(in crate::canonical_scene::store) fn finish(self) -> NodeSceneSemanticResult<()> {
         self.placements.finish()
-    }
-}
-
-fn resolve_table<'scene, Tag>(
-    canonical: &'scene SceneCanonicalStore,
-    reference: Option<crate::canonical_scene::store::schema::CanonicalBlockRef<Tag>>,
-    expected_rows: usize,
-    expected_fields: usize,
-    unavailable_reason: &'static str,
-    presence_reason: &'static str,
-    layout_reason: &'static str,
-) -> NodeSceneSemanticResult<Option<CanonicalRecordView<'scene>>>
-where
-    Tag: crate::canonical_scene::store::schema::CanonicalSchema<StoreKind = RecordBlock>,
-{
-    match (expected_rows, reference) {
-        (0, None) => Ok(None),
-        (0, Some(_)) | (_, None) => Err(invariant(presence_reason)),
-        (_, Some(reference)) => {
-            let table = canonical
-                .records(reference.into_store())
-                .ok_or_else(|| invariant(unavailable_reason))?;
-            if table.rows() != expected_rows || table.fields() != expected_fields {
-                return Err(invariant(layout_reason));
-            }
-            Ok(Some(table))
-        }
-    }
-}
-
-fn resolve_schema_name<'scene, Tag>(
-    canonical: &'scene SceneCanonicalStore,
-    reference: Option<crate::canonical_scene::store::schema::CanonicalBlockRef<Tag>>,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<Option<&'scene str>>
-where
-    Tag: crate::canonical_scene::store::schema::CanonicalSchema<
-            StoreKind = baozi_operation::Utf8Block,
-        >,
-{
-    reference
-        .map(|reference| {
-            canonical
-                .utf8(reference.into_store())
-                .filter(|name| !name.is_empty())
-                .ok_or_else(|| invariant(reason))
-        })
-        .transpose()
-}
-
-fn schema_ref<'scene>(
-    name: Option<&'scene str>,
-    directory: CanonicalRecordView<'_>,
-    version_field: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<Option<NodeSceneSpatialSchemaRef<'scene>>> {
-    name.map(|name| {
-        let version = NonZeroU32::new(read_scalar::<u32>(directory, 0, version_field, reason)?)
-            .ok_or_else(|| invariant(reason))?;
-        Ok(NodeSceneSpatialSchemaRef { name, version })
-    })
-    .transpose()
-}
-
-fn read_optional_f32(
-    table: CanonicalRecordView<'_>,
-    row: usize,
-    presence_field: usize,
-    value_field: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<Option<f32>> {
-    match read_scalar::<u8>(table, row, presence_field, reason)? {
-        PRESENCE_ABSENT => Ok(None),
-        PRESENCE_PRESENT => Ok(Some(read_scalar::<f32>(table, row, value_field, reason)?)),
-        _ => Err(invariant(reason)),
-    }
-}
-
-fn read_optional_f64(
-    table: CanonicalRecordView<'_>,
-    presence_field: usize,
-    value_field: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<Option<f64>> {
-    match read_scalar::<u8>(table, 0, presence_field, reason)? {
-        PRESENCE_ABSENT => Ok(None),
-        PRESENCE_PRESENT => Ok(Some(read_scalar::<f64>(table, 0, value_field, reason)?)),
-        _ => Err(invariant(reason)),
-    }
-}
-
-fn decode_handedness(value: u8) -> NodeSceneSemanticResult<Handedness> {
-    match value {
-        SPATIAL_HANDEDNESS_UNKNOWN => Ok(Handedness::Unknown),
-        SPATIAL_HANDEDNESS_RIGHT => Ok(Handedness::Right),
-        SPATIAL_HANDEDNESS_LEFT => Ok(Handedness::Left),
-        _ => Err(invariant("validated handedness code is unknown")),
-    }
-}
-
-fn decode_axis(value: u8) -> NodeSceneSemanticResult<Axis> {
-    match value {
-        SPATIAL_AXIS_UNKNOWN => Ok(Axis::Unknown),
-        SPATIAL_AXIS_POSITIVE_X => Ok(Axis::PositiveX),
-        SPATIAL_AXIS_NEGATIVE_X => Ok(Axis::NegativeX),
-        SPATIAL_AXIS_POSITIVE_Y => Ok(Axis::PositiveY),
-        SPATIAL_AXIS_NEGATIVE_Y => Ok(Axis::NegativeY),
-        SPATIAL_AXIS_POSITIVE_Z => Ok(Axis::PositiveZ),
-        SPATIAL_AXIS_NEGATIVE_Z => Ok(Axis::NegativeZ),
-        _ => Err(invariant("validated axis code is unknown")),
-    }
-}
-
-fn decode_winding(value: u8) -> NodeSceneSemanticResult<FrontFaceWinding> {
-    match value {
-        SPATIAL_WINDING_UNKNOWN => Ok(FrontFaceWinding::Unknown),
-        SPATIAL_WINDING_CLOCKWISE => Ok(FrontFaceWinding::Clockwise),
-        SPATIAL_WINDING_COUNTER_CLOCKWISE => Ok(FrontFaceWinding::CounterClockwise),
-        _ => Err(invariant("validated front-face winding code is unknown")),
-    }
-}
-
-fn decode_uv_origin(value: u8) -> NodeSceneSemanticResult<UvOrigin> {
-    match value {
-        SPATIAL_UV_ORIGIN_UNKNOWN => Ok(UvOrigin::Unknown),
-        SPATIAL_UV_ORIGIN_UPPER_LEFT => Ok(UvOrigin::UpperLeft),
-        SPATIAL_UV_ORIGIN_LOWER_LEFT => Ok(UvOrigin::LowerLeft),
-        _ => Err(invariant("validated UV-origin code is unknown")),
-    }
-}
-
-fn decode_transform_convention(value: u8) -> NodeSceneSemanticResult<TransformConvention> {
-    match value {
-        SPATIAL_TRANSFORM_UNKNOWN => Ok(TransformConvention::Unknown),
-        SPATIAL_TRANSFORM_COLUMN_VECTOR_LOCAL_TO_PARENT => {
-            Ok(TransformConvention::ColumnVectorLocalToParent)
-        }
-        _ => Err(invariant("validated transform-convention code is unknown")),
-    }
-}
-
-fn decode_tangent_basis<'scene>(
-    value: u8,
-    schema: Option<NodeSceneSpatialSchemaRef<'scene>>,
-) -> NodeSceneSemanticResult<NodeSceneSpatialTangentBasis<'scene>> {
-    match (value, schema) {
-        (SPATIAL_TANGENT_BASIS_UNKNOWN, None) => Ok(NodeSceneSpatialTangentBasis::Unknown),
-        (SPATIAL_TANGENT_BASIS_MIKKTSPACE, None) => Ok(NodeSceneSpatialTangentBasis::MikkTspace),
-        (SPATIAL_TANGENT_BASIS_NAMESPACED, Some(schema)) => {
-            Ok(NodeSceneSpatialTangentBasis::Namespaced(schema))
-        }
-        _ => Err(invariant("validated tangent-basis fields are inconsistent")),
-    }
-}
-
-fn decode_tangent_encoding<'scene>(
-    value: u8,
-    schema: Option<NodeSceneSpatialSchemaRef<'scene>>,
-) -> NodeSceneSemanticResult<NodeSceneSpatialTangentEncoding<'scene>> {
-    match (value, schema) {
-        (SPATIAL_TANGENT_ENCODING_UNKNOWN, None) => Ok(NodeSceneSpatialTangentEncoding::Unknown),
-        (SPATIAL_TANGENT_ENCODING_SIGN_IN_W, None) => Ok(NodeSceneSpatialTangentEncoding::SignInW),
-        (SPATIAL_TANGENT_ENCODING_NAMESPACED, Some(schema)) => {
-            Ok(NodeSceneSpatialTangentEncoding::Namespaced(schema))
-        }
-        _ => Err(invariant(
-            "validated tangent-encoding fields are inconsistent",
-        )),
     }
 }

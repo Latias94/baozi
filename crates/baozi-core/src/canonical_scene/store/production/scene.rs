@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use crate::SceneValidationLimits;
+use crate::canonical_scene::store::schema::SCENE_DIRECTORY_CANONICAL_BYTES;
 
 use super::input::{Presence, SceneAuthoringBatch};
 use super::{
@@ -238,17 +239,6 @@ impl SceneTopLevelShape {
     }
 
     fn canonical_block_upper_bound(self) -> Result<usize, SceneInputEnvelopeError> {
-        let spatial = checked_block_sum(
-            [
-                1,
-                presence(self.cameras),
-                presence(self.lights),
-                // Admission reads only top-level slice lengths. Both bounded
-                // namespaced SceneSpace slots are reserved pessimistically.
-                2,
-            ],
-            "spatial block upper bound",
-        )?;
         let appearance = checked_block_sum(
             [
                 1,
@@ -299,7 +289,7 @@ impl SceneTopLevelShape {
         )?;
 
         checked_block_sum(
-            [1, spatial, appearance, deformation, animation],
+            [1, appearance, deformation, animation],
             "canonical block upper bound",
         )
     }
@@ -310,12 +300,16 @@ mod maximum_tests {
     use super::*;
 
     #[test]
-    fn canonical_block_ceiling_is_independent_of_typed_geometry_counts() {
+    fn canonical_block_ceiling_is_independent_of_typed_domain_counts() {
         let maximum = SceneInputEnvelope::maximum_canonical_blocks()
             .expect("the bounded maximum must be representable");
         let mut admitted_shape = SceneTopLevelShape::all_present();
+        admitted_shape.nodes = 8;
+        admitted_shape.cameras = 8;
+        admitted_shape.lights = 8;
         admitted_shape.primitives = 8;
         admitted_shape.attributes = 8;
+        admitted_shape.provenance_nodes = 8;
         let admitted = admitted_shape
             .canonical_block_upper_bound()
             .expect("the admitted shape must be representable");
@@ -412,14 +406,20 @@ pub(in crate::canonical_scene::store) fn node_limits_after_spatial<R>(
     spatial: &ValidatedSpatialBatch<'_, R>,
     limits: SceneValidationLimits,
 ) -> Result<SceneValidationLimits, SceneAuthoringAggregateError> {
-    remaining_limits_after(spatial_metrics(spatial), limits)
+    let remaining_limits = remaining_limits_after(spatial_metrics(spatial), limits)?;
+    // The root record belongs to Scene, independently of every typed domain.
+    Ok(remaining_limits.with_max_canonical_bytes(remaining(
+        SceneAuthoringAggregateLimit::CanonicalBytes,
+        remaining_limits.max_canonical_bytes(),
+        SCENE_DIRECTORY_CANONICAL_BYTES,
+    )?))
 }
 
 pub(in crate::canonical_scene::store) fn appearance_limits_after_nodes<R>(
     nodes: &ValidatedNodeBatch<'_, R>,
     limits: SceneValidationLimits,
 ) -> Result<SceneValidationLimits, SceneAuthoringAggregateError> {
-    remaining_limits_after(node_metrics(nodes)?, limits)
+    remaining_limits_after(node_metrics(nodes), limits)
 }
 
 pub(in crate::canonical_scene::store) fn geometry_limits_after_appearance<R>(
@@ -463,7 +463,7 @@ pub(in crate::canonical_scene::store) fn validate_scene_aggregate<SR, NR, AR, GR
 ) -> Result<(), SceneAuthoringAggregateError> {
     let metrics = [
         spatial_metrics(spatial),
-        node_metrics(nodes)?,
+        node_metrics(nodes),
         appearance_metrics(appearance),
         geometry_metrics(geometry),
         deformation_metrics(deformation),
@@ -497,7 +497,10 @@ pub(in crate::canonical_scene::store) fn validate_scene_aggregate<SR, NR, AR, GR
     )?;
     require_total(
         SceneAuthoringAggregateLimit::CanonicalBytes,
-        metrics.map(|domain| domain.canonical_bytes),
+        metrics
+            .into_iter()
+            .map(|domain| domain.canonical_bytes)
+            .chain(std::iter::once(SCENE_DIRECTORY_CANONICAL_BYTES)),
         limits.max_canonical_bytes(),
     )?;
     require_total(
@@ -519,23 +522,16 @@ const fn spatial_metrics<R>(spatial: &ValidatedSpatialBatch<'_, R>) -> SceneDoma
     }
 }
 
-fn node_metrics<R>(
-    nodes: &ValidatedNodeBatch<'_, R>,
-) -> Result<SceneDomainMetrics, SceneAuthoringAggregateError> {
-    let canonical_bytes = nodes.canonical_non_geometry_bytes().ok_or(
-        SceneAuthoringAggregateError::AccountingOverflow {
-            dimension: "node-domain canonical bytes",
-        },
-    )?;
-    Ok(SceneDomainMetrics {
+const fn node_metrics<R>(nodes: &ValidatedNodeBatch<'_, R>) -> SceneDomainMetrics {
+    SceneDomainMetrics {
         entities: nodes.canonical_node_count(),
         edges: nodes.reference_count(),
         references: nodes.reference_count(),
         semantic_cells: nodes.semantic_cell_count(),
         work: nodes.validation_work(),
-        canonical_bytes,
+        canonical_bytes: nodes.canonical_bytes(),
         scratch_bytes: nodes.scratch_bytes(),
-    })
+    }
 }
 
 const fn appearance_metrics<R>(appearance: &ValidatedAppearanceBatch<'_, R>) -> SceneDomainMetrics {
@@ -693,9 +689,9 @@ fn remaining(
         })
 }
 
-fn require_total<const N: usize>(
+fn require_total(
     limit: SceneAuthoringAggregateLimit,
-    domain_values: [u64; N],
+    domain_values: impl IntoIterator<Item = u64>,
     maximum: u64,
 ) -> Result<(), SceneAuthoringAggregateError> {
     let actual = domain_values

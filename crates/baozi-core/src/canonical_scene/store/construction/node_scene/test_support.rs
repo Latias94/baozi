@@ -18,6 +18,78 @@ use super::materialization::{
 };
 use super::{NodeSceneBuildFaults, NodeSceneDraftBuild};
 
+/// Mutates actual admitted values after trusted construction and before central validation.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum SpatialBuildFault {
+    CameraCount,
+    LightCount,
+    InvalidUnitScale,
+    CoincidentAxes,
+    IncompleteTangentConvention,
+    UnexpectedSchemaNameBytes,
+    NonFiniteLightTint,
+    NonCanonicalZeroEmission,
+    CameraAttachmentOutOfRange,
+    LightAttachmentOutOfRange,
+    OrphanCamera,
+    OrphanLight,
+}
+
+impl SpatialBuildFault {
+    pub(super) const ALL: [Self; 12] = [
+        Self::CameraCount,
+        Self::LightCount,
+        Self::InvalidUnitScale,
+        Self::CoincidentAxes,
+        Self::IncompleteTangentConvention,
+        Self::UnexpectedSchemaNameBytes,
+        Self::NonFiniteLightTint,
+        Self::NonCanonicalZeroEmission,
+        Self::CameraAttachmentOutOfRange,
+        Self::LightAttachmentOutOfRange,
+        Self::OrphanCamera,
+        Self::OrphanLight,
+    ];
+
+    pub(super) fn corrupt_spatial(
+        self,
+        storage: &mut crate::canonical_scene::store::typed_storage::spatial::SpatialStorage,
+    ) {
+        match self {
+            Self::CameraCount => storage.cameras.clear(),
+            Self::LightCount => storage.lights.clear(),
+            Self::InvalidUnitScale => storage.space.unit_scale_to_meters = Some(0.0),
+            Self::CoincidentAxes => storage.space.front_axis = storage.space.up_axis,
+            Self::IncompleteTangentConvention => {
+                storage.space.tangent_basis = crate::TangentBasisConvention::MikkTspace;
+            }
+            Self::UnexpectedSchemaNameBytes => {
+                storage.space.tangent_basis = crate::TangentBasisConvention::Namespaced {
+                    schema_id: crate::ExtensionSchemaId::new("test:spatial_fault", 1).unwrap(),
+                };
+                storage.space.tangent_handedness_encoding =
+                    crate::TangentHandednessEncoding::SignInW;
+            }
+            Self::NonFiniteLightTint => storage.lights[0].tint.x = f32::NAN,
+            Self::NonCanonicalZeroEmission => storage.lights[0].intensity = -0.0,
+            _ => {}
+        }
+    }
+
+    pub(super) fn corrupt_nodes(
+        self,
+        storage: &mut crate::canonical_scene::store::typed_storage::NodeStorage,
+    ) {
+        match self {
+            Self::CameraAttachmentOutOfRange => storage.nodes[1].camera = Some(1),
+            Self::LightAttachmentOutOfRange => storage.nodes[1].light = Some(1),
+            Self::OrphanCamera => storage.nodes[1].camera = None,
+            Self::OrphanLight => storage.nodes[1].light = None,
+            _ => {}
+        }
+    }
+}
+
 #[must_use = "the admitted Scene input must be validated or deliberately dropped"]
 pub(in crate::canonical_scene::store) struct NodeSceneTestTransaction<'input> {
     owner: RetainedStoreSessionOutcomeOwner<

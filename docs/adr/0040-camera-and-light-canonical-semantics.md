@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-13
-updated: 2026-08-02
+updated: 2026-10-30
 authors:
   - Codex
 decision_type: architecture
@@ -60,6 +60,14 @@ flowchart LR
     Node --> Convert[Atomic coordinate/unit conversion]
     Entity --> Convert
 ```
+
+Camera and light definitions live in one private retained typed spatial owner alongside the inline
+`SceneSpace`. Projections and light kinds use their closed domain types; incompatible tag/payload
+combinations have no stored representation. Central validation borrows the actual rows, checks
+emission and spatial declarations, and verifies node attachments and orphan coverage using mutable
+placement counts. Node and geometry edits share unchanged spatial storage through the existing
+retained owner. There is no parallel spatial record schema or scalar decoder. Public views borrow
+the Scene, and no private table layout becomes a public ABI.
 
 ### Camera Projection
 

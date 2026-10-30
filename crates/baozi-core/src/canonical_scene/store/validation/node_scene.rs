@@ -7,7 +7,6 @@ mod animation;
 mod appearance;
 mod deformation;
 mod profile;
-mod spatial;
 
 use super::super::construction::node_scene::SceneEvidenceCounts;
 use super::super::construction::node_scene::{
@@ -37,10 +36,6 @@ use super::super::schema::deformation::{
     DeformationMorphTargetTableSchema, DeformationMorphValueSchema,
     DeformationPrimitiveTableSchema, DeformationSkinCorrectionMatrixSchema,
     DeformationSkinJointNodeSchema, DeformationSkinNameSchema, DeformationSkinTableSchema,
-};
-use super::super::schema::spatial::{
-    SpatialCameraTableSchema, SpatialDirectorySchema, SpatialLightTableSchema,
-    SpatialTangentBasisSchemaNameSchema, SpatialTangentEncodingSchemaNameSchema,
 };
 use super::super::schema::{
     CanonicalBlockRef, CanonicalSchema, NODE_SCENE_EVIDENCE_FIELD_COUNT,
@@ -76,10 +71,6 @@ pub(in crate::canonical_scene::store) use deformation::{
 };
 use profile::validate_profile_graph_metered;
 pub(in crate::canonical_scene::store) use profile::{ProfileMeteredCounts, ProfileMeteredScratch};
-use spatial::{
-    SpatialValidatedMembers, SpatialValidatedRefs, validate_spatial_canonical_structure_metered,
-};
-
 pub(in crate::canonical_scene::store) struct NodeSceneValidationScratch;
 impl NodeSceneValidationScratch {
     pub(in crate::canonical_scene::store) fn required_deformation_palette_marks(
@@ -111,7 +102,6 @@ impl NodeSceneValidationScratch {
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
     directory: CanonicalBlockRef<SceneDirectorySchema>,
-    spatial: SpatialValidatedRefs,
     appearance_directory: CanonicalBlockRef<AppearanceDirectorySchema>,
     deformation_directory: CanonicalBlockRef<DeformationDirectorySchema>,
     animation_directory: CanonicalBlockRef<AnimationDirectorySchema>,
@@ -135,34 +125,8 @@ impl NodeSceneValidationProof {
         self.directory
     }
 
-    pub(in crate::canonical_scene::store) const fn spatial_directory(
-        &self,
-    ) -> CanonicalBlockRef<SpatialDirectorySchema> {
-        self.spatial.directory
-    }
-
-    pub(in crate::canonical_scene::store) const fn cameras(
-        &self,
-    ) -> Option<CanonicalBlockRef<SpatialCameraTableSchema>> {
-        self.spatial.cameras
-    }
-
-    pub(in crate::canonical_scene::store) const fn lights(
-        &self,
-    ) -> Option<CanonicalBlockRef<SpatialLightTableSchema>> {
-        self.spatial.lights
-    }
-
-    pub(in crate::canonical_scene::store) const fn tangent_basis_schema_name(
-        &self,
-    ) -> Option<CanonicalBlockRef<SpatialTangentBasisSchemaNameSchema>> {
-        self.spatial.tangent_basis_schema_name
-    }
-
-    pub(in crate::canonical_scene::store) const fn tangent_encoding_schema_name(
-        &self,
-    ) -> Option<CanonicalBlockRef<SpatialTangentEncodingSchemaNameSchema>> {
-        self.spatial.tangent_encoding_schema_name
+    pub(in crate::canonical_scene::store) const fn spatial_name_bytes(&self) -> usize {
+        self.central_validation_plan.spatial_name_bytes()
     }
 
     pub(in crate::canonical_scene::store) const fn appearance_directory(
@@ -587,7 +551,6 @@ impl NodeSceneValidationProof {
 
 struct NodeMeteredStructure<'session> {
     directory: CanonicalValidationMember<'session, RecordBlock, SceneDirectorySchema>,
-    spatial: SpatialValidatedMembers<'session>,
     appearance_directory:
         CanonicalValidationMember<'session, RecordBlock, AppearanceDirectorySchema>,
     deformation_directory:
@@ -610,7 +573,11 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    let mut spatial = None;
+    if scratch.camera_placement_counts.len() != counts.camera_count as usize
+        || scratch.light_placement_counts.len() != counts.light_count as usize
+    {
+        return Ok(None);
+    }
     let mut appearance = None;
     let mut deformation = None;
     let mut animation = None;
@@ -625,10 +592,6 @@ where
             let node_count = row.scalar(scene_directory_field::NODE_COUNT, |value: u32| value)?;
             root_count =
                 row.scalar(scene_directory_field::SOURCE_ROOT_COUNT, |value: u32| value)?;
-            spatial = row.record_ref::<SpatialDirectorySchema, _>(
-                scene_directory_field::SPATIAL,
-                |value| value,
-            )?;
             appearance = row.record_ref::<AppearanceDirectorySchema, _>(
                 scene_directory_field::APPEARANCE,
                 |value| value,
@@ -668,26 +631,16 @@ where
     )?;
     let (
         Some(root_count),
-        Some(spatial),
         Some(appearance_directory),
         Some(deformation_directory),
         Some(animation_directory),
-    ) = (root_count, spatial, appearance, deformation, animation)
+    ) = (root_count, appearance, deformation, animation)
     else {
         return Ok(None);
     };
     if !complete {
         return Ok(None);
     }
-    let Some(spatial) = validate_spatial_canonical_structure_metered(
-        session,
-        spatial,
-        counts.camera_count,
-        counts.light_count,
-    )?
-    else {
-        return Ok(None);
-    };
     let nodes = tables.nodes.as_ref();
     if !nodes.validate(
         session,
@@ -707,7 +660,6 @@ where
     };
     Ok(Some(NodeMeteredStructure {
         directory,
-        spatial,
         appearance_directory,
         deformation_directory,
         animation_directory,
@@ -838,6 +790,14 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
+    if !tables.spatial.as_ref().validate(
+        session,
+        expected_counts.camera_count as usize,
+        expected_counts.light_count as usize,
+        validation_plan.spatial_name_bytes(),
+    )? {
+        return Ok(None);
+    }
     let Some(node) = validate_node_canonical_structure_metered(
         session,
         directory,
@@ -951,8 +911,6 @@ where
     }
 
     for (actual, expected) in [
-        (node.spatial.camera_count, expected_counts.camera_count),
-        (node.spatial.light_count, expected_counts.light_count),
         (deformation.skin_count, expected_counts.skin_count),
         (
             deformation.logical_morph_count,
@@ -1024,13 +982,6 @@ where
             return Ok(None);
         }
     }
-    let spatial_payload_count = [
-        node.spatial.tangent_basis_schema_name.is_some(),
-        node.spatial.tangent_encoding_schema_name.is_some(),
-    ]
-    .into_iter()
-    .map(u32::from)
-    .sum::<u32>();
     let appearance_payload_count = [
         appearance.image_payloads.is_some(),
         appearance.media_types.is_some(),
@@ -1042,9 +993,8 @@ where
     .into_iter()
     .map(u32::from)
     .sum::<u32>();
-    let domain_payload_count = spatial_payload_count
-        .checked_add(appearance_payload_count)
-        .and_then(|count| count.checked_add(deformation.payload_block_count))
+    let domain_payload_count = appearance_payload_count
+        .checked_add(deformation.payload_block_count)
         .and_then(|count| count.checked_add(animation.payload_block_count));
     let Some(domain_payload_count) = domain_payload_count else {
         return Ok(None);
@@ -1055,19 +1005,6 @@ where
         return Ok(None);
     }
     let canonical_block_count = Some(1_u32)
-        .and_then(|count| {
-            count.checked_add(
-                1 + [
-                    node.spatial.cameras.is_some(),
-                    node.spatial.lights.is_some(),
-                    node.spatial.tangent_basis_schema_name.is_some(),
-                    node.spatial.tangent_encoding_schema_name.is_some(),
-                ]
-                .into_iter()
-                .map(u32::from)
-                .sum::<u32>(),
-            )
-        })
         .and_then(|count| {
             count.checked_add(
                 1 + [
@@ -1124,20 +1061,6 @@ where
     let identities_match = node
         .directory
         .identifies(expected_refs.directory.into_store())
-        && node
-            .spatial
-            .directory
-            .identifies(expected_refs.spatial.directory.into_store())
-        && optional_member_identifies(node.spatial.cameras, expected_refs.spatial.cameras)
-        && optional_member_identifies(node.spatial.lights, expected_refs.spatial.lights)
-        && optional_member_identifies(
-            node.spatial.tangent_basis_schema_name,
-            expected_refs.spatial.tangent_basis_schema_name,
-        )
-        && optional_member_identifies(
-            node.spatial.tangent_encoding_schema_name,
-            expected_refs.spatial.tangent_encoding_schema_name,
-        )
         && optional_member_identifies(appearance.images, expected_refs.appearance.tables.images)
         && optional_member_identifies(
             appearance.samplers,
@@ -1288,15 +1211,6 @@ where
     }
     Ok(Some(NodeSceneValidationProof {
         directory: expected_refs.directory,
-        spatial: SpatialValidatedRefs {
-            directory: expected_refs.spatial.directory,
-            cameras: expected_refs.spatial.cameras,
-            lights: expected_refs.spatial.lights,
-            tangent_basis_schema_name: expected_refs.spatial.tangent_basis_schema_name,
-            tangent_encoding_schema_name: expected_refs.spatial.tangent_encoding_schema_name,
-            camera_count: node.spatial.camera_count,
-            light_count: node.spatial.light_count,
-        },
         appearance_directory: expected_refs.appearance.directory,
         deformation_directory: expected_refs.deformation.directory,
         animation_directory: expected_refs.animation.directory,

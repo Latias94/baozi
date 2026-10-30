@@ -331,3 +331,97 @@ fn spatial_readers_follow_node_attachments_and_preserve_unknowns() {
     drop(parts.report);
     assert_eq!(account.snapshot().live_retained_bytes(), 0);
 }
+
+#[test]
+fn spatial_readers_borrow_retained_values_after_authoring_storage_is_dropped() {
+    let factory = factory();
+    let account = account(&factory);
+    let projections = [
+        CameraProjection::perspective(0.75, None, 0.125, None).unwrap(),
+        CameraProjection::orthographic(2.5, 1.25, 0.25, 1024.0).unwrap(),
+    ];
+    let light_kinds = [
+        LightKind::directional(),
+        LightKind::point(None).unwrap(),
+        LightKind::spot(Some(32.0), 0.125, 0.75).unwrap(),
+    ];
+    let parts = {
+        let roots = [
+            NodeLocalId::new(0),
+            NodeLocalId::new(1),
+            NodeLocalId::new(2),
+        ];
+        let nodes = std::array::from_fn::<_, 3, _>(|index| {
+            NodeAuthoringNode::new(
+                Presence::Absent,
+                trs(index as f32),
+                Presence::Present(CameraLocalId::new((index % 2) as u32)),
+                Presence::Present(LightLocalId::new(index as u32)),
+            )
+        });
+        let space = namespaced_scene_space();
+        let cameras = projections.map(CameraAuthoring::new);
+        let lights = light_kinds.map(|kind| LightAuthoring::new(kind, white_emission(2.0)));
+        build_scene_with_spatial_appearance_and_geometry(
+            &account,
+            &roots,
+            &nodes,
+            SpatialAuthoringBatch::new(&space, &cameras, &lights),
+            AppearanceAuthoringBatch::empty(),
+            GeometryAuthoringBatch::empty(),
+        )
+    };
+    let scene = ValidatedScene::from_node_scene(parts.scene);
+    let allocations = allocation_counter::measure(|| {
+        let space = scene.space();
+        assert_eq!(space.handedness, Handedness::Left);
+        assert_eq!(space.up_axis, Axis::NegativeY);
+        assert_eq!(space.front_axis, Axis::PositiveZ);
+        assert_eq!(
+            space.unit_scale_to_meters.map(f64::to_bits),
+            Some(0.01_f64.to_bits())
+        );
+        assert_eq!(space.front_face_winding, FrontFaceWinding::Clockwise);
+        assert_eq!(space.uv_origin, UvOrigin::LowerLeft);
+        assert_eq!(
+            space.transform_convention,
+            TransformConvention::ColumnVectorLocalToParent
+        );
+        let crate::TangentBasisRef::Namespaced { name, version } = space.tangent_basis else {
+            panic!("the retained tangent-basis identity must remain borrowed");
+        };
+        assert_eq!((name, version.get()), ("example:tangent-basis", 2));
+        let crate::TangentEncodingRef::Namespaced { name, version } =
+            space.tangent_handedness_encoding
+        else {
+            panic!("the retained tangent encoding must remain borrowed");
+        };
+        assert_eq!((name, version.get()), ("example:tangent-sign", 3));
+
+        assert_eq!(scene.cameras().len(), projections.len());
+        for (camera, expected) in scene.cameras().zip(projections) {
+            assert_eq!(camera.projection(), expected);
+            assert_eq!(scene.camera(camera.id()).unwrap().projection(), expected);
+        }
+        assert_eq!(scene.lights().len(), light_kinds.len());
+        for (light, expected) in scene.lights().zip(light_kinds) {
+            assert_eq!(light.kind(), expected);
+            assert_eq!(light.tint(), Vec3::new(1.0, 1.0, 1.0));
+            assert_eq!(light.intensity().to_bits(), 2.0_f32.to_bits());
+            assert_eq!(scene.light(light.id()).unwrap().kind(), expected);
+        }
+        for (index, node) in scene.nodes().enumerate() {
+            assert_eq!(node.camera().unwrap().projection(), projections[index % 2]);
+            assert_eq!(node.light().unwrap().kind(), light_kinds[index]);
+        }
+        let first = scene.nodes().next().unwrap().camera().unwrap();
+        let repeated = scene.nodes().nth(2).unwrap().camera().unwrap();
+        assert_eq!(first.id(), repeated.id());
+    });
+    assert_eq!(allocations.count_total, 0);
+    assert_eq!(allocations.bytes_total, 0);
+    drop(scene);
+    drop(parts.report);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
