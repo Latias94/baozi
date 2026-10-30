@@ -11,11 +11,9 @@ use baozi_operation::{
 
 use crate::canonical_scene::store::validation::{
     AnimationMeteredCounts, AnimationValidationScratch, AnimationValidationScratchRequirements,
-    AppearanceBindingValidationScratch, AppearanceCanonicalCounts,
-    AppearanceMaterialValidationScratch, AppearanceValidationScratch,
-    AppearanceValidationScratchRequirements, DeformationMeteredCounts,
-    DeformationValidationScratch, DeformationValidationScratchRequirements,
-    NodeSceneValidationScratch, ProfileMeteredCounts, ProfileMeteredScratch,
+    AppearanceMeteredCounts, DeformationMeteredCounts, DeformationValidationScratch,
+    DeformationValidationScratchRequirements, NodeSceneValidationScratch, ProfileMeteredCounts,
+    ProfileMeteredScratch,
 };
 
 use super::{NODE_SCENE_STORAGE_REJECTION_CODE, SceneEvidenceCounts};
@@ -107,14 +105,11 @@ impl NodeSceneCentralValidationPlan {
 pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
     camera_placement_counts: ScratchCapacityPlan,
     light_placement_counts: ScratchCapacityPlan,
-    appearance_image_media_counts: ScratchCapacityPlan,
-    appearance_bindings: ScratchCapacityPlan,
-    appearance_materials: ScratchCapacityPlan,
     deformation_palette_maxima: ScratchCapacityPlan,
     deformation_uniqueness_marks: ScratchCapacityPlan,
     animation_target_marks: ScratchCapacityPlan,
     profile_provenance_depths: ScratchCapacityPlan,
-    appearance_requirements: AppearanceValidationScratchRequirements,
+    appearance_counts: AppearanceMeteredCounts,
     deformation_counts: DeformationMeteredCounts,
     deformation_requirements: DeformationValidationScratchRequirements,
     animation_counts: AnimationMeteredCounts,
@@ -122,12 +117,13 @@ pub(in crate::canonical_scene::store) struct NodeSceneValidationScratchPlan {
     profile_maximum_depth: u32,
     envelope_bytes: u64,
     initialization_work: u64,
-    semantic_projection_work: u64,
+    semantic_validation_work: u64,
 }
 
 impl NodeSceneValidationScratchPlan {
     pub(super) fn try_new(
         counts: SceneEvidenceCounts,
+        appearance_counts: AppearanceMeteredCounts,
         deformation_counts: DeformationMeteredCounts,
         deformation_uniqueness_capacity: usize,
         animation_counts: AnimationMeteredCounts,
@@ -138,21 +134,20 @@ impl NodeSceneValidationScratchPlan {
             .ok_or(StorePlanError::SizeOverflow)?;
         let light_count = NodeSceneValidationScratch::required_light_placement_counts(counts)
             .ok_or(StorePlanError::SizeOverflow)?;
-        let appearance_requirements =
-            AppearanceValidationScratchRequirements::from_counts(AppearanceCanonicalCounts::new(
-                counts.image_count,
-                counts.sampler_count,
-                counts.texture_count,
-                counts.material_count,
-                counts.material_binding_count,
-            ))
-            .ok_or(StorePlanError::SizeOverflow)?;
         let deformation_requirements = DeformationValidationScratchRequirements::try_new(
             deformation_counts,
             deformation_uniqueness_capacity,
         )
         .ok_or(StorePlanError::SizeOverflow)?;
         if [
+            (appearance_counts.image_count, counts.image_count),
+            (appearance_counts.sampler_count, counts.sampler_count),
+            (appearance_counts.texture_count, counts.texture_count),
+            (
+                appearance_counts.binding_count,
+                counts.material_binding_count,
+            ),
+            (appearance_counts.material_count, counts.material_count),
             (deformation_counts.skin_count, counts.skin_count),
             (
                 deformation_counts.logical_morph_count,
@@ -203,14 +198,6 @@ impl NodeSceneValidationScratchPlan {
         .ok_or(StorePlanError::SizeOverflow)?;
         let camera_placement_counts = scratch_capacity_plan::<u32>(camera_count)?;
         let light_placement_counts = scratch_capacity_plan::<u32>(light_count)?;
-        let appearance_image_media_counts =
-            scratch_capacity_plan::<u32>(appearance_requirements.image_media_counts())?;
-        let appearance_bindings = scratch_capacity_plan::<AppearanceBindingValidationScratch>(
-            appearance_requirements.bindings(),
-        )?;
-        let appearance_materials = scratch_capacity_plan::<AppearanceMaterialValidationScratch>(
-            appearance_requirements.materials(),
-        )?;
         let deformation_palette_maxima =
             scratch_capacity_plan::<Option<u32>>(deformation_requirements.palette_maxima)?;
         let deformation_uniqueness_marks =
@@ -224,9 +211,6 @@ impl NodeSceneValidationScratchPlan {
         let envelope_bytes = [
             camera_placement_counts,
             light_placement_counts,
-            appearance_image_media_counts,
-            appearance_bindings,
-            appearance_materials,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_target_marks,
@@ -247,15 +231,10 @@ impl NodeSceneValidationScratchPlan {
                 })?;
         let initialization_work = base_initialization_work
             .checked_add(
-                appearance_requirements
+                deformation_requirements
                     .initialization_work_units()
                     .ok_or(StorePlanError::SizeOverflow)?,
             )
-            .and_then(|work| {
-                deformation_requirements
-                    .initialization_work_units()
-                    .and_then(|additional| work.checked_add(additional))
-            })
             .and_then(|work| {
                 animation_requirements
                     .initialization_work_units()
@@ -267,8 +246,8 @@ impl NodeSceneValidationScratchPlan {
                     .and_then(|additional| work.checked_add(additional))
             })
             .ok_or(StorePlanError::SizeOverflow)?;
-        let semantic_projection_work = appearance_requirements
-            .semantic_projection_work_units()
+        let semantic_validation_work = appearance_counts
+            .validation_work()
             .and_then(|work| {
                 deformation_counts
                     .validation_work()
@@ -284,14 +263,11 @@ impl NodeSceneValidationScratchPlan {
         Ok(Self {
             camera_placement_counts,
             light_placement_counts,
-            appearance_image_media_counts,
-            appearance_bindings,
-            appearance_materials,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_target_marks,
             profile_provenance_depths,
-            appearance_requirements,
+            appearance_counts,
             deformation_counts,
             deformation_requirements,
             animation_counts,
@@ -299,7 +275,7 @@ impl NodeSceneValidationScratchPlan {
             profile_maximum_depth,
             envelope_bytes,
             initialization_work,
-            semantic_projection_work,
+            semantic_validation_work,
         })
     }
 
@@ -311,6 +287,7 @@ impl NodeSceneValidationScratchPlan {
     ) -> Result<Self, StorePlanError> {
         Self::try_new(
             counts,
+            self.appearance_counts,
             self.deformation_counts,
             self.deformation_uniqueness_marks.desired_capacity(),
             self.animation_counts,
@@ -327,14 +304,16 @@ impl NodeSceneValidationScratchPlan {
         self.envelope_bytes
     }
 
-    pub(super) const fn semantic_projection_work_units(&self) -> u64 {
-        self.semantic_projection_work
+    /// Appearance, deformation, and animation validate their actual typed rows and pools once.
+    /// Their algorithm scratch initialization is counted separately above.
+    pub(super) const fn semantic_validation_work_units(&self) -> u64 {
+        self.semantic_validation_work
     }
 
-    pub(in crate::canonical_scene::store) const fn appearance_requirements(
+    pub(in crate::canonical_scene::store) const fn appearance_counts(
         &self,
-    ) -> AppearanceValidationScratchRequirements {
-        self.appearance_requirements
+    ) -> AppearanceMeteredCounts {
+        self.appearance_counts
     }
 
     pub(in crate::canonical_scene::store) const fn deformation_requirements(
@@ -372,9 +351,6 @@ where
     // Storage must drop before the reservation that accounts for it.
     camera_placement_counts: Vec<u32>,
     light_placement_counts: Vec<u32>,
-    appearance_image_media_counts: Vec<u32>,
-    appearance_bindings: Vec<AppearanceBindingValidationScratch>,
-    appearance_materials: Vec<AppearanceMaterialValidationScratch>,
     deformation_palette_maxima: Vec<Option<u32>>,
     deformation_uniqueness_marks: Vec<u64>,
     animation_target_marks: Vec<u32>,
@@ -385,7 +361,6 @@ where
 pub(in crate::canonical_scene::store) struct NodeSceneMeteredValidationScratch<'scratch> {
     pub(in crate::canonical_scene::store) camera_placement_counts: &'scratch mut [u32],
     pub(in crate::canonical_scene::store) light_placement_counts: &'scratch mut [u32],
-    pub(in crate::canonical_scene::store) appearance: AppearanceValidationScratch<'scratch>,
     pub(in crate::canonical_scene::store) deformation: DeformationValidationScratch<'scratch>,
     pub(in crate::canonical_scene::store) animation: AnimationValidationScratch<'scratch>,
     pub(in crate::canonical_scene::store) profile: ProfileMeteredScratch<'scratch>,
@@ -423,9 +398,6 @@ where
         }
         let camera_placement_counts = allocate!(camera_placement_counts);
         let light_placement_counts = allocate!(light_placement_counts);
-        let appearance_image_media_counts = allocate!(appearance_image_media_counts);
-        let appearance_bindings = allocate!(appearance_bindings);
-        let appearance_materials = allocate!(appearance_materials);
         let deformation_palette_maxima = allocate!(deformation_palette_maxima);
         let deformation_uniqueness_marks = allocate!(deformation_uniqueness_marks);
         let animation_target_marks = allocate!(animation_target_marks);
@@ -435,9 +407,6 @@ where
         Ok(Self {
             camera_placement_counts,
             light_placement_counts,
-            appearance_image_media_counts,
-            appearance_bindings,
-            appearance_materials,
             deformation_palette_maxima,
             deformation_uniqueness_marks,
             animation_target_marks,
@@ -464,15 +433,6 @@ where
         }
         initialize!(camera_placement_counts, 0);
         initialize!(light_placement_counts, 0);
-        initialize!(appearance_image_media_counts, 0);
-        initialize!(
-            appearance_bindings,
-            AppearanceBindingValidationScratch::EMPTY
-        );
-        initialize!(
-            appearance_materials,
-            AppearanceMaterialValidationScratch::EMPTY
-        );
         initialize!(deformation_palette_maxima, None);
         initialize!(deformation_uniqueness_marks, 0);
         initialize!(animation_target_marks, 0);
@@ -486,11 +446,6 @@ where
         NodeSceneMeteredValidationScratch {
             camera_placement_counts: &mut self.camera_placement_counts,
             light_placement_counts: &mut self.light_placement_counts,
-            appearance: AppearanceValidationScratch::new(
-                &mut self.appearance_image_media_counts,
-                &mut self.appearance_bindings,
-                &mut self.appearance_materials,
-            ),
             deformation: DeformationValidationScratch::new(
                 &mut self.deformation_palette_maxima,
                 &mut self.deformation_uniqueness_marks,

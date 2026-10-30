@@ -41,9 +41,8 @@ pub use crate::animation::{AnimationExtrapolation, AnimationInterpolation, Anima
 pub use crate::appearance::{
     AlphaMode, AppearanceBuildError, ColorInterpretation, LegacyMaterialFactors, MaterialFactors,
     PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel,
-    SupplementalPbrFactors, TextureBlendOperation, TextureChannel, TextureChannelMapping,
-    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength,
-    TextureTransform,
+    SupplementalPbrFactors, TextureBlendOperation, TextureChannel, TextureChannelSwizzle,
+    TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
 };
 pub use crate::attribute::{AttributeDomain, AttributeSemantic, CustomAttributeSemantic};
 pub use crate::deform::{MorphDeltaSemantic, SkinMatrixSpaces};

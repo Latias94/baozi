@@ -6,6 +6,14 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Replaced the final appearance records with one retained typed owner for images, samplers,
+  textures, bindings, and materials. Unchanged edits share the complete owner, validation allocates
+  no appearance scratch, and public reads borrow actual payloads. Removed duplicate `*Kind` enums,
+  the `TextureChannelMapping` wrapper, and producerless appearance `Namespaced` behavior variants;
+  channel APIs use `TextureChannelSwizzle` directly. All Scene semantic domains now use typed
+  storage; the private directory contains counts only. Semantic snapshot encoding remains revision 4.
+  Authoring and central validation check opaque image ranges without redundant content walks;
+  unchanged node edits retain constant image-related allocation and validation work.
 - Replaced animation record encoding and validation descriptors with one retained typed owner.
   Clips and channels directly borrow f64 key times, values, and cubic tangents; unchanged edits
   share that owner. Unified time-domain, interpolation, and extrapolation declarations across

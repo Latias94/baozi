@@ -21,9 +21,8 @@ use baozi_import::authoring::{
     PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId,
     ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, SamplerAuthoring, SamplerLocalId,
     SamplerState, SceneAuthoringBatch, SceneSpace, ShadingModel, SkinAuthoring, SkinMatrixSpaces,
-    SpatialAuthoringBatch, TextureAuthoring, TextureBlendOperation, TextureChannelMapping,
-    TextureChannelSwizzle, TextureCoordinateSource, TextureLocalId, TextureRole, TextureStrength,
-    TextureTransform,
+    SpatialAuthoringBatch, TextureAuthoring, TextureBlendOperation, TextureChannelSwizzle,
+    TextureCoordinateSource, TextureLocalId, TextureRole, TextureStrength, TextureTransform,
 };
 use baozi_import::{
     CapabilityStatus, CauseOwner, DetectionOutcome, DetectionResult, DetectionScope,
@@ -123,7 +122,7 @@ fn submit_triangle(scope: &ParseScope<'_>, input: Input) -> ParseResult<SceneDra
     )];
     let role = TextureRole::BaseColor;
     let coordinates = TextureCoordinateSource::UvSet(0);
-    let channel_mapping = TextureChannelMapping::swizzle(TextureChannelSwizzle::RGBA);
+    let channel_mapping = TextureChannelSwizzle::RGBA;
     let interpretation = ColorInterpretation::SrgbColor;
     let blend = TextureBlendOperation::Replace;
     let binding = MaterialBindingAuthoring::try_from_parts(

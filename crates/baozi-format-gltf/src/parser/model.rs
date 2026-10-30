@@ -158,7 +158,7 @@ pub(super) struct BindingStorage {
     pub(super) provenance: u32,
     pub(super) role: TextureRole,
     pub(super) coordinate_source: TextureCoordinateSource,
-    pub(super) channel_mapping: TextureChannelMapping,
+    pub(super) channel_mapping: TextureChannelSwizzle,
     pub(super) color_interpretation: ColorInterpretation,
     pub(super) transform: TextureTransform,
     pub(super) strength: TextureStrength,

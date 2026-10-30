@@ -53,12 +53,12 @@ mod text_input;
 /// ```
 pub use baozi_core::scene::integration::SceneDraft;
 pub use baozi_core::{
-    AnimationInterpolation, AnimationTarget, AppearanceBehaviorKind, AppearanceBuildResource,
-    AppearanceLimitDimension, EntityNameError, MaterialFactorGroup, SceneAnimationRateKind,
-    SceneAnimationSamplePart, SceneAnimationTarget, SceneAppearanceRule, SceneAuthoredProfileOwner,
-    SceneGenerationId, SceneInputCollection, SceneLightEmissionRule, SceneProfileOwner,
-    SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, SceneValidationDomain,
-    SceneValidationError, SceneValidationLimit, TextureStrengthRequirement, ValidatedScene,
+    AnimationInterpolation, AnimationTarget, AppearanceBuildResource, AppearanceLimitDimension,
+    EntityNameError, MaterialFactorGroup, SceneAnimationRateKind, SceneAnimationSamplePart,
+    SceneAnimationTarget, SceneAppearanceRule, SceneAuthoredProfileOwner, SceneGenerationId,
+    SceneInputCollection, SceneLightEmissionRule, SceneProfileOwner, SceneSnapshot,
+    SceneSnapshotError, SceneSnapshotLimits, SceneValidationDomain, SceneValidationError,
+    SceneValidationLimit, TextureStrengthRequirement, ValidatedScene,
 };
 
 pub use config::{

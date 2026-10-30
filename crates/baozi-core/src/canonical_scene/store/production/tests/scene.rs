@@ -1,8 +1,8 @@
 use crate::SceneValidationLimits;
 use crate::appearance::{
     AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemanticsRef, ShadingModel,
-    TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelMapping,
-    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
+    TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelSwizzle,
+    TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
 };
 use crate::canonical_scene::store::construction::node_scene::{
     NodeSceneConstructionRejection, validate_node_scene_batches_for_test,
@@ -241,7 +241,7 @@ fn scene_envelope_reserves_complete_appearance_payload_envelope() {
     let role = TextureRole::BaseColor;
     let coordinate_source =
         TextureCoordinateSource::uv_set(0).expect("test UV set should be valid");
-    let channel_mapping = TextureChannelMapping::swizzle(TextureChannelSwizzle::RGBA);
+    let channel_mapping = TextureChannelSwizzle::RGBA;
     let color_interpretation = ColorInterpretation::SrgbColor;
     let blend = TextureBlendOperation::Replace;
     let binding_semantics = TextureBindingSemanticsRef::new(

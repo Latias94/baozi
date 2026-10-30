@@ -390,8 +390,7 @@ fn retain_edit(pending: BoundPendingNodeSceneEdit<'_>) -> RetainedEdit {
         ConstructionBrand::reserve_with_activation_request().expect("normals activation identity");
     let total = counts.canonical_blocks.as_usize();
     let requirements = CanonicalSuccessRequirements::new(
-        CanonicalTableShape::new(total, counts.new_canonical_blocks.as_usize())
-            .expect("normals canonical shape"),
+        CanonicalTableShape::new(total, total).expect("normals canonical shape"),
         4,
         total,
         counts.central_validation_plan.work(),

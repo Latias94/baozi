@@ -11,8 +11,8 @@ use crate::appearance::{
     AlphaMode, ColorInterpretation, MaterialFactors, MaterialSemanticsRef,
     PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors, ShadingModel,
     SupplementalPbrFactors, TextureBindingSemanticsRef, TextureBlendOperation, TextureChannel,
-    TextureChannelMapping, TextureChannelSwizzle, TextureCoordinateSource, TextureRole,
-    TextureSourceKey, TextureStrength, TextureTransform,
+    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength,
+    TextureTransform,
 };
 use crate::attribute::{AttributeDomain, AttributeSemantic};
 use crate::canonical_scene::store::construction::STORE_DIMENSION;
@@ -424,21 +424,8 @@ fn encode_gltf_source(
             TextureRole::Thickness => 15,
             TextureRole::SheenColor => 16,
             TextureRole::SheenRoughness => 17,
-            TextureRole::Namespaced { .. } => 18,
         };
         encoder.u8(tag);
-        if let TextureRole::Namespaced { schema_id } = role {
-            encoder.utf8(schema_id.name().as_str());
-            encoder.u32(schema_id.version().get());
-        }
-    }
-
-    fn encode_schema_id(
-        encoder: &mut GltfSourceEncoder,
-        schema_id: &crate::extension::ExtensionSchemaId,
-    ) {
-        encoder.utf8(schema_id.name().as_str());
-        encoder.u32(schema_id.version().get());
     }
 
     fn encode_option<T>(
@@ -477,12 +464,8 @@ fn encode_gltf_source(
             ShadingModel::BlinnPhong => 3,
             ShadingModel::PbrMetallicRoughness => 4,
             ShadingModel::PbrSpecularGlossiness => 5,
-            ShadingModel::Namespaced { .. } => 6,
         };
         encoder.u8(tag);
-        if let ShadingModel::Namespaced { schema_id } = model {
-            encode_schema_id(encoder, schema_id);
-        }
     }
 
     fn encode_alpha_mode(encoder: &mut GltfSourceEncoder, alpha_mode: &AlphaMode) {
@@ -493,10 +476,6 @@ fn encode_gltf_source(
                 encoder.f32(cutoff.get());
             }
             AlphaMode::Blend => encoder.u8(2),
-            AlphaMode::Namespaced { schema_id } => {
-                encoder.u8(3);
-                encode_schema_id(encoder, schema_id);
-            }
         }
     }
 
@@ -509,10 +488,6 @@ fn encode_gltf_source(
             TextureCoordinateSource::ObjectPosition => encoder.u8(1),
             TextureCoordinateSource::ObjectNormal => encoder.u8(2),
             TextureCoordinateSource::ReflectionVector => encoder.u8(3),
-            TextureCoordinateSource::Namespaced { schema_id } => {
-                encoder.u8(4);
-                encode_schema_id(encoder, schema_id);
-            }
         }
     }
 
@@ -527,19 +502,11 @@ fn encode_gltf_source(
         });
     }
 
-    fn encode_channel_mapping(encoder: &mut GltfSourceEncoder, mapping: &TextureChannelMapping) {
-        match mapping {
-            TextureChannelMapping::Swizzle(swizzle) => {
-                encoder.u8(0);
-                encoder.list(swizzle.channels(), |encoder, channel| {
-                    encode_channel(encoder, *channel);
-                });
-            }
-            TextureChannelMapping::Namespaced { schema_id } => {
-                encoder.u8(1);
-                encode_schema_id(encoder, schema_id);
-            }
-        }
+    fn encode_channel_mapping(encoder: &mut GltfSourceEncoder, mapping: &TextureChannelSwizzle) {
+        encoder.u8(0);
+        encoder.list(mapping.as_slice(), |encoder, channel| {
+            encode_channel(encoder, *channel);
+        });
     }
 
     fn encode_color_interpretation(
@@ -550,12 +517,8 @@ fn encode_gltf_source(
             ColorInterpretation::SrgbColor => 0,
             ColorInterpretation::LinearColor => 1,
             ColorInterpretation::Data => 2,
-            ColorInterpretation::Namespaced { .. } => 3,
         };
         encoder.u8(tag);
-        if let ColorInterpretation::Namespaced { schema_id } = interpretation {
-            encode_schema_id(encoder, schema_id);
-        }
     }
 
     fn encode_texture_transform(encoder: &mut GltfSourceEncoder, transform: TextureTransform) {
@@ -575,12 +538,8 @@ fn encode_gltf_source(
             TextureBlendOperation::Add => 2,
             TextureBlendOperation::Subtract => 3,
             TextureBlendOperation::Screen => 4,
-            TextureBlendOperation::Namespaced { .. } => 5,
         };
         encoder.u8(tag);
-        if let TextureBlendOperation::Namespaced { schema_id } = operation {
-            encode_schema_id(encoder, schema_id);
-        }
     }
 
     fn encode_material_factors(encoder: &mut GltfSourceEncoder, factors: MaterialFactors) {
@@ -1219,12 +1178,10 @@ fn with_gltf_capability_input<R>(
         TextureCoordinateSource::uv_set(0).expect("glTF UV set zero must be canonical"),
     ];
     let mut channel_mappings = [
-        TextureChannelMapping::swizzle(TextureChannelSwizzle::RGBA),
-        TextureChannelMapping::swizzle(
-            TextureChannelSwizzle::try_new(&[TextureChannel::Blue, TextureChannel::Green])
-                .expect("glTF metallic-roughness mapping must be canonical"),
-        ),
-        TextureChannelMapping::swizzle(TextureChannelSwizzle::RGB),
+        TextureChannelSwizzle::RGBA,
+        TextureChannelSwizzle::try_new(&[TextureChannel::Blue, TextureChannel::Green])
+            .expect("glTF metallic-roughness mapping must be canonical"),
+        TextureChannelSwizzle::RGB,
     ];
     let mut color_interpretations = [
         ColorInterpretation::SrgbColor,
@@ -1237,7 +1194,7 @@ fn with_gltf_capability_input<R>(
     if mutation == GltfCapabilityMutation::MaterialBindingSemantics {
         coordinate_sources[0] =
             TextureCoordinateSource::uv_set(1).expect("glTF UV set one must be canonical");
-        channel_mappings[0] = TextureChannelMapping::swizzle(TextureChannelSwizzle::RGB);
+        channel_mappings[0] = TextureChannelSwizzle::RGB;
         color_interpretations[0] = ColorInterpretation::LinearColor;
         transforms[0] =
             TextureTransform::try_new(Vec2::new(0.125, 0.25), 0.375, Vec2::new(2.0, 0.5))
@@ -1731,6 +1688,61 @@ fn with_gltf_scene_input<R>(
     use_input: impl FnOnce(SceneAuthoringBatch<'_>) -> R,
 ) -> R {
     with_gltf_capability_input(scope, mutation, |input, _| use_input(input))
+}
+
+#[test]
+fn central_validation_rejects_corrupted_typed_appearance_before_generation() {
+    use super::super::NodeSceneBuildFaults;
+    use super::super::test_support::AppearanceBuildFault;
+
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    for fault in AppearanceBuildFault::ALL {
+        with_gltf_scene_input(
+            GltfCapabilityScope::All,
+            GltfCapabilityMutation::Baseline,
+            |input| {
+                let terminal = NodeSceneTestTransaction::with_account(
+                    &account,
+                    test_limits(),
+                    input,
+                    SceneValidationLimits::default(),
+                )
+                .expect("typed appearance corruption fixture admission")
+                .finish_draft_with_faults(NodeSceneBuildFaults::altered_appearance(fault))
+                .expect("central appearance rejection must prepare cleanly")
+                .publish_with_generation_source_for_test(|| {
+                    SceneGenerationId::reserve_from(&generation_source)
+                })
+                .expect("central appearance rejection must publish bounded evidence");
+                let failure = rich_failure(terminal);
+                assert_eq!(
+                    generation_source.load(std::sync::atomic::Ordering::Relaxed),
+                    0,
+                    "{fault:?}"
+                );
+                assert_eq!(
+                    terminal_failure_code(failure.ledger_evidence()),
+                    super::super::NODE_SCENE_BUILD_INVARIANT_CODE,
+                    "{fault:?}",
+                );
+                let ledger = failure.ledger_evidence();
+                assert_eq!(ledger.header().current_live_bytes(), 0, "{fault:?}");
+                assert_eq!(ledger.header().active_reservations(), 0, "{fault:?}");
+                assert_eq!(
+                    ledger
+                        .dimension_by_semantic(STORE_DIMENSION)
+                        .unwrap()
+                        .committed_canonical_output(),
+                    0,
+                    "{fault:?}",
+                );
+                assert_released(failure, &account);
+                assert!(!account.snapshot().poisoned(), "{fault:?}");
+            },
+        );
+    }
 }
 
 #[test]
@@ -2252,24 +2264,22 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
                 0,
                 TextureRole::BaseColor,
                 TextureCoordinateSource::uv_set(0).expect("glTF UV set zero"),
-                TextureChannelMapping::swizzle(TextureChannelSwizzle::RGBA),
+                TextureChannelSwizzle::RGBA,
                 ColorInterpretation::SrgbColor,
             ),
             (
                 2,
                 TextureRole::MetallicRoughness,
                 TextureCoordinateSource::uv_set(0).expect("glTF UV set zero"),
-                TextureChannelMapping::swizzle(
-                    TextureChannelSwizzle::try_new(&[TextureChannel::Blue, TextureChannel::Green])
-                        .expect("glTF metallic-roughness mapping"),
-                ),
+                TextureChannelSwizzle::try_new(&[TextureChannel::Blue, TextureChannel::Green])
+                    .expect("glTF metallic-roughness mapping"),
                 ColorInterpretation::Data,
             ),
             (
                 1,
                 TextureRole::Normal,
                 TextureCoordinateSource::uv_set(0).expect("glTF UV set zero"),
-                TextureChannelMapping::swizzle(TextureChannelSwizzle::RGB),
+                TextureChannelSwizzle::RGB,
                 ColorInterpretation::Data,
             ),
         ];
@@ -2284,7 +2294,7 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
             assert_eq!(binding.texture(), texture);
             assert_eq!(binding.role_semantics(), &role);
             assert_eq!(binding.coordinate_source(), &coordinate_source);
-            assert_eq!(binding.channel_mapping(), &channel_mapping);
+            assert_eq!(binding.channel_mapping(), channel_mapping);
             assert_eq!(binding.color_interpretation(), &interpretation);
             assert_eq!(binding.transform(), TextureTransform::IDENTITY);
             assert_eq!(binding.strength(), TextureStrength::ONE);

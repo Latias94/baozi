@@ -1,6 +1,6 @@
 //! Complete authoring -> materialization -> central validation -> publication scale fixtures.
 //!
-//! Run all four fixtures serially with `cargo +1.95 nextest run --locked -p baozi-core --lib
+//! Run all fixtures serially with `cargo +1.95 nextest run --locked -p baozi-core --lib
 //! -E 'test(storage_scale)' --run-ignored all --test-threads 1 --success-output immediate`.
 //! Fixture allocation and output inspection are outside each allocation-counter measurement.
 //! Requested allocation sizes and ledger live-byte peaks are not process RSS measurements.
@@ -17,8 +17,8 @@ use crate::canonical_scene::store::construction::node_scene::edit::{
     NodeSceneEditTerminal, NodeTransformEditStart, try_begin_node_transform_edit,
 };
 use crate::canonical_scene::store::production::{
-    GeometryMeshInstanceAuthoring, InfluenceAuthoring, InfluenceRowsAuthoring, LogicalMeshLocalId,
-    MeshInstanceDeformationAuthoring, SkinAuthoring, SkinLocalId,
+    GeometryMeshInstanceAuthoring, ImageAuthoring, InfluenceAuthoring, InfluenceRowsAuthoring,
+    LogicalMeshLocalId, MeshInstanceDeformationAuthoring, SkinAuthoring, SkinLocalId,
 };
 use crate::deform::SkinMatrixSpaces;
 use crate::extension::ExtensionMediaType;
@@ -32,12 +32,12 @@ const MIB: usize = 1024 * 1024;
 fn measured_scene(
     account: &PhysicalStorageAccount,
     nodes: NodeAuthoringBatch<'_>,
+    appearance: AppearanceAuthoringBatch<'_>,
     geometry: GeometryAuthoringBatch<'_>,
     deformation: DeformationAuthoringBatch<'_>,
     metadata: MetadataAuthoringBatch<'_>,
 ) -> (NodeSceneSuccessParts, AllocationInfo) {
     let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
-    let appearance = AppearanceAuthoringBatch::empty();
     let animation = AnimationAuthoringBatch::empty();
     let profile = profile_fixture(spatial, nodes, appearance, geometry, deformation, animation);
     let input = SceneAuthoringBatch::new(
@@ -350,6 +350,7 @@ fn independent_indexed_primitive_buffers_scale() {
         let (parts, allocations) = measured_scene(
             &account,
             single_trs_batch(),
+            AppearanceAuthoringBatch::empty(),
             geometry,
             deformation,
             MetadataAuthoringBatch::empty(),
@@ -360,8 +361,8 @@ fn independent_indexed_primitive_buffers_scale() {
             allocations,
             &account,
         );
-        // This bound observes charged work on the real central path. There is currently no
-        // central-path cache-comparison counter; the separate cache-helper test is not one.
+        // The typed central path visits actual compact ranges and indices without a
+        // record-buffer cache. This bound observes its real controlled work growth.
         if let Some(previous) = previous_work {
             assert!(work > previous);
             assert!(
@@ -467,6 +468,7 @@ fn shared_eight_mib_points_payload_node_edit_scale() {
         let (parts, allocations) = measured_scene(
             &account,
             nodes,
+            AppearanceAuthoringBatch::empty(),
             geometry,
             deformation,
             MetadataAuthoringBatch::empty(),
@@ -588,6 +590,118 @@ fn shared_eight_mib_points_payload_node_edit_scale() {
 }
 
 #[test]
+#[ignore = "manual 1/8 MiB shared-appearance node-transform allocation pilot"]
+fn shared_encoded_image_payload_node_edit_scale() {
+    let mut first_edit_peak = None;
+    let mut first_edit_work = None;
+    for image_size in [MIB, 8 * MIB] {
+        let factory = test_factory();
+        let account = test_account(&factory, u64::MAX);
+        let (parts, allocations) = {
+            // These arbitrary encoded bytes are deliberately not a decodable image.
+            // Fixture allocation precedes measurement; authoring rows and bytes leave
+            // this scope before either generation's image bytes are inspected.
+            let payload: Vec<_> = (0..image_size)
+                .map(|index| u8::try_from(index % 251).unwrap())
+                .collect();
+            let images = [ImageAuthoring::encoded(&payload, Presence::Absent)];
+            measured_scene(
+                &account,
+                single_trs_batch(),
+                AppearanceAuthoringBatch::new(&images, &[], &[], &[], &[]),
+                GeometryAuthoringBatch::empty(),
+                DeformationAuthoringBatch::empty(),
+                MetadataAuthoringBatch::empty(),
+            )
+        };
+        record_measurement(
+            &format!("shared-image/{image_size}/build"),
+            parts.report.ledger_evidence(),
+            allocations,
+            &account,
+        );
+        let source = ValidatedScene::from_node_scene(parts.scene);
+        let (terminal, allocations) = measured_edit(&source, 0);
+        let NodeSceneEditTerminal::Success(edited) = terminal else {
+            panic!("shared-appearance node edit must publish without decoding the image");
+        };
+        assert!(
+            allocations.bytes_max < u64::try_from(image_size).unwrap(),
+            "shared appearance validation allocated an image-sized temporary: peak={}, payload={image_size}",
+            allocations.bytes_max
+        );
+        if let Some(expected) = first_edit_peak {
+            assert_eq!(
+                allocations.bytes_max, expected,
+                "node-edit allocation peak must not grow with encoded image payloads",
+            );
+        } else {
+            first_edit_peak = Some(allocations.bytes_max);
+        }
+        let edit_work = record_measurement(
+            &format!("shared-image/{image_size}/edit"),
+            edited.report.ledger_evidence(),
+            allocations,
+            &account,
+        );
+        if let Some(expected) = first_edit_work {
+            assert_eq!(
+                edit_work, expected,
+                "validation of shared opaque image contents must not scan their bytes",
+            );
+        } else {
+            first_edit_work = Some(edit_work);
+        }
+        let destination = ValidatedScene::from_node_scene(edited.scene);
+        assert_ne!(source.generation(), destination.generation());
+        assert!(
+            std::ptr::eq(
+                source.as_node_scene().read_appearance(),
+                destination.as_node_scene().read_appearance(),
+            ),
+            "a node edit must share the full appearance owner",
+        );
+        for (scene, transform) in [
+            (&source, AuthoredTransform::identity_trs()),
+            (&destination, trs_transform(42.0)),
+        ] {
+            assert_eq!(scene.node_count(), 1);
+            assert_eq!(scene.image_count(), 1);
+            assert!(
+                scene
+                    .nodes()
+                    .next()
+                    .unwrap()
+                    .authored_transform()
+                    .has_same_authored_bits(transform)
+            );
+        }
+        assert!(
+            std::ptr::eq(
+                source.images().next().unwrap().encoded_bytes(),
+                destination.images().next().unwrap().encoded_bytes(),
+            ),
+            "public image readers must borrow the same complete encoded byte slice",
+        );
+        drop(source);
+        drop(parts.report);
+        // The edited generation alone must keep every byte alive after both the
+        // authoring input and source generation/report have been destroyed.
+        let bytes = destination.images().next().unwrap().encoded_bytes();
+        assert_eq!(bytes.len(), image_size);
+        assert!(
+            bytes
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| usize::from(*byte) == index % 251)
+        );
+        drop(destination);
+        drop(edited.report);
+        assert_account_released(&account);
+    }
+}
+
+#[test]
 #[ignore = "manual 10k/100k four-influence and 1/8 MiB metadata allocation pilot"]
 fn influence_and_metadata_validation_scale() {
     let mut first_edit_peak = None;
@@ -688,6 +802,7 @@ fn influence_and_metadata_validation_scale() {
             let (parts, allocations) = measured_scene(
                 &account,
                 nodes,
+                AppearanceAuthoringBatch::empty(),
                 geometry,
                 deformation,
                 MetadataAuthoringBatch::new(&metadata),

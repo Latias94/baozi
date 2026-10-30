@@ -1,6 +1,6 @@
 use crate::appearance::{
     AlphaMode, AppearanceBuildError, ColorInterpretation, MaterialFactors, MaterialSemanticsRef,
-    ShadingModel, TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelMapping,
+    ShadingModel, TextureBindingSemanticsRef, TextureBlendOperation, TextureChannelSwizzle,
     TextureCoordinateSource, TextureRole, TextureSourceKey, TextureStrength, TextureTransform,
     validate_material_semantics, validate_texture_binding_semantics,
 };
@@ -131,7 +131,7 @@ impl<'a> MaterialBindingAuthoring<'a> {
         texture: TextureLocalId,
         role: &'a TextureRole,
         coordinate_source: &'a TextureCoordinateSource,
-        channel_mapping: &'a TextureChannelMapping,
+        channel_mapping: &'a TextureChannelSwizzle,
         color_interpretation: &'a ColorInterpretation,
         transform: TextureTransform,
         strength: TextureStrength,
@@ -161,10 +161,6 @@ impl<'a> MaterialBindingAuthoring<'a> {
 
     pub(in crate::canonical_scene::store) const fn texture(self) -> TextureLocalId {
         self.texture
-    }
-
-    pub(in crate::canonical_scene::store) const fn role(self) -> &'a TextureRole {
-        self.semantics.role()
     }
 
     pub(in crate::canonical_scene::store) const fn semantics(

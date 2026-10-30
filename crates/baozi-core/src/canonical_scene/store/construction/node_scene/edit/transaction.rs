@@ -820,8 +820,7 @@ impl<'a> SceneEditTransaction<'a> {
             });
         }
         let success_requirements = CanonicalSuccessRequirements::new(
-            CanonicalTableShape::new(total, pending.counts.new_canonical_blocks.as_usize())
-                .map_err(StoreRuntimeError::Plan)?,
+            CanonicalTableShape::new(total, total).map_err(StoreRuntimeError::Plan)?,
             4,
             total,
             extra_work,

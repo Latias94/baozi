@@ -169,19 +169,11 @@ pub(super) struct NodeSceneEditFixedCounts {
     pub(super) evidence: SceneEvidenceCounts,
     pub(super) central_validation_plan: NodeSceneCentralValidationPlan,
     pub(super) canonical_blocks: CheckedCount,
-    /// Every target block that must be newly retained for the destination generation.
-    pub(super) new_canonical_blocks: CheckedCount,
-    pub(super) inherited_leaf_count: CheckedCount,
     pub(super) canonical_attribution_slots: CheckedCount,
     pub(super) outcome_evidence_blocks: CheckedCount,
     pub(super) outcome_evidence_attribution_slots: CheckedCount,
     pub(super) canonical_node_rows: CheckedCount,
     pub(super) source_root_rows: CheckedCount,
-    pub(super) images: CheckedCount,
-    pub(super) samplers: CheckedCount,
-    pub(super) textures: CheckedCount,
-    pub(super) materials: CheckedCount,
-    pub(super) material_bindings: CheckedCount,
     pub(super) logical_meshes: CheckedCount,
     pub(super) primitives: CheckedCount,
     pub(super) attributes: CheckedCount,
@@ -325,26 +317,10 @@ impl NodeSceneEditFixedCounts {
             "source root and edge counts do not partition the source nodes",
         )?;
 
-        // The concrete typed edits leave every remaining record-store payload unchanged.
-        require_count(
-            evidence.shareable_leaf_block_count as usize,
-            source_evidence.shareable_leaf_block_count as usize,
-            "typed edits must preserve the remaining record-store leaf set",
-        )?;
-        let inherited_leaf_count = CheckedCount::try_from_u32(
-            source_evidence.shareable_leaf_block_count,
-            "inherited record-store leaf count",
-        )?;
-        let new_canonical_block_count = canonical_blocks
-            .as_usize()
-            .checked_sub(inherited_leaf_count.as_usize())
-            .ok_or(NodeSceneEditPlanError::InvalidSource {
-                reason: "inherited shareable leaf count exceeds the canonical output block count",
-            })?;
-        let new_canonical_blocks =
-            CheckedCount::try_from_usize(new_canonical_block_count, "new canonical block count")?;
+        // The sole canonical record is the destination's new count directory.
+        // Semantic payload sharing is handled by the typed owners, never record leaves.
         let canonical_attribution_slots = CheckedCount::try_from_usize(
-            new_canonical_block_count.checked_add(1).ok_or(
+            canonical_blocks.as_usize().checked_add(1).ok_or(
                 NodeSceneEditPlanError::SizeOverflow {
                     quantity: "canonical attribution slot count",
                 },
@@ -356,8 +332,6 @@ impl NodeSceneEditFixedCounts {
             evidence,
             central_validation_plan,
             canonical_blocks,
-            new_canonical_blocks,
-            inherited_leaf_count,
             canonical_attribution_slots,
             outcome_evidence_blocks: CheckedCount::try_from_u32(1, "outcome-evidence block count")?,
             outcome_evidence_attribution_slots: CheckedCount::try_from_u32(
@@ -366,14 +340,6 @@ impl NodeSceneEditFixedCounts {
             )?,
             canonical_node_rows,
             source_root_rows,
-            images: CheckedCount::try_from_u32(evidence.image_count, "image row count")?,
-            samplers: CheckedCount::try_from_u32(evidence.sampler_count, "sampler row count")?,
-            textures: CheckedCount::try_from_u32(evidence.texture_count, "texture row count")?,
-            materials: CheckedCount::try_from_u32(evidence.material_count, "material row count")?,
-            material_bindings: CheckedCount::try_from_u32(
-                evidence.material_binding_count,
-                "material binding row count",
-            )?,
             logical_meshes: CheckedCount::try_from_u32(
                 evidence.logical_mesh_count,
                 "logical mesh row count",

@@ -5,9 +5,8 @@ use thiserror::Error;
 pub use super::super::production::input::animation::AnimationTargetAuthoring as SceneAnimationTarget;
 pub use super::super::production::input::lineage::ProfileOwner as SceneAuthoredProfileOwner;
 pub use crate::appearance::{
-    AppearanceBehaviorKind, AppearanceBuildResource, AppearanceLimitDimension,
-    ColorInterpretationKind, MaterialFactorGroup, ShadingModelKind, TextureRoleKind,
-    TextureStrengthRequirement,
+    AppearanceBuildResource, AppearanceLimitDimension, ColorInterpretation, MaterialFactorGroup,
+    ShadingModel, TextureRole, TextureStrengthRequirement,
 };
 pub use crate::attribute::AttributeDomain;
 pub use crate::deform::{MorphDeltaSemantic, SkinMatrixSpace};
@@ -87,28 +86,28 @@ pub enum SceneInputCollection {
 pub enum SceneAppearanceRule {
     #[error("{shading:?} material requires factor group {required:?}")]
     MissingFactorGroup {
-        shading: ShadingModelKind,
+        shading: ShadingModel,
         required: MaterialFactorGroup,
     },
     #[error("texture role {role:?} does not admit color interpretation {interpretation:?}")]
     IncompatibleColorInterpretation {
-        role: TextureRoleKind,
-        interpretation: ColorInterpretationKind,
+        role: TextureRole,
+        interpretation: ColorInterpretation,
     },
     #[error("texture role {role:?} requires {minimum}..={maximum} mapped lanes, found {actual}")]
     IncompatibleChannelCount {
-        role: TextureRoleKind,
+        role: TextureRole,
         minimum: u8,
         maximum: u8,
         actual: u8,
     },
     #[error("texture role {role:?} violates its {requirement:?} strength requirement")]
     IncompatibleStrength {
-        role: TextureRoleKind,
+        role: TextureRole,
         requirement: TextureStrengthRequirement,
     },
     #[error("built-in texture role {role:?} requires Replace blend semantics")]
-    BuiltInRoleRequiresReplace { role: TextureRoleKind },
+    BuiltInRoleRequiresReplace { role: TextureRole },
     #[error("texture binding at index {duplicate_index} duplicates authority at {first_index}")]
     DuplicateBindingAuthority {
         first_index: usize,
@@ -119,9 +118,9 @@ pub enum SceneAppearanceRule {
     )]
     ConflictingBindingRoles {
         first_index: usize,
-        first_role: TextureRoleKind,
+        first_role: TextureRole,
         duplicate_index: usize,
-        duplicate_role: TextureRoleKind,
+        duplicate_role: TextureRole,
     },
     #[error(
         "appearance resource {resource:?} exceeds {dimension:?} limit: requested {requested}, maximum {maximum}"
@@ -505,17 +504,6 @@ pub enum SceneValidationError {
         texture: u32,
         texture_count: u32,
     },
-    #[error(
-        "binding {binding} uses a namespaced texture role before extension authority is retained by the production appearance rail"
-    )]
-    NamespacedTextureRoleUnsupported { binding: usize },
-    #[error(
-        "binding {binding} uses namespaced {behavior:?} before extension authority is retained by the production appearance rail"
-    )]
-    NamespacedBindingBehaviorUnsupported {
-        binding: usize,
-        behavior: AppearanceBehaviorKind,
-    },
     #[error("binding {binding} has invalid canonical usage semantics: {source}")]
     InvalidBindingSemantics {
         binding: usize,
@@ -533,13 +521,6 @@ pub enum SceneValidationError {
         material: usize,
         #[source]
         source: crate::entity::EntityNameError,
-    },
-    #[error(
-        "material {material} uses namespaced {behavior:?} before extension authority is retained by the production appearance rail"
-    )]
-    NamespacedMaterialBehaviorUnsupported {
-        material: usize,
-        behavior: AppearanceBehaviorKind,
     },
     #[error("material {material} has conflicting canonical binding authority: {source}")]
     InvalidMaterialBindingSemantics {
@@ -1081,12 +1062,9 @@ impl SceneValidationError {
             | Self::TextureImageOutOfRange { .. }
             | Self::TextureSamplerOutOfRange { .. }
             | Self::BindingTextureOutOfRange { .. }
-            | Self::NamespacedTextureRoleUnsupported { .. }
-            | Self::NamespacedBindingBehaviorUnsupported { .. }
             | Self::InvalidBindingSemantics { .. }
             | Self::InvalidMaterialSemantics { .. }
             | Self::InvalidMaterialName { .. }
-            | Self::NamespacedMaterialBehaviorUnsupported { .. }
             | Self::InvalidMaterialBindingSemantics { .. } => SceneValidationDomain::Appearance,
             Self::GeometryTableCardinality { .. }
             | Self::InvalidSkinName { .. }
@@ -1241,18 +1219,11 @@ impl SceneValidationError {
             Self::TextureImageOutOfRange { .. } => "appearance.texture-image-out-of-range",
             Self::TextureSamplerOutOfRange { .. } => "appearance.texture-sampler-out-of-range",
             Self::BindingTextureOutOfRange { .. } => "appearance.binding-texture-out-of-range",
-            Self::NamespacedTextureRoleUnsupported { .. } => {
-                "appearance.namespaced-texture-role-unsupported"
-            }
-            Self::NamespacedBindingBehaviorUnsupported { .. } => {
-                "appearance.namespaced-binding-behavior-unsupported"
-            }
+
             Self::InvalidBindingSemantics { .. } => "appearance.invalid-binding-semantics",
             Self::InvalidMaterialSemantics { .. } => "appearance.invalid-material-semantics",
             Self::InvalidMaterialName { .. } => "appearance.invalid-material-name",
-            Self::NamespacedMaterialBehaviorUnsupported { .. } => {
-                "appearance.namespaced-material-behavior-unsupported"
-            }
+
             Self::InvalidMaterialBindingSemantics { .. } => {
                 "appearance.invalid-material-binding-semantics"
             }

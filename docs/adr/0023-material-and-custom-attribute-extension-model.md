@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-07-10
+updated: 2026-10-30
 authors:
   - Codex
 decision_type: architecture
@@ -85,6 +85,15 @@ same validated generation. `SceneEdit` applies the declarative remap obligations
 schemas; an operation that cannot preserve or remap a present schema fails before mutation. ADR 0021
 is related navigation for how import registries admit and supply schema data; it does not change these
 core value, snapshot, validation, or remap semantics.
+
+These requirements are an admission boundary, not authorization for placeholder behavior variants.
+An `ExtensionSchemaId` alone cannot preserve unknown rendering semantics. The current appearance
+domain admits only its closed canonical behavior values; its former producerless `Namespaced`
+variants are removed. Unsupported roles, coordinate sources, channel behavior, shading, or composition
+produce explicit unsupported/loss evidence under caller policy. Adding a behavior-bearing descriptor
+requires a real producer, core-owned typed storage, bounded schema data, central validation, public
+reads, semantic snapshots, and concrete edit/remap obligations together. Generic metadata remains
+available for descriptive facts and cannot substitute for that work.
 
 Custom attributes are not metadata. Each declares a namespaced semantic, scalar component type,
 lane count, normalization/encoding, attribute domain, payload representation, and provenance. The

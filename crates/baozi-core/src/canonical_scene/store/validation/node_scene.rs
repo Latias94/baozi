@@ -3,7 +3,6 @@ use baozi_operation::__retained_store_integration::activation::{
 };
 use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, StoreWorkError};
 
-mod appearance;
 mod profile;
 
 use super::super::construction::node_scene::SceneEvidenceCounts;
@@ -11,26 +10,12 @@ use super::super::construction::node_scene::{
     NodeSceneCentralValidationPlan, NodeSceneMaterializedRefs, NodeSceneMeteredValidationScratch,
     NodeSceneValidationScratchPlan,
 };
-use super::super::schema::appearance::{
-    AppearanceBindingSemanticScalarSchema, AppearanceBindingTableSchema, AppearanceDirectorySchema,
-    AppearanceEncodedImagePayloadSchema, AppearanceImageTableSchema,
-    AppearanceMaterialFactorScalarSchema, AppearanceMaterialNameSchema,
-    AppearanceMaterialTableSchema, AppearanceMediaTypeSchema, AppearanceSamplerTableSchema,
-    AppearanceSourceKeySchema, AppearanceTextureTableSchema,
-};
 use super::super::schema::{
-    CanonicalBlockRef, CanonicalSchema, NODE_SCENE_EVIDENCE_FIELD_COUNT,
-    NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE, NodeSceneOutcomeEvidenceSchema,
-    SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION, SceneDirectorySchema,
-    scene_directory_field,
+    CanonicalBlockRef, NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
+    NodeSceneOutcomeEvidenceSchema, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
+    SceneDirectorySchema, scene_directory_field,
 };
 use super::super::typed_storage::SceneTables;
-pub(in crate::canonical_scene::store) use appearance::{
-    AppearanceBindingValidationScratch, AppearanceCanonicalCounts,
-    AppearanceMaterialValidationScratch, AppearanceValidationScratch,
-    AppearanceValidationScratchRequirements,
-};
-use appearance::{AppearanceValidatedRefs, validate_appearance_canonical_structure_metered};
 use profile::validate_profile_graph_metered;
 pub(in crate::canonical_scene::store) use profile::{ProfileMeteredCounts, ProfileMeteredScratch};
 pub(in crate::canonical_scene::store) struct NodeSceneValidationScratch;
@@ -51,8 +36,6 @@ impl NodeSceneValidationScratch {
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneValidationProof {
     directory: CanonicalBlockRef<SceneDirectorySchema>,
-    appearance_directory: CanonicalBlockRef<AppearanceDirectorySchema>,
-    appearance: AppearanceValidatedRefs,
     profile: ProfileMeteredCounts,
     maximum_provenance_depth: u32,
     source_node_count: usize,
@@ -71,78 +54,6 @@ impl NodeSceneValidationProof {
 
     pub(in crate::canonical_scene::store) const fn spatial_name_bytes(&self) -> usize {
         self.central_validation_plan.spatial_name_bytes()
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_directory(
-        &self,
-    ) -> CanonicalBlockRef<AppearanceDirectorySchema> {
-        self.appearance_directory
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_images(
-        &self,
-    ) -> Option<CanonicalBlockRef<AppearanceImageTableSchema>> {
-        self.appearance.images
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_samplers(
-        &self,
-    ) -> Option<CanonicalBlockRef<AppearanceSamplerTableSchema>> {
-        self.appearance.samplers
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_textures(
-        &self,
-    ) -> Option<CanonicalBlockRef<AppearanceTextureTableSchema>> {
-        self.appearance.textures
-    }
-
-    pub(in crate::canonical_scene::store) const fn materials(
-        &self,
-    ) -> Option<CanonicalBlockRef<AppearanceMaterialTableSchema>> {
-        self.appearance.materials
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_bindings(
-        &self,
-    ) -> Option<CanonicalBlockRef<AppearanceBindingTableSchema>> {
-        self.appearance.bindings
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_image_payloads(
-        &self,
-    ) -> Option<CanonicalBlockRef<AppearanceEncodedImagePayloadSchema>> {
-        self.appearance.image_payloads
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_media_types(
-        &self,
-    ) -> Option<CanonicalBlockRef<AppearanceMediaTypeSchema>> {
-        self.appearance.media_types
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_source_keys(
-        &self,
-    ) -> Option<CanonicalBlockRef<AppearanceSourceKeySchema>> {
-        self.appearance.source_keys
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_binding_semantic_scalars(
-        &self,
-    ) -> Option<CanonicalBlockRef<AppearanceBindingSemanticScalarSchema>> {
-        self.appearance.binding_semantic_scalars
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_material_factor_scalars(
-        &self,
-    ) -> Option<CanonicalBlockRef<AppearanceMaterialFactorScalarSchema>> {
-        self.appearance.material_factor_scalars
-    }
-
-    pub(in crate::canonical_scene::store) const fn appearance_material_names(
-        &self,
-    ) -> Option<CanonicalBlockRef<AppearanceMaterialNameSchema>> {
-        self.appearance.material_names
     }
 
     pub(in crate::canonical_scene::store) const fn profile_counts(&self) -> ProfileMeteredCounts {
@@ -315,8 +226,6 @@ impl NodeSceneValidationProof {
 
 struct NodeMeteredStructure<'session> {
     directory: CanonicalValidationMember<'session, RecordBlock, SceneDirectorySchema>,
-    appearance_directory:
-        CanonicalValidationMember<'session, RecordBlock, AppearanceDirectorySchema>,
     source_node_count: usize,
     source_root_count: usize,
     source_edge_count: usize,
@@ -339,7 +248,6 @@ where
     {
         return Ok(None);
     }
-    let mut appearance = None;
     let mut root_count = None;
     let complete = session.visit_canonical_records(
         directory,
@@ -351,10 +259,6 @@ where
             let node_count = row.scalar(scene_directory_field::NODE_COUNT, |value: u32| value)?;
             root_count =
                 row.scalar(scene_directory_field::SOURCE_ROOT_COUNT, |value: u32| value)?;
-            appearance = row.record_ref::<AppearanceDirectorySchema, _>(
-                scene_directory_field::APPEARANCE,
-                |value| value,
-            )?;
             let mut valid =
                 revision == Some(SCENE_SCHEMA_REVISION) && node_count == Some(counts.node_count);
             for (field, count) in [
@@ -380,7 +284,7 @@ where
             Ok(valid)
         },
     )?;
-    let (Some(root_count), Some(appearance_directory)) = (root_count, appearance) else {
+    let Some(root_count) = root_count else {
         return Ok(None);
     };
     if !complete {
@@ -405,7 +309,6 @@ where
     };
     Ok(Some(NodeMeteredStructure {
         directory,
-        appearance_directory,
         source_node_count,
         source_root_count: root_count as usize,
         source_edge_count,
@@ -488,20 +391,6 @@ where
     )
 }
 
-fn optional_member_identifies<Kind, Tag>(
-    member: Option<CanonicalValidationMember<'_, Kind, Tag>>,
-    slot: Option<CanonicalBlockRef<Tag>>,
-) -> bool
-where
-    Tag: CanonicalSchema<StoreKind = Kind>,
-{
-    match (member, slot) {
-        (Some(member), Some(slot)) => member.identifies(slot.into_store()),
-        (None, None) => true,
-        _ => false,
-    }
-}
-
 #[allow(
     clippy::too_many_arguments,
     reason = "the fresh canonical proof binds the complete typed graph, exact sealed counts, and independently retained slots"
@@ -551,24 +440,16 @@ where
     else {
         return Ok(None);
     };
-    let appearance_counts = AppearanceCanonicalCounts::new(
-        expected_counts.image_count,
-        expected_counts.sampler_count,
-        expected_counts.texture_count,
-        expected_counts.material_count,
-        expected_counts.material_binding_count,
-    );
-    let Some(appearance) = validate_appearance_canonical_structure_metered(
-        session,
-        node.appearance_directory,
-        appearance_counts,
-        &mut scratch.appearance,
-    )?
-    else {
-        return Ok(None);
-    };
-
     let scratch_plan = validation_plan.scratch_plan();
+    let appearance_counts = scratch_plan.appearance_counts();
+    if !tables
+        .appearance
+        .as_ref()
+        .validate(session, appearance_counts)?
+    {
+        return Ok(None);
+    }
+
     let geometry = tables.geometry.as_ref();
     if !geometry.validate(
         session,
@@ -632,6 +513,23 @@ where
     }
 
     for (actual, expected) in [
+        (appearance_counts.image_count, expected_counts.image_count),
+        (
+            appearance_counts.sampler_count,
+            expected_counts.sampler_count,
+        ),
+        (
+            appearance_counts.texture_count,
+            expected_counts.texture_count,
+        ),
+        (
+            appearance_counts.material_count,
+            expected_counts.material_count,
+        ),
+        (
+            appearance_counts.binding_count,
+            expected_counts.material_binding_count,
+        ),
         (deformation_counts.skin_count, expected_counts.skin_count),
         (
             deformation_counts.logical_morph_count,
@@ -706,108 +604,18 @@ where
             return Ok(None);
         }
     }
-    let appearance_payload_count = [
-        appearance.image_payloads.is_some(),
-        appearance.media_types.is_some(),
-        appearance.source_keys.is_some(),
-        appearance.binding_semantic_scalars.is_some(),
-        appearance.material_factor_scalars.is_some(),
-        appearance.material_names.is_some(),
-    ]
-    .into_iter()
-    .map(u32::from)
-    .sum::<u32>();
-    if appearance_payload_count != expected_counts.payload_block_count
-        || appearance_payload_count != expected_counts.shareable_leaf_block_count
+    // All domains retain typed owners. Only the scalar Scene root remains in the record store.
+    if expected_counts.canonical_block_count != 1
+        || expected_counts.payload_block_count != 0
+        || expected_counts.shareable_leaf_block_count != 0
+        || !node
+            .directory
+            .identifies(expected_refs.directory.into_store())
     {
-        return Ok(None);
-    }
-    // Only the Scene root and appearance directory retain concrete record-store roots.
-    let canonical_block_count = 2_u32.checked_add(
-        [
-            appearance.images.is_some(),
-            appearance.samplers.is_some(),
-            appearance.textures.is_some(),
-            appearance.materials.is_some(),
-            appearance.bindings.is_some(),
-            appearance.image_payloads.is_some(),
-            appearance.media_types.is_some(),
-            appearance.source_keys.is_some(),
-            appearance.binding_semantic_scalars.is_some(),
-            appearance.material_factor_scalars.is_some(),
-            appearance.material_names.is_some(),
-        ]
-        .into_iter()
-        .map(u32::from)
-        .sum::<u32>(),
-    );
-    if canonical_block_count != Some(expected_counts.canonical_block_count) {
-        return Ok(None);
-    }
-
-    let identities_match = node
-        .directory
-        .identifies(expected_refs.directory.into_store())
-        && optional_member_identifies(appearance.images, expected_refs.appearance.tables.images)
-        && optional_member_identifies(
-            appearance.samplers,
-            expected_refs.appearance.tables.samplers,
-        )
-        && optional_member_identifies(
-            appearance.textures,
-            expected_refs.appearance.tables.textures,
-        )
-        && optional_member_identifies(
-            appearance.materials,
-            expected_refs.appearance.tables.materials,
-        )
-        && optional_member_identifies(
-            appearance.bindings,
-            expected_refs.appearance.tables.bindings,
-        )
-        && optional_member_identifies(
-            appearance.image_payloads,
-            expected_refs.appearance.payloads.image_payloads,
-        )
-        && optional_member_identifies(
-            appearance.media_types,
-            expected_refs.appearance.payloads.media_types,
-        )
-        && optional_member_identifies(
-            appearance.source_keys,
-            expected_refs.appearance.payloads.source_keys,
-        )
-        && optional_member_identifies(
-            appearance.binding_semantic_scalars,
-            expected_refs.appearance.payloads.binding_semantic_scalars,
-        )
-        && optional_member_identifies(
-            appearance.material_factor_scalars,
-            expected_refs.appearance.payloads.material_factor_scalars,
-        )
-        && optional_member_identifies(
-            appearance.material_names,
-            expected_refs.appearance.payloads.material_names,
-        );
-    if !identities_match {
         return Ok(None);
     }
     Ok(Some(NodeSceneValidationProof {
         directory: expected_refs.directory,
-        appearance_directory: expected_refs.appearance.directory,
-        appearance: AppearanceValidatedRefs {
-            images: expected_refs.appearance.tables.images,
-            samplers: expected_refs.appearance.tables.samplers,
-            textures: expected_refs.appearance.tables.textures,
-            materials: expected_refs.appearance.tables.materials,
-            bindings: expected_refs.appearance.tables.bindings,
-            image_payloads: expected_refs.appearance.payloads.image_payloads,
-            media_types: expected_refs.appearance.payloads.media_types,
-            source_keys: expected_refs.appearance.payloads.source_keys,
-            binding_semantic_scalars: expected_refs.appearance.payloads.binding_semantic_scalars,
-            material_factor_scalars: expected_refs.appearance.payloads.material_factor_scalars,
-            material_names: expected_refs.appearance.payloads.material_names,
-        },
         profile: profile_counts,
         maximum_provenance_depth: profile.maximum_provenance_depth,
         source_node_count: node.source_node_count,

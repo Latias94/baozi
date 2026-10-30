@@ -1,9 +1,6 @@
-use crate::appearance::TextureChannelMapping;
-use crate::canonical_scene::store::schema::appearance::{
-    APPEARANCE_CHANNEL_ZERO, encode_appearance_alpha_mode, encode_appearance_blend_operation,
-    encode_appearance_channel, encode_appearance_color_interpretation,
-    encode_appearance_coordinate_source, encode_appearance_shading_model,
-    encode_appearance_texture_role,
+use crate::appearance::{
+    AlphaMode, ColorInterpretation, ShadingModel, TextureBlendOperation, TextureChannel,
+    TextureCoordinateSource, TextureRole,
 };
 use crate::image::{MipmapFilter, SamplerState, TexelFilter, TextureAddressMode};
 
@@ -268,13 +265,12 @@ fn write_materials(
             .ok_or(NodeSceneSnapshotError::InconsistentView {
                 reason: "material collection ended before declared total",
             })?;
-        let shading_model = encode_appearance_shading_model(material.shading_model())
-            .ok_or(unsupported("namespaced material shading model"))?;
-        let alpha_mode = encode_appearance_alpha_mode(material.alpha_mode())
-            .ok_or(unsupported("namespaced material alpha mode"))?;
+        let shading_model = encode_shading_model(*material.shading_model());
+        let alpha_mode = encode_alpha_mode(*material.alpha_mode());
         let alpha_cutoff = material.alpha_mode().mask_cutoff().unwrap_or(0.0);
         let factors = material.factors();
-        let factor_values = material.factor_values();
+        let mut factor_values = material.factor_values();
+        let factor_count = factor_values.len();
         transcript.write_tag(TAG_MATERIAL)?;
         transcript.tagged_usize(TAG_REFERENCE, material.source_index())?;
         transcript.tagged_u8(TAG_SHADING_MODEL, shading_model)?;
@@ -296,10 +292,13 @@ fn write_materials(
         transcript.tagged_usize(TAG_BINDING_OFFSET, material.binding_offset())?;
         transcript.tagged_usize(TAG_COLLECTION_TOTAL, material.binding_count())?;
         transcript.tagged_usize(TAG_FACTOR_OFFSET, material.factor_offset())?;
-        write_metered_f32_bits(transcript, work, TAG_FACTOR_VALUES, factor_values)?;
+        write_metered_f32_bits(transcript, work, TAG_FACTOR_VALUES, factor_values.by_ref())?;
+        factor_values
+            .finish()
+            .map_err(super::map_snapshot_invariant)?;
         totals.material_factor_scalars = add_bytes(
             totals.material_factor_scalars,
-            factor_values.len(),
+            factor_count,
             "material factor scalars",
         )?;
         transcript.write_tag(TAG_MATERIAL_NAME)?;
@@ -325,9 +324,9 @@ fn write_materials(
         preview.geometry_field_usize(render, "binding_offset", material.binding_offset());
         preview.geometry_field_usize(render, "binding_count", material.binding_count());
         preview.geometry_field_usize(render, "factor_offset", material.factor_offset());
-        preview.geometry_field_usize(render, "factor_count", factor_values.len());
-        preview.begin_geometry_leaf(render, "factors", true, factor_values.len());
-        for (ordinal, value) in factor_values.iter().enumerate() {
+        preview.geometry_field_usize(render, "factor_count", factor_count);
+        preview.begin_geometry_leaf(render, "factors", true, factor_count);
+        for (ordinal, value) in material.factor_values().enumerate() {
             preview.geometry_f32_bits(render, ordinal, value.to_bits())?;
         }
         preview.end_geometry_leaf(render);
@@ -356,26 +355,16 @@ fn write_bindings(
             .ok_or(NodeSceneSnapshotError::InconsistentView {
                 reason: "material-binding collection ended before declared total",
             })?;
-        let role = encode_appearance_texture_role(binding.role_semantics())
-            .ok_or(unsupported("namespaced texture role"))?;
+        let role = encode_texture_role(binding.role());
         let (coordinate_source, coordinate_set) =
-            encode_appearance_coordinate_source(binding.coordinate_source())
-                .ok_or(unsupported("namespaced texture coordinate source"))?;
-        let swizzle = match binding.channel_mapping() {
-            TextureChannelMapping::Swizzle(swizzle) => *swizzle,
-            TextureChannelMapping::Namespaced { .. } => {
-                return Err(unsupported("namespaced texture channel mapping"));
-            }
-        };
-        let mut channels = [APPEARANCE_CHANNEL_ZERO; 4];
-        for (destination, channel) in channels.iter_mut().zip(swizzle.channels().iter().copied()) {
-            *destination = encode_appearance_channel(channel);
+            encode_coordinate_source(*binding.coordinate_source());
+        let swizzle = binding.channel_mapping();
+        let mut channels = [encode_channel(TextureChannel::Zero); 4];
+        for (destination, channel) in channels.iter_mut().zip(swizzle.as_slice().iter().copied()) {
+            *destination = encode_channel(channel);
         }
-        let color_interpretation =
-            encode_appearance_color_interpretation(binding.color_interpretation())
-                .ok_or(unsupported("namespaced color interpretation"))?;
-        let blend = encode_appearance_blend_operation(binding.blend())
-            .ok_or(unsupported("noncanonical texture blend operation"))?;
+        let color_interpretation = encode_color_interpretation(*binding.color_interpretation());
+        let blend = encode_blend_operation(*binding.blend())?;
         transcript.write_tag(TAG_BINDING)?;
         transcript.tagged_usize(TAG_REFERENCE, binding.source_index())?;
         transcript.tagged_usize(TAG_TEXTURE_REFERENCE, binding.texture())?;
@@ -389,19 +378,24 @@ fn write_bindings(
         transcript.tagged_u8(TAG_CHANNEL_3, channels[3])?;
         transcript.tagged_u8(TAG_COLOR_INTERPRETATION, color_interpretation)?;
         transcript.tagged_usize(TAG_SEMANTIC_SCALAR_OFFSET, binding.semantic_offset())?;
+        let mut semantic_values = binding.semantic_values();
+        let semantic_count = semantic_values.len();
         write_metered_f32_bits(
             transcript,
             work,
             TAG_SEMANTIC_SCALAR_VALUES,
-            binding.semantic_values(),
+            semantic_values.by_ref(),
         )?;
+        semantic_values
+            .finish()
+            .map_err(super::map_snapshot_invariant)?;
         totals.binding_semantic_scalars = add_bytes(
             totals.binding_semantic_scalars,
-            binding.semantic_values().len(),
+            semantic_count,
             "binding semantic scalars",
         )?;
         transcript.tagged_u8(TAG_BLEND_OPERATION, blend)?;
-        transcript.tagged_usize(TAG_SOURCE_KEY_OFFSET, binding.source_key_offset())?;
+        transcript.tagged_usize(TAG_SOURCE_KEY_OFFSET, cursor.source_key_offset())?;
         transcript.write_tag(TAG_SOURCE_KEY)?;
         match binding.source_key() {
             Some(source_key) => {
@@ -460,7 +454,7 @@ fn write_metered_f32_bits(
     transcript: &mut CanonicalDigestEncoder,
     work: &mut SnapshotWorkMeter<'_>,
     tag: u8,
-    values: &[f32],
+    values: impl ExactSizeIterator<Item = f32>,
 ) -> Result<(), NodeSceneSnapshotError> {
     transcript.write_tag(tag)?;
     transcript.tagged_usize(TAG_COLLECTION_TOTAL, values.len())?;
@@ -545,6 +539,85 @@ fn address_mode_name(value: TextureAddressMode) -> &'static str {
     }
 }
 
-const fn unsupported(reason: &'static str) -> NodeSceneSnapshotError {
-    NodeSceneSnapshotError::InconsistentView { reason }
+const fn encode_shading_model(value: ShadingModel) -> u8 {
+    match value {
+        ShadingModel::Unspecified => 6,
+        ShadingModel::Unlit => 0,
+        ShadingModel::Lambert => 1,
+        ShadingModel::Phong => 2,
+        ShadingModel::BlinnPhong => 3,
+        ShadingModel::PbrMetallicRoughness => 4,
+        ShadingModel::PbrSpecularGlossiness => 5,
+    }
+}
+
+const fn encode_alpha_mode(value: AlphaMode) -> u8 {
+    match value {
+        AlphaMode::Opaque => 0,
+        AlphaMode::Mask(_) => 1,
+        AlphaMode::Blend => 2,
+    }
+}
+
+const fn encode_texture_role(value: TextureRole) -> u8 {
+    match value {
+        TextureRole::BaseColor => 0,
+        TextureRole::Diffuse => 1,
+        TextureRole::Specular => 2,
+        TextureRole::Metallic => 3,
+        TextureRole::Roughness => 4,
+        TextureRole::MetallicRoughness => 5,
+        TextureRole::Normal => 6,
+        TextureRole::Occlusion => 7,
+        TextureRole::Emissive => 8,
+        TextureRole::Opacity => 9,
+        TextureRole::Displacement => 10,
+        TextureRole::Clearcoat => 11,
+        TextureRole::ClearcoatRoughness => 12,
+        TextureRole::ClearcoatNormal => 13,
+        TextureRole::Transmission => 14,
+        TextureRole::Thickness => 15,
+        TextureRole::SheenColor => 16,
+        TextureRole::SheenRoughness => 17,
+    }
+}
+
+const fn encode_coordinate_source(value: TextureCoordinateSource) -> (u8, u32) {
+    match value {
+        TextureCoordinateSource::UvSet(set) => (0, set as u32),
+        TextureCoordinateSource::ObjectPosition => (1, 0),
+        TextureCoordinateSource::ObjectNormal => (2, 0),
+        TextureCoordinateSource::ReflectionVector => (3, 0),
+    }
+}
+
+const fn encode_channel(value: TextureChannel) -> u8 {
+    match value {
+        TextureChannel::Red => 0,
+        TextureChannel::Green => 1,
+        TextureChannel::Blue => 2,
+        TextureChannel::Alpha => 3,
+        TextureChannel::Zero => 4,
+        TextureChannel::One => 5,
+    }
+}
+
+const fn encode_color_interpretation(value: ColorInterpretation) -> u8 {
+    match value {
+        ColorInterpretation::SrgbColor => 0,
+        ColorInterpretation::LinearColor => 1,
+        ColorInterpretation::Data => 2,
+    }
+}
+
+fn encode_blend_operation(value: TextureBlendOperation) -> Result<u8, NodeSceneSnapshotError> {
+    match value {
+        TextureBlendOperation::Replace => Ok(0),
+        TextureBlendOperation::Multiply
+        | TextureBlendOperation::Add
+        | TextureBlendOperation::Subtract
+        | TextureBlendOperation::Screen => Err(NodeSceneSnapshotError::InconsistentView {
+            reason: "noncanonical texture blend operation",
+        }),
+    }
 }

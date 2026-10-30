@@ -343,7 +343,7 @@ fn edit_success_requirements(
 ) -> Result<CanonicalSuccessRequirements, StorePlanError> {
     let total = pending.counts.canonical_blocks.as_usize();
     CanonicalSuccessRequirements::new(
-        CanonicalTableShape::new(total, pending.counts.new_canonical_blocks.as_usize())?,
+        CanonicalTableShape::new(total, total)?,
         4,
         total,
         pending.counts.central_validation_plan.work(),

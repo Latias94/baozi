@@ -531,6 +531,10 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         std::ptr::eq(source.read_animation(), output.scene.read_animation()),
         "a transform edit must share the complete animation owner and its payloads",
     );
+    assert!(
+        std::ptr::eq(source.read_appearance(), output.scene.read_appearance()),
+        "a transform edit must share the complete appearance owner and its payloads",
+    );
     let first_geometry_scalar = source.read_geometry().f32_values.first().copied();
     let source_central_validation = source.proof.central_validation_plan();
     let output_central_validation = output.scene.proof.central_validation_plan();
@@ -541,8 +545,8 @@ fn changed_trs_publishes_one_exact_lineage_generation_with_complete_unchanged_re
         "the appended lineage segment must grow the sealed validation envelope",
     );
     assert_eq!(
-        output_validation.appearance_requirements(),
-        source_validation.appearance_requirements(),
+        output_validation.appearance_counts(),
+        source_validation.appearance_counts(),
     );
     assert_eq!(
         output_validation.deformation_requirements(),
@@ -689,6 +693,10 @@ fn host_unwind_releases_edited_tables_and_preserves_shared_source_domains() {
         assert!(std::ptr::eq(
             original.scene.read_animation(),
             edited.scene.read_animation(),
+        ));
+        assert!(std::ptr::eq(
+            original.scene.read_appearance(),
+            edited.scene.read_appearance(),
         ));
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let _edited = edited;
@@ -1181,7 +1189,7 @@ fn operation_start_rejection_does_not_consume_a_profile_segment_nonce() {
 }
 
 #[test]
-fn physical_plan_rebuilds_remaining_records_and_shares_typed_geometry() {
+fn physical_plan_keeps_one_root_and_shares_unchanged_typed_domains() {
     let factory = test_factory();
     let account = test_account(&factory, 512);
     let generation_source = AtomicU64::new(0);
@@ -1205,32 +1213,26 @@ fn physical_plan_rebuilds_remaining_records_and_shares_typed_geometry() {
     let total = same_layout.counts.canonical_blocks.as_usize();
     let payload = usize::try_from(same_layout.counts.evidence.payload_block_count)
         .expect("payload block count must fit the platform");
-    let shareable = same_layout.counts.inherited_leaf_count.as_usize();
-    assert!(payload > 0, "fixture must contain shareable payload leaves");
-    assert_eq!(shareable, payload);
-    assert!(
-        total > shareable,
-        "fixture must contain structural RecordBlock values"
+    assert_eq!(total, 1, "all semantic domains are retained typed owners");
+    assert_eq!(
+        payload, 0,
+        "typed payloads are not legacy record-store leaves"
     );
     assert_eq!(
-        same_layout.counts.new_canonical_blocks.as_usize(),
-        total - shareable,
-        "every RecordBlock and edited semantic leaf must be rebuilt",
+        same_layout.counts.evidence.shareable_leaf_block_count, 0,
+        "unchanged payloads are shared through their typed owner",
     );
     assert_eq!(
         same_layout.counts.canonical_attribution_slots.as_usize(),
-        total - shareable + 1,
+        total + 1,
         "the destination table root and every actual new block require attribution",
     );
     assert_eq!(
-        shape_change.counts.new_canonical_blocks.as_usize(),
-        total - shareable,
-        "typed transform variants use the same legacy-record rewrite count",
+        shape_change.counts.canonical_blocks.as_usize(),
+        total,
+        "both typed transform variants rebuild only the count directory",
     );
-    assert_eq!(
-        shape_change.counts.inherited_leaf_count.as_usize(),
-        shareable,
-    );
+    assert_eq!(shape_change.counts.evidence.shareable_leaf_block_count, 0,);
 }
 
 #[test]

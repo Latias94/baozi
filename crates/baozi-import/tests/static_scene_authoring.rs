@@ -20,8 +20,8 @@ use baozi_import::authoring::{
     ResourceIdentityLocalId, SamplerAuthoring, SamplerLocalId, SamplerState, SceneAuthoringBatch,
     SceneSpace, SessionOpaqueReason, ShadingModel, SourceIdentityAuthoring, SourceIdentityLocalId,
     SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch, StaticSceneBuilder,
-    TextureAuthoring, TextureBlendOperation, TextureChannelMapping, TextureChannelSwizzle,
-    TextureCoordinateSource, TextureLocalId, TextureRole, TextureStrength, TextureTransform,
+    TextureAuthoring, TextureBlendOperation, TextureChannelSwizzle, TextureCoordinateSource,
+    TextureLocalId, TextureRole, TextureStrength, TextureTransform,
 };
 use baozi_import::{
     CapabilityStatus, CauseOwner, DetectionOutcome, DetectionResult, DetectionScope,
@@ -219,7 +219,7 @@ impl FormatImporter for CustomImporter {
         )];
         let role = TextureRole::BaseColor;
         let coordinates = TextureCoordinateSource::ObjectPosition;
-        let channels = TextureChannelMapping::swizzle(TextureChannelSwizzle::RGBA);
+        let channels = TextureChannelSwizzle::RGBA;
         let interpretation = ColorInterpretation::SrgbColor;
         let blend = TextureBlendOperation::Replace;
         let bindings = [MaterialBindingAuthoring::try_from_parts(

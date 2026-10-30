@@ -21,8 +21,8 @@ use baozi_import::authoring::{
     SamplerLocalId, SamplerState, SceneAuthoringBatch, SceneSpace, SessionOpaqueReason,
     ShadingModel as CanonicalShadingModel, SourceIdentityAuthoring, SourceIdentityLocalId,
     SourceObjectKind, SourceObjectLocator, SpatialAuthoringBatch, TextureAuthoring,
-    TextureBlendOperation, TextureChannelMapping, TextureChannelSwizzle, TextureCoordinateSource,
-    TextureLocalId, TextureRole, TextureSourceKey, TextureStrength, TextureTransform, Vec3,
+    TextureBlendOperation, TextureChannelSwizzle, TextureCoordinateSource, TextureLocalId,
+    TextureRole, TextureSourceKey, TextureStrength, TextureTransform, Vec3,
 };
 use baozi_import::{
     DependencySnapshot, DiagnosticCode, ImportStorageClass, ImportWorkClass, MeteredVec,
@@ -1425,7 +1425,7 @@ fn submit_complete_batch<'scope>(
     let texture_role = TextureRole::Diffuse;
     let coordinate_source = TextureCoordinateSource::uv_set(0)
         .map_err(|_| scope.format_failure(ObjFailure::internal("invalid-texture-uv-set")))?;
-    let channel_mapping = TextureChannelMapping::swizzle(TextureChannelSwizzle::RGBA);
+    let channel_mapping = TextureChannelSwizzle::RGBA;
     let color_interpretation = ColorInterpretation::SrgbColor;
     let blend = TextureBlendOperation::Replace;
     let source_key = TextureSourceKey::try_new("map_Kd")

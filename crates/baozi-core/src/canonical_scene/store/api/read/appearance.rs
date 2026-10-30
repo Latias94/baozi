@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::appearance::{
     AlphaMode, ColorInterpretation, MaterialFactors, ShadingModel, TextureBlendOperation,
-    TextureChannelMapping, TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
+    TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength, TextureTransform,
 };
 use crate::canonical_scene::store::construction::node_scene::semantic::appearance::{
     NodeSceneAppearanceBinding, NodeSceneAppearanceImage, NodeSceneAppearanceMaterial,
@@ -149,12 +149,12 @@ impl<'s> MaterialRef<'s> {
 
     /// Returns the source shading model without reinterpreting its factor groups.
     pub fn shading_model(self) -> ShadingModel {
-        self.read().shading_model().clone()
+        *self.read().shading_model()
     }
 
     /// Returns the authored alpha behavior and any mask cutoff.
     pub fn alpha_mode(self) -> AlphaMode {
-        self.read().alpha_mode().clone()
+        *self.read().alpha_mode()
     }
 
     /// Returns whether both sides of the material are rendered.
@@ -183,9 +183,7 @@ impl<'s> MaterialRef<'s> {
     }
 
     fn read(self) -> NodeSceneAppearanceMaterial<'s> {
-        expect_validated(
-            tables(self.scene).material_at(self.scene.as_node_scene().read_proof(), self.index),
-        )
+        expect_validated(tables(self.scene).material_at(self.index))
     }
 }
 
@@ -220,22 +218,22 @@ impl<'s> MaterialBindingRef<'s> {
 
     /// Returns the texture's semantic role, preserving legacy diffuse versus PBR base color.
     pub fn role(self) -> TextureRole {
-        self.read().role_semantics().clone()
+        self.read().role()
     }
 
     /// Returns the source of texture coordinates and any UV set selection.
     pub fn coordinate_source(self) -> TextureCoordinateSource {
-        self.read().coordinate_source().clone()
+        *self.read().coordinate_source()
     }
 
     /// Returns the retained source-channel mapping.
-    pub fn channel_mapping(self) -> TextureChannelMapping {
-        self.read().channel_mapping().clone()
+    pub fn channel_mapping(self) -> TextureChannelSwizzle {
+        self.read().channel_mapping()
     }
 
     /// Returns whether sampled channels represent color or data.
     pub fn color_interpretation(self) -> ColorInterpretation {
-        self.read().color_interpretation().clone()
+        *self.read().color_interpretation()
     }
 
     /// Returns the authored coordinate transform.
@@ -250,7 +248,7 @@ impl<'s> MaterialBindingRef<'s> {
 
     /// Returns the authored texture blend operation.
     pub fn blend(self) -> TextureBlendOperation {
-        self.read().blend().clone()
+        *self.read().blend()
     }
 
     /// Returns the optional format-owned source property key without copying its text.
@@ -259,9 +257,7 @@ impl<'s> MaterialBindingRef<'s> {
     }
 
     fn read(self) -> NodeSceneAppearanceBinding<'s> {
-        expect_validated(
-            tables(self.scene).binding_at(self.scene.as_node_scene().read_proof(), self.index),
-        )
+        expect_validated(tables(self.scene).binding_at(self.index))
     }
 }
 
@@ -304,9 +300,7 @@ impl<'s> ImageRef<'s> {
     }
 
     fn read(self) -> NodeSceneAppearanceImage<'s> {
-        expect_validated(
-            tables(self.scene).image_at(self.scene.as_node_scene().read_proof(), self.index),
-        )
+        expect_validated(tables(self.scene).image_at(self.index))
     }
 }
 
@@ -345,9 +339,7 @@ impl<'s> SamplerRef<'s> {
     }
 
     fn read(self) -> NodeSceneAppearanceSampler {
-        expect_validated(
-            tables(self.scene).sampler_at(self.scene.as_node_scene().read_proof(), self.index),
-        )
+        expect_validated(tables(self.scene).sampler_at(self.index))
     }
 }
 
@@ -391,9 +383,7 @@ impl<'s> TextureRef<'s> {
     }
 
     fn read(self) -> NodeSceneAppearanceTexture {
-        expect_validated(
-            tables(self.scene).texture_at(self.scene.as_node_scene().read_proof(), self.index),
-        )
+        expect_validated(tables(self.scene).texture_at(self.index))
     }
 }
 
@@ -409,7 +399,7 @@ impl fmt::Debug for TextureRef<'_> {
 fn tables(scene: &ValidatedScene) -> NodeSceneAppearanceTables<'_> {
     let owner = scene.as_node_scene();
     expect_validated(NodeSceneAppearanceTables::try_new(
-        owner.read_canonical(),
+        owner.read_appearance(),
         owner.read_proof(),
     ))
 }

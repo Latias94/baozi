@@ -4,8 +4,8 @@ use baozi::{
     AnimationExtrapolation, AnimationInterpolation, AnimationTarget, AnimationTimeDomain,
     AttributeData, AttributeDomain, AuthoredTransformKind, Color, ColorInterpretation, Importer,
     Mat4, MipmapFilter, MorphDeltaData, MorphDeltaSemantic, Quat, SceneLookupError, ShadingModel,
-    SkinMatrixSpace, TexelFilter, TextureAddressMode, TextureChannelMapping, TextureChannelSwizzle,
-    TextureRole, TextureTransform, TopologyKind, ValidatedScene, Vec3,
+    SkinMatrixSpace, TexelFilter, TextureAddressMode, TextureChannelSwizzle, TextureRole,
+    TextureTransform, TopologyKind, ValidatedScene, Vec3,
 };
 use std::sync::{Arc, atomic::AtomicUsize};
 
@@ -449,10 +449,7 @@ fn assert_appearance(scene: &ValidatedScene) {
         let binding = material.bindings().next().unwrap();
         assert_eq!(binding.role(), TextureRole::BaseColor);
         assert_eq!(binding.coordinate_source().uv_set_index(), Some(0));
-        assert_eq!(
-            binding.channel_mapping(),
-            TextureChannelMapping::Swizzle(TextureChannelSwizzle::RGBA)
-        );
+        assert_eq!(binding.channel_mapping(), TextureChannelSwizzle::RGBA);
         assert_eq!(
             binding.color_interpretation(),
             ColorInterpretation::SrgbColor

@@ -1,5 +1,3 @@
-use baozi_operation::{CanonicalRecordView, StoredScalar};
-
 use crate::canonical_scene::store::typed_storage::{NodeStorage, StoredNodeIndex};
 use crate::canonical_scene::store::validation::NodeSceneValidationProof;
 use crate::entity::AuthoredTransform;
@@ -67,12 +65,11 @@ impl NodeSceneSemanticError {
     }
 }
 
-/// One-time typed projections governed by the central validation proof.
+/// Borrowed typed tables governed by the central validation proof.
 ///
 /// This layer closes the constant-time physical table shape against the proof.
-/// Traversal decodes only proof-bound fields and fails closed whenever a typed
-/// scalar, cross-table reference, transform slice, or payload leaf cannot be
-/// read mechanically.
+/// Traversal reads the actual rows and pools and fails closed whenever a typed
+/// range, cross-table reference, or authored value cannot be read mechanically.
 #[must_use = "the semantic view must be traversed or deliberately discarded"]
 pub(in crate::canonical_scene::store) struct NodeSceneSemanticView<'scene> {
     nodes: &'scene NodeStorage,
@@ -188,7 +185,8 @@ impl<'scene> NodeSceneSemanticView<'scene> {
             ));
         }
         let spatial = spatial::NodeSceneSpatialTables::try_new(scene.read_spatial(), proof)?;
-        let appearance = appearance::NodeSceneAppearanceTables::try_new(&scene.canonical, proof)?;
+        let appearance =
+            appearance::NodeSceneAppearanceTables::try_new(scene.read_appearance(), proof)?;
         let geometry = geometry::NodeSceneGeometryTables::try_new(scene.read_geometry(), proof)?;
         let deformation =
             deformation::NodeSceneDeformationTables::try_new(scene.read_deformation(), proof)?;
@@ -353,7 +351,7 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         )?;
         Ok(NodeSceneSemanticCursor {
             nodes: self.nodes,
-            appearance: Some(self.appearance.into_cursor(self.proof)),
+            appearance: Some(self.appearance.into_cursor()),
             geometry: Some(self.geometry.into_cursor()),
             deformation: Some(self.deformation.into_cursor()),
             animation: Some(self.animation.into_cursor()),
@@ -752,27 +750,6 @@ impl<'scene> NodeSceneChildCursor<'scene> {
         }
         Ok(())
     }
-}
-
-fn read_u32_as_usize(
-    records: CanonicalRecordView<'_>,
-    row: usize,
-    field: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<usize> {
-    let value = read_scalar::<u32>(records, row, field, reason)?;
-    usize::try_from(value).map_err(|_| invariant(reason))
-}
-
-fn read_scalar<T: StoredScalar>(
-    records: CanonicalRecordView<'_>,
-    row: usize,
-    field: usize,
-    reason: &'static str,
-) -> NodeSceneSemanticResult<T> {
-    records
-        .scalar::<T>(row, field)
-        .ok_or_else(|| invariant(reason))
 }
 
 const fn invariant(reason: &'static str) -> NodeSceneSemanticError {

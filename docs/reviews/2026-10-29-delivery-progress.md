@@ -151,6 +151,88 @@ Logs use `target/review/d2-animation-` with suffixes `native-debug.log`, `native
 `browser-wasm-check.log`, `doctests.log`, and `rustdoc.log`. No new sanitizer or sustained fuzz
 result is claimed for this source state.
 
+## Typed appearance owner cutover — 2026-10-30
+
+The final appearance domain now uses one retained owner with five row tables and two pools: images,
+samplers, textures, material-owned bindings, materials, encoded image bytes, and combined UTF-8 text.
+Fresh construction, central validation, public reads, snapshots, and unchanged edits use that same
+owner. The former record writer/schema/decoder, edit rewrite, three validation descriptor arrays,
+and inert record-leaf inheritance plan are deleted. All seven Scene semantic domains now use typed
+owners. The private revision-8 directory has seven scalar revision/count fields, no domain references,
+and no record-store payload leaves. Semantic snapshot encoding remains revision 4.
+
+Shared compact behavior enums replace the duplicate `ShadingModelKind`, `TextureRoleKind`, and
+`ColorInterpretationKind` enums. Channel APIs use `TextureChannelSwizzle` directly, without a
+single-variant wrapper. The seven producerless appearance `Namespaced` behavior variants and their
+schema-construction/error paths are removed. No admitted producer could publish those variants.
+Descriptive metadata and other domains' extension identities remain supported; a future rendering
+descriptor requires complete production, storage, validation, read/snapshot, and remap support.
+ADRs 0012, 0023, and 0045 record that boundary without pretending metadata preserves unknown behavior.
+
+Authoring retains only a metered resolved-image borrow table, preserving the same-session resource
+snapshot authority; binding and material descriptions stay in original input. Canonical-byte limits
+count the actual initialized header, rows, and pools. Semantic cells count present numerical values
+and bytes rather than retired codec padding. Central appearance validation allocates no scratch: it
+checks actual references, complete image/text/binding coverage, bounded numeric values, material
+workflow requirements, and single-role authority with fixed cursors and a bounded role set. Public
+random access reads only the selected row, and image identity does not follow byte equality.
+
+The initial core run passed 473/473 ordinary tests, with three manual pilots skipped. This includes
+fourteen post-construction appearance corruption classes through the complete central/publication
+pipeline, requiring zero generation reservations, zero canonical commits, bounded rich failure, and
+complete release. New builder, validator, and semantic tests check per-action interruption/unwind,
+exact footprint/work, absent versus empty names, source bits, channel order, and allocation-free
+validation/reading. Existing snapshot golden vectors passed without changing their expected bytes.
+Two independent read-only reviews found no concrete issue in their assigned builder/validation and
+reader/snapshot/sharing scopes. These static reviews do not replace executed tests.
+
+The integrated all-feature workspace run passed 2,311/2,311 with the three then-existing manual
+pilots skipped. After adding the explicit encoded-image pilot, the serial scale run passed all five
+selected tests: four manual pilots plus the ordinary admission/cancellation control. Strict
+all-target/all-feature Clippy passed. The same 100,000-vertex/four-influence/8 MiB metadata node edit
+now requests a 9,240-byte allocation peak in 53 requests, compared with 10,792 bytes and 55 requests
+at `95acffd`. All four influence/metadata size combinations retain that same peak. This workload has
+an empty appearance domain and measures removal of its legacy directory and projection overhead.
+
+The new 1 MiB and 8 MiB arbitrary encoded-image workloads both measure an 8,444-byte edit allocation
+peak in 50 requests. The complete appearance owner and public byte-slice addresses are shared;
+every byte remains correct after the authoring input and original generation/report are destroyed.
+Final retained bytes and allocations return to zero. No image decoding is required. Independent
+primitive-buffer work remains linear at 256/1,024/4,096. These are allocator-requested observations
+and deterministic work, not process RSS. Logs are `target/review/d2-appearance-workspace-nextest.log`,
+`d2-appearance-scale.log`, and `d2-appearance-clippy.log` in the same directory. Consumer and artifact
+execution evidence follows after those gates finish.
+
+That pilot also exposed redundant per-byte authoring and central-validation actions for opaque
+encoded images. Neither action inspected content or established an invariant. Both no-op scans are
+removed; per-image bounded range/nonempty/coverage validation remains, byte/cell admission still
+counts the full payload, and real materialization copies and snapshot hashing retain their actual
+metering. The source reader borrows an already-authorized snapshot, so no extra content pass is
+needed before copying. Text and numeric semantics retain their existing validation work.
+The final core run passed 475/475 ordinary tests with four manual pilots skipped. The image pilot
+then passed independently and now requires identical charged edit work across both payload sizes:
+224 units for 1 MiB and 8 MiB, with the same 8,444-byte requested peak and complete lifetime checks.
+Logs are `d2-appearance-core-final.log` and `d2-appearance-image-scale-final.log`. This measured
+change removes both payload-sized temporary growth and the otherwise linear opaque-content walk
+from a node edit; it does not claim constant work for unrelated semantic domains.
+
+The final production-workspace run, excluding the separately changing repository-only xtask, passed
+2,248/2,248 with four manual pilots skipped. Strict workspace all-target/all-feature Clippy and
+workspace/standalone-consumer formatting passed. Ordinary-stack Windows all-feature consumers
+executed all four format workflows and the complete postprocess chain in debug and release.
+Before the no-op scan removal, all twelve fixed package cases built and executed from fresh
+archives under `target/package-check-t9xocm93`. The final source then repeated the postprocess and
+selected glTF artifact workflows from new archives under `target/package-check-_pgds135`, with
+dependency origins verified against the extracted package closure. No checkout source substitution
+was accepted. Logs are `d2-appearance-workspace-final.log`, `d2-appearance-clippy-final.log`,
+`d2-appearance-native-debug-final.log`, `d2-appearance-native-release-final.log`,
+`d2-appearance-packaged-consumers.log`, and `d2-appearance-packaged-final.log` in `target/review`.
+Workspace doctests and strict rustdoc passed before that bounded work-scheduling change; their
+public interfaces are unchanged. No new sanitizer or sustained fuzz campaign is claimed.
+The final all-feature release WASI consumer executed the same four-format and postprocess workflows
+under checksum-qualified Wasmtime 50.0.0. Browser WASM passed compilation only. Logs are
+`d2-appearance-wasi-final.log` and `d2-appearance-browser-wasm-final.log`.
+
 ## Recovery integration and storage pilot
 
 The continuation after source session `01a1834e-5379-76b0-b412-01aa80c80fc6` reverified operation
@@ -696,9 +778,9 @@ artifact verification. No new sanitizer or sustained fuzz campaign is claimed by
 - Preserve B's verified retained manifest/evidence ownership and fidelity behavior through the
   remaining storage and postprocessing cutovers.
 - Preserve C's verified typed reads and required-dependency context through the storage cutover; retain the single Scene owner.
-- Continue D2 through appearance and deformation/animation storage. Preserve the completed
-  node/geometry/profile/spatial ownership cutovers and normal generation's concrete attribute-owner mapping.
-  Delete each replaced record/projection path.
+- Preserve all seven completed typed domain cutovers and normal generation's concrete
+  attribute-owner mapping. Keep validation borrowed and unchanged owner sharing intact through the
+  remaining postprocessing work; do not reintroduce retired record/projection paths.
 - Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
 - Preserve F's triangulation, normal generation, and static target-space conversion while closing
   the remaining spatial domains and application vertex lowering.

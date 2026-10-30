@@ -18,6 +18,87 @@ use super::materialization::{
 };
 use super::{NodeSceneBuildFaults, NodeSceneDraftBuild};
 
+/// Corrupts retained appearance rows or bytes after authoring admission.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum AppearanceBuildFault {
+    ImageCount,
+    EmptyImage,
+    ImagePartition,
+    InvalidMediaType,
+    TextureImage,
+    TextureSampler,
+    BindingTexture,
+    BindingPartition,
+    BindingColor,
+    BindingChannels,
+    BindingStrength,
+    DuplicateRole,
+    MaterialWorkflow,
+    SourceKeyOverlap,
+}
+
+impl AppearanceBuildFault {
+    pub(super) const ALL: [Self; 14] = [
+        Self::ImageCount,
+        Self::EmptyImage,
+        Self::ImagePartition,
+        Self::InvalidMediaType,
+        Self::TextureImage,
+        Self::TextureSampler,
+        Self::BindingTexture,
+        Self::BindingPartition,
+        Self::BindingColor,
+        Self::BindingChannels,
+        Self::BindingStrength,
+        Self::DuplicateRole,
+        Self::MaterialWorkflow,
+        Self::SourceKeyOverlap,
+    ];
+
+    pub(super) fn corrupt(
+        self,
+        storage: &mut crate::canonical_scene::store::typed_storage::appearance::AppearanceStorage,
+    ) {
+        use crate::appearance::{
+            ColorInterpretation, ShadingModel, TextureChannelSwizzle, TextureStrength,
+        };
+        use crate::canonical_scene::store::typed_storage::TableRange;
+        use crate::canonical_scene::store::typed_storage::appearance::{
+            StoredImageIndex, StoredSamplerIndex, StoredTextureIndex,
+        };
+
+        match self {
+            Self::ImageCount => storage.images.clear(),
+            Self::EmptyImage => storage.images[0].payload = TableRange::new(0, 0),
+            Self::ImagePartition => {
+                let range = storage.images[0].payload;
+                storage.images[0].payload = TableRange::new(1, range.len());
+            }
+            Self::InvalidMediaType => storage.text[0] = 0xff,
+            Self::TextureImage => {
+                storage.textures[0].image = StoredImageIndex(storage.images.len() as u32);
+            }
+            Self::TextureSampler => {
+                storage.textures[0].sampler = StoredSamplerIndex(storage.samplers.len() as u32);
+            }
+            Self::BindingTexture => {
+                storage.bindings[0].texture = StoredTextureIndex(storage.textures.len() as u32);
+            }
+            Self::BindingPartition => storage.materials[0].bindings = TableRange::new(1, 2),
+            Self::BindingColor => storage.bindings[0].color = ColorInterpretation::Data,
+            Self::BindingChannels => storage.bindings[0].channels = TextureChannelSwizzle::RED,
+            Self::BindingStrength => {
+                storage.bindings[0].strength = TextureStrength::try_new(2.0).unwrap();
+            }
+            Self::DuplicateRole => storage.bindings[1] = storage.bindings[0],
+            Self::MaterialWorkflow => {
+                storage.materials[0].shading = ShadingModel::PbrSpecularGlossiness
+            }
+            Self::SourceKeyOverlap => storage.bindings[0].source_key = storage.images[0].media_type,
+        }
+    }
+}
+
 /// Corrupts retained animation values after authoring admission has succeeded.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum AnimationBuildFault {

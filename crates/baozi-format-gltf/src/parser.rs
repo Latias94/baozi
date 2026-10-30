@@ -7,9 +7,9 @@ use baozi_import::authoring::{
     LogicalMeshLocalId, Mat4, MaterialFactors, MaterialLocalId, MipmapFilter, NodeAuthoringNode,
     NodeLocalId, NodeParent, PbrMetallicRoughnessFactors, Presence, Quat, ResourceIdentityLocalId,
     SamplerAuthoring, SamplerLocalId, SamplerState, SkinLocalId, TexelFilter, TextureAddressMode,
-    TextureAuthoring, TextureBlendOperation, TextureChannel, TextureChannelMapping,
-    TextureChannelSwizzle, TextureCoordinateSource, TextureLocalId, TextureRole, TextureSourceKey,
-    TextureStrength, TextureTransform, Vec2, Vec3,
+    TextureAuthoring, TextureBlendOperation, TextureChannel, TextureChannelSwizzle,
+    TextureCoordinateSource, TextureLocalId, TextureRole, TextureSourceKey, TextureStrength,
+    TextureTransform, Vec2, Vec3,
 };
 use baozi_import::{
     DiagnosticCode, DiagnosticSeverity, ImportStorageClass, ImportWorkClass, ImportWorkScope,
@@ -2494,8 +2494,8 @@ fn add_texture_binding<'scope, 'document>(
         texture: texture_id,
         provenance: 0,
         role,
-        coordinate_source: contract.coordinate_source.clone(),
-        channel_mapping: TextureChannelMapping::swizzle(channel_swizzle),
+        coordinate_source: contract.coordinate_source,
+        channel_mapping: channel_swizzle,
         color_interpretation,
         transform: contract.transform,
         strength,

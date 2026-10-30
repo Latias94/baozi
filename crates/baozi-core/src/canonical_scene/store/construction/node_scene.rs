@@ -15,9 +15,9 @@ use baozi_operation::__retained_store_integration::producer::{
 #[cfg(test)]
 use baozi_operation::PublishedOutcomeEvidenceStore;
 use baozi_operation::{
-    BytesPlan, FinalProgress, OperationOwner, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
-    PublishedRichFailureStore, PublishedStoreFallbackOutput, RecordBlock, RecordPlan, SequencePlan,
-    StoreLedgerEvidence, StorePlanError, StoreRuntimeError, StoredScalar, Utf8Plan,
+    FinalProgress, OperationOwner, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
+    PublishedRichFailureStore, PublishedStoreFallbackOutput, RecordBlock, RecordPlan,
+    StoreLedgerEvidence, StorePlanError, StoreRuntimeError,
 };
 use thiserror::Error;
 
@@ -53,7 +53,6 @@ impl ConstructionBrand {
     }
 }
 
-mod appearance;
 pub(crate) mod edit;
 mod geometry;
 mod materialization;
@@ -109,52 +108,12 @@ const NODE_SCENE_PROFILE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1108;
 const NODE_SCENE_PROFILE_OWNER_CATALOG_REJECTION_CODE: u32 = 0x5343_1109;
 const NODE_SCENE_PLANNING_REJECTION_CODE: u32 = 0x5343_110a;
 
-fn checked_validation_work_sum<const N: usize>(values: [u64; N]) -> Result<u64, StorePlanError> {
-    values
-        .into_iter()
-        .try_fold(0_u64, u64::checked_add)
-        .ok_or(StorePlanError::SizeOverflow)
-}
-
-fn record_validation_work(plan: RecordPlan) -> Result<u64, StorePlanError> {
-    let cells = plan
-        .rows()
-        .checked_mul(plan.fields())
-        .ok_or(StorePlanError::SizeOverflow)?;
-    u64::try_from(cells).map_err(|_| StorePlanError::SizeOverflow)
-}
-
-fn optional_record_validation_work(plan: Option<RecordPlan>) -> Result<u64, StorePlanError> {
-    plan.map_or(Ok(0), record_validation_work)
-}
-
-fn sequence_validation_work<T: StoredScalar>(plan: SequencePlan<T>) -> Result<u64, StorePlanError> {
-    u64::try_from(plan.element_count()).map_err(|_| StorePlanError::SizeOverflow)
-}
-
-fn optional_sequence_validation_work<T: StoredScalar>(
-    plan: Option<SequencePlan<T>>,
-) -> Result<u64, StorePlanError> {
-    plan.map_or(Ok(0), sequence_validation_work)
-}
-
-fn optional_bytes_validation_work(plan: Option<BytesPlan>) -> Result<u64, StorePlanError> {
-    plan.map_or(Ok(0), |plan| {
-        u64::try_from(plan.bytes()).map_err(|_| StorePlanError::SizeOverflow)
-    })
-}
-
-fn optional_utf8_validation_work(plan: Option<Utf8Plan>) -> Result<u64, StorePlanError> {
-    plan.map_or(Ok(0), |plan| {
-        u64::try_from(plan.bytes()).map_err(|_| StorePlanError::SizeOverflow)
-    })
-}
-
 #[cfg(test)]
 #[derive(Clone, Copy)]
 struct NodeSceneBuildFaults {
     alter_first_authored_transform: bool,
     alter_first_geometry_f32: bool,
+    appearance: Option<test_support::AppearanceBuildFault>,
     spatial: Option<test_support::SpatialBuildFault>,
     deformation: Option<test_support::DeformationBuildFault>,
     animation: Option<test_support::AnimationBuildFault>,
@@ -169,6 +128,7 @@ impl NodeSceneBuildFaults {
         Self {
             alter_first_authored_transform: false,
             alter_first_geometry_f32: false,
+            appearance: None,
             spatial: None,
             deformation: None,
             animation: None,
@@ -202,6 +162,13 @@ impl NodeSceneBuildFaults {
     const fn altered_spatial(fault: test_support::SpatialBuildFault) -> Self {
         Self {
             spatial: Some(fault),
+            ..Self::none()
+        }
+    }
+
+    const fn altered_appearance(fault: test_support::AppearanceBuildFault) -> Self {
+        Self {
+            appearance: Some(fault),
             ..Self::none()
         }
     }
@@ -600,6 +567,12 @@ impl SceneStorage {
         &self,
     ) -> &super::super::typed_storage::animation::AnimationStorage {
         self.tables.animation.as_ref()
+    }
+
+    pub(in crate::canonical_scene::store) fn read_appearance(
+        &self,
+    ) -> &super::super::typed_storage::appearance::AppearanceStorage {
+        self.tables.appearance.as_ref()
     }
     pub(in crate::canonical_scene::store) const fn read_proof(&self) -> &NodeSceneValidationProof {
         &self.proof

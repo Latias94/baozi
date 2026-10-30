@@ -78,11 +78,11 @@ pub mod scene {
 
 pub use animation::{AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain};
 pub use appearance::{
-    AlphaCutoff, AlphaMode, ColorInterpretation, ColorInterpretationKind, LegacyMaterialFactors,
-    MaterialFactorError, MaterialFactorField, MaterialFactors, PbrMetallicRoughnessFactors,
-    PbrSpecularGlossinessFactors, ShadingModel, ShadingModelKind, SupplementalPbrFactors,
-    TextureBlendOperation, TextureChannel, TextureChannelMapping, TextureChannelSwizzle,
-    TextureCoordinateSource, TextureRole, TextureRoleKind, TextureStrength, TextureTransform,
+    AlphaCutoff, AlphaMode, ColorInterpretation, LegacyMaterialFactors, MaterialFactorError,
+    MaterialFactorField, MaterialFactors, PbrMetallicRoughnessFactors,
+    PbrSpecularGlossinessFactors, ShadingModel, SupplementalPbrFactors, TextureBlendOperation,
+    TextureChannel, TextureChannelSwizzle, TextureCoordinateSource, TextureRole, TextureStrength,
+    TextureTransform,
 };
 pub use attribute::{
     AttributeDomain, AttributeSemantic, AttributeSemanticKind, CustomAttributeSemantic,
@@ -103,11 +103,10 @@ pub use canonical_scene::store::api::scene::{
     SceneSnapshot, SceneSnapshotError, SceneSnapshotLimits, ValidatedScene,
 };
 pub use canonical_scene::store::api::validation::{
-    AppearanceBehaviorKind, AppearanceBuildResource, AppearanceLimitDimension, EntityNameError,
-    MaterialFactorGroup, SceneAnimationRateKind, SceneAnimationSamplePart, SceneAnimationTarget,
-    SceneAppearanceRule, SceneAuthoredProfileOwner, SceneInputCollection, SceneLightEmissionRule,
-    SceneProfileOwner, SceneValidationDomain, SceneValidationError, SceneValidationLimit,
-    TextureStrengthRequirement,
+    AppearanceBuildResource, AppearanceLimitDimension, EntityNameError, MaterialFactorGroup,
+    SceneAnimationRateKind, SceneAnimationSamplePart, SceneAnimationTarget, SceneAppearanceRule,
+    SceneAuthoredProfileOwner, SceneInputCollection, SceneLightEmissionRule, SceneProfileOwner,
+    SceneValidationDomain, SceneValidationError, SceneValidationLimit, TextureStrengthRequirement,
 };
 pub use deform::{
     MorphDeltaSemantic, SkinMatrixCorrection, SkinMatrixCorrectionError, SkinMatrixSpace,

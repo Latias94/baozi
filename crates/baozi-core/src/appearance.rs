@@ -4,9 +4,7 @@
 //! This module defines validated appearance values and the borrowed semantic
 //! views consumed while producing that storage.
 
-use crate::extension::ExtensionSchemaId;
 use crate::math::{Color, Vec2, Vec3};
-use std::collections::HashMap;
 use std::fmt;
 use thiserror::Error;
 
@@ -16,37 +14,11 @@ pub const MAX_TEXTURE_SOURCE_KEY_BYTES: usize = 128;
 /// Maximum zero-based UV set address admitted by the canonical binding model.
 pub const MAX_TEXTURE_COORDINATE_SET: u32 = u16::MAX as u32;
 
-/// A behavior category whose namespaced form requires a declarative schema.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AppearanceBehaviorKind {
-    ShadingModel,
-    AlphaMode,
-    TextureRole,
-    CoordinateSource,
-    ChannelMapping,
-    ColorInterpretation,
-    BlendOperation,
-}
-
-/// A behavior-bearing extension was requested without schema authority.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum AppearanceBehaviorError {
-    #[error("namespaced {behavior:?} requires an admitted extension schema")]
-    SchemaRequired { behavior: AppearanceBehaviorKind },
-}
-
-fn require_behavior_schema(
-    schema_id: Option<ExtensionSchemaId>,
-    behavior: AppearanceBehaviorKind,
-) -> Result<ExtensionSchemaId, AppearanceBehaviorError> {
-    schema_id.ok_or(AppearanceBehaviorError::SchemaRequired { behavior })
-}
-
 /// The primary rendering model selected for one material.
 ///
 /// Factor groups are retained independently, so selecting a PBR model never
 /// deletes legacy source truth that was also present.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShadingModel {
     /// The source does not declare a rendering model.
     Unspecified,
@@ -56,59 +28,6 @@ pub enum ShadingModel {
     BlinnPhong,
     PbrMetallicRoughness,
     PbrSpecularGlossiness,
-    Namespaced {
-        schema_id: ExtensionSchemaId,
-    },
-}
-
-impl ShadingModel {
-    /// Creates a source-specific shading behavior only with schema authority.
-    pub fn try_namespaced(
-        schema_id: Option<ExtensionSchemaId>,
-    ) -> Result<Self, AppearanceBehaviorError> {
-        let schema_id = require_behavior_schema(schema_id, AppearanceBehaviorKind::ShadingModel)?;
-        Ok(Self::Namespaced { schema_id })
-    }
-
-    /// Returns the schema required by a namespaced behavior.
-    pub const fn schema_id(&self) -> Option<&ExtensionSchemaId> {
-        match self {
-            Self::Namespaced { schema_id } => Some(schema_id),
-            Self::Unspecified
-            | Self::Unlit
-            | Self::Lambert
-            | Self::Phong
-            | Self::BlinnPhong
-            | Self::PbrMetallicRoughness
-            | Self::PbrSpecularGlossiness => None,
-        }
-    }
-
-    pub const fn kind(&self) -> ShadingModelKind {
-        match self {
-            Self::Unspecified => ShadingModelKind::Unspecified,
-            Self::Unlit => ShadingModelKind::Unlit,
-            Self::Lambert => ShadingModelKind::Lambert,
-            Self::Phong => ShadingModelKind::Phong,
-            Self::BlinnPhong => ShadingModelKind::BlinnPhong,
-            Self::PbrMetallicRoughness => ShadingModelKind::PbrMetallicRoughness,
-            Self::PbrSpecularGlossiness => ShadingModelKind::PbrSpecularGlossiness,
-            Self::Namespaced { .. } => ShadingModelKind::Namespaced,
-        }
-    }
-}
-
-/// A text-free shading category suitable for structured errors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ShadingModelKind {
-    Unspecified,
-    Unlit,
-    Lambert,
-    Phong,
-    BlinnPhong,
-    PbrMetallicRoughness,
-    PbrSpecularGlossiness,
-    Namespaced,
 }
 
 /// A validated alpha-test cutoff in the closed unit interval.
@@ -127,12 +46,11 @@ impl AlphaCutoff {
 }
 
 /// Canonical material alpha behavior.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AlphaMode {
     Opaque,
     Mask(AlphaCutoff),
     Blend,
-    Namespaced { schema_id: ExtensionSchemaId },
 }
 
 impl AlphaMode {
@@ -140,24 +58,19 @@ impl AlphaMode {
         AlphaCutoff::try_new(cutoff).map(Self::Mask)
     }
 
-    pub fn try_namespaced(
-        schema_id: Option<ExtensionSchemaId>,
-    ) -> Result<Self, AppearanceBehaviorError> {
-        let schema_id = require_behavior_schema(schema_id, AppearanceBehaviorKind::AlphaMode)?;
-        Ok(Self::Namespaced { schema_id })
-    }
-
     pub const fn mask_cutoff(&self) -> Option<f32> {
         match self {
             Self::Mask(cutoff) => Some(cutoff.get()),
-            Self::Opaque | Self::Blend | Self::Namespaced { .. } => None,
+            Self::Opaque | Self::Blend => None,
         }
     }
 
-    pub const fn schema_id(&self) -> Option<&ExtensionSchemaId> {
+    pub(crate) fn validate(self) -> Result<(), MaterialFactorError> {
         match self {
-            Self::Namespaced { schema_id } => Some(schema_id),
-            Self::Opaque | Self::Mask(_) | Self::Blend => None,
+            Self::Mask(cutoff) => {
+                validate_unit_factor(cutoff.get(), MaterialFactorField::AlphaCutoff)
+            }
+            Self::Opaque | Self::Blend => Ok(()),
         }
     }
 }
@@ -502,6 +415,42 @@ impl MaterialFactors {
     pub const fn supplemental_pbr(self) -> SupplementalPbrFactors {
         self.supplemental_pbr
     }
+
+    /// Rechecks the actual inline values at the central retained-storage boundary.
+    pub(crate) fn validate(self) -> Result<(), MaterialFactorError> {
+        validate_nonnegative_vec3(self.emissive, MaterialFactorField::Emissive)?;
+        if let Some(pbr) = self.pbr_metallic_roughness {
+            PbrMetallicRoughnessFactors::try_new(pbr.base_color, pbr.metallic, pbr.roughness)?;
+        }
+        if let Some(pbr) = self.pbr_specular_glossiness {
+            PbrSpecularGlossinessFactors::try_new(pbr.diffuse, pbr.specular, pbr.glossiness)?;
+        }
+        if let Some(legacy) = self.legacy {
+            LegacyMaterialFactors::try_new(
+                legacy.ambient,
+                legacy.diffuse,
+                legacy.specular,
+                legacy.emissive,
+                legacy.shininess,
+                legacy.opacity,
+            )?;
+        }
+        let pbr = self.supplemental_pbr;
+        SupplementalPbrFactors::try_new(
+            pbr.clearcoat,
+            pbr.clearcoat_roughness,
+            pbr.transmission,
+            pbr.thickness,
+            pbr.sheen_color,
+            pbr.sheen_roughness,
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_emissive_for_test(&mut self) {
+        self.emissive.x = f32::NAN;
+    }
 }
 
 impl Default for MaterialFactors {
@@ -560,8 +509,8 @@ fn validate_nonnegative_factor(
     Ok(())
 }
 
-/// A canonical or schema-backed material texture role.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A canonical material texture role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextureRole {
     BaseColor,
     Diffuse,
@@ -581,62 +530,31 @@ pub enum TextureRole {
     Thickness,
     SheenColor,
     SheenRoughness,
-    Namespaced { schema_id: ExtensionSchemaId },
 }
 
 impl TextureRole {
-    pub fn try_namespaced(
-        schema_id: Option<ExtensionSchemaId>,
-    ) -> Result<Self, AppearanceBehaviorError> {
-        let schema_id = require_behavior_schema(schema_id, AppearanceBehaviorKind::TextureRole)?;
-        Ok(Self::Namespaced { schema_id })
-    }
+    pub(crate) const BUILTIN_COUNT: usize = 18;
 
-    pub const fn schema_id(&self) -> Option<&ExtensionSchemaId> {
+    const fn builtin_index(self) -> usize {
         match self {
-            Self::Namespaced { schema_id } => Some(schema_id),
-            Self::BaseColor
-            | Self::Diffuse
-            | Self::Specular
-            | Self::Metallic
-            | Self::Roughness
-            | Self::MetallicRoughness
-            | Self::Normal
-            | Self::Occlusion
-            | Self::Emissive
-            | Self::Opacity
-            | Self::Displacement
-            | Self::Clearcoat
-            | Self::ClearcoatRoughness
-            | Self::ClearcoatNormal
-            | Self::Transmission
-            | Self::Thickness
-            | Self::SheenColor
-            | Self::SheenRoughness => None,
-        }
-    }
-
-    pub const fn kind(&self) -> TextureRoleKind {
-        match self {
-            Self::BaseColor => TextureRoleKind::BaseColor,
-            Self::Diffuse => TextureRoleKind::Diffuse,
-            Self::Specular => TextureRoleKind::Specular,
-            Self::Metallic => TextureRoleKind::Metallic,
-            Self::Roughness => TextureRoleKind::Roughness,
-            Self::MetallicRoughness => TextureRoleKind::MetallicRoughness,
-            Self::Normal => TextureRoleKind::Normal,
-            Self::Occlusion => TextureRoleKind::Occlusion,
-            Self::Emissive => TextureRoleKind::Emissive,
-            Self::Opacity => TextureRoleKind::Opacity,
-            Self::Displacement => TextureRoleKind::Displacement,
-            Self::Clearcoat => TextureRoleKind::Clearcoat,
-            Self::ClearcoatRoughness => TextureRoleKind::ClearcoatRoughness,
-            Self::ClearcoatNormal => TextureRoleKind::ClearcoatNormal,
-            Self::Transmission => TextureRoleKind::Transmission,
-            Self::Thickness => TextureRoleKind::Thickness,
-            Self::SheenColor => TextureRoleKind::SheenColor,
-            Self::SheenRoughness => TextureRoleKind::SheenRoughness,
-            Self::Namespaced { .. } => TextureRoleKind::Namespaced,
+            Self::BaseColor => 0,
+            Self::Diffuse => 1,
+            Self::Specular => 2,
+            Self::Metallic => 3,
+            Self::Roughness => 4,
+            Self::MetallicRoughness => 5,
+            Self::Normal => 6,
+            Self::Occlusion => 7,
+            Self::Emissive => 8,
+            Self::Opacity => 9,
+            Self::Displacement => 10,
+            Self::Clearcoat => 11,
+            Self::ClearcoatRoughness => 12,
+            Self::ClearcoatNormal => 13,
+            Self::Transmission => 14,
+            Self::Thickness => 15,
+            Self::SheenColor => 16,
+            Self::SheenRoughness => 17,
         }
     }
 
@@ -660,17 +578,16 @@ impl TextureRole {
             | Self::Transmission
             | Self::Thickness
             | Self::SheenRoughness => TextureUsageClass::Data,
-            Self::Namespaced { .. } => TextureUsageClass::Namespaced,
         }
     }
 
-    const fn channel_lane_range(&self) -> Option<(u8, u8)> {
+    const fn channel_lane_range(&self) -> (u8, u8) {
         match self {
-            Self::BaseColor | Self::Diffuse => Some((3, 4)),
-            Self::Specular => Some((3, 3)),
-            Self::Emissive | Self::SheenColor => Some((3, 3)),
-            Self::MetallicRoughness => Some((2, 2)),
-            Self::Normal | Self::ClearcoatNormal => Some((2, 3)),
+            Self::BaseColor | Self::Diffuse => (3, 4),
+            Self::Specular => (3, 3),
+            Self::Emissive | Self::SheenColor => (3, 3),
+            Self::MetallicRoughness => (2, 2),
+            Self::Normal | Self::ClearcoatNormal => (2, 3),
             Self::Metallic
             | Self::Roughness
             | Self::Occlusion
@@ -680,60 +597,7 @@ impl TextureRole {
             | Self::ClearcoatRoughness
             | Self::Transmission
             | Self::Thickness
-            | Self::SheenRoughness => Some((1, 1)),
-            Self::Namespaced { .. } => None,
-        }
-    }
-}
-
-/// A text-free texture role category suitable for errors and snapshots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TextureRoleKind {
-    BaseColor,
-    Diffuse,
-    Specular,
-    Metallic,
-    Roughness,
-    MetallicRoughness,
-    Normal,
-    Occlusion,
-    Emissive,
-    Opacity,
-    Displacement,
-    Clearcoat,
-    ClearcoatRoughness,
-    ClearcoatNormal,
-    Transmission,
-    Thickness,
-    SheenColor,
-    SheenRoughness,
-    Namespaced,
-}
-
-impl TextureRoleKind {
-    pub(crate) const BUILTIN_COUNT: usize = 18;
-
-    const fn builtin_index(self) -> Option<usize> {
-        match self {
-            Self::BaseColor => Some(0),
-            Self::Diffuse => Some(1),
-            Self::Specular => Some(2),
-            Self::Metallic => Some(3),
-            Self::Roughness => Some(4),
-            Self::MetallicRoughness => Some(5),
-            Self::Normal => Some(6),
-            Self::Occlusion => Some(7),
-            Self::Emissive => Some(8),
-            Self::Opacity => Some(9),
-            Self::Displacement => Some(10),
-            Self::Clearcoat => Some(11),
-            Self::ClearcoatRoughness => Some(12),
-            Self::ClearcoatNormal => Some(13),
-            Self::Transmission => Some(14),
-            Self::Thickness => Some(15),
-            Self::SheenColor => Some(16),
-            Self::SheenRoughness => Some(17),
-            Self::Namespaced => None,
+            | Self::SheenRoughness => (1, 1),
         }
     }
 }
@@ -742,20 +606,16 @@ impl TextureRoleKind {
 enum TextureUsageClass {
     Color,
     Data,
-    Namespaced,
 }
 
 /// A coordinate source used to evaluate one texture binding.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextureCoordinateSource {
     /// A zero-based UV set independent from any one primitive cardinality.
     UvSet(u16),
     ObjectPosition,
     ObjectNormal,
     ReflectionVector,
-    Namespaced {
-        schema_id: ExtensionSchemaId,
-    },
 }
 
 impl TextureCoordinateSource {
@@ -767,30 +627,10 @@ impl TextureCoordinateSource {
         Ok(Self::UvSet(set))
     }
 
-    pub fn try_namespaced(
-        schema_id: Option<ExtensionSchemaId>,
-    ) -> Result<Self, AppearanceBehaviorError> {
-        let schema_id =
-            require_behavior_schema(schema_id, AppearanceBehaviorKind::CoordinateSource)?;
-        Ok(Self::Namespaced { schema_id })
-    }
-
     pub const fn uv_set_index(&self) -> Option<u32> {
         match self {
             Self::UvSet(set) => Some(*set as u32),
-            Self::ObjectPosition
-            | Self::ObjectNormal
-            | Self::ReflectionVector
-            | Self::Namespaced { .. } => None,
-        }
-    }
-
-    pub const fn schema_id(&self) -> Option<&ExtensionSchemaId> {
-        match self {
-            Self::Namespaced { schema_id } => Some(schema_id),
-            Self::UvSet(_) | Self::ObjectPosition | Self::ObjectNormal | Self::ReflectionVector => {
-                None
-            }
+            Self::ObjectPosition | Self::ObjectNormal | Self::ReflectionVector => None,
         }
     }
 }
@@ -851,12 +691,12 @@ impl TextureChannelSwizzle {
         lane_count: 4,
     };
 
-    pub fn try_new(channels: &[TextureChannel]) -> Result<Self, TextureChannelMappingError> {
+    pub fn try_new(channels: &[TextureChannel]) -> Result<Self, TextureChannelSwizzleError> {
         if channels.is_empty() {
-            return Err(TextureChannelMappingError::Empty);
+            return Err(TextureChannelSwizzleError::Empty);
         }
         if channels.len() > 4 {
-            return Err(TextureChannelMappingError::TooManyLanes {
+            return Err(TextureChannelSwizzleError::TooManyLanes {
                 actual: channels.len(),
                 maximum: 4,
             });
@@ -865,7 +705,7 @@ impl TextureChannelSwizzle {
         let mut canonical = [TextureChannel::Zero; 4];
         canonical[..channels.len()].copy_from_slice(channels);
         let lane_count =
-            u8::try_from(channels.len()).map_err(|_| TextureChannelMappingError::TooManyLanes {
+            u8::try_from(channels.len()).map_err(|_| TextureChannelSwizzleError::TooManyLanes {
                 actual: channels.len(),
                 maximum: 4,
             })?;
@@ -875,101 +715,42 @@ impl TextureChannelSwizzle {
         })
     }
 
-    pub fn channels(&self) -> &[TextureChannel] {
+    pub fn as_slice(&self) -> &[TextureChannel] {
         &self.channels[..usize::from(self.lane_count)]
     }
 
     pub const fn lane_count(self) -> u8 {
         self.lane_count
     }
-}
 
-/// Canonical channel selection or a declaratively schema-backed mapping.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum TextureChannelMapping {
-    Swizzle(TextureChannelSwizzle),
-    Namespaced { schema_id: ExtensionSchemaId },
-}
-
-impl TextureChannelMapping {
-    pub const fn swizzle(swizzle: TextureChannelSwizzle) -> Self {
-        Self::Swizzle(swizzle)
+    pub(crate) fn is_valid(self) -> bool {
+        self.channels
+            .get(..usize::from(self.lane_count))
+            .is_some_and(|channels| Self::try_new(channels).is_ok())
     }
 
-    pub fn try_namespaced(
-        schema_id: Option<ExtensionSchemaId>,
-    ) -> Result<Self, AppearanceBehaviorError> {
-        let schema_id = require_behavior_schema(schema_id, AppearanceBehaviorKind::ChannelMapping)?;
-        Ok(Self::Namespaced { schema_id })
-    }
-
-    pub const fn lane_count(&self) -> Option<u8> {
-        match self {
-            Self::Swizzle(swizzle) => Some(swizzle.lane_count()),
-            Self::Namespaced { .. } => None,
-        }
-    }
-
-    pub const fn schema_id(&self) -> Option<&ExtensionSchemaId> {
-        match self {
-            Self::Namespaced { schema_id } => Some(schema_id),
-            Self::Swizzle(_) => None,
-        }
+    #[cfg(test)]
+    pub(crate) fn corrupt_lane_count_for_test(&mut self, count: u8) {
+        self.lane_count = count;
     }
 }
 
-/// Why a fixed channel mapping was rejected.
+/// Why a fixed channel swizzle was rejected.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum TextureChannelMappingError {
-    #[error("texture channel mapping must contain at least one output lane")]
+pub enum TextureChannelSwizzleError {
+    #[error("texture channel swizzle must contain at least one output lane")]
     Empty,
 
-    #[error("texture channel mapping has {actual} lanes; the maximum is {maximum}")]
+    #[error("texture channel swizzle has {actual} lanes; the maximum is {maximum}")]
     TooManyLanes { actual: usize, maximum: usize },
 }
 
 /// How sampled values are interpreted at one material usage site.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorInterpretation {
     SrgbColor,
     LinearColor,
     Data,
-    Namespaced { schema_id: ExtensionSchemaId },
-}
-
-impl ColorInterpretation {
-    pub fn try_namespaced(
-        schema_id: Option<ExtensionSchemaId>,
-    ) -> Result<Self, AppearanceBehaviorError> {
-        let schema_id =
-            require_behavior_schema(schema_id, AppearanceBehaviorKind::ColorInterpretation)?;
-        Ok(Self::Namespaced { schema_id })
-    }
-
-    pub const fn schema_id(&self) -> Option<&ExtensionSchemaId> {
-        match self {
-            Self::Namespaced { schema_id } => Some(schema_id),
-            Self::SrgbColor | Self::LinearColor | Self::Data => None,
-        }
-    }
-
-    pub const fn kind(&self) -> ColorInterpretationKind {
-        match self {
-            Self::SrgbColor => ColorInterpretationKind::SrgbColor,
-            Self::LinearColor => ColorInterpretationKind::LinearColor,
-            Self::Data => ColorInterpretationKind::Data,
-            Self::Namespaced { .. } => ColorInterpretationKind::Namespaced,
-        }
-    }
-}
-
-/// A text-free sampled-value interpretation category.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ColorInterpretationKind {
-    SrgbColor,
-    LinearColor,
-    Data,
-    Namespaced,
 }
 
 /// A finite two-dimensional texture coordinate transform.
@@ -1025,6 +806,10 @@ impl TextureTransform {
     pub const fn scale(self) -> Vec2 {
         self.scale
     }
+
+    pub(crate) fn validate(self) -> Result<(), TextureTransformError> {
+        Self::try_new(self.offset, self.rotation_radians, self.scale).map(|_| ())
+    }
 }
 
 impl Default for TextureTransform {
@@ -1070,6 +855,10 @@ impl TextureStrength {
     pub const fn get(self) -> f32 {
         self.0
     }
+
+    pub(crate) fn validate(self) -> Result<(), TextureStrengthError> {
+        Self::try_new(self.0).map(|_| ())
+    }
 }
 
 /// Why a texture strength was rejected.
@@ -1080,31 +869,16 @@ pub enum TextureStrengthError {
 }
 
 /// Ordered blend behavior for a texture binding.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextureBlendOperation {
     Replace,
     Multiply,
     Add,
     Subtract,
     Screen,
-    Namespaced { schema_id: ExtensionSchemaId },
 }
 
-impl TextureBlendOperation {
-    pub fn try_namespaced(
-        schema_id: Option<ExtensionSchemaId>,
-    ) -> Result<Self, AppearanceBehaviorError> {
-        let schema_id = require_behavior_schema(schema_id, AppearanceBehaviorKind::BlendOperation)?;
-        Ok(Self::Namespaced { schema_id })
-    }
-
-    pub const fn schema_id(&self) -> Option<&ExtensionSchemaId> {
-        match self {
-            Self::Namespaced { schema_id } => Some(schema_id),
-            Self::Replace | Self::Multiply | Self::Add | Self::Subtract | Self::Screen => None,
-        }
-    }
-}
+impl TextureBlendOperation {}
 
 /// A bounded source-format property or slot key.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1116,21 +890,7 @@ pub struct TextureSourceKey {
 impl TextureSourceKey {
     pub fn try_new(value: impl AsRef<str>) -> Result<Self, TextureSourceKeyError> {
         let value = value.as_ref();
-        if value.is_empty() {
-            return Err(TextureSourceKeyError::Empty);
-        }
-        if value.len() > MAX_TEXTURE_SOURCE_KEY_BYTES {
-            return Err(TextureSourceKeyError::TooLong {
-                actual: value.len(),
-                maximum: MAX_TEXTURE_SOURCE_KEY_BYTES,
-            });
-        }
-        if let Some((offset, _)) = value
-            .char_indices()
-            .find(|(_, character)| character.is_control())
-        {
-            return Err(TextureSourceKeyError::ControlCharacter { offset });
-        }
+        validate_texture_source_key(value)?;
 
         let mut bytes = [0; MAX_TEXTURE_SOURCE_KEY_BYTES];
         bytes[..value.len()].copy_from_slice(value.as_bytes());
@@ -1184,11 +944,24 @@ pub enum TextureSourceKeyError {
     ControlCharacter { offset: usize },
 }
 
-/// The stable owner-local authority key used while validating one material.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct TextureBindingAuthorityKey<'a> {
-    role: &'a TextureRole,
-    source_key: Option<&'a TextureSourceKey>,
+/// Shares the bounded text contract with directly borrowed retained source-key ranges.
+pub(crate) fn validate_texture_source_key(value: &str) -> Result<(), TextureSourceKeyError> {
+    if value.is_empty() {
+        return Err(TextureSourceKeyError::Empty);
+    }
+    if value.len() > MAX_TEXTURE_SOURCE_KEY_BYTES {
+        return Err(TextureSourceKeyError::TooLong {
+            actual: value.len(),
+            maximum: MAX_TEXTURE_SOURCE_KEY_BYTES,
+        });
+    }
+    if let Some((offset, _)) = value
+        .char_indices()
+        .find(|(_, character)| character.is_control())
+    {
+        return Err(TextureSourceKeyError::ControlCharacter { offset });
+    }
+    Ok(())
 }
 
 /// Borrowed material-use semantics independent from texture identity and storage layout.
@@ -1196,7 +969,7 @@ struct TextureBindingAuthorityKey<'a> {
 pub(crate) struct TextureBindingSemanticsRef<'a> {
     role: &'a TextureRole,
     coordinate_source: &'a TextureCoordinateSource,
-    channel_mapping: &'a TextureChannelMapping,
+    channel_mapping: &'a TextureChannelSwizzle,
     color_interpretation: &'a ColorInterpretation,
     transform: TextureTransform,
     strength: TextureStrength,
@@ -1209,7 +982,7 @@ impl<'a> TextureBindingSemanticsRef<'a> {
     pub(crate) const fn new(
         role: &'a TextureRole,
         coordinate_source: &'a TextureCoordinateSource,
-        channel_mapping: &'a TextureChannelMapping,
+        channel_mapping: &'a TextureChannelSwizzle,
         color_interpretation: &'a ColorInterpretation,
         transform: TextureTransform,
         strength: TextureStrength,
@@ -1236,7 +1009,7 @@ impl<'a> TextureBindingSemanticsRef<'a> {
         self.coordinate_source
     }
 
-    pub(crate) const fn channel_mapping(self) -> &'a TextureChannelMapping {
+    pub(crate) const fn channel_mapping(self) -> &'a TextureChannelSwizzle {
         self.channel_mapping
     }
 
@@ -1258,16 +1031,6 @@ impl<'a> TextureBindingSemanticsRef<'a> {
 
     pub(crate) const fn source_key(self) -> Option<&'a TextureSourceKey> {
         self.source_key
-    }
-
-    const fn authority_key(self) -> TextureBindingAuthorityKey<'a> {
-        TextureBindingAuthorityKey {
-            role: self.role,
-            source_key: match self.role {
-                TextureRole::Namespaced { .. } => self.source_key,
-                _ => None,
-            },
-        }
     }
 }
 
@@ -1324,7 +1087,6 @@ pub enum MaterialFactorGroup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppearanceBuildResource {
     TextureBindings,
-    BindingAuthorityScratch,
 }
 
 /// The bounded dimension exceeded by one appearance resource.
@@ -1338,19 +1100,19 @@ pub enum AppearanceLimitDimension {
 pub enum AppearanceBuildError {
     #[error("{shading:?} material requires factor group {required:?}")]
     MissingFactorGroup {
-        shading: ShadingModelKind,
+        shading: ShadingModel,
         required: MaterialFactorGroup,
     },
 
     #[error("texture role {role:?} does not admit color interpretation {interpretation:?}")]
     IncompatibleColorInterpretation {
-        role: TextureRoleKind,
-        interpretation: ColorInterpretationKind,
+        role: TextureRole,
+        interpretation: ColorInterpretation,
     },
 
     #[error("texture role {role:?} requires {minimum}..={maximum} mapped lanes, found {actual}")]
     IncompatibleChannelCount {
-        role: TextureRoleKind,
+        role: TextureRole,
         minimum: u8,
         maximum: u8,
         actual: u8,
@@ -1358,12 +1120,12 @@ pub enum AppearanceBuildError {
 
     #[error("texture role {role:?} violates its {requirement:?} strength requirement")]
     IncompatibleStrength {
-        role: TextureRoleKind,
+        role: TextureRole,
         requirement: TextureStrengthRequirement,
     },
 
     #[error("built-in texture role {role:?} requires Replace blend semantics")]
-    BuiltInRoleRequiresReplace { role: TextureRoleKind },
+    BuiltInRoleRequiresReplace { role: TextureRole },
 
     #[error("texture binding at index {duplicate_index} duplicates authority at {first_index}")]
     DuplicateBindingAuthority {
@@ -1376,9 +1138,9 @@ pub enum AppearanceBuildError {
     )]
     ConflictingBindingRoles {
         first_index: usize,
-        first_role: TextureRoleKind,
+        first_role: TextureRole,
         duplicate_index: usize,
-        duplicate_role: TextureRoleKind,
+        duplicate_role: TextureRole,
     },
 
     #[error(
@@ -1390,9 +1152,6 @@ pub enum AppearanceBuildError {
         requested: usize,
         maximum: usize,
     },
-
-    #[error("appearance allocation failed for {resource:?}")]
-    AllocationFailed { resource: AppearanceBuildResource },
 }
 
 /// The role-specific numeric contract for one texture binding strength.
@@ -1427,13 +1186,12 @@ pub(crate) fn validate_material_semantics(
         | ShadingModel::Phong
         | ShadingModel::BlinnPhong
         | ShadingModel::PbrMetallicRoughness
-        | ShadingModel::PbrSpecularGlossiness
-        | ShadingModel::Namespaced { .. } => None,
+        | ShadingModel::PbrSpecularGlossiness => None,
     };
 
     if let Some(required) = required {
         return Err(AppearanceBuildError::MissingFactorGroup {
-            shading: shading_model.kind(),
+            shading: *shading_model,
             required,
         });
     }
@@ -1447,9 +1205,7 @@ fn validate_binding_color_interpretation(
     let compatible = match (role.usage_class(), interpretation) {
         (TextureUsageClass::Color, ColorInterpretation::SrgbColor)
         | (TextureUsageClass::Color, ColorInterpretation::LinearColor)
-        | (TextureUsageClass::Data, ColorInterpretation::Data)
-        | (_, ColorInterpretation::Namespaced { .. })
-        | (TextureUsageClass::Namespaced, _) => true,
+        | (TextureUsageClass::Data, ColorInterpretation::Data) => true,
         (TextureUsageClass::Color, ColorInterpretation::Data)
         | (TextureUsageClass::Data, ColorInterpretation::SrgbColor)
         | (TextureUsageClass::Data, ColorInterpretation::LinearColor) => false,
@@ -1459,8 +1215,8 @@ fn validate_binding_color_interpretation(
         Ok(())
     } else {
         Err(AppearanceBuildError::IncompatibleColorInterpretation {
-            role: role.kind(),
-            interpretation: interpretation.kind(),
+            role: *role,
+            interpretation: *interpretation,
         })
     }
 }
@@ -1476,19 +1232,15 @@ pub(crate) fn validate_texture_binding_semantics(
 
 fn validate_binding_channel_mapping(
     role: &TextureRole,
-    mapping: &TextureChannelMapping,
+    mapping: &TextureChannelSwizzle,
 ) -> Result<(), AppearanceBuildError> {
-    let Some((minimum, maximum)) = role.channel_lane_range() else {
-        return Ok(());
-    };
-    let Some(actual) = mapping.lane_count() else {
-        return Ok(());
-    };
+    let (minimum, maximum) = role.channel_lane_range();
+    let actual = mapping.lane_count();
     if (minimum..=maximum).contains(&actual) {
         Ok(())
     } else {
         Err(AppearanceBuildError::IncompatibleChannelCount {
-            role: role.kind(),
+            role: *role,
             minimum,
             maximum,
             actual,
@@ -1518,7 +1270,6 @@ fn validate_binding_strength(
         TextureRole::Normal | TextureRole::ClearcoatNormal | TextureRole::Displacement => {
             TextureStrengthRequirement::FiniteSigned
         }
-        TextureRole::Namespaced { .. } => return Ok(()),
     };
     let value = strength.get();
     let valid = match requirement {
@@ -1531,7 +1282,7 @@ fn validate_binding_strength(
         Ok(())
     } else {
         Err(AppearanceBuildError::IncompatibleStrength {
-            role: role.kind(),
+            role: *role,
             requirement,
         })
     }
@@ -1541,43 +1292,31 @@ fn validate_binding_blend(
     role: &TextureRole,
     blend: &TextureBlendOperation,
 ) -> Result<(), AppearanceBuildError> {
-    if matches!(role, TextureRole::Namespaced { .. })
-        || matches!(blend, TextureBlendOperation::Replace)
-    {
+    if matches!(blend, TextureBlendOperation::Replace) {
         Ok(())
     } else {
-        Err(AppearanceBuildError::BuiltInRoleRequiresReplace { role: role.kind() })
+        Err(AppearanceBuildError::BuiltInRoleRequiresReplace { role: *role })
     }
 }
 
-pub(crate) struct MaterialTextureBindingSemanticsValidator<'a> {
+pub(crate) struct MaterialTextureBindingSemanticsValidator {
     binding_count: usize,
     next_index: usize,
-    builtin_first_indices: [Option<usize>; TextureRoleKind::BUILTIN_COUNT],
-    namespaced_first_indices: HashMap<TextureBindingAuthorityKey<'a>, usize>,
-    namespaced_capacity_reserved: bool,
-    metallic: Option<usize>,
-    roughness: Option<usize>,
-    metallic_roughness: Option<usize>,
+    builtin_first_indices: [Option<usize>; TextureRole::BUILTIN_COUNT],
 }
 
-impl<'a> MaterialTextureBindingSemanticsValidator<'a> {
+impl MaterialTextureBindingSemanticsValidator {
     pub(crate) fn new(binding_count: usize) -> Self {
         Self {
             binding_count,
             next_index: 0,
-            builtin_first_indices: [None; TextureRoleKind::BUILTIN_COUNT],
-            namespaced_first_indices: HashMap::new(),
-            namespaced_capacity_reserved: false,
-            metallic: None,
-            roughness: None,
-            metallic_roughness: None,
+            builtin_first_indices: [None; TextureRole::BUILTIN_COUNT],
         }
     }
 
     pub(crate) fn validate_next(
         &mut self,
-        binding: TextureBindingSemanticsRef<'a>,
+        binding: TextureBindingSemanticsRef<'_>,
     ) -> Result<(), AppearanceBuildError> {
         if self.next_index >= self.binding_count {
             return Err(AppearanceBuildError::LimitExceeded {
@@ -1589,50 +1328,30 @@ impl<'a> MaterialTextureBindingSemanticsValidator<'a> {
         }
         let duplicate_index = self.next_index;
         self.next_index += 1;
-        let role = binding.role().kind();
-        if let Some(role_index) = role.builtin_index() {
-            let first_index = &mut self.builtin_first_indices[role_index];
-            if let Some(first_index) = *first_index {
-                return Err(AppearanceBuildError::DuplicateBindingAuthority {
-                    first_index,
-                    duplicate_index,
-                });
-            }
-            *first_index = Some(duplicate_index);
-        } else {
-            if !self.namespaced_capacity_reserved {
-                self.namespaced_first_indices
-                    .try_reserve(self.binding_count)
-                    .map_err(|_| AppearanceBuildError::AllocationFailed {
-                        resource: AppearanceBuildResource::BindingAuthorityScratch,
-                    })?;
-                self.namespaced_capacity_reserved = true;
-            }
-            let authority = binding.authority_key();
-            if let Some(&first_index) = self.namespaced_first_indices.get(&authority) {
-                return Err(AppearanceBuildError::DuplicateBindingAuthority {
-                    first_index,
-                    duplicate_index,
-                });
-            }
-            self.namespaced_first_indices
-                .insert(authority, duplicate_index);
+        let role = *binding.role();
+        let first_index = &mut self.builtin_first_indices[role.builtin_index()];
+        if let Some(first_index) = *first_index {
+            return Err(AppearanceBuildError::DuplicateBindingAuthority {
+                first_index,
+                duplicate_index,
+            });
         }
+        *first_index = Some(duplicate_index);
 
         let conflict = match role {
-            TextureRoleKind::Metallic => self
-                .metallic_roughness
-                .map(|index| (index, TextureRoleKind::MetallicRoughness)),
-            TextureRoleKind::Roughness => self
-                .metallic_roughness
-                .map(|index| (index, TextureRoleKind::MetallicRoughness)),
-            TextureRoleKind::MetallicRoughness => self
-                .metallic
-                .map(|index| (index, TextureRoleKind::Metallic))
-                .or_else(|| {
-                    self.roughness
-                        .map(|index| (index, TextureRoleKind::Roughness))
-                }),
+            TextureRole::Metallic => self.builtin_first_indices
+                [TextureRole::MetallicRoughness.builtin_index()]
+            .map(|index| (index, TextureRole::MetallicRoughness)),
+            TextureRole::Roughness => self.builtin_first_indices
+                [TextureRole::MetallicRoughness.builtin_index()]
+            .map(|index| (index, TextureRole::MetallicRoughness)),
+            TextureRole::MetallicRoughness => self.builtin_first_indices
+                [TextureRole::Metallic.builtin_index()]
+            .map(|index| (index, TextureRole::Metallic))
+            .or_else(|| {
+                self.builtin_first_indices[TextureRole::Roughness.builtin_index()]
+                    .map(|index| (index, TextureRole::Roughness))
+            }),
             _ => None,
         };
         if let Some((first_index, first_role)) = conflict {
@@ -1642,14 +1361,6 @@ impl<'a> MaterialTextureBindingSemanticsValidator<'a> {
                 duplicate_index,
                 duplicate_role: role,
             });
-        }
-        match role {
-            TextureRoleKind::Metallic => self.metallic = Some(duplicate_index),
-            TextureRoleKind::Roughness => self.roughness = Some(duplicate_index),
-            TextureRoleKind::MetallicRoughness => {
-                self.metallic_roughness = Some(duplicate_index);
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -1673,13 +1384,9 @@ mod tests {
     static UV_ZERO: TextureCoordinateSource = TextureCoordinateSource::UvSet(0);
     static REPLACE: TextureBlendOperation = TextureBlendOperation::Replace;
 
-    fn schema(name: &str) -> ExtensionSchemaId {
-        ExtensionSchemaId::new(name, 1).expect("test schema should be canonical")
-    }
-
     fn binding_semantics<'a>(
         role: &'a TextureRole,
-        channel_mapping: &'a TextureChannelMapping,
+        channel_mapping: &'a TextureChannelSwizzle,
         color_interpretation: &'a ColorInterpretation,
         strength: TextureStrength,
         blend: &'a TextureBlendOperation,
@@ -1709,7 +1416,7 @@ mod tests {
                 MaterialFactors::empty(),
             )),
             Err(AppearanceBuildError::MissingFactorGroup {
-                shading: ShadingModelKind::PbrMetallicRoughness,
+                shading: ShadingModel::PbrMetallicRoughness,
                 required: MaterialFactorGroup::PbrMetallicRoughness,
             })
         );
@@ -1737,27 +1444,6 @@ mod tests {
         assert_eq!(semantics.factors().pbr_metallic_roughness(), Some(pbr));
         assert_eq!(semantics.factors().legacy(), Some(legacy));
         assert!(semantics.double_sided());
-    }
-
-    #[test]
-    fn namespaced_behaviors_require_schema_authority() {
-        assert_eq!(
-            ShadingModel::try_namespaced(None),
-            Err(AppearanceBehaviorError::SchemaRequired {
-                behavior: AppearanceBehaviorKind::ShadingModel,
-            })
-        );
-        assert_eq!(
-            TextureRole::try_namespaced(None),
-            Err(AppearanceBehaviorError::SchemaRequired {
-                behavior: AppearanceBehaviorKind::TextureRole,
-            })
-        );
-
-        let admitted = schema("vendor:layered-role");
-        let role = TextureRole::try_namespaced(Some(admitted.clone()))
-            .expect("schema-backed role should build");
-        assert_eq!(role.schema_id(), Some(&admitted));
     }
 
     #[test]
@@ -1795,7 +1481,7 @@ mod tests {
     #[test]
     fn binding_semantics_enforce_role_contracts() {
         let normal = TextureRole::Normal;
-        let rgb = TextureChannelMapping::swizzle(TextureChannelSwizzle::RGB);
+        let rgb = TextureChannelSwizzle::RGB;
         let srgb = ColorInterpretation::SrgbColor;
         assert_eq!(
             validate_texture_binding_semantics(binding_semantics(
@@ -1807,13 +1493,13 @@ mod tests {
                 None,
             )),
             Err(AppearanceBuildError::IncompatibleColorInterpretation {
-                role: TextureRoleKind::Normal,
-                interpretation: ColorInterpretationKind::SrgbColor,
+                role: TextureRole::Normal,
+                interpretation: ColorInterpretation::SrgbColor,
             })
         );
 
         let specular = TextureRole::Specular;
-        let rgba = TextureChannelMapping::swizzle(TextureChannelSwizzle::RGBA);
+        let rgba = TextureChannelSwizzle::RGBA;
         let linear = ColorInterpretation::LinearColor;
         assert_eq!(
             validate_texture_binding_semantics(binding_semantics(
@@ -1825,7 +1511,7 @@ mod tests {
                 None,
             )),
             Err(AppearanceBuildError::IncompatibleChannelCount {
-                role: TextureRoleKind::Specular,
+                role: TextureRole::Specular,
                 minimum: 3,
                 maximum: 3,
                 actual: 4,
@@ -1833,7 +1519,7 @@ mod tests {
         );
 
         let metallic = TextureRole::Metallic;
-        let red = TextureChannelMapping::swizzle(TextureChannelSwizzle::RED);
+        let red = TextureChannelSwizzle::RED;
         let data = ColorInterpretation::Data;
         assert_eq!(
             validate_texture_binding_semantics(binding_semantics(
@@ -1845,7 +1531,7 @@ mod tests {
                 None,
             )),
             Err(AppearanceBuildError::IncompatibleStrength {
-                role: TextureRoleKind::Metallic,
+                role: TextureRole::Metallic,
                 requirement: TextureStrengthRequirement::ExactlyOne,
             })
         );
@@ -1862,15 +1548,15 @@ mod tests {
                 None,
             )),
             Err(AppearanceBuildError::BuiltInRoleRequiresReplace {
-                role: TextureRoleKind::BaseColor,
+                role: TextureRole::BaseColor,
             })
         );
     }
 
     #[test]
-    fn material_validator_tracks_builtin_and_namespaced_authority() {
+    fn material_validator_rejects_duplicate_roles_independently_of_source_key() {
         let builtin_role = TextureRole::BaseColor;
-        let rgb = TextureChannelMapping::swizzle(TextureChannelSwizzle::RGB);
+        let rgb = TextureChannelSwizzle::RGB;
         let color = ColorInterpretation::SrgbColor;
         let first_key = TextureSourceKey::try_new("layer-0").expect("source key should be valid");
         let second_key = TextureSourceKey::try_new("layer-1").expect("source key should be valid");
@@ -1897,29 +1583,6 @@ mod tests {
                 duplicate_index: 1,
             })
         );
-
-        let namespaced_role = TextureRole::try_namespaced(Some(schema("vendor:layered-role")))
-            .expect("schema-backed role should build");
-        let red = TextureChannelMapping::swizzle(TextureChannelSwizzle::RED);
-        let data = ColorInterpretation::Data;
-        let first = binding_semantics(
-            &namespaced_role,
-            &red,
-            &data,
-            TextureStrength::ONE,
-            &REPLACE,
-            Some(&first_key),
-        );
-        let second = binding_semantics(
-            &namespaced_role,
-            &red,
-            &data,
-            TextureStrength::ONE,
-            &REPLACE,
-            Some(&second_key),
-        );
-        validate_material_texture_binding_semantics([first, second].into_iter())
-            .expect("distinct schema-local keys define distinct authorities");
     }
 
     #[test]
@@ -1928,13 +1591,12 @@ mod tests {
         let combined_channels =
             TextureChannelSwizzle::try_new(&[TextureChannel::Blue, TextureChannel::Green])
                 .expect("two-lane mapping should be valid");
-        let combined_mapping = TextureChannelMapping::swizzle(combined_channels);
         let metallic_role = TextureRole::Metallic;
-        let metallic_mapping = TextureChannelMapping::swizzle(TextureChannelSwizzle::RED);
+        let metallic_mapping = TextureChannelSwizzle::RED;
         let data = ColorInterpretation::Data;
         let combined = binding_semantics(
             &combined_role,
-            &combined_mapping,
+            &combined_channels,
             &data,
             TextureStrength::ONE,
             &REPLACE,
@@ -1952,9 +1614,9 @@ mod tests {
             validate_material_texture_binding_semantics([combined, separate].into_iter()),
             Err(AppearanceBuildError::ConflictingBindingRoles {
                 first_index: 0,
-                first_role: TextureRoleKind::MetallicRoughness,
+                first_role: TextureRole::MetallicRoughness,
                 duplicate_index: 1,
-                duplicate_role: TextureRoleKind::Metallic,
+                duplicate_role: TextureRole::Metallic,
             })
         );
 
@@ -1968,5 +1630,137 @@ mod tests {
                 maximum: 0,
             })
         );
+    }
+
+    #[test]
+    fn swizzle_is_the_direct_copy_value_and_preserves_source_lane_order() {
+        fn require_copy<T: Copy>(value: T) -> T {
+            value
+        }
+        let expected = [
+            TextureChannel::Blue,
+            TextureChannel::Green,
+            TextureChannel::One,
+            TextureChannel::Zero,
+        ];
+        let swizzle = require_copy(TextureChannelSwizzle::try_new(&expected).unwrap());
+        let semantics = binding_semantics(
+            &TextureRole::BaseColor,
+            &swizzle,
+            &ColorInterpretation::LinearColor,
+            TextureStrength::ONE,
+            &REPLACE,
+            None,
+        );
+        assert_eq!(semantics.channel_mapping().as_slice(), expected);
+        assert_eq!(semantics.channel_mapping().lane_count(), 4);
+        assert!(swizzle.is_valid());
+        assert_eq!(
+            TextureChannelSwizzle::try_new(&[]),
+            Err(TextureChannelSwizzleError::Empty)
+        );
+        assert_eq!(
+            TextureChannelSwizzle::try_new(&[TextureChannel::Red; 5]),
+            Err(TextureChannelSwizzleError::TooManyLanes {
+                actual: 5,
+                maximum: 4
+            })
+        );
+        let mut corrupt = swizzle;
+        corrupt.lane_count = 0;
+        assert!(!corrupt.is_valid());
+        corrupt.lane_count = 5;
+        assert!(!corrupt.is_valid());
+        require_copy(ShadingModel::Unspecified);
+        require_copy(AlphaMode::Opaque);
+        require_copy(TextureRole::Normal);
+        require_copy(TextureCoordinateSource::ReflectionVector);
+        require_copy(ColorInterpretation::Data);
+        require_copy(TextureBlendOperation::Replace);
+    }
+
+    #[test]
+    fn actual_numeric_values_revalidate_without_normalizing_or_allocating() {
+        let mut factors = MaterialFactors::try_new(
+            Vec3::new(2.0, -0.0, 0.5),
+            Some(PbrMetallicRoughnessFactors::default()),
+            Some(
+                PbrSpecularGlossinessFactors::try_new(Color::WHITE, Vec3::new(0.5, 0.5, 0.5), 0.5)
+                    .unwrap(),
+            ),
+            Some(
+                LegacyMaterialFactors::try_new(
+                    Vec3::ZERO,
+                    Vec3::new(3.0, 2.0, 1.0),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                    64.0,
+                    1.0,
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        let transform =
+            TextureTransform::try_new(Vec2::new(-0.0, -2.0), 7.0, Vec2::new(-3.0, 0.0)).unwrap();
+        let allocation = allocation_counter::measure(|| {
+            assert!(factors.validate().is_ok());
+            assert!(AlphaMode::mask(-0.0).unwrap().validate().is_ok());
+            assert!(transform.validate().is_ok());
+            assert!(TextureStrength::try_new(-2.0).unwrap().validate().is_ok());
+            assert!(validate_texture_source_key("source:custom slot").is_ok());
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(factors.emissive().y.to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(transform.offset().x.to_bits(), (-0.0_f32).to_bits());
+        factors.pbr_specular_glossiness.as_mut().unwrap().glossiness = f32::NAN;
+        assert!(factors.validate().is_err());
+        assert!(
+            AlphaMode::Mask(AlphaCutoff(f32::INFINITY))
+                .validate()
+                .is_err()
+        );
+        assert!(TextureStrength(f32::INFINITY).validate().is_err());
+        assert!(
+            TextureTransform {
+                scale: Vec2::new(f32::NAN, 1.0),
+                ..transform
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn opposite_role_conflict_order_and_distinct_materials_keep_the_same_rules() {
+        let channels =
+            TextureChannelSwizzle::try_new(&[TextureChannel::Blue, TextureChannel::Green]).unwrap();
+        let combined = binding_semantics(
+            &TextureRole::MetallicRoughness,
+            &channels,
+            &ColorInterpretation::Data,
+            TextureStrength::ONE,
+            &REPLACE,
+            None,
+        );
+        let separate = binding_semantics(
+            &TextureRole::Roughness,
+            &TextureChannelSwizzle::RED,
+            &ColorInterpretation::Data,
+            TextureStrength::ONE,
+            &REPLACE,
+            None,
+        );
+        assert_eq!(
+            validate_material_texture_binding_semantics([separate, combined].into_iter()),
+            Err(AppearanceBuildError::ConflictingBindingRoles {
+                first_index: 0,
+                first_role: TextureRole::Roughness,
+                duplicate_index: 1,
+                duplicate_role: TextureRole::MetallicRoughness,
+            })
+        );
+        assert!(validate_material_texture_binding_semantics([separate].into_iter()).is_ok());
+        assert!(validate_material_texture_binding_semantics([separate].into_iter()).is_ok());
     }
 }

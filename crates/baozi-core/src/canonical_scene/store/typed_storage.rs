@@ -15,6 +15,7 @@ use crate::geometry::TopologyKind;
 use crate::math::{Mat4, Quat, Vec3};
 
 pub(super) mod animation;
+pub(super) mod appearance;
 pub(super) mod build;
 pub(super) mod deformation;
 pub(super) mod edit;
@@ -31,6 +32,7 @@ pub(super) struct SceneTables {
     pub(super) geometry: RetainedStorage<GeometryStorage>,
     pub(super) deformation: RetainedStorage<deformation::DeformationStorage>,
     pub(super) animation: RetainedStorage<animation::AnimationStorage>,
+    pub(super) appearance: RetainedStorage<appearance::AppearanceStorage>,
     pub(super) profile: profile::ProfileStorage,
 }
 

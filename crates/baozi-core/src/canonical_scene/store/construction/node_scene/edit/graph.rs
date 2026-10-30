@@ -1,25 +1,14 @@
 use baozi_operation::__retained_store_integration::activation::CanonicalLane;
 use baozi_operation::__retained_store_integration::authority::CanonicalInheritanceSource;
-use baozi_operation::{
-    OperationOwner, ProgressPhase, ProgressUnit, RecordBlock, RecordPlan, ShareableStoreKind,
-    StoreRuntimeError,
-};
+use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, RecordPlan, StoreRuntimeError};
 
-use super::super::appearance::{
-    AppearancePayloadRefs, AppearanceTableRefs, RetainedAppearanceRefs,
-};
+use super::super::NodeSceneMaterializedRefs;
 use super::super::geometry::map_build;
-use super::super::{NodeSceneMaterializedRefs, SceneStorage};
 use super::plan::{BoundPendingNodeSceneEdit, NodeSceneEditProgram};
 use super::profile::retain_edited_profile;
 use super::required_record_view;
-use crate::canonical_scene::store::schema::appearance::{
-    AppearanceBindingTableSchema, AppearanceDirectorySchema, AppearanceImageTableSchema,
-    AppearanceMaterialTableSchema, AppearanceSamplerTableSchema, AppearanceTextureTableSchema,
-};
 use crate::canonical_scene::store::schema::{
-    CanonicalBlockRef, CanonicalSchema, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION,
-    SceneDirectorySchema,
+    CanonicalBlockRef, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION, SceneDirectorySchema,
 };
 use crate::canonical_scene::store::typed_storage::{SceneTables, build::NodeStoragePlan};
 
@@ -27,11 +16,6 @@ pub(super) struct RewrittenNodeSceneGraph {
     pub(super) directory: CanonicalBlockRef<SceneDirectorySchema>,
     pub(super) refs: NodeSceneMaterializedRefs,
     pub(super) tables: SceneTables,
-}
-
-#[derive(Clone, Copy)]
-struct InheritedNodeSceneLeafRefs {
-    appearance: AppearancePayloadRefs,
 }
 
 pub(super) fn try_rewrite_node_scene<'lane, 'scene, O, PP, U>(
@@ -123,7 +107,6 @@ where
         pending.counts.profile,
         &pending.operation,
     )?;
-    let inherited = inherit_unchanged_evidence_leaves(lane, pending)?;
     let spatial = if let NodeSceneEditProgram::ConvertSpace { conversion, .. } = &pending.program {
         let source = pending.input.tables.spatial.as_ref();
         let plan = crate::canonical_scene::store::typed_storage::spatial::build::SpatialStoragePlan::for_storage(source)
@@ -140,16 +123,10 @@ where
     } else {
         lane.try_share_storage(&pending.input.tables.spatial)?
     };
-    let appearance = rewrite_appearance(lane, pending, inherited.appearance)?;
+    let appearance = lane.try_share_storage(&pending.input.tables.appearance)?;
     let deformation = lane.try_share_storage(&pending.input.tables.deformation)?;
     let animation = lane.try_share_storage(&pending.input.tables.animation)?;
-    let directory = rewrite_directory_with_shape(
-        lane,
-        pending,
-        NodeSceneDirectoryRefs {
-            appearance: appearance.directory,
-        },
-    )?;
+    let directory = rewrite_directory_with_shape(lane, pending)?;
 
     Ok(RewrittenNodeSceneGraph {
         directory,
@@ -159,24 +136,16 @@ where
             geometry,
             deformation,
             animation,
+            appearance,
             profile,
         },
-        refs: NodeSceneMaterializedRefs {
-            directory,
-            appearance,
-        },
+        refs: NodeSceneMaterializedRefs { directory },
     })
-}
-
-#[derive(Clone, Copy)]
-struct NodeSceneDirectoryRefs {
-    appearance: CanonicalBlockRef<AppearanceDirectorySchema>,
 }
 
 fn rewrite_directory_with_shape<'lane, O, PP, U>(
     lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
     pending: &BoundPendingNodeSceneEdit<'_>,
-    refs: NodeSceneDirectoryRefs,
 ) -> Result<CanonicalBlockRef<SceneDirectorySchema>, StoreRuntimeError>
 where
     O: OperationOwner,
@@ -202,201 +171,9 @@ where
                 row.write_scalar(pending.counts.logical_meshes.as_u32())?;
                 row.write_scalar(pending.counts.primitives.as_u32())?;
                 row.write_scalar(pending.counts.attributes.as_u32())?;
-                row.write_scalar(pending.counts.mesh_instances.as_u32())?;
-                row.write_record_ref(refs.appearance.into_store())
+                row.write_scalar(pending.counts.mesh_instances.as_u32())
             })
         },
     )
     .map(CanonicalBlockRef::from_store)
-}
-
-fn inherit_unchanged_evidence_leaves<'lane, 'scene, O, PP, U>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-    pending: &BoundPendingNodeSceneEdit<'scene>,
-) -> Result<InheritedNodeSceneLeafRefs, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let proof = pending.input.proof;
-    let mut inherited = 0_usize;
-
-    let appearance = AppearancePayloadRefs {
-        image_payloads: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.appearance_image_payloads(),
-            &mut inherited,
-        )?,
-        media_types: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.appearance_media_types(),
-            &mut inherited,
-        )?,
-        source_keys: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.appearance_source_keys(),
-            &mut inherited,
-        )?,
-        binding_semantic_scalars: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.appearance_binding_semantic_scalars(),
-            &mut inherited,
-        )?,
-        material_factor_scalars: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.appearance_material_factor_scalars(),
-            &mut inherited,
-        )?,
-        material_names: inherit_optional_leaf(
-            lane,
-            pending.input,
-            proof.appearance_material_names(),
-            &mut inherited,
-        )?,
-    };
-
-    if inherited != pending.counts.inherited_leaf_count.as_usize() {
-        return Err(StoreRuntimeError::InvalidSourceSlot);
-    }
-    Ok(InheritedNodeSceneLeafRefs { appearance })
-}
-
-fn rewrite_appearance<'lane, O, PP, U>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-    pending: &BoundPendingNodeSceneEdit<'_>,
-    payloads: AppearancePayloadRefs,
-) -> Result<RetainedAppearanceRefs, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    let input = pending.input;
-    let proof = input.proof;
-    let images = rewrite_optional_record(
-        lane,
-        input,
-        proof.appearance_images(),
-        pending.counts.images.as_usize(),
-        AppearanceImageTableSchema,
-    )?;
-    let samplers = rewrite_optional_record(
-        lane,
-        input,
-        proof.appearance_samplers(),
-        pending.counts.samplers.as_usize(),
-        AppearanceSamplerTableSchema,
-    )?;
-    let textures = rewrite_optional_record(
-        lane,
-        input,
-        proof.appearance_textures(),
-        pending.counts.textures.as_usize(),
-        AppearanceTextureTableSchema,
-    )?;
-    let bindings = rewrite_optional_record(
-        lane,
-        input,
-        proof.appearance_bindings(),
-        pending.counts.material_bindings.as_usize(),
-        AppearanceBindingTableSchema,
-    )?;
-    let materials = rewrite_optional_record(
-        lane,
-        input,
-        proof.materials(),
-        pending.counts.materials.as_usize(),
-        AppearanceMaterialTableSchema,
-    )?;
-    let directory = rewrite_required_record(
-        lane,
-        input,
-        proof.appearance_directory(),
-        1,
-        AppearanceDirectorySchema,
-    )?;
-    Ok(RetainedAppearanceRefs {
-        directory,
-        tables: AppearanceTableRefs {
-            images,
-            samplers,
-            textures,
-            bindings,
-            materials,
-        },
-        payloads,
-    })
-}
-
-fn rewrite_optional_record<'lane, O, PP, U, Schema>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-    input: &SceneStorage,
-    source: Option<CanonicalBlockRef<Schema>>,
-    expected_rows: usize,
-    tag: Schema,
-) -> Result<Option<CanonicalBlockRef<Schema>>, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    Schema: CanonicalSchema<StoreKind = RecordBlock>,
-{
-    match (source, expected_rows) {
-        (None, 0) => Ok(None),
-        (Some(source), rows) if rows != 0 => {
-            rewrite_required_record(lane, input, source, rows, tag).map(Some)
-        }
-        _ => Err(StoreRuntimeError::InvalidSourceSlot),
-    }
-}
-
-fn rewrite_required_record<'lane, O, PP, U, Schema>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-    input: &SceneStorage,
-    source: CanonicalBlockRef<Schema>,
-    expected_rows: usize,
-    tag: Schema,
-) -> Result<CanonicalBlockRef<Schema>, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    Schema: CanonicalSchema<StoreKind = RecordBlock>,
-{
-    let view = required_record_view(input, source)?;
-    if view.rows() != expected_rows {
-        return Err(StoreRuntimeError::InvalidSourceSlot);
-    }
-    let plan = RecordPlan::new(view.rows(), view.fields()).map_err(StoreRuntimeError::Plan)?;
-    lane.try_copy_mapped_records(&input.canonical, source.into_store(), plan, tag)
-        .map(CanonicalBlockRef::from_store)
-}
-
-fn inherit_optional_leaf<'lane, O, PP, U, Schema>(
-    lane: &mut CanonicalLane<'lane, O, PP, U, CanonicalInheritanceSource>,
-    input: &SceneStorage,
-    source: Option<CanonicalBlockRef<Schema>>,
-    inherited: &mut usize,
-) -> Result<Option<CanonicalBlockRef<Schema>>, StoreRuntimeError>
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-    Schema: CanonicalSchema,
-    Schema::StoreKind: ShareableStoreKind,
-{
-    let Some(source) = source else {
-        return Ok(None);
-    };
-    let mapped = lane.try_share_canonical(&input.canonical, source.into_store())?;
-    *inherited = inherited
-        .checked_add(1)
-        .ok_or(StoreRuntimeError::AccountingOverflow)?;
-    Ok(Some(CanonicalBlockRef::from_store(mapped)))
 }

@@ -226,10 +226,18 @@ descriptor scratch tables. Animation target validation borrows actual deformatio
 channel targets use logical coordinates. The animation increment replaces those remaining records
 with two typed row tables and five payload pools, shares unchanged owners, and removes its
 clip/channel validation descriptors. Shared time-domain/interpolation/extrapolation declarations
-serve authoring and reading directly. Appearance storage remains the subsequent D2 cutover.
+serve authoring and reading directly. The final appearance increment replaces its records with
+five typed row tables and two pools in one owner. Authoring retains only resolved image borrows;
+all other appearance descriptors stay in the original input. Central validation allocates no
+appearance scratch, and unchanged edits share the complete owner. Shared closed domain types replace
+duplicate Kind enums, a channel-mapping wrapper, and producerless Namespaced behavior variants.
+Delete their record writer/schema/decoder, edit rewrite, three validation projections, and inert
+record-leaf inheritance planning together. All seven semantic domains now use actual typed owners.
 
-The private root becomes `SceneTables`, retaining node, geometry, profile, spatial, deformation, and animation owners through the
-existing storage-first release mechanism. Profile state owns typed owner/attachment and metadata
+The private root becomes `SceneTables`, retaining node, geometry, profile, spatial, appearance,
+deformation, and animation owners through the
+existing storage-first release mechanism. Its remaining count directory is one record without
+domain references or payload leaves. Profile state owns typed owner/attachment and metadata
 descriptors; immutable lineage segments and metadata payloads have independent retained owners.
 Store operation digests as typed values, not offset/length rows. A provenance link identifies
 its exact segment and local node; derive other coordinates at checked lookup boundaries instead
@@ -253,7 +261,7 @@ Limit the pilot to these workloads, using existing helpers or small local probes
 
 | Workload | Sizes | Observation |
 | --- | --- | --- |
-| Independent indexed primitive buffers | 256, 1,024, 4,096 primitives | Actual cache comparisons and charged work; no prefix-scan growth. |
+| Independent indexed primitive buffers | 256, 1,024, 4,096 primitives | Actual controlled row/index traversal and charged work; no prefix-scan growth. Typed storage removes the former record-buffer cache entirely. |
 | One node-transform edit with unchanged geometry | 1,000 and 10,000 nodes with one shared 8 MiB payload | Unrelated record-copy volume and temporary allocation. |
 | Influence and metadata validation | 10,000 and 100,000 vertices with four influences; 1 and 8 MiB metadata | Temporary allocation/peak and absence of full immutable-payload copies. |
 
@@ -329,6 +337,12 @@ growth checks cover the specified workloads. Perform one bounded manual negative
 distinct-buffer comparison assertion, then remove the deliberate regression; do not build a mutation
 runner. A persistent blocking gate needs its own deterministic upper bound or justified threshold.
 Timing trends remain advisory unless measurement noise and thresholds are justified.
+
+After the typed cutover, the central geometry validator visits actual compact ranges and indices;
+it has no buffer-comparison cache to instrument. Perform the bounded manual negative check against
+the existing real-pipeline fourfold-input work-growth assertion by temporarily adding a metered
+prefix walk, verify rejection, then remove precisely that deliberate regression. Do not recreate a
+retired cache or build a comparison-instrumentation framework to satisfy historical terminology.
 
 ### H — Update dependencies and prove first publication
 

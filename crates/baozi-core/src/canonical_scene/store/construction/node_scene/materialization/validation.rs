@@ -79,10 +79,10 @@ fn aggregate_validation_error(
     }
 }
 
-fn appearance_rule(cause: &crate::appearance::AppearanceBuildError) -> Option<SceneAppearanceRule> {
+fn appearance_rule(cause: &crate::appearance::AppearanceBuildError) -> SceneAppearanceRule {
     use crate::appearance::AppearanceBuildError as Source;
 
-    Some(match cause {
+    match cause {
         Source::MissingFactorGroup { shading, required } => {
             SceneAppearanceRule::MissingFactorGroup {
                 shading: *shading,
@@ -145,8 +145,7 @@ fn appearance_rule(cause: &crate::appearance::AppearanceBuildError) -> Option<Sc
             requested: *requested,
             maximum: *maximum,
         },
-        Source::AllocationFailed { .. } => return None,
-    })
+    }
 }
 
 const fn animation_sample_part(part: AnimationSamplePart) -> SceneAnimationSamplePart {
@@ -636,25 +635,16 @@ pub(super) fn appearance_validation_error(
             texture: *texture,
             texture_count: *texture_count,
         },
-        Source::NamespacedTextureRoleUnsupported { binding } => {
-            SceneValidationError::NamespacedTextureRoleUnsupported { binding: *binding }
-        }
-        Source::NamespacedBindingBehaviorUnsupported { binding, behavior } => {
-            SceneValidationError::NamespacedBindingBehaviorUnsupported {
-                binding: *binding,
-                behavior: *behavior,
-            }
-        }
         Source::InvalidBindingSemantics { binding, source } => {
             SceneValidationError::InvalidBindingSemantics {
                 binding: *binding,
-                source: appearance_rule(source)?,
+                source: appearance_rule(source),
             }
         }
         Source::InvalidMaterialSemantics { material, source } => {
             SceneValidationError::InvalidMaterialSemantics {
                 material: *material,
-                source: appearance_rule(source)?,
+                source: appearance_rule(source),
             }
         }
         Source::InvalidMaterialName { material, source } => {
@@ -663,16 +653,10 @@ pub(super) fn appearance_validation_error(
                 source: *source,
             }
         }
-        Source::NamespacedMaterialBehaviorUnsupported { material, behavior } => {
-            SceneValidationError::NamespacedMaterialBehaviorUnsupported {
-                material: *material,
-                behavior: *behavior,
-            }
-        }
         Source::InvalidMaterialBindingSemantics { material, source } => {
             SceneValidationError::InvalidMaterialBindingSemantics {
                 material: *material,
-                source: appearance_rule(source)?,
+                source: appearance_rule(source),
             }
         }
         Source::CountDomainTooLarge { collection } => {
@@ -700,8 +684,6 @@ pub(super) fn appearance_validation_error(
             maximum: *maximum,
         },
         Source::AccountingOverflow { .. }
-        | Source::BindingEncodingInvariant { .. }
-        | Source::MaterialEncodingInvariant { .. }
         | Source::ScratchCapacity { .. }
         | Source::ScratchAllocation { .. } => return None,
     })

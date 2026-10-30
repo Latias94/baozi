@@ -47,6 +47,12 @@ Keep one production representation per completed domain cutover and delete the r
 Operation mechanisms retain allocation admission and lifetime-bound charging; core owns Scene
 semantics. Revise the affected architecture decisions together with the implementation boundary.
 
+Node, geometry, profile, spatial, deformation, animation, and appearance now use retained typed
+owners under one Scene root. The remaining private record directory contains revision/count fields
+only. Fresh builds, central validation, public reads, snapshots, and unchanged edit sharing use those
+same owners; each replaced codec and validation projection is deleted with its cutover. The active
+delivery plan and progress record carry execution evidence and the remaining product acceptance.
+
 ### 3. Complete glTF/GLB and Useful Geometry Processing
 
 Timebox the glTF backend fix/fork/replacement decision around its known malformed-input reproducer.
