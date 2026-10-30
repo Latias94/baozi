@@ -76,8 +76,7 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
     let mut target_metadata = BTreeMap::new();
     let mut repository_target_metadata = BTreeMap::new();
     let mut facade_candidate_target_metadata = BTreeMap::new();
-    let mut xtask_empty_metadata = None;
-    let mut xtask_all_metadata = None;
+    let mut xtask_metadata = None;
     let mut violations = Vec::new();
     for profile in DEPENDENCY_AUDIT_PROFILES {
         match load_metadata(
@@ -110,20 +109,11 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
     match load_metadata(
         repository_root,
         "crates/baozi-xtask/Cargo.toml",
-        Some(XTASK_REPOSITORY_RESOLUTION_TARGET),
+        Some(XTASK_RESOLUTION_TARGET),
         None,
         false,
     ) {
-        Ok(value) => xtask_empty_metadata = Some(value),
-        Err(violation) => violations.push(violation),
-    }
-    match load_metadata_all_features(
-        repository_root,
-        "crates/baozi-xtask/Cargo.toml",
-        Some(XTASK_REPOSITORY_RESOLUTION_TARGET),
-        false,
-    ) {
-        Ok(value) => xtask_all_metadata = Some(value),
+        Ok(value) => xtask_metadata = Some(value),
         Err(violation) => violations.push(violation),
     }
     for profile in DEPENDENCY_AUDIT_PROFILES {
@@ -161,16 +151,13 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
             profiles_checked: target_metadata.len()
                 + repository_target_metadata.len()
                 + facade_candidate_target_metadata.len()
-                + usize::from(xtask_empty_metadata.is_some())
-                + usize::from(xtask_all_metadata.is_some()),
+                + usize::from(xtask_metadata.is_some()),
             violations,
         };
     }
 
-    let xtask_empty_metadata =
-        xtask_empty_metadata.expect("successful metadata load must populate the empty profile");
-    let xtask_all_metadata =
-        xtask_all_metadata.expect("successful metadata load must populate the all-feature profile");
+    let xtask_metadata =
+        xtask_metadata.expect("successful metadata load must populate the xtask profile");
     check_metadata_fixture_with_repository(
         &manifest_metadata,
         &lockfile,
@@ -181,8 +168,7 @@ pub fn check_repository(repository_root: &Path) -> NativeFsReport {
             local_declarations: &local_declaration_metadata,
             repository: &repository_target_metadata,
             facade: &facade_candidate_target_metadata,
-            xtask_empty: &xtask_empty_metadata,
-            xtask_all: &xtask_all_metadata,
+            xtask: &xtask_metadata,
         },
     )
 }
@@ -245,21 +231,14 @@ pub fn check_metadata_fixture_with_repository(
         &mut report.violations,
     );
     check_facade_candidate_profiles(profiles.facade, &mut report.violations);
-    if let Err(violation) =
-        check_xtask_empty_profile(XTASK_REPOSITORY_RESOLUTION_TARGET, profiles.xtask_empty)
-    {
-        report.violations.push(violation);
-    }
-    if let Err(violation) =
-        check_xtask_repository_profile(XTASK_REPOSITORY_RESOLUTION_TARGET, profiles.xtask_all)
-    {
+    if let Err(violation) = check_xtask_profile(XTASK_RESOLUTION_TARGET, profiles.xtask) {
         report.violations.push(violation);
     }
     let checksums = match parse_lockfile_checksums(lockfile) {
         Ok(checksums) => checksums,
         Err(violation) => {
             report.violations.push(violation);
-            report.profiles_checked += profiles.repository.len() + profiles.facade.len() + 2;
+            report.profiles_checked += profiles.repository.len() + profiles.facade.len() + 1;
             report.violations.sort_unstable();
             report.violations.dedup();
             return report;
@@ -283,7 +262,7 @@ pub fn check_metadata_fixture_with_repository(
         );
     }
 
-    report.profiles_checked += profiles.repository.len() + profiles.facade.len() + 2;
+    report.profiles_checked += profiles.repository.len() + profiles.facade.len() + 1;
     report.violations.sort_unstable();
     report.violations.dedup();
     report
@@ -471,91 +450,26 @@ fn parse_lockfile_checksums(lockfile: &str) -> Result<BTreeMap<ChecksumKey, Stri
 
 fn check_complete_local_repository_declarations(metadata: &Value, violations: &mut Vec<String>) {
     const LABEL: &str = "native-fs complete local declarations";
-    const XTASK_MANIFEST: &str = "crates/baozi-xtask/Cargo.toml";
 
     let Some(packages) = metadata.get("packages").and_then(Value::as_array) else {
         violations.push(format!("{LABEL}: metadata omitted packages"));
         return;
     };
-    let Some(workspace_root) = metadata.get("workspace_root").and_then(Value::as_str) else {
-        violations.push(format!("{LABEL}: metadata omitted workspace_root"));
-        return;
-    };
-    let expected_xtask_manifest = Path::new(workspace_root).join(XTASK_MANIFEST);
-    let mut authentic_xtask_count = 0;
 
     for package in packages {
+        let Some(owner) = string_field(package, "name") else {
+            violations.push(format!("{LABEL}: package omitted its name"));
+            continue;
+        };
         let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
             if package.get("source") == Some(&Value::Null) {
-                let owner = string_field(package, "name").unwrap_or("<unnamed>");
                 violations.push(format!(
                     "{LABEL}: local package {owner} omitted dependencies"
                 ));
             }
             continue;
         };
-        if package.get("source") != Some(&Value::Null) {
-            let owner = string_field(package, "name").unwrap_or("<unnamed>");
-            check_unregistered_repository_feature_requests(
-                owner,
-                package,
-                dependencies,
-                violations,
-            );
-            continue;
-        }
-        let Some(owner) = string_field(package, "name") else {
-            violations.push(format!("{LABEL}: local package omitted its name"));
-            continue;
-        };
-        let Some(package_id) = string_field(package, "id") else {
-            violations.push(format!("{LABEL}: local package {owner} omitted its id"));
-            continue;
-        };
-        let manifest_matches_xtask = package
-            .get("manifest_path")
-            .and_then(Value::as_str)
-            .is_some_and(|manifest| Path::new(manifest) == expected_xtask_manifest);
-        let claims_xtask_identity = owner == XTASK_PACKAGE || manifest_matches_xtask;
-
-        let authentic_xtask = if claims_xtask_identity {
-            match check_workspace_package(
-                metadata,
-                package,
-                package_id,
-                XTASK_PACKAGE,
-                XTASK_MANIFEST,
-                LABEL,
-            ) {
-                Ok(()) => {
-                    authentic_xtask_count += 1;
-                    true
-                }
-                Err(violation) => {
-                    violations.push(violation);
-                    false
-                }
-            }
-        } else {
-            false
-        };
-
-        if authentic_xtask {
-            check_xtask_repository_dependency(package, violations);
-        } else {
-            check_unregistered_repository_feature_requests(
-                owner,
-                package,
-                dependencies,
-                violations,
-            );
-        }
-    }
-
-    if authentic_xtask_count != 1 {
-        violations.push(format!(
-            "{LABEL}: expected exactly one authentic {XTASK_PACKAGE} declaration, found {authentic_xtask_count}"
-        ));
+        check_repository_feature_requests(owner, package, dependencies, violations);
     }
 }
 
@@ -579,40 +493,7 @@ fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
             violations.push(format!("native-fs manifest: {owner} omitted dependencies"));
             continue;
         };
-        let registered_xtask = if owner == XTASK_PACKAGE {
-            match string_field(workspace_package, "id") {
-                Some(package_id) => match check_workspace_package(
-                    metadata,
-                    workspace_package,
-                    package_id,
-                    XTASK_PACKAGE,
-                    "crates/baozi-xtask/Cargo.toml",
-                    "native-fs manifest",
-                ) {
-                    Ok(()) => true,
-                    Err(violation) => {
-                        violations.push(violation);
-                        false
-                    }
-                },
-                None => {
-                    violations.push(format!(
-                        "native-fs manifest: {XTASK_PACKAGE} omitted its package id"
-                    ));
-                    false
-                }
-            }
-        } else {
-            false
-        };
-        if !registered_xtask {
-            check_unregistered_repository_feature_requests(
-                owner,
-                workspace_package,
-                dependencies,
-                violations,
-            );
-        }
+        check_repository_feature_requests(owner, workspace_package, dependencies, violations);
         for dependency in dependencies {
             let Some(name) = string_field(dependency, "name") else {
                 violations.push(format!(
@@ -627,11 +508,6 @@ fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
             }
         }
     }
-
-    let Some(xtask) = find_unique_package(metadata, XTASK_PACKAGE, "manifest", violations) else {
-        return;
-    };
-    check_xtask_repository_dependency(xtask, violations);
 
     let Some(package) = find_unique_package(metadata, "baozi-io", "manifest", violations) else {
         return;
@@ -806,7 +682,7 @@ fn check_baozi_io_production_dependency_set(dependencies: &[Value], violations: 
     }
 }
 
-fn check_unregistered_repository_feature_requests(
+fn check_repository_feature_requests(
     owner: &str,
     package: &Value,
     dependencies: &[Value],
@@ -869,87 +745,6 @@ fn check_unregistered_repository_feature_requests(
     }
 }
 
-fn check_xtask_repository_dependency(package: &Value, violations: &mut Vec<String>) {
-    let Some(feature_table) = package.get("features").and_then(Value::as_object) else {
-        violations.push(format!(
-            "native-fs manifest: {XTASK_PACKAGE} omitted its feature table"
-        ));
-        return;
-    };
-    let default_features = feature_table
-        .get("default")
-        .and_then(Value::as_array)
-        .and_then(|values| sorted_strings(values).ok());
-    if default_features.as_deref() != Some(&[]) {
-        violations.push(format!(
-            "native-fs manifest: {XTASK_PACKAGE}/default must be empty, found {default_features:?}"
-        ));
-    }
-    let repository_feature = feature_table
-        .get("repository-input-candidate")
-        .and_then(Value::as_array)
-        .and_then(|values| sorted_strings(values).ok());
-    let expected_repository_feature = vec!["dep:baozi-io".to_owned()];
-    if repository_feature.as_ref() != Some(&expected_repository_feature) {
-        violations.push(format!(
-            "native-fs manifest: {XTASK_PACKAGE}/repository-input-candidate must be exactly {expected_repository_feature:?}, found {repository_feature:?}"
-        ));
-    }
-    for feature in feature_table.keys() {
-        if feature == "repository-input-candidate" {
-            continue;
-        }
-        match feature_reaches_dependency(feature_table, feature, "baozi-io", XTASK_PACKAGE) {
-            Ok(false) => {}
-            Ok(true) => violations.push(format!(
-                "native-fs manifest: {XTASK_PACKAGE}/{feature} must not provide an alternate activation path to baozi-io"
-            )),
-            Err(violation) => violations.push(violation),
-        }
-    }
-
-    let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
-        violations.push(format!(
-            "native-fs manifest: {XTASK_PACKAGE} omitted dependencies"
-        ));
-        return;
-    };
-    let matching: Vec<_> = dependencies
-        .iter()
-        .filter(|dependency| string_field(dependency, "name") == Some("baozi-io"))
-        .collect();
-    let dependency = match matching.as_slice() {
-        [dependency] => *dependency,
-        _ => {
-            violations.push(format!(
-                "native-fs manifest: expected exactly one {XTASK_PACKAGE} direct baozi-io repository edge, found {}",
-                matching.len()
-            ));
-            return;
-        }
-    };
-    let features = dependency
-        .get("features")
-        .and_then(Value::as_array)
-        .and_then(|values| sorted_strings(values).ok());
-    let expected_features = vec!["repository-fs-candidate".to_owned()];
-    let exact = dependency.get("source") == Some(&Value::Null)
-        && dependency.get("kind") == Some(&Value::Null)
-        && dependency.get("rename") == Some(&Value::Null)
-        && dependency.get("optional").and_then(Value::as_bool) == Some(true)
-        && dependency
-            .get("uses_default_features")
-            .and_then(Value::as_bool)
-            == Some(false)
-        && string_field(dependency, "target") == Some(XTASK_REPOSITORY_TARGET)
-        && features.as_ref() == Some(&expected_features);
-    if !exact {
-        violations.push(format!(
-            "native-fs manifest: {XTASK_PACKAGE} direct baozi-io repository edge drifted from path source, normal optional kind, default-features=false, features={expected_features:?}, target={XTASK_REPOSITORY_TARGET}"
-        ));
-    }
-}
-
 fn feature_reaches_native_fs(features: &Map<String, Value>, root: &str) -> Result<bool, String> {
     feature_reaches_any(
         features,
@@ -1003,46 +798,6 @@ fn feature_reaches_any(
                 format!("native-fs manifest: baozi/{feature} contains a non-string feature")
             })?;
             if forbidden.contains(&value) {
-                return Ok(true);
-            }
-            if !value.starts_with("dep:") && !value.contains('/') {
-                pending.push_back(value.to_owned());
-            }
-        }
-    }
-    Ok(false)
-}
-
-fn feature_reaches_dependency(
-    features: &Map<String, Value>,
-    root: &str,
-    dependency: &str,
-    owner: &str,
-) -> Result<bool, String> {
-    let mut pending = VecDeque::from([root.to_owned()]);
-    let mut visited = BTreeSet::new();
-    let explicit_dependency = format!("dep:{dependency}");
-    let dependency_feature_prefix = format!("{dependency}/");
-    let weak_dependency_feature_prefix = format!("{dependency}?/");
-    while let Some(feature) = pending.pop_front() {
-        if !visited.insert(feature.clone()) {
-            continue;
-        }
-        let values = features
-            .get(&feature)
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                format!("native-fs manifest: {owner}/{feature} omitted a string feature list")
-            })?;
-        for value in values {
-            let value = value.as_str().ok_or_else(|| {
-                format!("native-fs manifest: {owner}/{feature} contains a non-string feature")
-            })?;
-            if value == explicit_dependency.as_str()
-                || value == dependency
-                || value.starts_with(&dependency_feature_prefix)
-                || value.starts_with(&weak_dependency_feature_prefix)
-            {
                 return Ok(true);
             }
             if !value.starts_with("dep:") && !value.contains('/') {
@@ -1150,8 +905,8 @@ fn check_facade_candidate_profile(target: &str, metadata: &Value) -> Result<(), 
     Ok(())
 }
 
-fn check_xtask_empty_profile(target: &str, metadata: &Value) -> Result<(), String> {
-    let label = format!("native-fs xtask empty profile {target}");
+fn check_xtask_profile(target: &str, metadata: &Value) -> Result<(), String> {
+    let label = format!("native-fs xtask profile {target}");
     let document = MetadataDocument::parse(metadata, target)?;
     let xtask_id = document.unique_package_id(XTASK_PACKAGE)?;
     check_workspace_package(
@@ -1162,113 +917,12 @@ fn check_xtask_empty_profile(target: &str, metadata: &Value) -> Result<(), Strin
         "crates/baozi-xtask/Cargo.toml",
         &label,
     )?;
-    let xtask_node = document.node(xtask_id)?;
-    let features = xtask_node
-        .get("features")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("{label}: {XTASK_PACKAGE} omitted resolved features"))?;
-    if !sorted_nondefault_features(features)?.is_empty() {
-        return Err(format!("{label}: {XTASK_PACKAGE} must resolve no features"));
-    }
     let reachable = document.production_closure(&[xtask_id.to_owned()])?;
     for id in reachable {
-        if string_field(document.package(&id)?, "name") == Some("baozi-io") {
-            return Err(format!(
-                "{label}: empty-feature xtask must not reach baozi-io"
-            ));
+        let name = required_string(document.package(&id)?, "name", "package")?;
+        if name == "baozi-io" || NATIVE_FILESYSTEM_PACKAGES.contains(&name) {
+            return Err(format!("{label}: xtask must not reach {name}"));
         }
-    }
-    Ok(())
-}
-
-fn check_xtask_repository_profile(target: &str, metadata: &Value) -> Result<(), String> {
-    let label = format!("native-fs xtask repository profile {target}");
-    let document = MetadataDocument::parse(metadata, target)?;
-    let xtask_id = document.unique_package_id(XTASK_PACKAGE)?;
-    let io_id = document.unique_package_id("baozi-io")?;
-    check_workspace_package(
-        metadata,
-        document.package(xtask_id)?,
-        xtask_id,
-        XTASK_PACKAGE,
-        "crates/baozi-xtask/Cargo.toml",
-        &label,
-    )?;
-    check_workspace_package(
-        metadata,
-        document.package(io_id)?,
-        io_id,
-        "baozi-io",
-        "crates/baozi-io/Cargo.toml",
-        &label,
-    )?;
-
-    let xtask_node = document.node(xtask_id)?;
-    let xtask_features = xtask_node
-        .get("features")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("{label}: {XTASK_PACKAGE} omitted resolved features"))?;
-    let xtask_features = sorted_nondefault_features(xtask_features)?;
-    let expected_xtask_features = vec!["repository-input-candidate".to_owned()];
-    if xtask_features != expected_xtask_features {
-        return Err(format!(
-            "{label}: {XTASK_PACKAGE} resolved features must be exactly {expected_xtask_features:?}, found {xtask_features:?}"
-        ));
-    }
-    let direct_io_edges = production_dependencies(xtask_node, target)?
-        .into_iter()
-        .filter(|dependency| dependency.package == io_id)
-        .collect::<Vec<_>>();
-    if direct_io_edges.len() != 1 {
-        return Err(format!(
-            "{label}: {XTASK_PACKAGE} must have exactly one resolved direct edge to workspace baozi-io, found {}",
-            direct_io_edges.len()
-        ));
-    }
-    let reachable = document.production_closure(&[xtask_id.to_owned()])?;
-    let mut incoming_io_edges = Vec::new();
-    for parent_id in &reachable {
-        for dependency in production_dependencies(document.node(parent_id)?, target)? {
-            if dependency.package == io_id {
-                incoming_io_edges.push((parent_id.as_str(), dependency.name));
-            }
-        }
-        let package = document.package(parent_id)?;
-        if package.get("source") == Some(&Value::Null)
-            && parent_id != xtask_id
-            && parent_id != io_id
-        {
-            return Err(format!(
-                "{label}: unexpected local package {} is reachable from xtask",
-                required_string(package, "name", "package")?
-            ));
-        }
-    }
-    if incoming_io_edges.len() != 1 || incoming_io_edges[0].0 != xtask_id {
-        return Err(format!(
-            "{label}: workspace baozi-io must have exactly one reachable incoming edge owned by xtask, found {incoming_io_edges:?}"
-        ));
-    }
-    let io_package = document.package(io_id)?;
-    if io_package.get("source") != Some(&Value::Null) {
-        return Err(format!(
-            "{label}: resolved baozi-io must be a workspace path package"
-        ));
-    }
-    let io_features = document
-        .node(io_id)?
-        .get("features")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("{label}: baozi-io omitted resolved features"))?;
-    let io_features = sorted_nondefault_features(io_features)?;
-    let expected_io_features = vec![
-        "fs-candidate".to_owned(),
-        "repository-fs-candidate".to_owned(),
-    ];
-    if io_features != expected_io_features {
-        return Err(format!(
-            "{label}: workspace baozi-io resolved features must be exactly {expected_io_features:?}, found {io_features:?}"
-        ));
     }
     Ok(())
 }

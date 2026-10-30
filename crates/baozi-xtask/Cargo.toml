@@ -7,16 +7,9 @@ license.workspace = true
 publish = false
 description = "Repository governance checks for Baozi"
 
-[features]
-default = []
-repository-input-candidate = ["dep:baozi-io"]
-
 [dependencies]
 serde_json.workspace = true
 toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
-
-[target.'cfg(any(all(target_arch = "x86_64", target_vendor = "unknown", target_os = "linux", target_env = "gnu", target_abi = ""), all(target_arch = "x86_64", target_vendor = "pc", target_os = "windows", target_env = "msvc", target_abi = ""), all(target_arch = "aarch64", target_vendor = "apple", target_os = "macos", target_env = "", target_abi = "")))'.dependencies]
-baozi-io = { workspace = true, default-features = false, features = ["repository-fs-candidate"], optional = true }
 
 [lib]
 path = "src/lib.rs"

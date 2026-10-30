@@ -343,6 +343,10 @@ it has no buffer-comparison cache to instrument. Perform the bounded manual nega
 the existing real-pipeline fourfold-input work-growth assertion by temporarily adding a metered
 prefix walk, verify rejection, then remove precisely that deliberate regression. Do not recreate a
 retired cache or build a comparison-instrumentation framework to satisfy historical terminology.
+This manual check executed on 2026-10-31: a correctly admitted quadratic prefix walk failed the
+existing 1,024-primitive growth assertion; after removing both temporary walk/admission changes,
+original file hashes matched and the 256/1,024/4,096 pilot passed again. The delivery progress records
+the exact observations. No deliberate regression or mutation runner remains in source.
 
 ### H — Update dependencies and prove first publication
 

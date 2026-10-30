@@ -15,12 +15,6 @@ pub(super) const CAP_STD_TARGET: &str = concat!(
     "all(target_arch = \"aarch64\", target_vendor = \"apple\", target_os = \"macos\", target_env = \"\", target_abi = \"\"), ",
     "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"freebsd\", target_env = \"\", target_abi = \"\")))"
 );
-pub(super) const XTASK_REPOSITORY_TARGET: &str = concat!(
-    "cfg(any(",
-    "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"linux\", target_env = \"gnu\", target_abi = \"\"), ",
-    "all(target_arch = \"x86_64\", target_vendor = \"pc\", target_os = \"windows\", target_env = \"msvc\", target_abi = \"\"), ",
-    "all(target_arch = \"aarch64\", target_vendor = \"apple\", target_os = \"macos\", target_env = \"\", target_abi = \"\")))"
-);
 pub(super) const RUSTIX_TARGET: &str = concat!(
     "cfg(any(",
     "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"linux\", target_env = \"gnu\", target_abi = \"\"), ",
@@ -43,7 +37,7 @@ pub(super) const REPOSITORY_CANDIDATE_TARGETS: &[&str] = &[
 pub(super) const REPOSITORY_OPERATIONAL_CANDIDATE_TARGETS: &[&str] =
     &["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"];
 pub(super) const REPOSITORY_FAIL_CLOSED_TARGETS: &[&str] = &["x86_64-pc-windows-msvc"];
-pub(super) const XTASK_REPOSITORY_RESOLUTION_TARGET: &str = "x86_64-unknown-linux-gnu";
+pub(super) const XTASK_RESOLUTION_TARGET: &str = "x86_64-unknown-linux-gnu";
 pub(super) const RELEASE_REGISTERED_TARGETS: &[&str] = &[];
 
 #[derive(Clone, Copy)]
@@ -131,8 +125,6 @@ pub struct RepositoryMetadataProfiles<'a> {
     pub repository: &'a BTreeMap<String, Value>,
     /// Facade runtime-candidate profiles for every exact candidate target.
     pub facade: &'a BTreeMap<String, Value>,
-    /// The xtask empty-feature profile, which must not reach repository IO.
-    pub xtask_empty: &'a Value,
-    /// The xtask all-feature profile used to bind the sole workspace dependency edge.
-    pub xtask_all: &'a Value,
+    /// The featureless xtask profile, which must not reach asset IO or native backends.
+    pub xtask: &'a Value,
 }

@@ -59,7 +59,7 @@ fn canonical_target_filtered_fixture_passes() {
     let report = fixture.check();
 
     assert!(report.violations.is_empty(), "{:#?}", report.violations);
-    assert_eq!(report.profiles_checked, 15);
+    assert_eq!(report.profiles_checked, 14);
     assert_eq!(fixture.baseline["schema"], json!(3));
     assert_eq!(fixture.repository_baseline["schema"], json!(2));
     assert_eq!(
@@ -269,7 +269,7 @@ fn facade_candidate_feature_must_delegate_to_baozi_io() {
 }
 
 #[test]
-fn repository_feature_and_xtask_edge_are_exact() {
+fn repository_feature_and_backend_dependency_are_exact() {
     let mut missing_dependency = Fixture::canonical();
     missing_dependency
         .manifest_dependencies_mut()
@@ -294,44 +294,6 @@ fn repository_feature_and_xtask_edge_are_exact() {
             .contains("baozi-io/repository-fs-candidate must be exactly")),
         "{:#?}",
         missing_feature_report.violations
-    );
-
-    let mut xtask_default_features = Fixture::canonical();
-    xtask_default_features.manifest["packages"][2]["dependencies"][0]["uses_default_features"] =
-        json!(true);
-    let xtask_report = xtask_default_features.check();
-    assert!(
-        xtask_report
-            .violations
-            .iter()
-            .any(|violation| violation
-                .contains("baozi-xtask direct baozi-io repository edge drifted")),
-        "{:#?}",
-        xtask_report.violations
-    );
-
-    let mut xtask_non_optional = Fixture::canonical();
-    xtask_non_optional.manifest["packages"][2]["dependencies"][0]["optional"] = json!(false);
-    let xtask_report = xtask_non_optional.check();
-    assert!(
-        xtask_report
-            .violations
-            .iter()
-            .any(|violation| violation
-                .contains("baozi-xtask direct baozi-io repository edge drifted")),
-        "{:#?}",
-        xtask_report.violations
-    );
-
-    let mut missing_xtask_feature = Fixture::canonical();
-    missing_xtask_feature.manifest["packages"][2]["features"]["repository-input-candidate"] =
-        json!([]);
-    let xtask_report = missing_xtask_feature.check();
-    assert!(
-        xtask_report.violations.iter().any(|violation| violation
-            .contains("baozi-xtask/repository-input-candidate must be exactly")),
-        "{:#?}",
-        xtask_report.violations
     );
 }
 
@@ -369,7 +331,7 @@ fn xtask_and_other_crates_cannot_own_native_backend_dependencies() {
 }
 
 #[test]
-fn only_the_registered_xtask_edge_can_request_repository_io() {
+fn dependency_declarations_cannot_request_repository_io() {
     let mut direct = Fixture::canonical();
     direct.manifest["packages"]
         .as_array_mut()
@@ -530,37 +492,6 @@ fn complete_local_declarations_scan_build_and_target_specific_edges() {
 }
 
 #[test]
-fn complete_local_declarations_reject_same_name_xtask_spoofs() {
-    const SPOOF_ID: &str = "path+file:///fixture/spoofed-baozi-xtask#0.1.0";
-    let mut fixture = Fixture::canonical();
-    fixture.local_declaration_metadata["packages"]
-        .as_array_mut()
-        .expect("complete declaration packages")
-        .push(json!({
-            "id": SPOOF_ID,
-            "name": "baozi-xtask",
-            "version": "0.1.0",
-            "source": null,
-            "manifest_path": "/fixture/vendor/baozi-xtask/Cargo.toml",
-            "features": {
-                "default": []
-            },
-            "dependencies": []
-        }));
-
-    let report = fixture.check();
-
-    assert!(
-        report.violations.iter().any(|violation| {
-            violation.contains("native-fs complete local declarations")
-                && violation.contains("manifest_path must be")
-        }),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
 fn facade_candidate_cannot_reach_repository_feature() {
     let mut fixture = Fixture::canonical();
     fixture.manifest["packages"][1]["features"]["repository-helper"] =
@@ -624,106 +555,126 @@ fn resolved_facade_candidate_binds_workspace_baozi_io_identity() {
 }
 
 #[test]
-fn xtask_repository_edge_has_one_feature_entry_and_workspace_identity() {
-    let mut alternate = Fixture::canonical();
-    alternate.manifest["packages"][2]["features"]["alternate"] = json!(["dep:baozi-io"]);
-    let report = alternate.check();
-    assert!(
-        report.violations.iter().any(|violation| violation.contains(
-            "baozi-xtask/alternate must not provide an alternate activation path to baozi-io"
-        )),
-        "{:#?}",
-        report.violations
-    );
+fn xtask_cannot_request_or_forward_repository_io() {
+    for forwarded in [false, true] {
+        let mut fixture = Fixture::canonical();
+        let xtask = &mut fixture.manifest["packages"][2];
+        xtask["dependencies"] = json!([{
+            "name": "baozi-io",
+            "kind": "dev",
+            "rename": "asset_io",
+            "features": if forwarded { vec![] } else { vec!["repository-fs-candidate"] }
+        }]);
+        let expected = if forwarded {
+            xtask["features"]["repository"] = json!(["asset_io?/repository-fs-candidate"]);
+            "native-fs manifest: baozi-xtask/repository must not forward baozi-io/repository-fs-candidate"
+        } else {
+            "native-fs manifest: baozi-xtask must not request baozi-io/repository-fs-candidate on a dependency edge"
+        };
 
-    let mut external_path = Fixture::canonical();
-    external_path.xtask_all_metadata["packages"]
+        let report = fixture.check();
+
+        assert!(
+            report
+                .violations
+                .iter()
+                .any(|violation| violation == expected),
+            "{:#?}",
+            report.violations
+        );
+    }
+}
+
+#[test]
+fn xtask_resolved_profile_rejects_direct_asset_io() {
+    let mut fixture = Fixture::canonical();
+    let nodes = fixture.xtask_metadata["resolve"]["nodes"]
         .as_array_mut()
-        .expect("fixture packages")
+        .expect("fixture nodes");
+    nodes
         .iter_mut()
-        .find(|package| package["name"] == "baozi-io")
-        .expect("baozi-io package")["manifest_path"] = json!("/fixture/vendor/baozi-io/Cargo.toml");
-    let report = external_path.check();
+        .find(|node| node["id"] == FIXTURE_XTASK_ID)
+        .expect("fixture xtask node")["deps"] = json!([dependency("asset_io", FIXTURE_IO_ID)]);
+    let io = nodes
+        .iter_mut()
+        .find(|node| node["id"] == FIXTURE_IO_ID)
+        .expect("fixture IO node");
+    io["features"] = json!([]);
+    io["deps"] = json!([]);
+
+    let report = fixture.check();
+
     assert!(
         report
             .violations
             .iter()
-            .any(|violation| violation.contains("manifest_path must be")),
+            .any(|violation| violation.contains("xtask must not reach baozi-io")),
         "{:#?}",
         report.violations
     );
 }
 
 #[test]
-fn xtask_resolved_profiles_reject_indirect_and_default_repository_paths() {
+fn xtask_resolved_profile_rejects_indirect_repository_io() {
     const HELPER_ID: &str = "path+file:///fixture/xtask-helper#0.1.0";
-    const IO_ID: &str = "path+file:///fixture/baozi-io#0.1.0";
-    const XTASK_ID: &str = "path+file:///fixture/baozi-xtask#0.1.0";
-
-    let mut all_features = Fixture::canonical();
-    all_features.manifest["packages"][2]["features"]["alternate"] = json!(["dep:helper"]);
-    let metadata = &mut all_features.xtask_all_metadata;
-    let mut helper = package(HELPER_ID, "xtask-helper", "0.1.0");
-    helper["manifest_path"] = json!("/fixture/crates/xtask-helper/Cargo.toml");
+    let mut fixture = Fixture::canonical();
+    let metadata = &mut fixture.xtask_metadata;
     metadata["packages"]
         .as_array_mut()
         .expect("fixture packages")
-        .push(helper);
-    let nodes = metadata["resolve"]["nodes"]
-        .as_array_mut()
-        .expect("fixture nodes");
-    let root = nodes
-        .iter_mut()
-        .find(|node| node["id"] == XTASK_ID)
-        .expect("fixture xtask node");
-    root["features"] = json!(["alternate", "repository-input-candidate"]);
-    root["deps"]
-        .as_array_mut()
-        .expect("fixture xtask deps")
-        .push(dependency("helper", HELPER_ID));
-    nodes.push(node(HELPER_ID, vec![dependency("baozi_io", IO_ID)], vec![]));
-    metadata["workspace_members"]
-        .as_array_mut()
-        .expect("workspace members")
-        .push(json!(HELPER_ID));
-    let report = all_features.check();
-    assert!(
-        report.violations.iter().any(|violation| violation.contains(
-            "baozi-xtask resolved features must be exactly [\"repository-input-candidate\"]"
-        )),
-        "{:#?}",
-        report.violations
-    );
-
-    let mut default_path = Fixture::canonical();
-    let metadata = &mut default_path.xtask_empty_metadata;
-    let mut helper = package(HELPER_ID, "xtask-helper", "0.1.0");
-    helper["manifest_path"] = json!("/fixture/crates/xtask-helper/Cargo.toml");
-    metadata["packages"]
-        .as_array_mut()
-        .expect("fixture packages")
-        .push(helper);
+        .push(package(HELPER_ID, "xtask-helper", "0.1.0"));
     let nodes = metadata["resolve"]["nodes"]
         .as_array_mut()
         .expect("fixture nodes");
     nodes
         .iter_mut()
-        .find(|node| node["id"] == XTASK_ID)
+        .find(|node| node["id"] == FIXTURE_XTASK_ID)
         .expect("fixture xtask node")["deps"] = json!([dependency("helper", HELPER_ID)]);
-    nodes.push(node(HELPER_ID, vec![dependency("baozi_io", IO_ID)], vec![]));
-    metadata["workspace_members"]
-        .as_array_mut()
-        .expect("workspace members")
-        .push(json!(HELPER_ID));
-    let report = default_path.check();
+    nodes.push(node(
+        HELPER_ID,
+        vec![dependency("asset_io", FIXTURE_IO_ID)],
+        vec![],
+    ));
+
+    let report = fixture.check();
+
     assert!(
         report
             .violations
             .iter()
-            .any(|violation| violation.contains("empty-feature xtask must not reach baozi-io")),
+            .any(|violation| violation.contains("xtask must not reach baozi-io")),
         "{:#?}",
         report.violations
     );
+}
+
+#[test]
+fn xtask_native_backend_closure_includes_normal_and_build_but_not_dev_edges() {
+    for kind in ["normal", "build", "dev"] {
+        let mut fixture = Fixture::canonical();
+        fixture.xtask_metadata["resolve"]["nodes"]
+            .as_array_mut()
+            .expect("fixture nodes")
+            .iter_mut()
+            .find(|node| node["id"] == FIXTURE_XTASK_ID)
+            .expect("fixture xtask node")["deps"] =
+            json!([dependency_with_kind("backend", CAP_FS_EXT_ID, kind)]);
+
+        let report = fixture.check();
+
+        if kind == "dev" {
+            assert!(report.violations.is_empty(), "{:#?}", report.violations);
+        } else {
+            assert!(
+                report
+                    .violations
+                    .iter()
+                    .any(|violation| violation.contains("xtask must not reach cap-fs-ext")),
+                "{:#?}",
+                report.violations
+            );
+        }
+    }
 }
 
 #[test]
@@ -1242,8 +1193,7 @@ struct Fixture {
     target_metadata: BTreeMap<String, Value>,
     repository_target_metadata: BTreeMap<String, Value>,
     facade_candidate_target_metadata: BTreeMap<String, Value>,
-    xtask_empty_metadata: Value,
-    xtask_all_metadata: Value,
+    xtask_metadata: Value,
 }
 
 impl Fixture {
@@ -1263,8 +1213,7 @@ impl Fixture {
         )
         .expect("canonical repository fixture snapshot");
         let facade_candidate_target_metadata = facade_candidate_target_metadata();
-        let xtask_empty_metadata = xtask_empty_metadata();
-        let xtask_all_metadata = xtask_all_metadata();
+        let xtask_metadata = xtask_metadata();
         Self {
             manifest,
             local_declaration_metadata,
@@ -1274,8 +1223,7 @@ impl Fixture {
             target_metadata,
             repository_target_metadata,
             facade_candidate_target_metadata,
-            xtask_empty_metadata,
-            xtask_all_metadata,
+            xtask_metadata,
         }
     }
 
@@ -1290,8 +1238,7 @@ impl Fixture {
                 local_declarations: &self.local_declaration_metadata,
                 repository: &self.repository_target_metadata,
                 facade: &self.facade_candidate_target_metadata,
-                xtask_empty: &self.xtask_empty_metadata,
-                xtask_all: &self.xtask_all_metadata,
+                xtask: &self.xtask_metadata,
             },
         )
     }
@@ -1401,23 +1348,8 @@ fn manifest_metadata() -> Value {
                 "version": "0.1.0",
                 "source": null,
                 "manifest_path": "/fixture/crates/baozi-xtask/Cargo.toml",
-                "features": {
-                    "default": [],
-                    "repository-input-candidate": ["dep:baozi-io"]
-                },
-                "dependencies": [
-                    {
-                        "name": "baozi-io",
-                        "source": null,
-                        "req": "*",
-                        "kind": null,
-                        "rename": null,
-                        "optional": true,
-                        "uses_default_features": false,
-                        "features": ["repository-fs-candidate"],
-                        "target": "cfg(any(all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"linux\", target_env = \"gnu\", target_abi = \"\"), all(target_arch = \"x86_64\", target_vendor = \"pc\", target_os = \"windows\", target_env = \"msvc\", target_abi = \"\"), all(target_arch = \"aarch64\", target_vendor = \"apple\", target_os = \"macos\", target_env = \"\", target_abi = \"\")))"
-                    }
-                ]
+                "features": {},
+                "dependencies": []
             }
         ]
     })
@@ -1489,46 +1421,22 @@ fn facade_candidate_metadata(target: &str, direct_rustix: bool) -> Value {
     metadata
 }
 
-fn xtask_all_metadata() -> Value {
-    const XTASK_ID: &str = "path+file:///fixture/baozi-xtask#0.1.0";
-    const IO_ID: &str = "path+file:///fixture/baozi-io#0.1.0";
+fn xtask_metadata() -> Value {
+    // Workspace IO may be present in metadata without being reachable from xtask.
     let mut metadata = native_metadata("x86_64-unknown-linux-gnu", true);
     add_cap_fs_ext(&mut metadata, true);
-    let packages = metadata["packages"]
-        .as_array_mut()
-        .expect("fixture packages");
-    packages
-        .iter_mut()
-        .find(|package| package["id"] == IO_ID)
-        .expect("fixture baozi-io package")["manifest_path"] =
-        json!("/fixture/crates/baozi-io/Cargo.toml");
-    let mut xtask_package = package(XTASK_ID, "baozi-xtask", "0.1.0");
+    let mut xtask_package = package(FIXTURE_XTASK_ID, "baozi-xtask", "0.1.0");
     xtask_package["manifest_path"] = json!("/fixture/crates/baozi-xtask/Cargo.toml");
-    packages.push(xtask_package);
+    metadata["packages"]
+        .as_array_mut()
+        .expect("fixture packages")
+        .push(xtask_package);
     metadata["resolve"]["nodes"]
         .as_array_mut()
         .expect("fixture nodes")
-        .push(node(
-            XTASK_ID,
-            vec![dependency("baozi_io", IO_ID)],
-            vec!["repository-input-candidate"],
-        ));
+        .push(node(FIXTURE_XTASK_ID, vec![], vec![]));
     metadata["workspace_root"] = json!("/fixture");
-    metadata["workspace_members"] = json!([IO_ID, XTASK_ID]);
-    metadata
-}
-
-fn xtask_empty_metadata() -> Value {
-    const XTASK_ID: &str = "path+file:///fixture/baozi-xtask#0.1.0";
-    let mut metadata = xtask_all_metadata();
-    let root = metadata["resolve"]["nodes"]
-        .as_array_mut()
-        .expect("fixture nodes")
-        .iter_mut()
-        .find(|node| node["id"] == XTASK_ID)
-        .expect("fixture xtask node");
-    root["deps"] = json!([]);
-    root["features"] = json!([]);
+    metadata["workspace_members"] = json!([FIXTURE_IO_ID, FIXTURE_XTASK_ID]);
     metadata
 }
 

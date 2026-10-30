@@ -259,6 +259,34 @@ and `d2-appearance-packaged-final.log`. These results establish package content 
 consumer cases; current-stable/release full matrices and native filesystem promotion remain separate
 acceptance, and no crate was uploaded or publication flag changed.
 
+## Featureless xtask and manual growth-gate check — 2026-10-31
+
+The unused `repository-input-candidate` xtask feature and optional `baozi-io` dependency are removed.
+There was no capture command or source consumer behind that edge. Repository/native IO mechanisms
+remain owned by `baozi-io`; the metadata checker has no runtime IO authority. Its production graph
+now rejects direct or indirect `baozi-io` and native filesystem dependencies, including normal/build
+edges while excluding dev-only edges. The former special-case dependency exception and its exact
+feature-routing machinery are deleted. One xtask metadata query replaces equivalent empty/all
+profiles, and CI runs its featureless suite once. ADRs 0007/0010 and the behavior index follow that
+implemented boundary; no target candidate was promoted.
+
+The real central typed geometry path has no legacy buffer cache. Its existing complete-pipeline
+256/1,024/4,096 pilot measures controlled traversal and rejects more than fourfold work growth for
+fourfold input. A one-time manual negative check inserted a test-only quadratic prefix walk. The
+first probe was rejected earlier by exact work admission, confirming that unplanned traversal could
+not publish. With matching temporary admission, 256/1,024 work rose to 53,295/605,103 units and the
+existing growth assertion failed at 1,024 primitives as intended. Both temporary edits were removed
+by precise patches; the two original SHA-256 values matched, with no source diff. The unchanged pilot
+then passed, recording 20,655/81,327/324,015 units. Logs are `target/review/g-prefix-negative.log`,
+`g-prefix-negative-admitted.log`, and `g-prefix-restored.log`. No persistent mutation runner,
+comparison collector, or deliberate regression was added.
+
+The final featureless xtask run passed 66/66 tests with no skips, including the real repository
+baseline check, direct/indirect IO rejection, normal/build versus dev-only closure cases, and
+renamed-feature forwarding rejection. Strict xtask all-target Clippy and workspace formatting
+passed. The lockfile change removes only xtask's obsolete `baozi-io` dependency entry. Logs are
+`target/review/g-xtask-featureless-final.log` and `g-xtask-featureless-clippy.log`.
+
 ## Recovery integration and storage pilot
 
 The continuation after source session `01a1834e-5379-76b0-b412-01aa80c80fc6` reverified operation

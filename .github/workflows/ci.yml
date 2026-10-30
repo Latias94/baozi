@@ -164,9 +164,6 @@ jobs:
       - name: Test baozi-xtask
         run: cargo nextest run --locked -p baozi-xtask
 
-      - name: Test all baozi-xtask features
-        run: cargo nextest run --locked -p baozi-xtask --all-features
-
       - name: Check dependency policy
         run: cargo deny --locked check
 

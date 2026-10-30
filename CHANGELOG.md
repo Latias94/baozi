@@ -6,6 +6,9 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Removed xtask's unused `repository-input-candidate` feature and IO dependency. Native dependency
+  checks now reject asset/native IO in the tool's production closure and query its featureless graph
+  once; CI no longer repeats an identical all-feature xtask test run.
 - Added package-local README and dual-license files to all ten production crates, with specific
   descriptions and documentation links. Maintained glTF backend packages now identify their Baozi
   role and preserve upstream authorship and licenses. The artifact-consumer checker verifies those

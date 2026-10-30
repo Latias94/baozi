@@ -100,8 +100,9 @@ enforces the complete ADR 0007 production direction table, rejects unclassified 
 support/tool dependencies, reverse paths, and production cycles, while allowing dev-only test edges.
 The workspace nextest runs exclude `baozi-xtask`. Its repository-scanning fixture suites duplicate
 whole-tree work and can dominate otherwise parallel workspace tests. CI runs the complete xtask
-package once with default features and once with all features, then invokes the required repository
-checks directly; ADR review remains an authoring concern rather than a default Rust gate.
+package once, then invokes the required repository checks directly. The dead repository-input
+feature and optional IO edge are removed, so a second all-feature run would repeat the same graph.
+ADR review remains an authoring concern rather than a default Rust gate.
 `runtime-admission-check` makes one locked Cargo metadata query and checks normal/build dependency
 reachability. Host scheduling, cancellation, release ordering, and publication are covered by the
 [behavior gate index](../testing/behavior-gates.md). The former conformance receipt and test-source

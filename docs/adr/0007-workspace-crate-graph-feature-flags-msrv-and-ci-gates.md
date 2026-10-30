@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-10-29
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
@@ -17,6 +17,9 @@ evidence:
   - crates/baozi/Cargo.toml
   - crates/baozi-xtask/src/crate_graph.rs
   - crates/baozi-xtask/tests/crate_graph.rs
+  - crates/baozi-xtask/Cargo.toml
+  - crates/baozi-xtask/src/native_fs.rs
+  - crates/baozi-xtask/tests/native_fs.rs
   - .github/workflows/ci.yml
   - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
   - docs/research/u4c-repository-input-capability.md
@@ -71,8 +74,7 @@ flowchart TD
     Formats --> Core
     Formats --> Import
     Formats -. only when required .-> IO
-    Xtask[baozi-xtask] -. metadata/docs .-> Workspace[workspace artifacts]
-    Xtask -. repository evidence candidate .-> IO
+    Xtask[baozi-xtask] -. data checks .-> Workspace[Cargo metadata and dependency baselines]
     Test[baozi-test-support] --> Core
     Test --> Import
 ```
@@ -100,14 +102,17 @@ Hard rules:
   mechanism; it is not a required graph edge and must not be added merely to mirror the diagram.
 - production crates never depend on `baozi-test-support`, fuzz packages, xtask, examples, or CLI
   tools.
-- `baozi-xtask` is a non-production tool and may depend target-specifically and optionally on
-  `baozi-io/repository-fs-candidate` only through its explicit `repository-input-candidate` feature
-  to consume the opaque repository capture mechanism owned by ADR 0010. Its default feature set is
-  empty so ordinary workspace, runtime, and portable resolution cannot activate this edge. It must
-  not depend directly on `cap-std`, `cap-primitives`, `cap-fs-ext`, `rustix`, or a
-  format/import/core/postprocess runtime surface for that purpose. This tool-to-production edge does
-  not authorize any reverse production dependency or add the candidate to facade features.
+- `baozi-xtask` is a non-production checker with no `baozi-io` edge or native filesystem backend
+  dependency. Its dependency checks inspect Cargo metadata, lockfile data, and reviewed dependency
+  baselines. Its single, featureless normal/build dependency closure must exclude `baozi-io`,
+  `cap-std`, `cap-primitives`, `cap-fs-ext`, and `rustix`. Declaration checks reject every package's
+  request or forwarding of `baozi-io/repository-fs-candidate`, including renamed, development, and
+  build dependencies. xtask does not capture repository source trees or own source-hashing policy.
 - no workspace production dependency cycle is allowed.
+
+Removing the unused `repository-input-candidate` feature and optional IO edge is a tool architecture
+change. ADR 0010 retains the IO-owned repository candidate mechanism; candidate target membership,
+Windows fail-closed behavior, and release registration remain governed by ADR 0034 and its evidence.
 
 The graph checker distinguishes three facts that must not be conflated:
 
@@ -320,7 +325,7 @@ Negative:
 | Optional dependency leaks into disabled builds | Medium | Medium | isolated `cargo tree`/package checks for no-default and single features |
 | Crate graph develops a cycle or reverse dependency | High | Low | metadata graph gate enforces the direction table |
 | An allowed edge is mistaken for a mandatory dependency | High | Medium | checker keeps allowed consumers separate from required actual consumers and tests facade presence/absence independently |
-| A repository tool duplicates native filesystem ownership | High | Medium | permit only xtask-to-`baozi-io/repository-fs-candidate`; reject every direct native backend edge outside IO |
+| A repository tool duplicates native filesystem ownership | High | Medium | keep xtask free of IO and native backend dependencies; reject repository-feature requests and forwarding by every package; retain native mechanisms under `baozi-io` |
 | Transitive dependency raises MSRV | High | Medium | MSRV job and dependency admission review |
 | Platform exception corrupts feature meaning | High | Low | keep target support in ADR 0034 and require complete membership independently |
 
@@ -333,7 +338,7 @@ Negative:
 | Default subset | xtask proves `default-formats` is a deliberate subset with ADR 0011 evidence for every member |
 | One-to-one wiring | each format feature maps to one optional dependency, registration path, descriptor, support entry, and isolated test |
 | No empty/leaky features | negative fixtures reject public empty features, backend selectors, and silent semantic switches |
-| Dependency direction | Cargo metadata proves `baozi-operation` has no upward Baozi edge; core/import/postprocess have their required direct edges; the facade passes with or without a canonical direct edge; formats cannot directly depend on operation; IO does not depend on core; postprocess does not depend on import; xtask reaches native repository IO only through the admitted IO-owned candidate; no other crate directly owns native filesystem dependencies; and no forbidden edge or production cycle exists |
+| Dependency direction | Cargo metadata proves `baozi-operation` has no upward Baozi edge; core/import/postprocess have their required direct edges; the facade passes with or without a canonical direct edge; formats cannot directly depend on operation; IO does not depend on core; postprocess does not depend on import; xtask's single featureless normal/build closure excludes IO and native backends; no package requests or forwards the repository candidate; no other crate directly owns native filesystem dependencies; and no forbidden edge or production cycle exists |
 | MSRV | workspace and every declared feature compile on Rust 1.95 |
 | Complete behavior surface | default, no-default, individual formats, `all-formats`, and `all-features` gates pass at their declared target tiers |
 
@@ -347,5 +352,7 @@ passes:
 - [CI workflow](../../.github/workflows/ci.yml)
 - [Crate graph checker](../../crates/baozi-xtask/src/crate_graph.rs)
 - [Crate graph checker tests](../../crates/baozi-xtask/tests/crate_graph.rs)
+- [Native dependency checker](../../crates/baozi-xtask/src/native_fs.rs)
+- [Native dependency fixtures](../../crates/baozi-xtask/tests/native_fs.rs)
 - [Canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
 - [Format support matrix](../formats/support-matrix.md)

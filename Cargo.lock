@@ -202,7 +202,6 @@ dependencies = [
 name = "baozi-xtask"
 version = "0.1.0"
 dependencies = [
- "baozi-io",
  "serde_json",
  "toml",
 ]
