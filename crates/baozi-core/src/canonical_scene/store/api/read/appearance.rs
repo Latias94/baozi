@@ -130,6 +130,14 @@ pub struct MaterialRef<'s> {
 }
 
 impl<'s> MaterialRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::Material(
+                self.index as u32,
+            ),
+        )
+    }
     pub(super) const fn at(scene: &'s ValidatedScene, index: usize) -> Self {
         Self { scene, index }
     }
@@ -207,6 +215,14 @@ pub struct MaterialBindingRef<'s> {
 }
 
 impl<'s> MaterialBindingRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::TextureBinding(
+                self.index as u32,
+            ),
+        )
+    }
     pub(super) const fn at(scene: &'s ValidatedScene, index: usize) -> Self {
         Self { scene, index }
     }
@@ -277,6 +293,14 @@ pub struct ImageRef<'s> {
 }
 
 impl<'s> ImageRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::Image(
+                self.index as u32,
+            ),
+        )
+    }
     pub(super) const fn at(scene: &'s ValidatedScene, index: usize) -> Self {
         Self { scene, index }
     }
@@ -321,6 +345,14 @@ pub struct SamplerRef<'s> {
 }
 
 impl<'s> SamplerRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::Sampler(
+                self.index as u32,
+            ),
+        )
+    }
     pub(super) const fn at(scene: &'s ValidatedScene, index: usize) -> Self {
         Self { scene, index }
     }
@@ -360,6 +392,14 @@ pub struct TextureRef<'s> {
 }
 
 impl<'s> TextureRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::Texture(
+                self.index as u32,
+            ),
+        )
+    }
     pub(super) const fn at(scene: &'s ValidatedScene, index: usize) -> Self {
         Self { scene, index }
     }

@@ -66,14 +66,16 @@ impl<'left, 'right> PartialEq<NodeSceneProfileProvenanceIndices<'right>>
 impl Eq for NodeSceneProfileProvenanceIndices<'_> {}
 
 #[derive(Clone, Copy)]
-pub(super) struct NodeSceneProfileTables<'scene> {
+pub(in crate::canonical_scene::store) struct NodeSceneProfileTables<'scene> {
     profile: &'scene ProfileStorage,
     state: &'scene ProfileState,
     metadata: &'scene MetadataPayloads,
 }
 
 impl<'scene> NodeSceneProfileTables<'scene> {
-    pub(super) fn try_new(profile: &'scene ProfileStorage) -> NodeSceneSemanticResult<Self> {
+    pub(in crate::canonical_scene::store) fn try_new(
+        profile: &'scene ProfileStorage,
+    ) -> NodeSceneSemanticResult<Self> {
         let state = profile.state.as_ref();
         if state.segments.is_empty() || state.owners.len() < 2 {
             return Err(invariant(
@@ -85,6 +87,65 @@ impl<'scene> NodeSceneProfileTables<'scene> {
             state,
             metadata: profile.metadata.as_ref(),
         })
+    }
+
+    /// Range ends remain monotone even when edits append segments with no source rows.
+    pub(in crate::canonical_scene::store) fn source_at(
+        self,
+        index: usize,
+    ) -> NodeSceneSemanticResult<NodeSceneProfileSource<'scene>> {
+        if index >= self.state.lineage_counts.sources {
+            return Err(invariant(
+                "profile source index is outside the validated Scene",
+            ));
+        }
+        let ordinal = self.state.segments.partition_point(|segment| {
+            segment.prefixes.sources + segment.lineage.as_ref().sources.len() <= index
+        });
+        let segment = self
+            .state
+            .segments
+            .get(ordinal)
+            .ok_or_else(|| invariant("validated source segment is absent"))?;
+        let row = index
+            .checked_sub(segment.prefixes.sources)
+            .ok_or_else(|| invariant("validated source segment prefix is inconsistent"))?;
+        let source = segment
+            .lineage
+            .as_ref()
+            .sources
+            .get(row)
+            .ok_or_else(|| invariant("validated source row is absent"))?;
+        read_source(segment, row, source)
+    }
+
+    pub(in crate::canonical_scene::store) fn resource_at(
+        self,
+        index: usize,
+    ) -> NodeSceneSemanticResult<NodeSceneProfileResource<'scene>> {
+        if index >= self.state.lineage_counts.resources {
+            return Err(invariant(
+                "profile resource index is outside the validated Scene",
+            ));
+        }
+        let ordinal = self.state.segments.partition_point(|segment| {
+            segment.prefixes.resources + segment.lineage.as_ref().resources.len() <= index
+        });
+        let segment = self
+            .state
+            .segments
+            .get(ordinal)
+            .ok_or_else(|| invariant("validated resource segment is absent"))?;
+        let row = index
+            .checked_sub(segment.prefixes.resources)
+            .ok_or_else(|| invariant("validated resource segment prefix is inconsistent"))?;
+        let resource = segment
+            .lineage
+            .as_ref()
+            .resources
+            .get(row)
+            .ok_or_else(|| invariant("validated resource row is absent"))?;
+        read_resource(segment, row, resource)
     }
 
     pub(super) fn into_cursor(self) -> NodeSceneProfileCursor<'scene> {

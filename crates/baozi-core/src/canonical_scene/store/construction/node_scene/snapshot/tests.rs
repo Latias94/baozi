@@ -1,3 +1,4 @@
+use crate::canonical_scene::store::production::CanonicalMetadataOwner;
 use baozi_operation::{
     CancellationToken, OperationControl, PhysicalStorageAccount, PhysicalStorageAccountFactory,
     PhysicalStorageAccountFactoryLimits, PhysicalStorageAccountLimits,
@@ -1491,7 +1492,10 @@ fn generic_metadata_round_trips_every_value_kind_without_provenance_ids() {
                 .next_metadata_entry()
                 .expect("metadata entry read")
                 .expect("metadata entry");
-            assert_eq!(entry.owner(), CanonicalProfileOwner::Scene);
+            assert_eq!(
+                entry.owner(),
+                CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Scene)
+            );
             assert_eq!(entry.key(), key.as_str());
             match (index, entry.value()) {
                 (0, NodeSceneProfileMetadataValue::Bool(value)) => assert!(value),

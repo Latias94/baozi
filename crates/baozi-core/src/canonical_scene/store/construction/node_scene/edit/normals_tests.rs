@@ -1,7 +1,11 @@
 //! Regression coverage for typed edits against an actual retained, centrally validated source.
 
+use crate::canonical_scene::store::production::CanonicalMetadataOwner;
+
 #[path = "appearance_tests.rs"]
 mod appearance_tests;
+#[path = "normals_tests/source_metadata_tests.rs"]
+mod source_metadata_tests;
 
 use std::convert::Infallible;
 use std::sync::atomic::AtomicU64;
@@ -598,7 +602,10 @@ fn assert_metadata(profile: &ProfileStorage, normal: bool, uv_owner: u32, second
             .any(|entry| { entry.key.get_str(&pools.text) == Some("test:tangent") })
     );
     let uv = metadata(profile, "test:uv");
-    assert_eq!(uv.owner, CanonicalProfileOwner::Attribute(uv_owner));
+    assert_eq!(
+        uv.owner,
+        CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Attribute(uv_owner))
+    );
     let StoredMetadataValue::F64Array(range) = uv.value else {
         panic!("F64 metadata type");
     };
@@ -611,7 +618,10 @@ fn assert_metadata(profile: &ProfileStorage, normal: bool, uv_owner: u32, second
         METADATA_SCALARS.map(f64::to_bits)
     );
     let second = metadata(profile, "test:second");
-    assert_eq!(second.owner, CanonicalProfileOwner::Attribute(second_owner));
+    assert_eq!(
+        second.owner,
+        CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Attribute(second_owner))
+    );
     let StoredMetadataValue::Bytes {
         media_type,
         payload,
@@ -626,7 +636,10 @@ fn assert_metadata(profile: &ProfileStorage, normal: bool, uv_owner: u32, second
     assert_eq!(payload.get(&pools.bytes), Some(SECOND_PAYLOAD.as_slice()));
     if normal {
         let entry = metadata(profile, "test:normal");
-        assert_eq!(entry.owner, CanonicalProfileOwner::Attribute(1));
+        assert_eq!(
+            entry.owner,
+            CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Attribute(1))
+        );
         let StoredMetadataValue::String(value) = entry.value else {
             panic!("normal metadata type");
         };

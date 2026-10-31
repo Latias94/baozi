@@ -1,12 +1,18 @@
 use crate::extension::ExtensionValueRef;
 use crate::namespaced::NamespacedName;
 
-use super::lineage::ProfileOwner;
+use super::lineage::{ProfileOwner, SourceIdentityLocalId};
 
-/// One descriptive metadata entry for a canonical owner.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::canonical_scene::store) enum MetadataAuthoringOwner {
+    Entity(ProfileOwner),
+    SourceObject(SourceIdentityLocalId),
+}
+
+/// One descriptive metadata entry for a canonical entity or a retained source object.
 #[derive(Debug, Clone, Copy)]
 pub struct MetadataAuthoringEntry<'input> {
-    owner: ProfileOwner,
+    owner: MetadataAuthoringOwner,
     key: &'input NamespacedName,
     value: ExtensionValueRef<'input>,
 }
@@ -17,10 +23,27 @@ impl<'input> MetadataAuthoringEntry<'input> {
         key: &'input NamespacedName,
         value: ExtensionValueRef<'input>,
     ) -> Self {
-        Self { owner, key, value }
+        Self {
+            owner: MetadataAuthoringOwner::Entity(owner),
+            key,
+            value,
+        }
     }
 
-    pub(in crate::canonical_scene::store) const fn owner(self) -> ProfileOwner {
+    /// Attaches descriptive metadata to one retained source object, independently of entities.
+    pub const fn for_source(
+        source: SourceIdentityLocalId,
+        key: &'input NamespacedName,
+        value: ExtensionValueRef<'input>,
+    ) -> Self {
+        Self {
+            owner: MetadataAuthoringOwner::SourceObject(source),
+            key,
+            value,
+        }
+    }
+
+    pub(in crate::canonical_scene::store) const fn owner(self) -> MetadataAuthoringOwner {
         self.owner
     }
 

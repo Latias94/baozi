@@ -55,6 +55,9 @@ baseline malformed-input safety for that source state; it is not sustained fuzz 
   base semantic. Cardinality, finite values, ordered POSITION bounds, and morph-cell admission are
   checked before canonical publication; unsupported morph semantics are rejected explicitly.
 - Perspective and orthographic camera projection data.
+- Selected `extras` values, including document/asset, scene, buffer/view/accessor, animation sampler,
+  and nested schema sites, retained as exact `application/json` bytes under source-object metadata
+  owners. Source objects without a canonical entity keep their own identity and metadata.
 - PBR metallic-roughness material factors.
 - Base color, metallic-roughness, normal, occlusion, and emissive texture URI references.
 - The typed `KHR_texture_transform` slice for selected base color, metallic-roughness, normal,
@@ -150,9 +153,9 @@ and import-contract tests.
 
 - Embedded image buffer views and image data URIs are materialized as encoded image payloads without
   pixel decoding. Sparse morph accessors, typed extension payloads beyond
-  `KHR_texture_transform`, and selected extras are rejected explicitly.
+  `KHR_texture_transform` are rejected explicitly.
 - Triangle strips, triangle fans, line strips, and line loops are not expanded yet.
-- Selected `extras` and unsupported extension payloads are explicitly rejected with original raw byte
+- Unsupported selected extension payloads are explicitly rejected with original raw byte
   ranges. A supported extension at an unsupported owner/site is rejected as well. Unselected entity
   payloads remain scope omissions. Declaring an unsupported optional extension without a selected
   payload retains the core fallback with `gltf.extension_ignored`.
@@ -165,6 +168,45 @@ and import-contract tests.
   session-opaque; the successful input manifest retains resolver stability evidence.
 - The maintained backend remains private and replaceable. Canonical authoring reads the bounded
   normalized model after backend data and its allowance have been released.
+
+## Descriptive Source Extras
+
+Each selected `extras` property creates one source-object-owned metadata value. The key names its
+schema site, and `MetadataValueRef::Bytes` exposes media type `application/json` and the original
+JSON value bytes. The [upstream extras schema](https://github.com/KhronosGroup/glTF/blob/main/specification/2.0/schema/extras.schema.json)
+allows any JSON type. There is no parse/reserialize step: null, booleans, strings, numbers, empty
+containers, Unicode escapes, number spelling, and internal whitespace remain distinct. An absent
+property produces no entry. The source object's versioned locator addresses the original object
+range in primary bytes, including the GLB JSON chunk offset.
+
+Direct object extras use `org.baozi.gltf:extras`; asset extras use
+`org.baozi.gltf:asset-extras` on the document source identity. Other nested sites use these suffixes
+under `org.baozi.gltf:`:
+
+| Source owner | Nested-site key suffix |
+| --- | --- |
+| Material | `pbr-metallic-roughness-extras` |
+| Material, for each of base-color, metallic-roughness, normal, occlusion, emissive | `<binding>-texture-extras`, `<binding>-texture-transform-extras` |
+| Accessor | `sparse-extras`, `sparse-indices-extras`, `sparse-values-extras` |
+| Animation channel | `target-extras` |
+| Camera | `orthographic-extras`, `perspective-extras` |
+
+Nested extras in a supported texture transform require that transform's supported parent binding.
+Unknown extension objects remain subject to the explicit extension rejection policy; data nested
+inside extras, including a property named `extensions`, is inert JSON. Extras do not create
+canonical material, animation, or reference behavior.
+
+Only the selected source closure is retained. Extras belonging to omitted objects are scope
+omissions, and shared accessors/buffers or other source objects are not duplicated onto all their
+canonical consumers. Source metadata survives canonical edits even when an associated derived
+attribute is deleted. See [metadata readers](../model/reading-scenes.md#metadata-and-source-objects)
+for lifetimes and ownership.
+
+Before dependency IO, the selected extras lower-bound preflight checks entry count against
+`max_records`, each key against `max_string_bytes`, and summed key, MIME, and payload bytes against
+`max_canonical_string_bytes`. Core separately admits the complete metadata batch, including other
+source properties, with those existing limits; there is no additional metadata quota or duplicate
+output commitment. Descriptors and retained payload storage remain metered and centrally validated.
 
 ## Version Metadata and Resource URIs
 

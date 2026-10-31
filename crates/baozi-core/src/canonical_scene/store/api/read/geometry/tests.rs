@@ -11,6 +11,10 @@ fn attribute(data: AttributeData<'_>, count: u32) -> AttributeRef<'_> {
         | AttributeData::SparseI32 { lanes, .. } => lanes,
     };
     AttributeRef {
+        metadata_owner: super::super::EntityMetadataOwner::from_parts(
+            crate::SceneGenerationId::allocate().unwrap(),
+            crate::canonical_scene::store::production::CanonicalProfileOwner::Attribute(0),
+        ),
         semantic: AttributeSemanticRef::Custom("test:element"),
         domain: AttributeDomain::Vertex,
         lanes,

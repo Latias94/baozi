@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use baozi::{
     AnimationInterpolation, AnimationTarget, AttributeDomain, AttributeElement,
-    AttributeSemanticRef, AuthoredTransform, Mat4, MaterialFactors, MorphDeltaSemantic,
-    TextureRole, TextureTransform, ValidatedScene, postprocess::triangle_vertices,
+    AttributeSemanticRef, AuthoredTransform, Mat4, MaterialFactors, MetadataOwnerRef,
+    MetadataValueRef, MorphDeltaSemantic, SourceObjectLocatorRef, TextureRole, TextureTransform,
+    ValidatedScene, postprocess::triangle_vertices,
 };
 
 use crate::Result;
@@ -105,6 +106,20 @@ pub struct Material {
     pub bindings: Vec<Binding>,
 }
 
+/// The application's owned subset of glTF source-object JSON metadata.
+/// Locator text remains qualified by the format-owned schema and version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceJsonMetadata {
+    pub resource: String,
+    pub format: String,
+    pub locator_schema: String,
+    pub locator_schema_version: u32,
+    pub locator: String,
+    pub key: String,
+    pub media_type: String,
+    pub payload: Vec<u8>,
+}
+
 #[derive(Debug)]
 pub struct ApplicationAsset {
     pub mesh_count: usize,
@@ -116,6 +131,7 @@ pub struct ApplicationAsset {
     pub animations: Vec<Clip>,
     pub materials: Vec<Material>,
     pub images: Vec<Vec<u8>>,
+    pub source_json_metadata: Vec<SourceJsonMetadata>,
 }
 
 impl ApplicationAsset {
@@ -339,6 +355,42 @@ impl ApplicationAsset {
                 })
                 .collect(),
             images: scene.images().map(|i| i.encoded_bytes().to_vec()).collect(),
+            source_json_metadata: scene
+                .metadata_entries()
+                .filter_map(|entry| {
+                    let MetadataOwnerRef::SourceObject(source) = entry.owner() else {
+                        return None;
+                    };
+                    let MetadataValueRef::Bytes {
+                        media_type,
+                        payload,
+                    } = entry.value()
+                    else {
+                        return None;
+                    };
+                    if source.format() != "org.baozi.gltf" || media_type != "application/json" {
+                        return None;
+                    }
+                    let SourceObjectLocatorRef::Namespaced {
+                        schema,
+                        schema_version,
+                        value,
+                    } = source.locator()
+                    else {
+                        return None;
+                    };
+                    Some(SourceJsonMetadata {
+                        resource: source.resource().identity().to_owned(),
+                        format: source.format().to_owned(),
+                        locator_schema: schema.to_owned(),
+                        locator_schema_version: schema_version,
+                        locator: value.to_owned(),
+                        key: entry.key().to_owned(),
+                        media_type: media_type.to_owned(),
+                        payload: payload.to_vec(),
+                    })
+                })
+                .collect(),
             draws,
         })
     }

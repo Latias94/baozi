@@ -6,7 +6,7 @@
 
 use baozi_operation::{CapacityPlan, StorePlanError};
 
-use crate::canonical_scene::store::production::CanonicalProfileOwner;
+use crate::canonical_scene::store::production::{CanonicalMetadataOwner, CanonicalProfileOwner};
 use crate::canonical_scene::store::typed_storage::build::{
     BuildResult, TypedStorageBuildControl, TypedStorageBuildError, allocate, append, capacity,
     count_work, finish,
@@ -64,7 +64,7 @@ impl MetadataEditPlan {
                     let entry = *entry;
                     source.remap_inner(entry, true)?;
                     validate_text_ranges(entry, &payloads.text)?;
-                    if deleted == Some(entry.owner) {
+                    if deleted.map(CanonicalMetadataOwner::Entity) == Some(entry.owner) {
                         removed_entries = removed_entries.checked_add(1)?;
                     } else {
                         output.remap(entry)?;
@@ -187,7 +187,10 @@ impl MetadataEditPlan {
         let mut kept = 0_u32;
         for entry in entries {
             let entry = control
-                .run_unit(|| (self.deleted != Some(entry.owner)).then_some(*entry))
+                .run_unit(|| {
+                    (self.deleted.map(CanonicalMetadataOwner::Entity) != Some(entry.owner))
+                        .then_some(*entry)
+                })
                 .map_err(TypedStorageBuildError::Control)?;
             let Some(entry) = entry else {
                 continue;

@@ -29,6 +29,7 @@ use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 mod animation;
+mod extras;
 mod model;
 mod morph;
 use model::*;

@@ -8,7 +8,7 @@ pub(in crate::canonical_scene::store) mod animation;
 pub(in crate::canonical_scene::store) mod appearance;
 pub(in crate::canonical_scene::store) mod deformation;
 pub(in crate::canonical_scene::store) mod geometry;
-mod profile;
+pub(in crate::canonical_scene::store) mod profile;
 pub(in crate::canonical_scene::store) mod spatial;
 
 pub(in crate::canonical_scene::store) use animation::{

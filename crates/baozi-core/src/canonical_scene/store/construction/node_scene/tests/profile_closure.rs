@@ -1,3 +1,4 @@
+use crate::canonical_scene::store::production::CanonicalMetadataOwner;
 use std::sync::atomic::AtomicU64;
 
 use baozi_operation::{PhysicalStorageAccount, PhysicalStorageAccountSnapshot, StoreRuntimeError};
@@ -736,7 +737,10 @@ pub(in crate::canonical_scene::store) fn inspect_profile_closure_semantics_for_p
             .next_metadata_entry()
             .expect("profile-closure metadata read")
             .expect("profile-closure metadata entry");
-        assert_eq!(entry.owner(), expected_owner);
+        assert_eq!(
+            entry.owner(),
+            CanonicalMetadataOwner::Entity(expected_owner)
+        );
         assert_eq!(entry.key(), expected_key);
         assert_eq!(entry.value(), expected_value);
     }

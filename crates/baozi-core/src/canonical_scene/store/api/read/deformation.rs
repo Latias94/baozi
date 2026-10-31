@@ -32,6 +32,14 @@ pub struct SkinRef<'s> {
 }
 
 impl<'s> SkinRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::Skin(
+                self.index as u32,
+            ),
+        )
+    }
     pub(super) const fn at(scene: &'s ValidatedScene, index: usize) -> Self {
         Self { scene, index }
     }
@@ -238,6 +246,14 @@ pub struct MorphTargetDefinitionRef<'s> {
 }
 
 impl<'s> MorphTargetDefinitionRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::MorphDefinition(
+                self.row as u32,
+            ),
+        )
+    }
     fn at(scene: &'s ValidatedScene, row: usize) -> Self {
         Self { scene, row }
     }
@@ -325,7 +341,7 @@ impl<'s> MorphTargetRef<'s> {
         let scene = self.primitive.scene();
         let start = target.delta_offset();
         (start..start + target.delta_count()).map(move |row| {
-            MorphDeltaRef::from_semantic(expect_validated(tables(scene).morph_delta_at(row)))
+            MorphDeltaRef::from_semantic(scene, expect_validated(tables(scene).morph_delta_at(row)))
         })
     }
 
@@ -406,12 +422,23 @@ impl MorphDeltaData<'_> {
 /// One borrowed relative delta stream with its authored semantic and storage representation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MorphDeltaRef<'s> {
+    metadata_owner: super::EntityMetadataOwner,
     semantic: MorphDeltaSemantic,
     data: MorphDeltaData<'s>,
 }
 
 impl<'s> MorphDeltaRef<'s> {
-    fn from_semantic(delta: NodeSceneDeformationMorphDelta<'s>) -> Self {
+    pub const fn metadata_owner(self) -> super::EntityMetadataOwner {
+        self.metadata_owner
+    }
+
+    fn from_semantic(scene: &ValidatedScene, delta: NodeSceneDeformationMorphDelta<'s>) -> Self {
+        let metadata_owner = super::EntityMetadataOwner::new(
+            scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::MorphDelta(
+                delta.source_index() as u32,
+            ),
+        );
         let semantic = delta.semantic();
         let data = match delta.into_payload() {
             NodeSceneDeformationMorphPayload::Dense { values, .. } => MorphDeltaData::Dense {
@@ -429,7 +456,11 @@ impl<'s> MorphDeltaRef<'s> {
                 }
             }
         };
-        Self { semantic, data }
+        Self {
+            metadata_owner,
+            semantic,
+            data,
+        }
     }
 
     pub const fn semantic(self) -> MorphDeltaSemantic {

@@ -1,4 +1,6 @@
-use crate::canonical_scene::store::production::{CanonicalProfileOwner, SessionOpaqueReason};
+use crate::canonical_scene::store::production::{
+    CanonicalMetadataOwner, CanonicalProfileOwner, SessionOpaqueReason,
+};
 use crate::provenance::{DigestAlgorithm, SourceObjectKind};
 
 use super::super::semantic::{
@@ -700,7 +702,10 @@ fn write_metadata_entry(
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
     begin_row(transcript, ROW_METADATA, ordinal)?;
-    let (owner_kind, owner_index) = encode_owner(entry.owner());
+    let (owner_kind, owner_index) = match entry.owner() {
+        CanonicalMetadataOwner::Entity(owner) => encode_owner(owner),
+        CanonicalMetadataOwner::SourceObject(index) => (19, index),
+    };
     write_u8_field(transcript, work, METADATA_OWNER_KIND, owner_kind)?;
     write_u32_field(transcript, work, METADATA_OWNER_INDEX, owner_index)?;
     write_bytes_field(transcript, work, METADATA_KEY, entry.key().as_bytes())?;

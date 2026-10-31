@@ -11,7 +11,9 @@ use baozi_operation::{
 };
 
 use crate::attribute::AttributeDomain;
-use crate::canonical_scene::store::production::{CanonicalProfileOwner, ProfileOwnerLayout};
+use crate::canonical_scene::store::production::{
+    CanonicalMetadataOwner, CanonicalProfileOwner, ProfileOwnerLayout,
+};
 use crate::canonical_scene::store::profile_provenance::{
     ProfileProvenanceRef, ProfileSegmentAddressDomain, issue_profile_segment_nonce,
 };
@@ -714,12 +716,23 @@ impl NodeSceneEditProfilePlan {
         for &entry in &source.metadata_entries {
             let entry = control
                 .run_unit(|| {
-                    let Some(owner) = self.targets.output_owner(entry.owner) else {
-                        return Ok(None);
+                    let owner = match entry.owner {
+                        CanonicalMetadataOwner::Entity(owner) => {
+                            let Some(owner) = self.targets.output_owner(owner) else {
+                                return Ok(None);
+                            };
+                            if !self.output_layout.contains(owner) {
+                                return Err(TypedStorageBuildError::Invariant);
+                            }
+                            CanonicalMetadataOwner::Entity(owner)
+                        }
+                        CanonicalMetadataOwner::SourceObject(index) => {
+                            if index as usize >= source.lineage_counts.sources {
+                                return Err(TypedStorageBuildError::Invariant);
+                            }
+                            entry.owner
+                        }
                     };
-                    if !self.output_layout.contains(owner) {
-                        return Err(TypedStorageBuildError::Invariant);
-                    }
                     let mut entry = if self.metadata.rewrites_payloads() {
                         cursor
                             .remap(entry)

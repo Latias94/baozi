@@ -1,5 +1,9 @@
 # Real-Asset Consumer Integration — 2026-10-31
 
+The later [source-object metadata increment](2026-10-31-source-object-metadata.md) admits selected
+glTF extras and makes `MorphPrimitivesTest` successful. Counts and measurements below describe the
+earlier source revisions named here; they are not updated with the later increment's observations.
+
 ## Scope
 
 PR #3 was merged as `04b4371b18d484d23641fdb8bda222741ddf2521`. The completed A–H library delivery

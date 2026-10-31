@@ -437,8 +437,8 @@ fn inspect_source_inventory(scope: &ParseScope<'_>, map: &GltfSourceMap<'_>) -> 
         node_zero
     );
     assert_ne!(
-        sources.provenance(scope, 1, node_zero)?,
-        sources.provenance(scope, 1, node_one)?
+        sources.source_index(scope, 1, node_zero)?,
+        sources.source_index(scope, 1, node_one)?
     );
     Ok(())
 }

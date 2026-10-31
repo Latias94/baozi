@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-10
-updated: 2026-10-30
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
@@ -212,11 +212,28 @@ Generic metadata and extension values contain no dense scene or provenance-arena
 behavior descriptor that needs a dense reference is part of the canonical schema and must register
 central validation and ADR 0032 remapping; encoding a numeric ID into a string/number is invalid.
 
-Metadata descriptors identify owners in the final Scene layout. Their immutable text, byte, and
-scalar payload pools have an independent retained owner, so changing owner coordinates does not
-require copying unchanged payloads. A concrete operation must remap descriptors together with its
-owner additions, deletions, or reindexing. Central validation requires canonical descriptor order,
-valid owner membership, and contiguous complete coverage of each payload pool.
+Metadata descriptors have two distinct ownership domains: a canonical entity in the final Scene
+layout, or a retained source identity. A source-object owner is a typed descriptor reference to the
+existing source inventory, never an ID encoded into a metadata key or value. Document, scene,
+buffer/view/accessor, and animation-sampler properties therefore need no invented canonical owner
+and are not copied onto every canonical entity derived from that source. Source ownership does not
+expand the set of canonical entities requiring provenance coverage.
+
+Their immutable text, byte, and scalar payload pools have an independent retained owner. Changing
+owner coordinates does not require copying unchanged payloads. A concrete operation remaps descriptors
+together with its entity owner additions, deletions, or reindexing. Source-object metadata follows the retained
+source identity and survives deletion of an associated derived canonical entity. Central validation
+requires canonical descriptor order (entity domain before source domain, then owner and key), valid
+membership in the appropriate inventory, and contiguous complete coverage of each payload pool.
+Metadata admission sizes owner counts/cursors against both domains; entity provenance planning
+continues to size against canonical entities alone.
+
+Bounded raw descriptive JSON uses the existing byte value with media type `application/json`.
+Core does not parse it into an arbitrary object model or interpret embedded references as canonical
+behavior. The format boundary is responsible for admitting syntax and selecting the descriptive
+property. Exact value bytes preserve null/scalars, empty containers, escapes, whitespace, and number
+spelling. Public readers borrow retained descriptors/pools without allocations or snapshot capture,
+and generation-qualified entity tokens remain separate from source identities.
 
 Normal generation provides the first concrete attribute addition/deletion mapping. A newly added
 Normal has no fictitious source attribute; its generated lineage merges the Primitive, Position,
@@ -305,6 +322,19 @@ This makes each lifetime and trust boundary explicit while retaining source trac
 - Per-step provenance and the composed input-to-final remap agree after multi-step edits.
 
 ## Amendment History
+
+### 2026-10-31: Separate source-object metadata from canonical entity metadata
+
+- Affected: `Metadata` and public borrowed profile readers.
+- Previous: metadata could describe only canonical entities, forcing source properties without one
+  canonical owner to be rejected or incorrectly attached to the Scene or every derived consumer.
+- New: source-object descriptors reference the existing source identity inventory independently;
+  entity provenance coverage and remapping remain unchanged. Descriptive JSON uses bounded exact
+  byte values rather than a second recursive metadata IR.
+- Impact: selected glTF extras survive postprocess edits and can be copied by applications before
+  Scene destruction; source-owner bounds, order, storage, and traversal are centrally validated.
+- Review: 2026-10-31 source-object metadata and real-asset integration review.
+- Rationale: source identity and canonical ownership have different lifetimes and cardinalities.
 
 ### 2026-07-17: Separate identity text from replay stability
 

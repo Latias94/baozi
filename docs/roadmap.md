@@ -120,9 +120,13 @@ Windows and Linux/WSL execution and separates advisory memory/timing measurement
 
 Keep stage time, allocator requests, operation ledgers, and process RSS distinct and advisory. Extend
 the corpus when a real caller supplies a missing profile, record its exact preservation/rejection
-behavior, and minimize each discovered regression. Higher-value follow-up work is explicit policy
-for common numeric/metadata admission gaps and larger real-workload costs; exporters, a renderer,
-automatic recovery, native release registration, and a generic asset compiler remain separate work.
+behavior, and minimize each discovered regression. Selected glTF extras now use source-object-owned
+exact JSON metadata and borrowed public readers, including objects without one canonical entity.
+The unchanged multi-primitive morph fixture covers their survival through edits and application
+extraction, as recorded in the [metadata integration review](reviews/2026-10-31-source-object-metadata.md).
+Higher-value follow-up work is explicit numeric admission policy and larger real-workload
+costs; exporters, a renderer, automatic recovery, native release registration, and a generic asset
+compiler remain separate work.
 
 ## Format Priorities
 

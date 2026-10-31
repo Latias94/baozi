@@ -246,7 +246,10 @@ impl ProfileBuildFault {
             }
             Self::MetadataOwner => {
                 if let Some(entry) = state.metadata_entries.first_mut() {
-                    entry.owner = CanonicalProfileOwner::Node(0);
+                    entry.owner =
+                        crate::canonical_scene::store::production::CanonicalMetadataOwner::Entity(
+                            CanonicalProfileOwner::Node(0),
+                        );
                 }
             }
             Self::MetadataRange => {

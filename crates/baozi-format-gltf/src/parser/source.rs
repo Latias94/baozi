@@ -84,6 +84,7 @@ pub(super) fn preflight(
     }
 
     // Payload ownership comes from scanner contexts, so unknown data cannot disappear in serde.
+    let mut extras = super::extras::ExtrasPreflight::default();
     for entity in map.entities() {
         ctx.charge_work(1)?;
         if !selected(entity.id, document, graph, closure, animations) {
@@ -101,9 +102,7 @@ pub(super) fn preflight(
             };
             match payload.kind {
                 SourcePayloadKind::Extras => {
-                    return Err(
-                        fail("extras", "glTF extras are outside the admitted profile").into(),
-                    );
+                    extras.add(ctx, payload)?;
                 }
                 SourcePayloadKind::Extensions => {
                     let offset = usize::try_from(range.byte_offset).ok();

@@ -20,8 +20,10 @@ The [exact selected profile](https://github.com/Latias94/baozi/blob/main/docs/fo
   pixel decoding. Selected dependencies use the origin-qualified session resolver;
   external URIs use the restricted relative-path profile and embedded data URLs
   require base64. URI schemes for remote fetching are unsupported.
+- Preserve selected `extras` as exact `application/json` byte values owned by source identities,
+  including JSON null, scalars, and nested sites. No source JSON is interpreted as scene behavior.
 - Support only the typed `KHR_texture_transform` slice at documented texture
-  bindings. Reject selected extras, unsupported selected extension payloads,
+  bindings. Reject unsupported selected extension payloads,
   unsupported required extensions, and sparse morph accessors. Unsupported optional extension
   declarations without selected payloads may retain the core fallback with a
   diagnostic.

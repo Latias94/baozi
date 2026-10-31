@@ -90,8 +90,8 @@ pub(super) use plan::geometry::{
 };
 pub(super) use plan::geometry::{GeometryAuthoringLimit, GeometryAuthoringSemanticError};
 pub(super) use plan::profile::{
-    CanonicalProfileOwner, ProfileAuthoringFailure, ProfileOwnerCatalog, ProfileOwnerCatalogError,
-    ProfileOwnerCounts, ProfileOwnerLayout, ValidatedProfileBatch,
+    CanonicalMetadataOwner, CanonicalProfileOwner, ProfileAuthoringFailure, ProfileOwnerCatalog,
+    ProfileOwnerCatalogError, ProfileOwnerCounts, ProfileOwnerLayout, ValidatedProfileBatch,
     validate_profile_batch_with_control,
 };
 pub(super) use plan::profile::{ProfileAuthoringLimit, ProfileAuthoringSemanticError};

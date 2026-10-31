@@ -26,7 +26,9 @@ use super::super::input::lineage::{
 };
 #[cfg(test)]
 use super::super::input::lineage::{ObservedResourceAuthoring, SourceIdentityLocalId};
-use super::super::input::metadata::{MetadataAuthoringBatch, MetadataAuthoringEntry};
+use super::super::input::metadata::{
+    MetadataAuthoringBatch, MetadataAuthoringEntry, MetadataAuthoringOwner,
+};
 use super::ValidatedNodeBatch;
 use super::animation::ValidatedAnimationBatch;
 use super::appearance::ValidatedAppearanceBatch;
@@ -140,12 +142,20 @@ pub(in crate::canonical_scene::store) enum ProfileAuthoringSemanticError {
     #[error("metadata entries {first} and {duplicate} repeat one owner-local key")]
     DuplicateMetadataKey { first: usize, duplicate: usize },
     #[error(
+        "metadata entry {entry} references source {source_index} outside source count {source_count}"
+    )]
+    MetadataSourceOutOfRange {
+        entry: usize,
+        source_index: u32,
+        source_count: u32,
+    },
+    #[error(
         "metadata entry {entry} key must follow entry {previous} for canonical owner {owner:?}"
     )]
     MetadataKeyOrder {
         previous: usize,
         entry: usize,
-        owner: CanonicalProfileOwner,
+        owner: CanonicalMetadataOwner,
     },
     #[error("scratch capacity planning failed for {resource}: {cause}")]
     ScratchCapacity {
@@ -189,6 +199,13 @@ pub(in crate::canonical_scene::store) enum CanonicalProfileOwner {
     MorphDelta(u32),
     AnimationClip(u32),
     AnimationChannel(u32),
+}
+
+/// Metadata ownership is independent of the entity provenance coverage directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(in crate::canonical_scene::store) enum CanonicalMetadataOwner {
+    Entity(CanonicalProfileOwner),
+    SourceObject(u32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -688,7 +705,7 @@ struct ValidatedOwnerProvenancePlan {
 
 #[derive(Debug, Clone, Copy)]
 struct ValidatedMetadataPlan {
-    owner: CanonicalProfileOwner,
+    owner: CanonicalMetadataOwner,
     input_index: usize,
 }
 
@@ -727,12 +744,12 @@ impl<'input> ValidatedSourceIdentity<'_, 'input> {
 
 #[derive(Debug, Clone, Copy)]
 pub(in crate::canonical_scene::store) struct ValidatedMetadataEntry<'input> {
-    owner: CanonicalProfileOwner,
+    owner: CanonicalMetadataOwner,
     input: MetadataAuthoringEntry<'input>,
 }
 
 impl<'input> ValidatedMetadataEntry<'input> {
-    pub(in crate::canonical_scene::store) const fn owner(self) -> CanonicalProfileOwner {
+    pub(in crate::canonical_scene::store) const fn owner(self) -> CanonicalMetadataOwner {
         self.owner
     }
 
@@ -1486,9 +1503,15 @@ where
         limits.max_metadata_entries(),
     )?;
 
-    let initialization_work = owners
+    let metadata_owner_count = owners
         .owner_count()
-        .checked_mul(4)
+        .checked_add(u64::from(source_count))
+        .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
+            dimension: "metadata owner count",
+        })?;
+    let initialization_work = metadata_owner_count
+        .checked_mul(3)
+        .and_then(|work| work.checked_add(owners.owner_count()))
         .and_then(|work| work.checked_add(u64::from(metadata_entry_count)))
         .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
             dimension: "profile scratch initialization work",
@@ -1508,8 +1531,13 @@ where
         scratch_plan::<u32>(lineage.provenance_nodes().len(), "provenance depth table")?;
     let owner_plan =
         scratch_plan::<ValidatedOwnerProvenancePlan>(owner_count_usize, "profile owner plans")?;
+    let metadata_owner_count = usize::try_from(metadata_owner_count).map_err(|_| {
+        ProfileAuthoringSemanticError::AccountingOverflow {
+            dimension: "metadata owner count",
+        }
+    })?;
     let metadata_owner_plan =
-        scratch_plan::<u32>(owner_count_usize, "profile metadata owner index")?;
+        scratch_plan::<u32>(metadata_owner_count, "profile metadata owner index")?;
     let metadata_plan =
         scratch_plan::<ValidatedMetadataPlan>(metadata.entries().len(), "profile metadata plans")?;
     let scratch_envelope = checked_sum(
@@ -1583,6 +1611,7 @@ where
     validate_metadata(
         metadata,
         owners,
+        source_count,
         limits,
         &mut storage,
         &mut metrics,

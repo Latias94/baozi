@@ -57,6 +57,11 @@ pub use baozi_core::{
     TargetSpace,
 };
 pub use baozi_core::{
+    DigestAlgorithm, EntityMetadataOwner, MetadataArrayRef, MetadataEntryRef, MetadataOwnerRef,
+    MetadataValueRef, ProfileResourceRef, ProfileResourceStabilityRef, ProfileSessionOpaqueReason,
+    SceneMetadataOwner, SourceIdentityRef, SourceObjectKind, SourceObjectLocatorRef,
+};
+pub use baozi_core::{
     InfluenceRef, InfluenceRowRef, InfluenceRows, MorphDeltaData, MorphDeltaRef,
     MorphDeltaSemantic, MorphTargetDefinitionRef, MorphTargetId, MorphTargetRef, SkinId,
     SkinMatrixCorrection, SkinMatrixCorrectionError, SkinMatrixSpace, SkinMatrixSpaces, SkinRef,

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-09
-updated: 2026-10-30
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
@@ -54,6 +54,11 @@ and typed dense arrays. Generic extension and metadata values may not contain de
 source handles, provenance-arena IDs, or encoded references to them. Nested arbitrary maps and backend
 objects are forbidden. Metadata is descriptive; an extension that changes rendering, topology,
 deformation, or animation must use a typed descriptor or be reported as unsupported behavior.
+
+A bounded byte payload may retain an admitted descriptive JSON value with media type
+`application/json`. Its bytes are opaque to core; this does not add a recursive map value or grant
+embedded application data canonical reference semantics. ADR 0036 distinguishes a metadata
+descriptor's typed source-object owner from references forbidden inside a generic value.
 
 ### Declarative Schema Snapshot
 

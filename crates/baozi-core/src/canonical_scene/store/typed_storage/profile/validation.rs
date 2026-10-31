@@ -200,7 +200,13 @@ impl ProfileStorage {
         else {
             return Ok(None);
         };
-        if !validate_metadata(control, &state.metadata_entries, metadata, owners)? {
+        if !validate_metadata(
+            control,
+            &state.metadata_entries,
+            metadata,
+            owners,
+            counts.source_count,
+        )? {
             return Ok(None);
         }
         run(control, || {
@@ -539,6 +545,7 @@ fn validate_metadata<C: TypedStorageValidationControl>(
     entries: &[StoredMetadataEntry],
     pools: &MetadataPayloads,
     owners: ProfileOwnerLayout,
+    source_count: u32,
 ) -> Result<bool, C::Error> {
     if !visit_bytes(control, pools.text.as_bytes())?
         || !visit_bytes(control, &pools.bytes)?
@@ -555,7 +562,10 @@ fn validate_metadata<C: TypedStorageValidationControl>(
     let mut previous_key = None;
     for row in entries {
         if run(control, || {
-            if !owners.contains(row.owner) {
+            if !match row.owner {
+                CanonicalMetadataOwner::Entity(owner) => owners.contains(owner),
+                CanonicalMetadataOwner::SourceObject(index) => index < source_count,
+            } {
                 return None;
             }
             let key = consume_text(row.key, &pools.text, &mut cursors.text)?;

@@ -60,6 +60,8 @@ fn run() -> Result<()> {
             "nodes": asset.nodes.len(), "meshes": asset.mesh_count, "primitives": asset.draws.len(),
             "instances": asset.instances.len(), "skins": asset.skins.len(), "animations": asset.animations.len(),
             "materials": asset.materials.len(), "images": asset.images.len(), "draw_vertices": asset.vertex_count(),
+            "source_json_metadata_entries": asset.source_json_metadata.len(),
+            "source_json_metadata_payload_bytes": asset.source_json_metadata.iter().map(|m| m.payload.len()).sum::<usize>(),
             "mesh_local_bounds": asset.bounds(), "loss_records": output.import_evidence.loss_evidence().len(),
             "import_micros": metrics.import_micros, "postprocess_micros": metrics.postprocess_micros,
             "buffers_micros": metrics.buffers_micros, "import_work": metrics.import_work,

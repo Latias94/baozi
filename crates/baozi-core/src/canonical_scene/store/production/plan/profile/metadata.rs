@@ -8,6 +8,7 @@ const METADATA_FLOAT32_BYTES: u64 = 4;
 pub(super) fn validate_metadata<C, R>(
     metadata: MetadataAuthoringBatch<'_>,
     owners: ProfileOwnerCatalog<'_>,
+    source_count: u32,
     limits: SceneValidationLimits,
     storage: &mut ProfileValidationScratch<R>,
     metrics: &mut ProfileMetrics,
@@ -23,11 +24,13 @@ where
         metadata_plans: plans,
         ..
     } = storage;
-    let owner_count = usize::try_from(owners.owner_count()).map_err(|_| {
-        ProfileAuthoringSemanticError::AccountingOverflow {
+    let owner_count = owners
+        .owner_count()
+        .checked_add(u64::from(source_count))
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
             dimension: "metadata owner count",
-        }
-    })?;
+        })?;
     if owner_counts.capacity() < owner_count {
         return Err(ProfileAuthoringSemanticError::ScratchAllocation {
             resource: "profile metadata owner counts",
@@ -77,7 +80,7 @@ where
         plans,
         metadata.entries().len(),
         ValidatedMetadataPlan {
-            owner: CanonicalProfileOwner::Scene,
+            owner: CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Scene),
             input_index: usize::MAX,
         },
         "profile metadata plans",
@@ -86,7 +89,8 @@ where
 
     for (input_index, entry) in metadata.entries().iter().copied().enumerate() {
         context.run_semantic_unit(SceneValidationWork::MetadataEntry, || {
-            let (owner, owner_ordinal) = owners.normalize(entry.owner())?;
+            let (owner, owner_ordinal) =
+                normalize_owner(entry.owner(), owners, source_count, input_index)?;
             let key_bytes = usize_to_u64(entry.key().as_str().len(), "metadata key bytes")?;
             if key_bytes > usize_to_u64(limits.max_metadata_key_bytes(), "metadata key limit")? {
                 return Err(ProfileAuthoringSemanticError::LimitExceeded {
@@ -183,7 +187,8 @@ where
         .into());
     }
     for (input_index, entry) in metadata.entries().iter().copied().enumerate() {
-        let (owner, owner_ordinal) = owners.normalize(entry.owner())?;
+        let (owner, owner_ordinal) =
+            normalize_owner(entry.owner(), owners, source_count, input_index)?;
         let cursor = owner_cursors.get_mut(owner_ordinal).ok_or(
             ProfileAuthoringSemanticError::AccountingOverflow {
                 dimension: "metadata owner cursor index",
@@ -211,6 +216,38 @@ where
         })?;
     }
     Ok(())
+}
+
+fn normalize_owner(
+    owner: MetadataAuthoringOwner,
+    owners: ProfileOwnerCatalog<'_>,
+    source_count: u32,
+    entry: usize,
+) -> Result<(CanonicalMetadataOwner, usize), ProfileAuthoringSemanticError> {
+    match owner {
+        MetadataAuthoringOwner::Entity(owner) => {
+            let (owner, ordinal) = owners.normalize(owner)?;
+            Ok((CanonicalMetadataOwner::Entity(owner), ordinal))
+        }
+        MetadataAuthoringOwner::SourceObject(source) => {
+            let source_index = source.index();
+            if source_index >= source_count {
+                return Err(ProfileAuthoringSemanticError::MetadataSourceOutOfRange {
+                    entry,
+                    source_index,
+                    source_count,
+                });
+            }
+            let ordinal = owners
+                .owner_count()
+                .checked_add(u64::from(source_index))
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or(ProfileAuthoringSemanticError::AccountingOverflow {
+                    dimension: "metadata source owner ordinal",
+                })?;
+            Ok((CanonicalMetadataOwner::SourceObject(source_index), ordinal))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

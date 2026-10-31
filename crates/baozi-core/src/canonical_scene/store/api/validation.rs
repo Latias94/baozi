@@ -195,6 +195,55 @@ pub enum SceneProfileOwner {
     AnimationChannel(u32),
 }
 
+/// A metadata owner descriptor in canonical coordinates. Use reader tokens to qualify a Scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SceneMetadataOwner {
+    Entity(SceneProfileOwner),
+    SourceObject(u32),
+}
+
+impl SceneProfileOwner {
+    pub(in crate::canonical_scene::store) const fn from_canonical(
+        owner: super::super::production::CanonicalProfileOwner,
+    ) -> Self {
+        use super::super::production::CanonicalProfileOwner as O;
+        match owner {
+            O::Scene => Self::Scene,
+            O::SyntheticRoot => Self::SyntheticRoot,
+            O::Node(i) => Self::Node(i),
+            O::Camera(i) => Self::Camera(i),
+            O::Light(i) => Self::Light(i),
+            O::Image(i) => Self::Image(i),
+            O::Sampler(i) => Self::Sampler(i),
+            O::Texture(i) => Self::Texture(i),
+            O::TextureBinding(i) => Self::TextureBinding(i),
+            O::Material(i) => Self::Material(i),
+            O::LogicalMesh(i) => Self::LogicalMesh(i),
+            O::Primitive(i) => Self::Primitive(i),
+            O::Attribute(i) => Self::Attribute(i),
+            O::MeshInstance(i) => Self::MeshInstance(i),
+            O::Skin(i) => Self::Skin(i),
+            O::MorphDefinition(i) => Self::MorphDefinition(i),
+            O::MorphDelta(i) => Self::MorphDelta(i),
+            O::AnimationClip(i) => Self::AnimationClip(i),
+            O::AnimationChannel(i) => Self::AnimationChannel(i),
+        }
+    }
+}
+
+impl SceneMetadataOwner {
+    pub(in crate::canonical_scene::store) const fn from_canonical(
+        owner: super::super::production::CanonicalMetadataOwner,
+    ) -> Self {
+        use super::super::production::CanonicalMetadataOwner as O;
+        match owner {
+            O::Entity(owner) => Self::Entity(SceneProfileOwner::from_canonical(owner)),
+            O::SourceObject(index) => Self::SourceObject(index),
+        }
+    }
+}
+
 /// An allocation-free explanation of a rejected producer submission.
 ///
 /// Top-level object indices follow producer input slice order. Animation channel indices are
@@ -1035,12 +1084,20 @@ pub enum SceneValidationError {
     #[error("metadata entries {first} and {duplicate} repeat one owner-local key")]
     DuplicateMetadataKey { first: usize, duplicate: usize },
     #[error(
+        "metadata entry {entry} references source {source_index} outside source count {source_count}"
+    )]
+    MetadataSourceOutOfRange {
+        entry: usize,
+        source_index: u32,
+        source_count: u32,
+    },
+    #[error(
         "metadata entry {entry} key must follow entry {previous} for canonical owner {owner:?}"
     )]
     MetadataKeyOrder {
         previous: usize,
         entry: usize,
-        owner: SceneProfileOwner,
+        owner: SceneMetadataOwner,
     },
 }
 
@@ -1151,6 +1208,7 @@ impl SceneValidationError {
             | Self::ProvenanceOutOfRange { .. }
             | Self::MetadataNonFinite { .. }
             | Self::DuplicateMetadataKey { .. }
+            | Self::MetadataSourceOutOfRange { .. }
             | Self::MetadataKeyOrder { .. } => SceneValidationDomain::Profile,
             Self::RootsAbsent
             | Self::NodeDomainTooLarge { .. }
@@ -1340,6 +1398,7 @@ impl SceneValidationError {
             Self::ProvenanceOutOfRange { .. } => "profile.provenance-out-of-range",
             Self::MetadataNonFinite { .. } => "profile.metadata-non-finite",
             Self::DuplicateMetadataKey { .. } => "profile.duplicate-metadata-key",
+            Self::MetadataSourceOutOfRange { .. } => "profile.metadata-source-out-of-range",
             Self::MetadataKeyOrder { .. } => "profile.metadata-key-order",
             Self::InputCountDomainExceeded { .. } => "scene.input-count-domain-exceeded",
             Self::RootsAbsent => "node.roots-absent",

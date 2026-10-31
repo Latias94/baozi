@@ -486,7 +486,7 @@ fn strict_json_failures_retain_the_offending_raw_range() -> TestResult<()> {
 }
 
 #[test]
-fn valid_json_with_unsupported_extras_reaches_the_explicit_profile_check() -> TestResult<()> {
+fn valid_json_extras_preserve_the_complete_admitted_grammar_family() -> TestResult<()> {
     let document = br#"{
         "asset": {
             "version": "2.0",
@@ -506,8 +506,25 @@ fn valid_json_with_unsupported_extras_reaches_the_explicit_profile_check() -> Te
     )?;
 
     assert!(diagnostics.is_empty());
-    let error = expected_error(result)?;
-    common::assert_gltf_failure(&error, GltfFailureCode::UnsupportedFeature, Some("extras"))?;
+    let report = result?;
+    assert!(report.loss_evidence().is_empty());
+    assert_eq!(report.scene().metadata_count(), 1);
+    let entry = report.scene().metadata_entries().next().unwrap();
+    assert_eq!(entry.key(), "org.baozi.gltf:asset-extras");
+    let baozi_import::MetadataValueRef::Bytes {
+        media_type,
+        payload,
+    } = entry.value()
+    else {
+        panic!("extras must retain their encoded value");
+    };
+    assert_eq!(media_type, "application/json");
+    let value: serde_json::Value = serde_json::from_slice(payload)?;
+    assert_eq!(
+        value["escaped"],
+        "quote:\" slash:/ line:\n scalar:中 pair:\u{1d11e}"
+    );
+    assert_eq!(value["values"].as_array().unwrap().len(), 9);
     Ok(())
 }
 

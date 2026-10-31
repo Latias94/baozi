@@ -2,7 +2,7 @@
 
 use baozi_operation::{CapacityPlan, StorePlanError};
 
-use crate::canonical_scene::store::production::{CanonicalProfileOwner, ValidatedProfileBatch};
+use crate::canonical_scene::store::production::{CanonicalMetadataOwner, ValidatedProfileBatch};
 use crate::canonical_scene::store::typed_storage::build::{
     BuildResult, TypedStorageBuildControl, TypedStorageBuildError, allocate, append, capacity,
     count_work, finish, push,
@@ -197,7 +197,7 @@ impl MetadataDescriptorCursor {
     /// Computes references only. The separately retained pools are never copied here.
     pub(in crate::canonical_scene::store) fn entry(
         &mut self,
-        owner: CanonicalProfileOwner,
+        owner: CanonicalMetadataOwner,
         key: &str,
         value: ExtensionValueRef<'_>,
     ) -> Option<StoredMetadataEntry> {

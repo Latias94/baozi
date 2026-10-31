@@ -2,7 +2,8 @@
 
 use crate::canonical_scene::store::api::validation::{
     SceneAnimationRateKind, SceneAnimationSamplePart, SceneAppearanceRule, SceneLightEmissionRule,
-    SceneProfileOwner, SceneValidationDomain, SceneValidationError, SceneValidationLimit,
+    SceneMetadataOwner, SceneProfileOwner, SceneValidationDomain, SceneValidationError,
+    SceneValidationLimit,
 };
 use crate::canonical_scene::store::production::{
     AnimationAuthoringLimit, AnimationAuthoringSemanticError, AnimationRateKind,
@@ -169,29 +170,7 @@ const fn light_emission_rule(cause: crate::entity::LightEmissionError) -> SceneL
 }
 
 const fn profile_owner(owner: CanonicalProfileOwner) -> SceneProfileOwner {
-    match owner {
-        CanonicalProfileOwner::Scene => SceneProfileOwner::Scene,
-        CanonicalProfileOwner::SyntheticRoot => SceneProfileOwner::SyntheticRoot,
-        CanonicalProfileOwner::Node(index) => SceneProfileOwner::Node(index),
-        CanonicalProfileOwner::Camera(index) => SceneProfileOwner::Camera(index),
-        CanonicalProfileOwner::Light(index) => SceneProfileOwner::Light(index),
-        CanonicalProfileOwner::Image(index) => SceneProfileOwner::Image(index),
-        CanonicalProfileOwner::Sampler(index) => SceneProfileOwner::Sampler(index),
-        CanonicalProfileOwner::Texture(index) => SceneProfileOwner::Texture(index),
-        CanonicalProfileOwner::TextureBinding(index) => SceneProfileOwner::TextureBinding(index),
-        CanonicalProfileOwner::Material(index) => SceneProfileOwner::Material(index),
-        CanonicalProfileOwner::LogicalMesh(index) => SceneProfileOwner::LogicalMesh(index),
-        CanonicalProfileOwner::Primitive(index) => SceneProfileOwner::Primitive(index),
-        CanonicalProfileOwner::Attribute(index) => SceneProfileOwner::Attribute(index),
-        CanonicalProfileOwner::MeshInstance(index) => SceneProfileOwner::MeshInstance(index),
-        CanonicalProfileOwner::Skin(index) => SceneProfileOwner::Skin(index),
-        CanonicalProfileOwner::MorphDefinition(index) => SceneProfileOwner::MorphDefinition(index),
-        CanonicalProfileOwner::MorphDelta(index) => SceneProfileOwner::MorphDelta(index),
-        CanonicalProfileOwner::AnimationClip(index) => SceneProfileOwner::AnimationClip(index),
-        CanonicalProfileOwner::AnimationChannel(index) => {
-            SceneProfileOwner::AnimationChannel(index)
-        }
-    }
+    SceneProfileOwner::from_canonical(owner)
 }
 
 pub(super) fn node_validation_error(
@@ -1475,6 +1454,15 @@ pub(super) fn profile_validation_error(
                 duplicate: *duplicate,
             }
         }
+        Source::MetadataSourceOutOfRange {
+            entry,
+            source_index,
+            source_count,
+        } => SceneValidationError::MetadataSourceOutOfRange {
+            entry: *entry,
+            source_index: *source_index,
+            source_count: *source_count,
+        },
         Source::MetadataKeyOrder {
             previous,
             entry,
@@ -1482,7 +1470,7 @@ pub(super) fn profile_validation_error(
         } => SceneValidationError::MetadataKeyOrder {
             previous: *previous,
             entry: *entry,
-            owner: profile_owner(*owner),
+            owner: SceneMetadataOwner::from_canonical(*owner),
         },
         Source::CountDomainTooLarge { collection } => {
             SceneValidationError::CollectionDomainTooLarge {

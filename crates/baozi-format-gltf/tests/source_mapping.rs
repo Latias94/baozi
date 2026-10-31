@@ -23,7 +23,7 @@ fn unsigned_detail(envelope: &baozi_import::FormatFailureEnvelope, key: &str) ->
 fn rejected_payload_ranges_preserve_raw_unicode_escapes_and_glb_offsets() -> TestResult<()> {
     let value = r#"{"tag":"扩展"}"#;
     let json = format!(
-        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"name":"节点","extr\u0061s":{value}}}]}}"#
+        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"name":"节点","extensions":{{"VENDOR_\u0078":{value}}}}}]}}"#
     );
     let offset = json.find(value).unwrap();
     for is_glb in [false, true] {
@@ -39,7 +39,11 @@ fn rejected_payload_ranges_preserve_raw_unicode_escapes_and_glb_offsets() -> Tes
         )?;
         assert!(diagnostics.is_empty());
         let error = expected_error(result)?;
-        assert_gltf_failure(&error, GltfFailureCode::UnsupportedFeature, Some("extras"))?;
+        assert_gltf_failure(
+            &error,
+            GltfFailureCode::UnsupportedFeature,
+            Some("extension payload"),
+        )?;
         let failure = gltf_failure(&error)?;
         assert_eq!(
             unsigned_detail(failure, "byte_offset"),
@@ -74,6 +78,7 @@ fn unselected_payloads_are_scope_omissions() -> TestResult<()> {
         GltfTestOptions::memory(),
     )?;
     assert!(diagnostics.is_empty());
+    assert_eq!(report.scene().metadata_count(), 0);
     assert_eq!(
         report
             .scene()
@@ -204,7 +209,6 @@ fn selected_unknown_extension_payloads_are_not_lost_in_backend_decode() -> TestR
     for property in [
         r#""extensions":{"VENDOR_anything":{}}"#,
         r#""extensions":{"KHR_texture_transform":{}}"#,
-        r#""extras":null"#,
     ] {
         let json = format!(r#"{{"asset":{{"version":"2.0"}},"nodes":[{{{property}}}]}}"#);
         let (result, _) = import_assets_result(
@@ -223,11 +227,11 @@ fn selected_unknown_extension_payloads_are_not_lost_in_backend_decode() -> TestR
 }
 
 #[test]
-fn selected_nested_camera_extras_are_explicitly_rejected() -> TestResult<()> {
+fn selected_nested_camera_unknown_extensions_are_explicitly_rejected() -> TestResult<()> {
     let json = br#"{
         "asset":{"version":"2.0"},
         "nodes":[{"camera":0}],
-        "cameras":[{"type":"orthographic","orthographic":{"xmag":1,"ymag":1,"znear":0.1,"zfar":10,"extras":{"nested":true}}}]
+        "cameras":[{"type":"orthographic","orthographic":{"xmag":1,"ymag":1,"znear":0.1,"zfar":10,"extensions":{"VENDOR_nested":{}}}}]
     }"#;
     let (result, _) = import_assets_result(
         "mapping.gltf",
@@ -237,7 +241,7 @@ fn selected_nested_camera_extras_are_explicitly_rejected() -> TestResult<()> {
     assert_gltf_failure(
         &expected_error(result)?,
         GltfFailureCode::UnsupportedFeature,
-        Some("extras"),
+        Some("extension payload"),
     )?;
     Ok(())
 }

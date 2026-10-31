@@ -165,6 +165,49 @@ Iterators are independent, exact-size, and may be stopped, restarted, or interle
 borrow the Scene itself, so they outlive a temporary view or iterator. Dropping a view performs no
 validation transaction and requires no `finish()` call.
 
+## Metadata and source objects
+
+`scene.metadata_entries()` is an independent exact-size, double-ended, cloneable iterator over
+borrowed `MetadataEntryRef` values. `metadata_count()` gives its size. `key()` borrows the retained
+namespaced key, and `value()` returns a closed `MetadataValueRef`: scalars, strings, byte payloads
+with media type, vectors/colors/matrices, or typed dense arrays. Vector and matrix payloads expose
+their validated packed scalar slices; array `len()` counts logical values. Reads allocate no heap
+storage, parse no JSON, and preserve the stored scalar bits and byte spelling.
+
+`owner()` distinguishes `MetadataOwnerRef::Entity` from `SourceObject`. An entity token includes the
+current Scene generation. Compare it with `metadata_owner()` from the Scene or an entity view to
+associate entries without constructing canonical numeric coordinates. A token's `descriptor()`
+is descriptive; it is not a reusable cross-generation ID. Iteration places entity owners first,
+then source-object owners, with each owner's keys in strictly increasing byte order.
+
+Source metadata belongs to the original source object even if that object has no single canonical
+entity. A buffer or animation sampler can contribute to many canonical owners, and a document
+need not correspond to the selected Scene. Source metadata is not duplicated for those consumers
+and survives edits that remove a derived attribute. Entity metadata follows canonical remaps and
+is removed when its actual owner is deleted.
+
+`scene.source_identities()` and `profile_resources()` expose the retained source and resource
+inventories. `SourceIdentityRef` follows its sanitized `resource()`, format, optional display name,
+locator, and optional content digest. A locator is either typed/indexed or qualified by its
+namespaced schema and version. `ProfileResourceRef::stability()` keeps replay evidence separate
+from the resource's identity text; a public identity grants no IO access. Source/resource lookup
+uses a segment range search in O(log segment count); getters then borrow the resolved rows.
+Numeric inventory indices are local to a Scene generation and are not persistence keys.
+Equality of `SourceIdentityRef` compares its generation and inventory row. Correlate across edits or
+imports through the retained resource, format, and locator fields, keeping digest and replay
+stability separate.
+
+For selected glTF extras, match `SourceObject`, then `MetadataValueRef::Bytes` with media type
+`application/json`. The payload includes the exact JSON value, even for an authored `null`, scalar,
+or empty container. The site key distinguishes direct object extras from nested asset, material,
+texture-transform, accessor, animation-target, and camera sites. See the
+[glTF profile](../formats/gltf.md#descriptive-source-extras) for the complete key mapping.
+
+All strings and slices borrow the Scene, so they may outlive a temporary entry or iterator but
+cannot outlive the Scene. Copy only the application-owned fields needed after Scene destruction.
+The [real-asset consumer](../../tools/consumers/assets/README.md) demonstrates that choice for
+source JSON, including its resource and versioned locator.
+
 ## Deformation and animation
 
 `scene.skins()` exposes ordered joint palettes, inverse-bind matrices, and explicit matrix-space

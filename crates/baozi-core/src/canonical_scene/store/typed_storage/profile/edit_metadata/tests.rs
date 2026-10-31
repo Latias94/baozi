@@ -68,7 +68,11 @@ fn add(
 ) {
     let key = store_text(&mut pools.text, key);
     let value = value(pools);
-    entries.push(StoredMetadataEntry { owner, key, value });
+    entries.push(StoredMetadataEntry {
+        owner: CanonicalMetadataOwner::Entity(owner),
+        key,
+        value,
+    });
 }
 
 fn lengths(pools: &MetadataPayloads) -> [usize; 7] {
@@ -346,7 +350,10 @@ fn deletion_compacts_every_pool_and_preserves_all_twenty_variants_and_bits() {
 
     let mut cursor = MetadataEditCursor::new();
     let mut mapped = vec![];
-    for &entry in entries.iter().filter(|entry| entry.owner != DELETED) {
+    for &entry in entries
+        .iter()
+        .filter(|entry| entry.owner != CanonicalMetadataOwner::Entity(DELETED))
+    {
         let after = cursor.remap(entry).unwrap();
         assert_eq!(after.owner, entry.owner);
         assert_eq!(
@@ -474,7 +481,7 @@ fn each_planning_and_copy_action_observes_cancellation_including_skipped_entries
 fn deleting_the_only_owner_leaves_no_unreferenced_payload() {
     let (mut entries, p) = tiny_fixture();
     for entry in &mut entries {
-        entry.owner = DELETED;
+        entry.owner = CanonicalMetadataOwner::Entity(DELETED);
     }
     let plan = MetadataEditPlan::for_entries(&entries, &p, Some(DELETED), &mut Control::default())
         .unwrap();
@@ -532,7 +539,10 @@ fn every_empty_array_keeps_its_type_when_prior_payload_is_deleted() {
         .unwrap();
     assert_eq!(lengths(&output), [9 * 6, 0, 0, 0, 0, 0, 0]);
     let mut cursor = MetadataEditCursor::new();
-    for &before in entries.iter().filter(|entry| entry.owner == KEPT) {
+    for &before in entries
+        .iter()
+        .filter(|entry| entry.owner == CanonicalMetadataOwner::Entity(KEPT))
+    {
         let after = cursor.remap(before).unwrap();
         assert_same_value(before.value, &p, after.value, &output);
     }
@@ -543,7 +553,7 @@ fn every_empty_array_keeps_its_type_when_prior_payload_is_deleted() {
 fn invalid_range_arithmetic_and_shapes_leave_the_descriptor_cursor_unchanged() {
     let mut cursor = MetadataEditCursor::new();
     let entry = StoredMetadataEntry {
-        owner: KEPT,
+        owner: CanonicalMetadataOwner::Entity(KEPT),
         key: TextRange(TableRange::new(0, 6)),
         value: Value::I64(TableRange::new(0, 1)),
     };

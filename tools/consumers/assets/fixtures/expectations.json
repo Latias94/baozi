@@ -23,6 +23,7 @@
     "bounds": "POSITION accessor min/max in base mesh local coordinates, before transforms, skinning and morph application. Floating-point comparisons require tolerance.",
     "mode": "glTF primitive mode; absent mode means TRIANGLES (4).",
     "expected_outcome": "Inferred from the repository's documented selected profile and source inspection; no importer execution. Rejection fixture counts describe source content only.",
+    "source_metadata": "Selected extras retained as source-owned Bytes with application/json media type. byte_offset and byte_length locate the exact JSON value in the unchanged primary file, using zero-based byte offsets; decoded_json records independently inspected source facts.",
     "animation_samples": "Key ordinals are zero-based. Binary F32 components are decoded directly without normalization; quaternion components use glTF XYZW order. Squared norms are calculated in binary64 from those decoded components.",
     "joint_indices": "JOINTS_0 components index the skin's ordered joints array; they are not source node indices.",
     "matrices": "Source MAT4 values and node matrices are stored in glTF column-major order.",
@@ -221,9 +222,12 @@
     {
       "id": "MorphPrimitivesTest",
       "path": "upstream/Models/MorphPrimitivesTest/glTF/MorphPrimitivesTest.gltf",
-      "expected_outcome": "rejection",
-      "rejection": {"feature": "selected_extras", "source_pointer": "/asset/extras", "error_code": "gltf.unsupported_feature", "subject": "extras", "reason": "The unchanged upstream asset contains extras on the selected document's asset object; the current selected profile rejects this payload."},
-      "coverage": ["explicit_profile_rejection", "multiple_primitives", "shared_morph_slot", "nonzero_default_morph_weight", "external_jpeg", "unicode_node_name"],
+      "expected_outcome": "success",
+      "coverage": ["preserved_source_metadata", "multiple_primitives", "shared_morph_slot", "nonzero_default_morph_weight", "external_jpeg", "unicode_node_name"],
+      "source_metadata": [
+        {"owner": "source", "source_pointer": "/asset/extras", "key": "org.baozi.gltf:asset-extras", "value_type": "Bytes", "media_type": "application/json", "byte_offset": 98, "byte_length": 147,
+         "decoded_json": {"title": "multiple_primitives", "author": "ft-lab", "license": "CC BY-4.0 (https://creativecommons.org/licenses/by/4.0/)"}}
+      ],
       "selected_scene": 0,
       "counts": {"nodes": 2, "meshes": 1, "primitives": 2, "mesh_instances": 1, "skins": 0, "morph_targets": 1, "animations": 0, "materials": 2, "images": 1},
       "mesh_names": ["mesh"],

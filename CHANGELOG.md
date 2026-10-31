@@ -6,6 +6,9 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Added source-object metadata ownership independently of canonical entities, with allocation-free
+  borrowed metadata/source/resource readers. Selected glTF extras preserve their exact JSON value
+  bytes and survive Scene edits; the offline consumer copies them into application-owned storage.
 - Added an unpublished offline real-asset consumer with pinned upstream models, application-owned
   buffers, typed rejection regressions, and separate advisory stage/allocation/RSS measurements.
 - Decoupled tangent construction algorithms from handedness encodings in partial scene-space

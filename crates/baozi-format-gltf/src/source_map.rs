@@ -81,8 +81,12 @@ pub(crate) enum SourcePayloadSite {
     NormalTexture,
     OcclusionTexture,
     EmissiveTexture,
-    /// Direct payload members inside a recognized texture binding's KHR_texture_transform.
-    TextureTransform,
+    /// Direct payload members inside each recognized binding's KHR_texture_transform.
+    BaseColorTextureTransform,
+    MetallicRoughnessTextureTransform,
+    NormalTextureTransform,
+    OcclusionTextureTransform,
+    EmissiveTextureTransform,
     AccessorSparse,
     AccessorSparseIndices,
     AccessorSparseValues,

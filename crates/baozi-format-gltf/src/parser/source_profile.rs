@@ -1,10 +1,12 @@
 //! Selected source identities and their canonical owners, independent of decoder lifetimes.
 
 use super::{
-    ContentError, GltfFailure, PreparedDocument, Result, authoring_u32, gltf_parse_error,
-    model::NormalizedGltf,
+    ContentError, GltfFailure, PreparedDocument, Result, authoring_u32, extras::SourceExtras,
+    gltf_parse_error, model::NormalizedGltf,
 };
-use crate::source_map::{GltfSourceMap, SourceEntity, SourceEntityId, SourceEntityKind};
+use crate::source_map::{
+    GltfSourceMap, SourceEntity, SourceEntityId, SourceEntityKind, SourcePayloadKind,
+};
 use baozi_import::authoring::{
     AttributeSemantic, ExtensionSchemaId, ProfileOwner, SourceLocatorValue, SourceObjectLocator,
 };
@@ -37,6 +39,7 @@ pub(super) struct OwnerSourceLink {
 pub(super) struct SelectedSourceProfile<'scope> {
     entries: MeteredVec<'scope, SelectedSource<'scope>>,
     links: MeteredVec<'scope, OwnerSourceLink>,
+    extras: MeteredVec<'scope, SourceExtras>,
 }
 
 pub(super) const fn entity(
@@ -63,18 +66,37 @@ impl<'scope> SelectedSourceProfile<'scope> {
             ImportStorageClass::FormatNormalization,
             "gltf-selected-source-identities",
         );
+        let mut extras = ctx.metered_vec(
+            ImportStorageClass::FormatNormalization,
+            "gltf-selected-source-extras",
+        );
         for &source in map.entities() {
             ctx.charge_work(1)?;
             if selected(source.id) {
                 entries.try_push(source_locator(ctx, source)?)?;
+                charge_lookup(ctx, ctx.primary_bytes().len(), 2)?;
+                for payload in map.payloads_for(source.id) {
+                    ctx.charge_work(1)?;
+                    if payload.kind == SourcePayloadKind::Extras {
+                        extras.try_push(SourceExtras::new(ctx, payload)?)?;
+                    }
+                }
             }
         }
+        extras.try_sort_unstable_by(|left, right| -> Result<_> {
+            ctx.charge_work(1)?;
+            Ok(left
+                .source
+                .cmp(&right.source)
+                .then_with(|| left.key.cmp(&right.key)))
+        })?;
         let profile = Self {
             entries,
             links: ctx.metered_vec(
                 ImportStorageClass::FormatNormalization,
                 "gltf-selected-source-owner-links",
             ),
+            extras,
         };
         profile.required(ctx, DOCUMENT)?;
         Ok(profile)
@@ -86,6 +108,10 @@ impl<'scope> SelectedSourceProfile<'scope> {
 
     pub(super) fn link_count(&self) -> usize {
         self.links.len()
+    }
+
+    pub(super) fn extras(&self) -> &[SourceExtras] {
+        self.extras.as_slice()
     }
 
     pub(super) fn required(
@@ -149,9 +175,10 @@ impl<'scope> SelectedSourceProfile<'scope> {
         Ok(&links[start..end])
     }
 
-    /// Resource leaves retain their existing indices. The selected document reuses leaf zero;
-    /// all other selected declarations follow the resource leaves in source-identity order.
-    pub(super) fn provenance(
+    /// Resource sources retain their existing indices. The document reuses source zero; other
+    /// declarations follow the resource sources. Normalized source provenance leaves use this
+    /// same order, while metadata explicitly references a SourceIdentityLocalId.
+    pub(super) fn source_index(
         &self,
         ctx: &ParseScope<'_>,
         resource_count: usize,

@@ -16,13 +16,20 @@ The 52 vendored files total 180,412 bytes. All primary files use the ordinary
 | [SimpleSkin](upstream/Models/SimpleSkin/glTF/SimpleSkin.gltf) | Two-joint skin, inverse bind matrices, LINEAR joint rotation animation, four external buffers | Reject quaternion values under Baozi policy |
 | [RiggedSimple](upstream/Models/RiggedSimple/glTF/RiggedSimple.gltf) | Two-joint skin, explicit skeleton root, inverse bind matrices, mixed influences, LINEAR joint TRS animation | Success |
 | [AnimatedMorphCube](upstream/Models/AnimatedMorphCube/glTF/AnimatedMorphCube.gltf) | Two morph targets with position/normal/tangent deltas and LINEAR weight animation | Success |
-| [MorphPrimitivesTest](upstream/Models/MorphPrimitivesTest/glTF/MorphPrimitivesTest.gltf) | Two textured primitives, one shared morph slot, default weight 0.5, asset metadata | Reject selected `extras` |
+| [MorphPrimitivesTest](upstream/Models/MorphPrimitivesTest/glTF/MorphPrimitivesTest.gltf) | Two textured primitives, one shared morph slot, default weight 0.5, preserved asset extras | Success |
 
-Expected outcomes come from inspecting the source files against the current
-[selected profile](../../../../docs/formats/gltf.md); no Baozi importer was run to
-produce these expectations. `MorphPrimitivesTest` has `/asset/extras`, which the
-current profile rejects (`gltf.unsupported_feature`, subject `extras`). Its
-geometry facts remain source facts, not an assertion that import succeeds.
+The [selected profile](../../../../docs/formats/gltf.md) expects six successes
+and one rejection, based on source inspection; no Baozi importer was run to
+produce these expectations.
+
+`MorphPrimitivesTest` preserves `/asset/extras` as source-owned `Bytes` metadata
+under `org.baozi.gltf:asset-extras`, with media type `application/json`. The
+payload retains the exact original JSON value bytes, including whitespace.
+General object extras use `org.baozi.gltf:extras` on their source owners. This
+metadata uses a source-object owner independently of canonical Scene entity metadata.
+The recorded title, author,
+and literal license value are source facts; upstream attribution and provenance
+remain unchanged.
 
 `SimpleSkin` is retained unchanged as a rejection fixture for Baozi's stricter
 canonical quaternion policy: `abs(norm2 - 1) <= 1e-4`. Direct binary decoding

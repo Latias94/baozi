@@ -45,6 +45,11 @@ This is a concrete extraction example, not a new canonical representation or a g
   joint references and inverse bind matrices, animation times/values/cubic derivatives, material
   factors and texture image/UV/transform references, and encoded images survive Scene destruction.
   Opaque Scene IDs are mapped to application indices only after the final edit.
+- Source-object glTF JSON metadata is copied explicitly with sanitized resource identity, format,
+  versioned namespaced locator, site key, media type, and exact payload bytes. This subset omits
+  entity metadata, non-JSON values, and other formats' metadata. It does not parse or rewrite extras.
+  The unchanged `MorphPrimitivesTest` checks all 147 original `/asset/extras` bytes after edits and
+  Scene destruction, together with both primitives, shared default morph weights, and its JPEG.
 - This application selects UV0 and a material/animation subset. It does not retain every material
   channel, binding strength, sampler, skin-space declaration, animation time-domain/extrapolation
   declaration, camera, light, custom attribute, or provenance attachment. It is not a round-trip

@@ -930,6 +930,22 @@ pub(super) fn submit_parts(
         ImportStorageClass::SceneConstruction,
         "gltf-complete-batch-metadata",
     );
+    let extras_media_type = ExtensionMediaType::new(super::extras::MEDIA_TYPE)
+        .map_err(|_| gltf_parse_error(ctx, "static glTF extras media type is invalid"))?;
+    for extras in selected_sources.extras() {
+        ctx.charge_work(1)?;
+        // Source leaves and source identities share the authoring index order. The metadata
+        // references the source identity, never a canonical entity or a provenance attachment.
+        let source = selected_sources.source_index(ctx, resource_count, extras.source)?;
+        metadata.try_push(MetadataAuthoringEntry::for_source(
+            SourceIdentityLocalId::new(source),
+            &extras.key,
+            ExtensionValueRef::Bytes {
+                media_type: &extras_media_type,
+                payload: extras.bytes(ctx)?,
+            },
+        ))?;
+    }
     for (index, name) in cameras.names.as_slice().iter().enumerate() {
         if let Some(name) = name {
             metadata.try_push(MetadataAuthoringEntry::new(
@@ -1073,7 +1089,7 @@ fn push_owner_sources(
     }
     for link in selected_sources.for_owner(ctx, owner)? {
         ctx.charge_work(1)?;
-        let source = selected_sources.provenance(ctx, resource_count, link.source)?;
+        let source = selected_sources.source_index(ctx, resource_count, link.source)?;
         if source == 0 {
             continue;
         }

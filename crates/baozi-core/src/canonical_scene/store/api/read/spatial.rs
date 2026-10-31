@@ -46,6 +46,14 @@ pub struct CameraRef<'s> {
 }
 
 impl<'s> CameraRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::Camera(
+                self.index as u32,
+            ),
+        )
+    }
     pub(super) const fn at(scene: &'s ValidatedScene, index: usize) -> Self {
         Self { scene, index }
     }
@@ -69,6 +77,14 @@ pub struct LightRef<'s> {
 }
 
 impl<'s> LightRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::Light(
+                self.index as u32,
+            ),
+        )
+    }
     pub(super) const fn at(scene: &'s ValidatedScene, index: usize) -> Self {
         Self { scene, index }
     }

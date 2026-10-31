@@ -92,6 +92,7 @@ pub enum AttributeElement<'s> {
 /// One primitive attribute, borrowing its descriptor and payload from the Scene.
 #[derive(Debug, Clone, Copy)]
 pub struct AttributeRef<'s> {
+    metadata_owner: super::EntityMetadataOwner,
     semantic: AttributeSemanticRef<'s>,
     domain: AttributeDomain,
     lanes: u8,
@@ -100,7 +101,7 @@ pub struct AttributeRef<'s> {
 }
 
 impl<'s> AttributeRef<'s> {
-    fn from_semantic(attribute: NodeSceneGeometryAttribute<'s>) -> Self {
+    fn from_semantic(scene: &ValidatedScene, attribute: NodeSceneGeometryAttribute<'s>) -> Self {
         use NodeSceneGeometryAttributePayload as P;
         use NodeSceneGeometryAttributeSemantic as S;
         let semantic = match attribute.semantic() {
@@ -115,6 +116,12 @@ impl<'s> AttributeRef<'s> {
         let domain = attribute.domain();
         let lanes = attribute.lanes();
         let count = attribute.element_count();
+        let metadata_owner = super::EntityMetadataOwner::new(
+            scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::Attribute(
+                attribute.source_index() as u32,
+            ),
+        );
         let data = match attribute.into_payload() {
             P::DenseF32 { values } => AttributeData::DenseF32 {
                 lanes,
@@ -167,6 +174,7 @@ impl<'s> AttributeRef<'s> {
             },
         };
         Self {
+            metadata_owner,
             semantic,
             domain,
             lanes,
@@ -177,6 +185,9 @@ impl<'s> AttributeRef<'s> {
 
     pub const fn semantic(self) -> AttributeSemanticRef<'s> {
         self.semantic
+    }
+    pub const fn metadata_owner(self) -> super::EntityMetadataOwner {
+        self.metadata_owner
     }
     pub const fn domain(self) -> AttributeDomain {
         self.domain
@@ -269,6 +280,14 @@ pub struct LogicalMeshRef<'s> {
 }
 
 impl<'s> LogicalMeshRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::LogicalMesh(
+                self.index as u32,
+            ),
+        )
+    }
     pub(super) const fn scene(self) -> &'s ValidatedScene {
         self.scene
     }
@@ -349,6 +368,14 @@ pub struct PrimitiveRef<'s> {
 }
 
 impl<'s> PrimitiveRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::Primitive(
+                self.row as u32,
+            ),
+        )
+    }
     pub(super) const fn scene(self) -> &'s ValidatedScene {
         self.scene
     }
@@ -402,7 +429,10 @@ impl<'s> PrimitiveRef<'s> {
         let primitive = self.read();
         let offset = primitive.attribute_offset();
         (offset..offset + primitive.attribute_count()).map(move |row| {
-            AttributeRef::from_semantic(expect_validated(tables(self.scene).attribute_at(row)))
+            AttributeRef::from_semantic(
+                self.scene,
+                expect_validated(tables(self.scene).attribute_at(row)),
+            )
         })
     }
     /// Looks up an exact semantic/domain pair in O(attribute count), without copying its values.
@@ -436,6 +466,14 @@ pub struct MeshInstanceRef<'s> {
 }
 
 impl<'s> MeshInstanceRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::MeshInstance(
+                self.index as u32,
+            ),
+        )
+    }
     pub(super) const fn scene(self) -> &'s ValidatedScene {
         self.scene
     }

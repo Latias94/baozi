@@ -329,6 +329,76 @@ fn morph_streams_and_weight_animation_remain_app_owned() -> Result<()> {
 }
 
 #[test]
+fn unchanged_morph_primitives_keep_source_json_after_edits_and_scene_drop() -> Result<()> {
+    let primary = std::fs::read(fixtures().join(model("MorphPrimitivesTest")))?;
+    for winding in [
+        FrontFaceWinding::CounterClockwise,
+        FrontFaceWinding::Clockwise,
+    ] {
+        let target = Options::default().target;
+        let output = process_file(
+            &fixtures(),
+            &model("MorphPrimitivesTest"),
+            Options {
+                target: TargetSpace::try_new(
+                    target.handedness(),
+                    target.up_axis(),
+                    target.front_axis(),
+                    target.unit_scale_to_meters(),
+                    winding,
+                )?,
+                ..Options::default()
+            },
+        )?;
+        // process_file has destroyed every Scene before returning these owned values.
+        let asset = output.asset;
+        assert_eq!(asset.vertex_count(), 96);
+        assert_eq!(asset.draws.len(), 2);
+        assert_eq!(asset.materials.len(), 2);
+        assert_ne!(asset.draws[0].material, asset.draws[1].material);
+        assert_eq!(asset.instances[0].morph_weights, [0.5]);
+        for draw in &asset.draws {
+            let delta = draw
+                .morphs
+                .iter()
+                .find(|m| m.target == 0 && m.semantic == MorphDeltaSemantic::Position)
+                .unwrap();
+            assert_eq!(delta.values.len(), draw.vertices.len());
+            assert!((delta.values.iter().map(|v| v[1]).fold(0.0, f32::max) - 20.0).abs() < 0.00001);
+        }
+        assert_eq!(
+            asset.images[0],
+            std::fs::read(
+                fixtures().join("upstream/Models/MorphPrimitivesTest/glTF/uv_texture.jpg")
+            )?
+        );
+        assert!(output.import_evidence.loss_evidence().is_empty());
+        assert_eq!(asset.source_json_metadata.len(), 1);
+        let metadata = &asset.source_json_metadata[0];
+        assert_eq!(metadata.resource, model("MorphPrimitivesTest"));
+        assert_eq!(metadata.format, "org.baozi.gltf");
+        assert_eq!(metadata.locator_schema, "org.baozi.gltf:source-object");
+        assert_eq!(metadata.locator_schema_version, 1);
+        // The upstream resource is 5,610 bytes; its final newline is outside the root value.
+        assert_eq!(
+            metadata.locator,
+            "kind=document;parent=-;index=0;offset=0;length=5609"
+        );
+        assert_eq!(metadata.key, "org.baozi.gltf:asset-extras");
+        assert_eq!(metadata.media_type, "application/json");
+        assert_eq!(metadata.payload, primary[98..245]);
+        let value: Value = serde_json::from_slice(&metadata.payload)?;
+        assert_eq!(value["title"], "multiple_primitives");
+        assert_eq!(value["author"], "ft-lab");
+        assert_eq!(
+            value["license"],
+            "CC BY-4.0 (https://creativecommons.org/licenses/by/4.0/)"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn authored_gltf_tangents_reflect_without_claiming_a_construction_algorithm() -> Result<()> {
     let io =
         FileSystemAssetIo::from_capability(NativeDirectoryCapability::open_ambient(fixtures())?);

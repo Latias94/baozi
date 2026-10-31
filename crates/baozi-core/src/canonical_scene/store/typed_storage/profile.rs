@@ -7,7 +7,9 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use baozi_operation::__retained_store_integration::authority::SharedRetainedStorage;
 
-use crate::canonical_scene::store::production::{CanonicalProfileOwner, SessionOpaqueReason};
+use crate::canonical_scene::store::production::{
+    CanonicalMetadataOwner, CanonicalProfileOwner, SessionOpaqueReason,
+};
 use crate::canonical_scene::store::profile_provenance::{
     ProfileProvenanceRef, ProfileSegmentAddressDomain, ProfileSegmentNonce,
 };
@@ -222,7 +224,7 @@ pub(in crate::canonical_scene::store) enum StoredMetadataValue {
 
 #[derive(Debug, Clone, Copy)]
 pub(in crate::canonical_scene::store) struct StoredMetadataEntry {
-    pub(in crate::canonical_scene::store) owner: CanonicalProfileOwner,
+    pub(in crate::canonical_scene::store) owner: CanonicalMetadataOwner,
     pub(in crate::canonical_scene::store) key: TextRange,
     pub(in crate::canonical_scene::store) value: StoredMetadataValue,
 }

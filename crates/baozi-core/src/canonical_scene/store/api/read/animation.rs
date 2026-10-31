@@ -34,6 +34,14 @@ pub struct AnimationClipRef<'s> {
 }
 
 impl<'s> AnimationClipRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::new(
+            self.scene,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::AnimationClip(
+                self.index as u32,
+            ),
+        )
+    }
     pub(super) const fn at(scene: &'s ValidatedScene, index: usize) -> Self {
         Self { scene, index }
     }
@@ -101,6 +109,14 @@ pub struct AnimationChannelRef<'s> {
 }
 
 impl<'s> AnimationChannelRef<'s> {
+    pub fn metadata_owner(self) -> super::EntityMetadataOwner {
+        super::EntityMetadataOwner::from_parts(
+            self.generation,
+            crate::canonical_scene::store::production::CanonicalProfileOwner::AnimationChannel(
+                self.channel.source_index() as u32,
+            ),
+        )
+    }
     fn at(scene: &'s ValidatedScene, row: usize) -> Self {
         Self {
             generation: scene.generation(),

@@ -10,6 +10,7 @@ mod animation;
 mod appearance;
 mod deformation;
 mod geometry;
+mod metadata;
 mod node;
 mod spatial;
 
@@ -22,6 +23,11 @@ pub use deformation::{
 pub use geometry::{
     AttributeData, AttributeElement, AttributeRef, AttributeSemanticRef, LogicalMeshRef,
     MeshInstanceRef, PrimitiveRef,
+};
+pub use metadata::{
+    EntityMetadataOwner, MetadataArrayRef, MetadataEntryRef, MetadataOwnerRef, MetadataValueRef,
+    ProfileResourceRef, ProfileResourceStabilityRef, ProfileSessionOpaqueReason, SourceIdentityRef,
+    SourceObjectLocatorRef,
 };
 pub use node::{NodeChildren, NodeRef};
 pub use spatial::{CameraRef, LightRef, SceneSpaceRef, TangentBasisRef, TangentEncodingRef};

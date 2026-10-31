@@ -1,4 +1,4 @@
-use crate::canonical_scene::store::production::CanonicalProfileOwner;
+use crate::canonical_scene::store::production::CanonicalMetadataOwner;
 use crate::canonical_scene::store::typed_storage::profile::{
     MetadataPayloads, ProfileState, StoredMetadataValue,
 };
@@ -53,13 +53,13 @@ pub(in crate::canonical_scene::store) enum NodeSceneProfileMetadataArrayKind {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::canonical_scene::store) struct NodeSceneProfileMetadataEntry<'scene> {
-    owner: CanonicalProfileOwner,
+    owner: CanonicalMetadataOwner,
     key: &'scene str,
     value: NodeSceneProfileMetadataValue<'scene>,
 }
 
 impl<'scene> NodeSceneProfileMetadataEntry<'scene> {
-    pub(in crate::canonical_scene::store) const fn owner(self) -> CanonicalProfileOwner {
+    pub(in crate::canonical_scene::store) const fn owner(self) -> CanonicalMetadataOwner {
         self.owner
     }
 
@@ -84,7 +84,7 @@ pub(super) struct MetadataCursor<'scene> {
     u64s: usize,
     f64s: usize,
     f32s: usize,
-    previous_owner: Option<CanonicalProfileOwner>,
+    previous_owner: Option<CanonicalMetadataOwner>,
     previous_key: Option<&'scene str>,
 }
 

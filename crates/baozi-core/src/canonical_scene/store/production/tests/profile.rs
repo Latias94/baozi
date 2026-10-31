@@ -1,3 +1,4 @@
+use crate::canonical_scene::store::production::CanonicalMetadataOwner;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -428,7 +429,10 @@ fn full_profile_preserves_identity_lineage_owners_and_metadata() {
     let metadata = validated
         .metadata_entry(0)
         .expect("the metadata entry must remain inspectable");
-    assert_eq!(metadata.owner(), CanonicalProfileOwner::Node(1));
+    assert_eq!(
+        metadata.owner(),
+        CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Node(1))
+    );
     assert_eq!(metadata.key().as_str(), "gltf:generator_version");
     assert_eq!(metadata.value(), ExtensionValueRef::F64(2.0));
 
@@ -818,10 +822,22 @@ fn metadata_owner_buckets_are_linear_and_owner_local_keys_must_be_ordered() {
     assert_eq!(
         canonical,
         [
-            (CanonicalProfileOwner::Scene, "gltf:first"),
-            (CanonicalProfileOwner::Scene, "gltf:second"),
-            (CanonicalProfileOwner::Node(1), "gltf:first"),
-            (CanonicalProfileOwner::Node(1), "gltf:second"),
+            (
+                CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Scene),
+                "gltf:first"
+            ),
+            (
+                CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Scene),
+                "gltf:second"
+            ),
+            (
+                CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Node(1)),
+                "gltf:first"
+            ),
+            (
+                CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Node(1)),
+                "gltf:second"
+            ),
         ]
     );
     drop(validated);
@@ -843,13 +859,172 @@ fn metadata_owner_buckets_are_linear_and_owner_local_keys_must_be_ordered() {
             ProfileAuthoringSemanticError::MetadataKeyOrder {
                 previous: 0,
                 entry: 1,
-                owner: CanonicalProfileOwner::Scene,
+                owner: CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Scene),
             }
         ))
     ));
 
     drop(domains);
     assert_eq!(control.live.get(), 0);
+}
+
+#[test]
+fn source_metadata_has_independent_ordered_buckets_and_checked_bounds() {
+    let roots = [NodeLocalId::new(0)];
+    let nodes = [trs(Presence::Absent)];
+    let mut control = TestControl::default();
+    let domains = validated_domains(&roots, &nodes, &mut control);
+    let resources = resource_rows();
+    let sources = [source_row(RESOURCE_ID)];
+    let provenance = [ProvenanceNodeAuthoring::source(SOURCE_ID)];
+    let attachment = [SOURCE_PROVENANCE];
+    let owner_rows = mandatory_owner_rows(&attachment, &attachment, &attachment);
+    let lineage = LineageAuthoringBatch::new(&resources, &sources, &provenance, &owner_rows);
+    let a = NamespacedName::new("test:a").unwrap();
+    let z = NamespacedName::new("test:z").unwrap();
+    let entries = [
+        MetadataAuthoringEntry::for_source(SOURCE_ID, &a, ExtensionValueRef::U64(1)),
+        MetadataAuthoringEntry::new(ProfileOwner::Scene, &a, ExtensionValueRef::U64(2)),
+        MetadataAuthoringEntry::for_source(SOURCE_ID, &z, ExtensionValueRef::U64(3)),
+        MetadataAuthoringEntry::new(ProfileOwner::Scene, &z, ExtensionValueRef::U64(4)),
+    ];
+    let batch = MetadataAuthoringBatch::new(&entries);
+    let mut profile_control = TestControl::default();
+    let validated = validate_profile_batch_with_control(
+        lineage,
+        batch,
+        domains.owners(),
+        SceneValidationLimits::default(),
+        &mut profile_control,
+    )
+    .unwrap();
+    let canonical: Vec<_> = (0..4)
+        .map(|i| {
+            let entry = validated.metadata_entry(i).unwrap();
+            (entry.owner(), entry.key().as_str())
+        })
+        .collect();
+    assert_eq!(
+        canonical,
+        [
+            (
+                CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Scene),
+                "test:a"
+            ),
+            (
+                CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Scene),
+                "test:z"
+            ),
+            (CanonicalMetadataOwner::SourceObject(0), "test:a"),
+            (CanonicalMetadataOwner::SourceObject(0), "test:z"),
+        ]
+    );
+    assert_eq!(
+        validated.owner_count(),
+        3,
+        "source metadata does not create provenance owners"
+    );
+    let exact_work = validated.validation_work();
+    let exact_scratch = profile_control.peak_bytes();
+    drop(validated);
+    let exact = validate_profile_batch_with_control(
+        lineage,
+        batch,
+        domains.owners(),
+        SceneValidationLimits::default().with_max_scratch_bytes(exact_scratch),
+        &mut profile_control,
+    )
+    .unwrap();
+    drop(exact);
+    assert!(matches!(validate_profile_batch_with_control(
+        lineage, batch, domains.owners(),
+        SceneValidationLimits::default().with_max_scratch_bytes(exact_scratch - 1),
+        &mut profile_control,
+    ), Err(ProfileAuthoringFailure::Semantic(ProfileAuthoringSemanticError::LimitExceeded {
+        limit: ProfileAuthoringLimit::ScratchBytes, actual, maximum,
+    })) if actual == exact_scratch && maximum == exact_scratch - 1));
+    let exact = validate_profile_batch_with_control(
+        lineage,
+        batch,
+        domains.owners(),
+        SceneValidationLimits::default().with_max_work(exact_work),
+        &mut control,
+    )
+    .unwrap();
+    drop(exact);
+    assert!(matches!(
+        validate_profile_batch_with_control(
+            lineage,
+            batch,
+            domains.owners(),
+            SceneValidationLimits::default().with_max_work(exact_work - 1),
+            &mut control
+        ),
+        Err(ProfileAuthoringFailure::Semantic(
+            ProfileAuthoringSemanticError::LimitExceeded {
+                limit: ProfileAuthoringLimit::Work,
+                ..
+            }
+        ))
+    ));
+
+    for (entries, expected) in [
+        ([entries[0], entries[0]], "duplicate"),
+        ([entries[2], entries[0]], "order"),
+        (
+            [
+                entries[0],
+                MetadataAuthoringEntry::for_source(
+                    SourceIdentityLocalId::new(1),
+                    &a,
+                    ExtensionValueRef::Bool(true),
+                ),
+            ],
+            "bounds",
+        ),
+    ] {
+        let rejected = validate_profile_batch_with_control(
+            lineage,
+            MetadataAuthoringBatch::new(&entries),
+            domains.owners(),
+            SceneValidationLimits::default(),
+            &mut control,
+        );
+        match (expected, rejected) {
+            (
+                "duplicate",
+                Err(ProfileAuthoringFailure::Semantic(
+                    ProfileAuthoringSemanticError::DuplicateMetadataKey {
+                        first: 0,
+                        duplicate: 1,
+                    },
+                )),
+            ) => {}
+            (
+                "order",
+                Err(ProfileAuthoringFailure::Semantic(
+                    ProfileAuthoringSemanticError::MetadataKeyOrder {
+                        owner: CanonicalMetadataOwner::SourceObject(0),
+                        ..
+                    },
+                )),
+            ) => {}
+            (
+                "bounds",
+                Err(ProfileAuthoringFailure::Semantic(
+                    ProfileAuthoringSemanticError::MetadataSourceOutOfRange {
+                        entry: 1,
+                        source_index: 1,
+                        source_count: 1,
+                    },
+                )),
+            ) => {}
+            _ => panic!("unexpected source metadata rejection for {expected}"),
+        }
+    }
+    drop(domains);
+    assert_eq!(control.live.get(), 0);
+    assert_eq!(profile_control.live.get(), 0);
 }
 
 #[test]

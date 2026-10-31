@@ -50,6 +50,7 @@ mod gltf_capability;
 mod obj_capability;
 mod profile_closure;
 mod public_animation_read;
+mod public_metadata_read;
 mod spatial_validation;
 mod storage_scale;
 

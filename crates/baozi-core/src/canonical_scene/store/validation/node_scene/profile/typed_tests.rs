@@ -318,7 +318,7 @@ fn owner_layout() -> ProfileOwnerLayout {
 fn metadata() -> (Vec<StoredMetadataEntry>, MetadataPayloads) {
     let mut pool = String::new();
     let mut entry = |key, value| StoredMetadataEntry {
-        owner: CanonicalProfileOwner::Scene,
+        owner: CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Scene),
         key: text(&mut pool, key),
         value,
     };
@@ -334,7 +334,7 @@ fn metadata() -> (Vec<StoredMetadataEntry>, MetadataPayloads) {
     let key = text(&mut pool, "test:e");
     let value = StoredMetadataValue::String(text(&mut pool, "hello \u{4e16}\u{754c}"));
     entries.push(StoredMetadataEntry {
-        owner: CanonicalProfileOwner::Scene,
+        owner: CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Scene),
         key,
         value,
     });
@@ -344,7 +344,7 @@ fn metadata() -> (Vec<StoredMetadataEntry>, MetadataPayloads) {
         payload: TableRange::new(0, 3),
     };
     entries.push(StoredMetadataEntry {
-        owner: CanonicalProfileOwner::Scene,
+        owner: CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Scene),
         key,
         value,
     });
@@ -360,13 +360,13 @@ fn metadata() -> (Vec<StoredMetadataEntry>, MetadataPayloads) {
         ),
     ] {
         entries.push(StoredMetadataEntry {
-            owner: CanonicalProfileOwner::Scene,
+            owner: CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Scene),
             key: text(&mut pool, key),
             value,
         });
     }
     entries.push(StoredMetadataEntry {
-        owner: CanonicalProfileOwner::Node(1),
+        owner: CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Node(1)),
         key: text(&mut pool, "test:a"),
         value: StoredMetadataValue::BoolArray(TableRange::new(1, 0)),
     });
@@ -391,7 +391,7 @@ fn metadata_visits_actual_payloads_once_with_no_scratch_allocation() {
     let mut control = Control::default();
     let allocations = allocation_counter::measure(|| {
         assert_eq!(
-            validate_metadata(&mut control, &entries, &pools, owners),
+            validate_metadata(&mut control, &entries, &pools, owners, 2),
             Ok(true),
         );
     });
@@ -406,7 +406,7 @@ fn metadata_visits_actual_payloads_once_with_no_scratch_allocation() {
             ..Control::default()
         };
         assert_eq!(
-            validate_metadata(&mut reject, &entries, &pools, owners),
+            validate_metadata(&mut reject, &entries, &pools, owners, 2),
             Err(position),
         );
         assert_eq!(reject.completed, position);
@@ -417,8 +417,12 @@ fn metadata_visits_actual_payloads_once_with_no_scratch_allocation() {
 fn metadata_rejects_foreign_owners_aliases_gaps_bad_shapes_and_nonfinite_values() {
     type Corruption = fn(&mut [StoredMetadataEntry], &mut MetadataPayloads);
     let corruptions: [Corruption; 15] = [
-        |entries, _| entries[0].owner = CanonicalProfileOwner::Camera(0),
-        |entries, _| entries[9].owner = CanonicalProfileOwner::Node(0),
+        |entries, _| {
+            entries[0].owner = CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Camera(0))
+        },
+        |entries, _| {
+            entries[9].owner = CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Node(0))
+        },
         |entries, _| entries[0].value = StoredMetadataValue::Bool(TableRange::new(0, 0)),
         |entries, _| entries[1].value = StoredMetadataValue::I64Array(TableRange::new(1, 1)),
         |entries, _| entries[6].value = StoredMetadataValue::Vec2(TableRange::new(0, 1)),
@@ -433,7 +437,9 @@ fn metadata_rejects_foreign_owners_aliases_gaps_bad_shapes_and_nonfinite_values(
             let range = entries[1].key.0.checked(pools.text.len()).unwrap();
             pools.text.replace_range(range, "test:a");
         },
-        |entries, _| entries[1].owner = CanonicalProfileOwner::Node(1),
+        |entries, _| {
+            entries[1].owner = CanonicalMetadataOwner::Entity(CanonicalProfileOwner::Node(1))
+        },
         |entries, pools| {
             let StoredMetadataValue::Bytes { media_type, .. } = entries[5].value else {
                 panic!("bytes fixture");
@@ -447,7 +453,7 @@ fn metadata_rejects_foreign_owners_aliases_gaps_bad_shapes_and_nonfinite_values(
         let (mut entries, mut pools) = metadata();
         corrupt(&mut entries, &mut pools);
         assert_eq!(
-            validate_metadata(&mut Control::default(), &entries, &pools, owners),
+            validate_metadata(&mut Control::default(), &entries, &pools, owners, 2),
             Ok(false),
             "corruption {index}",
         );
@@ -465,7 +471,25 @@ fn metadata_string_ranges_must_end_on_character_boundaries() {
         range.0.len() - 1,
     )));
     assert_eq!(
-        validate_metadata(&mut Control::default(), &entries, &pools, owner_layout()),
+        validate_metadata(&mut Control::default(), &entries, &pools, owner_layout(), 2),
         Ok(false),
     );
+}
+
+#[test]
+fn retained_source_metadata_checks_source_membership_without_entity_provenance_owners() {
+    let (mut entries, pools) = metadata();
+    entries.last_mut().unwrap().owner = CanonicalMetadataOwner::SourceObject(1);
+    assert_eq!(
+        validate_metadata(&mut Control::default(), &entries, &pools, owner_layout(), 2),
+        Ok(true),
+    );
+    for index in [2, u32::MAX] {
+        entries.last_mut().unwrap().owner = CanonicalMetadataOwner::SourceObject(index);
+        assert_eq!(
+            validate_metadata(&mut Control::default(), &entries, &pools, owner_layout(), 2),
+            Ok(false),
+            "source owner {index} must be rejected without violating descriptor order",
+        );
+    }
 }

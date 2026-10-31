@@ -61,6 +61,11 @@ pub use baozi_core::{
     SceneSnapshotError, SceneSnapshotLimits, SceneValidationDomain, SceneValidationError,
     SceneValidationLimit, TextureStrengthRequirement, ValidatedScene,
 };
+pub use baozi_core::{
+    DigestAlgorithm, EntityMetadataOwner, MetadataArrayRef, MetadataEntryRef, MetadataOwnerRef,
+    MetadataValueRef, ProfileResourceRef, ProfileResourceStabilityRef, ProfileSessionOpaqueReason,
+    SceneMetadataOwner, SourceIdentityRef, SourceObjectKind, SourceObjectLocatorRef,
+};
 
 pub use config::{
     ConformancePolicy, DetectionOptions, DetectionOptionsError, FormatSelection, ImportConfig,

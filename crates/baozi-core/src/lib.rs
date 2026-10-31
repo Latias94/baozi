@@ -114,6 +114,11 @@ pub use canonical_scene::store::api::read::{
     TextureRef,
 };
 pub use canonical_scene::store::api::read::{
+    EntityMetadataOwner, MetadataArrayRef, MetadataEntryRef, MetadataOwnerRef, MetadataValueRef,
+    ProfileResourceRef, ProfileResourceStabilityRef, ProfileSessionOpaqueReason, SourceIdentityRef,
+    SourceObjectLocatorRef,
+};
+pub use canonical_scene::store::api::read::{
     InfluenceRef, InfluenceRowRef, InfluenceRows, MorphDeltaData, MorphDeltaRef,
     MorphTargetDefinitionRef, MorphTargetRef, SkinRef,
 };
@@ -123,8 +128,9 @@ pub use canonical_scene::store::api::scene::{
 pub use canonical_scene::store::api::validation::{
     AppearanceBuildResource, AppearanceLimitDimension, EntityNameError, MaterialFactorGroup,
     SceneAnimationRateKind, SceneAnimationSamplePart, SceneAnimationTarget, SceneAppearanceRule,
-    SceneAuthoredProfileOwner, SceneInputCollection, SceneLightEmissionRule, SceneProfileOwner,
-    SceneValidationDomain, SceneValidationError, SceneValidationLimit, TextureStrengthRequirement,
+    SceneAuthoredProfileOwner, SceneInputCollection, SceneLightEmissionRule, SceneMetadataOwner,
+    SceneProfileOwner, SceneValidationDomain, SceneValidationError, SceneValidationLimit,
+    TextureStrengthRequirement,
 };
 pub use deform::{
     MorphDeltaSemantic, SkinMatrixCorrection, SkinMatrixCorrectionError, SkinMatrixSpace,
@@ -153,6 +159,7 @@ pub use namespaced::{NamespacedName, NamespacedNameError};
 pub use ordered_map::{
     OrderedMap, OrderedMapCapacityPlan, OrderedMapError, OrderedMapIter, PreparedOrderedMapCapacity,
 };
+pub use provenance::{DigestAlgorithm, SourceObjectKind};
 pub use scene_space::{
     Axis, FrontFaceWinding, Handedness, SceneSpace, SceneSpaceField, SceneSpaceValidationError,
     TangentBasisConvention, TangentHandednessEncoding, UvOrigin,

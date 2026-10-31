@@ -577,6 +577,12 @@ impl SceneStorage {
     ) -> &super::super::typed_storage::appearance::AppearanceStorage {
         &self.tables.appearance
     }
+
+    pub(in crate::canonical_scene::store) fn read_profile(
+        &self,
+    ) -> &super::super::typed_storage::profile::ProfileStorage {
+        &self.tables.profile
+    }
     pub(in crate::canonical_scene::store) const fn read_proof(&self) -> &NodeSceneValidationProof {
         &self.proof
     }

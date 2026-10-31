@@ -170,6 +170,7 @@ enum SourceContext {
     TextureTransform {
         payload_index: usize,
         owner: SourceEntityId,
+        site: SourcePayloadSite,
     },
 }
 
@@ -546,7 +547,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             ) => self.begin_source_payload(owner, site, frame),
             Some(
                 frame @ JsonFrame {
-                    source: SourceContext::TextureTransform { owner, .. },
+                    source: SourceContext::TextureTransform { owner, site, .. },
                     ..
                 },
             ) if matches!(
@@ -554,7 +555,7 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
                 SourceMember::Extras | SourceMember::Extensions
             ) =>
             {
-                self.begin_source_payload(owner, SourcePayloadSite::TextureTransform, frame)
+                self.begin_source_payload(owner, site, frame)
             }
             Some(JsonFrame {
                 source: SourceContext::EntityArray { kind, parent_index },
@@ -632,6 +633,29 @@ impl<'scope, 'session, 'bytes> JsonScanner<'scope, 'session, 'bytes> {
             Ok(SourceContext::TextureTransform {
                 payload_index,
                 owner,
+                site: match site {
+                    SourcePayloadSite::BaseColorTexture => {
+                        SourcePayloadSite::BaseColorTextureTransform
+                    }
+                    SourcePayloadSite::MetallicRoughnessTexture => {
+                        SourcePayloadSite::MetallicRoughnessTextureTransform
+                    }
+                    SourcePayloadSite::NormalTexture => SourcePayloadSite::NormalTextureTransform,
+                    SourcePayloadSite::OcclusionTexture => {
+                        SourcePayloadSite::OcclusionTextureTransform
+                    }
+                    SourcePayloadSite::EmissiveTexture => {
+                        SourcePayloadSite::EmissiveTextureTransform
+                    }
+                    _ => {
+                        return Err(self
+                            .ctx
+                            .format_failure(GltfFailure::internal(
+                                "glTF texture transform has no source binding site",
+                            ))
+                            .into());
+                    }
+                },
             })
         } else {
             Ok(SourceContext::Payload { payload_index })
@@ -2096,7 +2120,7 @@ mod tests {
                 ),
                 (material, SourcePayloadSite::MaterialPbrMetallicRoughness),
                 (material, SourcePayloadSite::EmissiveTexture),
-                (material, SourcePayloadSite::TextureTransform),
+                (material, SourcePayloadSite::BaseColorTextureTransform),
                 (
                     id(SourceEntityKind::Accessor, None, 0),
                     SourcePayloadSite::AccessorSparse,
