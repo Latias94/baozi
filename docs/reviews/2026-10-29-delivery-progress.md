@@ -2014,3 +2014,27 @@ That one test now creates an exclusive `0700` directory under `/tmp`; the comple
 path is at most 87 bytes. Existing socket/type rejection and FIFO deadlines remain intact. Its
 all-feature Apple test cross-check and formatting pass locally; actual completion still requires
 the next native run. The final hosted result below must establish that execution independently.
+
+At `2e77aaf`, [run 41198386475](https://github.com/Latias94/baozi/actions/runs/41198386475)
+executes the complete Apple native runtime/backend/repository suites: **20/18/38**, all with zero
+skipped tests. Both Apple twelve-case packaged-consumer profiles also pass. The later portable
+workspace step reports 2,286 passing tests before its space-conversion host-unwind allocation
+assertion observes one remaining allocation. A bare standard-library catch/drop measurement now
+precedes the measured first Baozi import/conversion and records its own retained count/bytes.
+The owner test still requires zero remaining allocations and bytes; it does not pre-run Baozi or
+allow a retained allocation. Actual Apple execution must distinguish host panic/capture first-use
+state from a library owner leak before this item is closed.
+
+The same run's MSRV and stable workspace checks stop at the existing STL color-expansion
+cancellation fixture's ten-second global ceiling. Those are runner timeouts, with no semantic
+assertion failure. The default nextest policy now warns every five seconds and terminates after
+six periods (thirty seconds); the preceding one-case glTF exception is removed. Existing explicit
+fixture deadlines and deterministic work/cancellation assertions remain unchanged. The following
+current-source run must complete those checks; previous partial suites are not substituted.
+
+Focused Windows verification passes the unchanged STL fixture before and after the runner-policy
+change (3.026/2.982 seconds), plus all three selected space-unwind, space-cancellation and normal-
+unwind ownership controls. The standalone standard-library panic probe reports zero retained count
+and bytes on Windows. These local checks and configuration/format validation do not establish the
+Apple hypothesis; the next Apple log must show the bare probe and preserve the full owner test's
+zero result.

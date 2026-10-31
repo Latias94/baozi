@@ -1,13 +1,9 @@
 [profile.default]
 failure-output = "immediate-final"
 status-level = "pass"
-slow-timeout = { period = "5s", terminate-after = 2 }
-
-# This 4,097-item fixture calibrates a complete import, then repeatedly imports
-# while locating exact cancellation prefixes. Allow bounded headroom on CI hosts.
-[[profile.default.overrides]]
-filter = "package(baozi-format-gltf) & binary(node_graph) & test(=large_node_and_scene_root_cancellation_preserves_exact_completed_prefixes)"
-slow-timeout = { period = "15s", terminate-after = 2 }
+# Cancellation-prefix fixtures calibrate a complete import, then repeat imports
+# to locate exact checkpoints. Keep frequent warnings with bounded CI headroom.
+slow-timeout = { period = "5s", terminate-after = 6 }
 
 [[profile.default.overrides]]
 filter = "package(baozi-xtask)"

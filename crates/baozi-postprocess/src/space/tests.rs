@@ -88,6 +88,20 @@ fn conversion_cancellation_during_planning_validation_and_publication_releases_a
 
 #[test]
 fn ordinary_host_unwind_drops_converted_scene_and_detached_report() {
+    // Isolate first-use std panic and output-capture allocations. Keep the entire
+    // first import and conversion inside the owner measurement below.
+    let panic_runtime = allocation_counter::measure(|| {
+        let panic = std::panic::catch_unwind(|| {
+            panic!("ordinary host panic after successful conversion");
+        });
+        assert!(panic.is_err());
+        drop(panic);
+    });
+    eprintln!(
+        "bare std catch/drop: count_current={}, bytes_current={}",
+        panic_runtime.count_current, panic_runtime.bytes_current
+    );
+
     let measured = allocation_counter::measure(|| {
         let panic = std::panic::catch_unwind(|| {
             let (scene, evidence) = common::canonical_triangle_import().into_parts();
