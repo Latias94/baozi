@@ -74,6 +74,14 @@ assumed source units, and evidence lifetime after Scene teardown. It builds appl
 vertex/index buffers from complete borrowed draw tuples and checks them after dropping the Scene.
 Global vertex deduplication is a separate caller policy.
 
+Every OBJ-enabled case also checks a partial-UV input: the default policy retains a typed loss
+rejection, while explicit `SourceSemanticLoss` authority permits dropping the incomplete UV channel
+and preserves the complete authored Corner normals. The consumer names `ImportEvidence` and the
+loss/diagnostic types through `baozi`, checks the exact source, subject, code and disposition, and
+reads the retained report after dropping its Scene. The glTF cases inspect the selected source
+scene identity and selected/omitted node counts through the same facade. Ordinary report consumers
+need no parser-authoring import to name these return types.
+
 The glTF feature's complete local production closure includes
 the maintained `baozi-gltf` and `baozi-gltf-json` packages as actual `.crate` artifacts.
 No patch points back to workspace or vendor source directories.

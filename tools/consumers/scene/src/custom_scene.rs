@@ -176,7 +176,7 @@ impl FormatImporter for CustomScene {
     }
 }
 
-pub(super) fn verify() -> baozi::Result<()> {
+pub(super) fn verify() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = Importer::builder();
     builder.register(CustomScene)?;
     let importer = builder.build()?;

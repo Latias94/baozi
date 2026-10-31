@@ -97,9 +97,9 @@ pub use format::{
     DetectionOutcome, FormatImporter, Probe, ReadConfidence,
 };
 pub use ledger::{
-    ImportDimension, ImportLedgerPhase, ImportLedgerSnapshot, ImportOperationControl,
-    ImportProgressPhase, ImportProgressUnit, ImportTerminalCause, ImportTerminalFailure,
-    ImportTerminalFailureClass,
+    ImportDimension, ImportDimensionSnapshot, ImportLedgerPhase, ImportLedgerSnapshot,
+    ImportOperationControl, ImportProgressPhase, ImportProgressUnit, ImportTerminalCause,
+    ImportTerminalFailure, ImportTerminalFailureClass,
 };
 pub use limits::{ResourceLimits, ResourceLimitsOverlay};
 pub use loss::{ImportLossDisposition, ImportLossEvidence, ImportLossSubject};

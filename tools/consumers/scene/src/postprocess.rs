@@ -8,7 +8,7 @@ use baozi::{
     },
 };
 
-pub fn verify(importer: &Importer) -> baozi::Result<()> {
+pub fn verify(importer: &Importer) -> Result<(), Box<dyn std::error::Error>> {
     let import = importer.read_bytes(
         "textured-quad.obj",
         b"v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n\

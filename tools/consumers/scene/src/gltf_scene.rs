@@ -116,7 +116,7 @@ const DOCUMENT: &str = r#"{
   ]
 }"#;
 
-pub(crate) fn verify_gltf(importer: &Importer) -> baozi::Result<()> {
+pub(crate) fn verify_gltf(importer: &Importer) -> Result<(), Box<dyn std::error::Error>> {
     let binary = binary();
     let embedded_json = document(false);
     let embedded = importer.read_bytes("scene.glb", glb(&embedded_json, &binary))?;
@@ -141,6 +141,20 @@ pub(crate) fn verify_gltf(importer: &Importer) -> baozi::Result<()> {
     assert_eq!(external.format().id().as_str(), "org.baozi.gltf");
     assert!(external.diagnostics().is_empty());
     assert!(external.loss_evidence().is_empty());
+    for (report, source) in [(&embedded, "scene.glb"), (&external, "models/scene.gltf")] {
+        let scope: &baozi::SourceScopeRecord = report
+            .source_scope_record()
+            .expect("selected glTF source scope is retained");
+        let baozi::SourceScopeSelectionOutcome::DeclaredScene(selected) = scope.selection_outcome()
+        else {
+            panic!("the explicitly selected source scene must be retained");
+        };
+        assert_eq!(selected.scene_index(), 1);
+        assert_eq!(selected.document().asset_path().as_str(), source);
+        let nodes: baozi::SourceScopeCounts = scope.counts(baozi::SourceScopeEntityKind::Node);
+        assert_eq!(nodes.selected(), 5);
+        assert_eq!(nodes.omitted(), 1);
+    }
     assert_scene(external.scene());
     assert_eq!(io.opens.load(std::sync::atomic::Ordering::Relaxed), 3);
     assert_eq!(

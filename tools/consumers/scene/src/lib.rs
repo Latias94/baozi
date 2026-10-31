@@ -6,6 +6,7 @@ use baozi::{
 
 mod custom_scene;
 mod gltf_scene;
+mod loss_reports;
 #[cfg(feature = "postprocess")]
 mod postprocess;
 
@@ -16,7 +17,7 @@ const PLY: &[u8] = b"ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\n
 /// Runs hand-written semantic expectations for an independently supplied format set.
 ///
 /// The expected set is deliberately not inferred from Cargo cfg or the registry itself.
-pub fn verify(expected: &[&str]) -> baozi::Result<()> {
+pub fn verify(expected: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     let projection =
         baozi::CameraProjection::perspective(baozi::LocalAxes::STANDARD, 1.0, None, 0.1, None)
             .unwrap();
@@ -140,6 +141,7 @@ pub fn verify(expected: &[&str]) -> baozi::Result<()> {
     }
     if expected.contains(&"obj") {
         verify_sidecars(&importer)?;
+        loss_reports::verify(&importer)?;
         #[cfg(feature = "postprocess")]
         postprocess::verify(&importer)?;
     }
@@ -183,7 +185,7 @@ impl baozi::AssetIo for CountingIo {
     }
 }
 
-fn verify_sidecars(importer: &Importer) -> baozi::Result<()> {
+fn verify_sidecars(importer: &Importer) -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::Arc;
     let io = CountingIo {
         memory: baozi::MemoryAssetIo::new(),
