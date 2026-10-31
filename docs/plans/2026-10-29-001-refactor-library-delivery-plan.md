@@ -2,14 +2,14 @@
 title: Baozi Usable Import Library and Core Simplification
 type: refactor
 date: 2026-10-29
-status: active
+status: completed
 ---
 
 # Baozi Usable Import Library and Core Simplification
 
 ## Decision and starting point
 
-This is the active execution plan for the remaining unpublished-library work, based on
+This completed execution plan records the unpublished-library delivery work, based on
 the [2026-10-29 review](../reviews/2026-10-29-library-state-review.md). The working-tree glTF/profile
 changes reviewed there are part of the baseline. The user adopted this direction on 2026-10-29 and
 explicitly authorized necessary architecture refactoring without preserving unpublished compatibility.
@@ -403,3 +403,12 @@ This plan is complete when normal-stack independent consumers, truthful fidelity
 typed consumption, simplified single storage, admitted glTF, useful postprocessing, and packaged
 target/profile evidence are delivered. No unit completes merely by adding an ADR, helper framework,
 source digest, or a larger count of passing internal tests.
+
+A–H implementation and required acceptance completed on 2026-10-31. At
+`0bb29f15ecff531dff48464bdbfd5906ba5cb468`,
+[hosted run 41201133748](https://github.com/Latias94/baozi/actions/runs/41201133748) passes all
+**15/15 jobs**, including actual Apple ARM64 behavior, all four twelve-case extracted-consumer
+matrices, the repaired standalone candidate dependency policy, and both verified leaf packages.
+The [final acceptance record](../reviews/2026-10-29-delivery-progress.md#completed-ah-delivery-2026-10-31)
+binds those results to their source scope. Native release registration, format maturity, and actual
+registry publication remain separate decisions.

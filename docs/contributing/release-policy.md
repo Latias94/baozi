@@ -3,7 +3,7 @@
 Baozi is currently foundation-first. Breaking changes are allowed when they protect the long-term
 IR, parser security model, or public API boundary.
 
-H in the [active delivery plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md#h--update-dependencies-and-prove-first-publication)
+H in the [delivery plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md#h--update-dependencies-and-prove-first-publication)
 qualifies packaged consumers and executed target/profile behavior. It does not require implementing
 a registry publication workflow, registry-state validator, or signing/SBOM/attestation framework.
 Local artifact qualification does not authorize a registry upload. Any actual upload must satisfy
@@ -155,7 +155,7 @@ targets rather than treating two selected cases as the entire publication matrix
 ## Release Checklist
 
 This checklist applies before an actual registry publication. H's local artifact qualification
-follows the active delivery plan and does not require completing publication automation.
+follows the delivery plan and does not require completing publication automation.
 
 Before any crate publish:
 

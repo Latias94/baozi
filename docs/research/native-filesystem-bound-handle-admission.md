@@ -5,6 +5,14 @@ described in [Bounded Open Work Cutover](#bounded-open-work-cutover-2026-10-31).
 and repository-delta schema 4 distinguish that modified source from its upstream archive provenance.
 Release registration remains empty. Earlier dated sections retain their original dependency states.
 
+**Executed candidate qualification:** at `55324fa`,
+[run 41199375814](https://github.com/Latias94/baozi/actions/runs/41199375814) executes the native
+runtime/backend/repository suites on Linux **21/18/39**, Windows **20/21/30**, and Apple ARM64
+**20/18/38**, with no fixture skips. Apple includes actual search-permission denial. The
+[delivery progress](../reviews/2026-10-29-delivery-progress.md#executed-apple-arm64-acceptance-2026-10-31)
+records the accompanying portable workspace, doctest, and extracted-consumer results. These are
+candidate results; `NATIVE_FS_REGISTERED_TARGETS` remains empty.
+
 **Historical decision date:** 2026-07-10
 
 **Historical decision:** Admit `cap-std` 4.0.2 as the capability backend for the
@@ -341,9 +349,12 @@ oracle: either a permitted object handle is returned or the open fails. Observin
 is always a test failure. Platform tests that require symlink privileges may skip only with explicit
 evidence; CI must have at least one authoritative runner where they execute.
 
-### Current Bounded Replacement Fixtures (2026-10-31)
+### Bounded Replacement Fixture Increment (2026-10-31)
 
-[`fs.rs`](../../crates/baozi-io/src/fs.rs) now exercises concurrent final-file, intermediate-directory, and file-symlink
+This dated increment retains its original qualification gaps. The current source boundary above
+and [Residual Risks](#residual-risks) record the later executed acceptance.
+
+[`fs.rs`](../../candidates/baozi-native-io/src/fs.rs) exercises concurrent final-file, intermediate-directory, and file-symlink
 replacement in 64 fixed rounds each. Objects are fully written before racing; the reader retains
 an opened handle until replacement completes, then accepts only complete authorized bytes or an
 open error. Stable positive and escaping-path controls run between rounds. Windows directory
@@ -470,7 +481,11 @@ state. Actual syscall traces show exactly one/one/four `openat2` attempts respec
 successful manual fixture `openat`, followed by the same-handle byte assertion. Evidence belongs
 to `target/review/h-open-work-linux-bdd7c800c463-ddigqztn/` (`exact-retries-*` and
 `candidate-fallback-*`). That trace supplies exact branch evidence; the separate bound API and
-fixed helper limits supply conservative pre-open billing. Apple ARM64 execution remains outstanding.
+fixed helper limits supply conservative pre-open billing. Actual Apple ARM64 qualification at
+`55324fa` passes runtime **20/20**, backend **18/18**, and repository **38/38** with no fixture skips,
+including real search-permission denial. Its portable workspace, doctests, and both twelve-case
+package profiles also pass. Release registration remains empty; Windows repository capture still
+returns `UnsupportedIdentityBackend` before traversal.
 
 | Risk | Impact | Treatment |
 | --- | --- | --- |

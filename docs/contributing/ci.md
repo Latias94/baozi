@@ -136,14 +136,15 @@ reachability. Host scheduling, cancellation, release ordering, and publication a
 [behavior gate index](../testing/behavior-gates.md). The former conformance receipt and test-source
 hash checks have been retired; a handwritten receipt never substituted for an executed test.
 
-A green dependency or candidate runner gate is not filesystem-conformance evidence. The three exact
-runtime candidates still require the complete platform-local race, link/reparse,
-special-file, and same-handle acceptance matrix from
+A green dependency check does not establish filesystem behavior. Native candidate qualification
+uses the complete platform-local race, link/reparse, special-file, and same-handle acceptance
+matrix recorded in
 [`native-filesystem-bound-handle-admission.md`](../research/native-filesystem-bound-handle-admission.md).
+The executed Linux, Windows, and Apple ARM64 suites have no fixture skips. Windows constructs actual
+unknown-tag reparse objects and verifies their typed rejection, as well as an actual volume-GUID
+mount escape. Release registration remains empty.
 The FreeBSD closure is resolved in CI, but it is not a runtime candidate and no hosted FreeBSD
 runtime job is claimed by this workflow.
-Windows unknown-reparse construction is likewise still a promotion blocker; it is not represented by
-an environment-dependent passing or skipped test.
 
 Run workflow lint locally when Go is available:
 

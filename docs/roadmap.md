@@ -1,10 +1,11 @@
 # Baozi Roadmap
 
-This roadmap states product direction and implementation order. The
-[active delivery plan](plans/2026-10-29-001-refactor-library-delivery-plan.md) owns execution scope and
-acceptance. The [2026-10-29 review](reviews/2026-10-29-library-state-review.md) records the starting
-evidence. This roadmap does not claim implementation completion, format maturity, or publication
-readiness. The former U4 execution sequence is superseded history.
+This roadmap states product direction and records the completed A–H library-delivery sequence. The
+[delivery plan](plans/2026-10-29-001-refactor-library-delivery-plan.md) owns its scope and acceptance;
+the [delivery progress](reviews/2026-10-29-delivery-progress.md#completed-ah-delivery-2026-10-31)
+records exact executed target/profile evidence. The [2026-10-29 review](reviews/2026-10-29-library-state-review.md)
+remains the starting observation. Format maturity, native release registration, and publication
+remain separate decisions. The former U4 execution sequence is superseded history.
 
 ## Product Direction
 
@@ -23,35 +24,35 @@ Baozi may use narrow native or isolated adapters when a format cannot be impleme
 economically in pure Rust. Decoder ownership, failure containment, and canonical semantics remain
 Baozi-owned. Assimp is a compatibility and differential oracle, not the production architecture.
 
-## Current Delivery Sequence
+## Completed Library Delivery Sequence
 
 ### 1. Repair Basic Execution and Source Fidelity
 
-Start with normal-stack Windows triangle import, ordinary host-unwind cleanup, stable registered
-identity, and executable examples. Close successful data-discard paths in OBJ/PLY, legal short-read
-handling, unmetered quadratic validation, repeated cache-hit hashing, and live-memory accounting
-gaps. Use specific reproductions and public behavior tests.
+Normal-stack Windows triangle import, ordinary host-unwind cleanup, stable registered identity,
+and executable examples establish the baseline. Specific reproductions and public behavior tests
+cover the repaired OBJ/PLY data-discard paths, legal short reads, quadratic validation, repeated
+cache-hit hashing, and live-memory accounting gaps.
 
 The unpublished status permits replacing the responsible architecture. API compatibility and the
 private shape of the current state machine do not justify retaining a defective design.
 
 ### 2. Deliver Typed Consumers and Simplify Scene Storage
 
-Expose borrowed geometry, material, hierarchy, instance, deformation, and animation views. A small
-independent consumer must read actual data; snapshots remain test/debug evidence. Simplify plugin
-authoring with default document provenance and useful validation errors.
+Borrowed views expose geometry, material, hierarchy, instance, deformation, and animation values.
+The independent consumer reads actual data; snapshots remain test/debug evidence. Plugin authoring
+uses default document provenance and useful validation errors.
 
-Replace generic Scene records and duplicate validation projections with private typed tables and
-immutable payloads. Start with node/geometry, then migrate other domains alongside their consumers.
-Keep one production representation per completed domain cutover and delete the replaced code.
-Operation mechanisms retain allocation admission and lifetime-bound charging; core owns Scene
-semantics. Revise the affected architecture decisions together with the implementation boundary.
+Private typed tables and immutable payloads replace generic Scene records and duplicate validation
+projections. The cutover proceeded from node/geometry through each consumer's remaining domains,
+deleting each replaced implementation. Operation mechanisms retain allocation admission and
+lifetime-bound charging; core owns Scene semantics. The affected architecture decisions describe
+the delivered implementation boundaries.
 
 Node, geometry, profile, spatial, deformation, animation, and appearance now use retained typed
 owners under one Scene root. The remaining private record directory contains revision/count fields
 only. Fresh builds, central validation, public reads, snapshots, and unchanged edit sharing use those
-same owners; each replaced codec and validation projection is deleted with its cutover. The active
-delivery plan and progress record carry execution evidence and the remaining product acceptance.
+same owners; each replaced codec and validation projection is deleted with its cutover. The
+completed delivery plan and progress record carry the measured costs and final product acceptance.
 
 ### 3. Complete glTF/GLB and Useful Geometry Processing
 

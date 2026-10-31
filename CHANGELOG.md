@@ -6,6 +6,10 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Exposed the public loss, diagnostic, source-scope, text-profile, and resource-evidence vocabulary
+  through `baozi`, including `ImportDimensionSnapshot`. Independent consumers can explicitly
+  authorize partial-channel loss, inspect its exact disposition, and retain readable reports
+  after releasing the Scene.
 - Added an actual Windows volume-GUID mount containment regression with native readback,
   known outside bytes, an in-root positive control, Unicode paths, and explicit fixture cleanup.
 - Made the vendored Unix link-content tests runnable from the complete upstream registry

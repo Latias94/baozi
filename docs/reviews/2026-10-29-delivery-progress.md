@@ -1,7 +1,10 @@
 # Library Delivery Progress — 2026-10-29
 
-This is implementation evidence for the [active A–H plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md),
-not release admission or whole-plan completion. The baseline reviews remain historical observations.
+The [A–H delivery plan](../plans/2026-10-29-001-refactor-library-delivery-plan.md) is complete.
+The [final acceptance record](#completed-ah-delivery-2026-10-31) binds all fifteen successful hosted
+CI jobs to the delivered source, including actual Apple ARM64 and extracted-package execution.
+Native release registration remains empty; format maturity and registry publication are separate
+decisions. Earlier baseline reviews and dated increments retain their historical source scope.
 Source changes below were exercised in the working tree on Windows x86_64 with Rust 1.95.0 unless
 another toolchain is named. Commands use one Cargo build job and reuse `target`.
 
@@ -1925,8 +1928,8 @@ is still required to complete the pending runtime jobs.
 
 Earlier entries describe their own increments and source revisions. This audit replaces the stale
 list of unfinished typed-domain and postprocess migrations; it does not turn historical execution
-into qualification of later changes. The active remaining work is behavioral acceptance and native
-candidate qualification, rather than another Scene representation or a speculative release system.
+into qualification of later changes. This audit describes the delivered implementation; the
+final acceptance record below closes the subsequent public-report and hosted qualification work.
 
 | Unit | Delivered implementation | Acceptance and remaining scope |
 | --- | --- | --- |
@@ -1937,10 +1940,10 @@ candidate qualification, rather than another Scene representation or a speculati
 | E | Maintained glTF/GLB backend, exact selected PBR/deformation/animation profile, normalized source ownership and explicit unsupported-profile rejection. | Typed artifact consumers and the newer immutable ownership ASan archive pass. The six historical backend reproducers remain committed corpus. This does not admit additional formats/extensions or claim sustained fuzz coverage. |
 | F | Triangulation, Flat/Smooth normals, complete admitted target-space conversion, and borrowed triangle tuples into application-owned buffers. | The independent artifact/WASI workflow checks actual values and buffers after Scene destruction. Corner/Face semantics, seams, deformation, animation, camera/light axes, and material lengths retain focused regression coverage. Global tuple deduplication and removed undefined generated-coordinate sources are not unfinished requirements. |
 | G | Compiler/behavior boundaries replace source-hash/AST governance; metadata checks stay locked; the scale driver is thin Python; Rust owns fixtures/assertions; fuzz logs/corpus are retained. Native development is an excluded workspace; the core integration uses actual privacy/linearity rather than a feature gate. | The deliberate quadratic growth regression was rejected and precisely removed. Distinct buffers, depth/width, resource sharing, and unique vertices have executed work checks. The newer core/candidate cutover has separate focused and integrated evidence; earlier package/ASan archives do not cover later source by implication. Driver timing/RSS stay advisory. |
-| H | Updated dependencies/MSRV checks, package-local documentation/licenses, extracted-only twelve-case consumer matrix, executable WASI and current-stable CI wiring. | Both fresh ownership-boundary artifact matrices and verified leaf packages pass; the newer native repair also passes all-feature package verification. Browser-WASM is compile-only. Linux forced fallback passes all three backend-error states. No hosted CI dispatch, upload, or registry publication is claimed. Native candidates retain the concrete remaining platform matrix below. |
+| H | Updated dependencies/MSRV checks, package-local documentation/licenses, extracted-only twelve-case consumer matrix, executable WASI and current-stable CI wiring. | All four Windows/Apple artifact matrices and both verified leaf packages pass in the final hosted run. Browser-WASM is compile-only; empty/all WASI execute. Linux forced fallback passes all three backend-error states. Actual candidate platform execution is recorded below. No registry upload or release registration is claimed. |
 
-Native release registration remains empty. Actual Apple ARM64 runtime/permission execution remains
-outstanding before promotion; the committed-source backend retry/work evidence above now passes.
+Native release registration remains empty. Actual Apple ARM64 runtime/permission execution passes
+in the hosted acceptance below; the committed-source backend retry/work evidence above also passes.
 The actual Windows volume-mount case above now passes. The accounting trace exposed a genuine
 implementation gap at `71a81e0`; the bounded-open increment implements that seam and backend limit.
 The completed package/Linux/Windows evidence above qualifies its changed source independently. The
@@ -1956,8 +1959,8 @@ The maintained [`scale-profile-policy.md`](../testing/scale-profile-policy.md) d
 driver and Rust workload boundaries. [`behavior-gates.md`](../testing/behavior-gates.md) maps the
 actual checks, and [native admission](../research/native-filesystem-bound-handle-admission.md)
 records the platform distinction. Exact RSS, sustained fuzz coverage, full target promotion, and
-registry publication readiness are not inferred from these local results. The delivery goal remains
-active until its required remaining behavior has actually been qualified.
+registry publication readiness are not inferred from these results. The final record below closes
+the delivery goal against its required executed behavior.
 
 ## Public Report Consumption and First Hosted CI (2026-10-31)
 
@@ -2076,3 +2079,41 @@ baozi-operation` and `cargo +1.95.0 package --locked -p baozi-io`, build verifie
 Logs are `target/review/h-cargo-deny-0.20.2-candidate.log`, `h-leaf-operation-package.log`, and
 `h-leaf-io-package.log`. The next current-head hosted run must confirm the repaired policy command
 and leaf step before the final whole-plan completion record.
+
+## Completed A–H Delivery (2026-10-31)
+
+At **`0bb29f15ecff531dff48464bdbfd5906ba5cb468`**,
+[run 41201133748](https://github.com/Latias94/baozi/actions/runs/41201133748) completes **15/15 jobs
+successfully**. The repaired candidate dependency-policy step executes cargo-deny **0.20.2** and
+passes advisories, bans, licenses, and sources under the unchanged root policy. Both following
+leaf packages build and verify. This closes the tooling failure in run 41199375814.
+
+| Executed gate | Result |
+| --- | --- |
+| Rust 1.95.0 workspace | **2,365** default and **2,372** all-feature tests; **66** xtask tests; strict Clippy, formatting, rustdoc and doctests pass. Four explicitly manual storage pilots are excluded from broad runs and have separate six-case scale/admission/cancellation evidence above. |
+| Current stable Linux | Rust **1.99.1**, **2,438/2,438** all-feature workspace tests plus strict Clippy and doctests. |
+| Actual Apple ARM64 | Rust **1.95.0**, **2,372/2,372** portable all-feature tests and **58 doctests**. Native runtime/backend/repository **20/18/38**, no fixture skips, including actual search-permission denial. |
+| Extracted-only public consumers | All **48 cases**: Windows x86_64 and Apple ARM64, each with twelve fixed feature cases in MSRV/debug and stable/release. Includes strict partial-UV rejection, explicit loss authority, typed values, source scope, postprocessing and retained report/application-buffer reads after Scene destruction. |
+| Other native candidates | Linux runtime/backend/repository **21/18/39** and Windows **20/21/30**, with no fixture skips; real Windows unknown-tag and volume-mount fixtures execute. |
+| Portable targets and compiler boundaries | Browser-WASM checks; actual empty/all WASI consumers on Wasmtime **50.0.0**; all five installed negative native targets reject with the required diagnostic. |
+| Sanitizers and dependency boundaries | Five Linux ASan targets execute **256 runs each**; crate graph, runtime/native admission and root/fuzz/candidate dependency policies pass. |
+
+The retained success log now exposes Apple's **bare std catch/drop: count_current=1,
+bytes_current=64** before the complete first Baozi import/conversion owner measurement. That full
+owner measurement still requires and observes **zero remaining allocations and bytes** after
+ordinary host unwind. No Baozi warmup or allowance replaces either assertion. The Apple host is
+`aarch64-apple-darwin`; MSRV identity is `rustc 1.95.0 (59807616e 2026-04-14)`.
+Logs are `target/review/ci-41201133748-apple-native.log` and
+`ci-41201133748-rust-msrv.log`, with all job results in `ci-41201133748-result.json`.
+
+The final A–H audit identifies no outstanding implementation or required acceptance unit. One
+typed Scene path serves all seven domains, independent consumers complete the three product
+workflows, and the required target/artifact gates have executed. The earlier manual scale,
+forced-fallback, example and process-memory observations retain their exact recorded revisions;
+the hosted result does not recast those as new measurements.
+
+This completion qualifies the unpublished library delivery. Native candidates remain
+`CandidateUnregistered` with an empty `NATIVE_FS_REGISTERED_TARGETS`; Windows repository capture
+continues to fail closed with `UnsupportedIdentityBackend`. Format maturity, additional profiles,
+sustained fuzz campaigns and actual registry publication remain separate decisions. PR #3 remains
+a draft; no merge, registry upload or platform promotion is part of this completion.
