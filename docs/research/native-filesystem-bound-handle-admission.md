@@ -313,8 +313,12 @@ evidence; CI must have at least one authoritative runner where they execute.
 replacement in 64 fixed rounds each. Objects are fully written before racing; the reader retains
 an opened handle until replacement completes, then accepts only complete authorized bytes or an
 open error. Stable positive and escaping-path controls run between rounds. Windows directory
-replacement uses a real junction; only sharing violation 32 may defer the exchange until handle
-release. The existing deterministic same-handle test remains the separate identity assertion.
+replacement uses a real junction. Errors 32 for a held directory and 5 for a held descendant may
+defer the exchange only until handle release; the same exchange must then succeed. A deterministic
+held-child control requires one of those exact codes before release and immediate rename success
+afterward. This distinction was confirmed in a controlled local Win32 fixture after the race
+exposed error 5.
+The existing deterministic same-handle test remains the separate identity assertion.
 Coordination timeouts detect a stalled protocol but cannot interrupt a hung OS open/read.
 
 Unix fixtures additionally check a multi-link relative chain containing an in-root parent step,
@@ -334,9 +338,30 @@ executed this fixture. The local F: fixture additionally produced the real 8.3 a
 opened the original name through `FileSystemAssetIo`, and required the alias to return
 `PathErrorCode::ShortNameAlias` before backend IO. This is one executed volume case; it does not
 qualify every Windows volume or hosted runner. Actual Apple ARM64 execution, including the
-permission case, Windows unknown/volume-mount reparse points, and the remaining backend
-retry/fallback evidence still precede complete promotion. Candidate membership and release
-registration remain distinct.
+permission case, Windows volume-mount reparse points, and the remaining backend retry/fallback
+evidence still precede complete promotion. Candidate membership and release registration remain
+distinct.
+
+An actual unknown-tag probe then exposed a missing runtime check: the capability backend could
+return an unresolved file handle for tag `0x42`, and its metadata still reported a regular file.
+Host `std::fs::read` rejected that same object with Windows error 1920. Runtime IO now inspects
+`FILE_ATTRIBUTE_REPARSE_POINT` on the returned handle before accepting regular-file metadata,
+sharing the predicate already needed by repository capture. It returns `InspectObject` with
+`NonRegularFile(SymlinkOrReparsePoint)` without reading or reopening the payload. No dependency,
+resolver, raw-handle API, or native unsafe boundary is added.
+
+The maintained Windows fixture uses `FSCTL_SET_REPARSE_POINT` and `FSCTL_GET_REPARSE_POINT` to
+verify the actual tag/GUID for root and nested file objects (`0x42`) and an in-root directory
+(`0x10000042`). Both unresolved file objects must receive the exact typed rejection. Ordinary
+file reads remain positive controls; the ordinary child of the tagged directory follows the
+authorized-bytes-or-open-error oracle. A directory itself never becomes parser input. These
+nonredirecting tags do not establish behavior for every filter driver or volume-mount reparse.
+The fixture follows Microsoft's [GUID data-buffer contract](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-reparse_guid_data_buffer)
+and [reparse file attribute](https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants).
+A separate local `SetVolumeMountPointW` attempt against a new, verified-empty directory under
+`target/review/` returned Windows `ERROR_ACCESS_DENIED` (5). No mount was created or existing
+volume mapping changed. This is an actual fixture-setup limitation, not adapter rejection or
+volume-mount acceptance; the retained result is `target/review/h-windows-volume-fixture.json`.
 
 ## Residual Risks
 

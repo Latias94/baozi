@@ -276,6 +276,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install Python for Windows native fixtures
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
       - name: Install Rust 1.95
         uses: dtolnay/rust-toolchain@1.95.0
         with:

@@ -88,6 +88,13 @@ impl AssetIo for FileSystemAssetIo {
         let metadata = file
             .metadata()
             .map_err(|error| AssetOpenError::from_io(AssetOpenStage::InspectObject, error))?;
+        // Unknown Windows reparse tags can still report a regular file on this handle.
+        if is_reparse_point(&metadata) {
+            return Err(AssetOpenError::new(
+                AssetOpenStage::InspectObject,
+                AssetOpenErrorKind::NonRegularFile(AssetObjectKind::SymlinkOrReparsePoint),
+            ));
+        }
         let file_type = metadata.file_type();
         if !file_type.is_file() {
             return Err(AssetOpenError::new(
@@ -113,12 +120,20 @@ fn configure_nonblocking(options: &mut OpenOptions) {
 #[cfg(windows)]
 fn configure_nonblocking(_options: &mut OpenOptions) {}
 
+#[cfg(windows)]
+pub(crate) fn is_reparse_point(metadata: &cap_std::fs::Metadata) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    cap_std::fs::MetadataExt::file_attributes(metadata) & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_reparse_point(metadata: &cap_std::fs::Metadata) -> bool {
+    metadata.is_symlink()
+}
+
 fn classify_object(file_type: cap_std::fs::FileType) -> AssetObjectKind {
     if file_type.is_dir() {
         return AssetObjectKind::Directory;
-    }
-    if file_type.is_symlink() {
-        return AssetObjectKind::SymlinkOrReparsePoint;
     }
     classify_platform_object(file_type)
 }
@@ -243,7 +258,7 @@ mod tests {
                 let moved = match fs::rename(active, &parked) {
                     Ok(()) => true,
                     #[cfg(windows)]
-                    Err(error) if error.raw_os_error() == Some(32) => false,
+                    Err(error) if matches!(error.raw_os_error(), Some(5 | 32)) => false,
                     Err(error) => panic!("round {round}: unexpected replacement failure: {error}"),
                 };
                 if moved {
@@ -261,7 +276,7 @@ mod tests {
                     );
                 }
                 if !moved {
-                    // A Windows sharing denial is valid only while the reader owns its handle.
+                    // Windows may deny the directory itself (32) or an open descendant (5).
                     // Complete the same exchange once that handle has been dropped; never skip it.
                     fs::rename(active, &parked)
                         .expect("replacement must succeed after the reader releases its handle");
@@ -536,6 +551,19 @@ mod tests {
             io.open(&AssetPath::new("alternate/payload.bin").unwrap())
                 .is_err()
         );
+        #[cfg(windows)]
+        {
+            let held_child = io
+                .open(&AssetPath::new("entry/payload.bin").unwrap())
+                .expect("open the authorized child before the rename control");
+            let parked = root.path().join("held-child-parked");
+            let error = fs::rename(&active, &parked)
+                .expect_err("Windows must deny moving a directory with an open child");
+            assert!(matches!(error.raw_os_error(), Some(5 | 32)), "{error}");
+            assert_eq!(read_all(held_child), b"authorized immutable payload");
+            fs::rename(&active, &parked).expect("rename must succeed after closing the child");
+            fs::rename(&parked, &active).expect("restore the authorized directory");
+        }
 
         assert_bounded_replacement_race(
             &io,
@@ -821,6 +849,60 @@ mod tests {
             fs::read(outside.path().join("secret.bin")).expect("outside fixture remains"),
             b"outside"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_unknown_reparse_payloads_never_become_parser_input() {
+        use std::os::windows::fs::MetadataExt;
+
+        let root = TempRoot::new("unknown-reparse");
+        let fixture = std::process::Command::new("python")
+            .arg("-c")
+            .arg(include_str!("fs/tests/windows_reparse.py"))
+            .arg(root.path())
+            .output()
+            .expect("Windows candidate runner must provide Python for native fixtures");
+        assert!(
+            fixture.status.success(),
+            "unknown-tag fixture creation/readback failed: {}",
+            String::from_utf8_lossy(&fixture.stderr)
+        );
+        for path in ["unknown.bin", "tagged", "tagged/unknown.bin"] {
+            let metadata = fs::symlink_metadata(root.path().join(path))
+                .expect("inspect the actual reparse fixture");
+            assert_ne!(metadata.file_attributes() & 0x0000_0400, 0);
+            assert!(!metadata.is_symlink(), "fixture must use an unknown tag");
+        }
+        let io = FileSystemAssetIo::from_capability(
+            NativeDirectoryCapability::open_ambient(root.path()).expect("open capability"),
+        );
+        assert_eq!(
+            read_all(io.open(&AssetPath::new("ordinary.bin").unwrap()).unwrap()),
+            b"authorized ordinary file"
+        );
+
+        for path in ["unknown.bin", "tagged/unknown.bin"] {
+            let error = io
+                .open(&AssetPath::new(path).unwrap())
+                .expect_err("an unresolved reparse payload must not be returned as a file");
+            assert_eq!(error.stage(), AssetOpenStage::InspectObject);
+            assert_eq!(
+                error.kind(),
+                AssetOpenErrorKind::NonRegularFile(AssetObjectKind::SymlinkOrReparsePoint)
+            );
+        }
+        assert!(
+            io.open(&AssetPath::new("tagged").unwrap()).is_err(),
+            "a directory reparse object must not become parser input"
+        );
+        match io.open(&AssetPath::new("tagged/ordinary.bin").unwrap()) {
+            Ok(file) => assert_eq!(read_all(file), b"authorized directory child"),
+            Err(error) => assert!(matches!(
+                error.stage(),
+                AssetOpenStage::Open | AssetOpenStage::InspectObject
+            )),
+        }
     }
 
     #[cfg(unix)]

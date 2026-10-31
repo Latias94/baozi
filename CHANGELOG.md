@@ -6,6 +6,9 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Rejected unresolved Windows reparse objects using metadata from the exact returned file handle.
+  Unknown tags can report ordinary file types; they now return a typed reparse-object rejection
+  before any payload reaches the importer. Runtime and repository IO share the same object check.
 - Released healthy unpublished retained parts, startup fallback owners, and publication assemblies
   during ordinary host unwind. Activation stages now keep callback output/proof/cause destruction
   coupled to their actual storage owner, quarantining only observed destructor failures and

@@ -8,7 +8,7 @@ use cap_fs_ext::{
 };
 use cap_std::fs::{Dir, File, FileType, Metadata, OpenOptions};
 
-use crate::NativeDirectoryCapability;
+use crate::{NativeDirectoryCapability, fs::is_reparse_point};
 
 use super::native::{ObjectIdentity, RepositoryDirectory, RepositoryDirectoryChild};
 use super::path::{
@@ -2089,7 +2089,7 @@ fn reject_reparse(
     stage: RepositoryCaptureStage,
     path: &RepositoryPath,
 ) -> Result<(), RepositoryCaptureError> {
-    if metadata.is_symlink() || is_windows_reparse(metadata) {
+    if is_reparse_point(metadata) {
         return Err(RepositoryCaptureError::at(
             stage,
             RepositoryCaptureErrorKind::UnsupportedObject(
@@ -2099,17 +2099,6 @@ fn reject_reparse(
         ));
     }
     Ok(())
-}
-
-#[cfg(windows)]
-fn is_windows_reparse(metadata: &Metadata) -> bool {
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    cap_fs_ext::OsMetadataExt::file_attributes(metadata) & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-const fn is_windows_reparse(_metadata: &Metadata) -> bool {
-    false
 }
 
 fn classify_metadata(metadata: &Metadata) -> RepositoryObjectKind {
