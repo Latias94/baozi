@@ -15,6 +15,7 @@ Importers should record source metadata when known:
 - UV origin
 - winding convention
 - tangent basis convention
+- tangent handedness encoding
 
 Importers must not silently convert coordinate systems, flip UVs, flip winding, or change units for renderer convenience.
 
@@ -57,6 +58,13 @@ an implemented operation; conversion returns a typed capability error otherwise.
 ## Tangents and Normal Maps
 
 Generated tangents store handedness in tangent `w`.
+
+The tangent construction algorithm and bitangent reconstruction encoding are independent source
+facts. A known encoding does not imply a known algorithm. Declaring MikkTSpace still requires
+`SignInW`, and complete scene-space validation still requires both facts. The
+[glTF specification](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#meshes) defines
+`SignInW` for authored tangents, so glTF imports declare it while leaving the construction algorithm
+unknown. glTF also declares an upper-left UV origin. Import does not generate tangents or flip UVs.
 
 Normal maps are data textures:
 

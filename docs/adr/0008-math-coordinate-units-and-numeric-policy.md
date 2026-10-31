@@ -64,6 +64,12 @@ The raw scene preserves source numbers and records a complete `SceneSpace`:
 - upper-left or lower-left UV origin, or unknown
 - tangent basis convention and handedness encoding, or unknown
 
+Tangent construction and handedness encoding are independent facts: either may remain unknown in a
+partial descriptor. An importer may know that tangent W encodes a sign without knowing the author's
+construction algorithm. Declaring MikkTSpace requires its `SignInW` encoding; a complete descriptor
+still requires both facts. In particular, glTF declares `SignInW` and an upper-left UV origin but
+does not guarantee that authored tangents were constructed with MikkTSpace.
+
 Column vectors and local-to-parent authored node transforms are fixed canonical API semantics,
 not source facts or target options. `SceneSpace` does not carry a duplicate transform-convention
 tag. Inverse bind, correction, and other matrices retain their domain-specific source/destination

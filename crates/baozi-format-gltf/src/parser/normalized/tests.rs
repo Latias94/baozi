@@ -289,6 +289,8 @@ fn canonical_authoring_accepts_a_hand_built_model_without_a_decoder()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let report = import_fixture(FIXTURE_PRIMARY, FixtureFault::None)??;
     let scene = report.scene();
+    let space = scene.space();
+    assert_eq!(space.uv_origin, UvOrigin::UpperLeft);
     let mesh = scene.meshes().next().unwrap();
     assert_eq!(mesh.name(), Some("hand-built mesh"));
     assert_eq!(mesh.default_morph_weights(), &[0.5]);

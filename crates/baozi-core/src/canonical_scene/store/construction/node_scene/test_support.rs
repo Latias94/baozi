@@ -226,7 +226,7 @@ pub(super) enum SpatialBuildFault {
     LightCount,
     InvalidUnitScale,
     CoincidentAxes,
-    IncompleteTangentConvention,
+    MissingMikkTspaceEncoding,
     UnexpectedSchemaNameBytes,
     NonFiniteLightTint,
     NonCanonicalZeroEmission,
@@ -242,7 +242,7 @@ impl SpatialBuildFault {
         Self::LightCount,
         Self::InvalidUnitScale,
         Self::CoincidentAxes,
-        Self::IncompleteTangentConvention,
+        Self::MissingMikkTspaceEncoding,
         Self::UnexpectedSchemaNameBytes,
         Self::NonFiniteLightTint,
         Self::NonCanonicalZeroEmission,
@@ -261,7 +261,7 @@ impl SpatialBuildFault {
             Self::LightCount => storage.lights.clear(),
             Self::InvalidUnitScale => storage.space.unit_scale_to_meters = Some(0.0),
             Self::CoincidentAxes => storage.space.front_axis = storage.space.up_axis,
-            Self::IncompleteTangentConvention => {
+            Self::MissingMikkTspaceEncoding => {
                 storage.space.tangent_basis = crate::TangentBasisConvention::MikkTspace;
             }
             Self::UnexpectedSchemaNameBytes => {

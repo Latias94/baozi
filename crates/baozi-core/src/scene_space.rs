@@ -213,9 +213,9 @@ impl SceneSpace {
 
     /// Validates a partial scene-space descriptor.
     ///
-    /// Individual spatial conventions may remain unknown. Tangent basis and
-    /// handedness encoding are one semantic declaration, so they must either
-    /// both be unknown or both be known.
+    /// Individual conventions may remain unknown. The tangent construction
+    /// algorithm and handedness encoding are independent facts, except that
+    /// declaring MikkTSpace also requires its defined sign-in-W encoding.
     pub fn validate(&self) -> Result<(), SceneSpaceValidationError> {
         if let Some(scale) = self.unit_scale_to_meters {
             if !scale.is_finite() {
@@ -231,22 +231,6 @@ impl SceneSpace {
                 up_axis: self.up_axis,
                 front_axis: self.front_axis,
             });
-        }
-
-        let tangent_basis_unknown = self.tangent_basis.is_unknown();
-        let tangent_encoding_unknown = self.tangent_handedness_encoding.is_unknown();
-        match (tangent_basis_unknown, tangent_encoding_unknown) {
-            (true, false) => {
-                return Err(SceneSpaceValidationError::IncompleteTangentConvention {
-                    missing: SceneSpaceField::TangentBasis,
-                });
-            }
-            (false, true) => {
-                return Err(SceneSpaceValidationError::IncompleteTangentConvention {
-                    missing: SceneSpaceField::TangentHandednessEncoding,
-                });
-            }
-            _ => {}
         }
 
         if matches!(self.tangent_basis, TangentBasisConvention::MikkTspace)
@@ -344,9 +328,6 @@ pub enum SceneSpaceValidationError {
 
     #[error("up axis {up_axis:?} and front axis {front_axis:?} share an underlying axis")]
     CoincidentAxes { up_axis: Axis, front_axis: Axis },
-
-    #[error("tangent convention is incomplete because {missing} is unknown")]
-    IncompleteTangentConvention { missing: SceneSpaceField },
 
     #[error("MikkTSpace tangent basis requires tangent handedness encoded as a sign in w")]
     MikkTspaceRequiresSignInW,
@@ -529,27 +510,47 @@ mod tests {
     }
 
     #[test]
-    fn tangent_basis_and_handedness_must_form_one_declaration() {
-        let missing_encoding = SceneSpace {
+    fn tangent_encoding_is_known_independently_of_its_construction_algorithm() {
+        let space = SceneSpace {
+            tangent_basis: TangentBasisConvention::Unknown,
+            tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
+            ..complete_space()
+        };
+        assert_eq!(space.validate(), Ok(()));
+        assert_eq!(
+            space.validate_complete(),
+            Err(SceneSpaceValidationError::UnknownField {
+                field: SceneSpaceField::TangentBasis,
+            })
+        );
+    }
+
+    #[test]
+    fn external_tangent_algorithm_does_not_imply_an_encoding() {
+        let schema_id = ExtensionSchemaId::new("example:tangent-basis", 1).unwrap();
+        let space = SceneSpace {
+            tangent_basis: TangentBasisConvention::Namespaced { schema_id },
+            tangent_handedness_encoding: TangentHandednessEncoding::Unknown,
+            ..complete_space()
+        };
+        assert_eq!(space.validate(), Ok(()));
+        assert_eq!(
+            space.validate_complete(),
+            Err(SceneSpaceValidationError::UnknownField {
+                field: SceneSpaceField::TangentHandednessEncoding,
+            })
+        );
+    }
+
+    #[test]
+    fn mikk_tspace_requires_its_known_encoding() {
+        let space = SceneSpace {
             tangent_basis: TangentBasisConvention::MikkTspace,
             ..SceneSpace::default()
         };
         assert_eq!(
-            missing_encoding.validate(),
-            Err(SceneSpaceValidationError::IncompleteTangentConvention {
-                missing: SceneSpaceField::TangentHandednessEncoding,
-            })
-        );
-
-        let missing_basis = SceneSpace {
-            tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
-            ..SceneSpace::default()
-        };
-        assert_eq!(
-            missing_basis.validate(),
-            Err(SceneSpaceValidationError::IncompleteTangentConvention {
-                missing: SceneSpaceField::TangentBasis,
-            })
+            space.validate(),
+            Err(SceneSpaceValidationError::MikkTspaceRequiresSignInW)
         );
     }
 

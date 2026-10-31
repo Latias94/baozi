@@ -191,7 +191,7 @@ fn actual_inline_space_rejects_nonpositive_and_nonfinite_units() {
 }
 
 #[test]
-fn actual_inline_space_rejects_coincident_axes_and_incomplete_or_conflicting_tangents() {
+fn actual_inline_space_rejects_coincident_axes_and_invalid_mikk_tspace_encodings() {
     let encoding = TangentHandednessEncoding::Namespaced {
         schema_id: ExtensionSchemaId::new("test:sign", 1).unwrap(),
     };
@@ -202,10 +202,6 @@ fn actual_inline_space_rejects_coincident_axes_and_incomplete_or_conflicting_tan
         },
         SceneSpace {
             tangent_basis: TangentBasisConvention::MikkTspace,
-            ..SceneSpace::UNKNOWN
-        },
-        SceneSpace {
-            tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
             ..SceneSpace::UNKNOWN
         },
         SceneSpace {
@@ -224,6 +220,33 @@ fn actual_inline_space_rejects_coincident_axes_and_incomplete_or_conflicting_tan
         assert_eq!(storage.validate(&mut control, 0, 0, names), Ok(false));
         assert_eq!(control.attempted, 1);
         assert_eq!(control.completed, 1);
+    }
+}
+
+#[test]
+fn actual_inline_space_accepts_independent_tangent_facts() {
+    for space in [
+        SceneSpace {
+            tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
+            ..SceneSpace::UNKNOWN
+        },
+        SceneSpace {
+            tangent_basis: TangentBasisConvention::Namespaced {
+                schema_id: ExtensionSchemaId::new("test:basis", 1).unwrap(),
+            },
+            ..SceneSpace::UNKNOWN
+        },
+    ] {
+        let names = schema_name_bytes(&space);
+        let storage = SpatialStorage {
+            space,
+            cameras: vec![],
+            lights: vec![],
+        };
+        assert_eq!(
+            storage.validate(&mut Control::default(), 0, 0, names),
+            Ok(true)
+        );
     }
 }
 

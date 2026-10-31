@@ -351,7 +351,13 @@ pub(super) fn submit_parts(
         primitive_deformations.as_slice(),
         mesh_instance_deformations.as_slice(),
     );
-    let scene_space = SceneSpace::STANDARD_TARGET;
+    // glTF defines the UV origin and bitangent reconstruction, independently
+    // of the algorithm used to construct authored tangents.
+    let scene_space = SceneSpace {
+        uv_origin: UvOrigin::UpperLeft,
+        tangent_handedness_encoding: TangentHandednessEncoding::SignInW,
+        ..SceneSpace::STANDARD_TARGET
+    };
     let spatial = SpatialAuthoringBatch::new(&scene_space, cameras.authored.as_slice(), &[]);
     let mut authored_nodes = ctx.metered_vec(
         ImportStorageClass::SceneConstruction,
