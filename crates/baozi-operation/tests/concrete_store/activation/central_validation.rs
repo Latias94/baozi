@@ -2401,6 +2401,167 @@ fn candidate_reports_exact_member_counts_without_running_the_joint_commit() {
 }
 
 #[test]
+fn activated_output_drop_panic_poison_preserves_all_physical_charges() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let (operation, keys) = operation(&account);
+    let outcome = plan_scoped_activation!(
+        operation,
+        scoped_activation_shape(keys, 1, 1),
+        |mut lane| {
+            let root = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(7)
+                })
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, PanicOnDrop)
+        },
+    )
+    .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(activated) => activated,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+    let before = account.snapshot();
+    assert!(!before.poisoned());
+    assert!(before.live_retained_allocations() > 0);
+
+    let payload =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(activated))).unwrap_err();
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"contained materialization callback drop panic")
+    );
+    drop(payload);
+
+    let after = account.snapshot();
+    assert!(after.poisoned());
+    assert_eq!(
+        after.first_poison_evidence().unwrap().reason(),
+        AccountPoisonReason::OwnershipGraphUnverified
+    );
+    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations()
+    );
+    assert_eq!(
+        after.total_admitted_retained_bytes(),
+        before.total_admitted_retained_bytes()
+    );
+    assert_eq!(
+        after.total_admitted_retained_allocations(),
+        before.total_admitted_retained_allocations()
+    );
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
+fn candidate_proof_and_output_drop_panics_preserve_all_physical_charges() {
+    let factory = factory(1);
+    let account = account(&factory);
+    let output_dropped = Cell::new(false);
+    let proof_dropped = Cell::new(false);
+    let (operation, keys) = operation(&account);
+    let outcome = plan_scoped_activation!(
+        operation,
+        scoped_activation_shape_with_validation_work(keys, 1, 1, NonZeroU64::new(2).unwrap()),
+        |mut lane| {
+            let root = lane
+                .try_retain_sequence(SequencePlan::<u8>::new(1).unwrap(), SequenceTag, |writer| {
+                    writer.push(7)
+                })
+                .unwrap();
+            lane.complete::<_, (), _, _>(root, (DropProbe(&output_dropped), PanicOnDrop))
+        },
+    )
+    .unwrap();
+    let activated = match outcome {
+        CanonicalActivationOutcome::Activated(activated) => activated,
+        CanonicalActivationOutcome::Rejected(_)
+        | CanonicalActivationOutcome::NeverActivated(_)
+        | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+    };
+    let outcome = activated
+        .validate_centrally(
+            CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
+            |lane, _output| {
+                let evidence = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        EvidenceLeafTag,
+                        |writer| writer.push(1),
+                    )
+                    .unwrap();
+                lane.complete(evidence)
+            },
+            |planning, _output| {
+                planning.validate_with(
+                    |_| Ok(()),
+                    |session, canonical, evidence, &mut ()| {
+                        assert!(inspect_one_byte_pair(session, canonical, evidence, 7, 1)?);
+                        Ok(
+                            CanonicalValidationDecision::<_, ValidationRejection>::accept((
+                                DropProbe(&proof_dropped),
+                                PanicOnDrop,
+                            )),
+                        )
+                    },
+                )
+            },
+        )
+        .unwrap();
+    let candidate = match outcome {
+        CanonicalCentralValidationOutcome::Candidate(candidate) => candidate,
+        CanonicalCentralValidationOutcome::Rejected(_)
+        | CanonicalCentralValidationOutcome::Fallback(_)
+        | CanonicalCentralValidationOutcome::Interrupted(_) => {
+            panic!("valid central validation must produce a candidate")
+        }
+    };
+    assert!(!output_dropped.get());
+    assert!(!proof_dropped.get());
+    let before = account.snapshot();
+    assert!(!before.poisoned());
+    assert!(before.live_retained_allocations() > 0);
+
+    let payload =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(candidate))).unwrap_err();
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"contained materialization callback drop panic")
+    );
+    drop(payload);
+
+    assert!(proof_dropped.get());
+    assert!(output_dropped.get());
+    let after = account.snapshot();
+    assert!(after.poisoned());
+    assert_eq!(
+        after.first_poison_evidence().unwrap().reason(),
+        AccountPoisonReason::OwnershipGraphUnverified
+    );
+    assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations()
+    );
+    assert_eq!(
+        after.total_admitted_retained_bytes(),
+        before.total_admitted_retained_bytes()
+    );
+    assert_eq!(
+        after.total_admitted_retained_allocations(),
+        before.total_admitted_retained_allocations()
+    );
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 1);
+}
+
+#[test]
 fn candidate_proof_drop_panic_poison_contains_the_physical_owner() {
     let factory = factory(1);
     let account = account(&factory);

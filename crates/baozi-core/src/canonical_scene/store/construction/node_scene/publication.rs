@@ -259,14 +259,19 @@ where
         return permit.reject_generation(cause, stable_code).map(reject);
     }
 
-    let generation = match reserve_generation() {
-        Ok(generation) => generation,
-        Err(SceneGenerationError::Exhausted) => {
-            let cause = NodeSceneLaneGenerationRejection::exhausted();
-            let stable_code = cause.stable_code();
-            return permit.reject_generation(cause, stable_code).map(reject);
-        }
-    };
+    let generation =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(reserve_generation)) {
+            Ok(Ok(generation)) => generation,
+            Ok(Err(SceneGenerationError::Exhausted)) => {
+                let cause = NodeSceneLaneGenerationRejection::exhausted();
+                let stable_code = cause.stable_code();
+                return permit.reject_generation(cause, stable_code).map(reject);
+            }
+            Err(payload) => {
+                let _ = permit.contain_generation_fault();
+                std::panic::resume_unwind(payload);
+            }
+        };
 
     Ok(
         permit.bind_joint_commit(|actual_output, proof, joint, seal| {

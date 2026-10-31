@@ -287,7 +287,7 @@ where
         ScopedPendingActivation::Activated(activated) => {
             let ActivatedCanonicalStoreSession {
                 canonical_root: _,
-                output,
+                owner,
                 failure_work: _,
                 validation_phase: _,
                 validation_work_dimension: _,
@@ -295,8 +295,8 @@ where
                 canonical_destination_dimension: _,
                 outcome_evidence_destination_dimension: _,
                 validation_work: _,
-                assembly,
             } = activated;
+            let (output, assembly) = owner.into_parts();
             let _ = drop_scoped_value(output);
             StoreActivationContainment {
                 cause: assembly.contain_activation_fault(),
@@ -305,13 +305,13 @@ where
         ScopedPendingActivation::Rejected(rejected) => {
             let RejectedCanonicalStoreSession { owner } = rejected;
             let UnrootedFailureEvidence {
-                cause,
+                owner,
                 domain: _,
                 failure_code: _,
                 failure_work: _,
                 outcome_evidence_destination_dimension: _,
-                raw,
             } = owner;
+            let (cause, raw) = owner.into_parts();
             let _ = drop_scoped_value(cause);
             StoreActivationContainment {
                 cause: raw.contain_activation_fault(),
@@ -1161,7 +1161,7 @@ where
                     self.install(ScopedPendingActivation::Activated(
                         ActivatedCanonicalStoreSession {
                             canonical_root: root,
-                            output,
+                            owner: PayloadOwner::new(output, assembly),
                             failure_work,
                             validation_phase,
                             validation_work_dimension,
@@ -1169,7 +1169,6 @@ where
                             canonical_destination_dimension,
                             outcome_evidence_destination_dimension,
                             validation_work,
-                            assembly,
                         },
                     ));
                 }

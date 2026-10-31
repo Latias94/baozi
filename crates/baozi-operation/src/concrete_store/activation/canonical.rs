@@ -386,10 +386,11 @@ where
     Ok(CanonicalCentralValidationOutcome::Candidate(
         CanonicalCandidateStoreSession {
             destinations,
-            proof,
-            output: ManuallyDrop::into_inner(output),
+            owner: PayloadOwner::new(
+                proof,
+                PayloadOwner::new(ManuallyDrop::into_inner(output), validated),
+            ),
             _failure_work: failure_work,
-            _validated: validated,
         },
     ))
 }
@@ -443,8 +444,7 @@ where
             Ok(CanonicalCentralValidationOutcome::Rejected(
                 CentrallyRejectedCanonicalStoreSession {
                     root: RootedFailureEvidence {
-                        failure,
-                        cause,
+                        owner: PayloadOwner::new(cause, failure),
                         failure_work,
                         outcome_evidence_destination_dimension,
                         _lifecycle: PhantomData::<OrdinaryFailureState>,
@@ -516,9 +516,11 @@ where
     Ok(CanonicalCentralValidationOutcome::Rejected(
         CentrallyRejectedCanonicalStoreSession {
             root: RootedFailureEvidence {
-                failure,
-                cause: StoreCanonicalRejection::Runtime(
-                    StoreRuntimeError::CanonicalValidationContractRejected,
+                owner: PayloadOwner::new(
+                    StoreCanonicalRejection::Runtime(
+                        StoreRuntimeError::CanonicalValidationContractRejected,
+                    ),
+                    failure,
                 ),
                 failure_work,
                 outcome_evidence_destination_dimension,
@@ -591,9 +593,11 @@ where
     Ok(CanonicalCentralValidationOutcome::Rejected(
         CentrallyRejectedCanonicalStoreSession {
             root: RootedFailureEvidence {
-                failure,
-                cause: StoreCanonicalRejection::Runtime(
-                    StoreRuntimeError::CanonicalValidationContractRejected,
+                owner: PayloadOwner::new(
+                    StoreCanonicalRejection::Runtime(
+                        StoreRuntimeError::CanonicalValidationContractRejected,
+                    ),
+                    failure,
                 ),
                 failure_work,
                 outcome_evidence_destination_dimension,
@@ -656,8 +660,7 @@ where
             Ok(CanonicalCentralValidationOutcome::Interrupted(
                 InterruptedCanonicalStoreSession {
                     root: RootedFailureEvidence {
-                        failure,
-                        cause,
+                        owner: PayloadOwner::new(cause, failure),
                         failure_work,
                         outcome_evidence_destination_dimension,
                         _lifecycle: PhantomData::<OrdinaryFailureState>,
@@ -680,11 +683,11 @@ where
     U: ProgressUnit,
 {
     pub const fn output(&self) -> &T {
-        &self.output
+        self.owner.value()
     }
 
     pub fn canonical_len(&self) -> usize {
-        self.assembly.canonical_len()
+        self.owner.storage().canonical_len()
     }
 
     /// Consumes the candidate through the operation-owned evidence and validation seam.
@@ -746,9 +749,8 @@ where
         let mut build_evidence = ManuallyDrop::new(Some(build_evidence));
         let mut validate = ManuallyDrop::new(Some(validate));
         let Self {
-            assembly,
+            owner,
             canonical_root,
-            output,
             failure_work,
             validation_phase,
             validation_work_dimension,
@@ -757,6 +759,7 @@ where
             outcome_evidence_destination_dimension,
             validation_work,
         } = self;
+        let (output, assembly) = owner.into_parts();
         let output = ManuallyDrop::new(output);
         let mut assembly = assembly;
         let mut failure_work = failure_work;
@@ -910,11 +913,11 @@ where
     U: ProgressUnit,
 {
     pub const fn output(&self) -> &T {
-        &self.output
+        self.owner.storage().value()
     }
 
     pub const fn proof(&self) -> &Proof {
-        &self.proof
+        self.owner.value()
     }
 
     pub const fn canonical_member_count(&self) -> u64 {
@@ -946,29 +949,33 @@ where
     > {
         let Self {
             destinations,
-            proof,
-            output,
+            owner,
             _failure_work: failure_work,
-            _validated: validated,
         } = self;
+        let (proof, output_owner) = owner.into_parts();
+        let (output, validated) = output_owner.into_parts();
         let ZeroCommitDestinationFacts {
             _canonical_dimension: canonical_dimension,
             canonical_members,
             _outcome_evidence_dimension: outcome_evidence_dimension,
             outcome_evidence_members,
         } = destinations;
-        match validated
-            .try_issue_freeze_permit(
-                canonical_dimension,
-                outcome_evidence_dimension,
-                final_progress,
-            )
-            .map_err(|cause| StoreActivationContainment { cause })?
-        {
+        let issued = match validated.try_issue_freeze_permit(
+            canonical_dimension,
+            outcome_evidence_dimension,
+            final_progress,
+        ) {
+            Ok(issued) => issued,
+            Err(cause) => {
+                let _ = drop_scoped_value(proof);
+                let _ = drop_scoped_value(output);
+                return Err(StoreActivationContainment { cause });
+            }
+        };
+        match issued {
             StoreSuccessFreezePermitIssue::Ready(store) => {
                 Ok(CanonicalFreezePermitIssue::Ready(CanonicalFreezePermit {
-                    output,
-                    proof,
+                    owner: PayloadOwner::new(output, PayloadOwner::new(proof, store)),
                     failure_work,
                     destinations: ZeroCommitDestinationFacts {
                         _canonical_dimension: canonical_dimension,
@@ -976,7 +983,6 @@ where
                         _outcome_evidence_dimension: outcome_evidence_dimension,
                         outcome_evidence_members,
                     },
-                    store,
                 }))
             }
             StoreSuccessFreezePermitIssue::RichFailure {
@@ -993,8 +999,10 @@ where
                 }
                 Ok(CanonicalFreezePermitIssue::Interrupted(
                     RootedFailureEvidence {
-                        failure,
-                        cause: CanonicalFreezeInterruption::from_failure_code(cause, control_cause),
+                        owner: PayloadOwner::new(
+                            CanonicalFreezeInterruption::from_failure_code(cause, control_cause),
+                            failure,
+                        ),
                         failure_work,
                         outcome_evidence_destination_dimension: outcome_evidence_dimension,
                         _lifecycle: PhantomData::<FrozenFailureState>,
@@ -1011,8 +1019,10 @@ where
                 }
                 Ok(CanonicalFreezePermitIssue::DestinationRejected(
                     RootedFailureEvidence {
-                        failure,
-                        cause: CanonicalFreezeInterruption::from_failure_code(cause, None),
+                        owner: PayloadOwner::new(
+                            CanonicalFreezeInterruption::from_failure_code(cause, None),
+                            failure,
+                        ),
                         failure_work,
                         outcome_evidence_destination_dimension: outcome_evidence_dimension,
                         _lifecycle: PhantomData::<OrdinaryFailureState>,
@@ -1077,16 +1087,39 @@ where
     /// Callers can validate descriptor pairing before generation admission without accepting a
     /// second, independently movable copy of the output.
     pub const fn output(&self) -> &T {
-        &self.output
+        self.owner.value()
+    }
+
+    /// Contains an unexpected failure of the core-owned generation admission boundary.
+    ///
+    /// Ordinary generation exhaustion uses `reject_generation`; this consumes the complete
+    /// frozen owner only after the generation source itself violated its execution contract.
+    pub fn contain_generation_fault(self) -> StoreActivationContainment {
+        let Self {
+            owner,
+            failure_work: _,
+            destinations: _,
+        } = self;
+        let (output, proof_owner) = owner.into_parts();
+        let (proof, store) = proof_owner.into_parts();
+        let _ = drop_scoped_value(output);
+        let _ = drop_scoped_value(proof);
+        StoreActivationContainment {
+            cause: store.contain_activation_fault(),
+        }
     }
 
     pub fn destination_counters_are_zero(&self) -> bool {
         let canonical = self
-            .store
+            .owner
+            .storage()
+            .storage()
             .terminal_observation(self.destinations._canonical_dimension)
             .expect("the sealed canonical destination remains registered");
         let evidence = self
-            .store
+            .owner
+            .storage()
+            .storage()
             .terminal_observation(self.destinations._outcome_evidence_dimension)
             .expect("the sealed outcome-evidence destination remains registered");
         [canonical, evidence].into_iter().all(|snapshot| {
@@ -1118,12 +1151,12 @@ where
         StoreActivationContainment,
     > {
         let Self {
-            output,
-            proof,
+            owner,
             failure_work,
             destinations,
-            store,
         } = self;
+        let (output, proof_owner) = owner.into_parts();
+        let (proof, store) = proof_owner.into_parts();
         let cause = ManuallyDrop::new(cause);
         let proof_drop_failed = drop_scoped_value(proof).is_err();
         let output_drop_failed = drop_scoped_value(output).is_err();
@@ -1143,8 +1176,7 @@ where
         let cause = ManuallyDrop::into_inner(cause);
         Ok(CentrallyRejectedCanonicalStoreSession {
             root: RootedFailureEvidence {
-                failure,
-                cause: StoreCanonicalRejection::Requested(cause),
+                owner: PayloadOwner::new(StoreCanonicalRejection::Requested(cause), failure),
                 failure_work,
                 outcome_evidence_destination_dimension: destinations._outcome_evidence_dimension,
                 _lifecycle: PhantomData::<FrozenFailureState>,
@@ -1180,12 +1212,12 @@ where
         Proof: Copy,
     {
         let Self {
-            output,
-            proof,
+            owner,
             failure_work,
             destinations,
-            store,
         } = self;
+        let (output, proof_owner) = owner.into_parts();
+        let (proof, store) = proof_owner.into_parts();
         bind(
             output,
             proof,

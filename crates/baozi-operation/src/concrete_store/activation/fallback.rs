@@ -163,10 +163,9 @@ where
                             });
                         }
                         UnrootedFailureEvidence {
-                            raw,
+                            owner: PayloadOwner::new(cause, raw),
                             domain,
                             failure_code,
-                            cause,
                             failure_work,
                             outcome_evidence_destination_dimension,
                         }

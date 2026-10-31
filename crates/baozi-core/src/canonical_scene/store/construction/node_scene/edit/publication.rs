@@ -192,16 +192,21 @@ where
     let evidence_counts = candidate.output().inner().evidence_counts;
     match candidate.try_issue_freeze_permit(final_progress)? {
         CanonicalFreezePermitIssue::Ready(permit) => {
-            let generation = match reserve_generation() {
-                Ok(generation) => generation,
-                Err(SceneGenerationError::Exhausted) => {
-                    let rejected = permit.reject_generation(
-                        NodeSceneEditGenerationRejection::Exhausted,
-                        GENERATION_EXHAUSTED_CODE,
-                    )?;
-                    return prepare_frozen_edit_failure!(rejected, evidence_counts);
-                }
-            };
+            let generation =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(reserve_generation)) {
+                    Ok(Ok(generation)) => generation,
+                    Ok(Err(SceneGenerationError::Exhausted)) => {
+                        let rejected = permit.reject_generation(
+                            NodeSceneEditGenerationRejection::Exhausted,
+                            GENERATION_EXHAUSTED_CODE,
+                        )?;
+                        return prepare_frozen_edit_failure!(rejected, evidence_counts);
+                    }
+                    Err(payload) => {
+                        let _ = permit.contain_generation_fault();
+                        std::panic::resume_unwind(payload);
+                    }
+                };
             let remaps =
                 match CanonicalRemapSet::try_all_unchanged(input_generation, generation.id()) {
                     Ok(remaps) => remaps,

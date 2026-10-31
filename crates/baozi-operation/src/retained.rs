@@ -3784,10 +3784,6 @@ where
         {
             return;
         }
-        if std::thread::panicking() {
-            let _ = self.poison_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
-            return;
-        }
         match self.containment {
             AssemblyContainmentProvenance::Healthy => {}
             AssemblyContainmentProvenance::NewFaultPending => {

@@ -454,7 +454,7 @@ impl<T> Drop for DetachedRetainedPart<T> {
         if self.allocation.is_none() && self.account.is_none() {
             return;
         }
-        if std::thread::panicking() || !self.has_exact_owner() {
+        if !self.has_exact_owner() {
             self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
             return;
         }
@@ -610,10 +610,6 @@ where
 {
     fn drop(&mut self) {
         if self.allocation.is_none() && self.batch.is_none() && self.account.is_none() {
-            return;
-        }
-        if std::thread::panicking() {
-            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
             return;
         }
         if !self.has_exact_product_graph() {
@@ -1187,10 +1183,6 @@ where
             && self.canonical_assembly.is_none()
             && self.evidence_assembly.is_none()
         {
-            return;
-        }
-        if std::thread::panicking() {
-            self.new_fault_and_fail_closed(AccountPoisonReason::OwnershipGraphUnverified);
             return;
         }
         let _ = self.try_discard_all();

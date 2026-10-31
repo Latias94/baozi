@@ -6,6 +6,10 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Released healthy unpublished retained parts, startup fallback owners, and publication assemblies
+  during ordinary host unwind. Activation stages now keep callback output/proof/cause destruction
+  coupled to their actual storage owner, quarantining only observed destructor failures and
+  preserving the original host panic when multiple payload destructors fail.
 - Replaced deprecated atomic `fetch_update` calls with `try_update`, available since the Rust 1.95
   MSRV, preserving checked-counter closures and memory orderings. The maintained glTF reader uses
   equivalent integer `MAX` constants. Constant-width traversal now borrows array chunks; dynamic

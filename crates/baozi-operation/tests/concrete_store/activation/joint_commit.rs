@@ -322,6 +322,273 @@ fn final_progress_interruption_never_issues_a_success_permit() {
 }
 
 #[test]
+fn healthy_candidate_and_freeze_permit_release_during_unrelated_host_unwind() {
+    for freeze in [false, true] {
+        let factory = factory(1);
+        let account = account(&factory);
+        let output_dropped = Cell::new(false);
+        let proof_dropped = Cell::new(false);
+        let (operation, keys) = operation(&account);
+        let outcome = plan_scoped_activation!(
+            operation,
+            scoped_activation_shape_with_validation_work(keys, 1, 1, NonZeroU64::new(2).unwrap()),
+            |mut lane| {
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        SequenceTag,
+                        |writer| writer.push(7),
+                    )
+                    .unwrap();
+                lane.complete::<_, (), _, _>(root, DropProbe(&output_dropped))
+            },
+        )
+        .unwrap();
+        let activated = match outcome {
+            CanonicalActivationOutcome::Activated(activated) => activated,
+            CanonicalActivationOutcome::Rejected(_)
+            | CanonicalActivationOutcome::NeverActivated(_)
+            | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+        };
+        let outcome = activated
+            .validate_centrally(
+                CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
+                |lane, _output| {
+                    let evidence = lane
+                        .try_retain_sequence(
+                            SequencePlan::<u8>::new(1).unwrap(),
+                            EvidenceLeafTag,
+                            |writer| writer.push(9),
+                        )
+                        .unwrap();
+                    lane.complete(evidence)
+                },
+                |planning, _output| {
+                    planning.validate_with(
+                        |_| Ok(()),
+                        |session, canonical, evidence, &mut ()| {
+                            assert!(session.visit_canonical_sequence(
+                                canonical,
+                                1,
+                                |_index, value| value == 7
+                            )?);
+                            assert!(session.visit_outcome_evidence_sequence(
+                                evidence,
+                                1,
+                                |_index, value| value == 9
+                            )?);
+                            Ok(
+                                CanonicalValidationDecision::<_, ValidationRejection>::accept(
+                                    DropProbe(&proof_dropped),
+                                ),
+                            )
+                        },
+                    )
+                },
+            )
+            .unwrap();
+        let candidate = match outcome {
+            CanonicalCentralValidationOutcome::Candidate(candidate) => candidate,
+            CanonicalCentralValidationOutcome::Rejected(_)
+            | CanonicalCentralValidationOutcome::Fallback(_)
+            | CanonicalCentralValidationOutcome::Interrupted(_) => {
+                panic!("valid central validation must produce a candidate")
+            }
+        };
+        assert!(!output_dropped.get());
+        assert!(!proof_dropped.get());
+        assert!(!account.snapshot().poisoned());
+        assert!(account.snapshot().live_retained_allocations() > 0);
+
+        let payload = if freeze {
+            let permit = match candidate
+                .try_issue_freeze_permit(candidate_final_progress())
+                .unwrap()
+            {
+                CanonicalFreezePermitIssue::Ready(permit) => permit,
+                CanonicalFreezePermitIssue::Interrupted(_) => {
+                    panic!("final progress must remain open")
+                }
+                CanonicalFreezePermitIssue::DestinationRejected(_) => {
+                    panic!("exact destinations must remain admissible")
+                }
+            };
+            assert!(permit.destination_counters_are_zero());
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _permit = permit;
+                panic!("unrelated host panic");
+            }))
+            .unwrap_err()
+        } else {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _candidate = candidate;
+                panic!("unrelated host panic");
+            }))
+            .unwrap_err()
+        };
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"unrelated host panic")
+        );
+        drop(payload);
+
+        assert!(output_dropped.get());
+        assert!(proof_dropped.get());
+        let after = account.snapshot();
+        assert!(!after.poisoned());
+        assert_eq!(after.poison_event_count(), 0);
+        assert_eq!(after.first_poison_evidence(), None);
+        assert_eq!(after.live_retained_bytes(), 0);
+        assert_eq!(after.live_retained_allocations(), 0);
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 0);
+        assert_eq!(factory.snapshot().live_account_control_bytes(), 0);
+    }
+}
+
+#[test]
+fn candidate_and_freeze_permit_double_payload_failure_preserves_the_outer_host_panic() {
+    for freeze in [false, true] {
+        let factory = factory(1);
+        let account = account(&factory);
+        let output_dropped = Cell::new(false);
+        let proof_dropped = Cell::new(false);
+        let (operation, keys) = operation(&account);
+        let outcome = plan_scoped_activation!(
+            operation,
+            scoped_activation_shape_with_validation_work(keys, 1, 1, NonZeroU64::new(2).unwrap()),
+            |mut lane| {
+                let root = lane
+                    .try_retain_sequence(
+                        SequencePlan::<u8>::new(1).unwrap(),
+                        SequenceTag,
+                        |writer| writer.push(7),
+                    )
+                    .unwrap();
+                lane.complete::<_, (), _, _>(root, (DropProbe(&output_dropped), PanicOnDrop))
+            },
+        )
+        .unwrap();
+        let activated = match outcome {
+            CanonicalActivationOutcome::Activated(activated) => activated,
+            CanonicalActivationOutcome::Rejected(_)
+            | CanonicalActivationOutcome::NeverActivated(_)
+            | CanonicalActivationOutcome::Fallback(_) => panic!("materialization must activate"),
+        };
+        let outcome = activated
+            .validate_centrally(
+                CanonicalValidationProgress::new(TestProgress::Build, TestUnit::Items),
+                |lane, _output| {
+                    let evidence = lane
+                        .try_retain_sequence(
+                            SequencePlan::<u8>::new(1).unwrap(),
+                            EvidenceLeafTag,
+                            |writer| writer.push(9),
+                        )
+                        .unwrap();
+                    lane.complete(evidence)
+                },
+                |planning, _output| {
+                    planning.validate_with(
+                        |_| Ok(()),
+                        |session, canonical, evidence, &mut ()| {
+                            assert!(session.visit_canonical_sequence(
+                                canonical,
+                                1,
+                                |_index, value| value == 7
+                            )?);
+                            assert!(session.visit_outcome_evidence_sequence(
+                                evidence,
+                                1,
+                                |_index, value| value == 9
+                            )?);
+                            Ok(
+                                CanonicalValidationDecision::<_, ValidationRejection>::accept((
+                                    DropProbe(&proof_dropped),
+                                    PanicOnDrop,
+                                )),
+                            )
+                        },
+                    )
+                },
+            )
+            .unwrap();
+        let candidate = match outcome {
+            CanonicalCentralValidationOutcome::Candidate(candidate) => candidate,
+            CanonicalCentralValidationOutcome::Rejected(_)
+            | CanonicalCentralValidationOutcome::Fallback(_)
+            | CanonicalCentralValidationOutcome::Interrupted(_) => {
+                panic!("valid central validation must produce a candidate")
+            }
+        };
+        assert!(!output_dropped.get());
+        assert!(!proof_dropped.get());
+
+        let (payload, before) = if freeze {
+            let permit = match candidate
+                .try_issue_freeze_permit(candidate_final_progress())
+                .unwrap()
+            {
+                CanonicalFreezePermitIssue::Ready(permit) => permit,
+                CanonicalFreezePermitIssue::Interrupted(_) => {
+                    panic!("final progress must remain open")
+                }
+                CanonicalFreezePermitIssue::DestinationRejected(_) => {
+                    panic!("exact destinations must remain admissible")
+                }
+            };
+            assert!(permit.destination_counters_are_zero());
+            let before = account.snapshot();
+            let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _permit = permit;
+                panic!("unrelated host panic");
+            }))
+            .unwrap_err();
+            (payload, before)
+        } else {
+            let before = account.snapshot();
+            let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _candidate = candidate;
+                panic!("unrelated host panic");
+            }))
+            .unwrap_err();
+            (payload, before)
+        };
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"unrelated host panic")
+        );
+        drop(payload);
+
+        assert!(proof_dropped.get());
+        assert!(output_dropped.get());
+        assert!(!before.poisoned());
+        assert!(before.live_retained_allocations() > 0);
+        let after = account.snapshot();
+        assert!(after.poisoned());
+        assert_eq!(
+            after.first_poison_evidence().unwrap().reason(),
+            AccountPoisonReason::OwnershipGraphUnverified
+        );
+        assert_eq!(after.live_retained_bytes(), before.live_retained_bytes());
+        assert_eq!(
+            after.live_retained_allocations(),
+            before.live_retained_allocations()
+        );
+        assert_eq!(
+            after.total_admitted_retained_bytes(),
+            before.total_admitted_retained_bytes()
+        );
+        assert_eq!(
+            after.total_admitted_retained_allocations(),
+            before.total_admitted_retained_allocations()
+        );
+        drop(account);
+        assert_eq!(factory.snapshot().live_accounts(), 1);
+    }
+}
+
+#[test]
 fn non_copy_output_remains_contained_before_the_success_binder() {
     let factory = factory(1);
     let account = account(&factory);

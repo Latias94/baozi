@@ -947,7 +947,7 @@ where
     U: ProgressUnit,
 {
     pub const fn cause(&self) -> &StoreCanonicalRejection<E> {
-        &self.owner.cause
+        self.owner.owner.value()
     }
 
     pub const fn canonical_len(&self) -> usize {
@@ -955,7 +955,7 @@ where
     }
 
     pub fn outcome_evidence_len(&self) -> usize {
-        self.owner.raw.outcome_evidence_len()
+        self.owner.owner.storage().outcome_evidence_len()
     }
 
     pub fn build_failure_evidence<EvidenceKind, EvidenceTag>(
@@ -1389,11 +1389,11 @@ where
     State: FailureLifecycleState,
 {
     pub const fn cause(&self) -> &Cause {
-        &self.cause
+        self.owner.value()
     }
 
     pub fn outcome_evidence_len(&self) -> usize {
-        self.failure.outcome_evidence_len()
+        self.owner.storage().outcome_evidence_len()
     }
 
     #[allow(
@@ -1415,12 +1415,12 @@ where
     {
         let mut validate = ManuallyDrop::new(Some(validate));
         let Self {
-            failure,
-            cause,
+            owner,
             failure_work,
             outcome_evidence_destination_dimension,
             _lifecycle: _,
         } = self;
+        let (cause, failure) = owner.into_parts();
         let cause = ManuallyDrop::new(cause);
         let evidence_root = failure.evidence_root();
         let mut controlled_failure = None;
@@ -1522,8 +1522,7 @@ where
                     outcome_evidence_destination_dimension,
                 ) {
                     Ok(()) => Ok(RootedFailureValidation::Valid(ValidatedFailureEvidence {
-                        validated,
-                        cause: ManuallyDrop::into_inner(cause),
+                        owner: PayloadOwner::new(ManuallyDrop::into_inner(cause), validated),
                         _lifecycle: PhantomData,
                     })),
                     Err(runtime_cause) => {
@@ -1554,8 +1553,7 @@ where
             }
             StoreFailureValidation::Rejected(failure) => {
                 Ok(RootedFailureValidation::Rejected(RejectedFailureEvidence {
-                    failure,
-                    cause: ManuallyDrop::into_inner(cause),
+                    owner: PayloadOwner::new(ManuallyDrop::into_inner(cause), failure),
                 }))
             }
             StoreFailureValidation::FallbackOnly(fallback) => {
@@ -1579,12 +1577,12 @@ where
         self,
     ) -> Result<VerifiedMinimalFallback<Cause>, StorePrepareError> {
         let Self {
-            failure,
-            cause,
+            owner,
             failure_work: _,
             outcome_evidence_destination_dimension: _,
             _lifecycle: _,
         } = self;
+        let (cause, failure) = owner.into_parts();
         let cause = ManuallyDrop::new(cause);
         let prepared = failure.prepare_minimal_fallback();
         match prepared {
@@ -1612,10 +1610,10 @@ where
         final_progress: FinalProgress<PP, U>,
     ) -> Result<PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag>, StorePrepareError> {
         let Self {
-            validated,
-            cause,
+            owner,
             _lifecycle: _,
         } = self;
+        let (cause, validated) = owner.into_parts();
         let cause = ManuallyDrop::new(cause);
         let prepared = validated.try_prepare_with_control(0, final_progress);
         match prepared {
@@ -1643,10 +1641,10 @@ where
         self,
     ) -> Result<PreparedFailureEvidence<Cause, EvidenceKind, EvidenceTag>, StorePrepareError> {
         let Self {
-            validated,
-            cause,
+            owner,
             _lifecycle: _,
         } = self;
+        let (cause, validated) = owner.into_parts();
         let cause = ManuallyDrop::new(cause);
         let prepared = validated.try_prepare_frozen();
         match prepared {
@@ -1671,17 +1669,17 @@ where
     U: ProgressUnit,
 {
     pub const fn cause(&self) -> &Cause {
-        &self.cause
+        self.owner.value()
     }
 
     pub fn prepare_minimal_fallback(
         self,
     ) -> Result<VerifiedMinimalFallback<Cause>, StorePrepareError> {
         let Self {
-            validated,
-            cause,
+            owner,
             _lifecycle: _,
         } = self;
+        let (cause, validated) = owner.into_parts();
         let cause = ManuallyDrop::new(cause);
         let prepared = validated.prepare_minimal_fallback();
         match prepared {
@@ -1774,13 +1772,14 @@ where
     U: ProgressUnit,
 {
     pub const fn cause(&self) -> &Cause {
-        &self.cause
+        self.owner.value()
     }
 
     pub fn prepare_minimal_fallback(
         self,
     ) -> Result<VerifiedMinimalFallback<Cause>, StorePrepareError> {
-        let Self { failure, cause } = self;
+        let Self { owner } = self;
+        let (cause, failure) = owner.into_parts();
         let cause = ManuallyDrop::new(cause);
         match failure.prepare_minimal_fallback() {
             Ok(prepared) => Ok(VerifiedMinimalFallback::new(
@@ -1849,13 +1848,13 @@ where
 {
     fn prepare_minimal_fallback(self) -> Result<VerifiedMinimalFallback<Cause>, StorePrepareError> {
         let Self {
-            raw,
+            owner,
             domain,
             failure_code: _,
-            cause,
             failure_work: _,
             outcome_evidence_destination_dimension: _,
         } = self;
+        let (cause, raw) = owner.into_parts();
         let cause = ManuallyDrop::new(cause);
         match raw
             .prepare_minimal_fallback()
@@ -1887,13 +1886,13 @@ where
         EvidenceTag: Copy + Send + Sync + 'static,
     {
         let Self {
-            raw,
+            owner,
             domain,
             failure_code,
-            cause,
             mut failure_work,
             outcome_evidence_destination_dimension,
         } = self;
+        let (cause, raw) = owner.into_parts();
         let cause = ManuallyDrop::new(cause);
         let mut raw = raw;
         let mut build = ManuallyDrop::new(Some(build));
@@ -1970,14 +1969,16 @@ where
             }
         };
         Ok(FailureEvidenceOutcome::Rooted(RootedFailureEvidence {
-            failure: StoreFailureAssembly {
-                raw,
-                fallback_only: false,
-                forced_cause: Some(failure_code),
-                evidence_root,
-                domain,
-            },
-            cause: ManuallyDrop::into_inner(cause),
+            owner: PayloadOwner::new(
+                ManuallyDrop::into_inner(cause),
+                StoreFailureAssembly {
+                    raw,
+                    fallback_only: false,
+                    forced_cause: Some(failure_code),
+                    evidence_root,
+                    domain,
+                },
+            ),
             failure_work,
             outcome_evidence_destination_dimension,
             _lifecycle: PhantomData::<OrdinaryFailureState>,

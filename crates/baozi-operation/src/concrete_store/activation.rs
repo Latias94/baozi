@@ -51,10 +51,12 @@ mod canonical;
 mod canonical_validation;
 mod failure_evidence;
 mod fallback;
+mod payload_owner;
 mod preflight;
 mod typed_storage;
 pub use typed_storage::CanonicalRetainedStorageBuildControl;
 mod work_batch;
+use payload_owner::PayloadOwner;
 
 pub use canonical_validation::{
     CanonicalValidationCheckpoint, CanonicalValidationMember, CanonicalValidationPlanning,
@@ -1258,10 +1260,9 @@ where
             }
             Ok(RejectedCanonicalStoreSession {
                 owner: UnrootedFailureEvidence {
-                    raw,
+                    owner: PayloadOwner::new(ManuallyDrop::into_inner(cause), raw),
                     domain,
                     failure_code,
-                    cause: ManuallyDrop::into_inner(cause),
                     failure_work,
                     outcome_evidence_destination_dimension,
                 },
@@ -2411,7 +2412,7 @@ pub struct ActivatedCanonicalStoreSession<
     U: ProgressUnit,
 {
     canonical_root: CanonicalStoreRef<CanonicalKind, CanonicalTag>,
-    output: T,
+    owner: PayloadOwner<T, RetainedStorePublicationAssembly<O, PP, U, L>>,
     failure_work: FailureEvidenceWorkBudget,
     validation_phase: StorePhaseKey,
     validation_work_dimension: StoreDimensionKey,
@@ -2419,8 +2420,6 @@ pub struct ActivatedCanonicalStoreSession<
     canonical_destination_dimension: StoreDimensionKey,
     outcome_evidence_destination_dimension: StoreDimensionKey,
     validation_work: NonZeroU64,
-    // The physical owner must drop last so an untrusted output panic is observed fail-closed.
-    assembly: RetainedStorePublicationAssembly<O, PP, U, L>,
 }
 
 /// Typed semantic outcome returned by the central validator callback.
@@ -2448,6 +2447,12 @@ pub enum OutcomeEvidenceDecision<Kind, Tag> {
     Abort,
 }
 
+type CandidatePayloadOwner<O, PP, U, T, Proof, CK, CT, EK, ET> =
+    PayloadOwner<Proof, PayloadOwner<T, ValidatedStoreSuccess<O, PP, U, CK, CT, EK, ET>>>;
+
+type FrozenPayloadOwner<O, PP, U, T, Proof, CK, CT, EK, ET> =
+    PayloadOwner<T, PayloadOwner<Proof, StoreSuccessFreezePermit<O, PP, U, CK, CT, EK, ET>>>;
+
 /// Candidate after central semantic validation. It contains no writable or raw store seam.
 ///
 /// This activation-only disposition deliberately has no prepare or handoff method. The later
@@ -2470,18 +2475,23 @@ pub struct CanonicalCandidateStoreSession<
     U: ProgressUnit,
 {
     destinations: ZeroCommitDestinationFacts,
-    proof: Proof,
-    output: T,
+    owner: CandidatePayloadOwner<
+        O,
+        PP,
+        U,
+        T,
+        Proof,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+    >,
     _failure_work: FailureEvidenceWorkBudget,
-    // This owner must drop last so payload panics still trigger unwind-aware account containment.
-    _validated:
-        ValidatedStoreSuccess<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
 }
 
 /// Linear candidate whose final operation progress and exact destinations are frozen.
 ///
-/// Payload and proof drop before the operation owner, so an unwind while dropping either
-/// value is still contained by the last-dropping physical owner.
+/// Payload and proof stay coupled to their physical owner through explicit destructor checks.
 #[must_use = "the freeze permit must be rejected or bound to one scoped joint commit"]
 pub struct CanonicalFreezePermit<
     O,
@@ -2498,20 +2508,26 @@ pub struct CanonicalFreezePermit<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    output: T,
-    proof: Proof,
+    owner: FrozenPayloadOwner<
+        O,
+        PP,
+        U,
+        T,
+        Proof,
+        CanonicalKind,
+        CanonicalTag,
+        EvidenceKind,
+        EvidenceTag,
+    >,
     failure_work: FailureEvidenceWorkBudget,
     destinations: ZeroCommitDestinationFacts,
-    // This owner must drop last so payload panics remain physically contained.
-    store:
-        StoreSuccessFreezePermit<O, PP, U, CanonicalKind, CanonicalTag, EvidenceKind, EvidenceTag>,
 }
 
 /// Scoped operation contribution for one core-owned joint commit.
 ///
 /// The invariant lifetime brand prevents this contribution from escaping its binder or being
-/// paired with a seal from another invocation. The physical owner remains last for fail-closed
-/// containment if the scoped aggregate is dropped before preparation.
+/// paired with a seal from another invocation. This contribution owns its physical graph;
+/// callback payloads have already moved into the binder's separately owned values.
 #[must_use = "the scoped joint commit must be prepared with its matching seal"]
 pub struct CanonicalJointCommit<
     'joint,
@@ -2530,7 +2546,6 @@ pub struct CanonicalJointCommit<
     _failure_work: FailureEvidenceWorkBudget,
     _destinations: ZeroCommitDestinationFacts,
     joint: PhantomData<fn(&'joint mut ()) -> &'joint mut ()>,
-    // This owner must drop last so the complete success graph remains fail-closed.
     store: StoreSuccessFreezeContribution<
         O,
         PP,
@@ -2768,13 +2783,11 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    cause: Cause,
+    owner: PayloadOwner<Cause, RawStoreFailureAssembly<O, PP, U>>,
     domain: StoreKeyDomain,
     failure_code: PreparationFailureCode,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
-    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
-    raw: RawStoreFailureAssembly<O, PP, U>,
 }
 
 /// Verified post-activation rejection after eager canonical cleanup.
@@ -2877,12 +2890,10 @@ pub struct RootedFailureEvidence<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    cause: Cause,
+    owner: PayloadOwner<Cause, StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>>,
     failure_work: FailureEvidenceWorkBudget,
     outcome_evidence_destination_dimension: StoreDimensionKey,
     _lifecycle: PhantomData<State>,
-    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
-    failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
 }
 
 /// Result of validating an already-rooted failure graph.
@@ -2919,10 +2930,8 @@ pub struct ValidatedFailureEvidence<
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    cause: Cause,
+    owner: PayloadOwner<Cause, ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>>,
     _lifecycle: PhantomData<State>,
-    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
-    validated: ValidatedStoreFailure<O, PP, U, EvidenceKind, EvidenceTag>,
 }
 
 #[must_use = "prepared failure evidence must be handed to the terminal publisher"]
@@ -2940,9 +2949,7 @@ where
     PP: ProgressPhase,
     U: ProgressUnit,
 {
-    cause: Cause,
-    // The physical owner must drop last so an untrusted cause panic is observed fail-closed.
-    failure: StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>,
+    owner: PayloadOwner<Cause, StoreFailureAssembly<O, PP, U, EvidenceKind, EvidenceTag>>,
 }
 
 /// Minimal fallback whose typed source cause remains available without exposing physical state.
@@ -3845,7 +3852,7 @@ mod scoped_transition_tests {
                 CanonicalActivationOutcome::Activated(activated) => activated,
                 _ => panic!("borrowed scratch must allow activation"),
             };
-            let probe = activated.assembly.raw.test_ledger_probe();
+            let probe = activated.owner.storage().raw.test_ledger_probe();
             let builder_called = Cell::new(false);
             let outcome = activated
                 .validate_centrally(

@@ -141,6 +141,20 @@ the same admission. A returned failure destroys the prepared handles and backing
 releasing that admission. This is one storage ownership path, not a second domain allocator.
 Both ownership forms use the same storage-first release and poison handling, including ordinary
 host unwind. A destructor failure preserves uncertain charges rather than reporting clean release.
+This also applies before publication: intact attributed parts, detached parts, startup fallback
+owners, and unprepared assemblies release through their existing exact-graph cleanup path during
+an unrelated caller panic. Thread unwind by itself is not evidence of a broken ownership graph.
+
+Activation stages that hold callback-owned output, proof, or failure cause must observe those
+values' destruction explicitly while retaining their concrete storage owner. The private payload
+owner couples both values without another allocation or account handle. A healthy destructor
+permits ordinary storage-first release; an actual destructor panic invokes the existing storage
+containment path. Multiple callback values are destroyed through separate catch boundaries.
+An outer caller panic is preserved, while a new destructor panic is resumed only when no unwind
+is already active. Destructuring a consumed stage transfers its payload and storage together.
+Core generation admission treats an unexpected generation-source panic as an explicit boundary
+fault while the frozen permit is still owned. It contains that permit and preserves the panic;
+ordinary exhaustion remains a typed rejection, and unrelated host unwind remains healthy cleanup.
 
 Trusted integration adapters derive admission from the same existing `CapacityPlan` values consumed
 by allocation. Already-owned caller storage is admitted when ownership transfers into the library.

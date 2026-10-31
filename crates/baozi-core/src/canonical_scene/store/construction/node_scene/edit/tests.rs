@@ -1301,6 +1301,48 @@ fn cancellation_after_evidence_commit_preserves_rich_failure_and_the_input() {
 }
 
 #[test]
+fn edit_generation_source_panic_burns_the_id_and_contains_the_operation() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let generation_source = AtomicU64::new(0);
+    let parts = build_single_trs_scene(&account, &generation_source);
+    let source = &parts.scene;
+    let node = NodeId::new(source.generation(), 0);
+    let before = account.snapshot();
+    let NodeTransformEditStart::Changed(pending) =
+        try_begin_node_transform_edit(source, node, changed_trs(23.0), edit_options_digest(9))
+            .expect("generation-fault transform edit plan")
+    else {
+        panic!("changed transform must enter edit planning");
+    };
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = pending.prepare_with_generation_source(source, test_limits(), || {
+            let _generation = SceneGenerationId::reserve_from(&generation_source).unwrap();
+            panic!("injected edit generation source panic after reservation")
+        });
+    }))
+    .unwrap_err();
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"injected edit generation source panic after reservation")
+    );
+    drop(payload);
+    assert_eq!(generation_source.load(Ordering::Relaxed), 2);
+    let after = account.snapshot();
+    assert!(after.poisoned());
+    assert!(after.live_retained_bytes() > before.live_retained_bytes());
+    assert!(after.live_retained_allocations() > before.live_retained_allocations());
+    assert!(
+        authored_transform_at(
+            source,
+            0,
+            "generation-fault input transform remains readable"
+        )
+        .has_same_authored_bits(AuthoredTransform::identity_trs())
+    );
+}
+
+#[test]
 fn generation_exhaustion_after_admission_leaves_one_invisible_nonce_gap() {
     let factory = test_factory();
     let account = test_account(&factory, 512);

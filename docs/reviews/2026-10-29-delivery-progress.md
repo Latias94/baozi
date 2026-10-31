@@ -10,11 +10,11 @@ another toolchain is named. Commands use one Cargo build job and reuse `target`.
 | Unit | Implemented behavior | Runtime evidence |
 | --- | --- | --- |
 | A1 | Compact references, admitted execution-plan storage, borrowed proof access, smaller phase transitions, and one owned terminal ledger remove cumulative stack movement. | Facade child-process regression imports, captures a snapshot, rejects malformed input, and returns cancellation on a 1 MiB thread. Standalone default consumer runs on the ordinary main stack. |
-| A2 | Healthy final owners release during host unwind. Actual payload/Cause destructor faults retain fail-closed containment. | Operation 700 tests passed on Rust 1.99; allocation probe after warmup observed zero net allocations/bytes for normal drop and host unwind. Intermediate unpublished attribution states remain a separate audit. |
+| A2 | Healthy final and unpublished owners release during host unwind. Callback output/proof/cause owners isolate actual destructor failure while preserving the original caller panic. | The final-owner allocation probe observed zero net allocations/bytes. Four new intermediate-owner regressions first failed on the old guards, then passed; the integrated operation suite passes 721 tests with the original destructor/poison cases retained. Final workspace and consumer qualification follows below. |
 | A3 | Registered proof schemes reside in one named static array rather than relying on promoted wrapper addresses. | Four focused IO identity tests passed on 1.95 debug and 1.99 debug/release. IO 47 and native-fs checker 50 tests passed before this increment's lockfile refresh. |
 | A4 | Executable sidecar example owns its PNG at the correct MTL-relative path; README and commands match real APIs. | All four examples and README quick start ran using the repaired 1.95 library. Typed-reader examples are rechecked at C's integration boundary. |
 | B fidelity | Partial OBJ channels require specific loss authority; homogeneous positions divide by finite nonzero W; three-component UVs retain per-segment width; unsupported color suffix omission is explicit. PLY F64 custom values remain F64. STL multiword names preserve full trimmed text. | OBJ/facade integration 182/182 passed. PLY custom-attribute suite 5/5 passed, including ASCII/LE/BE exact values and nonfinite/budget precedence. STL name/diagnostic regressions passed in its subsequent suite. |
-| B resource work | Short reads reuse admitted byte credit across serial resources; EOF probes are bounded read work; payload ceilings and live buffer capacity are independent. Hashes use 64 KiB control boundaries and dependency snapshots retain one digest. Geometry caches group slot identities without prefix scans. | Core/import/PLY/STL integration ran 804 tests: 801 passed and three old error/test-fixture expectations failed; those were corrected. Import's full portion, public reader allocation tests, five geometry-cache tests, eleven hashing tests, and short-read cases passed. Final combined rerun remains the integration gate. |
+| B resource work | Short reads reuse admitted byte credit; EOF probes are bounded read work; payload ceilings and live buffer capacity are independent. Hashes use 64 KiB control boundaries and immutable dependency snapshots retain one digest. Typed geometry validation reads actual compact ranges without the retired record-buffer cache. | The complete cache increment meters every physical-cache probe/replacement and graph lookup, with original-cause preservation, finite growth budgets, and transactional rejection tests. Current dual-toolchain workspace and integrated evidence are recorded below; the early 804-test calibration failures remain historical observations in their original sections. |
 | C reading | One immutable Scene exposes borrowed nodes/roots, geometry, scalar payloads, placements, materials/bindings, encoded images/samplers/textures, space declarations, cameras/lights, and checked typed IDs. | Dense/sparse/presence/spatial tests passed, including zero counted allocations during repeated reads. Facade geometry and appearance tests passed in 182/182. Independent default OBJ/STL consumer passed outside workspace feature unification. |
 | C authoring/errors | Static plugins use a borrowed builder with metered default alignment and primary-document provenance. Node, geometry, appearance, deformation, animation, spatial, profile, and aggregate errors preserve bounded semantic detail through finalization. | Nine static-plugin and eight submission-error tests passed, including domain/rule/value cases, later terminal cancellation, nested material rules, and digest reuse. Required-dependency context retains the declaring origin, role, original reference, normalized path, and resolver-authorized target. Nested missing/denied/redirected/rejected-reference tests passed in the integrated workspace run. |
 | F application workflow | Triangulation, normal generation, complete admitted Scene-space conversion, and borrowed draw-order tuples compose without a second Scene model or owning layout runtime. Applications select their concrete fields and own the final buffers. | Six typed-element and nine public tuple tests pass. The independent consumer builds vertex/index buffers after the geometry operations, checks them after dropping the Scene, and executes in native debug/release, fresh packages, and WASI. See the final increment evidence below. |
@@ -1228,6 +1228,15 @@ The source/toolchain, instrumentation, individual target logs, and resulting cor
 in `target/review/h-linux-asan-34b12dd5a9bb-jpoh52qb/`; orchestration logs are
 `target/review/h-linux-asan-final.log` and `h-linux-asan-registry.log`.
 
+The later immutable `10495f31d1aaa32478d78cc80018160ec14efae2` archive repeated all five
+targets successfully with the same compiler, sanitizer, locked fuzz dependencies, and per-target
+bounds after the MSRV API migration and native test/CI changes. This time all five targets ran in
+one sequence, with an explicitly empty registry corpus. All five binaries again contain the ASan
+symbols, and the lockfile remained unchanged. Logs, instrumentation, and resulting corpus are in
+`target/review/h-linux-asan-10495f31d1aa-07iyk1u8/`; orchestration is in
+`target/review/h-linux-asan-current.log`. This is evidence for that exact archive, not subsequent
+ownership changes discovered during the remaining acceptance audit.
+
 ## Native Capability Replacement Races (2026-10-31)
 
 Three default candidate tests each run 64 cooperating replacement rounds over prewritten immutable
@@ -1251,9 +1260,9 @@ On Ubuntu 26.04 x86_64 under WSL2, candidate runtime IO passed **43/43**, operat
 **61/61**, and the candidate facade **55/55**, all without skips. The locked native dependency check
 passed all 14 profiles. Strict IO all-target/all-feature Clippy, formatting, and diff checks passed.
 
-These are candidate development results. Windows case/8.3 alias oracles and unknown/volume-mount
-reparse fixtures, exact backend retry/fallback evidence, and actual Apple ARM64 execution remain
-required before the complete promotion matrix can close.
+These are candidate development results. Alias and permission additions are recorded below.
+Windows unknown/volume-mount reparse fixtures, exact backend retry/fallback evidence, and actual
+Apple ARM64 execution remain required before the complete promotion matrix can close.
 The race schedules are bounded samples rather than a proof of every interleaving. Release
 registration remains empty.
 
@@ -1279,6 +1288,16 @@ strict IO Clippy. Logs are `h-windows-native-case-runtime.log`,
 `h-windows-native-case-repository.log`, and `h-windows-native-case-clippy.log`. Read-only 8.3 volume
 queries on C: and F: returned access denied; no volume configuration was changed or 8.3 behavior
 inferred from that environment result.
+
+A later non-privileged file query returned the real F: short name `LONGAU~1.BIN` for a newly
+written long-name fixture. A small temporary native consumer linked against the existing Rust
+1.95 candidate IO library then verified both host spellings, successful original-name capability
+reads, and exact `ShortNameAlias` rejection before adapter IO. No 8.3 volume setting was changed.
+This qualifies the exercised local volume case only. The fixture, temporary Rust source, alias
+metadata, and successful build/run logs are retained as `target/review/windows-alias-probe/`,
+`native_alias_probe.rs`, `h-windows-8dot3-alias-probe.json`, `h-windows-8dot3-build.log`, and
+`h-windows-8dot3-runtime.log`. The portable path firewall remains the maintained automated check;
+this probe is not a new hosted CI result or universal volume claim.
 
 ## MSRV and Current-Stable Integration (2026-10-31)
 
@@ -1355,6 +1374,84 @@ are local executed results plus verified workflow wiring, not a claim of hosted 
 Logs are `target/review/h-deny-workspace.log`, `h-deny-fuzz.log`, `h-example-*.log`,
 `h-wasmtime-version.log`, `h-wasi-release-final.log`, `h-browser-check-final.log`, and
 `h-ci-actionlint.log`.
+
+## Separate Linux Process-Memory Observation (2026-10-31)
+
+The four existing manual storage pilots executed from the immutable `10495f31d1aa` archive under
+Linux Rust 1.95.0, debug libtest, and one test thread. Each semantic/work/allocation assertion
+passed. `/usr/bin/time` measured the individual test process after compilation, so compiler memory
+is excluded. Requested allocator counts/bytes and ledger work/peaks remain in each Rust test log;
+the following values are separately observed maximum resident set sizes:
+
+| Complete test process | Maximum RSS (KiB) |
+| --- | ---: |
+| Independent indexed primitive buffers, 256/1,024/4,096 | 20,584 |
+| Shared 8 MiB points, 1,000/10,000 node edits | 41,368 |
+| 10,000/100,000 four-influence vertices and 1/8 MiB metadata | 48,768 |
+| Shared encoded images, 1/8 MiB node edits | 34,056 |
+
+The same executable's list-only startup measured 4,192 KiB. These process observations include the
+test harness, input/output overlap, allocator behavior, and OS residency. They are advisory and
+are neither per-size RSS measurements nor exact Scene storage. No baseline subtraction, comparison
+with earlier Windows allocation counts, or exact-RSS inference from a ledger is made.
+
+The existing Rust assertions and workloads are unchanged. A temporary local driver selects the
+compiled test executable from Cargo JSON and wraps only those four tests with GNU time; it adds
+no maintained measurement framework. Source/toolchain scope, `report.json`, raw RSS values, and
+allocation/work logs are retained in `target/review/d-final-rss-10495f31d1aa-p3gobih4/`.
+
+## Unpublished Ownership and Actual Callback Destruction (2026-10-31)
+
+The final ownership audit found four remaining blanket unwind guards in detached/attributed
+retained parts, startup fallback owners, and unprepared publication assemblies. All four new
+regressions failed against those guards: an unrelated host panic prevented the healthy payload's
+destructor from running. Exact ownership, attribution, and account relationships are now checked
+through the existing normal cleanup path during unwind. The thread panic flag is no longer used
+as evidence of a physical ownership fault.
+
+This required making a previously implicit activation boundary explicit. Seven concrete stages
+own callback output, proof, or rejection cause together with their current store through a private
+`PayloadOwner`. It adds no allocation, account handle, ledger, or public extension protocol.
+Successful value destruction permits ordinary storage release. An actual destructor panic invokes
+the existing concrete store containment method while keeping all uncertain charges. Nested owners
+destroy proof and output through separate catches, so two destructor failures do not become an
+accidental process abort. The original callback panic is resumed during normal drop; an already
+active host panic is preserved instead. Consuming state transitions take payload and store together.
+The freeze-issue containment branch also destroys both detached values through separate catches
+before returning its original error.
+Core generation-source panic handling is explicit at its invocation boundary while the frozen
+permit remains owned. Its existing burn-the-reserved-ID and contain-the-operation regression is
+preserved; the generic physical destructor no longer needs to infer that fault from thread state.
+The corresponding old node-transform edit entry now uses the same explicit boundary. Its new
+regression first failed on missing containment, then passed with the burned identity, original
+panic, retained operation, and unchanged readable input checked together.
+
+The integrated operation suite passed **721/721 tests**. Its original candidate/failure/freeze
+destructor-fault and corrupt-graph tests remain intact; simply removing the guards would have
+failed eight of them. The new public cases cover direct activated-output failure, proof/output
+failure together, healthy candidate/freeze host unwind, and both callback destructors failing under
+an outer panic. Healthy cases require zero physical/factory accounts without poison; fault cases
+require both destructors, preserved original panic, and complete retained charges. The four
+intermediate tests additionally observe storage destruction while its physical and attribution
+charges are still live. Current-stable strict operation Clippy passed.
+
+Before/after evidence is in `target/review/a2-intermediate-before-all.log`,
+`a2-intermediate-after.log`, `a2-intermediate-operation-all-before.log`,
+`a2-payload-owner-operation-final.log`, `a2-payload-owner-clippy.log`,
+`a2-edit-generation-before.log`, and `a2-edit-generation-after.log`.
+
+Final Rust **1.95.0 and 1.99.1 workspace suites each passed 2,454/2,454**, with the four manual
+pilots skipped in their ordinary runs. A separate current-stable storage selection passed all
+**6/6** cases, including those four pilots and both ordinary controls. Strict workspace
+all-target/all-feature Clippy, doctests, and rustdoc with `-D warnings` passed. The image pilot
+retains the same 8,444-byte edit allocation peak and 226 consumed work units for 1/8 MiB inputs;
+distinct-buffer growth, source-first sharing, influence/metadata behavior, and normal release
+assertions passed. Pilot timing remains advisory (the metadata case was reported slow).
+
+Logs are `target/review/a2-owner-workspace-msrv.log`, `a2-owner-workspace-stable.log`,
+`a2-owner-core-pilots.log`, `a2-owner-clippy.log`, `a2-owner-doctests.log`, and
+`a2-owner-rustdoc.log`. Package and sanitizer verification for this newer owner boundary remains
+separate from the preceding archive evidence.
 
 ## Remaining acceptance
 
