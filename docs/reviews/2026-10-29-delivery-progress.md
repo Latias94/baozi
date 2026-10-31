@@ -1272,6 +1272,14 @@ all-target/all-feature Clippy and all 14 locked native dependency profiles. The 
 `h-linux-native-*.log` files contain that newer run; `h-linux-native-environment.log` records the
 actual user, kernel, and Rust 1.95.0 identity. The permission fixture still needs Apple execution.
 
+The later Windows case fixture verifies real lower/upper-case host aliases and a successful
+original-spelling capability read before checking its authorized-content-or-open-error oracle.
+It passed in **41/41 runtime IO and 51/51 repository IO tests**, without skips, with current-stable
+strict IO Clippy. Logs are `h-windows-native-case-runtime.log`,
+`h-windows-native-case-repository.log`, and `h-windows-native-case-clippy.log`. Read-only 8.3 volume
+queries on C: and F: returned access denied; no volume configuration was changed or 8.3 behavior
+inferred from that environment result.
+
 ## MSRV and Current-Stable Integration (2026-10-31)
 
 Current stable is `rustc 1.99.1 (58cf8f9c3 2026-10-13)`, LLVM 23.1.1, on Windows x86_64.
@@ -1323,6 +1331,30 @@ packaging, package ownership, authentication, publication, or target promotion.
 
 Logs are `target/review/h-package-msrv-debug-final.log`,
 `h-package-stable-release-final.log`, and `h-package-source-comparison.log`.
+
+## Executed Target, Example, and Dependency Gates (2026-10-31)
+
+The final production paths passed the four public examples (`import_bytes`,
+`import_memory_sidecars`, `diagnostics`, and `wasm_memory`) under Rust 1.99.1 with all features.
+The diagnostics example exercises its expected format-failure path and exits successfully; it is
+not an unexpected parser failure. Both the root and fuzz workspace dependency checks passed their
+advisory, ban, license, and source policies. Existing duplicate-version/wildcard warnings remain
+visible. The checked lockfiles did not change.
+
+The independent no-feature and all-feature release consumers executed under
+`wasmtime 50.0.0 (ebe5e8df1 2026-10-20)` on `wasm32-wasip1`, using Rust 1.95.0. Their typed semantic
+assertions and the enabled application-buffer workflow passed. The corresponding
+`wasm32-unknown-unknown` consumers passed compilation only; no browser execution is claimed.
+
+CI now contains MSRV/debug and current-stable/release Windows package matrices, an executable
+WASI empty/all matrix under pinned Wasmtime 50.0.0, strict current-stable workspace
+lint/tests/doctests, and always-retained PR fuzz corpus/logs. Actionlint 1.7.12 passed locally.
+No GitHub workflow was dispatched and no branch was pushed as part of this qualification, so these
+are local executed results plus verified workflow wiring, not a claim of hosted CI results.
+
+Logs are `target/review/h-deny-workspace.log`, `h-deny-fuzz.log`, `h-example-*.log`,
+`h-wasmtime-version.log`, `h-wasi-release-final.log`, `h-browser-check-final.log`, and
+`h-ci-actionlint.log`.
 
 ## Remaining acceptance
 

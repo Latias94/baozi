@@ -326,8 +326,11 @@ A Unix search-permission fixture now removes execute/search permission from an i
 directory, verifies actual host `PermissionDenied`, and requires the capability open to return
 the same typed class. It restores the permissions before asserting and rechecks successful reads.
 The fixture requires an unprivileged runner; a privileged bypass fails setup instead of skipping.
-It executed on Linux under UID 1000. Actual Apple ARM64 execution, including this permission case,
-Windows case/8.3 aliases and unknown/volume-mount reparse points, and the remaining backend
+It executed on Linux under UID 1000. A Windows fixture verifies real lower/upper-case host aliases
+before requiring capability reads to return the authorized in-root contents or a typed open error;
+the original spelling must open successfully. Windows runtime and repository candidate suites
+executed this fixture. Actual Apple ARM64 execution, including the permission case,
+Windows 8.3 aliases and unknown/volume-mount reparse points, and the remaining backend
 retry/fallback evidence still precede complete promotion. Candidate membership and release
 registration remain distinct.
 

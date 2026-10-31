@@ -727,6 +727,41 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn windows_case_alias_opens_only_the_authorized_in_root_file() {
+        let root = TempRoot::new("case-alias");
+        let outside = TempRoot::new("case-alias-outside");
+        fs::write(
+            root.path().join("MiXeD.bin"),
+            b"authorized immutable payload",
+        )
+        .expect("write the authorized case-alias fixture");
+        fs::write(
+            outside.path().join("mixed.bin"),
+            b"outside immutable payload",
+        )
+        .expect("write the outside same-name fixture");
+        let io = FileSystemAssetIo::from_capability(
+            NativeDirectoryCapability::open_ambient(root.path()).expect("open root capability"),
+        );
+        assert_eq!(
+            read_all(io.open(&AssetPath::new("MiXeD.bin").unwrap()).unwrap()),
+            b"authorized immutable payload"
+        );
+        for spelling in ["mixed.bin", "MIXED.BIN"] {
+            assert_eq!(
+                fs::read(root.path().join(spelling))
+                    .expect("candidate runner must provide actual case aliases"),
+                b"authorized immutable payload"
+            );
+            match io.open(&AssetPath::new(spelling).unwrap()) {
+                Ok(opened) => assert_eq!(read_all(opened), b"authorized immutable payload"),
+                Err(error) => assert_eq!(error.stage(), AssetOpenStage::Open),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_firewall_rejects_ads_device_and_namespace_forms_before_open() {
         let cases = [
             (
