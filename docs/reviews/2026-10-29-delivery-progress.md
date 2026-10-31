@@ -1228,6 +1228,40 @@ The source/toolchain, instrumentation, individual target logs, and resulting cor
 in `target/review/h-linux-asan-34b12dd5a9bb-jpoh52qb/`; orchestration logs are
 `target/review/h-linux-asan-final.log` and `h-linux-asan-registry.log`.
 
+## Native Capability Replacement Races (2026-10-31)
+
+Three default candidate tests each run 64 cooperating replacement rounds over prewritten immutable
+files: final-file exchange, intermediate-directory exchange with an escaping directory link, and
+file-symlink exchange between an in-root relative link and an outside link. A returned handle stays
+alive until replacement completes; successful reads must match complete authorized bytes. Stable
+positive and negative controls run between rounds. Windows directory replacement uses a real
+junction. Only sharing violation 32 may defer exchange until handle release, after which that
+exchange must succeed. This complements the existing deterministic same-handle identity test.
+
+Unix additionally checks a relative multi-link chain with an in-root parent step, then changes only
+its final link to escape. Linux opens a real `/proc/self/fd` magic link through a capability and
+rejects it after a host read verifies the outside sentinel. These tests need no new dependency,
+unsafe code, production hook, or alternate resolver. Coordination timeouts detect stalled test
+communication, but cannot interrupt an OS call or establish a hard open deadline.
+
+Rust 1.95.0 Windows candidate runtime IO passed **40/40**, repository IO **50/50**, and the
+all-format candidate facade **55/55**, all without skips. The Windows repository result includes
+its explicit `UnsupportedIdentityBackend` rejection before traversal, not operational capture.
+On Ubuntu 26.04 x86_64 under WSL2, candidate runtime IO passed **43/43**, operational repository IO
+**61/61**, and the candidate facade **55/55**, all without skips. The locked native dependency check
+passed all 14 profiles. Strict IO all-target/all-feature Clippy, formatting, and diff checks passed.
+
+These are candidate development results. Search-permission failure, Windows case/8.3 alias
+oracles and unknown/volume-mount reparse fixtures, exact backend retry/fallback evidence, and
+actual Apple ARM64 execution remain required before the complete promotion matrix can close.
+The race schedules are bounded samples rather than a proof of every interleaving. Release
+registration remains empty.
+
+Logs are `target/review/h-windows-native-runtime.log`, `h-windows-native-repository.log`,
+`h-windows-native-facade.log`, `h-linux-native-admission.log`, `h-linux-native-runtime.log`,
+`h-linux-native-repository.log`, `h-linux-native-facade.log`, `h-native-clippy.log`, and
+`h-native-fmt.log`.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite

@@ -189,6 +189,96 @@ mod tests {
         }
     }
 
+    fn assert_bounded_replacement_race(
+        io: &FileSystemAssetIo,
+        request: &AssetPath,
+        active: &Path,
+        alternate: &Path,
+        expected: [Option<&[u8]>; 2],
+    ) {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        const ROUNDS: usize = 64;
+        const TIMEOUT: Duration = Duration::from_secs(5);
+        let parked = active.with_file_name("race-parked");
+        assert!(!parked.exists());
+        let check_current = |state: usize| match expected[state] {
+            Some(bytes) => assert_eq!(
+                read_all(io.open(request).expect("stable authorized path must open")),
+                bytes
+            ),
+            None => assert!(
+                io.open(request).is_err(),
+                "stable escaping path must fail the negative control"
+            ),
+        };
+        check_current(0);
+        // Timeouts detect stalled coordination; joining cannot interrupt a hung OS open/read.
+        thread::scope(|threads| {
+            let (start, starts) = mpsc::sync_channel::<()>(0);
+            let (read, reads) = mpsc::channel::<()>();
+            let (result, results) = mpsc::channel();
+            let reader = threads.spawn(move || {
+                for _ in 0..ROUNDS {
+                    if starts.recv_timeout(TIMEOUT).is_err() {
+                        return;
+                    }
+                    let opened = io.open(request);
+                    // Keep the returned handle until the cooperating replacement has completed.
+                    if reads.recv_timeout(TIMEOUT).is_err() {
+                        return;
+                    }
+                    let observed = opened.map(read_all);
+                    // read_all has dropped the handle before the replacer restores the parked path.
+                    if result.send(observed).is_err() {
+                        return;
+                    }
+                }
+            });
+            let mut state = 0;
+            for round in 0..ROUNDS {
+                start.send(()).expect("reader must accept the next round");
+                let moved = match fs::rename(active, &parked) {
+                    Ok(()) => true,
+                    #[cfg(windows)]
+                    Err(error) if error.raw_os_error() == Some(32) => false,
+                    Err(error) => panic!("round {round}: unexpected replacement failure: {error}"),
+                };
+                if moved {
+                    fs::rename(alternate, active).expect("install the prewritten alternate entry");
+                }
+                read.send(())
+                    .expect("reader must accept replacement completion");
+                let observed = results
+                    .recv_timeout(TIMEOUT)
+                    .expect("reader did not report within the coordination timeout");
+                if let Ok(bytes) = observed {
+                    assert!(
+                        expected.iter().flatten().any(|allowed| bytes == *allowed),
+                        "round {round}: read outside or mixed bytes from the returned handle: {bytes:?}"
+                    );
+                }
+                if !moved {
+                    // A Windows sharing denial is valid only while the reader owns its handle.
+                    // Complete the same exchange once that handle has been dropped; never skip it.
+                    fs::rename(active, &parked)
+                        .expect("replacement must succeed after the reader releases its handle");
+                    fs::rename(alternate, active).expect("install the alternate after release");
+                }
+                fs::rename(&parked, alternate).expect("restore the parked entry as the alternate");
+                state ^= 1;
+                check_current(state);
+            }
+            reader
+                .join()
+                .expect("cooperating reader must finish all rounds");
+        });
+        check_current(0);
+        assert!(!parked.exists());
+    }
+
     #[cfg(windows)]
     fn replace_retained_root(root_path: &Path, moved_path: &Path) {
         let error = fs::rename(root_path, moved_path)
@@ -384,6 +474,215 @@ mod tests {
         replace_opened_file_fixture(&source, &moved);
 
         assert_eq!(read_all(opened), b"authorized");
+    }
+
+    #[test]
+    fn final_file_replacement_race_keeps_immutable_handle_bytes() {
+        let root = TempRoot::new("final-file-race");
+        let active = root.path().join("entry.bin");
+        let alternate = root.path().join("alternate.bin");
+        let first = [b'A'; 64];
+        let second = [b'B'; 64];
+        fs::write(&active, first).expect("write the first immutable file");
+        fs::write(&alternate, second).expect("write the second immutable file");
+        let io = FileSystemAssetIo::from_capability(
+            NativeDirectoryCapability::open_ambient(root.path()).expect("open race capability"),
+        );
+        assert_eq!(
+            read_all(io.open(&AssetPath::new("alternate.bin").unwrap()).unwrap()),
+            second
+        );
+        assert!(io.open(&AssetPath::new("missing.bin").unwrap()).is_err());
+
+        assert_bounded_replacement_race(
+            &io,
+            &AssetPath::new("entry.bin").unwrap(),
+            &active,
+            &alternate,
+            [Some(first.as_slice()), Some(second.as_slice())],
+        );
+        assert_eq!(fs::read(active).unwrap(), first);
+        assert_eq!(fs::read(alternate).unwrap(), second);
+    }
+
+    #[test]
+    fn directory_replacement_race_never_reads_outside_bytes() {
+        let root = TempRoot::new("directory-race");
+        let outside = TempRoot::new("directory-race-outside");
+        let active = root.path().join("entry");
+        let alternate = root.path().join("alternate");
+        fs::create_dir(&active).expect("create the real in-root directory");
+        fs::write(active.join("payload.bin"), b"authorized immutable payload")
+            .expect("write the authorized immutable file");
+        fs::write(
+            outside.path().join("payload.bin"),
+            b"outside immutable payload",
+        )
+        .expect("write the outside immutable file");
+        #[cfg(unix)]
+        create_file_symlink(outside.path(), &alternate)
+            .expect("create the escaping directory link");
+        #[cfg(windows)]
+        create_junction(outside.path(), &alternate)
+            .expect("create the escaping directory junction");
+        assert_eq!(
+            fs::read(alternate.join("payload.bin")).unwrap(),
+            b"outside immutable payload"
+        );
+        let io = FileSystemAssetIo::from_capability(
+            NativeDirectoryCapability::open_ambient(root.path()).expect("open race capability"),
+        );
+        assert!(
+            io.open(&AssetPath::new("alternate/payload.bin").unwrap())
+                .is_err()
+        );
+
+        assert_bounded_replacement_race(
+            &io,
+            &AssetPath::new("entry/payload.bin").unwrap(),
+            &active,
+            &alternate,
+            [Some(b"authorized immutable payload"), None],
+        );
+        assert_eq!(
+            fs::read(outside.path().join("payload.bin")).unwrap(),
+            b"outside immutable payload"
+        );
+        #[cfg(windows)]
+        fs::remove_dir(alternate).expect("remove the restored junction without following it");
+    }
+
+    #[test]
+    fn symlink_replacement_race_never_reads_outside_bytes() {
+        let root = TempRoot::new("symlink-race");
+        let outside = TempRoot::new("symlink-race-outside");
+        let active = root.path().join("entry.bin");
+        let alternate = root.path().join("alternate.bin");
+        fs::write(
+            root.path().join("inside.bin"),
+            b"authorized immutable payload",
+        )
+        .expect("write the authorized immutable file");
+        fs::write(
+            outside.path().join("payload.bin"),
+            b"outside immutable payload",
+        )
+        .expect("write the outside immutable file");
+        create_file_symlink(Path::new("inside.bin"), &active)
+            .expect("create the relative in-root link");
+        create_file_symlink(&outside.path().join("payload.bin"), &alternate)
+            .expect("create the escaping file link");
+        assert_eq!(fs::read(&alternate).unwrap(), b"outside immutable payload");
+        let io = FileSystemAssetIo::from_capability(
+            NativeDirectoryCapability::open_ambient(root.path()).expect("open race capability"),
+        );
+        assert!(io.open(&AssetPath::new("alternate.bin").unwrap()).is_err());
+
+        assert_bounded_replacement_race(
+            &io,
+            &AssetPath::new("entry.bin").unwrap(),
+            &active,
+            &alternate,
+            [Some(b"authorized immutable payload"), None],
+        );
+        assert_eq!(
+            fs::read(outside.path().join("payload.bin")).unwrap(),
+            b"outside immutable payload"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_fd_magic_link_cannot_reopen_an_outside_file() {
+        use std::os::fd::AsRawFd;
+
+        let outside = TempRoot::new("proc-fd-outside");
+        let target = outside.path().join("payload.bin");
+        fs::write(&target, b"outside immutable payload").expect("write the outside immutable file");
+        let file =
+            fs::File::open(&target).expect("retain the file referenced by the proc magic link");
+        let name = file.as_raw_fd().to_string();
+        let proc_path = Path::new("/proc/self/fd").join(&name);
+        assert!(
+            fs::symlink_metadata(&proc_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&proc_path).unwrap(), b"outside immutable payload");
+        let normal_io = FileSystemAssetIo::from_capability(
+            NativeDirectoryCapability::open_ambient(outside.path())
+                .expect("open ordinary capability"),
+        );
+        assert_eq!(
+            read_all(
+                normal_io
+                    .open(&AssetPath::new("payload.bin").unwrap())
+                    .unwrap()
+            ),
+            b"outside immutable payload"
+        );
+        let proc_io = FileSystemAssetIo::from_capability(
+            NativeDirectoryCapability::open_ambient("/proc/self/fd")
+                .expect("open proc fd capability"),
+        );
+        let error = proc_io
+            .open(&AssetPath::new(&name).unwrap())
+            .expect_err("a proc magic link must not escape its directory capability");
+        assert_eq!(error.stage(), AssetOpenStage::Open);
+        drop(file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multi_link_chain_allows_in_root_parent_steps_and_rejects_escape() {
+        let root = TempRoot::new("multi-link");
+        let outside = TempRoot::new("multi-link-outside");
+        fs::create_dir_all(root.path().join("links/nested"))
+            .expect("create link-chain directories");
+        fs::write(
+            root.path().join("links/payload.bin"),
+            b"authorized immutable payload",
+        )
+        .expect("write the authorized immutable file");
+        fs::write(
+            outside.path().join("payload.bin"),
+            b"outside immutable payload",
+        )
+        .expect("write the outside immutable file");
+        create_file_symlink(Path::new("links/first"), &root.path().join("entry"))
+            .expect("create the first relative link");
+        create_file_symlink(Path::new("nested/second"), &root.path().join("links/first"))
+            .expect("create the second relative link");
+        create_file_symlink(
+            Path::new("../payload.bin"),
+            &root.path().join("links/nested/second"),
+        )
+        .expect("create the in-root parent-relative final link");
+        let escape = root.path().join("links/nested/escape");
+        create_file_symlink(&outside.path().join("payload.bin"), &escape)
+            .expect("precreate the escaping final link");
+        let io = FileSystemAssetIo::from_capability(
+            NativeDirectoryCapability::open_ambient(root.path())
+                .expect("open link-chain capability"),
+        );
+        let request = AssetPath::new("entry").unwrap();
+        assert_eq!(
+            read_all(io.open(&request).unwrap()),
+            b"authorized immutable payload"
+        );
+        assert!(
+            io.open(&AssetPath::new("links/nested/escape").unwrap())
+                .is_err()
+        );
+
+        fs::rename(escape, root.path().join("links/nested/second"))
+            .expect("replace only the final symlink in the same multi-link chain");
+        assert_eq!(
+            fs::read(root.path().join("entry")).unwrap(),
+            b"outside immutable payload"
+        );
+        assert!(io.open(&request).is_err(), "the full chain must not escape");
     }
 
     #[cfg(windows)]

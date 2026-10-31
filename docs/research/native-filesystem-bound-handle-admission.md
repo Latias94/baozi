@@ -307,6 +307,25 @@ oracle: either a permitted object handle is returned or the open fails. Observin
 is always a test failure. Platform tests that require symlink privileges may skip only with explicit
 evidence; CI must have at least one authoritative runner where they execute.
 
+### Current Bounded Replacement Fixtures (2026-10-31)
+
+[`fs.rs`](../../crates/baozi-io/src/fs.rs) now exercises concurrent final-file, intermediate-directory, and file-symlink
+replacement in 64 fixed rounds each. Objects are fully written before racing; the reader retains
+an opened handle until replacement completes, then accepts only complete authorized bytes or an
+open error. Stable positive and escaping-path controls run between rounds. Windows directory
+replacement uses a real junction; only sharing violation 32 may defer the exchange until handle
+release. The existing deterministic same-handle test remains the separate identity assertion.
+Coordination timeouts detect a stalled protocol but cannot interrupt a hung OS open/read.
+
+Unix fixtures additionally check a multi-link relative chain containing an in-root parent step,
+then reject an escaping final-link replacement. Linux checks a real `/proc/self/fd` magic link,
+whose outside contents are first verified through a host read. These fixtures improve the
+executable matrix without proving every thread schedule or backend retry/fallback path.
+
+Complete promotion still needs platform-local evidence for the remaining matrix, including
+search-permission failure, Windows case/8.3 aliases and unknown/volume-mount reparse points, and
+actual Apple ARM64 execution. Candidate membership and release registration remain distinct.
+
 ## Residual Risks
 
 | Risk | Impact | Treatment |
