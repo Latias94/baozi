@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-16
-updated: 2026-08-19
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
@@ -127,6 +127,33 @@ Graph origin handles are opaque, session-bound capabilities. They are not `Asset
 public source identities, serialized values, or cross-operation cache keys. They have no public
 equality, ordering, hash, serialization, raw-ID, or value-revealing `Debug` operation. Importers may
 only return them to the owner-issued dependency capability as the declaring origin.
+
+The physical dependency cache remains the sole authority-qualified identity index. Graph lookup
+compares the primary identity directly, then uses that cache's existing index and the cache-slot to
+graph-node binding. It does not maintain a second identity map or scan all graph nodes. Only an
+available cache record with a committed graph binding supplies a target. Index probing checks
+control and charges `ResourceGraphWork` before examining each candidate slot. A hash/equality
+operation over one bounded resource identity is a bounded action, not byte-by-byte hashing work;
+the raw authored reference and payload digest keep their separate byte accounting.
+
+Committed available edges obey `depth[target] >= depth[source] + 1`, with depth equal to the longest
+root path. Before planning an existing target, a self-edge is rejected. If the new path cannot
+increase the target depth, this invariant proves the edge cannot close a cycle and no descendant
+traversal is needed. An increased leaf requires only its own update. Other connections traverse the
+target's reachable region iteratively, detect back edges, and merge proposed depths in reverse
+postorder. Epoch-tagged visit state resides in the already admitted graph rows; per-plan stack,
+postorder, and update buffers grow only with that region. No per-reference full-graph scratch
+initialization or path-recursive stack is required. Rejected plans preserve committed depths.
+
+A prepared target records the current committed relation count. Completion rejects a stale plan
+after any intervening edge commit, including a connection that could change source depth or create
+a return path. The count advances with checked arithmetic at commit; failed planning epochs are
+separate and do not invalidate otherwise current plans. All path copying, capacity admission,
+structural validation, graph work, and final control checks precede the allocation-free write phase.
+Node/relation consumption is admitted as one batch before publishing new nodes, bindings, links,
+and depth updates. Unavailable edges and primary binding likewise perform no fallible work after
+their final mutation begins. Preparatory capacity growth may retain charged empty slots, but a
+rejected completion exposes no new node, binding, relation, or depth change.
 
 After complete terminal-evidence admission succeeds, each logical dependency request creates one
 terminal relation containing:

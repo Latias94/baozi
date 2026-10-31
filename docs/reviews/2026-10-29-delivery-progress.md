@@ -1097,6 +1097,61 @@ Logs are `target/review/f-vertices-elements.log`, `f-vertices-layout-final.log`,
 `f-vertices-native-release-final.log`, `f-vertices-packaged-final.log`,
 `f-vertices-wasi-final.log`, and `f-vertices-browser-wasm-final.log`.
 
+## Indexed Resource Lookup and Local Depth Planning (2026-10-31)
+
+Resource-graph identity lookup now reuses the physical dependency cache's authority-qualified
+index and its existing cache-slot/node binding. The primary remains one direct complete identity
+comparison; available dependencies require an available bound cache record. No second identity map
+or full node scan remains. The shared probe loop checks control and charges actual examined slots.
+Resolving/failed/unbound records and foreign authorities cannot alias an available graph node.
+
+Existing-target depth planning uses the strict committed-edge depth invariant to accept an already
+deep-enough target without scratch or descendant traversal. A changed leaf needs one update. Other
+connections walk only the reachable region iteratively and merge longest depths in reverse
+postorder. Epoch-tagged marks are part of the admitted graph row; local stack/order/update owners
+retain their actual capacity charges. Whole-graph scratch initialization and its helper are removed.
+Cycle, depth-limit, work, and cancellation failures preserve committed depths and release scratch.
+
+Completion checks the relation count captured by target preparation and rejects stale plans after
+interleaved commits. All validation, path allocation, accounting, and final control checks precede
+the write phase. Available node/relation consumption is grouped before publishing nodes, cache
+bindings, links, and depth updates. Primary and unavailable commits follow the same final-check
+discipline. Tests cover stale source depth/back edges and late rejection without partial state.
+ADR 0041 records these internal contracts.
+
+The final all-feature workspace suite passed **2,434/2,434 tests**, with four manual pilots skipped;
+the full importer portion separately passed **401/401**. Strict Clippy, doctests, rustdoc with
+`-D warnings`, formatting, and diff checks passed. Independent read-only reviews found two concrete
+P2 gaps in cancellation and prepared-plan freshness; both were fixed and their regressions passed.
+The all-format independent consumer also executed on the ordinary Windows debug main stack,
+including external-resource inputs and the final application-buffer workflow.
+
+The new default node growth test builds and edits reverse-ID deep chains and ordered wide trees at
+256/1,024/4,096 nodes. Deep build work was **16,496 / 64,880 / 258,416**, wide build work
+**16,750 / 65,902 / 262,510**, and edit work for each shape **7,377 / 28,881 / 114,897**. Each
+fourfold input satisfies increasing work bounded by four times the previous value. Complete
+published structure, child order, edited transforms, source-first destruction, and healthy release
+also passed. This bounded fixture runs in under one second locally and no longer needs manual
+selection.
+
+The resource test executes 64/256/1,024 unique resources followed by N references to the final leaf.
+One recorded run used graph work **888 / 3,486 / 14,159** for unique insertion and
+**832 / 3,584 / 15,360** for reuse. It checks independent finite probe budgets, exact fixed-action
+plus measured-probe reuse work, and manifest node/occurrence/multiplicity/depth semantics. These
+RandomState-dependent observations are finite regression evidence, not worst-case bounds for every
+seed. Manifest sorting has its separate work dimension.
+
+This increment does not close all cache processing accounting: review identified pre-existing
+uncontrolled acquisition-state, insertion/transition/removal, and index-rebuild paths. Their
+storage admission and one-unit physical-open budget do not cover their actual loops. The next
+increment must meter those paths through the same index/control mechanism and revise growth
+formulae from the actual additional work. No full-cache metering or new fuzz/target claim is made
+from this graph-specific test.
+
+Logs are `target/review/g-resource-focused-final.log`, `g-resource-import-final.log`,
+`g-node-growth.log`, `g-resource-workspace-final.log`, `g-resource-clippy-final.log`,
+`g-resource-doctests-final.log`, `g-resource-rustdoc-final.log`, and `g-resource-native-debug.log`.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
@@ -1112,7 +1167,7 @@ Logs are `target/review/f-vertices-elements.log`, `f-vertices-layout-final.log`,
   authored nodes, skin matrices, morph deltas, animation curves, and camera/light definitions
   and material lengths together with the borrowed application-buffer workflow. Generated texture coordinates
   without a sampling contract are removed, rather than treated as a pending conversion capability.
-- Finish G's remaining behavioral growth checks and H's current-stable/release package matrix,
+- Finish G's complete cache-work accounting and final integration, and H's current-stable/release package matrix,
   CI execution wiring, and native candidate acceptance. Dependency upgrades, package-content fixes,
   and the recorded fixed artifact matrix already have their distinct implementation/evidence above.
 

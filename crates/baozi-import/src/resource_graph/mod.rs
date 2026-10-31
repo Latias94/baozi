@@ -4,6 +4,7 @@
 //! `ParseScope` receives only opaque origin handles and dependency results; format crates cannot
 //! inspect graph IDs, physical cache keys, or manifest construction state.
 
+mod depth;
 mod manifest;
 
 pub(crate) use manifest::registered_negative_proof_canonical_len;
@@ -49,6 +50,7 @@ pub(crate) enum ResourceGraphError {
     Cycle,
     DanglingNode,
     IncompleteRelation,
+    StaleRelation,
     AlreadySealed,
     DigestCollision,
     MissingPrimary,
@@ -70,6 +72,9 @@ impl ResourceGraphError {
             },
             Self::IncompleteRelation => ScopeAbortCause::DescriptorContract {
                 code: "resource-graph-incomplete-relation",
+            },
+            Self::StaleRelation => ScopeAbortCause::DescriptorContract {
+                code: "resource-graph-stale-relation",
             },
             Self::AlreadySealed => ScopeAbortCause::DescriptorContract {
                 code: "resource-graph-already-sealed",
@@ -107,6 +112,7 @@ struct GraphNode {
     last_outgoing: Option<usize>,
     outgoing_count: usize,
     depth: u64,
+    depth_visit: depth::DepthVisit,
     // Paths drop before the reservations covering their backing strings.
     _path_reservations: [Option<ImportStoreReservation>; 2],
 }
@@ -219,6 +225,16 @@ struct DepthUpdate {
     depth: u64,
 }
 
+/// Validated coordinates for the final allocation-free relation commit.
+struct RelationCommit {
+    source: usize,
+    first_outgoing: Option<usize>,
+    last_outgoing: Option<usize>,
+    next_outgoing_count: usize,
+    next_pending_relations: u64,
+    next_relation_count: u64,
+}
+
 pub(crate) enum ResourceAcquisitionState {
     Available {
         cache_index: usize,
@@ -247,6 +263,7 @@ pub(crate) struct PendingResourceRelation {
     requirement: DependencyRequirement,
     raw_reference_digest: ManifestDigest,
     target: Option<TargetAdmission>,
+    prepared_revision: u64,
 }
 
 pub(crate) struct AvailableResourceIdentity<'a> {
@@ -280,6 +297,7 @@ pub(crate) struct ResourceGraph {
     relation_count: u64,
     pending_relations: u64,
     maximum_depth: u64,
+    depth_epoch: u64,
     sealed_manifest: Option<SuccessfulInputManifest>,
 }
 
@@ -295,6 +313,7 @@ impl ResourceGraph {
             relation_count: 0,
             pending_relations: 0,
             maximum_depth: 0,
+            depth_epoch: 0,
             sealed_manifest: None,
         }
     }
@@ -523,15 +542,14 @@ impl ResourceGraph {
             last_outgoing: None,
             outgoing_count: 0,
             depth: 0,
+            depth_visit: depth::DepthVisit::default(),
             _path_reservations: [Some(exact_path.1), Some(public_identity.1)],
         };
-        self.nodes
-            .try_push_reserved(node)
-            .map_err(|_| ResourceGraphError::Allocation {
-                resource: "resource-graph-node-slot",
-            })?;
-        self.primary = Some(0);
+        host.poll()
+            .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
         charge_consumed(host, ImportDimension::ResourceGraphNodes, 1)?;
+        self.nodes.push_reserved_infallible(node);
+        self.primary = Some(0);
         Ok(())
     }
 
@@ -604,6 +622,7 @@ impl ResourceGraph {
             requirement,
             raw_reference_digest,
             target: None,
+            prepared_revision: self.relation_count,
         })
     }
 
@@ -616,6 +635,7 @@ impl ResourceGraph {
         if pending.target.is_some() {
             return Err(ResourceGraphError::IncompleteRelation);
         }
+        pending.prepared_revision = self.relation_count;
         let source_depth = self
             .nodes
             .get(pending.source)
@@ -657,6 +677,9 @@ impl ResourceGraph {
         bytes: &[u8],
         identity: AvailableResourceIdentity<'_>,
     ) -> Result<(), ResourceGraphError> {
+        if pending.prepared_revision != self.relation_count {
+            return Err(ResourceGraphError::StaleRelation);
+        }
         if identity.stable_schema.is_some() && identity.exact.path() != identity.normalized {
             return Err(ResourceGraphError::DigestCollision);
         }
@@ -667,8 +690,7 @@ impl ResourceGraph {
         let Some((cached_identity, snapshot)) = self.cache.available_snapshot(cache_index) else {
             return Err(ResourceGraphError::DanglingNode);
         };
-        // The caller must present the immutable bytes held by this exact cache entry. Comparing
-        // their owner-derived slice avoids rescanning the payload on every logical reference.
+        // Compare the exact immutable snapshot slice, without scanning encoded bytes again.
         if cached_identity != identity.exact || !std::ptr::eq(snapshot.bytes.bytes(), bytes) {
             return Err(ResourceGraphError::DigestCollision);
         }
@@ -677,7 +699,7 @@ impl ResourceGraph {
             .bytes
             .content_digest(host)
             .map_err(ResourceGraphError::Scope)?;
-        let (target, depth_updates) = match target_admission {
+        let (target, new_node, depth_updates) = match target_admission {
             TargetAdmission::Existing {
                 index,
                 depth_updates,
@@ -692,9 +714,14 @@ impl ResourceGraph {
                 {
                     return Err(ResourceGraphError::DigestCollision);
                 }
-                (index, depth_updates)
+                (index, None, depth_updates)
             }
             TargetAdmission::New { depth } => {
+                if !self.nodes.has_slots(1) {
+                    return Err(ResourceGraphError::Allocation {
+                        resource: "resource-graph-node-slot",
+                    });
+                }
                 let exact_path =
                     clone_graph_path(host, identity.exact.path(), "resource-graph-node-identity")?;
                 let public_identity = manifest_identity_for_resolution(
@@ -703,47 +730,71 @@ impl ResourceGraph {
                     identity.stable_schema,
                     "resource-graph-node-public-identity",
                 )?;
-                let index = self.nodes.len();
-                self.nodes
-                    .try_push_reserved(GraphNode {
-                        exact_identity: DependencyIdentity::new(
-                            identity.exact.authority().clone(),
-                            exact_path.0,
-                        ),
-                        public_identity: public_identity.0,
-                        byte_length,
-                        content_digest,
-                        first_outgoing: None,
-                        last_outgoing: None,
-                        outgoing_count: 0,
-                        depth,
-                        _path_reservations: [Some(exact_path.1), Some(public_identity.1)],
-                    })
-                    .map_err(|_| ResourceGraphError::Allocation {
-                        resource: "resource-graph-node-slot",
-                    })?;
-                self.maximum_depth = self.maximum_depth.max(depth);
-                charge_consumed(host, ImportDimension::ResourceGraphNodes, 1)?;
-                (index, AccountedVec::new())
+                let node = GraphNode {
+                    exact_identity: DependencyIdentity::new(
+                        identity.exact.authority().clone(),
+                        exact_path.0,
+                    ),
+                    public_identity: public_identity.0,
+                    byte_length,
+                    content_digest,
+                    first_outgoing: None,
+                    last_outgoing: None,
+                    outgoing_count: 0,
+                    depth,
+                    depth_visit: depth::DepthVisit::default(),
+                    _path_reservations: [Some(exact_path.1), Some(public_identity.1)],
+                };
+                (self.nodes.len(), Some(node), AccountedVec::new())
             }
         };
-        self.bind_cache_node(host, cache_index, target)?;
+        self.prepare_cache_binding(host, cache_index, target)?;
         let reference = manifest_identity_for_resolution(
             host,
             identity.normalized,
             identity.stable_schema,
             "resource-graph-normalized-reference",
         )?;
-        self.push_relation(
-            host,
+        let relation = self.prepare_relation(&pending)?;
+        for update in &*depth_updates {
+            charge_graph_work(host, 1)?;
+            self.nodes
+                .get(update.index)
+                .ok_or(ResourceGraphError::DanglingNode)?;
+        }
+        host.poll()
+            .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
+        host.charge_consumed_batch(&[
+            (
+                ImportDimension::ResourceGraphNodes,
+                u64::from(new_node.is_some()),
+            ),
+            (ImportDimension::ResourceGraphRelations, 1),
+        ])
+        .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
+
+        // All allocation, validation, and fallible operation accounting precede this commit.
+        // No observer or control callback can see a partially linked edge/depth update.
+        if let Some(node) = new_node {
+            self.maximum_depth = self.maximum_depth.max(node.depth);
+            self.nodes.push_reserved_infallible(node);
+        }
+        self.cache_to_node[cache_index] = Some(target);
+        self.commit_relation(
             pending,
             (
                 ManifestReference::Normalized(reference.0),
                 Some(reference.1),
             ),
             (GraphRelationOutcome::Available { target }, None),
-        )?;
-        self.apply_depth_updates(host, &depth_updates)
+            relation,
+        );
+        for update in &*depth_updates {
+            let node = &mut self.nodes[update.index];
+            node.depth = node.depth.max(update.depth);
+            self.maximum_depth = self.maximum_depth.max(node.depth);
+        }
+        Ok(())
     }
 
     pub(crate) fn complete_unavailable(
@@ -948,115 +999,120 @@ impl ResourceGraph {
         reference: (ManifestReference, Option<ImportStoreReservation>),
         outcome: (GraphRelationOutcome, Option<ImportStoreReservation>),
     ) -> Result<(), ResourceGraphError> {
-        let (first_outgoing, last_outgoing, outgoing_count) = self
+        let commit = self.prepare_relation(&pending)?;
+        host.poll()
+            .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
+        charge_consumed(host, ImportDimension::ResourceGraphRelations, 1)?;
+        self.commit_relation(pending, reference, outcome, commit);
+        Ok(())
+    }
+
+    fn prepare_relation(
+        &self,
+        pending: &PendingResourceRelation,
+    ) -> Result<RelationCommit, ResourceGraphError> {
+        let node = self
             .nodes
             .get(pending.source)
-            .map(|node| (node.first_outgoing, node.last_outgoing, node.outgoing_count))
             .ok_or(ResourceGraphError::DanglingNode)?;
         if !self.relations.has_slots(1) {
             return Err(ResourceGraphError::Allocation {
                 resource: "resource-graph-relation-slot",
             });
         }
-        if outgoing_count == 0 {
-            if first_outgoing.is_some() || last_outgoing.is_some() {
+        if node.outgoing_count == 0 {
+            if node.first_outgoing.is_some() || node.last_outgoing.is_some() {
                 return Err(ResourceGraphError::DanglingNode);
             }
         } else {
-            first_outgoing.ok_or(ResourceGraphError::DanglingNode)?;
-            let last = last_outgoing.ok_or(ResourceGraphError::DanglingNode)?;
-            if self
-                .relations
-                .get(last)
-                .is_none_or(|relation| relation.next_outgoing.is_some())
-            {
-                return Err(ResourceGraphError::DanglingNode);
-            }
-            let first = first_outgoing.ok_or(ResourceGraphError::DanglingNode)?;
+            let first = node
+                .first_outgoing
+                .ok_or(ResourceGraphError::DanglingNode)?;
+            let last = node.last_outgoing.ok_or(ResourceGraphError::DanglingNode)?;
             if self
                 .relations
                 .get(first)
                 .is_none_or(|relation| relation.previous_outgoing.is_some())
+                || self
+                    .relations
+                    .get(last)
+                    .is_none_or(|relation| relation.next_outgoing.is_some())
             {
                 return Err(ResourceGraphError::DanglingNode);
             }
         }
-        let next_outgoing_count = outgoing_count
-            .checked_add(1)
-            .ok_or(ResourceGraphError::Overflow)?;
-        let next_pending_relations = self
-            .pending_relations
-            .checked_sub(1)
-            .ok_or(ResourceGraphError::IncompleteRelation)?;
-        let next_relation_count = self
-            .relation_count
-            .checked_add(1)
-            .ok_or(ResourceGraphError::Overflow)?;
-
-        let relation_index = self.relations.len();
-        self.relations
-            .try_push_reserved(GraphRelation {
-                role: pending.role,
-                requirement: pending.requirement,
-                reference: reference.0,
-                outcome: outcome.0,
-                previous_outgoing: last_outgoing,
-                next_outgoing: None,
-                _path_reservations: [reference.1, outcome.1],
-            })
-            .map_err(|_| ResourceGraphError::Allocation {
-                resource: "resource-graph-relation-slot",
-            })?;
-        if let Some(last) = last_outgoing {
-            self.relations
-                .get_mut(last)
-                .ok_or(ResourceGraphError::DanglingNode)?
-                .next_outgoing = Some(relation_index);
-        }
-        let node = self
-            .nodes
-            .get_mut(pending.source)
-            .ok_or(ResourceGraphError::DanglingNode)?;
-        node.first_outgoing.get_or_insert(relation_index);
-        node.last_outgoing = Some(relation_index);
-        node.outgoing_count = next_outgoing_count;
-        self.pending_relations = next_pending_relations;
-        self.relation_count = next_relation_count;
-        charge_consumed(host, ImportDimension::ResourceGraphRelations, 1)
+        Ok(RelationCommit {
+            source: pending.source,
+            first_outgoing: node.first_outgoing,
+            last_outgoing: node.last_outgoing,
+            next_outgoing_count: node
+                .outgoing_count
+                .checked_add(1)
+                .ok_or(ResourceGraphError::Overflow)?,
+            next_pending_relations: self
+                .pending_relations
+                .checked_sub(1)
+                .ok_or(ResourceGraphError::IncompleteRelation)?,
+            next_relation_count: self
+                .relation_count
+                .checked_add(1)
+                .ok_or(ResourceGraphError::Overflow)?,
+        })
     }
 
-    fn bind_cache_node(
+    fn commit_relation(
+        &mut self,
+        pending: PendingResourceRelation,
+        reference: (ManifestReference, Option<ImportStoreReservation>),
+        outcome: (GraphRelationOutcome, Option<ImportStoreReservation>),
+        commit: RelationCommit,
+    ) {
+        let index = self.relations.len();
+        self.relations.push_reserved_infallible(GraphRelation {
+            role: pending.role,
+            requirement: pending.requirement,
+            reference: reference.0,
+            outcome: outcome.0,
+            previous_outgoing: commit.last_outgoing,
+            next_outgoing: None,
+            _path_reservations: [reference.1, outcome.1],
+        });
+        if let Some(last) = commit.last_outgoing {
+            self.relations[last].next_outgoing = Some(index);
+        }
+        let node = &mut self.nodes[commit.source];
+        node.first_outgoing = commit.first_outgoing.or(Some(index));
+        node.last_outgoing = Some(index);
+        node.outgoing_count = commit.next_outgoing_count;
+        self.pending_relations = commit.next_pending_relations;
+        self.relation_count = commit.next_relation_count;
+    }
+
+    fn prepare_cache_binding(
         &mut self,
         host: ImportStoreHost<'_>,
         cache_index: usize,
         node_index: usize,
     ) -> Result<(), ResourceGraphError> {
-        if self.nodes.get(node_index).is_none() {
-            return Err(ResourceGraphError::DanglingNode);
-        }
         if cache_index >= self.cache_to_node.len() {
             self.cache_to_node
                 .try_reserve(
-                    cache_index + 1 - self.cache_to_node.len(),
+                    cache_index
+                        .checked_add(1)
+                        .and_then(|len| len.checked_sub(self.cache_to_node.len()))
+                        .ok_or(ResourceGraphError::Overflow)?,
                     "resource-graph-cache-index",
                     |bytes| reserve_graph_storage(host, bytes),
                 )
                 .map_err(ResourceGraphError::Scope)?;
             while self.cache_to_node.len() <= cache_index {
                 charge_graph_work(host, 1)?;
-                self.cache_to_node.try_push_reserved(None).map_err(|_| {
-                    ResourceGraphError::Allocation {
-                        resource: "resource-graph-cache-index-slot",
-                    }
-                })?;
+                self.cache_to_node.push_reserved_infallible(None);
             }
         }
         match self.cache_to_node[cache_index] {
             Some(existing) if existing != node_index => Err(ResourceGraphError::DigestCollision),
-            _ => {
-                self.cache_to_node[cache_index] = Some(node_index);
-                Ok(())
-            }
+            _ => Ok(()),
         }
     }
 
@@ -1065,13 +1121,34 @@ impl ResourceGraph {
         host: ImportStoreHost<'_>,
         identity: &DependencyIdentity,
     ) -> Result<Option<usize>, ResourceGraphError> {
-        for (index, node) in self.nodes.iter().enumerate() {
+        if let Some(primary) = self.primary {
+            let node = self
+                .nodes
+                .get(primary)
+                .ok_or(ResourceGraphError::DanglingNode)?;
+            host.poll()
+                .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
             charge_graph_work(host, 1)?;
             if &node.exact_identity == identity {
-                return Ok(Some(index));
+                return Ok(Some(primary));
             }
         }
-        Ok(None)
+        let Some(cache_index) = self
+            .cache
+            .controlled_record_index(host, identity)
+            .map_err(ResourceGraphError::Scope)?
+        else {
+            return Ok(None);
+        };
+        if self.cache.available_identity(cache_index).is_none() {
+            return Ok(None);
+        }
+        Ok(self
+            .cache_to_node
+            .get(cache_index)
+            .copied()
+            .flatten()
+            .filter(|index| self.nodes.get(*index).is_some()))
     }
 
     fn outgoing_relations(
@@ -1106,124 +1183,6 @@ impl ResourceGraph {
             terminal_checked: false,
             direction: OutgoingDirection::Reverse,
         })
-    }
-
-    fn plan_existing_target(
-        &self,
-        host: ImportStoreHost<'_>,
-        target: usize,
-        source: usize,
-        target_depth: u64,
-    ) -> Result<AccountedVec<DepthUpdate>, ResourceGraphError> {
-        let mut states =
-            graph_scratch_vec(host, self.nodes.len(), "resource-graph-depth-visit-state")?;
-        for _ in 0..self.nodes.len() {
-            charge_graph_work(host, 1)?;
-            states.push_reserved_infallible(0_u8);
-        }
-        // Pending visits include repeated outgoing edges as well as one expansion per node.
-        let stack_capacity = self
-            .nodes
-            .len()
-            .checked_add(self.relations.len())
-            .and_then(|count| count.checked_add(1))
-            .ok_or(ResourceGraphError::Overflow)?;
-        let mut stack = graph_scratch_vec(host, stack_capacity, "resource-graph-depth-stack")?;
-        stack.push_reserved_infallible((target, false));
-        let mut postorder =
-            graph_scratch_vec(host, self.nodes.len(), "resource-graph-depth-postorder")?;
-
-        while let Some((index, expanded)) = stack.pop() {
-            charge_graph_work(host, 1)?;
-            if index == source {
-                return Err(ResourceGraphError::Cycle);
-            }
-            self.nodes
-                .get(index)
-                .ok_or(ResourceGraphError::DanglingNode)?;
-            if expanded {
-                states[index] = 2;
-                postorder.push_reserved_infallible(index);
-                continue;
-            }
-            match states[index] {
-                2 => continue,
-                1 => return Err(ResourceGraphError::Cycle),
-                _ => {}
-            }
-            states[index] = 1;
-            stack.push_reserved_infallible((index, true));
-            for relation in self.outgoing_relations_rev(index)? {
-                let relation = relation?;
-                charge_graph_work(host, 1)?;
-                if let GraphRelationOutcome::Available { target } = &relation.outcome {
-                    match states.get(*target).copied() {
-                        Some(0) => stack.push_reserved_infallible((*target, false)),
-                        Some(1) => return Err(ResourceGraphError::Cycle),
-                        Some(2) => {}
-                        _ => return Err(ResourceGraphError::DanglingNode),
-                    }
-                }
-            }
-        }
-
-        let mut proposed =
-            graph_scratch_vec(host, self.nodes.len(), "resource-graph-depth-projection")?;
-        for _ in 0..self.nodes.len() {
-            charge_graph_work(host, 1)?;
-            proposed.push_reserved_infallible(None);
-        }
-        proposed[target] = Some(target_depth);
-        let mut updates = graph_scratch_vec(host, postorder.len(), "resource-graph-depth-updates")?;
-        let maximum_depth = u64::try_from(self.limits.max_resource_graph_depth).unwrap_or(u64::MAX);
-        for &index in postorder.iter().rev() {
-            charge_graph_work(host, 1)?;
-            let depth = proposed[index].ok_or(ResourceGraphError::DanglingNode)?;
-            if depth > maximum_depth {
-                return Err(ResourceGraphError::Limit {
-                    resource: "max_resource_graph_depth",
-                    limit: maximum_depth,
-                });
-            }
-            let node = self
-                .nodes
-                .get(index)
-                .ok_or(ResourceGraphError::DanglingNode)?;
-            if depth > node.depth {
-                updates.push_reserved_infallible(DepthUpdate { index, depth });
-            }
-            let child_depth = depth.checked_add(1).ok_or(ResourceGraphError::Overflow)?;
-            for relation in self.outgoing_relations(index)? {
-                let relation = relation?;
-                charge_graph_work(host, 1)?;
-                if let GraphRelationOutcome::Available { target } = relation.outcome {
-                    let projected = proposed
-                        .get_mut(target)
-                        .ok_or(ResourceGraphError::DanglingNode)?;
-                    if projected.is_none_or(|current| child_depth > current) {
-                        *projected = Some(child_depth);
-                    }
-                }
-            }
-        }
-        Ok(updates)
-    }
-
-    fn apply_depth_updates(
-        &mut self,
-        host: ImportStoreHost<'_>,
-        updates: &[DepthUpdate],
-    ) -> Result<(), ResourceGraphError> {
-        for update in updates {
-            charge_graph_work(host, 1)?;
-            let node = self
-                .nodes
-                .get_mut(update.index)
-                .ok_or(ResourceGraphError::DanglingNode)?;
-            node.depth = node.depth.max(update.depth);
-            self.maximum_depth = self.maximum_depth.max(node.depth);
-        }
-        Ok(())
     }
 
     fn postorder(
@@ -1916,6 +1875,8 @@ fn charge_consumed(
 }
 
 fn charge_graph_work(host: ImportStoreHost<'_>, amount: u64) -> Result<(), ResourceGraphError> {
+    host.poll()
+        .map_err(|cause| ResourceGraphError::Scope(cause.into_scope_abort_cause()))?;
     charge_attempted(host, ImportDimension::ResourceGraphWork, amount)?;
     charge_consumed(host, ImportDimension::ResourceGraphWork, amount)
 }
@@ -1990,20 +1951,6 @@ fn manifest_output_vec<T>(
                 u64::from(bytes != 0),
             )
             .map_err(|cause| cause.into_scope_abort_cause())
-        })
-        .map_err(ResourceGraphError::Scope)?;
-    Ok(values)
-}
-
-fn graph_scratch_vec<T>(
-    host: ImportStoreHost<'_>,
-    capacity: usize,
-    resource: &'static str,
-) -> Result<AccountedVec<T>, ResourceGraphError> {
-    let mut values = AccountedVec::new();
-    values
-        .try_reserve_capacity(capacity, resource, |bytes| {
-            reserve_graph_storage(host, bytes)
         })
         .map_err(ResourceGraphError::Scope)?;
     Ok(values)
@@ -2129,6 +2076,9 @@ mod tests {
     };
 
     mod accounting;
+    #[path = "depth.rs"]
+    mod depth_tests;
+    mod growth;
     mod hashing;
 
     fn store_owner(limits: &ResourceLimits) -> ImportStoreSessionOwner {
@@ -2217,6 +2167,7 @@ mod tests {
             last_outgoing: None,
             outgoing_count: 0,
             depth: 0,
+            depth_visit: depth::DepthVisit::default(),
             _path_reservations: [None, None],
         }
     }

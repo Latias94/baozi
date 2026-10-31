@@ -12,6 +12,7 @@ use baozi_io::__semantic_identity::{
 use baozi_io::{AssetIo, AssetOpenErrorKind, AssetPath, AssetReadErrorKind, AuthorityDomain};
 use baozi_operation::{CapacityPlan, CapacityPlanError, LedgerCause, ReplacementCapacityPlan};
 use std::collections::hash_map::RandomState;
+use std::convert::Infallible;
 use std::error::Error;
 use std::fmt;
 use std::hash::{BuildHasher, Hash};
@@ -821,6 +822,35 @@ impl DependencyCache {
         Some((index, &record.entry))
     }
 
+    /// Looks up a record with one interruptible graph-work action per examined slot.
+    /// Callers still decide whether the record's acquisition state is usable.
+    pub(crate) fn controlled_record_index(
+        &self,
+        host: ImportStoreHost<'_>,
+        identity: &DependencyIdentity,
+    ) -> Result<Option<usize>, ScopeAbortCause> {
+        let probe = DependencyIndex::try_probe_slots(
+            &self.index.slots,
+            &self.index.hash_builder,
+            identity,
+            |record_index| {
+                self.entries
+                    .get(record_index)
+                    .and_then(DependencyCacheRecordSlot::record)
+                    .is_some_and(|record| &record.identity == identity)
+            },
+            || {
+                host.poll()
+                    .map_err(|cause| cause.into_scope_abort_cause())?;
+                host.charge_attempted(ImportDimension::ResourceGraphWork, 1)
+                    .map_err(|cause| cause.into_scope_abort_cause())?;
+                host.charge_consumed(ImportDimension::ResourceGraphWork, 1)
+                    .map_err(|cause| cause.into_scope_abort_cause())
+            },
+        )?;
+        Ok(probe.record_index)
+    }
+
     pub(crate) fn capacity_plan(
         &self,
     ) -> Result<DependencyCacheCapacityPlan, DependencyCacheCapacityError> {
@@ -1245,46 +1275,62 @@ impl DependencyIndex {
         slots: &[usize],
         hash_builder: &RandomState,
         identity: &DependencyIdentity,
-        mut matches: impl FnMut(usize) -> bool,
+        matches: impl FnMut(usize) -> bool,
     ) -> DependencyIndexProbe {
+        match Self::try_probe_slots(slots, hash_builder, identity, matches, || {
+            Ok::<(), Infallible>(())
+        }) {
+            Ok(probe) => probe,
+            Err(never) => match never {},
+        }
+    }
+
+    fn try_probe_slots<E>(
+        slots: &[usize],
+        hash_builder: &RandomState,
+        identity: &DependencyIdentity,
+        mut matches: impl FnMut(usize) -> bool,
+        mut before_probe: impl FnMut() -> Result<(), E>,
+    ) -> Result<DependencyIndexProbe, E> {
         if slots.is_empty() {
-            return DependencyIndexProbe::empty();
+            return Ok(DependencyIndexProbe::empty());
         }
         debug_assert!(slots.len().is_power_of_two());
         let mask = slots.len() - 1;
         let mut slot = hash_builder.hash_one(identity) as usize & mask;
         let mut first_tombstone = None;
         for probes in 1..=slots.len() {
+            before_probe()?;
             match slots[slot] {
                 DEPENDENCY_INDEX_EMPTY => {
-                    return DependencyIndexProbe {
+                    return Ok(DependencyIndexProbe {
                         record_index: None,
                         matched_slot: None,
                         insertion_slot: Some(first_tombstone.unwrap_or(slot)),
                         _probes: probes,
-                    };
+                    });
                 }
                 DEPENDENCY_INDEX_TOMBSTONE => {
                     first_tombstone.get_or_insert(slot);
                 }
                 record_index if matches(record_index) => {
-                    return DependencyIndexProbe {
+                    return Ok(DependencyIndexProbe {
                         record_index: Some(record_index),
                         matched_slot: Some(slot),
                         insertion_slot: None,
                         _probes: probes,
-                    };
+                    });
                 }
                 _ => {}
             }
             slot = (slot + 1) & mask;
         }
-        DependencyIndexProbe {
+        Ok(DependencyIndexProbe {
             record_index: None,
             matched_slot: None,
             insertion_slot: first_tombstone,
             _probes: slots.len(),
-        }
+        })
     }
 
     fn occupy(&mut self, slot: usize, record_index: usize) {
@@ -1878,6 +1924,63 @@ mod tests {
         assert!(insertion_probes < ENTRY_COUNT * 16);
         assert!(lookup_probes < ENTRY_COUNT * 16);
         assert!(lookup_probes < linear_scan_probes / 128);
+    }
+
+    #[test]
+    fn dependency_index_budget_rejection_stops_before_the_next_candidate_comparison() {
+        let identity = indexed_identity(&AuthorityDomain::new(), "budget", 0);
+        let hash_builder = RandomState::new();
+        let mut slots = [DEPENDENCY_INDEX_EMPTY; 8];
+        let mask = slots.len() - 1;
+        let first = hash_builder.hash_one(&identity) as usize & mask;
+        // Three occupied slots force a known collision chain regardless of the random seed.
+        for offset in 0..3 {
+            slots[(first + offset) & mask] = offset;
+        }
+
+        for completed in [0_u64, 1, 2] {
+            let store = StoreHarness::new();
+            let host = store.host();
+            host.tighten_dimension_policy(
+                ImportDimension::ResourceGraphWork,
+                baozi_operation::DimensionPolicy::counter(u64::MAX, completed, 0),
+            )
+            .unwrap();
+            let mut comparisons = 0_u64;
+            let result = DependencyIndex::try_probe_slots(
+                &slots,
+                &hash_builder,
+                &identity,
+                |_| {
+                    comparisons += 1;
+                    false
+                },
+                || {
+                    host.charge_attempted(ImportDimension::ResourceGraphWork, 1)
+                        .map_err(|cause| cause.into_scope_abort_cause())?;
+                    host.charge_consumed(ImportDimension::ResourceGraphWork, 1)
+                        .map_err(|cause| cause.into_scope_abort_cause())
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                    dimension: ImportDimension::ResourceGraphWork,
+                    class: baozi_operation::CounterClass::Consumed,
+                    value,
+                    limit,
+                })) if value == completed + 1 && limit == completed
+            ));
+            assert_eq!(comparisons, completed);
+            let work = host
+                .dimension_state(ImportDimension::ResourceGraphWork)
+                .unwrap();
+            assert_eq!(work.attempted(), completed + 1);
+            // The ledger retains the failing consumed charge before reporting its limit;
+            // before_probe still rejects it before the next slot or candidate is read.
+            assert_eq!(work.consumed(), completed + 1);
+            store.assert_released();
+        }
     }
 
     #[test]

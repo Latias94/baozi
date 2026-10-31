@@ -6,6 +6,11 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Reused the dependency cache's identity index for resource-graph lookup and replaced per-reference
+  full-graph depth scratch with constant-work unchanged-depth admission and a reachable-region
+  planner. Graph commits now validate prepared-plan freshness and finish control, allocation,
+  and accounting before writing nodes, links, and depth updates. Added resource sharing and
+  deep/wide node growth regression coverage with actual work counters.
 - Added allocation-free `AttributeRef::element` reads and `postprocess::triangle_vertices` for
   building application buffers from complete draw-order tuples. Vertex/Corner/Face fields keep
   their original keys, scalar types, sparse defaults, and Scene borrows; influences and morph

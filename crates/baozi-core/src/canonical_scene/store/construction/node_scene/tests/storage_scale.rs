@@ -406,6 +406,149 @@ fn independent_indexed_primitive_buffers_scale() {
 }
 
 #[test]
+fn deep_and_wide_node_pipeline_work_scales_linearly() {
+    for deep in [true, false] {
+        let shape = if deep { "deep" } else { "wide" };
+        let mut previous_work: Option<[u64; 2]> = None;
+        for count in [256_usize, 1_024, 4_096] {
+            let factory = test_factory();
+            let account = test_account(&factory, u64::MAX);
+            // Fixed-width names keep per-node text work constant across all sizes.
+            let names: Vec<_> = (0..count).map(|local| format!("node-{local:04}")).collect();
+            let roots = [NodeLocalId::new(u32::try_from(count - 1).unwrap())];
+            let node_rows: Vec<_> = (0..count)
+                .map(|local| {
+                    let parent = if local + 1 == count {
+                        Presence::Absent
+                    } else if deep {
+                        // The root is last: resolving local zero discovers the entire chain.
+                        parent(u32::try_from(local + 1).unwrap(), 0)
+                    } else {
+                        // Child order intentionally opposes producer-local node order.
+                        parent(
+                            u32::try_from(count - 1).unwrap(),
+                            u32::try_from(count - 2 - local).unwrap(),
+                        )
+                    };
+                    NodeAuthoringNode::new(
+                        parent,
+                        AuthoredTransform::identity_trs(),
+                        Presence::Absent,
+                        Presence::Absent,
+                    )
+                    .with_name(names[local].as_str())
+                })
+                .collect();
+            let inspect = |scene: &ValidatedScene, changed: bool| {
+                assert_eq!(scene.node_count(), count);
+                assert_eq!(scene.root_count(), 1);
+                let root = scene.roots().next().unwrap();
+                let check_node = |node: crate::NodeRef<'_>, local: usize| {
+                    assert_eq!(node.name(), Some(names[local].as_str()));
+                    let expected = if changed && local == 0 {
+                        trs_transform(42.0)
+                    } else {
+                        AuthoredTransform::identity_trs()
+                    };
+                    assert!(node.authored_transform().has_same_authored_bits(expected));
+                };
+                let mut edges = 0;
+                let mut maximum_depth = 2; // Includes the synthetic root above the source root.
+                let mut target = root.id();
+                if deep {
+                    let mut current = root;
+                    for local in (0..count).rev() {
+                        check_node(current, local);
+                        target = current.id();
+                        let mut children = current.children();
+                        assert_eq!(children.len(), usize::from(local != 0));
+                        if let Some(child) = children.next() {
+                            current = child;
+                            edges += 1;
+                            maximum_depth += 1;
+                        }
+                    }
+                } else {
+                    check_node(root, count - 1);
+                    let children = root.children();
+                    assert_eq!(children.len(), count - 1);
+                    for (ordinal, child) in children.enumerate() {
+                        check_node(child, count - 2 - ordinal);
+                        assert_eq!(child.children().len(), 0);
+                        target = child.id();
+                        edges += 1;
+                        maximum_depth = 3;
+                    }
+                }
+                assert_eq!(edges, count - 1);
+                assert_eq!(maximum_depth, if deep { count + 1 } else { 3 });
+                target
+            };
+            let (parts, allocations) = measured_scene(
+                &account,
+                NodeAuthoringBatch::new(Presence::Present(&roots), &node_rows),
+                AppearanceAuthoringBatch::empty(),
+                GeometryAuthoringBatch::empty(),
+                DeformationAuthoringBatch::empty(),
+                MetadataAuthoringBatch::empty(),
+            );
+            let build_work = record_measurement(
+                &format!("nodes-{shape}/{count}/build"),
+                parts.report.ledger_evidence(),
+                allocations,
+                &account,
+            );
+            let source = ValidatedScene::from_node_scene(parts.scene);
+            // Follow published children to obtain the actual ID after canonical reordering.
+            let target = inspect(&source, false);
+            let (terminal, allocations) = measured_edit(&source, target.index());
+            let NodeSceneEditTerminal::Success(edited) = terminal else {
+                panic!("{shape}/{count}: node transform edit must publish");
+            };
+            let edit_work = record_measurement(
+                &format!("nodes-{shape}/{count}/edit"),
+                edited.report.ledger_evidence(),
+                allocations,
+                &account,
+            );
+            let destination = ValidatedScene::from_node_scene(edited.scene);
+            assert_ne!(source.generation(), destination.generation());
+            inspect(&source, false);
+            inspect(&destination, true);
+
+            drop(source);
+            drop(parts.report);
+            // Read the complete edited hierarchy after releasing the source generation first.
+            inspect(&destination, true);
+            assert!(!account.snapshot().poisoned());
+            drop(destination);
+            drop(edited.report);
+            assert_account_released(&account);
+            assert!(!account.snapshot().poisoned());
+            assert_eq!(account.snapshot().poison_event_count(), 0);
+
+            assert!(build_work > 0 && edit_work > 0);
+            if let Some([previous_build, previous_edit]) = previous_work {
+                for (operation, work, previous) in [
+                    ("build", build_work, previous_build),
+                    ("edit", edit_work, previous_edit),
+                ] {
+                    assert!(
+                        work > previous,
+                        "{shape}/{count}/{operation}: consumed work {work} must exceed {previous}"
+                    );
+                    assert!(
+                        work <= previous.checked_mul(4).unwrap(),
+                        "{shape}/{count}/{operation}: consumed work {work} must not exceed 4 * {previous}"
+                    );
+                }
+            }
+            previous_work = Some([build_work, edit_work]);
+        }
+    }
+}
+
+#[test]
 #[ignore = "manual 8 MiB shared-payload node-transform allocation pilot"]
 fn shared_eight_mib_points_payload_node_edit_scale() {
     // Three F32 coordinates and one U32 index per point: exactly 8 MiB total.
