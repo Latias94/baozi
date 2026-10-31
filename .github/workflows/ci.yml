@@ -161,6 +161,8 @@ jobs:
               throw "native IO candidate failed for $targetTriple without the fail-closed diagnostic"
             }
           }
+          # Every nonzero Cargo status above was expected and its diagnostic verified.
+          exit 0
 
       - name: Check crate dependency architecture
         run: cargo run --locked -p baozi-xtask -- crate-graph-check

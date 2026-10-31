@@ -29,7 +29,11 @@ volume_name.restype = wintypes.BOOL
 mode, mount_arg, outside_arg = sys.argv[1:]
 mount = Path(mount_arg).absolute()
 assert mount.name == "volume" and mount.parent.name.startswith("baozi-io-volume-root-")
-assert mount.parent.resolve(strict=True) == mount.parent
+# Runner temp paths can contain aliases. Resolve the owned parent, never the
+# mount leaf: in clear mode the leaf already points at the volume root.
+owned_root = mount.parent.resolve(strict=True)
+assert owned_root.name.startswith("baozi-io-volume-root-") and owned_root.is_dir()
+mount = owned_root / mount.name
 assert mode in ("create", "clear")
 if mode == "create":
     assert not mount.is_symlink() and mount.is_dir() and not any(mount.iterdir())

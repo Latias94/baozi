@@ -942,56 +942,63 @@ mod tests {
         let secret = outside.path().join("secret-\u{03c0}.bin");
         fs::write(&secret, b"outside volume bytes").expect("write outside fixture");
         fs::write(root.path().join("ordinary.bin"), b"inside bytes").expect("write inside fixture");
-        let mount = root.path().join("volume");
-        fs::create_dir(&mount).expect("create empty owned mount directory");
-        let created = std::process::Command::new("python")
-            .args(["-X", "utf8"])
-            .arg("-c")
-            .arg(include_str!("fs/tests/windows_volume.py"))
-            .arg("create")
-            .arg(&mount)
-            .arg(&secret)
-            .output()
-            .expect("Windows candidate runner must provide Python for volume fixtures");
-        assert!(
-            created.status.success(),
-            "actual volume fixture/readback failed: {}",
-            String::from_utf8_lossy(&created.stderr)
-        );
-        let mut fixture = VolumeFixture {
-            path: mount,
-            active: true,
-        };
-        let relative = std::str::from_utf8(&created.stdout)
-            .expect("portable fixture path")
-            .trim();
-        let path = AssetPath::new(format!("volume/{relative}")).expect("logical volume path");
-        let io = FileSystemAssetIo::from_capability(
-            NativeDirectoryCapability::open_ambient(root.path()).expect("open retained root"),
-        );
-        assert_eq!(
-            read_all(io.open(&AssetPath::new("ordinary.bin").unwrap()).unwrap()),
-            b"inside bytes"
-        );
-        assert!(io.open_work_bound(&path).is_ok());
-        assert!(
-            io.open(&path).is_err(),
-            "volume GUID mount escaped the retained root"
-        );
-        drop(io);
-        fixture
-            .clear()
-            .expect("clear the owned volume reparse fixture");
-        assert_eq!(
-            fs::read(secret).expect("outside bytes remain"),
-            b"outside volume bytes"
-        );
-        assert!(
-            !fs::symlink_metadata(root.path().join("volume"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        let aliases = TempRoot::new("volume-alias");
+        let alias = aliases.path().join(root.path().file_name().unwrap());
+        create_junction(root.path(), &alias).expect("create owned volume-root alias");
+        for fixture_root in [root.path(), alias.as_path()] {
+            let mount = fixture_root.join("volume");
+            fs::create_dir(&mount).expect("create empty owned mount directory");
+            let created = std::process::Command::new("python")
+                .args(["-X", "utf8"])
+                .arg("-c")
+                .arg(include_str!("fs/tests/windows_volume.py"))
+                .arg("create")
+                .arg(&mount)
+                .arg(&secret)
+                .output()
+                .expect("Windows candidate runner must provide Python for volume fixtures");
+            assert!(
+                created.status.success(),
+                "actual volume fixture/readback failed: {}",
+                String::from_utf8_lossy(&created.stderr)
+            );
+            let mut fixture = VolumeFixture {
+                path: mount,
+                active: true,
+            };
+            let relative = std::str::from_utf8(&created.stdout)
+                .expect("portable fixture path")
+                .trim();
+            let path = AssetPath::new(format!("volume/{relative}")).expect("logical volume path");
+            let io = FileSystemAssetIo::from_capability(
+                NativeDirectoryCapability::open_ambient(fixture_root).expect("open retained root"),
+            );
+            assert_eq!(
+                read_all(io.open(&AssetPath::new("ordinary.bin").unwrap()).unwrap()),
+                b"inside bytes"
+            );
+            assert!(io.open_work_bound(&path).is_ok());
+            assert!(
+                io.open(&path).is_err(),
+                "volume GUID mount escaped the retained root"
+            );
+            drop(io);
+            fixture
+                .clear()
+                .expect("clear the owned volume reparse fixture");
+            assert_eq!(
+                fs::read(&secret).expect("outside bytes remain"),
+                b"outside volume bytes"
+            );
+            assert!(
+                !fs::symlink_metadata(fixture_root.join("volume"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            fs::remove_dir(fixture_root.join("volume")).expect("remove cleared mount directory");
+        }
+        fs::remove_dir(&alias).expect("remove the owned volume-root alias");
     }
 
     #[cfg(windows)]

@@ -153,6 +153,23 @@ fn tty_path() {
     #[cfg(unix)]
     use std::os::unix::fs::FileTypeExt;
 
+    fn assert_file_path_identity(file: &std::fs::File, path: &str) {
+        let recovered = file_path(file).expect("the opened device has a file path");
+        let reopened = std::fs::File::open(&recovered).expect("reopen the recovered device path");
+        assert!(
+            is_same_file(file, &reopened).unwrap(),
+            "for path {path}, file_path {recovered:?} identifies the opened device"
+        );
+    }
+
+    // Keep positive coverage even without a controlling tty, and distinguish
+    // devices so returning an unrelated path (such as always /dev/null) fails.
+    let null = std::fs::File::open("/dev/null").unwrap();
+    let zero = std::fs::File::open("/dev/zero").unwrap();
+    assert!(!is_same_file(&null, &zero).unwrap());
+    assert_file_path_identity(&null, "/dev/null");
+    assert_file_path_identity(&zero, "/dev/zero");
+
     let paths: &[&str] = if cfg!(target_os = "freebsd") {
         // On FreeBSD, /dev/{tty,stdin,stdout,stderr} are aliases to different
         // real devices.
@@ -170,15 +187,10 @@ fn tty_path() {
         // OS's use for stdin/stdout/stderr.
         if let Ok(file) = std::fs::File::open(path) {
             if !file.metadata().unwrap().file_type().is_fifo() {
-                if let Ok(canonical) = std::fs::canonicalize(path) {
-                    assert_eq!(
-                        file_path(&file)
-                            .as_ref()
-                            .map(std::fs::canonicalize)
-                            .map(Result::unwrap),
-                        Some(canonical),
-                        "for path {path}, file_path matches canonicalized path"
-                    );
+                if std::fs::canonicalize(path).is_ok() {
+                    // /dev/stdin may canonicalize to /dev/fd/0 while the
+                    // descriptor's actual object has another name.
+                    assert_file_path_identity(&file, path);
                 }
             }
         }

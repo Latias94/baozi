@@ -1958,3 +1958,47 @@ actual checks, and [native admission](../research/native-filesystem-bound-handle
 records the platform distinction. Exact RSS, sustained fuzz coverage, full target promotion, and
 registry publication readiness are not inferred from these local results. The delivery goal remains
 active until its required remaining behavior has actually been qualified.
+
+## Public Report Consumption and First Hosted CI (2026-10-31)
+
+The completion audit identified one remaining C/H public boundary: report getters returned loss,
+source-scope and resource-dimension values that an application could inspect through inference but
+could not name through `baozi`. The facade now exports the ordinary report-reading vocabulary,
+including the independent `ImportEvidence` owner, typed loss subjects/dispositions, diagnostics,
+source selection/counts, text-profile policies and `ImportDimensionSnapshot`. The latter is also
+exported from `baozi-import`; its private fields and read-only snapshot semantics are preserved.
+
+The maintained independent consumer now requires a strict partial-UV OBJ rejection, explicitly
+authorizes `SourceSemanticLoss`, and verifies the applied loss's exact code, source, subject and
+disposition. Typed reads require preserved positions, indices and complete Corner normals with
+no UV channel. After dropping the Scene, it reads the separately retained loss/diagnostic and
+resource evidence. The glTF/GLB consumer additionally checks selected source scene 1 and five
+selected/one omitted nodes. Its application-owned error boundary uses a boxed standard error;
+the library's allocation-free terminal error transport is unchanged.
+
+With explicit user authorization, branch `refactor/baozi-canonical-architecture` was pushed and
+[draft PR #3](https://github.com/Latias94/baozi/pull/3) opened. The first hosted
+[run 41196335613](https://github.com/Latias94/baozi/actions/runs/41196335613) records `b8ab176` results:
+all four twelve-case Windows/Apple package matrices execute successfully, including actual Apple
+ARM64 Rust 1.95.0/debug and 1.99.1/release. Linux native runtime/backend/repository pass 21/18/39
+tests with no skips, and each of the five ASan jobs records `Done 256 runs`. Those results precede
+the added public-report assertions above and do not qualify them by implication.
+
+That run also exposed four concrete test/runner defects: a Darwin device-path spelling assertion,
+a Windows temporary-root alias assumption, a ten-second timeout for a repeated-import cancellation
+fixture, and an expected negative Cargo exit leaking out of a successful PowerShell assertion loop.
+The repairs retain object-identity checks (including distinct `/dev/null` and `/dev/zero` controls),
+exercise the real volume mount through both direct and junction paths, give only the existing
+4,097-item cancellation case a thirty-second ceiling, and explicitly return success only after all
+negative-target assertions pass. No test is ignored and no production containment policy changes.
+The repaired Apple backend and complete hosted acceptance still require the next current-source
+run; draft creation and the first run alone do not close that item or promote native support.
+
+Local Rust 1.95.0 checks after these repairs execute independent `empty`, `obj` and `all` consumers,
+and pass strict facade and standalone-consumer Clippy. The updated nextest configuration runs all
+24 `node_graph` cases without skips; the large cancellation case completes in 4.421 seconds.
+Windows native runtime/repository pass 20/30 without skips, including both actual mount spellings.
+The corrected vendored backend's Apple library/tests cross-check passes; this remains compilation
+evidence only. Six controlled PowerShell subprocess probes preserve success and each rejection
+route, and actionlint, formatting and `git diff --check` pass. Actual hosted negative-target Cargo
+checks and the remaining Apple execution still belong to the following run.
