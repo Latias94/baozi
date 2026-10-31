@@ -1,28 +1,43 @@
 #![forbid(unsafe_code)]
 
-//! Runtime-neutral asset IO contracts for Baozi importers.
+//! Runtime-neutral, capability-bound asset IO contracts.
 
-#[cfg(feature = "fs")]
-pub mod fs;
-pub mod limits;
-pub mod memory;
-pub mod path;
+mod error;
+mod immutable_memory;
+mod memory;
+mod path;
+mod resource;
+mod semantic_identity;
 
-#[cfg(feature = "fs")]
-pub use fs::FileSystemAssetIo;
-pub use limits::ResourceLimits;
+pub use error::{
+    AssetObjectKind, AssetOpenError, AssetOpenErrorKind, AssetOpenStage,
+    AssetReadContractViolation, AssetReadError, AssetReadErrorKind, ImmutableMemoryAssetBuildError,
+    MemoryAssetInsertError, PathError, PathErrorCode,
+};
+pub use immutable_memory::ImmutableMemoryAssetIo;
 pub use memory::MemoryAssetIo;
-pub use path::{AssetPath, AssetScope, AssetUri};
-
-use baozi_core::Result;
-use std::io::{Read, Seek};
-
-pub trait ReadSeek: Read + Seek {}
-
-impl<T> ReadSeek for T where T: Read + Seek {}
-
-pub trait AssetIo: Send + Sync {
-    fn open(&self, path: &AssetPath) -> Result<Box<dyn ReadSeek + Send>>;
-    fn exists(&self, path: &AssetPath) -> bool;
-    fn resolve(&self, base: &AssetPath, relative: &str) -> Result<AssetPath>;
+pub use path::AssetPath;
+pub use resource::{
+    AssetIo, AssetLength, AssetOpenWorkError, AssetReader, AuthorityDomain, OpenedAsset,
+};
+/// Stable asset-IO semantic registry used by import's deep resource graph module.
+///
+/// This is intentionally hidden from the ordinary root API. Importers may provide a custom
+/// resolver, but only the import session can decide whether a registered profile is admitted into
+/// a successful-input manifest.
+#[doc(hidden)]
+pub mod __semantic_identity {
+    pub use crate::semantic_identity::{
+        CanonicalizationProfileId, NamespaceSemanticsId, NegativeProofDigestAlgorithm,
+        NegativeProofResourceCaps, NegativeProofSchemeId, NegativeProofSchemeSemanticSubject,
+        NegativeProofSubjectKind, NegativeProofValidityRuleId, NormalizedReference,
+        ReferenceNormalizerContractId, ReferenceNormalizerSemanticSubject,
+        RegisteredAssetResolution, RegisteredNegativeProofError, RegisteredNegativeProofPlan,
+        RegisteredNegativeProofScheme, RegisteredReferenceNormalizer, RegisteredResolutionError,
+        RegisteredResolverProfile, RegisteredUnavailableCause, ResolverContractId,
+        ResolverSemanticSubject, SemanticParameterSchema, StableResourceIdentity,
+        StableResourceIdentitySchema, VerifiedNegativeInputProof,
+        VerifiedNegativeInputProofBinding, immutable_memory_namespace_absence_v1,
+        portable_asset_path_normalizer_v1, same_authority_resolver_v1,
+    };
 }

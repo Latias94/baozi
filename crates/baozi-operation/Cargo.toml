@@ -1,0 +1,16 @@
+[package]
+name = "baozi-operation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/baozi-operation"
+authors.workspace = true
+description = "Runtime-neutral operation control, resource accounting, and retained-storage support for Baozi"
+readme = "README.md"
+
+[dependencies]
+triomphe.workspace = true
+scopeguard.workspace = true

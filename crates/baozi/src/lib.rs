@@ -1,213 +1,109 @@
 #![forbid(unsafe_code)]
 
 //! Public Baozi facade.
+//!
+//! Custom [`AssetIo`] backends and [`DependencyResolver`] policies use the types re-exported
+//! here. Implementing format parsers additionally requires `baozi_import` for parser scopes,
+//! option codecs, descriptor construction, and Scene authoring contracts.
 
-pub use baozi_core::*;
+mod error;
+mod importer;
+
+pub use error::{Error, Result};
+pub use importer::{Importer, ImporterBuilder};
+
+/// Explicit, controlled operations on immutable validated Scenes.
+#[cfg(feature = "postprocess")]
+pub use baozi_postprocess as postprocess;
+
+pub use baozi_core::{
+    Aabb, Color, FormatId, FormatIdError, Mat4, Quat, SceneGenerationId, Vec2, Vec3, Vec4,
+};
+pub use baozi_core::{
+    AlphaCutoff, AlphaMode, ColorInterpretation, ExtensionSchemaId, ExtensionSchemaIdError,
+    LegacyMaterialFactors, MaterialFactorError, MaterialFactorField, MaterialFactors,
+    NamespacedName, NamespacedNameError, PbrMetallicRoughnessFactors, PbrSpecularGlossinessFactors,
+    ShadingModel, SupplementalPbrFactors, TextureBlendOperation, TextureChannel,
+    TextureChannelSwizzle, TextureRole, TextureStrength, TextureTransform,
+};
+pub use baozi_core::{
+    AnimationChannelRef, AnimationClipId, AnimationClipRef, AnimationExtrapolation,
+    AnimationInterpolation, AnimationTarget, AnimationTimeDomain,
+};
+pub use baozi_core::{
+    AppearanceBuildResource, AppearanceLimitDimension, EntityNameError, MaterialFactorGroup,
+    SceneAnimationRateKind, SceneAnimationSamplePart, SceneAnimationTarget, SceneAppearanceRule,
+    SceneAuthoredProfileOwner, SceneInputCollection, SceneLightEmissionRule, SceneProfileOwner,
+    SceneValidationDomain, SceneValidationError, SceneValidationLimit, TextureStrengthRequirement,
+};
+pub use baozi_core::{
+    AttributeData, AttributeDomain, AttributeElement, AttributeRef, AttributeSemantic,
+    AttributeSemanticKind, AttributeSemanticRef, AuthoredTransform, AuthoredTransformError,
+    AuthoredTransformKind, Axis, CameraId, CameraProjection, CameraRef, CustomAttributeSemantic,
+    FrontFaceWinding, Handedness, ImageId, ImageRef, LightId, LightKind, LightRef, LogicalMeshId,
+    LogicalMeshRef, MaterialBindingRef, MaterialId, MaterialRef, MeshInstanceId, MeshInstanceRef,
+    MipmapFilter, NodeChildren, NodeId, NodeRef, PrimitiveId, PrimitiveRef, SamplerId, SamplerRef,
+    SamplerState, SceneEntityKind, SceneLookupError, SceneSpaceRef, TangentBasisRef,
+    TangentEncodingRef, TexelFilter, TextureAddressMode, TextureId, TextureRef, TopologyKind,
+    TrsTransform, UvOrigin,
+};
+pub use baozi_core::{
+    CameraProjectionError, LightDefinition, LightEmissionError, LightError, LightKindCategory,
+    LocalAxes, LocalAxesError, LocalAxis, OrthographicProjection, PerspectiveProjection,
+};
+pub use baozi_core::{
+    ConventionValue, NumericConversionError, SceneSpace, SceneSpaceField,
+    SceneSpaceValidationError, SourceSpaceError, TangentBasisConvention, TangentHandednessEncoding,
+    TargetSpace,
+};
+pub use baozi_core::{
+    InfluenceRef, InfluenceRowRef, InfluenceRows, MorphDeltaData, MorphDeltaRef,
+    MorphDeltaSemantic, MorphTargetDefinitionRef, MorphTargetId, MorphTargetRef, SkinId,
+    SkinMatrixCorrection, SkinMatrixCorrectionError, SkinMatrixSpace, SkinMatrixSpaces, SkinRef,
+};
 pub use baozi_import::{
-    CapabilityStatus, DetectionOptions, DiagnosticOptions, ExternalReferencePolicy,
-    FormatCapability, FormatEncoding, FormatInfo, FormatMaturity, FormatSidecarPolicy,
-    ImportOptions, ImportReport, ImportStage, ImportStats, IoOptions,
+    AuthorizedDependency, CapabilityStatus, CauseOwner, ConformancePolicy,
+    DeclarationEvidenceAuthority, DependencyCacheDisposition, DependencyFailureContext,
+    DependencyIdentity, DependencyPolicyError, DependencyReference, DependencyRequirement,
+    DependencyResolver, DependencyRoleId, DependencyRoleIdError, DetectionEvidence,
+    DetectionFailure, DetectionFault, DetectionFaultCode, DetectionInconclusive, DetectionOptions,
+    DetectionOptionsError, DetectionOutcome, DiagnosticByteRange, DiagnosticCause, DiagnosticCode,
+    DiagnosticDetail, DiagnosticDetailValue, DiagnosticLineColumn, DiagnosticSeverity,
+    DiagnosticSummary, FormatCapability, FormatDescriptor, FormatEncoding, FormatFailureDetail,
+    FormatFailureDetailValue, FormatFailureEnvelope, FormatFailureEvidence, FormatImporter,
+    FormatOptionEnvelope, FormatOptionEnvelopeError, FormatOptionSchemaId,
+    FormatOptionSchemaIdError, FormatOptionSchemaKey, FormatSelection, FormatUnavailability,
+    ImportCause, ImportConfig, ImportConfigOverlay, ImportDiagnostic, ImportDimension,
+    ImportDimensionSnapshot, ImportEvidence, ImportFailure, ImportInitializationError,
+    ImportLedgerPhase, ImportLedgerSnapshot, ImportLossDisposition, ImportLossEvidence,
+    ImportLossKind, ImportLossSubject, ImportOperationControl, ImportPhase, ImportPhaseEvidence,
+    ImportPreset, ImportProgressPhase, ImportProgressUnit, ImportReport, ImportRequest,
+    ImportRequestBuildError, ImportRequestLayer, ImportRunError, ImportTerminalCause,
+    ImportTerminalFailure, ImportTerminalFailureClass, InputReplayStatus, LossPolicy,
+    ManifestDigest, ManifestNamespaceSnapshotProof, ManifestNodeClass, ManifestObservedOnlyReason,
+    ManifestObservedOnlyReasons, ManifestPerReferenceProof, ManifestReference, ManifestRelation,
+    ManifestRelationOutcome, ManifestResourceIdentity, ManifestResourceIdentityStability,
+    ManifestSemanticIdentity, ManifestSessionDependentReason, ManifestSessionOpaqueReason,
+    ManifestUnavailableClass, ManifestUnavailableCode, ManifestUnavailableReplay,
+    OptionCompileLimits, OptionScopeLimits, OptionalDependencyEvidence, PreparedImportRequest,
+    ReadConfidence, RegistryBuildError, RegistryBuildLimits, RegistryRegistrationError,
+    RequestError, ResourceLimits, ResourceLimitsOverlay, ResourceManifestCounts, SceneSnapshot,
+    SceneSnapshotError, SceneSnapshotLimits, ScopeAbort, ScopeAbortCause, SourceScopeCounts,
+    SourceScopeDetail, SourceScopeDetailState, SourceScopeDetails, SourceScopeDigest,
+    SourceScopeDisposition, SourceScopeDocumentIdentity, SourceScopeEntityKind, SourceScopeRecord,
+    SourceScopeSelectionOutcome, SourceScopeSourceIdentity, SuccessfulInputManifest, TextBomPolicy,
+    TextControlPolicy, TextDecodingMode, TextHardCapDimension, TextHardCaps, TextLexicalMode,
+    TextNewline, TextProfile, TextProfileBuilder, TextProfileError, TextProfileField,
+    TextSourceEncoding, TrustedExtensionBoundary, ValidatedScene,
 };
-#[cfg(feature = "native-fs")]
-pub use baozi_io::FileSystemAssetIo;
 pub use baozi_io::{
-    AssetIo, AssetPath, AssetScope, AssetUri, MemoryAssetIo, ReadSeek, ResourceLimits,
+    AssetIo, AssetLength, AssetObjectKind, AssetOpenError, AssetOpenErrorKind, AssetOpenStage,
+    AssetOpenWorkError, AssetPath, AssetReadContractViolation, AssetReadError, AssetReadErrorKind,
+    AssetReader, AuthorityDomain, ImmutableMemoryAssetBuildError, ImmutableMemoryAssetIo,
+    MemoryAssetInsertError, MemoryAssetIo, OpenedAsset, PathError, PathErrorCode,
 };
-pub use baozi_postprocess::{
-    PostProcessPipeline, PostProcessPreset, PostProcessStage, PostProcessStep,
+pub use baozi_operation::{
+    CancellationOrigin, CancellationSignal, CancellationToken, ControlCause, LedgerLimitsError,
+    ProgressDecision, ProgressDeliveryLimits, ProgressEvent, ProgressObserver,
+    ProgressStorageError, ProgressViolation,
 };
-
-use baozi_import::{FormatImporter, ImportContext, ImporterRegistry as Registry, ReadHint};
-use std::sync::Arc;
-
-#[cfg(feature = "native-fs")]
-use std::path::Path;
-
-#[derive(Default)]
-pub struct Importer {
-    registry: Registry,
-}
-
-impl Importer {
-    pub fn new() -> Self {
-        let mut importer = Self {
-            registry: Registry::new(),
-        };
-        importer.register_default_formats();
-        importer
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            registry: Registry::new(),
-        }
-    }
-
-    pub fn registry(&self) -> &Registry {
-        &self.registry
-    }
-
-    pub fn registry_mut(&mut self) -> &mut Registry {
-        &mut self.registry
-    }
-
-    pub fn register<I>(&mut self, importer: I) -> Result<()>
-    where
-        I: FormatImporter,
-    {
-        self.registry.register(importer)
-    }
-
-    pub fn read_bytes(
-        &self,
-        source: impl AsRef<str>,
-        bytes: impl AsRef<[u8]>,
-    ) -> Result<ImportReport> {
-        self.read_bytes_with_options(source, bytes, ImportOptions::memory())
-    }
-
-    pub fn read_bytes_with_options(
-        &self,
-        source: impl AsRef<str>,
-        bytes: impl AsRef<[u8]>,
-        options: ImportOptions,
-    ) -> Result<ImportReport> {
-        let bytes = bytes.as_ref();
-        if bytes.len() as u64 > options.limits.max_primary_asset_bytes {
-            return Err(BaoziError::LimitExceeded {
-                limit: "max_primary_asset_bytes",
-            });
-        }
-
-        let source = AssetPath::new(source.as_ref())?;
-        let mut io = MemoryAssetIo::new();
-        io.insert(source.clone(), Arc::<[u8]>::from(bytes));
-        self.read_asset_with_options(&io, source, options)
-    }
-
-    pub fn read_bytes_with_postprocess(
-        &self,
-        source: impl AsRef<str>,
-        bytes: impl AsRef<[u8]>,
-        options: ImportOptions,
-        pipeline: &PostProcessPipeline,
-    ) -> Result<ImportReport> {
-        let limits = options.limits.clone();
-        let report = self.read_bytes_with_options(source, bytes, options)?;
-        Self::apply_postprocess(report, pipeline, &limits)
-    }
-
-    pub fn read_asset(&self, io: &dyn AssetIo, source: AssetPath) -> Result<ImportReport> {
-        self.read_asset_with_options(io, source, ImportOptions::memory())
-    }
-
-    pub fn read_asset_with_options(
-        &self,
-        io: &dyn AssetIo,
-        source: AssetPath,
-        options: ImportOptions,
-    ) -> Result<ImportReport> {
-        let mut input = io.open(&source)?;
-        let hint = ReadHint::from_source(source.clone());
-        let selected = self
-            .registry
-            .detect_with_options(&mut *input, &hint, &options.detection)?;
-        drop(input);
-
-        let mut ctx = ImportContext::with_options(io, source, options);
-        let scene = selected.importer.read(&mut ctx)?;
-        ctx.into_report(scene, selected.info)
-    }
-
-    pub fn read_asset_with_postprocess(
-        &self,
-        io: &dyn AssetIo,
-        source: AssetPath,
-        options: ImportOptions,
-        pipeline: &PostProcessPipeline,
-    ) -> Result<ImportReport> {
-        let limits = options.limits.clone();
-        let report = self.read_asset_with_options(io, source, options)?;
-        Self::apply_postprocess(report, pipeline, &limits)
-    }
-
-    #[cfg(feature = "native-fs")]
-    pub fn read_path(&self, path: impl AsRef<Path>) -> Result<ImportReport> {
-        self.read_path_with_options(path, ImportOptions::filesystem())
-    }
-
-    #[cfg(feature = "native-fs")]
-    pub fn read_path_with_options(
-        &self,
-        path: impl AsRef<Path>,
-        options: ImportOptions,
-    ) -> Result<ImportReport> {
-        let path = path.as_ref();
-        let file_name = path
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
-            .ok_or_else(|| {
-                BaoziError::io(path.display().to_string(), "asset path has no file name")
-            })?;
-        let root = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let io = FileSystemAssetIo::new(AssetScope::new(root.to_path_buf()));
-        self.read_asset_with_options(&io, AssetPath::new(file_name)?, options)
-    }
-
-    #[cfg(feature = "native-fs")]
-    pub fn read_path_with_postprocess(
-        &self,
-        path: impl AsRef<Path>,
-        options: ImportOptions,
-        pipeline: &PostProcessPipeline,
-    ) -> Result<ImportReport> {
-        let limits = options.limits.clone();
-        let report = self.read_path_with_options(path, options)?;
-        Self::apply_postprocess(report, pipeline, &limits)
-    }
-
-    fn apply_postprocess(
-        report: ImportReport,
-        pipeline: &PostProcessPipeline,
-        limits: &ResourceLimits,
-    ) -> Result<ImportReport> {
-        report.map_scene_with_limits(ImportStage::PostProcessed, limits, |scene| {
-            let scene = pipeline.run(scene)?;
-            validate_scene(&scene)?;
-            Ok(scene)
-        })
-    }
-
-    fn register_default_formats(&mut self) {
-        #[cfg(feature = "format-stl")]
-        baozi_format_stl::register(&mut self.registry).expect("built-in format ids must be unique");
-        #[cfg(feature = "format-obj")]
-        baozi_format_obj::register(&mut self.registry).expect("built-in format ids must be unique");
-        #[cfg(feature = "format-ply")]
-        baozi_format_ply::register(&mut self.registry).expect("built-in format ids must be unique");
-        #[cfg(feature = "format-gltf")]
-        baozi_format_gltf::register(&mut self.registry)
-            .expect("built-in format ids must be unique");
-    }
-}
-
-#[cfg(feature = "native-fs")]
-pub fn load_scene(path: impl AsRef<Path>) -> Result<Scene> {
-    Ok(Importer::new().read_path(path)?.into_scene())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn facade_reports_unsupported_until_parsers_exist() {
-        let error = Importer::new()
-            .read_bytes("model.unknown", b"not a supported model")
-            .unwrap_err();
-        assert!(matches!(error, BaoziError::UnsupportedFormat { .. }));
-    }
-}

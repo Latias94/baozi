@@ -1,57 +1,71 @@
 ---
 status: accepted
 date: 2026-07-09
+updated: 2026-08-19
 authors:
   - Codex
 decision_type: architecture
+depends_on:
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
+  - docs/adr/0030-logical-mesh-primitive-and-attribute-domain.md
 related:
-  - docs/adr/0003-core-scene-ir-and-material-model.md
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
+  - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
+  - docs/adr/0037-archive-and-container-security.md
 ---
 
 # ADR 0009: Data Ownership, Zero-Copy, Lifetimes, and Memory Layout
 
 ## Context
 
-Asset importers often parse large binary buffers, sidecar files, archives, embedded images, and mesh
-attribute arrays. It is tempting to expose borrowed slices into the original input for speed.
-However, borrowed public scenes would push lifetimes through the entire API, make async and archive
-loading harder, and complicate post-processing.
+Asset importers often parse large binary buffers, sidecar files, embedded images, and mesh attribute
+arrays. It is tempting to expose borrowed slices into the original input for speed. However,
+borrowed public scenes would push lifetimes through the entire API, complicate dependency lifetimes
+and post-processing, and constrain any future container adapter. ADR 0037 remains Proposed and this
+ADR does not authorize archive/container support.
 
 Baozi needs a memory model that allows parser-level optimization without making users manage input
 buffer lifetimes.
 
 ## Decision
 
-Baozi's public `Scene` will be fully owned. Parser implementations may use borrowed views and
-zero-copy decoding internally during one import operation, but the returned `Scene` must not borrow
-from user input, temporary archives, parser ASTs, or third-party backend objects.
+Baozi's public `ValidatedScene` will be fully owned. Parser implementations may use borrowed views and
+zero-copy decoding internally during one import operation, but the returned scene must not borrow
+from user input, session resource snapshots, parser ASTs, or third-party backend objects.
 
 The public API will not expose lifetime-parameterized scene types such as `Scene<'a>` in the main
 facade.
 
 Core policy:
 
-- returned scenes own their nodes, meshes, materials, textures, animations, and metadata
+- returned scenes own their nodes, mesh instances, logical meshes, materials, images, samplers,
+  textures, animations, and metadata
 - mesh attribute buffers are contiguous owned buffers
-- large byte payloads may use shared ownership such as `Arc<[u8]>`
-- IDs and arenas provide stable references inside a scene
+- every admitted image owns its immutable encoded bytes; large payloads may use a hidden immutable
+  shared backing without exposing its concrete container
+- dense IDs provide stable references inside one validated scene generation
 - public memory layout is not an ABI promise
 - zero-copy is an internal optimization boundary, not a public contract
-- parsers must preallocate when source counts are trusted enough and bounded by `ResourceLimits`
+- parsers reserve through the import-domain ledger, backed by `baozi-operation`'s runtime-neutral
+  reservation/state-machine mechanism, and use fallible `try_reserve*` paths only after checked
+  source-count and byte/cell bounds
 - typed byte casting is allowed only behind explicit endian, alignment, length, and plain-data checks
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Input[File / memory / archive bytes] --> Parser[Parser backend]
+    Input[Primary and dependency snapshots] --> Parser[Parser backend]
     Parser --> Borrowed[Internal borrowed views]
     Parser --> Decode[Decode and validate]
-    Decode --> Builder[SceneBuilder owns data]
-    Builder --> Scene[Owned Scene]
-    Scene --> User[User code]
+    Decode --> Author[Bounded core authoring capability]
+    Author --> Storage[Core-owned retained construction storage]
+    Storage --> Draft[Non-owning SceneDraft descriptor]
+    Draft --> Validator[Matching construction owner and central validator]
+    Validator --> Scene[Owned ValidatedScene]
+    Scene --> User[Read views or SceneEdit]
 
     Borrowed -. dropped after import .-> Parser
 ```
@@ -61,26 +75,29 @@ sequenceDiagram
     participant User
     participant Importer
     participant Parser
-    participant Builder
+    participant Construction as Core SceneConstruction
     participant Scene
 
     User->>Importer: read_memory(&[u8])
     Importer->>Parser: parse with temporary views
-    Parser->>Builder: copy/convert into owned buffers
-    Builder->>Scene: finish validated owned Scene
-    Importer-->>User: Scene with no input lifetime
+    Importer->>Construction: retain opaque owner
+    Parser->>Construction: author through bounded borrowed capability
+    Construction-->>Importer: non-owning SceneDraft descriptor
+    Importer->>Construction: consume exact descriptor and prepare
+    Construction->>Scene: central validation and pure success handoff
+    Importer-->>User: validated scene with no input lifetime
 ```
 
 ## Public Ownership Rules
 
 ### Scene
 
-`Scene` owns:
+`ValidatedScene` owns its canonical `Scene` storage, including:
 
 - node storage
-- mesh storage
+- logical meshes, which own primitive storage, plus scene-owned mesh instances
 - material storage
-- texture descriptors and embedded bytes
+- image payloads, samplers, textures, and material bindings
 - animation data
 - camera and light data
 - metadata
@@ -90,54 +107,68 @@ be explicit.
 
 ### Mesh Buffers
 
-Mesh attributes should use owned contiguous storage:
+Dense mesh attributes use owned contiguous storage, while sparse attributes use owned checked index
+and value buffers:
 
 ```text
-positions: Vec<Vec3>
-normals: Vec<Vec3>
-tangents: Vec<Vec4>
-texcoords: Vec<Vec2>
-colors: Vec<Color>
-indices: Vec<u32>
+AttributePayload::Dense(OwnedBuffer<T>)
+AttributePayload::Sparse { indices: OwnedBuffer<u32>, values: OwnedBuffer<T>, logical_count }
+IndexStream: OwnedBuffer<u32>
 ```
 
-This exact field shape may evolve, but the invariant is owned contiguous buffers suitable for
-validation, post-processing, and eventual parallel iteration.
+The concrete storage type may evolve, but each validated payload has one owner or immutable shared
+owner, deterministic cardinality, and typed read views suitable for validation and processing.
+Attribute source byte order is decoded at import. Ordinary canonical scalar buffers expose logical
+typed values and have no per-stream endian flag. If a future named packed encoding stores bytes, its
+registered schema fixes byte width and byte order; opaque source-endian payloads cannot masquerade as
+canonical attributes. ADR 0030 owns the complete format and payload contract.
 
-Use `u32` indices by default. Reject or split meshes that exceed index limits unless a later ADR
-introduces `u64` index buffers.
+Use `u32` indices in the accepted canonical model and reject input that exceeds the representable or
+configured limit. Importers must not hide overflow by splitting geometry. Any future wider index or
+explicit split operation requires its own accepted contract, loss policy, provenance, and remaps.
 
 ### Byte Payloads
 
-Embedded textures, compressed buffers, and raw sidecar data can use:
-
-```text
-Arc<[u8]>
-```
+Embedded image payloads, compressed buffers, and retained raw sidecar data may use a private
+immutable shared backing. Its concrete container is not part of the public or canonical contract.
 
 Rationale:
 
 - avoids lifetime propagation
-- allows cheap sharing between texture objects and metadata
+- allows cheap sharing between image/resource records and internal decode caches
 - makes memory ownership explicit
 - works across sync and async import paths
+
+Every canonical `Image` produced by import contains an immutable owned encoded payload. External
+images are authorized, opened, bounded, and snapshotted by the import session; publication transfers
+the snapshot bytes into scene ownership. Embedded and data-URI images materialize the same owned
+payload shape. A sanitized logical locator may remain as a provenance/reload hint, but it conveys no
+authority, does not promise byte equality, and is never required to inspect or decode the returned
+scene. Missing, denied, or intentionally unretained image bytes therefore produce explicit
+unsupported/loss evidence or no `Image`; they never produce a nominally usable dangling image.
 
 ### Names and Strings
 
 Names and metadata strings should be owned `String` values in the public scene. String interning may
 be added internally later, but it must not change public semantics.
 
-### SceneBuilder
+### Canonical Construction Boundary
 
-`SceneBuilder` is the mutable construction surface. It can accept borrowed parser data and convert it
-into owned storage.
+Producer input may remain borrowed only while one authoring call is active. The core-owned
+construction lifecycle copies, converts, or admits canonical data into Baozi-owned retained storage
+before returning a draft descriptor.
 
-Rules:
+`SceneDraft` owns no payload and carries no input lifetime. Its matching construction owner remains
+inside the host lifecycle until central preparation consumes both. A published `ValidatedScene` may
+use immutable shared backing only through Baozi's hidden retained-storage mechanism and never borrows
+parser input, resource snapshots, parser ASTs, or backend objects. No concrete backing type is part of
+the public contract.
 
-- builder methods may copy, validate, and normalize
-- builder should record source locations separately from core object identity
-- builder finish returns either validated `Scene` or structured errors
-- builder internals are not stable public memory layout
+The bounded authoring surface may perform representation-preserving canonicalization. Source repair
+requires diagnostics and provenance, while semantic normalization belongs to ADR 0013 postprocess.
+Source identity and provenance follow ADR 0036 rather than overloading dense IDs or names. Producer
+code cannot extract or replace the retained owner, physical account, operation ledger, validation
+proof, or generation authority.
 
 ## Zero-Copy Policy
 
@@ -145,8 +176,8 @@ Allowed:
 
 - parser borrows from an input buffer during parsing
 - binary parser creates temporary typed views after validating alignment and length
-- archive reader shares decompressed bytes through `Arc<[u8]>`
-- image payloads are carried as `Arc<[u8]>` without decoding
+- session-owned immutable resource snapshots may share bytes through a hidden immutable backing
+- image payloads may retain the same admitted immutable backing without decoding
 - format backend AST borrows internally before conversion
 
 Typed byte casting helpers such as `bytemuck` may be introduced behind parser-private modules or
@@ -166,7 +197,7 @@ Not allowed in the main public API:
 - `Scene<'a>` borrowing from input
 - mesh attributes referencing parser buffers
 - material strings borrowing from a temporary file buffer
-- texture bytes borrowing from a closed archive
+- image bytes borrowing from a released session resource snapshot
 - third-party parser AST nodes reachable from `Scene`
 
 ## Memory Layout and ABI Policy
@@ -187,31 +218,38 @@ change public `Scene` semantics.
 
 Parsers must avoid unbounded growth patterns on large assets:
 
-- validate declared counts before `Vec::with_capacity`
-- use `with_capacity` for positions, normals, indices, faces, strings, and diagnostics when the
-  bounded count is known
-- prefer checked arithmetic for `count * element_size` and related derived counts
-- return `BaoziError::LimitExceeded` before allocation when counts exceed `ResourceLimits`
-- record benchmark evidence before adding complex pooling or custom allocators
+- validate declared counts and checked `count * element_size`/cell totals before reservation
+- use ADR 0047's owning-domain protocol: charge attempted work before an action, obtain live capacity
+  reservations before `try_reserve` or `try_reserve_exact`, and record committed output only at
+  successful publication; these evidence classes are never interchangeable
+- propagate allocation failure as a typed resource error; input-derived `Vec::with_capacity` is
+  forbidden because capacity allocation may panic or abort outside the failure contract
+- release phase-live reservations when temporary storage is dropped without refunding consumed work
+- record benchmark and peak-live evidence before adding pooling or custom allocators
 
 ## Mutation Policy
 
-Initial public flow:
+Canonical public flow:
 
 ```text
-SceneBuilder -> validated Scene -> post-process returns Scene
+core SceneConstruction -> non-owning SceneDraft descriptor -> central validation -> ValidatedScene
+ValidatedScene -> SceneEdit -> central validation -> new ValidatedScene
 ```
 
-Post-processing may mutate internal buffers when it owns the `Scene`, but user-visible APIs should
-make ownership clear.
+`SceneEdit` is the only canonical mutation transaction. It shares unchanged owned storage, builds
+affected replacements privately, and publishes a new generation only after central validation.
+Postprocess and user-authored changes use this same boundary; neither mutates a `ValidatedScene` in
+place. This ADR supplies the lower-level ownership and representation boundary consumed by ADR 0032;
+exact remap, rollback, and derived-data rules remain authoritative there. The reference is not a
+reverse normative dependency from storage policy to postprocess policy.
 
 Possible future APIs:
 
-- `SceneEdit` for controlled mutation
-- copy-on-write large buffers
+- specialized borrowed read-only inspection views
 - streaming import for extremely large assets
 
-These are not part of the first stable surface.
+These possible read/import surfaces do not replace the owned canonical result or `SceneEdit` mutation
+contract.
 
 ## Alternatives Considered
 
@@ -226,18 +264,18 @@ Pros:
 Cons:
 
 - Infects the API with lifetimes.
-- Makes archive, async, and sidecar asset lifetimes difficult.
+- Makes sidecar and any future async/container resource lifetimes difficult.
 - Makes post-processing and validation harder.
 - Third-party parser backends can leak into public model.
 
 Decision: rejected for the main facade.
 
-### Option B: Fully owned public scene with internal zero-copy parsing
+### Option B: Fully owned validated scene with internal zero-copy parsing and edit transactions
 
 Pros:
 
 - Simple user API.
-- Works across file, memory, archive, and async adapters.
+- Works across primary/dependency snapshots and does not constrain future admitted adapters.
 - Keeps parser backends replaceable.
 - Allows internal optimization without public lifetime churn.
 
@@ -269,43 +307,25 @@ Decision: deferred. A borrowed inspection API can be reconsidered after the owne
 
 | Metric | Target | Measurement |
 | --- | --- | --- |
-| Lifetime simplicity | Public facade returns `Scene`, not `Scene<'a>` | public API review |
+| Lifetime simplicity | Public facade returns owned `ValidatedScene`, not `Scene<'a>` | public API review |
 | Backend isolation | Scene does not expose parser AST or borrowed backend data | public API review |
-| Post-process usability | Post-process steps can own and transform scene buffers | integration tests |
-| Large payload sharing | Embedded bytes can be shared without copies after import | tests over embedded textures |
+| Post-process usability | Steps replace affected buffers through `SceneEdit` without mutating input | integration tests |
+| Large payload sharing | Embedded bytes can be shared without copies after import without exposing a concrete backing type | tests over embedded images and public API review |
+| Session independence | External image bytes remain usable after resolver, session, and input snapshots are dropped | external-image lifetime tests |
 | Memory visibility | allocations and peak memory are benchmarked for large fixtures | Criterion benchmarks |
+| Fallible growth | Every input-derived capacity uses ledger reservation plus `try_reserve*` | exact/excess/allocation-failure tests |
 | Safety | parser temporary views cannot outlive import context | compile-time API shape |
 
 ## Risks and Mitigations
 
 | Risk | Severity | Likelihood | Mitigation |
 | --- | --- | --- | --- |
-| Copying hurts very large assets | Medium | Medium | Benchmark early; use `Arc<[u8]>` for payloads and optimize hot conversions |
+| Copying hurts very large assets | Medium | Medium | Benchmark early; use hidden immutable shared backing for payloads and optimize hot conversions |
 | Owned model blocks streaming workflows | Medium | Medium | Add streaming reader later as separate API, not main scene facade |
 | Mesh buffers need different layouts for SIMD | Medium | Medium | Keep SIMD layout internal and convert at algorithm boundaries |
 | Public fields expose layout too early | Medium | Medium | Use accessors where invariants matter and reserve ABI promises |
-| `u32` indices are insufficient for huge meshes | Medium | Low | Enforce limits, split meshes, or revisit with an index-width ADR |
+| `u32` indices are insufficient for huge meshes | Medium | Low | Reject above the admitted limit and revisit through a dedicated index-width decision; never split silently. |
 | Cloning scenes is expensive | Low | High | Document clone cost and expose shared byte buffers where useful |
-
-## Implementation Plan
-
-### Phase 0: Owned Core Storage
-
-- Define owned `Scene`, `SceneBuilder`, arenas, IDs, and mesh buffers.
-- Use owned strings and metadata.
-- Use shared byte payloads for embedded assets.
-
-### Phase 1: Parser Boundary
-
-- Allow parsers to use borrowed views internally.
-- Convert parser output to owned scene data at builder boundaries.
-- Add tests that imported scenes outlive input buffers.
-
-### Phase 2: Performance Visibility
-
-- Add allocation and throughput benchmarks.
-- Optimize hot copies only after measurements.
-- Keep zero-copy parser optimizations behind internal modules.
 
 ## Consequences
 
@@ -313,7 +333,7 @@ Positive:
 
 - User API is simple and runtime-neutral.
 - Format backends remain replaceable.
-- Post-processing and validation operate on stable owned data.
+- Post-processing and validation operate on stable owned generations through one edit transaction.
 
 Negative:
 
@@ -321,11 +341,63 @@ Negative:
 - Huge asset workflows may need specialized future APIs.
 - Baozi must measure allocation cost instead of assuming it is fine.
 
-## Open Questions
+## Resolved Questions
 
-1. Should mesh indices support `u64`?
-   Recommendation: not initially. Use `u32`, enforce limits, and split if needed.
-2. Should `Scene` implement `Clone`?
-   Recommendation: only if clone cost is explicit and large buffers share storage where appropriate.
-3. Should a borrowed inspection API exist later?
-   Recommendation: defer until stable importers reveal real demand.
+1. Canonical mesh indices and dense Scene-local identities remain `u32`. Inputs above the admitted
+   range fail before materialization. A wider index model requires a new Accepted decision covering
+   every affected payload, algorithm, limit, snapshot, and postprocess cost.
+2. `ValidatedScene` is not `Clone`. Sharing is expressed through explicit derived generations and
+   ADR 0044 physical lineage, not by an implicit owner duplication whose cost and generation
+   semantics are unclear.
+3. Inspection borrows the owning `ValidatedScene` through bounded semantic methods, snapshots, and
+   future domain views. Baozi will not introduce a second borrowed Scene model or expose retained
+   storage layout to satisfy inspection.
+
+## Amendment History
+
+### 2026-08-19: Resolve ownership questions after the canonical cutover
+
+- Affected: `Open Questions`, renamed to `Resolved Questions`.
+- Previous: index width, `ValidatedScene` cloning, and borrowed inspection remained deferred.
+- New: canonical indices remain `u32`, `ValidatedScene` remains a unique opaque owner, and inspection
+  borrows that owner through bounded semantic interfaces without creating a second Scene model.
+- Impact: future work cannot silently add wide indices, implicit Scene cloning, or a public borrowed
+  storage representation.
+- Review: [Post-U4 authority-reset review](../knowledge/engineering/verification/2026-08-19T152712Z-post-u4-authority-reset-review.md), required by the canonical architecture implementation plan
+  and checked against the current public Scene interface and retained-lineage contract.
+- Rationale: the completed cutover provides enough implementation evidence to close these questions
+  without freezing a private container or table layout.
+
+### 2026-08-01: Separate draft descriptors from canonical storage ownership
+
+- Affected headings: core policy, architecture diagrams, byte payloads, canonical construction
+  boundary, zero-copy policy, mutation policy, success metrics, risks, and removal of the transient
+  implementation plan.
+- Previous rule: the document described `SceneBuilder` and an owned `SceneDraft` as the canonical
+  storage owners and named `Arc<[u8]>` as the expected payload representation.
+- New rule: an opaque core `SceneConstruction` owns unpublished retained storage while producers
+  borrow a bounded authoring surface. `SceneDraft` is a non-owning descriptor with no payload or input
+  lifetime, and only its matching owner may drive central validation. Published Scenes may use hidden
+  immutable shared backing, but no concrete container is a public contract.
+- Compatibility impact: pre-release builder, draft, and payload-container APIs may break; public
+  lifetime independence and canonical semantics are unchanged.
+- Required review: parser-input lifetime compile checks, descriptor/owner API shape, resource/session
+  drop tests, hidden-backing public API review, SceneEdit sharing evidence, and direct ADR coherence
+  review.
+- Rationale: a fully owned published Scene does not require the intermediate descriptor to own
+  storage. Separating those concepts prevents producer code from extracting retained authority while
+  preserving internal zero-copy and sharing optimizations.
+
+### 2026-07-19: Correct the storage-to-edit dependency direction
+
+- Affected headings: frontmatter dependency metadata and the `SceneEdit` authority paragraph.
+- Previous rule: this lower-level storage-representation ADR normatively depended on ADR 0032's
+  higher-level postprocess transaction contract, creating a cycle once retained physical ownership
+  became a dependency of postprocess.
+- New rule: ADR 0009 owns the lower-level ownership, borrowing, sharing, and representation boundary.
+  ADR 0032 depends on that boundary for edit semantics; this ADR keeps ADR 0032 only as related
+  navigation to its remap and rollback authority.
+- Compatibility impact: none; this corrects architectural authority metadata before release.
+- Required review: ADR dependency-cycle gate and ownership-boundary review.
+- Rationale: representation policy must be reusable below import and postprocess transactions rather
+  than depend on either consumer.

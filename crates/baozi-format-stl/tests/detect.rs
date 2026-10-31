@@ -1,75 +1,126 @@
 mod common;
 
-use baozi_core::Result;
 use baozi_format_stl::StlImporter;
-use baozi_import::{FormatImporter, ReadConfidence, ReadHint};
-use baozi_io::AssetPath;
-use common::{BinaryFacet, ascii_triangle, binary_stl};
-use std::io::{Cursor, Seek};
+use baozi_import::{
+    DetectionOptions, DetectionOutcome, ImportCause, ImportConfigOverlay, ImportOperationControl,
+    ImportRequest, ImportRequestLayer, OptionCompileLimits, ReadConfidence, RegistryBuildLimits,
+    RegistryBuilder, import_asset,
+};
+use baozi_io::{AssetPath, MemoryAssetIo};
+use common::{BinaryFacet, TestImportOutcome, ascii_triangle, binary_stl};
+use std::sync::Arc;
 
-fn hint(source: &str) -> Result<ReadHint> {
-    Ok(ReadHint::from_source(AssetPath::new(source)?))
+fn detect(source: &str, bytes: Vec<u8>, max_probe_bytes: u64) -> TestImportOutcome<ReadConfidence> {
+    let mut builder = RegistryBuilder::new();
+    builder.register(StlImporter).expect("valid STL importer");
+    let snapshot = builder
+        .freeze(RegistryBuildLimits::default())
+        .expect("valid registry");
+    let request = snapshot
+        .compile_request(
+            &ImportRequest::from_layers(
+                ImportRequestLayer::default(),
+                ImportRequestLayer::new(
+                    ImportConfigOverlay::default().with_detection_options(
+                        DetectionOptions::new(max_probe_bytes)
+                            .expect("test probe is within cancellation bound"),
+                    ),
+                ),
+            ),
+            OptionCompileLimits::default(),
+        )
+        .expect("request compiles");
+    let path = AssetPath::new(source).expect("valid path");
+    let io = MemoryAssetIo::new();
+    io.try_insert(path.clone(), Arc::<[u8]>::from(bytes))
+        .expect("test asset insertion must succeed");
+    TestImportOutcome::new(
+        import_asset(&request, &io, path, ImportOperationControl::default()).map(|report| {
+            let evidence = report
+                .detection_evidence()
+                .first()
+                .expect("STL detector evidence");
+            match evidence.outcome() {
+                DetectionOutcome::Match(confidence) => *confidence,
+                outcome => panic!("expected matching detector outcome, got {outcome:?}"),
+            }
+        }),
+    )
 }
 
 #[test]
-fn binary_exact_size_is_certain() -> Result<()> {
+fn binary_exact_size_is_certain() {
     let bytes = binary_stl(b"binary", &[BinaryFacet::unit_triangle()]);
-    let mut cursor = Cursor::new(bytes);
-    let confidence = StlImporter.can_read(&mut cursor, &hint("triangle.stl")?)?;
-
-    assert_eq!(confidence, ReadConfidence::Certain);
-    Ok(())
+    assert_eq!(
+        detect("triangle.stl", bytes, 4096).expect("binary STL is detected"),
+        ReadConfidence::Certain
+    );
 }
 
 #[test]
-fn binary_header_starting_with_solid_is_still_binary() -> Result<()> {
+fn binary_header_starting_with_solid_is_still_binary() {
     let bytes = binary_stl(b"solid binary header", &[BinaryFacet::unit_triangle()]);
-    let mut cursor = Cursor::new(bytes);
-    let confidence = StlImporter.can_read(&mut cursor, &hint("solid-header.stl")?)?;
-
-    assert_eq!(confidence, ReadConfidence::Certain);
-    Ok(())
+    assert_eq!(
+        detect("solid-header.stl", bytes, 4096).expect("size evidence wins"),
+        ReadConfidence::Certain
+    );
 }
 
 #[test]
-fn ascii_solid_after_whitespace_is_likely() -> Result<()> {
+fn ascii_solid_after_ascii_whitespace_is_likely() {
     let bytes = format!("\n\t{}", ascii_triangle("triangle"));
-    let mut cursor = Cursor::new(bytes.into_bytes());
-    let confidence = StlImporter.can_read(&mut cursor, &hint("triangle.stl")?)?;
-
-    assert_eq!(confidence, ReadConfidence::Likely);
-    Ok(())
+    assert_eq!(
+        detect("triangle.stl", bytes.into_bytes(), 4096).expect("ASCII STL is detected"),
+        ReadConfidence::Likely
+    );
 }
 
 #[test]
-fn ascii_solid_after_utf8_bom_is_likely() -> Result<()> {
-    let bytes = format!("\u{feff}{}", ascii_triangle("triangle"));
-    let mut cursor = Cursor::new(bytes.into_bytes());
-    let confidence = StlImporter.can_read(&mut cursor, &hint("triangle.stl")?)?;
+fn incomplete_ascii_keyword_remains_inconclusive() {
+    let bytes = ascii_triangle("triangle").into_bytes();
+    let error =
+        detect("triangle.mesh", bytes.clone(), 5).expect_err("partial keyword must not match");
+    let ImportCause::Detection(_) = error.cause() else {
+        panic!("expected detection failure")
+    };
 
-    assert_eq!(confidence, ReadConfidence::Likely);
-    Ok(())
+    assert_eq!(
+        detect("triangle.mesh", bytes, 6).expect("keyword boundary is sufficient"),
+        ReadConfidence::Likely
+    );
 }
 
 #[test]
-fn random_bytes_are_not_stl() -> Result<()> {
-    let mut cursor = Cursor::new(b"baozi is not an stl".to_vec());
-    let confidence = StlImporter.can_read(&mut cursor, &hint("triangle.stl")?)?;
-
-    assert_eq!(confidence, ReadConfidence::No);
-    Ok(())
+fn random_bytes_are_not_stl() {
+    let failure = detect("triangle.mesh", b"baozi is not an stl".to_vec(), 4096)
+        .expect_err("random bytes must not match STL");
+    assert!(matches!(failure.cause(), ImportCause::UnsupportedFormat));
 }
 
 #[test]
-fn can_read_rewinds_input() -> Result<()> {
+fn empty_probe_preserves_extension_fallback_without_a_scope_contract_failure() {
+    let unsupported =
+        detect("empty.mesh", Vec::new(), 4096).expect_err("empty non-STL input must not match");
+    assert!(matches!(
+        unsupported.cause(),
+        ImportCause::UnsupportedFormat
+    ));
+
+    let failure = detect("empty.stl", Vec::new(), 4096)
+        .expect_err("the extension fallback selects STL before the empty document fails parsing");
+    assert!(matches!(failure.cause(), ImportCause::Format(_)));
+    let [evidence] = failure.detection_evidence() else {
+        panic!("empty STL input must retain one detector outcome");
+    };
+    assert!(matches!(
+        evidence.outcome(),
+        DetectionOutcome::Match(ReadConfidence::Maybe)
+    ));
+}
+
+#[test]
+fn short_binary_probe_is_inconclusive() {
     let bytes = binary_stl(b"binary", &[BinaryFacet::unit_triangle()]);
-    let mut cursor = Cursor::new(bytes);
-    cursor.set_position(7);
-    let _ = StlImporter.can_read(&mut cursor, &hint("triangle.stl")?)?;
-
-    let position = cursor
-        .stream_position()
-        .map_err(|error| baozi_core::BaoziError::io("cursor", error.to_string()))?;
-    assert_eq!(position, 7);
-    Ok(())
+    let error = detect("triangle.stl", bytes, 83).expect_err("facet count is outside probe");
+    assert!(matches!(error.cause(), ImportCause::Detection(_)));
 }

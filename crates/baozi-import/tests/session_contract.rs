@@ -1,0 +1,4253 @@
+mod support;
+
+use baozi_core::FormatId;
+use baozi_import::{
+    AuthorizedDependency, CapabilityStatus, CauseOwner, DependencyPolicyError, DependencyReference,
+    DependencyRequirement, DependencyResolver, DependencyRoleId, DetectionFailure,
+    DetectionInconclusive, DetectionOutcome, DetectionResult, DetectionScope, FormatCapability,
+    FormatDescriptor, FormatEncoding, FormatFailureDetailSink, FormatFailureDetailValue,
+    FormatFailureEvidence, FormatFailureEvidenceProducer, FormatImporter, FormatSelection,
+    ImportCause, ImportConfigOverlay, ImportDimension, ImportFailure, ImportLossKind,
+    ImportOperationControl, ImportPhase, ImportProgressPhase, ImportProgressUnit, ImportReport,
+    ImportRequest, ImportRequestLayer, ImportResult, ImportStorageClass, ImportTerminalCause,
+    ImportTerminalFailureClass, ImportWorkClass, InputReplayStatus, LossPolicy,
+    ManifestObservedOnlyReason, ManifestReference, ManifestRelationOutcome,
+    ManifestResourceIdentityStability, ManifestSessionDependentReason, ManifestUnavailableClass,
+    ManifestUnavailableReplay, MeteredDecodedText, MeteredString, MeteredVec, OptionCompileLimits,
+    ParseResult, ParseScope, PreparedImportRequest, ReadConfidence, ReadHint, RegistryBuildLimits,
+    RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneDraft, ScopeAbortCause,
+    SourceScopeSelectionOutcome, TextBomPolicy, TextControlPolicy, TextDecodingMode, TextHardCaps,
+    TextInputOptions, TextLexicalMode, TextNewline, TextProfile, TextSourceEncoding,
+    TrustedExtensionBoundary, import_asset as run_import_asset,
+    import_asset_with_resolver as run_import_asset_with_resolver, import_bytes as run_import_bytes,
+};
+use baozi_io::{
+    AssetIo, AssetLength, AssetOpenError, AssetOpenErrorKind, AssetOpenStage, AssetOpenWorkError,
+    AssetPath, AssetReadContractViolation, AssetReadError, AssetReadErrorKind, AssetReader,
+    AuthorityDomain, ImmutableMemoryAssetIo, OpenedAsset,
+};
+use baozi_operation::{CancellationToken, LedgerCause, ProgressDecision};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt;
+use std::io::Cursor;
+use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+#[allow(
+    clippy::result_large_err,
+    reason = "session contract assertions inspect complete bounded import failure evidence"
+)]
+fn operation_result<T>(result: ImportResult<T>) -> Result<T, ImportFailure> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => match error.into_operation_failure() {
+            Ok(failure) => Err(failure),
+            Err(source) => {
+                panic!("import test setup failed before a session was created: {source}")
+            }
+        },
+    }
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "session contract assertions inspect complete bounded import failure evidence"
+)]
+fn import_asset(
+    request: &PreparedImportRequest,
+    io: &dyn AssetIo,
+    source: AssetPath,
+    control: ImportOperationControl,
+) -> Result<ImportReport, ImportFailure> {
+    operation_result(run_import_asset(request, io, source, control))
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "session contract assertions inspect complete bounded import failure evidence"
+)]
+fn import_asset_with_resolver(
+    request: &PreparedImportRequest,
+    io: &dyn AssetIo,
+    source: AssetPath,
+    resolver: &dyn DependencyResolver,
+    control: ImportOperationControl,
+) -> Result<ImportReport, ImportFailure> {
+    operation_result(run_import_asset_with_resolver(
+        request, io, source, resolver, control,
+    ))
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "session contract assertions inspect complete bounded import failure evidence"
+)]
+fn import_bytes(
+    request: &PreparedImportRequest,
+    source: AssetPath,
+    bytes: &[u8],
+    control: ImportOperationControl,
+) -> Result<ImportReport, ImportFailure> {
+    operation_result(run_import_bytes(request, source, bytes, control))
+}
+
+#[derive(Clone)]
+struct RecordingImporter {
+    id: &'static str,
+    extension: &'static str,
+    dependency: Option<(DependencyRoleId, DependencyRequirement, DependencyBehavior)>,
+    dependency_views: Arc<Mutex<Vec<Vec<u8>>>>,
+    dependency_dispositions: Arc<Mutex<Vec<baozi_import::DependencyCacheDisposition>>>,
+    primary_views: Arc<Mutex<Vec<Vec<u8>>>>,
+    primary_addresses: Arc<Mutex<Vec<usize>>>,
+    detector_cancel: Option<CancellationToken>,
+    detection: DetectionOutcome,
+    scene_name: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DependencyBehavior {
+    RequiredCaught,
+    RequiredAvailableWithDiagnostic,
+    RequiredAvailableTwice,
+    OptionalTwice,
+    OptionalThenFail,
+}
+
+impl RecordingImporter {
+    fn plain(id: &'static str, extension: &'static str) -> Self {
+        Self {
+            id,
+            extension,
+            dependency: None,
+            dependency_views: Arc::new(Mutex::new(Vec::new())),
+            dependency_dispositions: Arc::new(Mutex::new(Vec::new())),
+            primary_views: Arc::new(Mutex::new(Vec::new())),
+            primary_addresses: Arc::new(Mutex::new(Vec::new())),
+            detector_cancel: None,
+            detection: DetectionOutcome::Match(ReadConfidence::Certain),
+            scene_name: None,
+        }
+    }
+
+    fn with_scene_name(mut self, name: &'static str) -> Self {
+        self.scene_name = Some(name);
+        self
+    }
+
+    fn with_dependency(
+        mut self,
+        role: DependencyRoleId,
+        requirement: DependencyRequirement,
+        behavior: DependencyBehavior,
+    ) -> Self {
+        self.dependency = Some((role, requirement, behavior));
+        self
+    }
+
+    fn descriptor_value(&self) -> FormatDescriptor {
+        let mut builder = FormatDescriptor::builder(
+            FormatId::new(self.id).expect("valid format id"),
+            "Session Test",
+        )
+        .extensions([self.extension])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)]);
+        if let Some((role, requirement, _)) = &self.dependency {
+            builder = builder.dependency_roles([(role.clone(), *requirement)]);
+        }
+        builder.build().expect("valid descriptor")
+    }
+}
+
+impl FormatImporter for RecordingImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        self.descriptor_value()
+    }
+
+    fn detect(
+        &self,
+        probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        self.primary_addresses
+            .lock()
+            .expect("recording mutex")
+            .push(probe.bytes().as_ptr() as usize);
+        let mut observed = Vec::new();
+        for (index, byte) in probe.bytes().iter().copied().enumerate() {
+            observed.push(byte);
+            if index == probe.bytes().len() / 2
+                && let Some(token) = &self.detector_cancel
+            {
+                token.cancel();
+            }
+        }
+        self.primary_views
+            .lock()
+            .expect("recording mutex")
+            .push(observed);
+        Ok(self.detection.clone())
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        self.primary_addresses
+            .lock()
+            .expect("recording mutex")
+            .push(scope.primary_bytes().as_ptr() as usize);
+        self.primary_views
+            .lock()
+            .expect("recording mutex")
+            .push(scope.primary_bytes().to_vec());
+        if let Some((role, _, behavior)) = &self.dependency {
+            match behavior {
+                DependencyBehavior::RequiredCaught => {
+                    let _ignored = support::required_root_dependency(scope, role, "missing.bin");
+                }
+                DependencyBehavior::RequiredAvailableWithDiagnostic => {
+                    let diagnostic_source = scope.diagnostic_source();
+                    assert_eq!(diagnostic_source.path(), scope.source());
+                    assert_eq!(diagnostic_source.bytes(), scope.primary_bytes());
+                    let dependency = support::required_root_dependency(scope, role, "missing.bin")?;
+                    assert_eq!(dependency.bytes(), b"dependency");
+                }
+                DependencyBehavior::RequiredAvailableTwice => {
+                    let first = support::required_root_dependency(scope, role, "missing.bin")?;
+                    let second = support::required_root_dependency(scope, role, "missing.bin")?;
+                    self.dependency_views
+                        .lock()
+                        .expect("recording mutex")
+                        .extend([first.bytes().to_vec(), second.bytes().to_vec()]);
+                    self.dependency_dispositions
+                        .lock()
+                        .expect("recording mutex")
+                        .extend([first.cache_disposition(), second.cache_disposition()]);
+                }
+                DependencyBehavior::OptionalTwice => {
+                    let first = support::root_dependency(scope, role, "missing.bin")?;
+                    let second = support::root_dependency(scope, role, "missing.bin")?;
+                    assert!(first.unavailable_evidence().is_some());
+                    assert!(second.unavailable_evidence().is_some());
+                }
+                DependencyBehavior::OptionalThenFail => {
+                    let dependency = support::root_dependency(scope, role, "missing.bin")?;
+                    assert!(dependency.unavailable_evidence().is_some());
+                    return Err(scope.format_failure(TestFormatCause::new(Arc::new(
+                        FormatFailureProducerObservation::default(),
+                    ))));
+                }
+            }
+        }
+        match self.scene_name {
+            Some(name) => support::submit_named_scene(scope, name),
+            None => support::submit_minimal_scene(scope),
+        }
+    }
+}
+
+struct FormatFailingImporter {
+    observation: Arc<FormatFailureProducerObservation>,
+}
+struct OversizedFormatFailingImporter;
+
+#[derive(Debug, Clone, Copy)]
+enum ReentrantFormatFailurePhase {
+    Code,
+    Details,
+    DecodedStorage,
+    FormattedStorage,
+    MeteredStorage,
+    ReservedStorage,
+    SceneStorageAdmission,
+    NestedFormatFailure,
+    Drop,
+}
+
+struct ReentrantFormatFailureImporter {
+    phase: ReentrantFormatFailurePhase,
+}
+
+struct PanickingImporter {
+    calls: Arc<AtomicUsize>,
+}
+
+struct OpaquePanickingImporter {
+    payload_drops: Arc<AtomicUsize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OpaqueAssetIoPanicBoundary {
+    Authority,
+    WorkBound,
+    Open,
+    Read,
+}
+
+struct OpaquePanickingAssetIo {
+    boundary: OpaqueAssetIoPanicBoundary,
+    domain: AuthorityDomain,
+    source: AssetPath,
+    payload_drops: Arc<AtomicUsize>,
+}
+
+struct OpaquePanickingReader {
+    payload_drops: Arc<AtomicUsize>,
+}
+
+struct RacingParsePoisonImporter {
+    calls: Arc<AtomicUsize>,
+    first_entered: SyncSender<()>,
+    release_first: Mutex<Receiver<()>>,
+}
+
+struct PanickingDropPayload {
+    drops: Arc<AtomicUsize>,
+}
+
+impl Drop for PanickingDropPayload {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::AcqRel);
+        panic!("untrusted panic payload destructor")
+    }
+}
+
+impl AssetReader for OpaquePanickingReader {
+    fn read_chunk(&mut self, _buffer: &mut [u8]) -> Result<usize, AssetReadError> {
+        std::panic::panic_any(PanickingDropPayload {
+            drops: Arc::clone(&self.payload_drops),
+        })
+    }
+}
+
+impl AssetIo for OpaquePanickingAssetIo {
+    fn authority_domain(&self) -> AuthorityDomain {
+        if matches!(self.boundary, OpaqueAssetIoPanicBoundary::Authority) {
+            std::panic::panic_any(PanickingDropPayload {
+                drops: Arc::clone(&self.payload_drops),
+            });
+        }
+        self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        if matches!(self.boundary, OpaqueAssetIoPanicBoundary::WorkBound) {
+            std::panic::panic_any(PanickingDropPayload {
+                drops: Arc::clone(&self.payload_drops),
+            });
+        }
+        // One identity comparison/clone and fixed reader construction on a returning open.
+        Ok(NonZeroU64::new(2 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
+    }
+
+    fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
+        assert_eq!(path, &self.source);
+        if matches!(self.boundary, OpaqueAssetIoPanicBoundary::Open) {
+            std::panic::panic_any(PanickingDropPayload {
+                drops: Arc::clone(&self.payload_drops),
+            });
+        }
+        Ok(OpenedAsset::new(
+            self.domain.clone(),
+            self.source.clone(),
+            OpaquePanickingReader {
+                payload_drops: Arc::clone(&self.payload_drops),
+            },
+            Some(AssetLength::Exact(1)),
+        ))
+    }
+}
+
+impl FormatImporter for PanickingImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.panic-shared").unwrap(),
+            "Panic Shared",
+        )
+        .extensions(["panic"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, _scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        panic!("shared registration panic")
+    }
+}
+
+impl FormatImporter for OpaquePanickingImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.opaque-panic").unwrap(),
+            "Opaque Panic",
+        )
+        .extensions(["opaque-panic"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, _scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        std::panic::panic_any(PanickingDropPayload {
+            drops: Arc::clone(&self.payload_drops),
+        })
+    }
+}
+
+impl FormatImporter for RacingParsePoisonImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.racing-parse-poison").unwrap(),
+            "Racing Parse Poison",
+        )
+        .extensions(["racing-parse-poison"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+            self.first_entered
+                .send(())
+                .expect("test observes the first parser entry");
+            self.release_first
+                .lock()
+                .expect("release receiver mutex")
+                .recv_timeout(Duration::from_secs(5))
+                .expect("test releases the first parser");
+            support::submit_minimal_scene(scope)
+        } else {
+            panic!("racing parser panic")
+        }
+    }
+}
+
+impl FormatImporter for FormatFailingImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.format-failure").unwrap(),
+            "Format Failure",
+        )
+        .extensions(["failure"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        Err(scope.format_failure(TestFormatCause::new(Arc::clone(&self.observation))))
+    }
+}
+
+impl FormatImporter for OversizedFormatFailingImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.oversized-format-failure").unwrap(),
+            "Oversized Format Failure",
+        )
+        .extensions(["oversized-failure"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        Err(scope.format_failure(OversizedFormatCause {
+            _payload: [0; 4 * 1024 + 1],
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct OversizedFormatCause {
+    _payload: [u8; 4 * 1024 + 1],
+}
+
+impl fmt::Display for OversizedFormatCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("oversized format failure")
+    }
+}
+
+impl Error for OversizedFormatCause {}
+
+impl FormatFailureEvidenceProducer for OversizedFormatCause {
+    fn code(&self) -> &'static str {
+        "test.oversized_format_failure"
+    }
+}
+
+#[derive(Debug)]
+struct TestFormatCause {
+    code: String,
+    key: String,
+    value: String,
+    _source: TestBackendCause,
+    observation: Arc<FormatFailureProducerObservation>,
+}
+
+impl TestFormatCause {
+    fn new(observation: Arc<FormatFailureProducerObservation>) -> Self {
+        let code = String::from("test.format_failure");
+        let key = String::from("backend_message");
+        let value = String::from("private test backend failure");
+        observation
+            .code_pointer
+            .store(code.as_ptr() as usize, Ordering::Release);
+        observation
+            .key_pointer
+            .store(key.as_ptr() as usize, Ordering::Release);
+        observation
+            .value_pointer
+            .store(value.as_ptr() as usize, Ordering::Release);
+        Self {
+            code,
+            key,
+            value,
+            _source: TestBackendCause {
+                observation: Arc::clone(&observation),
+            },
+            observation,
+        }
+    }
+}
+
+impl Drop for TestFormatCause {
+    fn drop(&mut self) {
+        self.observation.drops.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+impl FormatFailureEvidenceProducer for TestFormatCause {
+    fn code(&self) -> &str {
+        &self.code
+    }
+
+    fn visit_details(&self, sink: &mut dyn FormatFailureDetailSink) {
+        sink.unsigned("record", 7);
+        sink.string(&self.key, &self.value);
+    }
+}
+
+#[derive(Debug)]
+struct TestBackendCause {
+    observation: Arc<FormatFailureProducerObservation>,
+}
+
+impl Drop for TestBackendCause {
+    fn drop(&mut self) {
+        self.observation.drops.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug, Default)]
+struct FormatFailureProducerObservation {
+    drops: AtomicUsize,
+    code_pointer: AtomicUsize,
+    key_pointer: AtomicUsize,
+    value_pointer: AtomicUsize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FailureEvidenceMode {
+    Normal,
+    CodePanics,
+    InvalidCode,
+    OverlongCode,
+    DetailsPanic,
+    DetailsRejected,
+    DropPanics,
+}
+
+#[derive(Debug)]
+struct LifecycleFormatCause {
+    mode: FailureEvidenceMode,
+    visits: Arc<AtomicUsize>,
+}
+
+impl fmt::Display for LifecycleFormatCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("lifecycle format failure")
+    }
+}
+
+impl Error for LifecycleFormatCause {}
+
+impl FormatFailureEvidenceProducer for LifecycleFormatCause {
+    fn code(&self) -> &'static str {
+        match self.mode {
+            FailureEvidenceMode::CodePanics => panic!("format failure code panic"),
+            FailureEvidenceMode::InvalidCode => "",
+            FailureEvidenceMode::OverlongCode => concat!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+            FailureEvidenceMode::Normal
+            | FailureEvidenceMode::DetailsPanic
+            | FailureEvidenceMode::DetailsRejected
+            | FailureEvidenceMode::DropPanics => "test.lifecycle_failure",
+        }
+    }
+
+    fn visit_details(&self, sink: &mut dyn FormatFailureDetailSink) {
+        self.visits.fetch_add(1, Ordering::AcqRel);
+        match self.mode {
+            FailureEvidenceMode::DetailsPanic => panic!("format failure detail panic"),
+            FailureEvidenceMode::DetailsRejected => sink.unsigned("INVALID", 1),
+            FailureEvidenceMode::Normal | FailureEvidenceMode::DropPanics => {
+                sink.unsigned("record", 7);
+            }
+            FailureEvidenceMode::CodePanics
+            | FailureEvidenceMode::InvalidCode
+            | FailureEvidenceMode::OverlongCode => {}
+        }
+    }
+}
+
+impl Drop for LifecycleFormatCause {
+    fn drop(&mut self) {
+        if matches!(self.mode, FailureEvidenceMode::DropPanics) {
+            panic!("format failure producer drop panic");
+        }
+    }
+}
+
+struct NestedFormatFailureProducer;
+
+impl FormatFailureEvidenceProducer for NestedFormatFailureProducer {
+    fn code(&self) -> &str {
+        "test.nested_format_failure"
+    }
+}
+
+struct ReentrantFormatFailureProducer<'scope, 'session> {
+    scope: &'scope ParseScope<'session>,
+    phase: ReentrantFormatFailurePhase,
+    storage: RefCell<Option<MeteredVec<'scope, u8>>>,
+    decoded: Option<RefCell<MeteredDecodedText<'scope>>>,
+    formatted: Option<RefCell<MeteredString<'scope>>>,
+}
+
+struct FailingFormatValue;
+
+impl fmt::Display for FailingFormatValue {
+    fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Err(fmt::Error)
+    }
+}
+
+impl FormatFailureEvidenceProducer for ReentrantFormatFailureProducer<'_, '_> {
+    fn code(&self) -> &str {
+        if matches!(self.phase, ReentrantFormatFailurePhase::Code) {
+            drop(
+                self.scope
+                    .with_work(ImportWorkClass::WorkUnits, 1, |work| work.complete_all()),
+            );
+        }
+        "test.reentrant_format_failure"
+    }
+
+    fn visit_details(&self, sink: &mut dyn FormatFailureDetailSink) {
+        match self.phase {
+            ReentrantFormatFailurePhase::Details => drop(self.scope.source_scope_builder(
+                SourceScopeSelectionOutcome::parentless_node_projection(
+                    self.scope.source().try_clone().expect("source clone"),
+                ),
+            )),
+            ReentrantFormatFailurePhase::DecodedStorage => {
+                drop(
+                    self.decoded
+                        .as_ref()
+                        .expect("decoded-storage phase owns decoded text")
+                        .borrow_mut()
+                        .try_push_str_reserved("x"),
+                );
+            }
+            ReentrantFormatFailurePhase::FormattedStorage => {
+                drop(
+                    self.formatted
+                        .as_ref()
+                        .expect("formatted-storage phase owns a string")
+                        .borrow_mut()
+                        .try_write_fmt(format_args!("{}", FailingFormatValue)),
+                );
+            }
+            ReentrantFormatFailurePhase::MeteredStorage => {
+                drop(
+                    self.storage
+                        .borrow_mut()
+                        .as_mut()
+                        .expect("metered-storage phase owns storage")
+                        .try_push(1),
+                );
+            }
+            ReentrantFormatFailurePhase::ReservedStorage => {
+                drop(
+                    self.storage
+                        .borrow_mut()
+                        .as_mut()
+                        .expect("reserved-storage phase owns storage")
+                        .try_push_reserved(1),
+                );
+            }
+            ReentrantFormatFailurePhase::SceneStorageAdmission => drop(
+                self.scope
+                    .metered_opaque_allowance(ImportStorageClass::SceneConstruction, 1),
+            ),
+            ReentrantFormatFailurePhase::NestedFormatFailure => {
+                drop(self.scope.format_failure(NestedFormatFailureProducer));
+            }
+            ReentrantFormatFailurePhase::Code | ReentrantFormatFailurePhase::Drop => {}
+        }
+        sink.unsigned("ignored", 1);
+    }
+}
+
+impl Drop for ReentrantFormatFailureProducer<'_, '_> {
+    fn drop(&mut self) {
+        if matches!(self.phase, ReentrantFormatFailurePhase::Drop) {
+            drop(
+                self.scope
+                    .with_work(ImportWorkClass::WorkUnits, 1, |work| work.complete_all()),
+            );
+        }
+    }
+}
+
+impl FormatImporter for ReentrantFormatFailureImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.reentrant-format-failure").unwrap(),
+            "Reentrant Format Failure",
+        )
+        .extensions(["reentrant-failure"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        let class = if matches!(
+            self.phase,
+            ReentrantFormatFailurePhase::SceneStorageAdmission
+        ) {
+            ImportStorageClass::SceneConstruction
+        } else {
+            ImportStorageClass::FormatNormalization
+        };
+        let mut storage = scope.metered_vec(class, "reentrant-format-failure-storage");
+        if matches!(self.phase, ReentrantFormatFailurePhase::ReservedStorage) {
+            storage.try_reserve(1)?;
+        }
+        let decoded = if matches!(self.phase, ReentrantFormatFailurePhase::DecodedStorage) {
+            Some(RefCell::new(scope.metered_decoded_text(
+                1,
+                "reentrant-format-failure-decoded-text",
+            )?))
+        } else {
+            None
+        };
+        let formatted =
+            matches!(self.phase, ReentrantFormatFailurePhase::FormattedStorage).then(|| {
+                RefCell::new(scope.metered_string(
+                    ImportStorageClass::FormatNormalization,
+                    "reentrant-format-failure-formatted-storage",
+                ))
+            });
+        Err(scope.format_failure(ReentrantFormatFailureProducer {
+            scope,
+            phase: self.phase,
+            storage: RefCell::new(Some(storage)),
+            decoded,
+            formatted,
+        }))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FailureReturnMode {
+    Return,
+    Swallow,
+    CancelAfterCreate,
+}
+
+struct LifecycleFailureImporter {
+    evidence: FailureEvidenceMode,
+    return_mode: FailureReturnMode,
+    visits: Arc<AtomicUsize>,
+    cancellation: Option<CancellationToken>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TerminalLatchTrigger {
+    MissingRequiredDependency,
+    ResourceLimit,
+    Cancellation,
+}
+
+#[derive(Clone)]
+struct TerminalLatchImporter {
+    trigger: TerminalLatchTrigger,
+    required_role: DependencyRoleId,
+    optional_role: DependencyRoleId,
+    cancellation: CancellationToken,
+    attempt_late_capabilities: bool,
+    late_successes: Arc<AtomicUsize>,
+    diagnostic_callbacks: Arc<AtomicUsize>,
+    format_detail_callbacks: Arc<AtomicUsize>,
+}
+
+struct CountingResolver {
+    calls: AtomicUsize,
+}
+
+impl CountingResolver {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::Acquire)
+    }
+}
+
+impl DependencyResolver for CountingResolver {
+    fn authorize<'a>(
+        &'a self,
+        primary: &'a dyn AssetIo,
+        primary_authority: &AuthorityDomain,
+        _primary_path: &AssetPath,
+        _role: &DependencyRoleId,
+        reference: DependencyReference<'_>,
+    ) -> Result<AuthorizedDependency<'a>, DependencyPolicyError> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        let path = reference
+            .normalized()
+            .try_clone()
+            .map_err(|_| DependencyPolicyError::AllocationFailed)?;
+        Ok(AuthorizedDependency::new(
+            primary,
+            primary_authority.clone(),
+            path,
+        ))
+    }
+}
+
+struct NormalizationAdmissionImporter {
+    role: DependencyRoleId,
+    raw_reference: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DiagnosticPanicMode {
+    Details,
+    Message,
+}
+
+struct DiagnosticPanickingImporter {
+    mode: DiagnosticPanicMode,
+}
+
+struct PanickingDiagnosticMessage;
+
+impl fmt::Display for PanickingDiagnosticMessage {
+    fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        panic!("diagnostic message panic")
+    }
+}
+
+impl FormatImporter for DiagnosticPanickingImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.diagnostic-panic").unwrap(),
+            "Diagnostic Panic",
+        )
+        .extensions(["diagnostic-panic"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        let code = baozi_import::DiagnosticCode::new("test.diagnostic_panic").unwrap();
+        match self.mode {
+            DiagnosticPanicMode::Details => scope.emit_diagnostic_with(
+                baozi_import::DiagnosticSeverity::Warning,
+                code,
+                ImportProgressPhase::Decode,
+                scope.diagnostic_source(),
+                None,
+                None,
+                |_| panic!("diagnostic details panic"),
+                format_args!("diagnostic details panic"),
+            )?,
+            DiagnosticPanicMode::Message => {
+                let message = PanickingDiagnosticMessage;
+                scope.emit_diagnostic_with(
+                    baozi_import::DiagnosticSeverity::Warning,
+                    code,
+                    ImportProgressPhase::Decode,
+                    scope.diagnostic_source(),
+                    None,
+                    None,
+                    |_| {},
+                    format_args!("{message}"),
+                )?;
+            }
+        }
+        support::submit_minimal_scene(scope)
+    }
+}
+
+impl FormatImporter for NormalizationAdmissionImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.normalization-admission").unwrap(),
+            "Normalization Admission",
+        )
+        .extensions(["normalization-admission"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .dependency_roles([(self.role.clone(), DependencyRequirement::Required)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        let _dependency =
+            support::required_root_dependency(scope, &self.role, &self.raw_reference)?;
+        support::submit_minimal_scene(scope)
+    }
+}
+
+impl FormatImporter for TerminalLatchImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.terminal-latch").unwrap(),
+            "Terminal Latch",
+        )
+        .extensions(["terminal-latch"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .dependency_roles([
+            (self.required_role.clone(), DependencyRequirement::Required),
+            (self.optional_role.clone(), DependencyRequirement::Optional),
+        ])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        let mut resize_storage = scope.metered_vec::<u8>(
+            ImportStorageClass::BackendDecode,
+            "terminal-latch-resize-storage",
+        );
+        resize_storage.try_push(0)?;
+        let resize_capacity = resize_storage.capacity();
+        let first_failure = match self.trigger {
+            TerminalLatchTrigger::MissingRequiredDependency => {
+                match support::required_root_dependency(scope, &self.required_role, "missing.bin") {
+                    Ok(_) => panic!("the required dependency is absent"),
+                    Err(failure) => failure,
+                }
+            }
+            TerminalLatchTrigger::ResourceLimit => scope
+                .enforce_resource_limit("terminal-latch-trigger", 2, 1)
+                .expect_err("the injected resource limit must fail"),
+            TerminalLatchTrigger::Cancellation => {
+                self.cancellation.cancel();
+                scope
+                    .poll()
+                    .expect_err("the injected cancellation must fail")
+            }
+        };
+        if !self.attempt_late_capabilities {
+            return Err(first_failure);
+        }
+        drop(first_failure);
+
+        let record_late_success = |succeeded: bool| {
+            if succeeded {
+                self.late_successes.fetch_add(1, Ordering::AcqRel);
+            }
+        };
+        record_late_success(
+            support::root_dependency(scope, &self.optional_role, "late-optional.bin").is_ok(),
+        );
+        record_late_success(
+            support::required_root_dependency(scope, &self.required_role, "late-required.bin")
+                .is_ok(),
+        );
+        record_late_success(
+            scope
+                .with_work(ImportWorkClass::WorkUnits, 1, |work| work.complete_all())
+                .is_ok(),
+        );
+        record_late_success(
+            scope
+                .metered_opaque_allowance(ImportStorageClass::BackendDecode, 1)
+                .is_ok(),
+        );
+        record_late_success(resize_storage.try_reserve(resize_capacity).is_ok());
+        record_late_success(
+            scope
+                .report_progress(
+                    ImportProgressPhase::Decode,
+                    ImportProgressUnit::Records,
+                    0,
+                    None,
+                )
+                .is_ok(),
+        );
+        record_late_success(
+            scope
+                .enforce_resource_limit("late-noop-limit", 0, 1)
+                .is_ok(),
+        );
+
+        let diagnostic_callbacks = Arc::clone(&self.diagnostic_callbacks);
+        record_late_success(
+            scope
+                .emit_diagnostic_with(
+                    baozi_import::DiagnosticSeverity::Warning,
+                    baozi_import::DiagnosticCode::new("test.late_diagnostic").unwrap(),
+                    ImportProgressPhase::Decode,
+                    scope.diagnostic_source(),
+                    None,
+                    None,
+                    move |_| {
+                        diagnostic_callbacks.fetch_add(1, Ordering::AcqRel);
+                    },
+                    format_args!("late diagnostic"),
+                )
+                .is_ok(),
+        );
+        record_late_success(support::submit_minimal_scene(scope).is_ok());
+
+        let terminal_failure = scope.format_failure(LifecycleFormatCause {
+            mode: FailureEvidenceMode::Normal,
+            visits: Arc::clone(&self.format_detail_callbacks),
+        });
+        Err(terminal_failure)
+    }
+}
+
+impl LifecycleFailureImporter {
+    fn returning(evidence: FailureEvidenceMode, visits: Arc<AtomicUsize>) -> Self {
+        Self {
+            evidence,
+            return_mode: FailureReturnMode::Return,
+            visits,
+            cancellation: None,
+        }
+    }
+}
+
+impl FormatImporter for LifecycleFailureImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.lifecycle-failure").unwrap(),
+            "Lifecycle Failure",
+        )
+        .extensions(["lifecycle-failure"])
+        .encoding(FormatEncoding::Binary)
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        let failure = scope.format_failure(LifecycleFormatCause {
+            mode: self.evidence,
+            visits: Arc::clone(&self.visits),
+        });
+        match self.return_mode {
+            FailureReturnMode::Return => Err(failure),
+            FailureReturnMode::Swallow => {
+                drop(failure);
+                support::submit_minimal_scene(scope)
+            }
+            FailureReturnMode::CancelAfterCreate => {
+                self.cancellation
+                    .as_ref()
+                    .expect("cancellation token")
+                    .cancel();
+                Err(failure)
+            }
+        }
+    }
+}
+
+struct SequencedIo {
+    domain: AuthorityDomain,
+    assets: BTreeMap<AssetPath, Vec<Arc<[u8]>>>,
+    opens: AtomicUsize,
+}
+
+impl SequencedIo {
+    fn new(path: AssetPath, versions: impl IntoIterator<Item = Arc<[u8]>>) -> Self {
+        Self {
+            domain: AuthorityDomain::new(),
+            assets: BTreeMap::from([(path, versions.into_iter().collect())]),
+            opens: AtomicUsize::new(0),
+        }
+    }
+
+    fn open_count(&self) -> usize {
+        self.opens.load(Ordering::Acquire)
+    }
+
+    fn with_asset(
+        mut self,
+        path: AssetPath,
+        versions: impl IntoIterator<Item = Arc<[u8]>>,
+    ) -> Self {
+        self.assets.insert(path, versions.into_iter().collect());
+        self
+    }
+}
+
+impl AssetIo for SequencedIo {
+    fn authority_domain(&self) -> AuthorityDomain {
+        self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Keys and version tables are frozen before shared use; selecting a version is constant work.
+        fixture_table_open_work_bound(path, self.assets.len())
+    }
+
+    fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
+        let index = self.opens.fetch_add(1, Ordering::AcqRel);
+        let versions = self.assets.get(path).ok_or_else(|| {
+            AssetOpenError::new(AssetOpenStage::Open, AssetOpenErrorKind::NotFound)
+        })?;
+        let bytes = versions
+            .get(index.min(versions.len().saturating_sub(1)))
+            .cloned()
+            .ok_or_else(|| {
+                AssetOpenError::new(AssetOpenStage::Open, AssetOpenErrorKind::NotFound)
+            })?;
+        Ok(OpenedAsset::new(
+            self.domain.clone(),
+            path.clone(),
+            Cursor::new(Arc::clone(&bytes)),
+            Some(AssetLength::Exact(bytes.len() as u64)),
+        ))
+    }
+}
+
+struct PartialThenInvalidReader {
+    returned_prefix: bool,
+}
+
+impl AssetReader for PartialThenInvalidReader {
+    fn read_chunk(&mut self, buffer: &mut [u8]) -> Result<usize, AssetReadError> {
+        if self.returned_prefix {
+            return Err(AssetReadError::new(AssetReadErrorKind::InvalidData));
+        }
+
+        let prefix = b"old";
+        buffer[..prefix.len()].copy_from_slice(prefix);
+        self.returned_prefix = true;
+        Ok(prefix.len())
+    }
+}
+
+struct PartialDependencyReadIo {
+    domain: AuthorityDomain,
+    primary: AssetPath,
+    dependency: AssetPath,
+    opens: AtomicUsize,
+    dependency_opens: AtomicUsize,
+}
+
+impl PartialDependencyReadIo {
+    fn open_count(&self) -> usize {
+        self.opens.load(Ordering::Acquire)
+    }
+}
+
+impl AssetIo for PartialDependencyReadIo {
+    fn authority_domain(&self) -> AuthorityDomain {
+        self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Two path comparisons, one clone, and fixed counters/reader setup for either version.
+        Ok(NonZeroU64::new(3 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
+    }
+
+    fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
+        self.opens.fetch_add(1, Ordering::AcqRel);
+        if path == &self.primary {
+            return Ok(OpenedAsset::new(
+                self.domain.clone(),
+                self.primary.clone(),
+                Cursor::new(&b"primary"[..]),
+                Some(AssetLength::Exact(7)),
+            ));
+        }
+
+        assert_eq!(path, &self.dependency);
+        let dependency_open = self.dependency_opens.fetch_add(1, Ordering::AcqRel);
+        if dependency_open == 0 {
+            Ok(OpenedAsset::new(
+                self.domain.clone(),
+                self.dependency.clone(),
+                PartialThenInvalidReader {
+                    returned_prefix: false,
+                },
+                Some(AssetLength::Exact(8)),
+            ))
+        } else {
+            Ok(OpenedAsset::new(
+                self.domain.clone(),
+                self.dependency.clone(),
+                Cursor::new(&b"changed!"[..]),
+                Some(AssetLength::Exact(8)),
+            ))
+        }
+    }
+}
+
+struct ContractViolatingReader;
+
+impl AssetReader for ContractViolatingReader {
+    fn read_chunk(&mut self, buffer: &mut [u8]) -> Result<usize, AssetReadError> {
+        Ok(buffer.len().saturating_add(1))
+    }
+}
+
+struct ContractViolatingDependencyIo {
+    domain: AuthorityDomain,
+    primary: AssetPath,
+    dependency: AssetPath,
+    opens: AtomicUsize,
+}
+
+impl ContractViolatingDependencyIo {
+    fn open_count(&self) -> usize {
+        self.opens.load(Ordering::Acquire)
+    }
+}
+
+impl AssetIo for ContractViolatingDependencyIo {
+    fn authority_domain(&self) -> AuthorityDomain {
+        self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // Two path comparisons, one clone, and fixed counter/reader setup, even for the bad reader.
+        Ok(NonZeroU64::new(3 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
+    }
+
+    fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
+        self.opens.fetch_add(1, Ordering::AcqRel);
+        if path == &self.primary {
+            return Ok(OpenedAsset::new(
+                self.domain.clone(),
+                self.primary.clone(),
+                Cursor::new(&b"primary"[..]),
+                Some(AssetLength::Exact(7)),
+            ));
+        }
+
+        assert_eq!(path, &self.dependency);
+        Ok(OpenedAsset::new(
+            self.domain.clone(),
+            self.dependency.clone(),
+            ContractViolatingReader,
+            None,
+        ))
+    }
+}
+
+struct SingleAuthorityQueryIo {
+    domain: AuthorityDomain,
+    assets: BTreeMap<AssetPath, Arc<[u8]>>,
+    authority_queries: AtomicUsize,
+    opens: AtomicUsize,
+}
+
+impl SingleAuthorityQueryIo {
+    fn new(assets: impl IntoIterator<Item = (AssetPath, Arc<[u8]>)>) -> Self {
+        Self {
+            domain: AuthorityDomain::new(),
+            assets: assets.into_iter().collect(),
+            authority_queries: AtomicUsize::new(0),
+            opens: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl AssetIo for SingleAuthorityQueryIo {
+    fn authority_domain(&self) -> AuthorityDomain {
+        let query = self.authority_queries.fetch_add(1, Ordering::AcqRel);
+        assert_eq!(
+            query, 0,
+            "authority domain must be frozen by primary binding"
+        );
+        self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // The frozen key count bounds lookup without querying authority or preparing a reader.
+        fixture_table_open_work_bound(path, self.assets.len())
+    }
+
+    fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
+        self.opens.fetch_add(1, Ordering::AcqRel);
+        let bytes = self.assets.get(path).cloned().ok_or_else(|| {
+            AssetOpenError::new(AssetOpenStage::Open, AssetOpenErrorKind::NotFound)
+        })?;
+        Ok(OpenedAsset::new(
+            self.domain.clone(),
+            path.clone(),
+            Cursor::new(Arc::clone(&bytes)),
+            Some(AssetLength::Exact(bytes.len() as u64)),
+        ))
+    }
+}
+
+fn fixture_table_open_work_bound(
+    path: &AssetPath,
+    entries: usize,
+) -> Result<NonZeroU64, AssetOpenWorkError> {
+    // Conservatively visit every frozen key once, then clone the requested path. Eight
+    // fixed units cover the counter, version selection, Arc clones, and reader construction.
+    let comparisons_and_clone = u64::try_from(entries)
+        .ok()
+        .and_then(|count| count.checked_add(1))
+        .ok_or(AssetOpenWorkError::Overflow)?;
+    (path.as_str().len() as u64 + 1)
+        .checked_mul(comparisons_and_clone)
+        .and_then(|weight| weight.checked_add(8))
+        .and_then(NonZeroU64::new)
+        .ok_or(AssetOpenWorkError::Overflow)
+}
+
+struct RecordingReader {
+    bytes: Arc<[u8]>,
+    offset: usize,
+    max_chunk: usize,
+    requests: Arc<Mutex<Vec<usize>>>,
+    observed: Arc<AtomicUsize>,
+}
+
+impl AssetReader for RecordingReader {
+    fn read_chunk(&mut self, buffer: &mut [u8]) -> Result<usize, AssetReadError> {
+        self.requests
+            .lock()
+            .expect("read request mutex")
+            .push(buffer.len());
+        let remaining = &self.bytes[self.offset..];
+        let count = remaining.len().min(buffer.len()).min(self.max_chunk);
+        buffer[..count].copy_from_slice(&remaining[..count]);
+        self.offset += count;
+        self.observed.fetch_add(count, Ordering::AcqRel);
+        Ok(count)
+    }
+}
+
+struct VariableLengthIo {
+    domain: AuthorityDomain,
+    source: AssetPath,
+    bytes: Arc<[u8]>,
+    length: Option<AssetLength>,
+    max_chunk: usize,
+    backend_limit: Option<u64>,
+    requests: Arc<Mutex<Vec<usize>>>,
+    observed: Arc<AtomicUsize>,
+}
+
+impl VariableLengthIo {
+    fn new(source: AssetPath, bytes: &[u8], length: Option<AssetLength>) -> Self {
+        Self {
+            domain: AuthorityDomain::new(),
+            source,
+            bytes: Arc::from(bytes),
+            length,
+            max_chunk: usize::MAX,
+            backend_limit: None,
+            requests: Arc::new(Mutex::new(Vec::new())),
+            observed: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl AssetIo for VariableLengthIo {
+    fn authority_domain(&self) -> AuthorityDomain {
+        self.domain.clone()
+    }
+
+    fn open_work_bound(&self, path: &AssetPath) -> Result<NonZeroU64, AssetOpenWorkError> {
+        // One path comparison/clone and fixed shared-reader setup, independent of payload length.
+        Ok(NonZeroU64::new(2 * path.as_str().len() as u64 + 16).expect("bounded fixture work"))
+    }
+
+    fn open(&self, path: &AssetPath) -> Result<OpenedAsset, AssetOpenError> {
+        assert_eq!(path, &self.source);
+        let opened = OpenedAsset::new(
+            self.domain.clone(),
+            self.source.clone(),
+            RecordingReader {
+                bytes: Arc::clone(&self.bytes),
+                offset: 0,
+                max_chunk: self.max_chunk,
+                requests: Arc::clone(&self.requests),
+                observed: Arc::clone(&self.observed),
+            },
+            self.length,
+        );
+        Ok(match self.backend_limit {
+            Some(limit) => opened.with_backend_hard_limit(limit),
+            None => opened,
+        })
+    }
+}
+
+fn request_for(importer: impl FormatImporter) -> PreparedImportRequest {
+    request_for_with_config(importer, ImportConfigOverlay::default())
+}
+
+fn request_for_with_config(
+    importer: impl FormatImporter,
+    config: ImportConfigOverlay,
+) -> PreparedImportRequest {
+    let mut builder = RegistryBuilder::new();
+    builder.register(importer).unwrap();
+    let snapshot = builder.freeze(RegistryBuildLimits::default()).unwrap();
+    snapshot
+        .compile_request(
+            &ImportRequest::from_layers(
+                ImportRequestLayer::default(),
+                ImportRequestLayer::new(config),
+            ),
+            OptionCompileLimits::default(),
+        )
+        .unwrap()
+}
+
+fn lossy_request_for(importer: impl FormatImporter) -> PreparedImportRequest {
+    request_for_with_config(
+        importer,
+        ImportConfigOverlay::default().with_loss_policy(
+            LossPolicy::preserve_or_fail().allow(ImportLossKind::OptionalDependencyUnavailable),
+        ),
+    )
+}
+
+fn request_for_with_limits(
+    importer: impl FormatImporter,
+    limits: ResourceLimits,
+) -> PreparedImportRequest {
+    request_for_with_config(
+        importer,
+        ImportConfigOverlay::default()
+            .with_resource_limits(ResourceLimitsOverlay::from_limits(limits)),
+    )
+}
+
+fn lossy_request_for_with_limits(
+    importer: impl FormatImporter,
+    limits: ResourceLimits,
+) -> PreparedImportRequest {
+    request_for_with_config(
+        importer,
+        ImportConfigOverlay::default()
+            .with_resource_limits(ResourceLimitsOverlay::from_limits(limits))
+            .with_loss_policy(
+                LossPolicy::preserve_or_fail().allow(ImportLossKind::OptionalDependencyUnavailable),
+            ),
+    )
+}
+
+fn request_for_with_selection(
+    importer: impl FormatImporter,
+    selection: FormatSelection,
+) -> PreparedImportRequest {
+    request_for_with_config(
+        importer,
+        ImportConfigOverlay::default().with_format_selection(selection),
+    )
+}
+
+fn request_for_with_detection(
+    importer: impl FormatImporter,
+    detection: baozi_import::DetectionOptions,
+) -> PreparedImportRequest {
+    request_for_with_config(
+        importer,
+        ImportConfigOverlay::default().with_detection_options(detection),
+    )
+}
+
+fn request_for_all(
+    importers: impl IntoIterator<Item = RecordingImporter>,
+) -> PreparedImportRequest {
+    let mut builder = RegistryBuilder::new();
+    for importer in importers {
+        builder.register(importer).unwrap();
+    }
+    let snapshot = builder.freeze(RegistryBuildLimits::default()).unwrap();
+    snapshot
+        .compile_request(&ImportRequest::new(), OptionCompileLimits::default())
+        .unwrap()
+}
+
+#[test]
+fn primary_is_opened_once_and_probe_and_parser_share_the_first_snapshot() {
+    let source = AssetPath::new("asset.once").unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut importer = RecordingImporter::plain("dev.baozi.test.once", "once");
+    importer.primary_views = Arc::clone(&observed);
+    let request = request_for(importer);
+    let io = SequencedIo::new(
+        source.clone(),
+        [Arc::from(&b"first"[..]), Arc::from(&b"second"[..])],
+    );
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+
+    assert_eq!(io.open_count(), 1);
+    assert_eq!(
+        &*observed.lock().unwrap(),
+        &[b"first".to_vec(), b"first".to_vec()]
+    );
+    assert_eq!(report.last_completed().phase(), ImportPhase::Validated);
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn unhinted_maybe_retains_fault_and_inconclusive_selection_evidence() {
+    let source = AssetPath::new("asset.unknown").unwrap();
+    let mut maybe = RecordingImporter::plain("dev.baozi.test.maybe", "maybe");
+    maybe.detection = DetectionOutcome::Match(ReadConfidence::Maybe);
+    let mut fault = RecordingImporter::plain("dev.baozi.test.fault", "fault");
+    fault.detection = DetectionOutcome::fault("detector failed");
+    let mut inconclusive = RecordingImporter::plain("dev.baozi.test.inconclusive", "inconclusive");
+    inconclusive.detection = DetectionOutcome::Inconclusive(DetectionInconclusive::ProbeExhausted);
+    let request = request_for_all([maybe, fault, inconclusive]);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect_err("an unhinted Maybe candidate must not be selected");
+
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Detection(DetectionFailure::NoSelection {
+            had_match: true,
+            had_inconclusive: true,
+            had_fault: true,
+        })
+    ));
+}
+
+#[test]
+fn primary_authority_is_frozen_for_diagnostics_and_same_authority_dependencies() {
+    let source = AssetPath::new("asset.authority").unwrap();
+    let dependency = AssetPath::new("missing.bin").unwrap();
+    let role = DependencyRoleId::new("buffer.required").unwrap();
+    let importer = RecordingImporter::plain("dev.baozi.test.authority", "authority")
+        .with_dependency(
+            role,
+            DependencyRequirement::Required,
+            DependencyBehavior::RequiredAvailableWithDiagnostic,
+        );
+    let request = request_for(importer);
+    let io = SingleAuthorityQueryIo::new([
+        (source.clone(), Arc::from(&b"primary"[..])),
+        (dependency, Arc::from(&b"dependency"[..])),
+    ]);
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect("one primary binding must authorize the whole session");
+
+    assert_eq!(io.authority_queries.load(Ordering::Acquire), 1);
+    assert_eq!(io.opens.load(Ordering::Acquire), 2);
+    assert_eq!(report.last_completed().phase(), ImportPhase::Validated);
+}
+
+#[test]
+fn variable_length_reads_are_admitted_before_backend_entry_and_retain_consumption() {
+    for (max_primary_asset_bytes, max_total_asset_bytes) in [(4, 1024), (10, 4)] {
+        for length in [None, Some(AssetLength::Hint(1024))] {
+            let source = AssetPath::new("asset.variable-budget").unwrap();
+            let io = VariableLengthIo::new(source.clone(), b"ten bytes!", length);
+            let mut limits = ResourceLimits::default();
+            limits.max_primary_asset_bytes = max_primary_asset_bytes;
+            limits.max_total_asset_bytes = max_total_asset_bytes;
+            let request = request_for_with_limits(
+                RecordingImporter::plain("dev.baozi.test.variable-budget", "variable-budget"),
+                limits,
+            );
+            // An oversized exact declaration reaches the same opened-resource boundary but
+            // fails before any backend read, preserving the startup and ownership work prefix.
+            let baseline_io = VariableLengthIo::new(
+                source.clone(),
+                b"ten bytes!",
+                Some(AssetLength::Exact(b"ten bytes!".len() as u64)),
+            );
+            let baseline = import_asset(
+                &request,
+                &baseline_io,
+                source.clone(),
+                ImportOperationControl::default(),
+            )
+            .expect_err("the exact declaration must exceed the byte limit before reading");
+            assert!(baseline_io.requests.lock().unwrap().is_empty());
+            assert_eq!(baseline_io.observed.load(Ordering::Acquire), 0);
+            let baseline_work = baseline
+                .ledger()
+                .dimension(ImportDimension::WorkUnits)
+                .unwrap();
+
+            let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+                .expect_err("the bounded variable-length resource must fail closed at its limit");
+
+            let requests = io.requests.lock().expect("read request mutex");
+            assert!(!requests.is_empty());
+            assert_eq!(*requests, [4, 1], "payload read followed by one EOF probe");
+            assert_eq!(io.observed.load(Ordering::Acquire), 5);
+            let primary = failure
+                .ledger()
+                .dimension(ImportDimension::PrimaryBytes)
+                .unwrap();
+            assert_eq!(primary.attempted(), 5, "includes the observed excess byte");
+            assert_eq!(primary.consumed(), 4);
+            let total = failure
+                .ledger()
+                .dimension(ImportDimension::TotalAssetBytes)
+                .unwrap();
+            assert_eq!(
+                total.attempted(),
+                if max_primary_asset_bytes == 4 { 4 } else { 5 }
+            );
+            assert_eq!(total.consumed(), 4);
+            let work = failure
+                .ledger()
+                .dimension(ImportDimension::WorkUnits)
+                .unwrap();
+            assert_eq!(
+                work.attempted() - baseline_work.attempted(),
+                2,
+                "admit exactly the payload read and EOF probe"
+            );
+            assert_eq!(
+                work.consumed() - baseline_work.consumed(),
+                2,
+                "retain exactly the two completed backend calls"
+            );
+        }
+    }
+}
+
+#[test]
+fn short_reads_reuse_byte_allowance_and_share_the_complete_snapshot() {
+    let payload = b"0123456789abcdef0123456789abcdef";
+    for length in [
+        None,
+        Some(AssetLength::Hint(1024)),
+        Some(AssetLength::Exact(32)),
+    ] {
+        for max_chunk in [1, usize::MAX] {
+            let source = AssetPath::new("asset.short-read").unwrap();
+            let mut io = VariableLengthIo::new(source.clone(), payload, length);
+            io.max_chunk = max_chunk;
+            io.backend_limit = Some(33);
+            let importer = RecordingImporter::plain("dev.baozi.test.short-read", "short-read");
+            let views = Arc::clone(&importer.primary_views);
+            let request = request_for(importer);
+
+            let report = import_asset(&request, &io, source, ImportOperationControl::default())
+                .expect("legal short reads must retain unused byte admission");
+
+            assert_eq!(*views.lock().unwrap(), [payload.to_vec(), payload.to_vec()]);
+            let primary = report
+                .ledger()
+                .dimension(ImportDimension::PrimaryBytes)
+                .unwrap();
+            assert_eq!(
+                primary.attempted(),
+                if length == Some(AssetLength::Exact(32)) {
+                    32
+                } else {
+                    33
+                }
+            );
+            assert_eq!(primary.consumed(), 32);
+            let requests = io.requests.lock().unwrap();
+            assert_eq!(requests.len(), if max_chunk == 1 { 33 } else { 2 });
+            assert_eq!(requests.last(), Some(&1));
+            if max_chunk == 1 {
+                assert!(
+                    requests.iter().sum::<usize>() > 33,
+                    "repeated requests reuse existing credit"
+                );
+            }
+            assert_eq!(io.observed.load(Ordering::Acquire), 32);
+        }
+    }
+}
+
+#[test]
+fn variable_length_primary_aggregate_and_backend_limits_accept_eof_and_reject_excess() {
+    for (primary_limit, total_limit, backend_limit) in
+        [(4, 64, None), (64, 4, None), (64, 64, Some(4))]
+    {
+        for length in [None, Some(AssetLength::Hint(1024))] {
+            for payload in [b"abc".as_slice(), b"abcd".as_slice(), b"abcde".as_slice()] {
+                let source = AssetPath::new("asset.eof-limit").unwrap();
+                let mut io = VariableLengthIo::new(source.clone(), payload, length);
+                io.backend_limit = backend_limit;
+                io.max_chunk = if payload.len() == 4 { 1 } else { usize::MAX };
+                let mut limits = ResourceLimits::default();
+                limits.max_primary_asset_bytes = primary_limit;
+                limits.max_total_asset_bytes = total_limit;
+                let importer = RecordingImporter::plain("dev.baozi.test.eof-limit", "eof-limit");
+                let views = Arc::clone(&importer.primary_views);
+                let request = request_for_with_limits(importer, limits);
+
+                let result = import_asset(&request, &io, source, ImportOperationControl::default());
+
+                if payload.len() <= 4 {
+                    let report = result.expect("below-limit and exact-limit EOF must succeed");
+                    assert_eq!(*views.lock().unwrap(), [payload.to_vec(), payload.to_vec()]);
+                    for dimension in [
+                        ImportDimension::PrimaryBytes,
+                        ImportDimension::TotalAssetBytes,
+                    ] {
+                        let evidence = report.ledger().dimension(dimension).unwrap();
+                        assert_eq!(evidence.attempted(), 4);
+                        assert_eq!(evidence.consumed(), payload.len() as u64);
+                    }
+                } else {
+                    let failure =
+                        result.expect_err("a positive EOF probe must reject excess bytes");
+                    let ImportCause::Scope(abort) = failure.cause() else {
+                        panic!("expected a typed byte-limit failure")
+                    };
+                    assert!(matches!(
+                        abort.cause(),
+                        ScopeAbortCause::ResourceLimit {
+                            resource: "asset-bytes",
+                            limit: 4
+                        } | ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                            dimension: ImportDimension::PrimaryBytes
+                                | ImportDimension::TotalAssetBytes,
+                            limit: 4,
+                            ..
+                        })
+                    ));
+                    assert!(
+                        views.lock().unwrap().is_empty(),
+                        "excess input must not reach detection or parsing"
+                    );
+                    assert_eq!(io.observed.load(Ordering::Acquire), 5);
+                    assert_eq!(*io.requests.lock().unwrap(), [4, 1]);
+                    let primary = failure
+                        .ledger()
+                        .dimension(ImportDimension::PrimaryBytes)
+                        .unwrap();
+                    assert_eq!(primary.attempted(), 5);
+                    assert_eq!(
+                        primary.consumed(),
+                        if backend_limit.is_some() { 5 } else { 4 }
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn direct_bytes_uses_one_admitted_snapshot_for_detection_and_parsing() {
+    let source = AssetPath::new("asset.direct").unwrap();
+    let importer = RecordingImporter::plain("dev.baozi.test.direct", "direct");
+    let addresses = Arc::clone(&importer.primary_addresses);
+    let request = request_for(importer);
+    let input = b"direct primary bytes";
+    let input_address = input.as_ptr() as usize;
+
+    let report = import_bytes(&request, source, input, ImportOperationControl::default())
+        .expect("direct bytes import");
+
+    let addresses = addresses.lock().unwrap();
+    assert_eq!(addresses.len(), 2);
+    assert_eq!(addresses[0], addresses[1]);
+    assert_ne!(addresses[0], input_address);
+    assert_eq!(
+        report
+            .ledger()
+            .dimension(ImportDimension::AssetOpen)
+            .unwrap()
+            .attempted(),
+        0
+    );
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn direct_bytes_rejects_primary_and_live_limits_before_copying() {
+    let small_input = b"direct primary bytes";
+    let large_input = vec![0x5a; 256 * 1024];
+    let default_live_bytes = ResourceLimits::default().max_live_bytes;
+    for (input, max_primary_asset_bytes, max_live_bytes) in [
+        (
+            small_input.as_slice(),
+            u64::try_from(small_input.len() - 1).unwrap(),
+            default_live_bytes,
+        ),
+        (
+            large_input.as_slice(),
+            u64::try_from(large_input.len()).unwrap(),
+            128 * 1024,
+        ),
+    ] {
+        let source = AssetPath::new("asset.direct-limit").unwrap();
+        let importer = RecordingImporter::plain("dev.baozi.test.direct-limit", "direct-limit");
+        let addresses = Arc::clone(&importer.primary_addresses);
+        let mut limits = ResourceLimits::default();
+        limits.max_primary_asset_bytes = max_primary_asset_bytes;
+        limits.max_live_bytes = max_live_bytes;
+        let request = request_for_with_limits(importer, limits);
+
+        let failure = import_bytes(&request, source, input, ImportOperationControl::default())
+            .expect_err("direct snapshot admission must fail");
+
+        assert!(matches!(failure.cause(), ImportCause::Scope(_)));
+        assert!(addresses.lock().unwrap().is_empty());
+        let primary = failure
+            .ledger()
+            .dimension(ImportDimension::PrimaryBytes)
+            .unwrap();
+        assert_eq!(primary.consumed(), 0);
+        assert_eq!(primary.peak_live_bytes(), 0);
+        assert_eq!(
+            failure.last_completed().phase(),
+            ImportPhase::SessionCreated
+        );
+    }
+}
+
+#[test]
+fn swallowed_required_scope_abort_still_forces_terminal_failure() {
+    let source = AssetPath::new("asset.req").unwrap();
+    let role = DependencyRoleId::new("buffer.required").unwrap();
+    let importer = RecordingImporter::plain("dev.baozi.test.required", "req").with_dependency(
+        role,
+        DependencyRequirement::Required,
+        DependencyBehavior::RequiredCaught,
+    );
+    let request = request_for(importer);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect_err("latched abort must beat parser success");
+
+    assert!(matches!(failure.cause(), ImportCause::Scope(_)));
+    assert_eq!(
+        failure.last_completed().phase(),
+        ImportPhase::SelectionCompleted
+    );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn terminal_latch_rejects_every_late_capability_without_side_effects() {
+    for trigger in [
+        TerminalLatchTrigger::MissingRequiredDependency,
+        TerminalLatchTrigger::ResourceLimit,
+        TerminalLatchTrigger::Cancellation,
+    ] {
+        let required_role = DependencyRoleId::new("buffer.required").unwrap();
+        let optional_role = DependencyRoleId::new("material.optional").unwrap();
+        let cancellation = CancellationToken::new();
+        let late_successes = Arc::new(AtomicUsize::new(0));
+        let diagnostic_callbacks = Arc::new(AtomicUsize::new(0));
+        let format_detail_callbacks = Arc::new(AtomicUsize::new(0));
+        let importer = TerminalLatchImporter {
+            trigger,
+            required_role,
+            optional_role,
+            cancellation: cancellation.clone(),
+            attempt_late_capabilities: true,
+            late_successes: Arc::clone(&late_successes),
+            diagnostic_callbacks: Arc::clone(&diagnostic_callbacks),
+            format_detail_callbacks: Arc::clone(&format_detail_callbacks),
+        };
+        let control = |cancellation| match trigger {
+            TerminalLatchTrigger::Cancellation => {
+                ImportOperationControl::default().with_cancellation(cancellation)
+            }
+            TerminalLatchTrigger::MissingRequiredDependency
+            | TerminalLatchTrigger::ResourceLimit => ImportOperationControl::default(),
+        };
+        let baseline_cancellation = CancellationToken::new();
+        let baseline_request = lossy_request_for(TerminalLatchImporter {
+            cancellation: baseline_cancellation.clone(),
+            attempt_late_capabilities: false,
+            ..importer.clone()
+        });
+        let source = AssetPath::new("asset.terminal-latch").unwrap();
+        let baseline_io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+        // Keep the same trigger and setup, then return its first failure without invoking any
+        // late capability. Trigger-specific ownership work belongs to this baseline as well.
+        let baseline = import_asset(
+            &baseline_request,
+            &baseline_io,
+            source.clone(),
+            control(baseline_cancellation),
+        )
+        .expect_err("the baseline returns the first latched failure");
+        assert_eq!(
+            baseline.last_completed().phase(),
+            ImportPhase::SelectionCompleted,
+            "{trigger:?}: the baseline must reach the trigger"
+        );
+        let baseline_work = baseline
+            .ledger()
+            .dimension(ImportDimension::WorkUnits)
+            .unwrap();
+        let request = lossy_request_for(importer);
+        let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+        let failure = import_asset(&request, &io, source, control(cancellation))
+            .expect_err("the first scope abort must remain terminal");
+
+        let ImportCause::Scope(abort) = failure.cause() else {
+            panic!("{trigger:?}: expected a scope abort")
+        };
+        match trigger {
+            TerminalLatchTrigger::MissingRequiredDependency => {
+                assert!(matches!(abort.cause(), ScopeAbortCause::AssetOpen(_)));
+                assert_eq!(failure.cause().owner(), CauseOwner::Io);
+            }
+            TerminalLatchTrigger::ResourceLimit => {
+                assert!(matches!(
+                    abort.cause(),
+                    ScopeAbortCause::ResourceLimit {
+                        resource: "terminal-latch-trigger",
+                        limit: 1,
+                    }
+                ));
+                assert_eq!(failure.cause().owner(), CauseOwner::Import);
+            }
+            TerminalLatchTrigger::Cancellation => {
+                assert!(matches!(abort.cause(), ScopeAbortCause::Control(_)));
+                assert_eq!(failure.cause().owner(), CauseOwner::Operation);
+            }
+        }
+        assert_eq!(
+            failure.last_completed().phase(),
+            ImportPhase::SelectionCompleted,
+            "{trigger:?}"
+        );
+        assert_eq!(late_successes.load(Ordering::Acquire), 0, "{trigger:?}");
+        assert_eq!(
+            diagnostic_callbacks.load(Ordering::Acquire),
+            0,
+            "{trigger:?}"
+        );
+        assert_eq!(
+            format_detail_callbacks.load(Ordering::Acquire),
+            0,
+            "{trigger:?}"
+        );
+        assert!(failure.optional_dependency_evidence().is_empty());
+        assert_eq!(failure.diagnostic_summary().attempted_count(), 0);
+        assert_eq!(failure.diagnostic_summary().stored_count(), 0);
+
+        let expected_references = usize::from(matches!(
+            trigger,
+            TerminalLatchTrigger::MissingRequiredDependency
+        )) as u64;
+        let references = failure
+            .ledger()
+            .dimension(ImportDimension::DependencyReference)
+            .unwrap();
+        assert_eq!(references.attempted(), expected_references, "{trigger:?}");
+        assert_eq!(references.consumed(), expected_references, "{trigger:?}");
+        let work = failure
+            .ledger()
+            .dimension(ImportDimension::WorkUnits)
+            .unwrap();
+        assert_eq!(
+            work.attempted(),
+            baseline_work.attempted(),
+            "late capabilities must not attempt any work; {trigger:?}"
+        );
+        assert_eq!(
+            work.consumed(),
+            baseline_work.consumed(),
+            "late capabilities must not consume any work; {trigger:?}"
+        );
+        let expected_opens = if expected_references == 0 { 1 } else { 2 };
+        assert_eq!(io.open_count(), expected_opens, "{trigger:?}");
+        assert_eq!(failure.ledger().current_live_bytes(), 0, "{trigger:?}");
+    }
+}
+
+#[test]
+fn dependency_normalization_is_admitted_before_path_growth_or_resolver_entry() {
+    let raw_reference = String::from("dependency.bin");
+    let source_text = format!("{}asset.normalization-admission", "a/".repeat(2_000));
+    assert!(source_text.len() < AssetPath::MAX_BYTES);
+    let source = AssetPath::new(source_text).unwrap();
+    let role = DependencyRoleId::new("buffer.required").unwrap();
+    let importer = NormalizationAdmissionImporter {
+        role,
+        raw_reference: raw_reference.clone(),
+    };
+    let mut limits = ResourceLimits::default();
+    assert!(raw_reference.len() < limits.max_path_length);
+    // The retained session's protected terminal owner is live before parser scratch is admitted.
+    // Keep enough room to start the session while remaining below this fixture's 68 KiB
+    // normalization envelope.
+    limits.max_live_bytes = 64 * 1024;
+    let request = request_for_with_limits(importer, limits);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+    let resolver = CountingResolver::new();
+
+    let failure = import_asset_with_resolver(
+        &request,
+        &io,
+        source,
+        &resolver,
+        ImportOperationControl::default(),
+    )
+    .expect_err("normalization scratch must be admitted before allocation");
+
+    let ImportCause::Scope(abort) = failure.cause() else {
+        panic!("expected a scope abort")
+    };
+    let rejected_live_bytes = match abort.cause() {
+        ScopeAbortCause::Ledger(baozi_import::LedgerCause::LimitExceeded {
+            dimension: ImportDimension::ScratchBytes,
+            value,
+            ..
+        }) => *value,
+        cause => panic!("unexpected cause: {cause:?}"),
+    };
+    assert_eq!(resolver.call_count(), 0);
+    assert_eq!(io.open_count(), 1, "only the primary resource may open");
+    let references = failure
+        .ledger()
+        .dimension(ImportDimension::DependencyReference)
+        .unwrap();
+    assert_eq!(references.attempted(), 1);
+    assert_eq!(references.consumed(), 1);
+    let scratch = failure
+        .ledger()
+        .dimension(ImportDimension::ScratchBytes)
+        .unwrap();
+    assert_eq!(scratch.current_live_bytes(), 0);
+    assert!(scratch.peak_live_bytes() < rejected_live_bytes);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+    assert_eq!(
+        failure.last_completed().phase(),
+        ImportPhase::SelectionCompleted
+    );
+}
+
+#[test]
+fn optional_failure_is_cached_once_but_charged_for_each_logical_reference() {
+    let source = AssetPath::new("asset.opt").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain("dev.baozi.test.optional", "opt").with_dependency(
+        role,
+        DependencyRequirement::Optional,
+        DependencyBehavior::OptionalTwice,
+    );
+    let request = lossy_request_for(importer);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+
+    assert_eq!(
+        io.open_count(),
+        2,
+        "primary plus one cached dependency attempt"
+    );
+    let references = report
+        .ledger()
+        .dimension(ImportDimension::DependencyReference)
+        .unwrap();
+    assert_eq!(references.attempted(), 2);
+    assert_eq!(references.consumed(), 2);
+    assert_eq!(report.diagnostic_summary().stored_count(), 2);
+    assert_eq!(report.optional_dependency_evidence().len(), 2);
+    assert_eq!(
+        report.optional_dependency_evidence()[0].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Fresh
+    );
+    assert_eq!(
+        report.optional_dependency_evidence()[1].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Reused
+    );
+    let manifest = report.successful_input_manifest();
+    assert_eq!(manifest.counts().node_class_count(), 1);
+    assert_eq!(manifest.counts().quotient_relation_record_count(), 1);
+    assert_eq!(manifest.counts().relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().unavailable_relation_record_count(), 1);
+    assert_eq!(manifest.counts().unavailable_relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().maximum_depth(), 0);
+    assert!(matches!(
+        manifest.replay_status(),
+        InputReplayStatus::ObservedOnly(reasons)
+            if reasons.as_slice() == [
+                ManifestObservedOnlyReason::UnstableResourceIdentity,
+                ManifestObservedOnlyReason::UnprovenNegativeInput,
+            ]
+    ));
+    let graph_nodes = report
+        .ledger()
+        .dimension(ImportDimension::ResourceGraphNodes)
+        .unwrap();
+    assert_eq!(graph_nodes.attempted(), 3);
+    assert_eq!(graph_nodes.consumed(), 1);
+    let graph_relations = report
+        .ledger()
+        .dimension(ImportDimension::ResourceGraphRelations)
+        .unwrap();
+    assert_eq!(graph_relations.attempted(), 2);
+    assert_eq!(graph_relations.consumed(), 2);
+}
+
+#[test]
+fn immutable_namespace_negative_proof_is_cached_once_and_removes_unproven_reason() {
+    let source = AssetPath::new("asset.opt").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain("dev.baozi.test.optional-proof", "opt")
+        .with_dependency(
+            role,
+            DependencyRequirement::Optional,
+            DependencyBehavior::OptionalTwice,
+        );
+    let request = lossy_request_for(importer);
+    let io = ImmutableMemoryAssetIo::try_from_entries(vec![(
+        source.clone(),
+        Arc::from(&b"primary"[..]),
+    )])
+    .expect("unique immutable namespace");
+
+    let report = import_asset(
+        &request,
+        &io,
+        source.clone(),
+        ImportOperationControl::default(),
+    )
+    .expect("an admitted immutable absence proof permits optional continuation");
+    let repeated = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect("a fresh session must reproduce the same immutable proof manifest");
+    let independent_io = ImmutableMemoryAssetIo::try_from_entries(vec![(
+        AssetPath::new("asset.opt").unwrap(),
+        Arc::from(&b"primary"[..]),
+    )])
+    .expect("an independently constructed immutable namespace");
+    let independent = import_asset(
+        &request,
+        &independent_io,
+        AssetPath::new("asset.opt").unwrap(),
+        ImportOperationControl::default(),
+    )
+    .expect("the same immutable namespace contents must reproduce the proof manifest");
+
+    assert_eq!(
+        report.successful_input_manifest(),
+        repeated.successful_input_manifest()
+    );
+    assert_eq!(
+        report.successful_input_manifest(),
+        independent.successful_input_manifest()
+    );
+    let changed_namespace_io = ImmutableMemoryAssetIo::try_from_entries(vec![
+        (
+            AssetPath::new("asset.opt").unwrap(),
+            Arc::from(&b"primary"[..]),
+        ),
+        (
+            AssetPath::new("unrelated.asset").unwrap(),
+            Arc::from(&b"unrelated"[..]),
+        ),
+    ])
+    .expect("a changed immutable namespace");
+    let changed_namespace = import_asset(
+        &request,
+        &changed_namespace_io,
+        AssetPath::new("asset.opt").unwrap(),
+        ImportOperationControl::default(),
+    )
+    .expect("the changed namespace still proves absence, but with a different proof digest");
+    assert_ne!(
+        report.successful_input_manifest().digest(),
+        changed_namespace.successful_input_manifest().digest()
+    );
+
+    assert_eq!(
+        report.optional_dependency_evidence()[0].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Fresh
+    );
+    assert_eq!(
+        report.optional_dependency_evidence()[1].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Reused
+    );
+    let manifest = report.successful_input_manifest();
+    assert!(matches!(
+        manifest.replay_status(),
+        InputReplayStatus::ObservedOnly(reasons)
+            if reasons.as_slice() == [ManifestObservedOnlyReason::UnstableResourceIdentity]
+    ));
+    let relation = &manifest.node_classes()[0].outgoing_relations()[0];
+    assert_eq!(relation.multiplicity(), 2);
+    assert!(matches!(
+        relation.reference(),
+        ManifestReference::Normalized(identity)
+            if identity.value().as_str() == "missing.bin"
+                && matches!(
+                    identity.stability(),
+                    ManifestResourceIdentityStability::Stable {
+                        owner: "baozi.asset-io",
+                        schema: "same-authority-asset-path",
+                        version: 1,
+                    }
+                )
+    ));
+    let ManifestRelationOutcome::Unavailable {
+        code,
+        identity_evidence: Some(identity_evidence),
+        replay: ManifestUnavailableReplay::NamespaceSnapshotProof(proof),
+        ..
+    } = relation.outcome()
+    else {
+        panic!("expected one namespace-snapshot absence proof")
+    };
+    assert_eq!(code.as_str(), "missing");
+    assert_eq!(identity_evidence.value().as_str(), "missing.bin");
+    assert_eq!(proof.scheme(), "baozi.immutable-memory-namespace-absence");
+    assert_eq!(proof.version(), 1);
+    assert_eq!(proof.cause_class(), "baozi.io");
+    assert_eq!(proof.cause_code(), "missing");
+    assert_eq!(
+        proof.validity_rule(),
+        "baozi.immutable-memory-namespace-membership-v1"
+    );
+    assert_eq!(
+        proof.namespace_snapshot_digest().as_bytes(),
+        io.namespace_snapshot_digest()
+    );
+    assert_ne!(proof.proof_digest().as_bytes(), [0; 32]);
+    let resolver_identity = proof.resolver_identity();
+    assert_eq!(resolver_identity.owner(), "baozi.asset-io");
+    assert_eq!(resolver_identity.schema(), "resolver-semantic");
+    assert_eq!(resolver_identity.version(), 1);
+    assert_eq!(
+        resolver_identity.digest().as_bytes(),
+        [
+            0x3b, 0xcc, 0x55, 0xc9, 0x5e, 0xb4, 0xb5, 0xaa, 0x15, 0x35, 0x1c, 0xbc, 0xbe, 0xd7,
+            0x3d, 0xea, 0x8e, 0x82, 0xbf, 0x23, 0x7c, 0x97, 0x7e, 0xb2, 0x9d, 0x6d, 0x5c, 0x31,
+            0x4c, 0x1d, 0x19, 0xb8,
+        ]
+    );
+
+    let proof_bytes = report
+        .ledger()
+        .dimension(ImportDimension::NegativeProofCanonicalBytes)
+        .expect("negative-proof canonical-byte evidence");
+    assert!(proof_bytes.consumed() > 0);
+    assert_eq!(proof_bytes.attempted(), proof_bytes.consumed());
+    for (dimension, expected) in [
+        (ImportDimension::NegativeProofTemporaryBytes, 0),
+        (ImportDimension::NegativeProofConstructionWork, 1),
+        (ImportDimension::NegativeProofVerificationWork, 1),
+    ] {
+        let evidence = report
+            .ledger()
+            .dimension(dimension)
+            .expect("registered negative-proof dimension");
+        assert_eq!(evidence.attempted(), expected, "{dimension:?}");
+        assert_eq!(evidence.consumed(), expected, "{dimension:?}");
+    }
+}
+
+#[test]
+fn immutable_negative_proof_honors_exact_and_rejected_budgets() {
+    #[allow(
+        clippy::result_large_err,
+        reason = "the contract test inspects complete bounded failure evidence at the budget edge"
+    )]
+    fn run(limits: ResourceLimits) -> Result<ImportReport, ImportFailure> {
+        let source = AssetPath::new("asset.proof-budget").unwrap();
+        let role = DependencyRoleId::new("material.library").unwrap();
+        let importer =
+            RecordingImporter::plain("dev.baozi.test.optional-proof-budget", "proof-budget")
+                .with_dependency(
+                    role,
+                    DependencyRequirement::Optional,
+                    DependencyBehavior::OptionalTwice,
+                );
+        let request = lossy_request_for_with_limits(importer, limits);
+        let io = ImmutableMemoryAssetIo::try_from_entries(vec![(
+            source.clone(),
+            Arc::from(&b"primary"[..]),
+        )])
+        .expect("unique immutable namespace");
+        import_asset(&request, &io, source, ImportOperationControl::default())
+    }
+
+    let baseline = run(ResourceLimits::default()).expect("baseline proof import");
+    let required = baseline
+        .ledger()
+        .dimension(ImportDimension::NegativeProofCanonicalBytes)
+        .expect("negative-proof byte evidence")
+        .consumed();
+    assert!(required > 0);
+
+    let mut exact_limits = ResourceLimits::default();
+    exact_limits.max_negative_proof_canonical_bytes = required;
+    let exact = run(exact_limits).expect("the exact proof-byte budget must succeed");
+    let exact_bytes = exact
+        .ledger()
+        .dimension(ImportDimension::NegativeProofCanonicalBytes)
+        .unwrap();
+    assert_eq!(exact_bytes.attempted(), required);
+    assert_eq!(exact_bytes.consumed(), required);
+
+    let mut one_short_limits = ResourceLimits::default();
+    one_short_limits.max_negative_proof_canonical_bytes = required - 1;
+    let failure = run(one_short_limits).expect_err("one byte below proof admission must fail");
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                    dimension: ImportDimension::NegativeProofCanonicalBytes,
+                    ..
+                })
+            )
+    ));
+    let rejected_bytes = failure
+        .ledger()
+        .dimension(ImportDimension::NegativeProofCanonicalBytes)
+        .unwrap();
+    assert_eq!(rejected_bytes.attempted(), required);
+    assert_eq!(rejected_bytes.consumed(), 0);
+    for (dimension, attempted) in [
+        (ImportDimension::NegativeProofTemporaryBytes, 0),
+        (ImportDimension::NegativeProofConstructionWork, 1),
+        (ImportDimension::NegativeProofVerificationWork, 1),
+    ] {
+        let evidence = failure.ledger().dimension(dimension).unwrap();
+        assert_eq!(evidence.attempted(), attempted, "{dimension:?}");
+        assert_eq!(evidence.consumed(), 0, "{dimension:?}");
+    }
+
+    for rejected_dimension in [
+        ImportDimension::NegativeProofConstructionWork,
+        ImportDimension::NegativeProofVerificationWork,
+    ] {
+        let mut limits = ResourceLimits::default();
+        match rejected_dimension {
+            ImportDimension::NegativeProofConstructionWork => {
+                limits.max_negative_proof_construction_work = 0;
+            }
+            ImportDimension::NegativeProofVerificationWork => {
+                limits.max_negative_proof_verification_work = 0;
+            }
+            _ => unreachable!("the loop contains only proof-work dimensions"),
+        }
+        let failure = run(limits).expect_err("zero proof-work capacity must reject admission");
+        assert!(matches!(
+            failure.cause(),
+            ImportCause::Scope(abort)
+                if matches!(
+                    abort.cause(),
+                    ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                        dimension,
+                        ..
+                    }) if *dimension == rejected_dimension
+                )
+        ));
+        for (dimension, attempted) in [
+            (ImportDimension::NegativeProofCanonicalBytes, required),
+            (ImportDimension::NegativeProofTemporaryBytes, 0),
+            (ImportDimension::NegativeProofConstructionWork, 1),
+            (ImportDimension::NegativeProofVerificationWork, 1),
+        ] {
+            let evidence = failure.ledger().dimension(dimension).unwrap();
+            assert_eq!(evidence.attempted(), attempted, "{dimension:?}");
+            assert_eq!(evidence.consumed(), 0, "{dimension:?}");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OptionalStructuralGraphLimitCase {
+    Node,
+    Relation,
+    Depth,
+    Work,
+}
+
+impl OptionalStructuralGraphLimitCase {
+    const ALL: [Self; 4] = [Self::Node, Self::Relation, Self::Depth, Self::Work];
+
+    const fn source(self) -> &'static str {
+        match self {
+            Self::Node => "asset.optional-graph-node-limit",
+            Self::Relation => "asset.optional-graph-relation-limit",
+            Self::Depth => "asset.optional-graph-depth-limit",
+            Self::Work => "asset.optional-graph-work-limit",
+        }
+    }
+
+    const fn format_id(self) -> &'static str {
+        match self {
+            Self::Node => "dev.baozi.test.optional-graph-node-limit",
+            Self::Relation => "dev.baozi.test.optional-graph-relation-limit",
+            Self::Depth => "dev.baozi.test.optional-graph-depth-limit",
+            Self::Work => "dev.baozi.test.optional-graph-work-limit",
+        }
+    }
+
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::Node => "optional-graph-node-limit",
+            Self::Relation => "optional-graph-relation-limit",
+            Self::Depth => "optional-graph-depth-limit",
+            Self::Work => "optional-graph-work-limit",
+        }
+    }
+
+    fn configure(self, limits: &mut ResourceLimits) {
+        match self {
+            Self::Node => limits.max_resource_graph_nodes = 1,
+            Self::Relation => limits.max_resource_graph_relations = 0,
+            Self::Depth => limits.max_resource_graph_depth = 0,
+            Self::Work => limits.max_resource_graph_work = 0,
+        }
+    }
+
+    fn assert_cause(self, cause: &ScopeAbortCause) {
+        match self {
+            Self::Node => assert!(matches!(
+                cause,
+                ScopeAbortCause::ResourceLimit {
+                    resource: "max_resource_graph_nodes",
+                    limit: 1,
+                }
+            )),
+            Self::Relation => assert!(matches!(
+                cause,
+                ScopeAbortCause::ResourceLimit {
+                    resource: "max_resource_graph_relations",
+                    limit: 0,
+                }
+            )),
+            Self::Depth => assert!(matches!(
+                cause,
+                ScopeAbortCause::ResourceLimit {
+                    resource: "max_resource_graph_depth",
+                    limit: 0,
+                }
+            )),
+            Self::Work => assert!(matches!(
+                cause,
+                ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                    dimension: ImportDimension::ResourceGraphWork,
+                    value: 1,
+                    limit: 0,
+                    ..
+                })
+            )),
+        }
+    }
+
+    fn assert_ledger(self, failure: &ImportFailure) {
+        match self {
+            Self::Node => {
+                let graph_nodes = failure
+                    .ledger()
+                    .dimension(ImportDimension::ResourceGraphNodes)
+                    .unwrap();
+                assert_eq!(graph_nodes.attempted(), 1);
+                assert_eq!(graph_nodes.consumed(), 1);
+                let graph_relations = failure
+                    .ledger()
+                    .dimension(ImportDimension::ResourceGraphRelations)
+                    .unwrap();
+                assert_eq!(graph_relations.attempted(), 1);
+                assert_eq!(graph_relations.consumed(), 1);
+            }
+            Self::Relation => {
+                let graph_relations = failure
+                    .ledger()
+                    .dimension(ImportDimension::ResourceGraphRelations)
+                    .unwrap();
+                assert_eq!(graph_relations.attempted(), 0);
+                assert_eq!(graph_relations.consumed(), 0);
+            }
+            Self::Depth => {
+                let graph_relations = failure
+                    .ledger()
+                    .dimension(ImportDimension::ResourceGraphRelations)
+                    .unwrap();
+                assert_eq!(graph_relations.attempted(), 1);
+                assert_eq!(graph_relations.consumed(), 1);
+            }
+            Self::Work => {
+                let graph_work = failure
+                    .ledger()
+                    .dimension(ImportDimension::ResourceGraphWork)
+                    .unwrap();
+                assert_eq!(graph_work.attempted(), 1);
+                assert_eq!(graph_work.consumed(), 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn optional_dependency_cannot_suppress_structural_resource_graph_limits() {
+    for case in OptionalStructuralGraphLimitCase::ALL {
+        let source = AssetPath::new(case.source()).unwrap();
+        let role = DependencyRoleId::new("material.library").unwrap();
+        let importer = RecordingImporter::plain(case.format_id(), case.extension())
+            .with_dependency(
+                role,
+                DependencyRequirement::Optional,
+                DependencyBehavior::OptionalTwice,
+            );
+        let mut limits = ResourceLimits::default();
+        case.configure(&mut limits);
+        let request = lossy_request_for_with_limits(importer, limits);
+        let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+        let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+            .expect_err("a structural graph limit cannot be converted into optional loss");
+
+        let ImportCause::Scope(abort) = failure.cause() else {
+            panic!(
+                "expected scope failure for {case:?}, got {:?}",
+                failure.cause()
+            );
+        };
+        case.assert_cause(abort.cause());
+        assert_eq!(failure.optional_dependency_evidence().len(), 0, "{case:?}");
+        assert_eq!(
+            io.open_count(),
+            1,
+            "the dependency backend must not open for {case:?}"
+        );
+        case.assert_ledger(&failure);
+    }
+}
+
+#[test]
+fn optional_dependency_byte_budget_exhaustion_is_session_dependent_omission() {
+    let source = AssetPath::new("asset.optional-dependency-byte-budget").unwrap();
+    let dependency = AssetPath::new("missing.bin").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain(
+        "dev.baozi.test.optional-dependency-byte-budget",
+        "optional-dependency-byte-budget",
+    )
+    .with_dependency(
+        role,
+        DependencyRequirement::Optional,
+        DependencyBehavior::OptionalTwice,
+    );
+    let mut limits = ResourceLimits::default();
+    limits.max_dependency_asset_bytes = 4;
+    let request = lossy_request_for_with_limits(importer, limits);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])])
+        .with_asset(dependency, [Arc::from(&b"dependency"[..])]);
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect("optional dependency-byte budget exhaustion must remain a successful omission");
+
+    assert_eq!(
+        io.open_count(),
+        2,
+        "the cached budget failure must avoid reopening the dependency"
+    );
+    assert_eq!(report.optional_dependency_evidence().len(), 2);
+    assert_eq!(
+        report.optional_dependency_evidence()[0].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Fresh
+    );
+    assert_eq!(
+        report.optional_dependency_evidence()[1].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Reused
+    );
+    assert!(
+        report
+            .optional_dependency_evidence()
+            .iter()
+            .all(|evidence| evidence.identity().is_some())
+    );
+
+    let manifest = report.successful_input_manifest();
+    assert!(matches!(
+        manifest.replay_status(),
+        InputReplayStatus::ObservedOnly(reasons)
+            if reasons.as_slice() == [
+                ManifestObservedOnlyReason::UnstableResourceIdentity,
+                ManifestObservedOnlyReason::SessionDependentUnavailable,
+            ]
+    ));
+    assert_eq!(manifest.counts().node_class_count(), 1);
+    assert_eq!(manifest.counts().quotient_relation_record_count(), 1);
+    assert_eq!(manifest.counts().relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().unavailable_relation_record_count(), 1);
+    assert_eq!(manifest.counts().unavailable_relation_occurrence_count(), 2);
+
+    let relation = &manifest.node_classes()[0].outgoing_relations()[0];
+    assert_eq!(relation.multiplicity(), 2);
+    assert!(matches!(
+        relation.reference(),
+        ManifestReference::Normalized(identity) if identity.value().as_str() == "missing.bin"
+    ));
+    assert!(matches!(
+        relation.outcome(),
+        ManifestRelationOutcome::Unavailable {
+            class: ManifestUnavailableClass::Resource,
+            code,
+            identity_evidence: Some(identity),
+            replay: ManifestUnavailableReplay::SessionDependent(
+                ManifestSessionDependentReason::AcquisitionBudget
+            ),
+        } if code.as_str() == "resource-limit"
+            && identity.value().as_str() == "missing.bin"
+    ));
+    let dependency_bytes = report
+        .ledger()
+        .dimension(ImportDimension::DependencyBytes)
+        .unwrap();
+    assert_eq!(dependency_bytes.attempted(), 10);
+    assert_eq!(dependency_bytes.consumed(), 0);
+}
+
+#[test]
+fn optional_dependency_work_budget_exhaustion_is_session_dependent_omission() {
+    let source = AssetPath::new("asset.optional-dependency-work-budget").unwrap();
+    let dependency = AssetPath::new("missing.bin").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain(
+        "dev.baozi.test.optional-dependency-work-budget",
+        "optional-dependency-work-budget",
+    )
+    .with_dependency(
+        role,
+        DependencyRequirement::Optional,
+        DependencyBehavior::OptionalTwice,
+    );
+    let mut limits = ResourceLimits::default();
+    limits.max_dependency_acquisition_work = 0;
+    let request = lossy_request_for_with_limits(importer, limits);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])])
+        .with_asset(dependency, [Arc::from(&b"dependency"[..])]);
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect("optional dependency-work budget exhaustion must remain a successful omission");
+
+    assert_eq!(
+        io.open_count(),
+        2,
+        "the cached work failure must avoid reopening the dependency"
+    );
+    assert_eq!(report.optional_dependency_evidence().len(), 2);
+    assert_eq!(
+        report.optional_dependency_evidence()[0].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Fresh
+    );
+    assert_eq!(
+        report.optional_dependency_evidence()[1].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Reused
+    );
+    assert!(
+        report
+            .optional_dependency_evidence()
+            .iter()
+            .all(|evidence| evidence.identity().is_some())
+    );
+
+    let manifest = report.successful_input_manifest();
+    assert!(matches!(
+        manifest.replay_status(),
+        InputReplayStatus::ObservedOnly(reasons)
+            if reasons.as_slice() == [
+                ManifestObservedOnlyReason::UnstableResourceIdentity,
+                ManifestObservedOnlyReason::SessionDependentUnavailable,
+            ]
+    ));
+    assert_eq!(manifest.counts().node_class_count(), 1);
+    assert_eq!(manifest.counts().quotient_relation_record_count(), 1);
+    assert_eq!(manifest.counts().relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().unavailable_relation_record_count(), 1);
+    assert_eq!(manifest.counts().unavailable_relation_occurrence_count(), 2);
+
+    let relation = &manifest.node_classes()[0].outgoing_relations()[0];
+    assert_eq!(relation.multiplicity(), 2);
+    assert!(matches!(
+        relation.reference(),
+        ManifestReference::Normalized(identity) if identity.value().as_str() == "missing.bin"
+    ));
+    assert!(matches!(
+        relation.outcome(),
+        ManifestRelationOutcome::Unavailable {
+            class: ManifestUnavailableClass::Resource,
+            code,
+            identity_evidence: Some(identity),
+            replay: ManifestUnavailableReplay::SessionDependent(
+                ManifestSessionDependentReason::AcquisitionBudget
+            ),
+        } if code.as_str() == "resource-limit"
+            && identity.value().as_str() == "missing.bin"
+    ));
+    let dependency_work = report
+        .ledger()
+        .dimension(ImportDimension::DependencyAcquisitionWork)
+        .unwrap();
+    assert_eq!(dependency_work.attempted(), 1);
+    assert_eq!(dependency_work.consumed(), 0);
+    let dependency_bytes = report
+        .ledger()
+        .dimension(ImportDimension::DependencyBytes)
+        .unwrap();
+    assert_eq!(dependency_bytes.attempted(), 0);
+    assert_eq!(dependency_bytes.consumed(), 0);
+}
+
+fn available_dependency_manifest_digest(
+    format_id: &'static str,
+    extension: &'static str,
+    behavior: DependencyBehavior,
+    duplicate_registry_order: bool,
+) -> ([u8; 32], u64, u64) {
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let main = RecordingImporter::plain(format_id, extension).with_dependency(
+        role,
+        DependencyRequirement::Required,
+        behavior,
+    );
+    let noise = RecordingImporter::plain("dev.baozi.test.manifest-permutation.noise", "noise");
+    let request = if duplicate_registry_order {
+        request_for_all(vec![noise, main])
+    } else {
+        request_for_all(vec![main, noise])
+    };
+    let source = AssetPath::new("asset.manifest-permutation").unwrap();
+    let dependency = AssetPath::new("missing.bin").unwrap();
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])])
+        .with_asset(dependency, [Arc::from(&b"dependency"[..])]);
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect("available dependency manifest import");
+
+    assert_eq!(io.open_count(), 2, "primary plus one dependency open");
+    let manifest = report.successful_input_manifest();
+    let relation = manifest
+        .node_classes()
+        .iter()
+        .flat_map(|class| class.outgoing_relations())
+        .next()
+        .expect("dependency relation");
+    (
+        manifest.digest().as_bytes(),
+        relation.multiplicity(),
+        manifest.counts().available_relation_occurrence_count(),
+    )
+}
+
+#[test]
+fn manifest_digest_is_stable_across_registry_cache_and_task_order() {
+    let first = available_dependency_manifest_digest(
+        "dev.baozi.test.manifest-permutation",
+        "manifest-permutation",
+        DependencyBehavior::RequiredAvailableTwice,
+        false,
+    );
+    let reversed_registry = available_dependency_manifest_digest(
+        "dev.baozi.test.manifest-permutation",
+        "manifest-permutation",
+        DependencyBehavior::RequiredAvailableTwice,
+        true,
+    );
+    assert_eq!(first, reversed_registry);
+    assert_eq!(first.1, 2);
+    assert_eq!(first.2, 2);
+
+    let left = std::thread::spawn(|| {
+        available_dependency_manifest_digest(
+            "dev.baozi.test.manifest-permutation",
+            "manifest-permutation",
+            DependencyBehavior::RequiredAvailableTwice,
+            false,
+        )
+    });
+    let right = std::thread::spawn(|| {
+        available_dependency_manifest_digest(
+            "dev.baozi.test.manifest-permutation",
+            "manifest-permutation",
+            DependencyBehavior::RequiredAvailableTwice,
+            true,
+        )
+    });
+
+    assert_eq!(first, left.join().expect("left import thread"));
+    assert_eq!(first, right.join().expect("right import thread"));
+}
+
+#[test]
+fn manifest_digest_changes_when_dependency_multiplicity_changes() {
+    let single = available_dependency_manifest_digest(
+        "dev.baozi.test.manifest-multiplicity.single",
+        "manifest-permutation",
+        DependencyBehavior::RequiredAvailableWithDiagnostic,
+        false,
+    );
+    let repeated = available_dependency_manifest_digest(
+        "dev.baozi.test.manifest-multiplicity.repeated",
+        "manifest-permutation",
+        DependencyBehavior::RequiredAvailableTwice,
+        false,
+    );
+
+    assert_eq!(single.1, 1);
+    assert_eq!(single.2, 1);
+    assert_eq!(repeated.1, 2);
+    assert_eq!(repeated.2, 2);
+    assert_ne!(single.0, repeated.0);
+}
+
+#[test]
+fn successful_dependency_snapshot_is_shared_and_reused_without_reopening() {
+    let source = AssetPath::new("asset.dependency-cache").unwrap();
+    let dependency = AssetPath::new("missing.bin").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain("dev.baozi.test.dependency-cache", "dep-cache")
+        .with_dependency(
+            role,
+            DependencyRequirement::Required,
+            DependencyBehavior::RequiredAvailableTwice,
+        );
+    let dependency_views = Arc::clone(&importer.dependency_views);
+    let dependency_dispositions = Arc::clone(&importer.dependency_dispositions);
+    let mut limits = ResourceLimits::default();
+    limits.max_live_bytes = 128 * 1024;
+    let request = request_for_with_limits(importer, limits);
+    let dependency_bytes = Arc::<[u8]>::from(vec![0x5a; 64 * 1024]);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]).with_asset(
+        dependency,
+        [
+            Arc::from(&b"unused"[..]),
+            Arc::clone(&dependency_bytes),
+            Arc::from(vec![0xa5; 64 * 1024]),
+        ],
+    );
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect("two references must share the first admitted dependency snapshot");
+
+    assert_eq!(io.open_count(), 2, "primary plus one dependency open");
+    assert_eq!(
+        &*dependency_views.lock().expect("recording mutex"),
+        &[dependency_bytes.to_vec(), dependency_bytes.to_vec()]
+    );
+    assert_eq!(
+        &*dependency_dispositions.lock().expect("recording mutex"),
+        &[
+            baozi_import::DependencyCacheDisposition::Fresh,
+            baozi_import::DependencyCacheDisposition::Reused,
+        ]
+    );
+    let references = report
+        .ledger()
+        .dimension(ImportDimension::DependencyReference)
+        .unwrap();
+    assert_eq!(references.attempted(), 2);
+    assert_eq!(references.consumed(), 2);
+    let dependency = report
+        .ledger()
+        .dimension(ImportDimension::DependencyBytes)
+        .unwrap();
+    assert_eq!(dependency.consumed(), 64 * 1024);
+    let manifest = report.successful_input_manifest();
+    assert_eq!(manifest.counts().node_class_count(), 2);
+    assert_eq!(manifest.counts().quotient_relation_record_count(), 1);
+    assert_eq!(manifest.counts().relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().available_relation_record_count(), 1);
+    assert_eq!(manifest.counts().available_relation_occurrence_count(), 2);
+    assert_eq!(manifest.counts().maximum_depth(), 1);
+    assert!(matches!(
+        manifest.replay_status(),
+        InputReplayStatus::ObservedOnly(reasons)
+            if reasons.as_slice() == [ManifestObservedOnlyReason::UnstableResourceIdentity]
+    ));
+    let stable_dependency = manifest
+        .node_classes()
+        .iter()
+        .find(|class| {
+            class.identity().value().as_str() == "missing.bin"
+                && matches!(
+                    class.identity().stability(),
+                    ManifestResourceIdentityStability::Stable { .. }
+                )
+        })
+        .expect("the built-in resolver must publish its registered resource identity");
+    assert_eq!(stable_dependency.identity().value().as_str(), "missing.bin");
+    assert!(matches!(
+        stable_dependency.identity().stability(),
+        ManifestResourceIdentityStability::Stable {
+            owner: "baozi.asset-io",
+            schema: "same-authority-asset-path",
+            version: 1,
+        }
+    ));
+    let normalized_reference = manifest
+        .node_classes()
+        .iter()
+        .flat_map(|class| class.outgoing_relations())
+        .find_map(|relation| match relation.reference() {
+            ManifestReference::Normalized(identity) => Some(identity),
+            ManifestReference::Rejected { .. } => None,
+        })
+        .expect("the available dependency must retain normalized-reference evidence");
+    assert_eq!(normalized_reference.value().as_str(), "missing.bin");
+    assert!(matches!(
+        normalized_reference.stability(),
+        ManifestResourceIdentityStability::Stable {
+            owner: "baozi.asset-io",
+            schema: "same-authority-asset-path",
+            version: 1,
+        }
+    ));
+    assert_ne!(manifest.digest().as_bytes(), [0; 32]);
+    let graph_nodes = report
+        .ledger()
+        .dimension(ImportDimension::ResourceGraphNodes)
+        .unwrap();
+    assert_eq!(graph_nodes.attempted(), 2);
+    assert_eq!(graph_nodes.consumed(), 2);
+    let graph_relations = report
+        .ledger()
+        .dimension(ImportDimension::ResourceGraphRelations)
+        .unwrap();
+    assert_eq!(graph_relations.attempted(), 2);
+    assert_eq!(graph_relations.consumed(), 2);
+    let manifest_bytes = report
+        .ledger()
+        .dimension(ImportDimension::InputManifestBytes)
+        .unwrap();
+    assert!(manifest_bytes.consumed() > 0);
+    assert_eq!(manifest_bytes.attempted(), manifest_bytes.consumed());
+}
+
+#[test]
+fn optional_partial_read_failure_is_cached_with_physical_byte_accounting() {
+    let source = AssetPath::new("asset.optional-partial-read").unwrap();
+    let dependency = AssetPath::new("missing.bin").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain(
+        "dev.baozi.test.optional-partial-read",
+        "optional-partial-read",
+    )
+    .with_dependency(
+        role,
+        DependencyRequirement::Optional,
+        DependencyBehavior::OptionalTwice,
+    );
+    let request = lossy_request_for(importer);
+    let io = PartialDependencyReadIo {
+        domain: AuthorityDomain::new(),
+        primary: source.clone(),
+        dependency,
+        opens: AtomicUsize::new(0),
+        dependency_opens: AtomicUsize::new(0),
+    };
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect("optional read failure must be retained and reused");
+
+    assert_eq!(io.open_count(), 2, "primary plus one dependency open");
+    assert_eq!(report.optional_dependency_evidence().len(), 2);
+    assert_eq!(
+        report.optional_dependency_evidence()[0].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Fresh
+    );
+    assert_eq!(
+        report.optional_dependency_evidence()[1].cache_disposition(),
+        baozi_import::DependencyCacheDisposition::Reused
+    );
+    let references = report
+        .ledger()
+        .dimension(ImportDimension::DependencyReference)
+        .unwrap();
+    assert_eq!(references.attempted(), 2);
+    assert_eq!(references.consumed(), 2);
+    let dependency_bytes = report
+        .ledger()
+        .dimension(ImportDimension::DependencyBytes)
+        .unwrap();
+    assert_eq!(dependency_bytes.attempted(), 8);
+    assert_eq!(dependency_bytes.consumed(), 3);
+}
+
+#[test]
+fn optional_reader_contract_violation_is_terminal_and_not_cacheable() {
+    let source = AssetPath::new("asset.optional-reader-contract").unwrap();
+    let dependency = AssetPath::new("missing.bin").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain(
+        "dev.baozi.test.optional-reader-contract",
+        "optional-reader-contract",
+    )
+    .with_dependency(
+        role,
+        DependencyRequirement::Optional,
+        DependencyBehavior::OptionalTwice,
+    );
+    let request = lossy_request_for(importer);
+    let io = ContractViolatingDependencyIo {
+        domain: AuthorityDomain::new(),
+        primary: source.clone(),
+        dependency,
+        opens: AtomicUsize::new(0),
+    };
+
+    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect_err("a trusted reader contract violation must terminate the session");
+
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Scope(abort)
+            if matches!(
+                abort.cause(),
+                ScopeAbortCause::AssetRead(error)
+                    if matches!(
+                        error.kind(),
+                        AssetReadErrorKind::ContractViolation(
+                            AssetReadContractViolation::CountExceedsBuffer { .. }
+                        )
+                    )
+            )
+    ));
+    assert_eq!(
+        io.open_count(),
+        2,
+        "the failed physical dependency must not be retried"
+    );
+    assert!(failure.optional_dependency_evidence().is_empty());
+}
+
+#[test]
+fn optional_dependency_loss_requires_explicit_caller_authority() {
+    let source = AssetPath::new("asset.optional-policy").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain("dev.baozi.test.optional-policy", "optional-policy")
+        .with_dependency(
+            role,
+            DependencyRequirement::Optional,
+            DependencyBehavior::OptionalTwice,
+        );
+
+    let preserving_request = request_for(importer.clone());
+    let preserving_io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+    let failure = import_asset(
+        &preserving_request,
+        &preserving_io,
+        source.clone(),
+        ImportOperationControl::default(),
+    )
+    .expect_err("default policy must preserve optional content or fail");
+    assert!(matches!(failure.cause(), ImportCause::Scope(_)));
+    assert!(failure.optional_dependency_evidence().is_empty());
+
+    let lossy_request = lossy_request_for(importer);
+    let lossy_io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+    let report = import_asset(
+        &lossy_request,
+        &lossy_io,
+        source,
+        ImportOperationControl::default(),
+    )
+    .expect("explicit caller authority permits unavailable optional content");
+    assert_eq!(report.optional_dependency_evidence().len(), 2);
+}
+
+#[test]
+fn format_failure_retains_stable_packed_evidence_and_owner() {
+    let source = AssetPath::new("asset.failure").unwrap();
+    let observation = Arc::new(FormatFailureProducerObservation::default());
+    let request = request_for(FormatFailingImporter {
+        observation: Arc::clone(&observation),
+    });
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect_err("format failure must be retained");
+    drop(request);
+    drop(io);
+
+    let ImportCause::Format(envelope) = failure.cause() else {
+        panic!("expected format envelope")
+    };
+    assert_eq!(envelope.code(), "test.format_failure");
+    assert!(matches!(
+        envelope.details().get(0).unwrap().value(),
+        FormatFailureDetailValue::Unsigned(7)
+    ));
+    let detail = envelope.details().get(1).expect("copied string evidence");
+    assert_eq!(detail.key(), "backend_message");
+    let FormatFailureDetailValue::String(value) = detail.value() else {
+        panic!("expected copied string evidence")
+    };
+    assert_eq!(value.as_str(), "private test backend failure");
+    assert_eq!(observation.drops.load(Ordering::Acquire), 2);
+    assert_ne!(
+        envelope.code().as_ptr() as usize,
+        observation.code_pointer.load(Ordering::Acquire)
+    );
+    assert_ne!(
+        detail.key().as_ptr() as usize,
+        observation.key_pointer.load(Ordering::Acquire)
+    );
+    assert_ne!(
+        value.as_str().as_ptr() as usize,
+        observation.value_pointer.load(Ordering::Acquire)
+    );
+    let evidence = Error::source(envelope).expect("host evidence must be the direct source");
+    assert!(evidence.downcast_ref::<FormatFailureEvidence>().is_some());
+    assert!(evidence.source().is_none());
+    assert!(std::ptr::eq(
+        evidence.downcast_ref::<FormatFailureEvidence>().unwrap(),
+        envelope.evidence()
+    ));
+    assert!(!format!("{envelope:?}").contains("TestBackendCause"));
+    assert!(
+        !envelope
+            .to_string()
+            .contains("private test backend failure")
+    );
+    assert_eq!(envelope.code(), "test.format_failure");
+    assert_eq!(envelope.details().get(1).unwrap().key(), detail.key());
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn large_format_failure_producer_is_destroyed_after_bounded_evidence_capture() {
+    let source = AssetPath::new("asset.oversized-failure").unwrap();
+    let request = request_for(OversizedFormatFailingImporter);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect_err("the importer deliberately returns a format failure");
+
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Format(envelope)
+            if envelope.code() == "test.oversized_format_failure"
+    ));
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn format_failure_storage_survives_all_terminal_evidence_paths() {
+    for mode in [
+        FailureEvidenceMode::Normal,
+        FailureEvidenceMode::CodePanics,
+        FailureEvidenceMode::InvalidCode,
+        FailureEvidenceMode::OverlongCode,
+        FailureEvidenceMode::DetailsPanic,
+        FailureEvidenceMode::DetailsRejected,
+        FailureEvidenceMode::DropPanics,
+    ] {
+        let visits = Arc::new(AtomicUsize::new(0));
+        let request = request_for(LifecycleFailureImporter::returning(
+            mode,
+            Arc::clone(&visits),
+        ));
+        let failure = import_bytes(
+            &request,
+            AssetPath::new("asset.lifecycle-failure").unwrap(),
+            b"primary",
+            ImportOperationControl::default(),
+        )
+        .expect_err("every lifecycle mode must fail");
+
+        match mode {
+            FailureEvidenceMode::Normal => {
+                assert!(matches!(failure.cause(), ImportCause::Format(_)));
+                assert_eq!(visits.load(Ordering::Acquire), 1);
+            }
+            FailureEvidenceMode::CodePanics
+            | FailureEvidenceMode::InvalidCode
+            | FailureEvidenceMode::OverlongCode => {
+                assert!(matches!(failure.cause(), ImportCause::Scope(_)));
+                assert_eq!(visits.load(Ordering::Acquire), 0);
+            }
+            FailureEvidenceMode::DetailsPanic | FailureEvidenceMode::DetailsRejected => {
+                assert!(matches!(failure.cause(), ImportCause::Scope(_)));
+                assert_eq!(visits.load(Ordering::Acquire), 1);
+                if matches!(mode, FailureEvidenceMode::DetailsPanic) {
+                    let ImportCause::Scope(abort) = failure.cause() else {
+                        unreachable!()
+                    };
+                    assert!(matches!(
+                        abort.cause(),
+                        ScopeAbortCause::TrustedExtension {
+                            boundary: TrustedExtensionBoundary::FormatFailureDetail,
+                            code: "format-failure-detail-panicked",
+                        }
+                    ));
+                }
+            }
+            FailureEvidenceMode::DropPanics => {
+                let ImportCause::Scope(abort) = failure.cause() else {
+                    panic!("expected a contained producer drop panic")
+                };
+                assert!(matches!(
+                    abort.cause(),
+                    ScopeAbortCause::TrustedExtension {
+                        boundary: TrustedExtensionBoundary::FormatFailureDetail,
+                        code: "format-failure-producer-drop-panicked",
+                    }
+                ));
+                assert_eq!(visits.load(Ordering::Acquire), 1);
+            }
+        }
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+    }
+}
+
+#[test]
+fn format_failure_evidence_callbacks_cannot_reenter_parse_capabilities() {
+    for phase in [
+        ReentrantFormatFailurePhase::Code,
+        ReentrantFormatFailurePhase::Details,
+        ReentrantFormatFailurePhase::DecodedStorage,
+        ReentrantFormatFailurePhase::FormattedStorage,
+        ReentrantFormatFailurePhase::MeteredStorage,
+        ReentrantFormatFailurePhase::ReservedStorage,
+        ReentrantFormatFailurePhase::SceneStorageAdmission,
+        ReentrantFormatFailurePhase::NestedFormatFailure,
+        ReentrantFormatFailurePhase::Drop,
+    ] {
+        let request = request_for(ReentrantFormatFailureImporter { phase });
+        let failure = import_bytes(
+            &request,
+            AssetPath::new("asset.reentrant-format-failure").unwrap(),
+            b"primary",
+            ImportOperationControl::default(),
+        )
+        .expect_err("reentrant format evidence must fail closed");
+
+        let ImportCause::Scope(abort) = failure.cause() else {
+            panic!("expected a scope contract failure for {phase:?}")
+        };
+        assert!(matches!(
+            abort.cause(),
+            ScopeAbortCause::DescriptorContract {
+                code: "parse-capability-reentered",
+            }
+        ));
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+    }
+}
+
+#[test]
+fn diagnostic_callback_panics_have_their_own_stable_boundary_and_code() {
+    for mode in [DiagnosticPanicMode::Details, DiagnosticPanicMode::Message] {
+        let request = request_for(DiagnosticPanickingImporter { mode });
+
+        let failure = import_bytes(
+            &request,
+            AssetPath::new("asset.diagnostic-panic").unwrap(),
+            b"primary",
+            ImportOperationControl::default(),
+        )
+        .expect_err("diagnostic callback panic must be contained");
+
+        let ImportCause::Scope(abort) = failure.cause() else {
+            panic!("{mode:?}: expected a scope abort")
+        };
+        assert!(matches!(
+            abort.cause(),
+            ScopeAbortCause::TrustedExtension {
+                boundary: TrustedExtensionBoundary::DiagnosticCallback,
+                code: "diagnostic-callback-panicked",
+            }
+        ));
+        assert_eq!(failure.ledger().current_live_bytes(), 0, "{mode:?}");
+    }
+}
+
+#[test]
+fn format_failure_storage_is_admitted_before_trusted_callbacks() {
+    let baseline_visits = Arc::new(AtomicUsize::new(0));
+    let baseline_request = request_for(LifecycleFailureImporter::returning(
+        FailureEvidenceMode::Normal,
+        Arc::clone(&baseline_visits),
+    ));
+    let source = AssetPath::new("asset.lifecycle-failure").unwrap();
+    let baseline = import_bytes(
+        &baseline_request,
+        source.clone(),
+        b"primary",
+        ImportOperationControl::default(),
+    )
+    .expect_err("baseline format failure");
+    assert_eq!(baseline_visits.load(Ordering::Acquire), 1);
+
+    let mut limits = ResourceLimits::default();
+    limits.max_live_bytes = baseline
+        .ledger()
+        .peak_live_bytes()
+        .checked_sub(1)
+        .expect("format failure admission raises the live peak");
+    let rejected_visits = Arc::new(AtomicUsize::new(0));
+    let rejected_request = request_for_with_limits(
+        LifecycleFailureImporter::returning(
+            FailureEvidenceMode::Normal,
+            Arc::clone(&rejected_visits),
+        ),
+        limits,
+    );
+    let rejected = import_bytes(
+        &rejected_request,
+        source,
+        b"primary",
+        ImportOperationControl::default(),
+    )
+    .expect_err("one byte below the observed peak must reject admission");
+
+    assert_eq!(rejected_visits.load(Ordering::Acquire), 0);
+    assert!(matches!(rejected.cause(), ImportCause::Scope(_)));
+    assert_eq!(rejected.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn swallowed_format_failure_is_a_descriptor_contract_failure() {
+    let visits = Arc::new(AtomicUsize::new(0));
+    let request = request_for(LifecycleFailureImporter {
+        evidence: FailureEvidenceMode::Normal,
+        return_mode: FailureReturnMode::Swallow,
+        visits: Arc::clone(&visits),
+        cancellation: None,
+    });
+    let failure = import_bytes(
+        &request,
+        AssetPath::new("asset.lifecycle-failure").unwrap(),
+        b"primary",
+        ImportOperationControl::default(),
+    )
+    .expect_err("a parser cannot swallow a format failure capability");
+
+    let ImportCause::Scope(abort) = failure.cause() else {
+        panic!("expected a scope contract failure")
+    };
+    assert!(matches!(
+        abort.cause(),
+        ScopeAbortCause::DescriptorContract { code }
+            if *code == "format-failure-was-swallowed"
+    ));
+    assert_eq!(visits.load(Ordering::Acquire), 1);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn post_parse_cancellation_releases_staged_format_failure_storage() {
+    let cancellation = CancellationToken::new();
+    let visits = Arc::new(AtomicUsize::new(0));
+    let request = request_for(LifecycleFailureImporter {
+        evidence: FailureEvidenceMode::Normal,
+        return_mode: FailureReturnMode::CancelAfterCreate,
+        visits: Arc::clone(&visits),
+        cancellation: Some(cancellation.clone()),
+    });
+    let control = ImportOperationControl::default().with_cancellation(cancellation);
+    let failure = import_bytes(
+        &request,
+        AssetPath::new("asset.lifecycle-failure").unwrap(),
+        b"primary",
+        control,
+    )
+    .expect_err("post-parse cancellation must override the returned format failure");
+
+    let ImportCause::Scope(abort) = failure.cause() else {
+        panic!("expected a cancellation scope failure")
+    };
+    assert!(matches!(abort.cause(), ScopeAbortCause::Control(_)));
+    assert_eq!(visits.load(Ordering::Acquire), 1);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn finalize_cancellation_overrides_a_pre_scene_format_failure() {
+    let visits = Arc::new(AtomicUsize::new(0));
+    let request = request_for(LifecycleFailureImporter::returning(
+        FailureEvidenceMode::Normal,
+        Arc::clone(&visits),
+    ));
+    let final_events = Arc::new(AtomicUsize::new(0));
+    let observed_final_events = Arc::clone(&final_events);
+    let control = ImportOperationControl::default().with_progress_observer(
+        move |event: baozi_operation::ProgressEvent<ImportProgressPhase, ImportProgressUnit>| {
+            if event.phase() == ImportProgressPhase::Finalize {
+                observed_final_events.fetch_add(1, Ordering::AcqRel);
+                ProgressDecision::Cancel
+            } else {
+                ProgressDecision::Continue
+            }
+        },
+    );
+
+    let failure = import_bytes(
+        &request,
+        AssetPath::new("asset.pre-scene-final-cancel").unwrap(),
+        b"primary",
+        control,
+    )
+    .expect_err("final cancellation must override the earlier format failure");
+
+    let ImportCause::Scope(abort) = failure.cause() else {
+        panic!("expected a control scope failure")
+    };
+    assert!(matches!(abort.cause(), ScopeAbortCause::Control(_)));
+    assert!(matches!(
+        failure.ledger().terminal_cause(),
+        ImportTerminalCause::Failure(terminal)
+            if terminal.class() == ImportTerminalFailureClass::Control
+    ));
+    assert_eq!(final_events.load(Ordering::Acquire), 1);
+    assert_eq!(visits.load(Ordering::Acquire), 1);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn failure_retains_optional_dependency_loss_evidence() {
+    let source = AssetPath::new("asset.optional-failure").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain("dev.baozi.test.optional-failure", "optional-failure")
+        .with_dependency(
+            role,
+            DependencyRequirement::Optional,
+            DependencyBehavior::OptionalThenFail,
+        );
+    let request = lossy_request_for(importer);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect_err("format failure after optional loss");
+
+    assert_eq!(failure.optional_dependency_evidence().len(), 1);
+    assert_eq!(failure.diagnostic_summary().stored_count(), 1);
+}
+
+fn structured_diagnostic_text_profile() -> TextProfile {
+    TextProfile::builder(
+        TextHardCaps::new(
+            512 * 1024 * 1024,
+            512 * 1024 * 1024,
+            64 * 1024 * 1024,
+            1_000_000_000,
+            64 * 1024 * 1024,
+        )
+        .expect("static structured-diagnostic text hard caps must be valid"),
+    )
+    .source_encodings([TextSourceEncoding::Utf8])
+    .bom_policy(TextBomPolicy::Forbidden)
+    .newlines([TextNewline::Lf])
+    .lexical_mode(TextLexicalMode::Utf8Document)
+    .decoding_modes([TextDecodingMode::RejectInvalid])
+    .control_policy(TextControlPolicy::AllowHorizontalTab)
+    .build()
+    .expect("static structured-diagnostic text profile must be valid")
+}
+
+struct StructuredDiagnosticImporter {
+    diagnostic_count: usize,
+}
+
+impl StructuredDiagnosticImporter {
+    const fn new(diagnostic_count: usize) -> Self {
+        Self { diagnostic_count }
+    }
+}
+
+impl FormatImporter for StructuredDiagnosticImporter {
+    fn descriptor(&self) -> FormatDescriptor {
+        FormatDescriptor::builder(
+            FormatId::new("dev.baozi.test.structured-diagnostic").unwrap(),
+            "Structured Diagnostic",
+        )
+        .extensions(["structured-diagnostic"])
+        .encoding(FormatEncoding::Text)
+        .text_profile(structured_diagnostic_text_profile())
+        .capabilities([(FormatCapability::Geometry, CapabilityStatus::Supported)])
+        .build()
+        .unwrap()
+    }
+
+    fn detect(
+        &self,
+        _probe: &baozi_import::Probe<'_>,
+        _hint: &ReadHint,
+        _scope: &DetectionScope<'_>,
+    ) -> DetectionResult<DetectionOutcome> {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    }
+
+    fn parse(&self, scope: &mut ParseScope<'_>) -> ParseResult<SceneDraft> {
+        scope
+            .with_conformed_text_input(
+                scope.diagnostic_source(),
+                TextInputOptions::new(TextDecodingMode::RejectInvalid, "structured-diagnostic")
+                    .with_line_index_resource("structured-diagnostic-line-index"),
+                |input, _recoveries| {
+                    let line = input
+                        .lines()
+                        .nth(1)
+                        .expect("fixture must expose its second line");
+                    let location = line
+                        .diagnostic_location(baozi_import::DiagnosticByteRange::new(2, 4).unwrap())
+                        .expect("fixture range must belong to the second line");
+                    for record in 0..self.diagnostic_count {
+                        scope.emit_text_diagnostic_with(
+                            baozi_import::DiagnosticSeverity::Warning,
+                            baozi_import::DiagnosticCode::new("test.structured_warning").unwrap(),
+                            ImportProgressPhase::Decode,
+                            location,
+                            Some("/records/0"),
+                            |details| {
+                                details.unsigned(
+                                    "record",
+                                    u64::try_from(record).expect("bounded diagnostic count"),
+                                );
+                                details.string("token", "bad\nvalue");
+                            },
+                            format_args!("bad\nrecord"),
+                        )?;
+                    }
+                    Ok(())
+                },
+            )?
+            .expect("structured diagnostic fixture must conform");
+        support::submit_minimal_scene(scope)
+    }
+}
+
+#[allow(
+    clippy::result_large_err,
+    reason = "the test helper returns the public terminal failure with complete bounded evidence"
+)]
+fn import_structured_diagnostics(
+    diagnostic_count: usize,
+    limits: ResourceLimits,
+) -> Result<ImportReport, ImportFailure> {
+    let source = AssetPath::new("asset.structured-diagnostic").unwrap();
+    let request =
+        request_for_with_limits(StructuredDiagnosticImporter::new(diagnostic_count), limits);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"a\nprimary"[..])]);
+    import_asset(&request, &io, source, ImportOperationControl::default())
+}
+
+#[test]
+fn structured_diagnostic_retains_bounded_location_and_details() {
+    let source = AssetPath::new("asset.structured-diagnostic").unwrap();
+    let request = request_for(StructuredDiagnosticImporter::new(1));
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"a\nprimary"[..])]);
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+    let diagnostic = &report.diagnostics()[0];
+
+    assert_eq!(diagnostic.phase(), ImportProgressPhase::Decode);
+    assert_eq!(diagnostic.byte_range().unwrap().start(), 2);
+    assert_eq!(diagnostic.line_column().unwrap().line(), 2);
+    assert_eq!(diagnostic.line_column().unwrap().column(), 1);
+    assert_eq!(diagnostic.object_path(), Some("/records/0"));
+    assert_eq!(diagnostic.details().len(), 2);
+    assert_eq!(
+        report
+            .ledger()
+            .dimension(ImportDimension::DiagnosticBytes)
+            .unwrap()
+            .current_live_bytes(),
+        0
+    );
+}
+
+#[test]
+fn repeated_text_locations_reuse_one_shared_line_index() {
+    let single = import_structured_diagnostics(1, ResourceLimits::default())
+        .expect("single diagnostic import");
+    let repeated = import_structured_diagnostics(2, ResourceLimits::default())
+        .expect("repeated diagnostic import");
+
+    assert_eq!(single.diagnostics().len(), 1);
+    assert_eq!(repeated.diagnostics().len(), 2);
+    let line_index_peak = |report: &ImportReport| {
+        report
+            .ledger()
+            .dimension(ImportDimension::LineIndexBytes)
+            .expect("line-index evidence is configured")
+            .peak_live_bytes()
+    };
+    assert!(line_index_peak(&single) > 0);
+    assert_eq!(line_index_peak(&repeated), line_index_peak(&single));
+}
+
+#[test]
+fn text_diagnostic_locations_require_the_shared_line_index_budget() {
+    let mut limits = ResourceLimits::default();
+    limits.max_line_index_bytes = 0;
+
+    let failure = import_structured_diagnostics(1, limits)
+        .expect_err("text locations must not fall back to an arbitrary source scan");
+    let ImportCause::Scope(abort) = failure.cause() else {
+        panic!("shared line-index exhaustion must remain import-owned")
+    };
+    assert!(matches!(
+        abort.cause(),
+        ScopeAbortCause::ResourceLimit {
+            resource: "structured-diagnostic-line-index",
+            limit: 0,
+        }
+    ));
+}
+
+#[test]
+fn publication_peak_includes_output_and_retained_diagnostic_payload() {
+    let source = AssetPath::new("asset.diagnostic-peak").unwrap();
+    let request = request_for(StructuredDiagnosticImporter::new(1));
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"a\nprimary"[..])]);
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+    let canonical_output = report
+        .ledger()
+        .dimension(ImportDimension::CanonicalOutputBytes)
+        .unwrap()
+        .peak_live_bytes();
+    let diagnostic_payload = report
+        .ledger()
+        .dimension(ImportDimension::DiagnosticBytes)
+        .unwrap()
+        .peak_live_bytes();
+    let retained_diagnostic_payload = report.diagnostic_summary().stored_bytes();
+
+    assert!(canonical_output > 0);
+    assert!(diagnostic_payload > 0);
+    assert!(retained_diagnostic_payload > 0);
+    assert!(diagnostic_payload >= retained_diagnostic_payload);
+    assert!(
+        report.ledger().peak_live_bytes()
+            >= canonical_output
+                .checked_add(retained_diagnostic_payload)
+                .expect("bounded retained payload accounting")
+    );
+}
+
+#[test]
+fn oversized_detector_configuration_is_rejected_before_session_creation() {
+    assert!(
+        baozi_import::DetectionOptions::new(baozi_import::MAX_DETECTOR_WORK_BETWEEN_POLLS + 1)
+            .is_err()
+    );
+}
+
+#[test]
+fn forced_detection_distinguishes_contradiction_fault_and_inconclusive() {
+    let source = AssetPath::new("asset.forced").unwrap();
+
+    let mut contradiction = RecordingImporter::plain("dev.baozi.test.forced-no", "forced");
+    contradiction.detection = DetectionOutcome::NoMatch;
+    let request = request_for_with_selection(
+        contradiction,
+        FormatSelection::Forced(FormatId::new("dev.baozi.test.forced-no").unwrap()),
+    );
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+    let failure = import_asset(
+        &request,
+        &io,
+        source.clone(),
+        ImportOperationControl::default(),
+    )
+    .expect_err("forced contradiction");
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Detection(DetectionFailure::ForcedFormatContradiction { .. })
+    ));
+
+    let mut fault = RecordingImporter::plain("dev.baozi.test.forced-fault", "forced");
+    fault.detection = DetectionOutcome::fault("detector failed");
+    let request = request_for_with_selection(
+        fault,
+        FormatSelection::Forced(FormatId::new("dev.baozi.test.forced-fault").unwrap()),
+    );
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+    let failure = import_asset(
+        &request,
+        &io,
+        source.clone(),
+        ImportOperationControl::default(),
+    )
+    .expect_err("forced fault");
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Detection(DetectionFailure::ForcedDetectorFault { .. })
+    ));
+
+    let mut inconclusive = RecordingImporter::plain("dev.baozi.test.forced-inc", "forced");
+    inconclusive.detection = DetectionOutcome::Inconclusive(DetectionInconclusive::ProbeExhausted);
+    let request = request_for_with_selection(
+        inconclusive,
+        FormatSelection::Forced(FormatId::new("dev.baozi.test.forced-inc").unwrap()),
+    );
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+    assert!(import_asset(&request, &io, source, ImportOperationControl::default()).is_ok());
+}
+
+#[test]
+fn automatic_detection_only_reports_unsupported_for_clean_no_match() {
+    let source = AssetPath::new("asset.auto").unwrap();
+    let mut clean = RecordingImporter::plain("dev.baozi.test.clean-no", "auto");
+    clean.detection = DetectionOutcome::NoMatch;
+    let request = request_for(clean);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+    let failure = import_asset(
+        &request,
+        &io,
+        source.clone(),
+        ImportOperationControl::default(),
+    )
+    .expect_err("clean no match");
+    assert!(matches!(failure.cause(), ImportCause::UnsupportedFormat));
+
+    let mut faulty = RecordingImporter::plain("dev.baozi.test.faulty-no", "auto");
+    faulty.detection = DetectionOutcome::fault("fault");
+    let request = request_for(faulty);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+    let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+        .expect_err("fault is not unsupported");
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::Detection(DetectionFailure::NoSelection {
+            had_fault: true,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn parser_panic_poison_is_shared_across_snapshots() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut builder = RegistryBuilder::new();
+    builder
+        .register(PanickingImporter {
+            calls: Arc::clone(&calls),
+        })
+        .unwrap();
+    let snapshot_a = builder.freeze(RegistryBuildLimits::default()).unwrap();
+    let snapshot_b = builder.freeze(RegistryBuildLimits::default()).unwrap();
+    let compile = |snapshot: &baozi_import::RegistrySnapshot| {
+        snapshot
+            .compile_request(
+                &ImportRequest::from_layers(
+                    ImportRequestLayer::default(),
+                    ImportRequestLayer::new(ImportConfigOverlay::default().with_format_selection(
+                        FormatSelection::Forced(
+                            FormatId::new("dev.baozi.test.panic-shared").unwrap(),
+                        ),
+                    )),
+                ),
+                OptionCompileLimits::default(),
+            )
+            .unwrap()
+    };
+    let request_a = compile(&snapshot_a);
+    let request_b = compile(&snapshot_b);
+    let source = AssetPath::new("asset.panic").unwrap();
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+    let panicked = import_asset(
+        &request_a,
+        &io,
+        source.clone(),
+        ImportOperationControl::default(),
+    )
+    .expect_err("the first parser invocation panics");
+    let poisoned = import_asset(&request_b, &io, source, ImportOperationControl::default())
+        .expect_err("the shared registration remains poisoned");
+
+    assert!(matches!(
+        panicked.cause(),
+        ImportCause::TrustedExtension {
+            boundary: TrustedExtensionBoundary::Importer,
+            code: "importer-panicked",
+        }
+    ));
+    assert!(matches!(
+        poisoned.cause(),
+        ImportCause::Detection(DetectionFailure::ForcedDetectorFault { .. })
+    ));
+    for failure in [&panicked, &poisoned] {
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+    }
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn in_flight_parse_success_is_rejected_after_a_parallel_parser_panics() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (first_entered, entered) = sync_channel(0);
+    let (release, release_first) = sync_channel(0);
+    let mut builder = RegistryBuilder::new();
+    builder
+        .register(RacingParsePoisonImporter {
+            calls: Arc::clone(&calls),
+            first_entered,
+            release_first: Mutex::new(release_first),
+        })
+        .unwrap();
+    let first_snapshot = builder.freeze(RegistryBuildLimits::default()).unwrap();
+    let second_snapshot = builder.freeze(RegistryBuildLimits::default()).unwrap();
+    let compile = |snapshot: &baozi_import::RegistrySnapshot| {
+        snapshot
+            .compile_request(
+                &ImportRequest::from_layers(
+                    ImportRequestLayer::default(),
+                    ImportRequestLayer::new(ImportConfigOverlay::default().with_format_selection(
+                        FormatSelection::Forced(
+                            FormatId::new("dev.baozi.test.racing-parse-poison").unwrap(),
+                        ),
+                    )),
+                ),
+                OptionCompileLimits::default(),
+            )
+            .unwrap()
+    };
+    let first_request = compile(&first_snapshot);
+    let second_request = compile(&second_snapshot);
+
+    let first = std::thread::spawn(move || {
+        import_bytes(
+            &first_request,
+            AssetPath::new("first.racing-parse-poison").unwrap(),
+            b"primary",
+            ImportOperationControl::default(),
+        )
+        .expect_err("the in-flight successful parse must be discarded after shared poison")
+    });
+    entered
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the first parser reaches the controlled boundary");
+    let panicked = import_bytes(
+        &second_request,
+        AssetPath::new("second.racing-parse-poison").unwrap(),
+        b"primary",
+        ImportOperationControl::default(),
+    )
+    .expect_err("the parallel parser panics");
+    release
+        .send(())
+        .expect("the first parser still waits for release");
+    let poisoned = first
+        .join()
+        .expect("the first import thread remains contained");
+
+    assert!(matches!(
+        panicked.cause(),
+        ImportCause::TrustedExtension {
+            boundary: TrustedExtensionBoundary::Importer,
+            code: "importer-panicked",
+        }
+    ));
+    assert!(matches!(
+        poisoned.cause(),
+        ImportCause::TrustedExtension {
+            boundary: TrustedExtensionBoundary::Importer,
+            code: "importer-poisoned",
+        }
+    ));
+    for failure in [&panicked, &poisoned] {
+        assert_eq!(failure.ledger().current_live_bytes(), 0);
+    }
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+}
+
+#[test]
+fn parser_panic_does_not_run_an_untrusted_payload_destructor() {
+    let payload_drops = Arc::new(AtomicUsize::new(0));
+    let request = request_for(OpaquePanickingImporter {
+        payload_drops: Arc::clone(&payload_drops),
+    });
+    let failure = import_bytes(
+        &request,
+        AssetPath::new("asset.opaque-panic").unwrap(),
+        b"primary",
+        ImportOperationControl::default(),
+    )
+    .expect_err("opaque parser panic must be contained");
+
+    assert!(matches!(
+        failure.cause(),
+        ImportCause::TrustedExtension {
+            boundary: TrustedExtensionBoundary::Importer,
+            code: "importer-panicked",
+        }
+    ));
+    assert_eq!(payload_drops.load(Ordering::Acquire), 0);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn asset_io_panics_do_not_run_untrusted_payload_destructors() {
+    let request = request_for(RecordingImporter::plain(
+        "dev.baozi.test.opaque-asset-io",
+        "opaque-asset-io",
+    ));
+
+    for (boundary, expected_code) in [
+        (
+            OpaqueAssetIoPanicBoundary::Authority,
+            "primary-authority-panicked",
+        ),
+        (
+            OpaqueAssetIoPanicBoundary::WorkBound,
+            "primary-open-work-panicked",
+        ),
+        (OpaqueAssetIoPanicBoundary::Open, "primary-open-panicked"),
+        (OpaqueAssetIoPanicBoundary::Read, "asset-read-panicked"),
+    ] {
+        let source = AssetPath::new("asset.opaque-asset-io").unwrap();
+        let payload_drops = Arc::new(AtomicUsize::new(0));
+        let io = OpaquePanickingAssetIo {
+            boundary,
+            domain: AuthorityDomain::new(),
+            source: source.clone(),
+            payload_drops: Arc::clone(&payload_drops),
+        };
+
+        let failure = import_asset(&request, &io, source, ImportOperationControl::default())
+            .expect_err("opaque AssetIo panic must be contained");
+        let matched_boundary = match failure.cause() {
+            ImportCause::TrustedExtension { boundary, code } => {
+                *boundary == TrustedExtensionBoundary::AssetIo && *code == expected_code
+            }
+            ImportCause::Scope(abort) => matches!(
+                abort.cause(),
+                ScopeAbortCause::TrustedExtension { boundary, code }
+                    if *boundary == TrustedExtensionBoundary::AssetIo && *code == expected_code
+            ),
+            _ => false,
+        };
+
+        assert!(matched_boundary, "{boundary:?}: {:#?}", failure.cause());
+        assert_eq!(payload_drops.load(Ordering::Acquire), 0, "{boundary:?}");
+        assert_eq!(failure.ledger().current_live_bytes(), 0, "{boundary:?}");
+    }
+}
+
+#[test]
+fn cancellation_before_primary_open_creates_failure_evidence_without_io() {
+    let source = AssetPath::new("asset.cancel").unwrap();
+    let request = request_for(RecordingImporter::plain("dev.baozi.test.cancel", "cancel"));
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+    let token = CancellationToken::new();
+    token.cancel();
+    let control = ImportOperationControl::default().with_cancellation(token);
+
+    let failure = import_asset(&request, &io, source, control).expect_err("cancelled");
+
+    assert_eq!(io.open_count(), 0);
+    assert_eq!(
+        failure.last_completed().phase(),
+        ImportPhase::SessionCreated
+    );
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn detector_work_is_probe_bounded_and_post_detector_cancellation_prevents_selection() {
+    let source = AssetPath::new("asset.scan").unwrap();
+    let token = CancellationToken::new();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let mut importer = RecordingImporter::plain("dev.baozi.test.scan", "scan");
+    importer.primary_views = Arc::clone(&observed);
+    importer.detector_cancel = Some(token.clone());
+    let request =
+        request_for_with_detection(importer, baozi_import::DetectionOptions::new(8).unwrap());
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"0123456789abcdef"[..])]);
+    let control = ImportOperationControl::default().with_cancellation(token);
+
+    let failure = import_asset(&request, &io, source, control).expect_err("cancelled after scan");
+
+    assert_eq!(observed.lock().unwrap()[0].len(), 8);
+    assert_eq!(failure.last_completed().phase(), ImportPhase::PrimaryBound);
+    assert!(failure.selected_format().is_none());
+}
+
+#[test]
+fn observer_panic_is_contained_and_releases_primary_snapshot() {
+    let source = AssetPath::new("asset.observer").unwrap();
+    let request = request_for(RecordingImporter::plain(
+        "dev.baozi.test.observer",
+        "observer",
+    ));
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+    let control = ImportOperationControl::default()
+        .with_progress_observer(|_| -> ProgressDecision { panic!("observer panic") });
+
+    let failure = import_asset(&request, &io, source, control).expect_err("observer panic");
+
+    assert!(matches!(failure.cause(), ImportCause::Scope(_)));
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn progress_observer_can_run_a_nested_import_without_lock_reentry() {
+    let nested_source = AssetPath::new("asset.nested-observer").unwrap();
+    let nested_request = Arc::new(request_for(RecordingImporter::plain(
+        "dev.baozi.test.nested-observer",
+        "nested-observer",
+    )));
+    let nested_io = Arc::new(SequencedIo::new(
+        nested_source.clone(),
+        [Arc::from(&b"nested"[..])],
+    ));
+    let observer_calls = Arc::new(AtomicUsize::new(0));
+    let nested_successes = Arc::new(AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&observer_calls);
+    let observed_successes = Arc::clone(&nested_successes);
+    let control = ImportOperationControl::default().with_progress_observer(move |_| {
+        if observed_calls.fetch_add(1, Ordering::AcqRel) == 0
+            && import_asset(
+                &nested_request,
+                nested_io.as_ref(),
+                nested_source.clone(),
+                ImportOperationControl::default(),
+            )
+            .is_ok()
+        {
+            observed_successes.fetch_add(1, Ordering::AcqRel);
+        }
+        ProgressDecision::Continue
+    });
+    let source = AssetPath::new("asset.outer-observer").unwrap();
+    let request = request_for(RecordingImporter::plain(
+        "dev.baozi.test.outer-observer",
+        "outer-observer",
+    ));
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"outer"[..])]);
+
+    let report = import_asset(&request, &io, source, control).expect("outer import");
+
+    assert!(observer_calls.load(Ordering::Acquire) > 0);
+    assert_eq!(nested_successes.load(Ordering::Acquire), 1);
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn final_observer_cancellation_rolls_back_publication_exactly_once() {
+    let final_events = Arc::new(AtomicUsize::new(0));
+    let observed_final_events = Arc::clone(&final_events);
+    let control = ImportOperationControl::default().with_progress_observer(
+        move |event: baozi_operation::ProgressEvent<ImportProgressPhase, ImportProgressUnit>| {
+            if event.phase() == ImportProgressPhase::Finalize {
+                observed_final_events.fetch_add(1, Ordering::AcqRel);
+                ProgressDecision::Cancel
+            } else {
+                ProgressDecision::Continue
+            }
+        },
+    );
+    let source = AssetPath::new("asset.final-cancel").unwrap();
+    let request = request_for(RecordingImporter::plain(
+        "dev.baozi.test.final-cancel",
+        "final-cancel",
+    ));
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+    let failure = import_asset(&request, &io, source, control)
+        .expect_err("final observer cancellation must roll back publication");
+
+    let output = failure
+        .ledger()
+        .dimension(ImportDimension::CanonicalOutputBytes)
+        .unwrap();
+    assert_eq!(final_events.load(Ordering::Acquire), 1);
+    assert_eq!(failure.last_completed().phase(), ImportPhase::Validated);
+    assert_eq!(output.committed(), 0);
+    assert_eq!(failure.ledger().committed_canonical_members(), 0);
+    assert_eq!(failure.ledger().current_live_bytes(), 0);
+}
+
+#[test]
+fn diagnostic_storage_caps_drop_excess_without_changing_success() {
+    let source = AssetPath::new("asset.diag").unwrap();
+    let role = DependencyRoleId::new("material.library").unwrap();
+    let importer = RecordingImporter::plain("dev.baozi.test.diag", "diag").with_dependency(
+        role,
+        DependencyRequirement::Optional,
+        DependencyBehavior::OptionalTwice,
+    );
+    let mut limits = ResourceLimits::default();
+    limits.max_diagnostics = 1;
+    let request = lossy_request_for_with_limits(importer, limits);
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+
+    assert_eq!(report.diagnostic_summary().attempted_count(), 2);
+    assert_eq!(report.diagnostic_summary().stored_count(), 1);
+    assert_eq!(report.diagnostic_summary().dropped_count(), 1);
+    assert_eq!(report.optional_dependency_evidence().len(), 2);
+}
+
+#[test]
+fn complete_batch_activation_transitions_to_committed_output() {
+    const SCENE_NAME: &str = "named-node";
+
+    let source = AssetPath::new("asset.complete-batch-budget").unwrap();
+    let request = request_for(
+        RecordingImporter::plain(
+            "dev.baozi.test.complete-batch-budget",
+            "complete-batch-budget",
+        )
+        .with_scene_name(SCENE_NAME),
+    );
+    let io = SequencedIo::new(source.clone(), [Arc::from(&b"primary"[..])]);
+
+    let report = import_asset(&request, &io, source, ImportOperationControl::default()).unwrap();
+    let output = report
+        .ledger()
+        .dimension(ImportDimension::CanonicalOutputBytes)
+        .expect("canonical output accounting");
+    let canonical_strings = report
+        .ledger()
+        .dimension(ImportDimension::CanonicalStringBytes)
+        .expect("canonical string accounting");
+
+    assert!(output.peak_live_bytes() > 0);
+    assert_eq!(output.committed(), 0);
+    assert_eq!(
+        report.ledger().committed_canonical_members(),
+        u64::try_from(report.scene().canonical_block_count())
+            .expect("canonical block count fits the import ledger scalar")
+    );
+    assert_eq!(output.current_live_bytes(), 0);
+    assert_eq!(
+        (canonical_strings.attempted(), canonical_strings.consumed()),
+        (SCENE_NAME.len() as u64, SCENE_NAME.len() as u64)
+    );
+    assert_eq!(report.ledger().current_live_bytes(), 0);
+}

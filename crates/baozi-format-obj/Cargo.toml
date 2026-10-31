@@ -6,14 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/baozi-format-obj"
 authors.workspace = true
-description.workspace = true
+description = "Wavefront OBJ/MTL importer backend for Baozi"
+readme = "README.md"
 
 [dependencies]
-baozi-core.workspace = true
 baozi-import.workspace = true
 baozi-io.workspace = true
 
 [dev-dependencies]
+baozi-core.workspace = true
+baozi-operation.workspace = true
 baozi-test-support.workspace = true

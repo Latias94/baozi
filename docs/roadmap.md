@@ -1,164 +1,152 @@
 # Baozi Roadmap
 
-This roadmap keeps implementation order aligned with the architecture decisions. It is not a promise
-that every listed format is already supported.
+This roadmap states product direction and records the completed A–H library-delivery sequence. The
+[delivery plan](plans/2026-10-29-001-refactor-library-delivery-plan.md) owns its scope and acceptance;
+the [delivery progress](reviews/2026-10-29-delivery-progress.md#completed-ah-delivery-2026-10-31)
+records exact executed target/profile evidence. The [2026-10-29 review](reviews/2026-10-29-library-state-review.md)
+remains the starting observation. Format maturity, native release registration, and publication
+remain separate decisions. The former U4 execution sequence is superseded history.
 
 ## Product Direction
 
-Baozi should become a Rust-native importer with Assimp-class breadth over time. The path is not to
-bind to another importer as the primary design. The path is to define a durable scene IR, importer
-contract, IO policy, post-process pipeline, test oracle, and format promotion process, then add
-formats through repeatable vertical slices.
+Baozi is trusted, fidelity-preserving, engine-neutral 3D asset ingestion and offline compilation
+infrastructure for Rust ecosystems. Its differentiation is not the number of filename extensions it
+can open. It is the combination of:
 
-## Milestone 0: Workspace Foundation
+- one usable, typed, immutable Scene lifecycle;
+- bounded and attributable resource use for untrusted inputs;
+- explicit loss, provenance, source scope, and successful-input evidence;
+- explicit, deterministic postprocessing with useful geometry operations;
+- format-profile maturity backed by reproducible evidence; and
+- engine-neutral output suitable for runtime loaders, editors, and offline cookers.
 
-Status: in progress.
+Baozi may use narrow native or isolated adapters when a format cannot be implemented safely and
+economically in pure Rust. Decoder ownership, failure containment, and canonical semantics remain
+Baozi-owned. Assimp is a compatibility and differential oracle, not the production architecture.
 
-Exit criteria:
+## Completed Library Delivery Sequence
 
-- workspace crate graph exists
-- facade compiles with default features and `all-formats`
-- core scene IR has IDs, materials, diagnostics, IO limits, and format registry contracts
-- architecture ADRs cover the major stability boundaries
-- CI-equivalent local commands pass
+### 1. Repair Basic Execution and Source Fidelity
 
-Key docs:
+Normal-stack Windows triangle import, ordinary host-unwind cleanup, stable registered identity,
+and executable examples establish the baseline. Specific reproductions and public behavior tests
+cover the repaired OBJ/PLY data-discard paths, legal short reads, quadratic validation, repeated
+cache-hit hashing, and live-memory accounting gaps.
 
-- ADR 0001 through ADR 0017
-- `docs/model/scene-ir.md`
-- `docs/security/parser-threat-model.md`
+The unpublished status permits replacing the responsible architecture. API compatibility and the
+private shape of the current state machine do not justify retaining a defective design.
 
-## Milestone 1: First Real Parser Slice
+### 2. Deliver Typed Consumers and Simplify Scene Storage
 
-Recommended target: binary and ASCII STL.
+Borrowed views expose geometry, material, hierarchy, instance, deformation, and animation values.
+The independent consumer reads actual data; snapshots remain test/debug evidence. Plugin authoring
+uses default document provenance and useful validation errors.
 
-Why STL first:
+Private typed tables and immutable payloads replace generic Scene records and duplicate validation
+projections. The cutover proceeded from node/geometry through each consumer's remaining domains,
+deleting each replaced implementation. Operation mechanisms retain allocation admission and
+lifetime-bound charging; core owns Scene semantics. The affected architecture decisions describe
+the delivered implementation boundaries.
 
-- small format surface
-- no material sidecars
-- good parser security exercise
-- clear geometry-only snapshots
-- useful baseline for post-process validation
+Node, geometry, profile, spatial, deformation, animation, and appearance now use retained typed
+owners under one Scene root. The remaining private record directory contains revision/count fields
+only. Fresh builds, central validation, public reads, snapshots, and unchanged edit sharing use those
+same owners; each replaced codec and validation projection is deleted with its cutover. The
+completed delivery plan and progress record carry the measured costs and final product acceptance.
 
-Exit criteria:
+### 3. Complete glTF/GLB and Useful Geometry Processing
 
-- parser handles ASCII and binary STL detection
-- malformed fixtures return structured errors, not panics
-- resource limits are enforced before large allocation
-- raw snapshot format exists in `baozi-test-support`
-- support matrix records exact capability status
-- fuzz target exists before beta promotion
+The selected glTF/GLB profile is source-admitted through `format-gltf` and `all-formats`, using a
+private maintained decoder. It includes selected-scene PBR assets in GLB and external-resource forms,
+skins, morphs, and TRS animation. The [exact profile](formats/gltf.md) defines its supported slices
+and explicit restrictions; source admission does not assign format maturity or publication readiness.
 
-## Milestone 2: Text Format and Sidecar Slice
+Concrete triangulation, Flat/Smooth normal generation, and explicit coordinate/unit conversion use
+transactional edits. They preserve winding and attribute-domain remaps, require authority for
+declared loss, and return the original immutable Scene on ordinary failure.
 
-Recommended target: OBJ with MTL.
+Whole-Scene space conversion now covers geometry, authored nodes, skin matrices, morph deltas,
+TRS curves and derivatives, and camera/light definitions. Complete intrinsic camera/light axes
+compose without changing node hierarchy. Supplemental material thickness and signed displacement
+strength scale with units while unchanged encoded-image and text payloads remain shared.
 
-Status: first experimental slice implemented.
+The allocation-free `triangle_vertices` reader exposes one complete application tuple per draw
+Corner, preserving Vertex/Corner/Face fields, influence rows, and primitive-qualified morph reads.
+Applications select fields, allocate their concrete buffers, and may collect the implicit
+`0..corner_count` indices; equal tuples may repeat. The independent consumer constructs and checks
+owned vertex/index buffers through this workflow. Verified increments and target/profile evidence
+are recorded in the [delivery progress](reviews/2026-10-29-delivery-progress.md).
 
-Why OBJ second:
+### 4. Reduce Governance and Prove Distribution
 
-- separate indices force vertex remapping decisions
-- polygon topology exercises triangulation boundary
-- MTL exercises material and texture path policy
-- sidecars exercise `AssetIo` and path security
+Retain meaningful compiler-boundary, ownership, budget, failure, filesystem-race, and sanitizer tests.
+Remove test-source hashes, AST-shape proofs, dead collector features, and repeated metadata scans.
+Use a short behavior-to-test index, retained fuzz corpus, and a few explicit growth workloads. Do not
+reintroduce retired `u4c-metrics` infrastructure.
 
-Exit criteria:
+Update dependencies in focused changes with relevant semantic/platform checks. Run independent
+consumers against unpacked packages and supported targets. Finish licenses, notices, examples,
+feature coverage, and exact profile claims before release. External attestation, signing, and cache
+identity require a real distribution consumer; they do not precede basic library usability.
 
-- OBJ geometry, groups, smoothing metadata, and MTL references are represented for static face meshes
-- importer preserves polygons before requested triangulation
-- core `Mesh` face-boundary data and triangulation postprocess remain sufficient for OBJ polygons
-- sidecar loading obeys `AssetIo` scope rules
-- material mapping is documented against ADR 0012 and the OBJ format page
-- snapshots or direct field assertions cover raw and post-processed scenes
+Formats gain maturity only through their exact tested profiles. Neither an ADR, a parser crate, nor
+a passing snapshot alone constitutes supported format behavior.
 
-## Milestone 3: Flexible Vertex Properties
+Public facade features now describe only portable library capabilities. Native runtime IO and
+repository capture live together in an excluded unpublished candidate workspace and compose through
+the public `AssetIo` interface. Core adapters share an unconditional hidden integration namespace;
+private constructors and single-use ownership enforce publication instead of Cargo feature union.
+Historical internal execution rails that serve fault tests are compiled only for tests, and unused
+projection/collector helpers are removed. The delivery progress records the corresponding source
+and behavior qualification; this structural separation does not promote native support.
 
-Recommended target: PLY.
+## Format Priorities
 
-Why PLY third:
+Format work begins only when it strengthens a current architecture or product goal.
 
-- property schema varies by file
-- point clouds and vertex colors are common
-- helps prove custom attribute policy from ADR 0015
+| Priority | Format or profile | Role |
+| --- | --- | --- |
+| P0 | glTF 2.0 / GLB | Core game, editor, and offline-pipeline profile; GLB is the preferred single-file path. |
+| P0 | OBJ / common MTL | Static-model, debugging, and legacy-toolchain profile without promising every MTL dialect. |
+| P0 | PLY mesh and PLY point cloud | Two explicit scanning/tooling profiles rather than one ambiguous capability. |
+| P0 | STL | Manufacturing and regression baseline; not the default game-content format. |
+| P1 | VRM 1.0 | A glTF profile, not an independent parser architecture. |
+| P1 | Binary FBX 7.x game profile | Optional isolated ingestion after the existing typed-consumer and processing workflows are usable. |
+| P2 | Resolved USD stage | A composed Scene snapshot profile, not a claim of complete USD implementation. |
+| P2 | BVH / PMX / VMD | Demand-driven motion-capture and avatar profiles. |
+| P3 | Collada | Demand-driven legacy migration only. |
 
-Exit criteria:
+`.blend` is handled through a pinned, isolated Blender conversion workflow rather than direct parsing.
+Alembic requires a separate time-sequenced geometry model and remains out of scope for the current
+Scene IR. 3MF is considered only if Baozi deliberately enters manufacturing workflows.
 
-- ASCII and binary little-endian PLY are handled first
-- common position, normal, color, and UV properties map to typed channels
-- unknown bounded properties map to namespaced custom attributes or diagnostics
-- support matrix distinguishes point cloud and mesh capabilities
+## Later Product Work
 
-## Milestone 4: Modern Scene Format
-
-Recommended target: glTF2 and GLB.
-
-Why glTF fourth:
-
-- validates PBR material model
-- validates textures and color space policy
-- validates skins, morph targets, and animation channels
-- validates buffer and URI policy
-
-Exit criteria:
-
-- GLB and external-buffer glTF work through `AssetIo`
-- metallic-roughness material mapping is documented
-- skins, morph targets, and basic animation channels map without IR redesign
-- strict and permissive import options are tested
-- fixtures cover coordinates, cameras, lights, and animation timing
-
-## Milestone 5: Post-Process Depth
-
-Exit criteria:
-
-- validation pass is implemented
-- triangulation pass is implemented
-- bounding box generation is implemented
-- coordinate/unit normalization is implemented
-- normal and tangent generation have documented math and tests
-- presets expand to explicit pipelines
-- destructive steps report diagnostics or stats
-
-## Milestone 6: Format Promotion System
-
-Exit criteria:
-
-- every format has a capability document under `docs/formats/`
-- stable promotion requires fixtures, fuzzing, differential evidence, and docs
-- support matrix is generated or checked against crate metadata
-- release notes distinguish parser maturity from crate existence
-
-## Later Milestones
-
-Potential later work:
-
-- Collada parser
-- FBX strategy and parser feasibility study
-- IQM, MD5, MD2/MD3, and MMD family formats
-- image decoding helpers behind optional features
-- exporter crates
-- persistent cache crate
-- C ABI or dynamic plugin strategy
-
-Each of these should get a design note or ADR before implementation if it changes public contracts.
+Exporter infrastructure follows ADR 0038 only after registry identity, transactional sinks, loss
+evidence, feature membership, and package gates are complete. Persistent caching, dynamic plugins,
+third-party passes, C ABI support, out-of-core Scene storage, and standalone skeleton models remain
+demand-driven. Each requires an Accepted decision only when it changes an existing public or durable
+architecture contract.
 
 ## Success Metrics
 
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Build health | workspace check, clippy, nextest, and deny pass | local/CI commands |
-| Parser safety | malformed fixtures never panic | parser tests |
-| Format honesty | support matrix never claims unimplemented support | docs review and tests |
-| IR stability | STL, OBJ, PLY, and glTF map without replacing core scene types | milestone reviews |
-| Post-process clarity | raw and processed snapshots are separately reviewable | golden tests |
-| License hygiene | default dependency tree remains compatible with MIT/Apache-2.0 consumers | `cargo deny check` |
+| Metric | Target |
+| --- | --- |
+| Basic usability | Independent consumers run on normal platform stacks; normal drop and ordinary unwind release healthy owned allocations. |
+| Canonical lifecycle | Typed public reads and central validation use one Scene path; completed cutovers delete replaced storage and adapters. |
+| Resource safety | Actual work and overlapping live allocations follow the declared limits; terminal evidence remains bounded. |
+| Evidence integrity | Direct behavior tests, bounded corpus growth, and explicit workload results are reproducible. |
+| Semantic fidelity | Known source loss requires authorization and evidence; numeric precision and authored representation are preserved. |
+| Format honesty | Support statements describe exact verified profiles and named evidence authority. |
+| Engine neutrality | Packaged downstream consumers can ingest canonical output without a Baozi-specific engine runtime. |
+| Release readiness | Locked package consumers, licenses, notices, and executed target/profile checks pass independently of ADR status. |
 
-## Risks and Mitigations
+## Primary Risks
 
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Parser count grows before core invariants are enforced | High | Medium | Keep milestones vertical and validator-first |
-| Complex formats expose missing animation or material semantics | High | Medium | Use ADR 0012 and ADR 0015 before glTF stabilization |
-| Snapshot format becomes noisy | Medium | Medium | Normalize snapshots separately from public API |
-| Support claims outrun implementation | High | Medium | Keep support matrix conservative |
-| Optional dependencies bloat default builds | Medium | Medium | Keep codecs and FFI out of default features |
+| Risk | Mitigation |
+| --- | --- |
+| Architecture work delays usable features | Deliver typed consumption first and migrate domains in bounded cuts tied to actual consumers. |
+| Old and replacement paths diverge | Keep one production path per completed domain and delete obsolete implementations in that cutover. |
+| Resource accounting diverges from live data | Bind reservations to actual allocation owners and test overlapping lifetimes, cache hits, short reads, and ordinary unwind. |
+| Format breadth outruns evidence | Promote exact profiles only after corpus, fuzz, malformed, limit, facade, and provenance gates pass. |
+| Infrastructure becomes architecture | Remove source-shape proof systems; require concrete risks and bounded behavioral checks for every replacement tool. |

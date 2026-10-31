@@ -9,19 +9,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
-name = "baozi"
-version = "0.1.0"
-dependencies = [
- "baozi-core",
- "baozi-import",
- "baozi-io",
- "baozi-postprocess",
-]
-
-[[package]]
 name = "baozi-core"
 version = "0.1.0"
 dependencies = [
+ "baozi-operation",
+ "sha2",
  "thiserror",
 ]
 
@@ -29,18 +21,18 @@ dependencies = [
 name = "baozi-format-gltf"
 version = "0.1.0"
 dependencies = [
- "baozi-core",
+ "baozi-gltf",
  "baozi-import",
- "baozi-io",
  "base64",
- "gltf",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
 name = "baozi-format-obj"
 version = "0.1.0"
 dependencies = [
- "baozi-core",
  "baozi-import",
  "baozi-io",
 ]
@@ -49,30 +41,47 @@ dependencies = [
 name = "baozi-format-ply"
 version = "0.1.0"
 dependencies = [
- "baozi-core",
  "baozi-import",
- "baozi-io",
 ]
 
 [[package]]
 name = "baozi-format-stl"
 version = "0.1.0"
 dependencies = [
- "baozi-core",
  "baozi-import",
- "baozi-io",
 ]
 
 [[package]]
 name = "baozi-fuzz"
 version = "0.0.0"
 dependencies = [
- "baozi",
  "baozi-format-gltf",
  "baozi-format-obj",
  "baozi-format-ply",
  "baozi-format-stl",
+ "baozi-import",
+ "baozi-io",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "baozi-gltf"
+version = "0.1.0"
+dependencies = [
+ "baozi-gltf-json",
+ "byteorder",
+ "lazy_static",
+ "serde_json",
+]
+
+[[package]]
+name = "baozi-gltf-json"
+version = "0.1.0"
+dependencies = [
+ "gltf-derive",
+ "serde",
+ "serde_derive",
+ "serde_json",
 ]
 
 [[package]]
@@ -81,20 +90,24 @@ version = "0.1.0"
 dependencies = [
  "baozi-core",
  "baozi-io",
+ "baozi-operation",
+ "sha2",
 ]
 
 [[package]]
 name = "baozi-io"
 version = "0.1.0"
 dependencies = [
- "baozi-core",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]
-name = "baozi-postprocess"
+name = "baozi-operation"
 version = "0.1.0"
 dependencies = [
- "baozi-core",
+ "scopeguard",
+ "triomphe",
 ]
 
 [[package]]
@@ -102,6 +115,15 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "block-buffer"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
+dependencies = [
+ "hybrid-array",
+]
 
 [[package]]
 name = "byteorder"
@@ -128,6 +150,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "cpufeatures"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "crypto-common"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
+dependencies = [
+ "hybrid-array",
+]
+
+[[package]]
+name = "digest"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
+dependencies = [
+ "block-buffer",
+ "const-oid",
+ "crypto-common",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -145,18 +202,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gltf"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3ce1918195723ce6ac74e80542c5a96a40c2b26162c1957a5cd70799b8cacf7"
-dependencies = [
- "byteorder",
- "gltf-json",
- "lazy_static",
- "serde_json",
-]
-
-[[package]]
 name = "gltf-derive"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -169,15 +214,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "gltf-json"
-version = "1.4.1"
+name = "hybrid-array"
+version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6176f9d60a7eab0a877e8e96548605dedbde9190a7ae1e80bbcc1c9af03ab14"
+checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
 dependencies = [
- "gltf-derive",
- "serde",
- "serde_derive",
- "serde_json",
+ "typenum",
 ]
 
 [[package]]
@@ -255,6 +297,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "scopeguard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
 name = "serde"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -297,6 +345,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -332,6 +391,18 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "triomphe"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d15f4f5898bcfc5d8a8e45ed30b2f108d710c1a2e5489dbf80e078f707181bc"
+
+[[package]]
+name = "typenum"
+version = "1.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "unicode-ident"

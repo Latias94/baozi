@@ -32,11 +32,15 @@ Review these pins when changing CI, investigating tooling failures, or promoting
 
 - `ACTIONLINT_VERSION` in `.github/workflows/ci.yml`
 - `GO_VERSION` in `.github/workflows/ci.yml`
+- `cargo-deny@0.20.2` in the `taiki-e/install-action` tool list in `.github/workflows/ci.yml`
 - `CARGO_FUZZ_VERSION` in `.github/workflows/ci.yml` and `.github/workflows/fuzz.yml`
 - `RUST_FUZZ_NIGHTLY` in `.github/workflows/ci.yml` and `.github/workflows/fuzz.yml`
 
 The dated fuzz nightly intentionally uses `dtolnay/rust-toolchain@master` with a `toolchain` input.
-Stable Rust CI uses the `dtolnay/rust-toolchain@1.95.0` action ref instead.
+The workspace job tests MSRV through `dtolnay/rust-toolchain@1.95.0`. A separate current-stable
+job runs strict workspace Clippy, all-feature tests, and doctests. The Windows and Apple ARM64
+packaged-consumer matrix additionally tests current stable in release mode. Stable jobs record `rustc -Vv`,
+so a rolling stable result has an exact compiler identity.
 
 ## Local Checks
 
@@ -44,14 +48,103 @@ Run the core Rust gates before opening a PR:
 
 ```powershell
 cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace
-cargo test --doc --workspace --all-features
+cargo check --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo nextest run --locked --workspace --exclude baozi-xtask
+cargo nextest run --locked --workspace --all-features --exclude baozi-xtask
+cargo test --locked --doc --workspace --all-features
 $env:RUSTDOCFLAGS = '-D warnings'
-cargo doc --workspace --all-features --no-deps
-cargo deny check
+cargo doc --locked --workspace --all-features --no-deps
+cargo deny --locked check
+cargo deny --locked --manifest-path fuzz/Cargo.toml check
+cargo deny --locked --all-features --manifest-path candidates/baozi-native-io/Cargo.toml --config deny.toml check
+cargo check --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc
+cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc
+cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc --features repository-capture
+cargo check --locked -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats
+cargo check --locked -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
+cargo run --locked -p baozi-xtask -- crate-graph-check
+cargo run --locked -p baozi-xtask -- native-fs-check
+cargo nextest run --locked -p baozi-xtask
+cargo run --locked -p baozi-xtask -- runtime-admission-check
+python scripts/check_features.py --toolchain 1.95.0
+python scripts/check_packages.py --toolchain 1.95.0
+python scripts/check_packages.py --toolchain stable --release
 ```
+
+Use cargo-deny 0.20.2 for the dependency checks above. Its `--config` option belongs before the
+`check` subcommand; the standalone candidate uses the root policy explicitly.
+
+The package matrix creates fresh archives for the complete production dependency closure, checks
+each package's normalized metadata, README and licenses, and resolves local dependencies only from
+their extracted contents. It builds and executes all twelve fixed consumer cases in a fresh
+artifact build directory: no features, curated defaults, each format independently, postprocessing,
+all formats, tracing, mint, and all features. The MSRV/debug and current-stable/release Windows
+and Apple ARM64 jobs execute the same maintained semantic consumer, including the ordinary
+main-stack import and application-buffer workflow. Each checks the actual compiler host against
+its exact target before building; the artifact matrix is not a cross-compile substitute.
+
+There is currently no release-registered `native-fs` or low-level `fs` feature. The unpublished
+`baozi-native-io-candidate` package has its own workspace/lockfile and an optional
+`repository-capture` capability. The portable facade and IO crate expose no candidate switches
+or path helpers. Native tests compose the adapter through public `read_asset` and retain an empty
+`NATIVE_FS_REGISTERED_TARGETS`; successful candidate tests do not establish a support promise.
+
+GitHub Actions binds each runtime candidate to one fixed runner and exact target:
+`ubuntu-24.04` / `x86_64-unknown-linux-gnu`, `windows-2025` /
+`x86_64-pc-windows-msvc`, and `macos-15` / `aarch64-apple-darwin`. Each job first compares the
+`rustc -vV` host with its matrix target, then passes that target explicitly to every Cargo and
+nextest command. Candidate fixture setup is fail-closed; the suite contains no `SKIP` path.
+Unix candidate tests require an unprivileged runner so the search-permission fixture can verify
+an actual host denial. Root or another DAC bypass fails that fixture rather than passing it silently.
+The Apple candidate job also executes the portable all-feature workspace tests and doctests on
+that actual ARM64 host. It uses one Cargo build job and two workspace test threads. Its 45-minute
+ceiling includes those checks; the separate packaged-consumer jobs retain their own 45-minute
+ceilings. Workflow wiring is not execution evidence: Apple qualification requires completed
+current-source jobs and their recorded host/toolchain identities.
+
+Browser WASM remains compile-only. WASI executes the independent no-feature and all-feature release
+consumers under Wasmtime 50.0.0, including byte/custom-IO imports, typed semantic value assertions,
+and the application-buffer workflow where compiled in. The workflow pins the
+Wasmtime setup action by commit and its runtime by version. These executed WASI cases do not
+establish browser runtime support or promote any native-filesystem candidate. Portable Byte release
+promotion still follows ADR 0034 and the exact executed target/profile evidence. CI also
+requires the candidate package to fail with the same explicit Baozi diagnostic on
+`wasm32-unknown-unknown`, `wasm32-wasip1`, Build Monitored `x86_64-apple-darwin`, and audit-only
+`x86_64-unknown-freebsd`, plus ABI-distinct `x86_64-unknown-linux-gnux32`, after first proving each
+target is installed. The `native-fs-check` command separately compares normal/build dependency
+closures for the three runtime candidates plus the FreeBSD audit profile against schema 5 of
+[`native-filesystem-resolved-closure.json`](../research/native-filesystem-resolved-closure.json),
+whose `runtime_candidate_targets`, `dependency_audit_profiles`, and
+`release_registered_targets` fields keep those universes distinct. It also checks package sources,
+lockfile checksums, resolved features, direct target edges, the unique local bounded backend
+path/version with distinct upstream archive provenance, and the version-bound review basis for
+the Windows directory share-mode boundary. Native filesystem
+dependencies remain private to the standalone candidate workspace. The checker also rejects `cap-std`, `cap-primitives`,
+`rustix`, or `cap-fs-ext`, and rejects activation of either registered or candidate native filesystem
+features in byte-only WebAssembly graphs. The separate `crate-graph-check` traverses every workspace
+normal/build dependency edge, including optional, renamed, and target-conditional declarations. It
+enforces the complete ADR 0007 production direction table, rejects unclassified production crates,
+support/tool dependencies, reverse paths, and production cycles, while allowing dev-only test edges.
+The workspace nextest runs exclude `baozi-xtask`. Its repository-scanning fixture suites duplicate
+whole-tree work and can dominate otherwise parallel workspace tests. CI runs the complete xtask
+package once, then invokes the required repository checks directly. The dead repository-input
+feature and optional IO edge are removed, so a second all-feature run would repeat the same graph.
+ADR review remains an authoring concern rather than a default Rust gate.
+`runtime-admission-check` makes one locked Cargo metadata query and checks normal/build dependency
+reachability. Host scheduling, cancellation, release ordering, and publication are covered by the
+[behavior gate index](../testing/behavior-gates.md). The former conformance receipt and test-source
+hash checks have been retired; a handwritten receipt never substituted for an executed test.
+
+A green dependency check does not establish filesystem behavior. Native candidate qualification
+uses the complete platform-local race, link/reparse, special-file, and same-handle acceptance
+matrix recorded in
+[`native-filesystem-bound-handle-admission.md`](../research/native-filesystem-bound-handle-admission.md).
+The executed Linux, Windows, and Apple ARM64 suites have no fixture skips. Windows constructs actual
+unknown-tag reparse objects and verifies their typed rejection, as well as an actual volume-GUID
+mount escape. Release registration remains empty.
+The FreeBSD closure is resolved in CI, but it is not a runtime candidate and no hosted FreeBSD
+runtime job is claimed by this workflow.
 
 Run workflow lint locally when Go is available:
 
@@ -64,13 +157,14 @@ unpinned installer.
 
 ## Fuzz Gates
 
-Normal PR CI runs short Linux sanitizer smoke targets for `stl_import`, `obj_import`,
-`obj_postprocess`, and `ply_import`. Experimental fuzz targets that are not yet sanitizer-run safe
-still compile in a separate check-only job; `gltf_import` is in that tier until the private
-`gltf-rs` bootstrap backend no longer aborts under fuzz panic settings. The scheduled/manual fuzz
-workflow follows the same split: stable targets run longer Linux-only campaigns, while experimental
-targets run `cargo fuzz check`.
+Normal PR CI runs short Linux AddressSanitizer smoke targets for `stl_import`, `obj_import`,
+`ply_import`, `gltf_import`, and `registry_detection`. The selected glTF profile uses the maintained
+backend corrections and passed its recorded baseline admission; it is no longer a check-only
+candidate. The scheduled/manual workflow runs bounded Linux sanitizer campaigns for the same five
+targets and retains their corpus and logs. A compile check alone does not establish sanitizer or
+format admission, and a historical successful source state does not prove a later revision.
 
 Windows fuzzing is useful for local parser work, but Windows sanitizer setup failures are toolchain
 evidence, not parser evidence. Linux GitHub Actions remains the promotion gate for sanitizer fuzz
-smoke results.
+smoke results. Both PR smoke and scheduled campaigns retain successful or failed corpus/log
+artifacts; their presence preserves progress without implying sustained coverage.

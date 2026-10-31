@@ -1,0 +1,292 @@
+# Historical catalog, superseded by the 2026-10-29 library delivery plan.
+# Current executable coverage: docs/testing/behavior-gates.md. No active receipt checker consumes this file.
+
+schema_version = 1
+
+# Optional `evidence_claims` describe self-attested subject/revision bindings only. They do not
+# establish execution and cannot authorize conformance promotion.
+
+[[gates]]
+gate_id = "canonical-scene-behavior-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.canonical-scene.behavior-tests/v1"
+evidence_paths = [
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/edit/tests.rs",
+]
+applicable_contracts = [
+  "u4-canonical-scene-lifecycle",
+  "u4-private-producer-consumer-proof",
+  "u4-legacy-scene-deletion",
+  "validation-snapshot-fuzz-evidence",
+  "source-identity-provenance-metadata",
+]
+program = "cargo"
+args = [
+  "nextest",
+  "run",
+  "-j",
+  "1",
+  "--locked",
+  "-p",
+  "baozi-core",
+  "--all-features",
+]
+
+[[gates]]
+gate_id = "retained-store-behavior-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.retained-store.behavior-tests/v1"
+evidence_paths = [
+  "crates/baozi-operation/src/retained/tests.rs",
+  "crates/baozi-operation/tests/ledger.rs",
+  "crates/baozi-operation/tests/concrete_store/activation/scoped_plan.rs",
+  "crates/baozi-operation/tests/concrete_store/activation/central_validation.rs",
+]
+applicable_contracts = [
+  "u4-retained-physical-ownership",
+  "resource-ledger-budget-accounting",
+]
+program = "cargo"
+args = [
+  "nextest",
+  "run",
+  "-j",
+  "1",
+  "--locked",
+  "-p",
+  "baozi-operation",
+  "--all-features",
+]
+
+[[gates]]
+gate_id = "import-authoring-boundary-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.import.authoring-boundary-tests/v1"
+evidence_paths = ["crates/baozi-import/tests/authoring_api.rs"]
+applicable_contracts = ["u4-private-producer-consumer-proof"]
+program = "cargo"
+args = [
+  "nextest",
+  "run",
+  "-j",
+  "1",
+  "--locked",
+  "-p",
+  "baozi-import",
+  "--test",
+  "authoring_api",
+]
+
+[[gates]]
+gate_id = "import-request-contract-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.import.request-contract-tests/v1"
+evidence_paths = [
+  "crates/baozi-import/src/config.rs",
+  "crates/baozi-import/src/options.rs",
+  "crates/baozi-import/src/request.rs",
+  "crates/baozi-import/tests/config_contract.rs",
+  "crates/baozi-import/tests/registry_options.rs",
+]
+applicable_contracts = ["u4-request-wire-deletion"]
+program = "cargo"
+args = [
+  "nextest",
+  "run",
+  "-j",
+  "1",
+  "--locked",
+  "-p",
+  "baozi-import",
+  "--test",
+  "config_contract",
+  "--test",
+  "registry_options",
+]
+
+[[gates]]
+gate_id = "import-public-api-docs-ci"
+tracer_class = "ci"
+executor = "workflow"
+success_condition = "required-workflow-status"
+evidence_identity = "github-actions/ci/rust/test-documentation-examples"
+evidence_paths = [
+  ".github/workflows/ci.yml",
+  "crates/baozi-import/src/lib.rs",
+]
+applicable_contracts = ["u4-request-wire-deletion"]
+workflow_path = ".github/workflows/ci.yml"
+job_id = "rust"
+step_name = "Test documentation examples"
+
+[[gates]]
+gate_id = "core-scene-integration-boundary-ci"
+tracer_class = "ci"
+executor = "workflow"
+success_condition = "required-workflow-status"
+evidence_identity = "github-actions/ci/rust/check-standalone-core-scene-boundary"
+evidence_paths = [
+  ".github/workflows/ci.yml",
+  "crates/baozi-core/Cargo.toml",
+  "crates/baozi-core/src/lib.rs",
+  "crates/baozi-core/tests/public_api.rs",
+  "crates/baozi-import/Cargo.toml",
+]
+applicable_contracts = [
+  "u4-canonical-scene-lifecycle",
+  "u4-private-producer-consumer-proof",
+  "import-lifecycle-outcome",
+]
+workflow_path = ".github/workflows/ci.yml"
+job_id = "rust"
+step_name = "Check standalone core Scene boundary"
+
+[[gates]]
+gate_id = "format-fuzz-smoke-ci"
+tracer_class = "ci"
+executor = "workflow"
+success_condition = "required-workflow-status"
+evidence_identity = "github-actions/ci/fuzz/run-fuzz-smoke"
+evidence_paths = [".github/workflows/ci.yml"]
+applicable_contracts = ["validation-snapshot-fuzz-evidence"]
+workflow_path = ".github/workflows/ci.yml"
+job_id = "fuzz"
+step_name = "Run fuzz smoke"
+
+[[gates]]
+gate_id = "repository-conformance-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.repository-conformance-tests/v3"
+evidence_paths = [
+  "crates/baozi-xtask/src/conformance.rs",
+  "crates/baozi-xtask/src/conformance/evidence.rs",
+  "crates/baozi-xtask/src/main.rs",
+  "crates/baozi-xtask/tests/conformance.rs",
+  "crates/baozi-xtask/tests/conformance_evidence.rs",
+  "docs/conformance/contracts.toml",
+  "docs/conformance/gates.toml",
+  "docs/conformance/gate-retirements.md",
+  "docs/contributing/adr-governance.md",
+]
+applicable_contracts = ["repository-architecture-conformance"]
+program = "cargo"
+args = [
+  "nextest",
+  "run",
+  "--locked",
+  "-p",
+  "baozi-xtask",
+  "--test",
+  "conformance",
+  "--test",
+  "conformance_evidence",
+]
+
+[[gates]]
+gate_id = "repository-conformance-ci"
+tracer_class = "ci"
+executor = "workflow"
+success_condition = "required-workflow-status"
+evidence_identity = "github-actions/ci/rust/check-focused-conformance-inventory"
+evidence_paths = [".github/workflows/ci.yml"]
+applicable_contracts = ["repository-architecture-conformance"]
+workflow_path = ".github/workflows/ci.yml"
+job_id = "rust"
+step_name = "Check focused conformance inventory"
+
+[[gates]]
+gate_id = "postprocess-current-behavior-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.postprocess.owning-empty-plan-tests/v2"
+evidence_paths = [
+  "crates/baozi-import/src/outcome.rs",
+  "crates/baozi-postprocess/src/error.rs",
+  "crates/baozi-postprocess/src/pipeline.rs",
+  "crates/baozi-postprocess/tests/operation_boundary.rs",
+  "crates/baozi-postprocess/tests/tracing.rs",
+]
+applicable_contracts = ["postprocess-pipeline-semantics"]
+program = "cargo"
+args = [
+  "nextest",
+  "run",
+  "--locked",
+  "-p",
+  "baozi-postprocess",
+  "--all-features",
+]
+
+[[gates]]
+gate_id = "import-resource-graph-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.import.resource-graph-tests/v4"
+evidence_paths = [
+  "crates/baozi-io/src/immutable_memory.rs",
+  "crates/baozi-io/src/semantic_identity.rs",
+  "crates/baozi-import/src/dependency.rs",
+  "crates/baozi-import/src/limits.rs",
+  "crates/baozi-import/src/ledger.rs",
+  "crates/baozi-import/src/resource_graph/mod.rs",
+  "crates/baozi-import/src/resource_graph/manifest.rs",
+  "crates/baozi-import/src/resource_graph/manifest/encoding.rs",
+  "crates/baozi-import/src/scope.rs",
+  "crates/baozi-import/tests/authority_cache_contract.rs",
+  "crates/baozi-import/tests/session_contract.rs",
+]
+applicable_contracts = ["resource-dependency-graph-manifest"]
+program = "cargo"
+args = ["nextest", "run", "-j", "1", "--locked", "-p", "baozi-import"]
+
+[[gates]]
+gate_id = "obj-resource-current-behavior-tests"
+tracer_class = "test"
+executor = "command"
+success_condition = "process-exit-zero"
+evidence_identity = "baozi.obj.resource-current-behavior-tests/v1"
+evidence_paths = [
+  "crates/baozi-format-obj/src/mtl.rs",
+  "crates/baozi/tests/obj_facade.rs",
+]
+applicable_contracts = ["resource-dependency-graph-manifest"]
+program = "cargo"
+args = ["nextest", "run", "--locked", "-p", "baozi", "--test", "obj_facade"]
+
+[[gates]]
+gate_id = "workspace-tests-ci"
+tracer_class = "ci"
+executor = "workflow"
+success_condition = "required-workflow-status"
+evidence_identity = "github-actions/ci/rust/test-workspace"
+evidence_paths = [".github/workflows/ci.yml"]
+applicable_contracts = [
+  "u4-canonical-scene-lifecycle",
+  "u4-private-producer-consumer-proof",
+  "u4-retained-physical-ownership",
+  "import-lifecycle-outcome",
+  "resource-ledger-budget-accounting",
+  "u4-legacy-scene-deletion",
+  "u4-request-wire-deletion",
+  "postprocess-pipeline-semantics",
+  "validation-snapshot-fuzz-evidence",
+  "source-identity-provenance-metadata",
+  "resource-dependency-graph-manifest",
+]
+workflow_path = ".github/workflows/ci.yml"
+job_id = "rust"
+step_name = "Test workspace"

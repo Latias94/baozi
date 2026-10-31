@@ -6,15 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/baozi-core"
 authors.workspace = true
-description.workspace = true
+description = "Canonical scene model, borrowed typed readers, and validation for Baozi"
+readme = "README.md"
 
 [features]
-default = ["std"]
-std = []
+default = []
 mint = ["dep:mint"]
 
 [dependencies]
+baozi-operation.workspace = true
 mint = { workspace = true, optional = true }
+sha2.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+allocation-counter = "=0.8.1"

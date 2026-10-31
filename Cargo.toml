@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["candidates/baozi-native-io", "tools/consumers/scene", "vendor/gltf", "vendor/gltf-json"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +15,7 @@ authors = ["Mingzhen Zhuang <superfrankie621@gmail.com>"]
 description = "Rust-native asset import crates for loading 3D model formats into an owned scene IR"
 
 [workspace.dependencies]
+baozi-operation = { path = "crates/baozi-operation", version = "0.1.0" }
 baozi-core = { path = "crates/baozi-core", version = "0.1.0" }
 baozi-io = { path = "crates/baozi-io", version = "0.1.0", default-features = false }
 baozi-import = { path = "crates/baozi-import", version = "0.1.0", default-features = false }
@@ -27,5 +29,10 @@ base64 = "0.22"
 thiserror = "2"
 tracing = "0.1"
 mint = "0.5"
-criterion = { version = "0.5", default-features = false }
-gltf = { version = "1.4.1", default-features = false, features = ["names", "utils"] }
+triomphe = { version = "=0.1.17", default-features = false }
+scopeguard = "=1.2.0"
+criterion = { version = "0.8.2", default-features = false }
+gltf = { package = "baozi-gltf", path = "vendor/gltf", version = "=0.1.0", default-features = false, features = ["extensions", "extras", "KHR_texture_transform", "names", "utils"] }
+serde = "1"
+serde_json = "1"
+sha2 = "0.11.1"

@@ -1,332 +1,278 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-08
+updated: 2026-07-10
 authors:
   - Codex
 decision_type: architecture
-related:
+depends_on:
   - docs/adr/0001-baozi-assimp-compatible-architecture.md
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+related:
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
+  - docs/adr/0005-testing-fuzzing-and-differential-oracle-strategy.md
+  - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
+  - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
+  - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
   - docs/adr/0018-parser-tooling-and-format-owned-parser-policy.md
+  - docs/adr/0027-gltf-backend-ownership-and-replacement-policy.md
+evidence:
+  - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
+  - crates/baozi-format-stl/src/lib.rs
+  - crates/baozi-format-obj/src/lib.rs
+  - crates/baozi-format-ply/src/lib.rs
+  - crates/baozi-format-gltf/src/lib.rs
 ---
 
 # ADR 0004: Parser Backend and Format Coverage Policy
 
+## Status and Scope
+
+This accepted decision governs how a format parser is selected, contained, documented, and
+promoted. Acceptance establishes the policy; it does not claim that every current format has met a
+particular maturity tier. Current support and verification status live in format evidence records
+and the canonical refactor plan.
+
+Public compatibility consequences are owned solely by ADR 0006. Parser tooling details are refined
+by ADR 0018, but no tooling decision may weaken this format-private boundary.
+
 ## Context
 
-Baozi wants Assimp-class format breadth. The Rust ecosystem has useful crates for some formats and
-almost no mature coverage for others. A rigid "always wrap crates" policy would make Baozi inherit
-third-party API and maintenance risk. A rigid "always write parsers from scratch" policy would slow
-the project and ignore good existing work.
+Baozi needs broad format coverage, while Rust parser ecosystems vary from mature domain libraries
+to incomplete or unsuitable crates. A universal self-write rule wastes mature work. A universal
+wrapper rule lets dependency APIs, allocation behavior, diagnostics, and release cadence define
+Baozi. Both approaches become unsafe if parsers can bypass the shared import session or publish a
+backend model directly.
 
-The architecture needs a format policy before importers are added. Otherwise early parser choices
-will accidentally define public API, feature layout, error behavior, and support promises.
+The architectural question is therefore not "owned parser or dependency" in the abstract. It is
+whether a backend can remain private, bounded, replaceable, and semantically accountable to the
+same canonical output contract.
 
 ## Decision
 
-Baozi will use a hybrid parser strategy:
+Baozi uses a hybrid, per-format parser strategy behind a mandatory format-private backend boundary.
 
-- self-write parsers when the format is small, diagnostics matter, or ecosystem crates are immature
-- wrap ecosystem crates when they are well licensed, useful, and replaceable behind Baozi traits
-- use parser tooling such as parser combinators, binary parsers, lexers, or parser generators only
-  behind the format-owned parser boundary defined in ADR 0018
-- use Assimp only as a behavioral or migration oracle, not as Baozi's architecture source
-- expose only Baozi-owned `Scene`, options, diagnostics, and importer traits
-- document coverage and limitations per format before marking a format stable
+- self-write when the format is small, diagnostics and recovery require precise control, or no
+  acceptable dependency exists
+- use a mature Rust dependency when it reduces real complexity and passes license, target, MSRV,
+  safety, resource, and replacement gates
+- use parser tooling selectively inside the format crate under ADR 0018
+- convert backend data into Baozi-owned canonical IR before it leaves the format crate
+- use Assimp only as an optional external behavioral/differential oracle over curated fixtures
+- never introduce a stopgap alternate backend, Assimp binding, or parallel old/new public model to
+  preserve the unpublished prototype
+- require an additional accepted ADR before adding native FFI to any production format path; FFI is
+  never an implicit fallback or part of the default/WASM path
 
-Every format crate must have a backend boundary:
-
-```text
-bytes / AssetIo
-  -> parser backend
-  -> format converter
-  -> SceneBuilder
-  -> validator
-  -> Scene
-```
-
-The parser backend may be:
-
-- Baozi-owned
-- a third-party Rust crate
-- a temporary compatibility backend
-- an FFI backend in an optional crate
-
-The public API must look the same either way.
-
-## Architecture
+### Mandatory Boundary
 
 ```mermaid
 flowchart LR
-    App[Application] --> Facade[baozi facade]
-    Facade --> Registry[Importer registry]
-    Registry --> FormatCrate[baozi-format-*]
-    FormatCrate --> Backend{Parser backend}
-    Backend -->|self-written| Owned[Owned parser]
-    Backend -->|wrapped crate| ThirdParty[Third-party parser]
-    Backend -->|oracle only| Oracle[Assimp comparison]
-    Owned --> Converter[Converter to SceneBuilder]
-    ThirdParty --> Converter
-    Converter --> Builder[SceneBuilder]
-    Builder --> Validator[Scene validator]
-    Validator --> Scene[Scene]
+    Snapshot[Bounded input snapshot] --> Scope[Capability-limited parse scope]
+    Scope --> Format[baozi-format-*]
+    Format --> Backend{Private backend}
+    Backend -->|owned parser| Owned[Format-owned parser]
+    Backend -->|admitted crate| Dependency[Third-party Rust parser]
+    Backend -->|parser tooling| Tool[Private generated/combinator code]
+    Owned --> Convert[Format-owned semantic converter]
+    Dependency --> Convert
+    Tool --> Convert
+    Convert --> Author[Bounded core authoring capability]
+    Author --> Validate[Central validator]
+    Validate --> Scene[Validated canonical Scene]
 ```
 
-```mermaid
-sequenceDiagram
-    participant Registry
-    participant Format
-    participant Backend
-    participant Converter
-    participant Validator
+The backend and any intermediate AST/event/error types are private implementation details. They do
+not appear in the facade, canonical IR, public outcomes, diagnostics, typed options, snapshots, or
+support promises.
 
-    Registry->>Format: probe(source, hint)
-    Format->>Backend: sniff bytes
-    Backend-->>Format: confidence
-    Registry->>Format: read(context)
-    Format->>Backend: parse
-    Backend-->>Converter: backend AST/events
-    Converter->>Validator: SceneBuilder.finish()
-    Validator-->>Format: Scene or InvalidScene
-```
+Every parser receives resources only through the selected session capability. It cannot reopen the
+primary asset, access raw application IO, finalize reports, assign lifecycle stages, or construct a
+validated result.
 
-## Format Maturity Levels
+### Backend Replacement
 
-Each format crate must publish a maturity level in `FormatInfo`.
+Changing a private backend is not a public API event. It is a semantic conformance event.
 
-| Level | Meaning | Public promise |
-| --- | --- | --- |
-| Experimental | Loads selected fixtures; API and behavior may change | disabled by default or clearly documented |
-| Beta | Handles common files; known limitations documented | enabled only by feature or facade preset decision |
-| Stable | Coverage, diagnostics, fuzzing, and compatibility tests meet Baozi criteria | included in default format set if dependency cost is acceptable |
-| Deprecated | Kept for compatibility but not actively expanded | documented migration or replacement path |
+A replacement must run the same:
 
-Maturity is per format, not per crate version. A mature core crate can contain an experimental
-format feature.
+- Baozi-owned fixture corpus and normalized semantic expectations
+- malformed, resource-limit, dependency-IO, and cancellation cases
+- facade-path import and validation contracts
+- deterministic snapshot/digest comparisons
+- format fuzz target and required target builds
 
-## Initial Format Roadmap
+Backend-specific quirks are not preserved unless the format contract deliberately documents them
+as Baozi semantics. A replacement that discovers an incorrect canonical behavior fixes it under the
+relevant semantic ADR; it does not add a compatibility switch.
 
-| Phase | Formats | Parser policy | Rationale |
-| --- | --- | --- | --- |
-| P0 | Core registry and validation | Baozi-owned | Needed before parser count matters |
-| P1 | STL | Baozi-owned or `stl_io` backend | Small format, good first binary/text importer |
-| P1 | OBJ/MTL | Baozi-owned parser, `tobj` as reference or optional backend | Common, diagnostics and MTL quirks matter |
-| P1 | PLY | Baozi-owned parser preferred | Small enough; property model tests metadata discipline |
-| P2 | glTF2/GLB | wrap `gltf` first, convert immediately into Baozi IR | Modern baseline with hierarchy, materials, buffers |
-| P3 | 3MF | evaluate `lib3mf-core` or implement with zip/XML | Good container and units exercise |
-| P3 | Collada | evaluate crate backend, likely Baozi converter heavy | XML scene and animation coverage |
-| P4 | FBX | dedicated long-term parser/converter | Complex binary/text format; ecosystem crates are low-level |
-| P4 | USD/USDZ | defer backend choice | OpenUSD ecosystem and FFI trade-offs need separate ADR |
-| P4 | IFC/CAD-like metadata | defer until metadata model is proven | High semantic complexity |
-| P4 | Blender native | defer or avoid | Assimp itself treats direct Blender support as fragile/deprecated |
+### Dependency Admission and Maturity Separation
 
-This roadmap is about architectural learning order, not market priority.
+Admission safety and maturity evidence are separate decisions. A production parser backend may enter
+the first-party format inventory and become reachable through a facade format feature only after all
+applicable baseline admission gates pass:
 
-## Dependency Adoption Rules
+1. license and redistribution terms fit Baozi and its fixture policy;
+2. declared MSRV and dependency MSRV satisfy the workspace target;
+3. the bytes-only path compiles for every required portable target without native filesystem or
+   process-global assumptions;
+4. no parser/backend type crosses the format boundary;
+5. attacker-controlled counts, recursion, reads, and decoded storage are bounded before allocation
+   or backend amplification and fit the session's attempted/live/committed accounting;
+6. admitted malformed inputs become bounded Baozi failures rather than panic, abort, unbounded
+   recursion, unchecked allocation, or invalid validated success;
+7. source spans and backend errors map to bounded Baozi diagnostics without host-path leakage; and
+8. dependency purpose, version policy, license, unsafe/FFI footprint, and limitations are recorded
+   in the format evidence document.
 
-A format dependency may be adopted only when all checks pass:
+A conservative opaque-allocation allowance is accounting evidence, not permission for a known
+unbounded path. If Baozi cannot prevent attacker-controlled unbounded allocation, recursion, panic,
+or abort before backend entry, the affected path must be disabled and unregistered, rejected, or
+isolated in a non-first-party process boundary. It cannot enter the first-party inventory or remain
+reachable under an Experimental label.
 
-1. license is compatible with Baozi distribution
-2. dependency does not force public API exposure
-3. backend output can be converted to `SceneBuilder`
-4. diagnostics can map to `BaoziError` and `Diagnostic`
-5. parser can run under resource limits
-6. replacement test exists so swapping backend preserves public behavior
-7. format coverage document records limitations
+Only after baseline admission may missing non-safety maturity evidence leave a backend Experimental.
+Examples include incomplete declared semantic breadth, replacement/conformance breadth, sustained
+fuzz or RSS campaign history beyond the admission baseline, an independent oracle, and packaged
+consumer evidence. ADR 0011 owns those maturity requirements and promotion decisions.
 
-Each format should get a document:
+A green happy-path import is neither admission nor maturity evidence.
 
-```text
-docs/formats/obj.md
-docs/formats/stl.md
-docs/formats/ply.md
-docs/formats/gltf.md
-```
+### Maturity and Evidence Authority
 
-Minimum sections:
+ADR 0011 is the sole authority for format maturity levels, capability statuses, promotion evidence,
+and user-facing support claims. This ADR adds only backend-specific admission evidence: dependency
+metadata, private-type isolation, bounded failure behavior, and the boundary between mandatory
+safety admission and later maturity evidence. There is no opaque-allocation or sanitizer exception
+to baseline hostile-data safety.
 
-- supported versions
-- supported features
-- unsupported features
-- parser backend
-- dependencies and licenses
-- resource limits
-- security notes
-- fixture and oracle coverage
-- known deviations from Assimp, if any
+The code-side format descriptor and structured evidence must identify the backend and satisfy both
+authorities, but backend popularity or a successful sample import never promotes maturity.
+Transient test counts and current work-unit progress stay in verification evidence rather than in
+either durable decision.
 
-## Security and Resource Limits
+### Feature Authority
 
-Parser policy must include adversarial input from the beginning. Import options should include:
+ADR 0007 is the sole authority for facade feature names, default/all-format composition, crate
+topology, and feature CI. This ADR imposes one parser-boundary constraint on that composition:
+facade features express formats or capabilities, never backend implementation choices.
 
-- maximum file size
-- maximum included file count
-- maximum archive decompressed size
-- maximum recursion depth
-- maximum node count
-- maximum mesh count
-- maximum vertex count
-- maximum face/index count
-- maximum material/texture count
-- maximum string length
-- maximum warning count before truncation
-
-Format crates must reject:
-
-- path traversal through external references
-- archive entries escaping the virtual asset root
-- zip bombs and decompression bombs
-- integer overflows in buffer size calculations
-- unbounded recursion in scene hierarchy or XML
-- invalid UTF-8 where the format requires UTF-8
-
-These checks belong in Baozi's import context and format crates, not only in application code.
-
-## Feature Flag Policy
-
-Feature flags should express capability, not implementation trivia:
-
-- `format-obj`
-- `format-stl`
-- `format-ply`
-- `format-gltf`
-- `format-3mf`
-- `format-collada`
-- `format-fbx`
-- `default-formats`
-- `all-formats`
-
-`default-formats` must stay conservative: it includes only implemented, CI-gated, low-surprise
-formats. Planned parser shells can be compiled through their explicit `format-*` features, but they
-must not enter the default set until they import real assets and their support document is accurate.
-
-Backend-specific features may exist inside format crates, but the facade should avoid exposing them
-unless users need explicit control:
-
-- `baozi-format-gltf/gltf-backend`
-- `baozi-format-stl/stl-io-backend`
-
-No feature should silently change public scene semantics.
+A backend-specific Cargo feature, when unavoidable inside an unpublished format crate, remains
+private implementation configuration and cannot alter canonical semantics. The facade does not
+forward backend selector features. A user-selectable backend requires a separate accepted public
+contract; it is not created as an escape hatch.
 
 ## Alternatives Considered
 
-### Option A: All parsers self-written from day one
+### Option A: Self-write every parser
 
 Pros:
 
-- Maximum control over diagnostics and resource limits.
-- No third-party parser model leakage.
-- Cleaner licensing story.
+- maximum control over limits, diagnostics, and source semantics
+- smallest dependency and licensing surface
 
 Cons:
 
-- Slower path to broad coverage.
-- Reimplements mature code where good crates exist.
-- Delays learning from complex formats such as glTF.
+- repeats mature parsing work
+- delays complex formats and architectural feedback
+- can produce ad hoc implementations where proven tooling is clearer
 
-Decision: rejected as a universal rule. Use it for small or immature areas.
+Decision: rejected as a universal rule; preferred when the format and evidence justify it.
 
 ### Option B: Wrap ecosystem crates wherever possible
 
 Pros:
 
-- Fast initial coverage.
-- Leverages existing maintenance.
-- Reduces parser implementation effort.
+- fastest initial breadth
+- leverages upstream maintenance and conformance work
 
 Cons:
 
-- Ecosystem maturity is uneven.
-- Backends can leak through API and behavior.
-- Diagnostics, limits, and fuzzing may be insufficient.
+- ecosystem quality and target support vary widely
+- opaque allocation, panic, and diagnostic behavior may violate Baozi contracts
+- dependency models can leak into canonical design
 
-Decision: rejected as a universal rule. Wrapping is allowed only behind Baozi-owned contracts.
+Decision: rejected as a universal rule.
 
-### Option C: Hybrid backend boundary with per-format policy
+### Option C: Use Assimp or another compatibility backend until native parsers arrive
 
 Pros:
 
-- Balances speed and control.
-- Keeps public API stable when backends change.
-- Lets Baozi self-write critical parsers later without breaking users.
-- Supports clean-room implementation while still using Assimp as behavior reference.
+- broad immediate format coverage
+- provides familiar normalized output
 
 Cons:
 
-- Requires more documentation per format.
-- Needs conformance tests to prove backend replacement.
-- Some duplicate work exists between backend ASTs and Baozi IR conversion.
+- introduces native build/ABI and clean-room ambiguity
+- creates a second architecture and migration obligation
+- makes temporary lossy behavior a de facto public contract
+
+Decision: rejected. Assimp remains an optional out-of-process test oracle only.
+
+### Option D: Hybrid format-private backends with uniform conformance gates
+
+Pros:
+
+- balances delivery speed with ownership and replaceability
+- lets each format choose suitable parsing technology
+- preserves one public semantic and safety contract
+- makes backend replacement measurable
+
+Cons:
+
+- requires converter layers and per-format audits
+- evidence cost is higher than accepting backend success at face value
 
 Decision: chosen.
-
-## Success Metrics
-
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Backend isolation | No public Baozi facade API exposes parser crate types | public API review |
-| Format documentation | Each non-experimental format has `docs/formats/<format>.md` | documentation check |
-| Replacement safety | At least one backend replacement or mock test per wrapped parser | conformance test |
-| Security limits | Every parser reads limits from `ImportOptions` | malformed fixture tests |
-| Diagnostics quality | Parse errors include source and location where format supports it | snapshot tests |
-| Feature clarity | `cargo tree` for default features is explainable and minimal | dependency audit |
-| License clarity | Each format doc lists dependency licenses | docs review |
-
-## Risks and Mitigations
-
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Third-party backend becomes a permanent hidden dependency | Medium | Medium | Require replacement tests and backend docs |
-| Format count grows before quality does | High | High | Gate stable maturity on tests, fuzzing, and docs |
-| Security limits are inconsistent across formats | High | Medium | Centralize limits in `ImportContext` and test malformed assets |
-| Licensing is unclear for parser dependencies or assets | High | Medium | Record license in each format doc and keep third-party notices |
-| glTF backend shapes the whole IR | High | Medium | Convert immediately into Baozi IR and keep glTF-specific data namespaced |
-| FBX scope consumes project capacity | Medium | High | Defer until core, tests, and simpler formats are stable |
-
-## Implementation Plan
-
-### Phase 0: Format Contract
-
-- Define `FormatInfo`, `FormatMaturity`, `ReadConfidence`, and `ImportContext`.
-- Add feature flag naming convention.
-- Add `docs/formats/_template.md`.
-
-### Phase 1: Small Parsers
-
-- Implement STL and OBJ/MTL with strict diagnostics.
-- Implement PLY or a PLY prototype to prove flexible vertex properties.
-- Add resource limit tests.
-
-### Phase 2: Wrapped Backend
-
-- Add glTF2/GLB through a wrapped backend.
-- Convert all backend structures to Baozi IR immediately.
-- Add backend replacement conformance tests.
-
-### Phase 3: Coverage Expansion
-
-- Add 3MF and Collada after core material and animation fields are proven.
-- Start FBX research only after the importer pipeline has fuzzing and diagnostics discipline.
 
 ## Consequences
 
 Positive:
 
-- Baozi can move quickly where ecosystem crates help.
-- Public API remains Baozi-owned and stable.
-- Parser maturity becomes visible to users.
-- Security and licensing checks become part of format onboarding.
+- Baozi can use mature Rust libraries without making them public architecture
+- small formats retain precise diagnostics and limit control
+- all formats share validation, outcomes, security, and maturity rules
+- replacement pressure is handled inside format crates rather than through versioned public models
 
 Negative:
 
-- More per-format documentation and test burden.
-- Some wrappers may be replaced later.
-- Format crates need explicit converter layers even when a parser already has a nice API.
+- backend wrappers must account for opaque behavior and normalize errors
+- each format needs durable documentation and broad evidence
+- safely admitted dependencies may remain Experimental while non-safety promotion evidence is
+  incomplete
 
-## Open Questions
+## Risks and Mitigations
 
-1. Should default features include only stable formats or also beta formats?
-   Recommendation: default only stable formats once the project has stable releases.
-2. Should each format crate be published independently?
-   Recommendation: yes eventually, but use workspace-internal crates until API patterns settle.
-3. Should FFI-based importers ever be part of `all-formats`?
-   Recommendation: no by default. Keep FFI importers opt-in because build and license cost differs.
+| Risk | Severity | Likelihood | Mitigation |
+| --- | --- | --- | --- |
+| Third-party backend allocates before Baozi preflight | Critical | Medium | preflight the slice or disable, reject, replace, or process-isolate it; allowance/RSS evidence cannot admit a known unbounded path |
+| Backend types or assumptions leak into IR | High | Medium | public API/rustdoc checks plus replacement conformance tests |
+| Format count grows faster than semantic quality | High | High | structured maturity gates and curated defaults |
+| Limits differ between formats | High | Medium | session-owned budgets and shared facade contract harnesses |
+| Backend selector silently changes output | High | Low | no facade backend features; canonical semantic tests apply to every backend |
+| License or fixture provenance is unclear | High | Medium | format evidence and dependency/fixture audit before promotion |
+| Deprecated tier becomes a pre-release compatibility dump | Medium | Medium | delete unpublished prototypes; use Deprecated only for released contracts |
+
+## Acceptance Criteria
+
+| Contract | Measurable evidence |
+| --- | --- |
+| Boundary isolation | public API/rustdoc search exposes no parser backend AST, error, handle, or Assimp type |
+| Capability discipline | production format code has no direct policy-bypassing primary/sidecar IO path |
+| Safety admission | a backend with a known panic, abort, unbounded-allocation/recursion, or invalid-success path has no first-party registration, inventory entry, or facade format feature |
+| Replacement safety | admitted wrapped backends pass the same facade, semantic, malformed, limit, snapshot, and fuzz harness as owned parsers |
+| Feature boundary | ADR 0007's machine gate finds no facade backend selector and every backend configuration preserves canonical semantics |
+| Promotion evidence | each backend satisfies ADR 0011's structured maturity/evidence gate without using backend popularity as proof |
+| Target safety | each backend satisfies the target, sanitizer, and package gates owned by the target/release authorities |
+| Failure truth | unsupported semantics and backend failures return structured errors/diagnostics instead of silent drops |
+
+## Implementation Evidence
+
+Implementation status changes over time. Consult:
+
+- [Canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
+- [STL format crate](../../crates/baozi-format-stl/)
+- [OBJ format crate](../../crates/baozi-format-obj/)
+- [PLY format crate](../../crates/baozi-format-ply/)
+- [glTF format crate](../../crates/baozi-format-gltf/)
+- [Format support documents](../formats/)
+- [Engineering memory index](../knowledge/engineering/index.md)

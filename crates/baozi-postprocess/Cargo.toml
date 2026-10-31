@@ -6,9 +6,23 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/baozi-postprocess"
 authors.workspace = true
-description.workspace = true
+description = "Controlled triangulation, normal generation, and static scene-space conversion for Baozi"
+readme = "README.md"
+
+[features]
+default = []
+tracing = ["dep:tracing"]
 
 [dependencies]
 baozi-core.workspace = true
+baozi-operation.workspace = true
+thiserror.workspace = true
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+allocation-counter = "=0.8.1"
+baozi-format-obj.workspace = true
+baozi-import.workspace = true
+baozi-io.workspace = true

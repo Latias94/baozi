@@ -1,8 +1,10 @@
 # Assimp Replication Study for Baozi
 
 **Date**: 2026-07-08
-**Status**: Draft for discussion
-**Reference source**: `repo-ref/assimp`
+**Status**: Durable historical audit summary (non-normative)
+**Reference revision**: [`assimp/assimp@bcc62230fc0471475528d732f4ad108a59bb7f6c`](https://github.com/assimp/assimp/tree/bcc62230fc0471475528d732f4ad108a59bb7f6c)
+**Local navigation**: An optional gitignored `repo-ref/assimp` checkout may mirror that revision for local browsing, but it is non-authoritative and is not evidence, an implementation source, or a repository tracer.
+**Authority**: Accepted Baozi ADRs and the canonical architecture plan. Recommendations below are preserved as audit history and may have been superseded.
 
 ## Executive Summary
 
@@ -23,7 +25,7 @@ Assimp's root `LICENSE` is a modified BSD / BSD-3-Clause style license. Its own 
 - Comparing Baozi behavior against Assimp is fine.
 - Porting concrete source code or algorithms is possible only if the derived files keep the required Assimp copyright and license notices.
 - Baozi should not use Assimp's project name or contributors as endorsement.
-- Assimp test assets must be handled separately from source code. `repo-ref/assimp/test/models-nonbsd` contains non-BSD model assets with additional source-specific requirements.
+- Assimp test assets must be handled separately from source code. The fixed-revision [`test/models-nonbsd`](https://github.com/assimp/assimp/tree/bcc62230fc0471475528d732f4ad108a59bb7f6c/test/models-nonbsd) tree contains non-BSD model assets with additional source-specific requirements.
 
 Recommended project policy: keep Baozi code independently authored by default, use Assimp as an oracle and reference, and create `THIRD_PARTY_NOTICES.md` before importing any Assimp-derived code or fixtures.
 
@@ -45,8 +47,8 @@ For crate licensing, the recommended default is `MIT OR Apache-2.0` for clean-ro
 
 Evidence:
 
-- `repo-ref/assimp/include/assimp/scene.h`
-- `repo-ref/assimp/code/Common/scene.cpp`
+- [`include/assimp/scene.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/scene.h)
+- [`code/Common/scene.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/scene.cpp)
 
 ### Node Graph
 
@@ -56,7 +58,7 @@ Baozi should keep the same graph concept, but replace pointers with ids and owne
 
 Evidence:
 
-- `repo-ref/assimp/include/assimp/scene.h`
+- [`include/assimp/scene.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/scene.h)
 
 ### Mesh
 
@@ -66,7 +68,7 @@ Baozi should keep the one-material-per-mesh invariant because it simplifies post
 
 Evidence:
 
-- `repo-ref/assimp/include/assimp/mesh.h`
+- [`include/assimp/mesh.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/mesh.h)
 
 ### Material
 
@@ -76,8 +78,8 @@ Baozi should expose typed common material fields, but keep an extensible propert
 
 Evidence:
 
-- `repo-ref/assimp/include/assimp/material.h`
-- `repo-ref/assimp/code/Common/material.cpp`
+- [`include/assimp/material.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/material.h)
+- [`code/Common/material.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/material.cpp)
 
 ### Importer Facade
 
@@ -87,8 +89,8 @@ Baozi should expose a facade with similar capability, but return `Result<Scene, 
 
 Evidence:
 
-- `repo-ref/assimp/include/assimp/Importer.hpp`
-- `repo-ref/assimp/code/Common/Importer.cpp`
+- [`include/assimp/Importer.hpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/Importer.hpp)
+- [`code/Common/Importer.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/Importer.cpp)
 
 ### Format Importers
 
@@ -103,8 +105,8 @@ Evidence:
 
 Evidence:
 
-- `repo-ref/assimp/include/assimp/BaseImporter.h`
-- `repo-ref/assimp/code/Common/BaseImporter.cpp`
+- [`include/assimp/BaseImporter.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/BaseImporter.h)
+- [`code/Common/BaseImporter.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/BaseImporter.cpp)
 
 ### IO
 
@@ -114,8 +116,8 @@ Baozi should use an `AssetIo` trait returning `Read + Seek` streams, plus source
 
 Evidence:
 
-- `repo-ref/assimp/include/assimp/IOSystem.hpp`
-- `repo-ref/assimp/include/assimp/IOStream.hpp`
+- [`include/assimp/IOSystem.hpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/IOSystem.hpp)
+- [`include/assimp/IOStream.hpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/IOStream.hpp)
 
 ### Post-Processing
 
@@ -125,9 +127,9 @@ Baozi should encode ordering as part of the pipeline, because user flag order is
 
 Evidence:
 
-- `repo-ref/assimp/include/assimp/postprocess.h`
-- `repo-ref/assimp/code/Common/PostStepRegistry.cpp`
-- `repo-ref/assimp/code/Common/BaseProcess.h`
+- [`include/assimp/postprocess.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/postprocess.h)
+- [`code/Common/PostStepRegistry.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/PostStepRegistry.cpp)
+- [`code/Common/BaseProcess.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/BaseProcess.h)
 
 ## Import Lifecycle
 
@@ -147,7 +149,7 @@ Assimp's file import flow:
 
 Evidence:
 
-- `repo-ref/assimp/code/Common/Importer.cpp`
+- [`code/Common/Importer.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/Importer.cpp)
 
 Baozi should preserve this logic, but make it explicit in a Rust `Importer` session:
 
@@ -173,12 +175,12 @@ The simple and complex format importers differ sharply:
 
 Evidence:
 
-- `repo-ref/assimp/code/Common/ImporterRegistry.cpp`
-- `repo-ref/assimp/code/AssetLib/STL/STLLoader.cpp`
-- `repo-ref/assimp/code/AssetLib/Obj/ObjFileImporter.cpp`
-- `repo-ref/assimp/code/AssetLib/Ply/PlyLoader.cpp`
-- `repo-ref/assimp/code/AssetLib/glTF2/glTF2Importer.cpp`
-- `repo-ref/assimp/code/AssetLib/FBX/FBXImporter.cpp`
+- [`code/Common/ImporterRegistry.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/ImporterRegistry.cpp)
+- [`code/AssetLib/STL/STLLoader.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/AssetLib/STL/STLLoader.cpp)
+- [`code/AssetLib/Obj/ObjFileImporter.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/AssetLib/Obj/ObjFileImporter.cpp)
+- [`code/AssetLib/Ply/PlyLoader.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/AssetLib/Ply/PlyLoader.cpp)
+- [`code/AssetLib/glTF2/glTF2Importer.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/AssetLib/glTF2/glTF2Importer.cpp)
+- [`code/AssetLib/FBX/FBXImporter.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/AssetLib/FBX/FBXImporter.cpp)
 
 ## Rust Ecosystem Survey
 
@@ -363,33 +365,37 @@ read_file("materialized.obj", options)
 
 This pair exercises both single-file and multi-file import without entering the complexity of glTF2 or FBX too early.
 
-## Discussion Questions
+## Historical Discussion Questions
+
+These questions were open when the audit was written. Accepted Baozi ADRs now own the answers; this
+section records the original decision surface rather than current authority.
 
 1. Is Baozi's goal API compatibility with Assimp, behavior compatibility, or "same breadth with Rust-native API"?
 2. Should first-party format crates be allowed to wrap existing parser crates when that accelerates coverage?
    Recommendation: yes, but only behind Baozi-owned traits and only after recording license, maturity, and replacement risk.
 3. Should `baozi-core` depend on a math crate, or define minimal vector/matrix types to avoid dependency lock-in?
 4. Should material keys intentionally mirror Assimp names for familiarity?
-5. Should `repo-ref/assimp` remain in the repository as a local reference, and should it be added to `.gitignore` if it is not meant to be committed?
+5. The Assimp checkout is now optional gitignored local navigation only. Fixed upstream permalinks,
+   Baozi-owned research records, and accepted ADRs are the durable evidence and authority.
 
 ## Source Map
 
 | Topic | Evidence |
 | --- | --- |
-| Public facade | `repo-ref/assimp/include/assimp/Importer.hpp` |
-| Import lifecycle | `repo-ref/assimp/code/Common/Importer.cpp` |
-| Format trait | `repo-ref/assimp/include/assimp/BaseImporter.h` |
-| Format read wrapper | `repo-ref/assimp/code/Common/BaseImporter.cpp` |
-| Importer registry | `repo-ref/assimp/code/Common/ImporterRegistry.cpp` |
-| Post-process registry | `repo-ref/assimp/code/Common/PostStepRegistry.cpp` |
-| Post-process trait | `repo-ref/assimp/code/Common/BaseProcess.h` |
-| Scene IR | `repo-ref/assimp/include/assimp/scene.h` |
-| Mesh IR | `repo-ref/assimp/include/assimp/mesh.h` |
-| Material system | `repo-ref/assimp/include/assimp/material.h` |
-| IO abstraction | `repo-ref/assimp/include/assimp/IOSystem.hpp` |
-| Post-process flags | `repo-ref/assimp/include/assimp/postprocess.h` |
-| STL importer | `repo-ref/assimp/code/AssetLib/STL/STLLoader.cpp` |
-| OBJ importer | `repo-ref/assimp/code/AssetLib/Obj/ObjFileImporter.cpp` |
-| PLY importer | `repo-ref/assimp/code/AssetLib/Ply/PlyLoader.cpp` |
-| glTF2 importer | `repo-ref/assimp/code/AssetLib/glTF2/glTF2Importer.cpp` |
-| FBX importer | `repo-ref/assimp/code/AssetLib/FBX/FBXImporter.cpp` |
+| Public facade | [`include/assimp/Importer.hpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/Importer.hpp) |
+| Import lifecycle | [`code/Common/Importer.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/Importer.cpp) |
+| Format trait | [`include/assimp/BaseImporter.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/BaseImporter.h) |
+| Format read wrapper | [`code/Common/BaseImporter.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/BaseImporter.cpp) |
+| Importer registry | [`code/Common/ImporterRegistry.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/ImporterRegistry.cpp) |
+| Post-process registry | [`code/Common/PostStepRegistry.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/PostStepRegistry.cpp) |
+| Post-process trait | [`code/Common/BaseProcess.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/Common/BaseProcess.h) |
+| Scene IR | [`include/assimp/scene.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/scene.h) |
+| Mesh IR | [`include/assimp/mesh.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/mesh.h) |
+| Material system | [`include/assimp/material.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/material.h) |
+| IO abstraction | [`include/assimp/IOSystem.hpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/IOSystem.hpp) |
+| Post-process flags | [`include/assimp/postprocess.h`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/include/assimp/postprocess.h) |
+| STL importer | [`code/AssetLib/STL/STLLoader.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/AssetLib/STL/STLLoader.cpp) |
+| OBJ importer | [`code/AssetLib/Obj/ObjFileImporter.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/AssetLib/Obj/ObjFileImporter.cpp) |
+| PLY importer | [`code/AssetLib/Ply/PlyLoader.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/AssetLib/Ply/PlyLoader.cpp) |
+| glTF2 importer | [`code/AssetLib/glTF2/glTF2Importer.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/AssetLib/glTF2/glTF2Importer.cpp) |
+| FBX importer | [`code/AssetLib/FBX/FBXImporter.cpp`](https://github.com/assimp/assimp/blob/bcc62230fc0471475528d732f4ad108a59bb7f6c/code/AssetLib/FBX/FBXImporter.cpp) |

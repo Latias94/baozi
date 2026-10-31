@@ -1,15 +1,20 @@
 ---
 status: accepted
 date: 2026-07-09
+updated: 2026-08-01
 authors:
   - Codex
 decision_type: architecture
+depends_on:
+  - docs/adr/0019-parser-diagnostic-streaming-and-generated-code-contract.md
+  - docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md
+  - docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md
 related:
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
   - docs/adr/0014-parser-security-unsafe-ffi-and-panic-boundary-policy.md
-  - docs/adr/0019-parser-diagnostic-streaming-and-generated-code-contract.md
   - docs/architecture/parser-tool-audit-checklist.md
 ---
 
@@ -43,9 +48,10 @@ Baozi will use parser tooling selectively behind format crate boundaries.
 
 Core rules:
 
-- every parser remains format-owned and converts into Baozi-owned diagnostics, options, and `Scene`
-- parser tooling is private implementation detail unless a format-specific feature explicitly exposes
-  an optional backend
+- every parser remains format-owned and converts tool-native state into a format-private normalized
+  model, Baozi-owned diagnostics/loss facts, and a `SceneDraft` through the selected `ParseScope`
+- parser tooling and backend selection are private implementation details; public features select
+  admitted format capabilities and never expose a backend choice
 - simple formats should start with small hand-written parsers when that yields clearer limits and
   diagnostics
 - mature parsing crates may be used when they reduce real complexity without weakening resource
@@ -54,8 +60,23 @@ Core rules:
   because generated code can make resource limits and error mapping less obvious
 - generated parsers must be checked in only when generation is deterministic and the generator is
   also available through a documented development workflow
-- parser tools must not bypass `ImportContext`, `AssetIo`, `ResourceLimits`, or `SceneBuilder`
-  validation
+- parser adapters obtain primary/dependency snapshots, selected options, work charges, live
+  reservations, diagnostics, cancellation, progress, and a bounded borrow of core-owned Scene
+  authoring only through their selected `ParseScope`; they receive no raw `AssetIo`, mutable import
+  coordinator, retained owner, or ledger
+- the import session owns the opaque `SceneConstruction` continuation; the parser returns only its
+  branded, non-owning `SceneDraft` descriptor, and core's central validator is the sole proof
+  constructor
+- first-party and admitted parser paths cooperatively honor checked charges/reservations or reviewed
+  conservative allowances; hostile or untrusted parser code requires process isolation because an
+  in-process API cannot prevent arbitrary allocation, looping, abort, or process exit
+
+### ParseScope-Bound Metered Storage
+
+Format-owned parsers compose the ParseScope-bound metered storage governed exclusively by ADR 0047.
+Parser tooling does not create a second capacity, reservation, transfer, rollback, or release
+protocol. A format-specific wrapper may add source semantics, but all storage accounting remains
+behind ADR 0047's `baozi-import` interface.
 
 Recommended first choices by format shape:
 
@@ -72,8 +93,13 @@ Recommended first choices by format shape:
 
 ```mermaid
 flowchart LR
-    Input[bytes through AssetIo] --> Limits[ResourceLimits]
-    Limits --> FormatCrate[baozi-format-*]
+    Session[Import session owns SceneConstruction] --> Scope[Selected ParseScope]
+    Scope --> Input[Immutable primary/dependency snapshots]
+    Scope --> Capabilities[Options, budget, diagnostics, control]
+    Scope --> Storage[ADR 0047-owned metered storage]
+    Input --> FormatCrate[baozi-format-*]
+    Capabilities --> FormatCrate
+    Storage --> FormatCrate
     FormatCrate --> Tool{Parser implementation}
     Tool -->|hand-written| Owned[Owned scanner/parser]
     Tool -->|combinator| Combinator[winnow / nom]
@@ -83,23 +109,35 @@ flowchart LR
     Combinator --> Adapter
     Binary --> Adapter
     Generated --> Adapter
-    Adapter --> Diagnostics[Baozi diagnostics]
-    Adapter --> Builder[SceneBuilder]
-    Builder --> Validator[validate_scene]
+    Adapter --> Normalized[Private normalized model/events]
+    Normalized --> Author[Borrowed bounded authoring capability]
+    Author --> Draft[Branded SceneDraft descriptor]
+    Draft --> Session
+    Session --> Validator[Core validator]
+    Validator --> Validated[ValidatedScene or core failure]
 ```
 
 ```mermaid
 sequenceDiagram
+    participant Session as Import session
     participant Format as Format crate
+    participant Scope as ParseScope
     participant Tool as Parser tool
-    participant Adapter as Baozi adapter
-    participant Builder as SceneBuilder
+    participant Construction as Core SceneConstruction
+    participant Validator as Core validator
 
+    Session->>Construction: create exact session-owned continuation
+    Session->>Format: parse(selected ParseScope)
+    Format->>Scope: snapshots/options/checked capabilities
+    Scope-->>Format: bounded capability views
     Format->>Tool: parse bounded input
     Tool-->>Format: private AST/events/errors
-    Format->>Adapter: convert private data
-    Adapter->>Builder: add nodes, meshes, materials
-    Builder-->>Adapter: validated Scene or InvalidScene
+    Format->>Scope: charge work/obtain metered storage/emit diagnostics
+    Format->>Construction: author through ParseScope's bounded borrow
+    Construction-->>Format: branded SceneDraft descriptor
+    Format-->>Session: ParseResult<SceneDraft>
+    Session->>Validator: consume exact continuation plus descriptor
+    Validator-->>Session: ValidatedScene or core-owned failure
 ```
 
 ## Adoption Checklist
@@ -111,10 +149,17 @@ A parser tool may be added to a production crate only when all checks pass:
 - `wasm32-unknown-unknown` bytes-path build passes for the relevant format feature
 - dependency does not add native FFI, process-global runtime, threads, or filesystem assumptions to
   the default parser path
-- malformed input returns `BaoziError` or diagnostics rather than panicking
-- parser resource usage is bounded by `ResourceLimits`
-- parser output is private and converted into Baozi IR immediately
-- tests cover happy path, malformed input, resource limits, and at least one snapshot
+- malformed input becomes a stable format-owned cause admitted through the selected `ParseScope`, or
+  bounded diagnostics/loss facts, rather than a backend-native error or panic
+- the adapter propagates opaque session-terminal capability-produced `ScopeAbort` values and never
+  catches or reclassifies them as format failures; a permitted optional-dependency unavailable
+  outcome is an explicit resolver success branch, not an abort to suppress
+- all input-derived work and allocation is covered by checked charges, live reservations, or a
+  reviewed conservative allowance before an opaque parser/backend allocation occurs
+- parser output remains private and is converted into Baozi-owned draft data without backend types
+  crossing the format boundary
+- tests cover happy path, malformed input, budget exhaustion, cancellation, central validation, and
+  at least one deterministic snapshot
 
 Diagnostic, streaming, and generated-code requirements are defined in
 [`ADR 0019`](0019-parser-diagnostic-streaming-and-generated-code-contract.md). The operational
@@ -182,8 +227,9 @@ Decision: chosen.
 | Feature hygiene | Disabling a format removes its parser-tool dependencies | `cargo tree -e features` |
 | MSRV hygiene | Parser tools do not accidentally raise documented MSRV | dependency metadata review and MSRV check |
 | WASM hygiene | Format bytes path compiles for `wasm32-unknown-unknown` | target-specific `cargo check` |
-| Error quality | Malformed inputs return Baozi errors/diagnostics | malformed fixture tests |
-| Resource control | Oversized inputs hit `ResourceLimits` before unbounded allocation | limit tests/fuzz seeds |
+| Error quality | Malformed inputs return stable format causes or bounded diagnostics | malformed fixture tests |
+| Resource control | Admitted adapters charge or reserve before input-derived work/allocation | budget tests, allocation probes, fuzz seeds |
+| Validation authority | Parser APIs return only the branded `SceneDraft` descriptor, never the construction owner or parser-supplied proof | API-shape, foreign-descriptor, and invalid-draft tests |
 
 ## Risks and Mitigations
 
@@ -192,7 +238,8 @@ Decision: chosen.
 | Parser tool raises MSRV | High | Medium | Gate additions through ADR 0007 and dependency metadata review |
 | Tool AST leaks into public API | High | Low | Keep tools private to format crates and convert immediately |
 | Generated parser hides allocation behavior | Medium | Medium | Require resource-limit tests and fuzz seeds before maturity promotion |
-| Different parser styles fragment maintenance | Medium | Medium | Keep common diagnostics, `ImportContext`, snapshots, and validation shared |
+| Different parser styles fragment maintenance | Medium | Medium | Keep `ParseScope`, diagnostics, snapshots, budgets, and central validation shared |
+| A hostile in-process extension ignores cooperative limits | Critical | Medium | Treat extensions as trusted code; require process isolation for hostile plugins |
 | Tool is not WASM-friendly | High | Medium | Require bytes-path target check before enabling the format feature |
 
 ## Consequences
@@ -216,3 +263,18 @@ Negative:
 - crates.io API: [`pest`](https://crates.io/api/v1/crates/pest)
 - crates.io API: [`logos`](https://crates.io/api/v1/crates/logos)
 - crates.io API: [`lalrpop`](https://crates.io/api/v1/crates/lalrpop)
+
+## Amendment History
+
+### 2026-08-01: Align parser tooling with the opaque construction boundary
+
+- Affected: `Decision`, `Architecture`, and `Success Metrics`.
+- Previous: parser adapters were described as driving an importer-facing `SceneBuilder` that owned
+  unvalidated construction state.
+- New: the import session owns one opaque core `SceneConstruction`; `ParseScope` lends only bounded
+  authoring authority, and parsers return a branded non-owning `SceneDraft` descriptor.
+- Impact: the pre-release parser boundary becomes narrower and prevents format code from retaining or
+  finalizing canonical storage independently.
+- Review: 2026-08-01 fixed-range architecture and parser-boundary review.
+- Rationale: this preserves the format-owned parser policy while aligning it with ADR 0003 and ADR
+  0020's single canonical lifecycle rather than selecting a new parser architecture.

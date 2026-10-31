@@ -24,24 +24,35 @@ The default normalized target for explicit post-processing is:
 
 - right-handed coordinates
 - Y-up
+- negative Z front
 - meters
-- column-vector transform convention
-- local-to-parent node transforms
 - counter-clockwise front faces unless target options say otherwise
 
-Normalization is a post-process decision, not a parser side effect.
+Matrices always use column vectors, and authored node transforms always map local coordinates to
+the parent. TRS means `T * R * S`. These are fixed API semantics rather than conversion options;
+other matrix domains define their own source and destination spaces.
+
+`TargetSpace::try_new` validates all five target facts. `convert_scene_space` performs the explicit
+conversion. Unknown source facts require `SpaceConversionOptions::source_assumptions`; assumptions
+cannot override declared facts. The report records fields actually filled from assumptions.
+Normalization remains a post-process decision rather than a parser side effect.
 
 ## UV Origin
 
 Raw scenes record source UV origin when known.
 
-Texture coordinates are not flipped during import. Use a `FlipUvs` or coordinate target post-process step when a renderer expects a different origin.
+Texture coordinates are not flipped during import. Coordinate conversion preserves the UV origin.
+A caller needing another origin must perform an explicit separately supported conversion; no public
+`FlipUvs` operation is currently provided.
 
 ## Winding
 
 Raw scenes preserve source winding when possible.
 
-Coordinate conversion and handedness conversion must update winding or emit diagnostics when winding cannot be preserved safely.
+Coordinate conversion reverses triangle index lanes and all Corner attribute lanes together when
+the basis determinant and independent winding convention require it. Vertex and Face identities
+retain their order. A nonempty polygon/strip/fan requiring reversal must first be lowered through
+an implemented operation; conversion returns a typed capability error otherwise.
 
 ## Tangents and Normal Maps
 
@@ -53,7 +64,10 @@ Normal maps are data textures:
 - no implicit green-channel flip
 - normal map convention metadata should be recorded when known
 
-Coordinate conversion must update tangent basis or invalidate tangents with diagnostics.
+Coordinate conversion transports normals and tangent directions by the signed basis permutation.
+It multiplies tangent `w` by the basis determinant when the encoding is `SignInW`; it does not
+normalize authored vectors or alter the tangent-generation declaration. A reflection with an
+unhandled present tangent encoding returns a typed capability error.
 
 ## Units
 
@@ -74,3 +88,39 @@ Coordinate normalization must apply consistently to:
 - morph targets
 
 If a post-process step cannot update a feature correctly, it must diagnose or reject that scene rather than silently producing inconsistent output.
+
+Skin inverse binds and optional corrections use `H M H^-1`, with `H = diag(sQ, 1)`.
+Dense and sparse Position morph deltas use `sQ`; Normal and Tangent deltas use `Q`.
+Sparse omissions, explicit entries, target identities, influence rows, and morph weights remain unchanged.
+
+Animation translation values and cubic derivatives use `sQ`. Scale values and derivatives
+permute axes without sign changes. Quaternion samples and arbitrary cubic derivatives use
+`(det(Q) Q xyz, w)`. This linear map preserves `q/-q`, zero/nonunit derivatives, and scalar bits
+except for the declared permutation, sign, and unit arithmetic. No normalization or quaternion
+sign canonicalization occurs. Names, source order, f64 key times/time domains, and interpolation
+and extrapolation declarations remain unchanged.
+
+Camera and light definitions carry complete intrinsic `LocalAxes`. With reference-to-node map
+`B = [right, up, -forward]`, conversion applies `B' = Q B`, preserving all 48 signed permutations
+and leaving the node hierarchy and attachments unchanged. Camera clipping distances and orthographic
+half-extents scale by `s`; point/spot ranges do likewise. FOV, aspect, cone angles, tint, and
+photometric intensity keep their bits. Projection ordering must remain valid after F32 rounding.
+
+Supplemental material thickness is a nonnegative Scene-unit length; a Displacement binding's
+strength is a signed Scene-unit length. Both scale by the positive unit ratio `s`, using a binary64
+intermediate and one checked binary32 rounding. Reflection does not add a displacement sign.
+Signed zeros and representable subnormals are preserved; overflow and nonzero underflow to zero
+return a typed material/binding error. Other factors, binding values, names, and source keys retain
+their bits and presence. Converted appearance rows share the original encoded-image and text
+payload owners; if no row values change bits, the row owner is shared as well.
+
+Texture bindings select a direct UV set index. Coordinate conversion preserves that index and the
+UV transform; reads resolve the chosen Vertex or Corner stream explicitly. Generated spatial
+coordinate-source variants are absent from the current model.
+
+Numeric conversion of custom attributes without defined spatial semantics still returns a typed
+capability error. Winding-only conversion can retain otherwise unaffected spatial domains.
+These typed rejections preserve the original Scene. Unrepresentable numeric output identifies the
+skin correction, inverse-bind matrix, morph delta/tuple, animation channel/stream/key, camera/light
+definition, material, or binding before retained output admission. Winding-only and declaration-only
+edits share deformation and animation storage.

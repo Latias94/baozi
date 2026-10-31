@@ -1,0 +1,50 @@
+name: Scheduled Scale Profile
+
+on:
+  schedule:
+    - cron: "43 4 * * 3"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scale:
+    name: OBJ scale contract and advisory time/RSS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      SCALE_ARTIFACT_ROOT: target/scale-artifacts/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run scale contract and collect measurements
+        timeout-minutes: 60
+        run: python3 scripts/run_scale_profile.py --artifact-root "$SCALE_ARTIFACT_ROOT"
+
+      - name: Upload scale logs and measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: baozi-scale-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SCALE_ARTIFACT_ROOT }}/**
+          if-no-files-found: warn
+          retention-days: 90

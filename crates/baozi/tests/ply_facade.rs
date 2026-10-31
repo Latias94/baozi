@@ -1,6 +1,13 @@
+#![allow(
+    clippy::result_large_err,
+    reason = "facade tests preserve complete bounded terminal evidence by value"
+)]
 #![cfg(feature = "format-ply")]
 
-use baozi::{CapabilityStatus, FormatCapability, Importer, PrimitiveTopology, Result, Vec3};
+mod common;
+
+use baozi::{CapabilityStatus, FormatCapability, Importer, Result};
+use common::{scene_snapshot, snapshot_line};
 
 fn triangle_ply() -> &'static [u8] {
     b"ply
@@ -21,36 +28,49 @@ end_header
 
 #[test]
 fn facade_reads_ply_from_bytes() -> Result<()> {
-    let report = Importer::new().read_bytes("facade.ply", triangle_ply())?;
+    let report = Importer::new()?.read_bytes("facade.ply", triangle_ply())?;
+    let snapshot = scene_snapshot(&report);
 
-    assert_eq!(report.format().id(), "ply");
-    let mesh = &report.scene().meshes[0];
-    assert_eq!(mesh.topology, PrimitiveTopology::Triangles);
-    assert_eq!(mesh.positions[1], Vec3::new(1.0, 0.0, 0.0));
-    assert_eq!(mesh.indices, vec![0, 1, 2]);
+    assert_eq!(report.format().id().as_str(), "org.baozi.ply");
+    assert_eq!(snapshot.logical_mesh_count(), 1);
+    assert_eq!(snapshot.primitive_count(), 1);
+    assert_eq!(snapshot.attribute_count(), 1);
+    assert_eq!(snapshot.primitive_index_count(), 3);
+    assert!(snapshot_line(&snapshot, "primitive[0]").contains("topology=triangle_list"));
+    let position = snapshot_line(&snapshot, "attribute[0]");
+    assert!(position.contains(concat!(
+        "semantic=position semantic_set=0 domain=vertex scalar=f32 lanes=3 ",
+        "normalization=none payload=dense elements=3"
+    )));
+    assert!(position.contains(concat!(
+        "values(present,total=9)=[",
+        "0x00000000,0x00000000,0x00000000,0x3f800000"
+    )));
     assert!(report.diagnostics().is_empty());
     Ok(())
 }
 
 #[test]
 fn facade_reports_ply_capabilities() -> Result<()> {
-    let report = Importer::new().read_bytes("facade.ply", triangle_ply())?;
+    let report = Importer::new()?.read_bytes("facade.ply", triangle_ply())?;
 
-    assert!(
+    assert_eq!(
         report
             .format()
-            .capabilities()
-            .contains(&(FormatCapability::Geometry, CapabilityStatus::Supported))
+            .capability_status(FormatCapability::Geometry),
+        Some(CapabilityStatus::Supported)
     );
-    assert!(
+    assert_eq!(
         report
             .format()
-            .capabilities()
-            .contains(&(FormatCapability::Diagnostics, CapabilityStatus::Supported))
+            .capability_status(FormatCapability::Diagnostics),
+        Some(CapabilityStatus::Supported)
     );
-    assert!(report.format().capabilities().contains(&(
-        FormatCapability::ResourceLimits,
-        CapabilityStatus::Supported
-    )));
+    assert_eq!(
+        report
+            .format()
+            .capability_status(FormatCapability::ResourceLimits),
+        Some(CapabilityStatus::Supported)
+    );
     Ok(())
 }

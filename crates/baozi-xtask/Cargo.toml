@@ -1,0 +1,19 @@
+[package]
+name = "baozi-xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Repository governance checks for Baozi"
+
+[dependencies]
+serde_json.workspace = true
+toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "baozi-xtask"
+path = "src/main.rs"

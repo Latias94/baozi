@@ -6,14 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/baozi-format-stl"
 authors.workspace = true
-description.workspace = true
+description = "Binary and ASCII STL triangle-mesh importer backend for Baozi"
+readme = "README.md"
 
 [dependencies]
-baozi-core.workspace = true
 baozi-import.workspace = true
-baozi-io.workspace = true
 
 [dev-dependencies]
+baozi-core.workspace = true
+baozi-io.workspace = true
+baozi-operation.workspace = true
 baozi-test-support.workspace = true

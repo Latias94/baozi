@@ -1,0 +1,1851 @@
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
+
+use baozi_operation::{
+    CancellationSignal, PhysicalStorageAccountFactory, PhysicalStorageAccountFactoryLimits,
+    PhysicalStorageAccountLimits, StorePlanError, StorePreparationFailureClass, StoreTerminalCause,
+};
+
+use crate::FormatId;
+use crate::SceneValidationLimits;
+use crate::attribute::{AttributeDomain, AttributeSemantic};
+use crate::canonical_scene::store::construction::node_scene::semantic::{
+    NodeSceneProfileCursor, NodeSceneProfileStep,
+};
+use crate::canonical_scene::store::construction::{
+    FAILURE_TERMINAL_WORK_DIMENSION, GENERATION_EXHAUSTED_CODE, STORE_DIMENSION,
+    SceneConstructionLimits, failure_terminal_work_requirement,
+};
+use crate::canonical_scene::store::production::{
+    AnimationAuthoringBatch, AppearanceAuthoringBatch, AuthoringRange, DeformationAuthoringBatch,
+    GeometryAttributeAuthoring, GeometryAuthoringBatch, GeometryLogicalMeshAuthoring,
+    GeometryPrimitiveAuthoring, GeometryTopologyAuthoring, LineageAuthoringBatch,
+    LogicalMorphAuthoring, MetadataAuthoringBatch, MetadataAuthoringEntry, NodeAuthoringBatch,
+    NodeAuthoringFailure, NodeAuthoringLimit, NodeAuthoringNode, NodeAuthoringSemanticError,
+    NodeLocalId, NodeParent, ObservedResourceAuthoring, OwnerProvenanceAuthoring, Presence,
+    PrimitiveDeformationAuthoring, ProfileAuthoringBatch, ProfileOwner, ProvenanceLocalId,
+    ProvenanceNodeAuthoring, ResourceIdentityLocalId, SceneAuthoringBatch, SessionOpaqueReason,
+    SourceIdentityAuthoring, SourceIdentityLocalId, SpatialAuthoringBatch,
+};
+use crate::canonical_scene::store::profile_provenance::corrupt_profile_reference_for_test;
+use crate::entity::AuthoredTransform;
+use crate::extension::ExtensionValueRef;
+use crate::identity::{SceneGenerationError, SceneGenerationId};
+use crate::math::{Mat4, Quat, Vec3};
+use crate::namespaced::NamespacedName;
+use crate::provenance::{ResourceIdentity, SourceObjectKind, SourceObjectLocator};
+use crate::scene_space::SceneSpace;
+
+use super::materialization::{NodeScenePlanningFault, test_scene_authoring_batch};
+use super::profile::ProfileBuildFault;
+use super::publication::post_evidence_build_failure_code;
+use super::{
+    NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_NODE_AUTHORING_REJECTION_CODE,
+    NODE_SCENE_PLANNING_REJECTION_CODE, NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneBuildFaults,
+    NodeSceneConstructionRejection, NodeSceneConstructionTerminal, NodeSceneDraft,
+    NodeSceneDraftBuild, NodeSceneRichFailure, NodeSceneTestTransaction, PendingNodeSceneDraft,
+};
+
+mod gltf_capability;
+mod obj_capability;
+mod profile_closure;
+mod public_animation_read;
+mod spatial_validation;
+mod storage_scale;
+
+fn exhaust_profile_for_test(profile: &mut NodeSceneProfileCursor<'_>) {
+    while !matches!(
+        profile.step_resource().expect("profile resource step"),
+        NodeSceneProfileStep::End
+    ) {}
+    while !matches!(
+        profile.step_source().expect("profile source step"),
+        NodeSceneProfileStep::End
+    ) {}
+    while !matches!(
+        profile.step_provenance().expect("profile provenance step"),
+        NodeSceneProfileStep::End
+    ) {}
+    while !matches!(
+        profile.step_evidence().expect("profile evidence step"),
+        NodeSceneProfileStep::End
+    ) {}
+    while profile.next_owner().expect("profile owner read").is_some() {}
+    while profile
+        .next_metadata_entry()
+        .expect("profile metadata read")
+        .is_some()
+    {}
+}
+
+pub(in crate::canonical_scene::store) use gltf_capability::{
+    build_gltf_capability_scene_for_probe, project_gltf_facade_observation_v1_for_probe,
+};
+
+// These phase boundaries are black-box accounting evidence for the complete scoped rail. They
+// include operation-owned startup and retained-share work, not only core semantic actions.
+const SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK: u64 = 80;
+const SINGLE_TRS_ROOTS: [NodeLocalId; 1] = [NodeLocalId::new(0)];
+const SINGLE_TRS_NODES: [NodeAuthoringNode; 1] = [NodeAuthoringNode::new(
+    Presence::Absent,
+    AuthoredTransform::identity_trs(),
+    Presence::Absent,
+    Presence::Absent,
+)];
+
+const PROFILE_SOURCE_PROVENANCE: [ProvenanceLocalId; 1] = [ProvenanceLocalId::new(0)];
+
+struct ProfileFixtureVocabulary {
+    resource: ResourceIdentity,
+    format: FormatId,
+    locator: SourceObjectLocator,
+}
+
+fn profile_fixture_vocabulary() -> &'static ProfileFixtureVocabulary {
+    static VOCABULARY: OnceLock<ProfileFixtureVocabulary> = OnceLock::new();
+    VOCABULARY.get_or_init(|| ProfileFixtureVocabulary {
+        resource: ResourceIdentity::new("fixtures/node-scene/input")
+            .expect("test profile resource identity"),
+        format: FormatId::new("org.baozi.fixture").expect("test profile format"),
+        locator: SourceObjectLocator::indexed(SourceObjectKind::Document, 0),
+    })
+}
+
+pub(super) struct ProfileFixture {
+    resources: [ObservedResourceAuthoring<'static>; 1],
+    sources: [SourceIdentityAuthoring<'static>; 1],
+    provenance: [ProvenanceNodeAuthoring<'static>; 1],
+    owners: Vec<OwnerProvenanceAuthoring<'static>>,
+}
+
+impl ProfileFixture {
+    pub(super) fn batch(&self) -> ProfileAuthoringBatch<'_> {
+        self.batch_with_metadata(MetadataAuthoringBatch::empty())
+    }
+
+    pub(super) fn batch_with_metadata<'fixture>(
+        &'fixture self,
+        metadata: MetadataAuthoringBatch<'fixture>,
+    ) -> ProfileAuthoringBatch<'fixture> {
+        ProfileAuthoringBatch::new(
+            LineageAuthoringBatch::new(
+                &self.resources,
+                &self.sources,
+                &self.provenance,
+                &self.owners,
+            ),
+            metadata,
+        )
+    }
+}
+
+pub(super) fn profile_fixture(
+    spatial: SpatialAuthoringBatch<'_>,
+    nodes: NodeAuthoringBatch<'_>,
+    appearance: AppearanceAuthoringBatch<'_>,
+    geometry: GeometryAuthoringBatch<'_>,
+    deformation: DeformationAuthoringBatch<'_>,
+    animation: AnimationAuthoringBatch<'_>,
+) -> ProfileFixture {
+    let vocabulary = profile_fixture_vocabulary();
+    let mut owners = vec![ProfileOwner::Scene, ProfileOwner::SyntheticRoot];
+    owners.extend(nodes.nodes().iter().enumerate().map(|(index, _)| {
+        ProfileOwner::Node(NodeLocalId::new(
+            u32::try_from(index).expect("test node index"),
+        ))
+    }));
+    owners.extend(indexed_profile_owners(
+        spatial.cameras().len(),
+        ProfileOwner::Camera,
+    ));
+    owners.extend(indexed_profile_owners(
+        spatial.lights().len(),
+        ProfileOwner::Light,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.images().len(),
+        ProfileOwner::Image,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.samplers().len(),
+        ProfileOwner::Sampler,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.textures().len(),
+        ProfileOwner::Texture,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.bindings().len(),
+        ProfileOwner::TextureBinding,
+    ));
+    owners.extend(indexed_profile_owners(
+        appearance.materials().len(),
+        ProfileOwner::Material,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.logical_meshes().len(),
+        ProfileOwner::LogicalMesh,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.primitives().len(),
+        ProfileOwner::Primitive,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.attributes().len(),
+        ProfileOwner::Attribute,
+    ));
+    owners.extend(indexed_profile_owners(
+        geometry.mesh_instances().len(),
+        ProfileOwner::MeshInstance,
+    ));
+    owners.extend(indexed_profile_owners(
+        deformation.skins().len(),
+        ProfileOwner::Skin,
+    ));
+    owners.extend(indexed_profile_owners(
+        deformation.morph_target_definitions().len(),
+        ProfileOwner::MorphDefinition,
+    ));
+    let morph_delta_count = deformation
+        .primitives()
+        .iter()
+        .flat_map(|primitive| primitive.morph_targets())
+        .map(|target| target.deltas().len())
+        .sum();
+    owners.extend(indexed_profile_owners(
+        morph_delta_count,
+        ProfileOwner::MorphDelta,
+    ));
+    owners.extend(indexed_profile_owners(
+        animation.clips().len(),
+        ProfileOwner::AnimationClip,
+    ));
+    owners.extend(indexed_profile_owners(
+        animation.channels().len(),
+        ProfileOwner::AnimationChannel,
+    ));
+
+    ProfileFixture {
+        resources: [ObservedResourceAuthoring::session_opaque(
+            &vocabulary.resource,
+            SessionOpaqueReason::CallerLabel,
+        )],
+        sources: [SourceIdentityAuthoring::new(
+            ResourceIdentityLocalId::new(0),
+            &vocabulary.format,
+            &vocabulary.locator,
+        )],
+        provenance: [ProvenanceNodeAuthoring::source(SourceIdentityLocalId::new(
+            0,
+        ))],
+        owners: owners
+            .into_iter()
+            .map(|owner| OwnerProvenanceAuthoring::new(owner, &PROFILE_SOURCE_PROVENANCE))
+            .collect(),
+    }
+}
+
+fn indexed_profile_owners(
+    len: usize,
+    owner: impl Fn(u32) -> ProfileOwner,
+) -> impl Iterator<Item = ProfileOwner> {
+    (0..len).map(move |index| owner(u32::try_from(index).expect("test profile owner index")))
+}
+
+#[derive(Clone)]
+struct CancelOnSignalPoll {
+    polls: Arc<AtomicUsize>,
+    cancel_on: Arc<AtomicUsize>,
+}
+
+impl CancelOnSignalPoll {
+    fn new() -> Self {
+        Self {
+            polls: Arc::new(AtomicUsize::new(0)),
+            cancel_on: Arc::new(AtomicUsize::new(usize::MAX)),
+        }
+    }
+
+    fn polls(&self) -> usize {
+        self.polls.load(Ordering::Acquire)
+    }
+
+    fn cancel_after_additional_polls(&self, additional: usize) {
+        self.cancel_on.store(
+            self.polls()
+                .checked_add(additional)
+                .expect("test cancellation poll threshold"),
+            Ordering::Release,
+        );
+    }
+}
+
+impl CancellationSignal for CancelOnSignalPoll {
+    fn is_cancelled(&self) -> bool {
+        let poll = self.polls.fetch_add(1, Ordering::AcqRel) + 1;
+        poll >= self.cancel_on.load(Ordering::Acquire)
+    }
+}
+
+pub(super) fn test_limits() -> SceneConstructionLimits {
+    SceneConstructionLimits {
+        operation_live_bytes: u64::MAX,
+        dimension_live_bytes: u64::MAX,
+        attempted_work: u64::MAX,
+        consumed_work: u64::MAX,
+        committed_output: u64::MAX,
+        published_evidence: u64::MAX,
+    }
+}
+
+pub(super) fn test_factory() -> PhysicalStorageAccountFactory {
+    PhysicalStorageAccountFactory::try_new(
+        PhysicalStorageAccountFactoryLimits::new(u64::MAX, 1)
+            .expect("node Scene test factory limits"),
+    )
+    .expect("node Scene test factory")
+}
+
+fn test_limits_with_work(work: u64) -> SceneConstructionLimits {
+    let terminal_work = failure_terminal_work_requirement()
+        .expect("node Scene failure-terminal work requirement")
+        .attempted_work_limit();
+    let total_work = work
+        .checked_add(terminal_work)
+        .expect("test ordinary and terminal work limits must fit");
+    SceneConstructionLimits {
+        attempted_work: total_work,
+        consumed_work: total_work,
+        ..test_limits()
+    }
+}
+
+pub(super) fn single_trs_batch() -> NodeAuthoringBatch<'static> {
+    NodeAuthoringBatch::new(Presence::Present(&SINGLE_TRS_ROOTS), &SINGLE_TRS_NODES)
+}
+
+fn finish_node_batch(
+    account: &baozi_operation::PhysicalStorageAccount,
+    limits: SceneConstructionLimits,
+    nodes: NodeAuthoringBatch<'_>,
+    validation_limits: SceneValidationLimits,
+) -> NodeSceneDraftBuild {
+    NodeSceneTestTransaction::with_account(
+        account,
+        limits,
+        test_scene_authoring_batch(nodes),
+        validation_limits,
+    )
+    .expect("node Scene input must be admitted")
+    .finish_draft()
+    .expect("node Scene scoped activation must prepare an exact outcome")
+}
+
+fn single_trs_work_baseline(account: &baozi_operation::PhysicalStorageAccount) -> (u64, u64) {
+    let parts = successful_parts(
+        finish_node_batch(
+            account,
+            test_limits(),
+            single_trs_batch(),
+            SceneValidationLimits::default(),
+        )
+        .publish_for_test()
+        .expect("healthy single-TRS work baseline"),
+    );
+    let work = parts
+        .report
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("healthy single-TRS work evidence");
+    assert_eq!(work.attempted(), work.consumed());
+    let total = work.consumed();
+    let validation = parts.scene.proof.central_validation_plan().work().get();
+    assert!(total > validation);
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    (total, validation)
+}
+
+fn finish_node_batch_with_faults(
+    account: &baozi_operation::PhysicalStorageAccount,
+    limits: SceneConstructionLimits,
+    nodes: NodeAuthoringBatch<'_>,
+    validation_limits: SceneValidationLimits,
+    faults: NodeSceneBuildFaults,
+) -> NodeSceneDraftBuild {
+    NodeSceneTestTransaction::with_account(
+        account,
+        limits,
+        test_scene_authoring_batch(nodes),
+        validation_limits,
+    )
+    .expect("node Scene input must be admitted")
+    .finish_draft_with_faults(faults)
+    .expect("node Scene scoped activation must prepare an exact outcome")
+}
+
+fn finish_node_batch_with_cancellation(
+    account: &baozi_operation::PhysicalStorageAccount,
+    limits: SceneConstructionLimits,
+    nodes: NodeAuthoringBatch<'_>,
+    validation_limits: SceneValidationLimits,
+    cancellation: impl CancellationSignal,
+) -> NodeSceneDraftBuild {
+    NodeSceneTestTransaction::with_account_and_cancellation(
+        account,
+        limits,
+        test_scene_authoring_batch(nodes),
+        validation_limits,
+        cancellation,
+    )
+    .expect("cancellable node Scene input must be admitted")
+    .finish_draft()
+    .expect("cancellable scoped activation must prepare an exact outcome")
+}
+
+fn finish_node_batch_with_planning_fault(
+    account: &baozi_operation::PhysicalStorageAccount,
+    nodes: NodeAuthoringBatch<'_>,
+    planning_fault: NodeScenePlanningFault,
+) -> NodeSceneDraftBuild {
+    NodeSceneTestTransaction::with_account(
+        account,
+        test_limits(),
+        test_scene_authoring_batch(nodes),
+        SceneValidationLimits::default(),
+    )
+    .expect("planning-fault node Scene input must be admitted")
+    .finish_draft_with_planning_fault(planning_fault)
+    .expect("planning rejection must prepare an exact scoped outcome")
+}
+
+fn parent(node: u32, child_ordinal: u32) -> Presence<NodeParent> {
+    Presence::Present(NodeParent::new(NodeLocalId::new(node), child_ordinal))
+}
+
+pub(super) fn test_account(
+    factory: &PhysicalStorageAccountFactory,
+    max_live_allocations: u64,
+) -> baozi_operation::PhysicalStorageAccount {
+    factory
+        .try_create_account(
+            PhysicalStorageAccountLimits::new(u64::MAX, max_live_allocations)
+                .expect("node Scene test account limits"),
+        )
+        .expect("node Scene test account")
+}
+
+pub(super) fn successful_parts(
+    terminal: NodeSceneConstructionTerminal,
+) -> super::NodeSceneSuccessParts {
+    match terminal {
+        NodeSceneConstructionTerminal::Success(parts) => parts,
+        NodeSceneConstructionTerminal::RichFailure(failure) => {
+            let store_dimension = failure
+                .ledger_evidence()
+                .dimension_by_semantic(STORE_DIMENSION);
+            let failure_dimension = failure
+                .ledger_evidence()
+                .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION);
+            panic!(
+                "valid node Scene must not publish rich failure: class={:?}, code={}, store={store_dimension:?}, failure={failure_dimension:?}",
+                terminal_failure_class(failure.ledger_evidence()),
+                terminal_failure_code(failure.ledger_evidence()),
+            )
+        }
+        NodeSceneConstructionTerminal::MinimalFallback(fallback) => {
+            panic!(
+                "valid node Scene must not publish minimal fallback: class={:?}, code={}",
+                terminal_failure_class(fallback.ledger_evidence()),
+                terminal_failure_code(fallback.ledger_evidence()),
+            )
+        }
+    }
+}
+
+pub(in crate::canonical_scene::store) fn build_minimal_fallback_terminal_for_probe(
+    account: &baozi_operation::PhysicalStorageAccount,
+) -> NodeSceneConstructionTerminal {
+    finish_node_batch_with_faults(
+        account,
+        test_limits(),
+        single_trs_batch(),
+        SceneValidationLimits::default(),
+        NodeSceneBuildFaults::minimal_fallback(),
+    )
+    .publish_for_test()
+    .expect("aborted outcome evidence must publish fail closed")
+}
+
+fn rich_failure(terminal: NodeSceneConstructionTerminal) -> NodeSceneRichFailure {
+    match terminal {
+        NodeSceneConstructionTerminal::Success(_) => {
+            panic!("rejected node Scene must not publish canonical storage")
+        }
+        NodeSceneConstructionTerminal::RichFailure(failure) => failure,
+        NodeSceneConstructionTerminal::MinimalFallback(fallback) => {
+            panic!(
+                "recoverable node Scene rejection must preserve rich evidence; fallback terminal={:?}/0x{:08x}",
+                terminal_failure_class(fallback.ledger_evidence()),
+                terminal_failure_code(fallback.ledger_evidence())
+            )
+        }
+    }
+}
+
+fn assert_released(
+    failure: NodeSceneRichFailure,
+    account: &baozi_operation::PhysicalStorageAccount,
+) {
+    assert!(failure.account().is_same_account(account));
+    assert_eq!(failure.outcome_evidence_block_count(), 1);
+    drop(failure);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+fn terminal_failure_code(evidence: &baozi_operation::StoreLedgerEvidence) -> u32 {
+    match evidence.header().terminal_cause() {
+        StoreTerminalCause::Failure(cause) => cause.code(),
+        StoreTerminalCause::Success => {
+            panic!("rejected node Scene must freeze a failure cause")
+        }
+        _ => panic!("unknown terminal cause cannot prove a node Scene failure"),
+    }
+}
+
+fn terminal_failure_class(
+    evidence: &baozi_operation::StoreLedgerEvidence,
+) -> StorePreparationFailureClass {
+    match evidence.header().terminal_cause() {
+        StoreTerminalCause::Failure(cause) => cause.class(),
+        StoreTerminalCause::Success => {
+            panic!("rejected node Scene must freeze a failure cause")
+        }
+        _ => panic!("unknown terminal cause cannot prove a node Scene failure"),
+    }
+}
+
+fn matrix_transform(translation_x: f32) -> AuthoredTransform {
+    AuthoredTransform::try_matrix(Mat4 {
+        cols: [
+            [1.0, -0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [translation_x, 2.0, -3.0, 1.0],
+        ],
+    })
+    .expect("finite affine authored matrix")
+}
+
+fn trs_transform(translation_x: f32) -> AuthoredTransform {
+    AuthoredTransform::try_trs(
+        Vec3::new(translation_x, -0.0, 3.5),
+        Quat::IDENTITY,
+        Vec3::new(1.0, 2.0, 0.5),
+    )
+    .expect("valid authored TRS")
+}
+
+fn finish_draft_from_local_authoring_vecs(
+    account: &baozi_operation::PhysicalStorageAccount,
+) -> NodeSceneDraftBuild {
+    let roots = vec![NodeLocalId::new(0)];
+    let nodes = vec![NodeAuthoringNode::new(
+        Presence::Absent,
+        AuthoredTransform::identity_trs(),
+        Presence::Absent,
+        Presence::Absent,
+    )];
+    finish_node_batch(
+        account,
+        test_limits(),
+        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+        SceneValidationLimits::default(),
+    )
+}
+
+fn exact_draft_pair_from_local_authoring_vecs(
+    account: &baozi_operation::PhysicalStorageAccount,
+) -> (NodeSceneDraft, PendingNodeSceneDraft) {
+    match finish_draft_from_local_authoring_vecs(account) {
+        NodeSceneDraftBuild::Draft { draft, owner } => (draft, owner),
+        NodeSceneDraftBuild::Failure { .. } => {
+            panic!("valid materialization must preserve an exact canonical draft pair")
+        }
+    }
+}
+
+#[test]
+fn dropping_scoped_activation_outcome_releases_all_retained_storage() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let build = finish_node_batch(
+        &account,
+        test_limits(),
+        single_trs_batch(),
+        SceneValidationLimits::default(),
+    );
+
+    assert!(account.snapshot().live_retained_allocations() > 0);
+
+    drop(build);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn planning_rejections_preserve_rich_evidence_without_canonical_commitment() {
+    for planning_fault in [
+        NodeScenePlanningFault::SealedPlan,
+        NodeScenePlanningFault::Publication,
+    ] {
+        let factory = test_factory();
+        let account = test_account(&factory, 256);
+        let build =
+            finish_node_batch_with_planning_fault(&account, single_trs_batch(), planning_fault);
+        let NodeSceneDraftBuild::Failure {
+            authoring_rejection: Some(rejection),
+            prepared,
+        } = build
+        else {
+            panic!("{planning_fault:?} must retain an exact planning rejection")
+        };
+        assert!(matches!(
+            rejection,
+            NodeSceneConstructionRejection::Planning(StorePlanError::InvalidBlockTable)
+        ));
+        let failure = rich_failure(prepared.handoff_for_test());
+        assert_eq!(
+            terminal_failure_code(failure.ledger_evidence()),
+            NODE_SCENE_PLANNING_REJECTION_CODE
+        );
+        assert_eq!(
+            failure
+                .ledger_evidence()
+                .dimension_by_semantic(STORE_DIMENSION)
+                .expect("planning rejection dimension")
+                .committed_canonical_output(),
+            0
+        );
+        assert_released(failure, &account);
+    }
+}
+
+#[test]
+fn materialized_draft_outlives_source_buffers_before_generation_and_handoff() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let generation_source = AtomicU64::new(0);
+
+    // The helper's Vec-backed authoring storage is gone before generation and joint publication.
+    let (draft, owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let prepared = owner
+        .prepare_with_generation_source(draft, || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("owned draft must centrally prepare without source buffers");
+    let parts = successful_parts(prepared.handoff());
+    let semantic = parts
+        .scene
+        .semantic_view()
+        .expect("materialized draft semantic view");
+
+    assert_eq!(semantic.node_count(), 1);
+    assert_eq!(semantic.root_count(), 1);
+    assert_eq!(generation_source.load(Ordering::Relaxed), 1);
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn dropping_draft_descriptor_does_not_release_its_retained_owner() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+
+    let (draft, owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let retained = account.snapshot();
+    assert!(retained.live_retained_bytes() > 0);
+    assert!(retained.live_retained_allocations() > 0);
+
+    {
+        let _descriptor = draft;
+    }
+
+    assert_eq!(account.snapshot(), retained);
+    drop(owner);
+
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn dropping_draft_owner_releases_storage_while_descriptor_remains_inert() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+
+    let (_descriptor, owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    assert!(account.snapshot().live_retained_bytes() > 0);
+    assert!(account.snapshot().live_retained_allocations() > 0);
+
+    drop(owner);
+
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn foreign_brand_descriptor_fails_before_generation_reservation() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let (local_draft, local_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let (foreign_draft, foreign_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let mismatched = NodeSceneDraft {
+        brand: foreign_draft.brand,
+        directory: local_draft.directory,
+    };
+    drop(foreign_owner);
+
+    let failure = rich_failure(
+        local_owner
+            .prepare_with_generation_source(mismatched, || {
+                panic!("foreign brand must fail before generation reservation")
+            })
+            .expect("foreign brand must preserve rich build-invariant evidence")
+            .handoff(),
+    );
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        NODE_SCENE_BUILD_INVARIANT_CODE
+    );
+    assert_eq!(
+        failure
+            .ledger_evidence()
+            .dimension_by_semantic(STORE_DIMENSION)
+            .expect("foreign-brand failure dimension")
+            .committed_canonical_output(),
+        0
+    );
+    assert_released(failure, &account);
+}
+
+#[test]
+fn foreign_directory_descriptor_fails_before_generation_reservation() {
+    let factory = test_factory();
+    let account = test_account(&factory, 512);
+    let (local_draft, local_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let (foreign_draft, foreign_owner) = exact_draft_pair_from_local_authoring_vecs(&account);
+    let mismatched = NodeSceneDraft {
+        brand: local_draft.brand,
+        directory: foreign_draft.directory,
+    };
+    drop(foreign_owner);
+
+    let failure = rich_failure(
+        local_owner
+            .prepare_with_generation_source(mismatched, || {
+                panic!("foreign directory must fail before generation reservation")
+            })
+            .expect("foreign directory must preserve rich build-invariant evidence")
+            .handoff(),
+    );
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        NODE_SCENE_BUILD_INVARIANT_CODE
+    );
+    assert_eq!(
+        failure
+            .ledger_evidence()
+            .dimension_by_semantic(STORE_DIMENSION)
+            .expect("foreign-directory failure dimension")
+            .committed_canonical_output(),
+        0
+    );
+    assert_released(failure, &account);
+}
+
+#[test]
+fn source_ordered_forest_materializes_canonical_graph_and_preserves_authored_bits() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let generation_source = AtomicU64::new(0);
+    let generation_before = SceneGenerationId::reserve_from(&generation_source)
+        .expect("generation before node Scene construction")
+        .into_id();
+    let transforms = [
+        matrix_transform(-4.0),
+        trs_transform(1.0),
+        trs_transform(2.0),
+        matrix_transform(4.0),
+        trs_transform(5.0),
+    ];
+    let nodes = [
+        NodeAuthoringNode::new(
+            parent(3, 1),
+            transforms[0],
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            transforms[1],
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(
+            parent(3, 0),
+            transforms[2],
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            transforms[3],
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(
+            parent(1, 0),
+            transforms[4],
+            Presence::Absent,
+            Presence::Absent,
+        ),
+    ];
+    let roots = [NodeLocalId::new(3), NodeLocalId::new(1)];
+    let build = finish_node_batch(
+        &account,
+        test_limits(),
+        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+        SceneValidationLimits::default(),
+    );
+    let NodeSceneDraftBuild::Draft { draft, owner } = build else {
+        panic!("valid source-ordered forest must retain a draft before publication")
+    };
+    let prepared = owner
+        .prepare_with_generation_source(draft, || {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("valid source-ordered forest must prepare");
+    let before_handoff = account.snapshot();
+    let parts = successful_parts(prepared.handoff());
+    let after_handoff = account.snapshot();
+    let generation_after = SceneGenerationId::reserve_from(&generation_source)
+        .expect("generation after node Scene construction")
+        .into_id();
+
+    let canonical_block_count = parts.scene.canonical_block_count();
+    let semantic = parts
+        .scene
+        .semantic_view()
+        .expect("source-ordered forest semantic view");
+    assert_eq!(semantic.node_count(), 5);
+    assert_eq!(semantic.root_count(), 2);
+    assert!(canonical_block_count > 0);
+    let profile = parts.scene.tables.profile.state.as_ref();
+    assert_eq!(profile.segments.len(), 1);
+    assert_eq!(profile.owners.len(), 7);
+    assert_eq!(profile.attachments.len(), 7);
+    assert!(parts.scene.account().is_same_account(&account));
+    assert!(generation_before < parts.scene.generation());
+    assert!(parts.scene.generation() < generation_after);
+    assert_eq!(generation_source.load(Ordering::Relaxed), 3);
+    assert_eq!(before_handoff, after_handoff);
+    let mut cursor = semantic
+        .into_cursor()
+        .expect("source-ordered forest semantic cursor");
+    let mut roots = cursor.take_roots().expect("source-ordered forest roots");
+    assert_eq!(roots.declared_count(), 2);
+    assert_eq!(roots.next().expect("first root"), Some(0));
+    assert_eq!(roots.next().expect("second root"), Some(1));
+    assert_eq!(roots.next().expect("root cursor exhaustion"), None);
+
+    let expected_children: [&[usize]; 5] = [&[2, 3], &[4], &[], &[], &[]];
+    for (expected_source, expected_children) in expected_children.into_iter().enumerate() {
+        let node = cursor
+            .next_node()
+            .expect("source-ordered forest node read")
+            .expect("source-ordered forest node count");
+        assert_eq!(node.source_index(), expected_source);
+        assert_eq!(node.child_count(), expected_children.len());
+        let mut children = node.into_children();
+        for &expected_child in expected_children {
+            assert_eq!(
+                children.next().expect("source-ordered child read"),
+                Some(expected_child)
+            );
+        }
+        assert_eq!(
+            children.next().expect("source-ordered child exhaustion"),
+            None
+        );
+    }
+    assert!(
+        cursor
+            .next_node()
+            .expect("source-node cursor exhaustion")
+            .is_none()
+    );
+
+    let canonical_local_order = [3, 1, 2, 0, 4];
+    for (canonical_source, local) in canonical_local_order.into_iter().enumerate() {
+        let inspected = parts
+            .scene
+            .semantic_authored_transform_at(canonical_source)
+            .expect("canonical authored transform")
+            .authored_transform();
+        assert!(inspected.has_same_authored_bits(transforms[local]));
+    }
+    assert_eq!(parts.report.outcome_evidence_block_count(), 1);
+    let ledger = parts.report.ledger_evidence();
+    let header = ledger.header();
+    assert!(matches!(
+        header.terminal_cause(),
+        StoreTerminalCause::Success
+    ));
+    assert_eq!(header.dimension_count(), 2);
+    assert_eq!(header.phase_count(), 1);
+    assert_eq!(header.current_live_bytes(), 0);
+    assert!(header.peak_live_bytes() > 0);
+    assert_eq!(header.active_reservations(), 0);
+    let dimension = ledger
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("node Scene dimension evidence");
+    assert!(dimension.attempted() > 0);
+    assert_eq!(dimension.consumed(), dimension.attempted());
+    assert_eq!(dimension.current_live_bytes(), 0);
+    assert!(dimension.peak_live_bytes() > 0);
+    assert_eq!(dimension.pending_publication(), 0);
+    assert_eq!(
+        dimension.committed(),
+        u64::try_from(canonical_block_count).expect("node Scene canonical block count")
+    );
+    assert_eq!(
+        dimension.committed_canonical_output(),
+        u64::try_from(canonical_block_count).expect("node Scene canonical block count")
+    );
+    assert_eq!(
+        dimension.published_outcome_evidence(),
+        2,
+        "startup fallback and successful outcome evidence are both accounted"
+    );
+    let failure_terminal_work = ledger
+        .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
+        .expect("failure-terminal work dimension evidence");
+    assert_eq!(failure_terminal_work.attempted(), 0);
+    assert_eq!(failure_terminal_work.consumed(), 0);
+    assert_eq!(failure_terminal_work.current_live_bytes(), 0);
+    assert_eq!(failure_terminal_work.peak_live_bytes(), 0);
+    assert_eq!(failure_terminal_work.pending_publication(), 0);
+    assert_eq!(failure_terminal_work.committed(), 0);
+    assert_eq!(failure_terminal_work.committed_canonical_output(), 0);
+    assert_eq!(failure_terminal_work.published_outcome_evidence(), 0);
+
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+    drop(account);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn many_primitives_materialize_into_one_typed_geometry_owner() {
+    const PRIMITIVE_COUNT: usize = 12;
+    const PRIMITIVES_PER_MESH: usize = PRIMITIVE_COUNT / 2;
+
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let roots = [];
+    let nodes = [];
+    let position = [0.0_f32, 0.0, 0.0];
+    let index = [0_u32];
+    let attributes = (0..PRIMITIVE_COUNT)
+        .map(|_| {
+            GeometryAttributeAuthoring::f32(
+                AttributeSemantic::Position,
+                AttributeDomain::Vertex,
+                3,
+                &position,
+                Presence::Absent,
+            )
+        })
+        .collect::<Vec<_>>();
+    let primitives = (0..PRIMITIVE_COUNT)
+        .map(|primitive| {
+            GeometryPrimitiveAuthoring::new(
+                GeometryTopologyAuthoring::Points,
+                Presence::Present(&index),
+                Presence::Absent,
+                AuthoringRange::new(u32::try_from(primitive).expect("test primitive index"), 1),
+            )
+        })
+        .collect::<Vec<_>>();
+    let logical_meshes = [
+        GeometryLogicalMeshAuthoring::new(AuthoringRange::new(
+            0,
+            u32::try_from(PRIMITIVES_PER_MESH).expect("test primitive count"),
+        )),
+        GeometryLogicalMeshAuthoring::new(AuthoringRange::new(
+            u32::try_from(PRIMITIVES_PER_MESH).expect("test primitive offset"),
+            u32::try_from(PRIMITIVES_PER_MESH).expect("test primitive count"),
+        )),
+    ];
+    let logical_morphs = [
+        LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]),
+        LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[]),
+    ];
+    let primitive_deformations =
+        vec![PrimitiveDeformationAuthoring::new(Presence::Absent, &[]); PRIMITIVE_COUNT];
+    let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+    let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+    let appearance = AppearanceAuthoringBatch::empty();
+    let geometry = GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]);
+    let deformation =
+        DeformationAuthoringBatch::new(&[], &[], &logical_morphs, &primitive_deformations, &[]);
+    let animations = AnimationAuthoringBatch::empty();
+    let profile = profile_fixture(
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+    );
+    let input = SceneAuthoringBatch::new(
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+        profile.batch(),
+    );
+
+    let terminal = NodeSceneTestTransaction::with_account(
+        &account,
+        test_limits(),
+        input,
+        SceneValidationLimits::default(),
+    )
+    .expect("dynamic Scene attribution admission")
+    .finish_draft()
+    .expect("dynamic Scene attribution activation")
+    .publish_for_test()
+    .expect("dynamic Scene attribution publication");
+    let parts = successful_parts(terminal);
+
+    assert_eq!(
+        parts.scene.read_geometry().primitives.len(),
+        PRIMITIVE_COUNT
+    );
+    assert_eq!(
+        parts.scene.read_geometry().attributes.len(),
+        PRIMITIVE_COUNT
+    );
+    assert_eq!(
+        parts.scene.read_geometry().f32_values.len(),
+        PRIMITIVE_COUNT * 3
+    );
+    assert_eq!(
+        parts.scene.read_geometry().u32_values.len(),
+        PRIMITIVE_COUNT
+    );
+    let profile = parts.scene.tables.profile.state.as_ref();
+    assert_eq!(profile.segments.len(), 1);
+    assert_eq!(profile.lineage_counts.resources, 1);
+    assert_eq!(profile.lineage_counts.sources, 1);
+    assert_eq!(profile.lineage_counts.provenance, 1);
+    assert_eq!(profile.owners.len(), 4 + 2 * PRIMITIVE_COUNT);
+    assert_eq!(
+        parts
+            .report
+            .ledger_evidence()
+            .dimension_by_semantic(STORE_DIMENSION)
+            .expect("typed geometry publication evidence")
+            .committed_canonical_output(),
+        u64::try_from(parts.scene.canonical_block_count())
+            .expect("remaining raw canonical block count"),
+    );
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn present_empty_scene_publishes_all_domains() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let roots = [];
+    let nodes = [];
+    let terminal = finish_node_batch(
+        &account,
+        test_limits(),
+        NodeAuthoringBatch::new(Presence::Present(&roots), &nodes),
+        SceneValidationLimits::default(),
+    )
+    .publish_for_test()
+    .expect("present empty node Scene must publish");
+    let parts = successful_parts(terminal);
+    let semantic = parts
+        .scene
+        .semantic_view()
+        .expect("present-empty Scene semantic view");
+
+    assert_eq!(semantic.node_count(), 0);
+    assert_eq!(semantic.root_count(), 0);
+    assert!(parts.scene.read_geometry().primitives.is_empty());
+    let profile = parts.scene.tables.profile.state.as_ref();
+    assert_eq!(profile.segments.len(), 1);
+    assert_eq!(profile.owners.len(), 2);
+    assert_eq!(profile.attachments.len(), 2);
+    assert!(profile.metadata_entries.is_empty());
+    let mut cursor = semantic
+        .into_cursor()
+        .expect("present-empty Scene semantic cursor");
+    let mut roots = cursor.take_roots().expect("present-empty Scene roots");
+    assert_eq!(roots.next().expect("empty root cursor"), None);
+    assert!(cursor.next_node().expect("empty node cursor").is_none());
+    assert!(parts.scene.semantic_authored_transform_at(0).is_err());
+
+    drop(parts);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn canonical_byte_rejection_publishes_evidence_only_rich_failure() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let spatial_bytes = std::mem::size_of::<
+        crate::canonical_scene::store::typed_storage::spatial::SpatialStorage,
+    >() as u64;
+    use crate::canonical_scene::store::typed_storage::{NodeStorage, StoredNode, StoredNodeIndex};
+    let node_bytes = (std::mem::size_of::<NodeStorage>()
+        + 2 * std::mem::size_of::<StoredNode>()
+        + std::mem::size_of::<StoredNodeIndex>()) as u64;
+    let directory_bytes = crate::canonical_scene::store::schema::SCENE_DIRECTORY_CANONICAL_BYTES;
+    let build = finish_node_batch(
+        &account,
+        test_limits(),
+        single_trs_batch(),
+        SceneValidationLimits::default()
+            .with_max_canonical_bytes(spatial_bytes + directory_bytes + node_bytes - 1),
+    );
+    let NodeSceneDraftBuild::Failure {
+        authoring_rejection: Some(rejection),
+        prepared,
+    } = build
+    else {
+        panic!("one byte below the canonical requirement must reject authoring")
+    };
+    assert!(
+        matches!(
+            &rejection,
+            NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
+                NodeAuthoringSemanticError::LimitExceeded {
+                    limit: NodeAuthoringLimit::CanonicalBytes,
+                    actual,
+                    maximum,
+                }
+            ))
+                if *actual == node_bytes && *maximum == node_bytes - 1
+        ),
+        "unexpected canonical-byte rejection: {rejection:#?}"
+    );
+    let failure = rich_failure(prepared.handoff_for_test());
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        NODE_SCENE_NODE_AUTHORING_REJECTION_CODE
+    );
+    assert_eq!(
+        failure
+            .ledger_evidence()
+            .dimension_by_semantic(STORE_DIMENSION)
+            .expect("authoring rejection dimension")
+            .committed_canonical_output(),
+        0
+    );
+    assert_released(failure, &account);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn cancelled_authoring_preserves_control_as_the_terminal_first_cause() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let cancellation = CancelOnSignalPoll::new();
+    cancellation.cancel_after_additional_polls(1);
+    let build = finish_node_batch_with_cancellation(
+        &account,
+        test_limits(),
+        single_trs_batch(),
+        SceneValidationLimits::default(),
+        cancellation.clone(),
+    );
+    let NodeSceneDraftBuild::Failure {
+        authoring_rejection: None,
+        prepared,
+    } = build
+    else {
+        panic!("cancelled authoring must publish its control first cause")
+    };
+    let failure = rich_failure(prepared.handoff_for_test());
+    assert_eq!(
+        terminal_failure_class(failure.ledger_evidence()),
+        StorePreparationFailureClass::Control
+    );
+    assert_released(failure, &account);
+}
+
+#[test]
+fn authoring_work_budget_rejection_preserves_exact_ledger_evidence() {
+    const AUTHORING_WORK_LIMIT: u64 = 10;
+
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let build = finish_node_batch(
+        &account,
+        test_limits_with_work(AUTHORING_WORK_LIMIT),
+        single_trs_batch(),
+        SceneValidationLimits::default(),
+    );
+    let NodeSceneDraftBuild::Failure {
+        authoring_rejection: None,
+        prepared,
+    } = build
+    else {
+        panic!("exhausted authoring work budget must publish its ledger first cause")
+    };
+    let failure = rich_failure(prepared.handoff_for_test());
+    assert_eq!(
+        terminal_failure_class(failure.ledger_evidence()),
+        StorePreparationFailureClass::Ledger
+    );
+    let work = failure
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("authoring budget rejection dimension");
+    assert_eq!(work.attempted(), AUTHORING_WORK_LIMIT + 1);
+    assert_eq!(work.consumed(), AUTHORING_WORK_LIMIT);
+    let terminal_work = failure
+        .ledger_evidence()
+        .dimension_by_semantic(FAILURE_TERMINAL_WORK_DIMENSION)
+        .expect("authoring failure-terminal work dimension");
+    let terminal_requirement =
+        failure_terminal_work_requirement().expect("node Scene failure-terminal work requirement");
+    assert_eq!(
+        terminal_work.attempted(),
+        terminal_requirement.attempted_work_limit()
+    );
+    assert_eq!(
+        terminal_work.consumed(),
+        terminal_requirement.consumed_work_limit()
+    );
+    assert_released(failure, &account);
+}
+
+#[test]
+fn materialization_work_budget_interruption_publishes_rich_failure() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let build = finish_node_batch(
+        &account,
+        test_limits_with_work(SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK),
+        single_trs_batch(),
+        SceneValidationLimits::default(),
+    );
+
+    let failure = rich_failure(
+        build
+            .publish_for_test()
+            .expect("materialization budget interruption must publish rich failure"),
+    );
+    let work = failure
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("node Scene work evidence");
+    assert!(work.attempted() > SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK);
+    assert_eq!(work.consumed(), SINGLE_TRS_AUTHORING_COMPLETED_PREFIX_WORK);
+    assert_eq!(
+        terminal_failure_class(failure.ledger_evidence()),
+        StorePreparationFailureClass::Ledger
+    );
+    assert_released(failure, &account);
+}
+
+#[test]
+fn central_validation_work_budget_interruption_publishes_rich_failure() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let (complete_work, validation_work) = single_trs_work_baseline(&account);
+    let pre_validation_work = complete_work - validation_work;
+    let build = finish_node_batch(
+        &account,
+        test_limits_with_work(pre_validation_work),
+        single_trs_batch(),
+        SceneValidationLimits::default(),
+    );
+
+    let failure = rich_failure(
+        build
+            .publish_for_test()
+            .expect("central validation budget interruption must publish rich failure"),
+    );
+    let work = failure
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("node Scene work evidence");
+    assert_eq!(
+        terminal_failure_class(failure.ledger_evidence()),
+        StorePreparationFailureClass::Ledger
+    );
+    assert_eq!(work.attempted(), complete_work);
+    // The complete construction prefix remains consumed when validation admission fails.
+    assert_eq!(work.consumed(), pre_validation_work);
+    assert_released(failure, &account);
+}
+
+#[test]
+fn generation_exhaustion_discards_canonical_storage_and_preserves_evidence() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let (complete_work, _) = single_trs_work_baseline(&account);
+    let build = finish_node_batch(
+        &account,
+        test_limits(),
+        single_trs_batch(),
+        SceneValidationLimits::default(),
+    );
+
+    let failure = rich_failure(
+        build
+            .publish_with_generation_source_for_test(|| Err(SceneGenerationError::Exhausted))
+            .expect("generation exhaustion must publish rich failure"),
+    );
+    let work = failure
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("node Scene work evidence");
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        GENERATION_EXHAUSTED_CODE
+    );
+    assert_eq!(work.attempted(), complete_work);
+    assert_eq!(work.consumed(), complete_work);
+    assert_eq!(work.committed_canonical_output(), 0);
+    assert_released(failure, &account);
+}
+
+#[test]
+fn generation_source_panic_after_reservation_burns_the_gap_and_fails_closed() {
+    let factory = test_factory();
+    let control_account = test_account(&factory, 256);
+    let control_generation_source = AtomicU64::new(0);
+    let control = successful_parts(
+        finish_node_batch(
+            &control_account,
+            test_limits(),
+            single_trs_batch(),
+            SceneValidationLimits::default(),
+        )
+        .publish_with_generation_source_for_test(|| {
+            SceneGenerationId::reserve_from(&control_generation_source)
+        })
+        .expect("healthy typed-owner release control must publish"),
+    );
+    let control_before = control_account.snapshot();
+    drop(control.scene.tables);
+    let control_after = control_account.snapshot();
+    let typed_bytes = control_before.live_retained_bytes() - control_after.live_retained_bytes();
+    let typed_allocations =
+        control_before.live_retained_allocations() - control_after.live_retained_allocations();
+    assert!(typed_bytes > 0);
+    assert!(typed_allocations > 0);
+    drop(control.scene.canonical);
+    drop(control.report);
+    assert_eq!(control_account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(control_account.snapshot().live_retained_allocations(), 0);
+    assert!(!control_account.snapshot().poisoned());
+    drop(control_account);
+
+    let account = test_account(&factory, 256);
+    let generation_source = AtomicU64::new(0);
+    let build = finish_node_batch(
+        &account,
+        test_limits(),
+        single_trs_batch(),
+        SceneValidationLimits::default(),
+    );
+    let before = account.snapshot();
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = build.publish_with_generation_source_for_test(|| {
+            let _generation = SceneGenerationId::reserve_from(&generation_source)
+                .expect("the injected generation reservation must succeed");
+            panic!("injected generation source panic after reservation")
+        });
+    }));
+
+    assert!(panic.is_err());
+    assert_eq!(generation_source.load(Ordering::Relaxed), 1);
+    let after = account.snapshot();
+    assert!(after.poisoned());
+    // The operation remains contained, but its independently owned inert typed tables can prove
+    // their own healthy destruction. Do not require those owners to leak with the poisoned root.
+    assert!(after.live_retained_bytes() > 0);
+    assert_eq!(
+        after.live_retained_bytes(),
+        before.live_retained_bytes() - typed_bytes
+    );
+    assert_eq!(
+        after.live_retained_allocations(),
+        before.live_retained_allocations() - typed_allocations
+    );
+    assert_eq!(
+        after.total_admitted_retained_bytes(),
+        before.total_admitted_retained_bytes()
+    );
+    assert_eq!(
+        after.total_admitted_retained_allocations(),
+        before.total_admitted_retained_allocations()
+    );
+}
+
+#[test]
+fn invalid_authored_transform_fault_is_a_build_invariant_rich_failure() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let (complete_work, validation_work) = single_trs_work_baseline(&account);
+    let build = finish_node_batch_with_faults(
+        &account,
+        test_limits(),
+        single_trs_batch(),
+        SceneValidationLimits::default(),
+        NodeSceneBuildFaults::altered_authored_transform(),
+    );
+
+    let failure = rich_failure(
+        build
+            .publish_for_test()
+            .expect("invalid authored transform must publish rich failure"),
+    );
+    let work = failure
+        .ledger_evidence()
+        .dimension_by_semantic(STORE_DIMENSION)
+        .expect("node Scene work evidence");
+    assert_eq!(work.attempted(), complete_work);
+    assert!(work.consumed() >= complete_work - validation_work);
+    assert!(work.consumed() < complete_work);
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        NODE_SCENE_BUILD_INVARIANT_CODE
+    );
+    assert_released(failure, &account);
+}
+
+#[test]
+fn central_validation_rejects_each_corrupted_owner_attachment_component() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+
+    for (component, replacement) in [(0, 1), (1, u64::MAX), (2, 1)] {
+        corrupt_profile_reference_for_test(0, component, replacement);
+        let build = finish_node_batch(
+            &account,
+            test_limits(),
+            single_trs_batch(),
+            SceneValidationLimits::default(),
+        );
+
+        let failure = rich_failure(
+            build
+                .publish_for_test()
+                .expect("corrupted owner attachment must publish rich failure"),
+        );
+        assert_eq!(
+            terminal_failure_code(failure.ledger_evidence()),
+            NODE_SCENE_BUILD_INVARIANT_CODE,
+        );
+        assert_released(failure, &account);
+    }
+}
+
+#[test]
+fn central_validation_rejects_each_corrupted_profile_structure() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+
+    for fault in ProfileBuildFault::ALL {
+        let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+        let nodes = single_trs_batch();
+        let appearance = AppearanceAuthoringBatch::empty();
+        let geometry = GeometryAuthoringBatch::new(&[], &[], &[], &[]);
+        let deformation = DeformationAuthoringBatch::new(&[], &[], &[], &[], &[]);
+        let animations = AnimationAuthoringBatch::empty();
+        let profile = profile_fixture(
+            spatial,
+            nodes,
+            appearance,
+            geometry,
+            deformation,
+            animations,
+        );
+        let metadata_key =
+            NamespacedName::new("test:profile_fault").expect("profile fault metadata key");
+        let metadata = [MetadataAuthoringEntry::new(
+            ProfileOwner::Scene,
+            &metadata_key,
+            ExtensionValueRef::Bool(true),
+        )];
+        let input = SceneAuthoringBatch::new(
+            spatial,
+            nodes,
+            appearance,
+            geometry,
+            deformation,
+            animations,
+            profile.batch_with_metadata(MetadataAuthoringBatch::new(&metadata)),
+        );
+        let build = NodeSceneTestTransaction::with_account(
+            &account,
+            test_limits(),
+            input,
+            SceneValidationLimits::default(),
+        )
+        .unwrap_or_else(|_| panic!("{fault:?} profile fault operation must be admitted"))
+        .finish_draft_with_faults(NodeSceneBuildFaults::altered_profile(fault))
+        .unwrap_or_else(|_| panic!("{fault:?} must prepare an exact scoped outcome"));
+
+        let failure = rich_failure(
+            build
+                .publish_for_test()
+                .unwrap_or_else(|_| panic!("{fault:?} must publish a rich failure")),
+        );
+        assert_eq!(
+            terminal_failure_code(failure.ledger_evidence()),
+            NODE_SCENE_BUILD_INVARIANT_CODE,
+            "{fault:?} must fail at the central canonical boundary",
+        );
+        assert_released(failure, &account);
+    }
+}
+
+#[test]
+fn invalid_geometry_payload_fault_is_a_build_invariant_rich_failure() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let roots = [];
+    let nodes = [];
+    let positions = [0.0_f32, 0.0, 0.0];
+    let attributes = [GeometryAttributeAuthoring::f32(
+        AttributeSemantic::Position,
+        AttributeDomain::Vertex,
+        3,
+        &positions,
+        Presence::Absent,
+    )];
+    let primitives = [GeometryPrimitiveAuthoring::new(
+        GeometryTopologyAuthoring::Points,
+        Presence::Absent,
+        Presence::Absent,
+        AuthoringRange::new(0, 1),
+    )];
+    let logical_meshes = [GeometryLogicalMeshAuthoring::new(AuthoringRange::new(0, 1))];
+    let logical_morphs = [LogicalMorphAuthoring::new(AuthoringRange::new(0, 0), &[])];
+    let primitive_deformations = [PrimitiveDeformationAuthoring::new(Presence::Absent, &[])];
+    let spatial = SpatialAuthoringBatch::new(&SceneSpace::UNKNOWN, &[], &[]);
+    let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+    let appearance = AppearanceAuthoringBatch::empty();
+    let geometry = GeometryAuthoringBatch::new(&logical_meshes, &primitives, &attributes, &[]);
+    let deformation =
+        DeformationAuthoringBatch::new(&[], &[], &logical_morphs, &primitive_deformations, &[]);
+    let animations = AnimationAuthoringBatch::empty();
+    let profile = profile_fixture(
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+    );
+    let input = SceneAuthoringBatch::new(
+        spatial,
+        node_batch,
+        appearance,
+        geometry,
+        deformation,
+        animations,
+        profile.batch(),
+    );
+    let build = NodeSceneTestTransaction::with_account(
+        &account,
+        test_limits(),
+        input,
+        SceneValidationLimits::default(),
+    )
+    .expect("geometry semantic fault operation")
+    .finish_draft_with_faults(NodeSceneBuildFaults::altered_geometry_f32())
+    .expect("invalid geometry payload must prepare an exact scoped outcome");
+
+    let failure = rich_failure(
+        build
+            .publish_for_test()
+            .expect("invalid geometry payload must publish rich failure"),
+    );
+    assert_eq!(
+        terminal_failure_code(failure.ledger_evidence()),
+        NODE_SCENE_BUILD_INVARIANT_CODE,
+    );
+    assert_released(failure, &account);
+}
+
+#[test]
+fn clean_validator_panic_fails_closed_as_minimal_fallback() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let terminal = build_minimal_fallback_terminal_for_probe(&account);
+    let NodeSceneConstructionTerminal::MinimalFallback(fallback) = terminal else {
+        panic!("a clean validator panic must terminate as minimal fallback");
+    };
+    assert_eq!(
+        terminal_failure_class(fallback.ledger_evidence()),
+        StorePreparationFailureClass::ProductGraph
+    );
+    drop(fallback);
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn canonical_publication_limit_rejection_preserves_evidence_without_reserving_generation() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let generation_source = AtomicU64::new(0);
+    let limits = SceneConstructionLimits {
+        committed_output: 0,
+        ..test_limits()
+    };
+    let build = finish_node_batch(
+        &account,
+        limits,
+        single_trs_batch(),
+        SceneValidationLimits::default(),
+    );
+
+    let terminal = build
+        .publish_with_generation_source_for_test(|| {
+            SceneGenerationId::reserve_from(&generation_source)
+        })
+        .expect("canonical publication rejection must publish fail closed");
+    let NodeSceneConstructionTerminal::RichFailure(failure) = terminal else {
+        panic!("canonical rejection must preserve validated outcome evidence");
+    };
+    assert_eq!(
+        terminal_failure_class(failure.ledger_evidence()),
+        StorePreparationFailureClass::Ledger
+    );
+    assert_eq!(generation_source.load(Ordering::Relaxed), 0);
+    assert_released(failure, &account);
+
+    let _next_generation = SceneGenerationId::reserve_from(&generation_source)
+        .expect("first generation must remain reservable after destination rejection");
+    assert_eq!(generation_source.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn cycle_authoring_rejection_preserves_rich_evidence() {
+    let factory = test_factory();
+    let account = test_account(&factory, 256);
+    let cycle_nodes = [
+        NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(
+            parent(2, 0),
+            AuthoredTransform::identity_trs(),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+        NodeAuthoringNode::new(
+            parent(1, 0),
+            AuthoredTransform::identity_trs(),
+            Presence::Absent,
+            Presence::Absent,
+        ),
+    ];
+    let cycle_roots = [NodeLocalId::new(0)];
+    let build = finish_node_batch(
+        &account,
+        test_limits(),
+        NodeAuthoringBatch::new(Presence::Present(&cycle_roots), &cycle_nodes),
+        SceneValidationLimits::default(),
+    );
+    let NodeSceneDraftBuild::Failure {
+        authoring_rejection: Some(rejection),
+        prepared,
+    } = build
+    else {
+        panic!("cycle must retain its exact authoring rejection")
+    };
+    assert!(matches!(
+        &rejection,
+        NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
+            NodeAuthoringSemanticError::Cycle { .. }
+        ))
+    ));
+    assert!(matches!(
+        rejection,
+        NodeSceneConstructionRejection::NodeAuthoring(NodeAuthoringFailure::Semantic(
+            NodeAuthoringSemanticError::Cycle { .. }
+        ))
+    ));
+    assert_released(rich_failure(prepared.handoff_for_test()), &account);
+
+    assert_eq!(account.snapshot().live_retained_bytes(), 0);
+    assert_eq!(account.snapshot().live_retained_allocations(), 0);
+}
+
+#[test]
+fn physical_budget_boundaries_release_storage_for_every_terminal_class() {
+    let factory = test_factory();
+    let mut observed_failure = false;
+
+    for max_live_allocations in 1..=128 {
+        let account = test_account(&factory, max_live_allocations);
+        let roots = [NodeLocalId::new(0)];
+        let nodes = [NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Absent,
+            Presence::Absent,
+        )];
+        let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+        let operation = match NodeSceneTestTransaction::with_account(
+            &account,
+            test_limits(),
+            test_scene_authoring_batch(node_batch),
+            SceneValidationLimits::default(),
+        ) {
+            Ok(operation) => operation,
+            Err(_) => {
+                assert_eq!(account.snapshot().live_retained_bytes(), 0);
+                assert_eq!(account.snapshot().live_retained_allocations(), 0);
+                drop(account);
+                continue;
+            }
+        };
+        let terminal = operation
+            .finish_draft()
+            .expect("physical output failure must retain an exact scoped outcome")
+            .publish_for_test()
+            .expect("physical output failure must publish a terminal outcome");
+        match terminal {
+            NodeSceneConstructionTerminal::Success(parts) => drop(parts),
+            NodeSceneConstructionTerminal::RichFailure(failure) => {
+                observed_failure = true;
+                drop(failure);
+            }
+            NodeSceneConstructionTerminal::MinimalFallback(fallback) => {
+                observed_failure = true;
+                drop(fallback);
+            }
+        }
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        drop(account);
+
+        if observed_failure {
+            break;
+        }
+    }
+
+    assert!(
+        observed_failure,
+        "at least one low physical allocation budget must reject without leaking storage"
+    );
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn materialization_failure_never_calls_the_generation_source() {
+    let factory = test_factory();
+    let mut observed_materialization_failure = false;
+
+    for max_live_allocations in 1..=128 {
+        let account = test_account(&factory, max_live_allocations);
+        let roots = [NodeLocalId::new(0)];
+        let nodes = [NodeAuthoringNode::new(
+            Presence::Absent,
+            AuthoredTransform::identity_trs(),
+            Presence::Absent,
+            Presence::Absent,
+        )];
+        let node_batch = NodeAuthoringBatch::new(Presence::Present(&roots), &nodes);
+        let operation = match NodeSceneTestTransaction::with_account(
+            &account,
+            test_limits(),
+            test_scene_authoring_batch(node_batch),
+            SceneValidationLimits::default(),
+        ) {
+            Ok(operation) => operation,
+            Err(_) => {
+                drop(account);
+                continue;
+            }
+        };
+        let build = operation
+            .finish_draft()
+            .expect("materialization failure must retain an exact failure owner");
+
+        if matches!(
+            &build,
+            NodeSceneDraftBuild::Failure {
+                authoring_rejection: None,
+                ..
+            }
+        ) {
+            let terminal = build
+                .publish_with_generation_source_for_test(|| {
+                    panic!("materialization failure must not call the generation source")
+                })
+                .expect("materialization failure must publish its retained failure");
+            assert!(!matches!(
+                &terminal,
+                NodeSceneConstructionTerminal::Success(_)
+            ));
+            drop(terminal);
+            assert_eq!(account.snapshot().live_retained_bytes(), 0);
+            assert_eq!(account.snapshot().live_retained_allocations(), 0);
+            observed_materialization_failure = true;
+            drop(account);
+            break;
+        }
+
+        drop(build);
+        assert_eq!(account.snapshot().live_retained_bytes(), 0);
+        assert_eq!(account.snapshot().live_retained_allocations(), 0);
+        drop(account);
+    }
+
+    assert!(observed_materialization_failure);
+    assert_eq!(factory.snapshot().live_accounts(), 0);
+}
+
+#[test]
+fn internal_block_allocation_failure_is_a_storage_rejection() {
+    assert_eq!(
+        post_evidence_build_failure_code(baozi_operation::StoreBuildFailureClass::AllocationFailed,),
+        Some(NODE_SCENE_STORAGE_REJECTION_CODE)
+    );
+    assert_eq!(
+        post_evidence_build_failure_code(
+            baozi_operation::StoreBuildFailureClass::CapacityEnvelopeViolated,
+        ),
+        None
+    );
+}

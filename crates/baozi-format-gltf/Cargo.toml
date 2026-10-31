@@ -6,17 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/baozi-format-gltf"
 authors.workspace = true
-description.workspace = true
+description = "Selected glTF 2.0/GLB scene, PBR, skin, morph, and animation importer backend for Baozi"
+readme = "README.md"
 publish = false
 
 [dependencies]
-baozi-core.workspace = true
 baozi-import.workspace = true
-baozi-io.workspace = true
 base64.workspace = true
 gltf.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
+baozi-io.workspace = true
+baozi-operation.workspace = true
 baozi-test-support.workspace = true

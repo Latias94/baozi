@@ -1,75 +1,63 @@
 mod common;
 
-use baozi_core::{BaoziErrorKind, Result};
-use baozi_format_gltf::GltfImporter;
-use baozi_import::{DetectionOptions, FormatImporter, ImporterRegistry, ReadConfidence, ReadHint};
-use baozi_io::AssetPath;
-use common::triangle_gltf;
-use std::io::{Cursor, Seek};
+use baozi_import::{DetectionInconclusive, DetectionOutcome, ReadConfidence};
+use common::{TestResult, detection_outcome, triangle_gltf};
 
 #[test]
-fn detects_gltf_json() -> Result<()> {
-    let source = AssetPath::new("scene.gltf")?;
-    let hint = ReadHint::from_source(source);
-    let mut input = Cursor::new(triangle_gltf());
-
-    let confidence = GltfImporter.can_read(&mut input, &hint)?;
-
-    assert_eq!(confidence, ReadConfidence::Likely);
+fn detects_gltf_json() -> TestResult<()> {
+    assert_eq!(
+        detection_outcome("scene.gltf", triangle_gltf(), 4096)?,
+        DetectionOutcome::Match(ReadConfidence::Likely)
+    );
     Ok(())
 }
 
 #[test]
-fn detects_glb_magic() -> Result<()> {
-    let source = AssetPath::new("scene.glb")?;
-    let hint = ReadHint::from_source(source);
-    let mut input = Cursor::new(b"glTF\x02\0\0\0".to_vec());
-
-    let confidence = GltfImporter.can_read(&mut input, &hint)?;
-
-    assert_eq!(confidence, ReadConfidence::Certain);
+fn detects_glb_magic() -> TestResult<()> {
+    assert_eq!(
+        detection_outcome("scene.glb", b"glTF\x02\0\0\0".to_vec(), 4096)?,
+        DetectionOutcome::Match(ReadConfidence::Certain)
+    );
     Ok(())
 }
 
 #[test]
-fn can_read_rewinds_input() -> Result<()> {
-    let source = AssetPath::new("scene.gltf")?;
-    let hint = ReadHint::from_source(source);
-    let mut input = Cursor::new(triangle_gltf());
-    input.set_position(7);
-
-    let confidence = GltfImporter.can_read(&mut input, &hint)?;
-
-    assert_eq!(confidence, ReadConfidence::Likely);
-    assert_eq!(input.stream_position().unwrap(), 7);
+fn glb_magic_requires_all_four_bytes() -> TestResult<()> {
+    let bytes = b"glTF\x02\0\0\0".to_vec();
+    assert_eq!(
+        detection_outcome("scene.mesh", bytes.clone(), 3)?,
+        DetectionOutcome::Inconclusive(DetectionInconclusive::ProbeExhausted)
+    );
+    assert_eq!(
+        detection_outcome("scene.mesh", bytes, 4)?,
+        DetectionOutcome::Match(ReadConfidence::Certain)
+    );
     Ok(())
 }
 
 #[test]
-fn registry_probe_limit_bounds_content_detection() -> Result<()> {
-    let mut registry = ImporterRegistry::new();
-    registry.register(GltfImporter)?;
-    let hint = ReadHint::from_source(AssetPath::new("scene.mesh")?);
+fn completed_json_signature_survives_a_probe_cut_inside_utf8() -> TestResult<()> {
+    let mut bytes = br#"{"asset":{"version":"2.0"},"name":""#.to_vec();
+    bytes.extend_from_slice("包".as_bytes());
+    bytes.extend_from_slice(br#""}"#);
 
-    let mut too_short = Cursor::new(triangle_gltf());
-    let error = registry
-        .detect_with_options(
-            &mut too_short,
-            &hint,
-            &DetectionOptions { max_probe_bytes: 1 },
-        )
-        .unwrap_err();
-    assert_eq!(error.kind(), BaoziErrorKind::UnsupportedFormat);
+    let visible_len = (bytes.len() - 3) as u64;
+    assert_eq!(
+        detection_outcome("scene.mesh", bytes, visible_len)?,
+        DetectionOutcome::Match(ReadConfidence::Likely)
+    );
+    Ok(())
+}
 
-    let mut enough = Cursor::new(triangle_gltf());
-    let selected = registry.detect_with_options(
-        &mut enough,
-        &hint,
-        &DetectionOptions {
-            max_probe_bytes: 4096,
-        },
-    )?;
-    assert_eq!(selected.info.id(), "gltf");
-    assert_eq!(selected.confidence, ReadConfidence::Likely);
+#[test]
+fn development_probe_limit_bounds_content_detection() -> TestResult<()> {
+    assert_eq!(
+        detection_outcome("scene.mesh", triangle_gltf(), 1)?,
+        DetectionOutcome::Inconclusive(DetectionInconclusive::ProbeExhausted)
+    );
+    assert_eq!(
+        detection_outcome("scene.mesh", triangle_gltf(), 4096)?,
+        DetectionOutcome::Match(ReadConfidence::Likely)
+    );
     Ok(())
 }

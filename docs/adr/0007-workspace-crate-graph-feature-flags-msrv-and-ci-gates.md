@@ -1,350 +1,367 @@
 ---
 status: accepted
 date: 2026-07-09
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
-related:
+depends_on:
   - docs/adr/0001-baozi-assimp-compatible-architecture.md
+  - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
+  - docs/adr/0034-supported-targets-and-portability.md
+related:
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
+evidence:
+  - Cargo.toml
+  - crates/baozi/Cargo.toml
+  - crates/baozi-xtask/src/crate_graph.rs
+  - crates/baozi-xtask/tests/crate_graph.rs
+  - crates/baozi-xtask/Cargo.toml
+  - crates/baozi-xtask/src/native_fs.rs
+  - crates/baozi-xtask/tests/native_fs.rs
+  - .github/workflows/ci.yml
+  - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
+  - docs/research/u4c-repository-input-capability.md
 ---
 
-# ADR 0007: Workspace Crate Graph, Feature Flags, MSRV, and CI Gates
+# ADR 0007: Workspace Crate Graph, Feature Membership, MSRV, and CI Gates
+
+## Status and Authority
+
+This accepted ADR is the sole authority for production workspace dependency direction, facade
+feature membership, aggregate-feature algebra, the minimum supported Rust version (MSRV), and the
+baseline CI gates that protect those contracts.
+
+Acceptance defines the target contract. It does not claim that today's manifest or workflow is
+already complete; implementation status and exact verification results belong in linked evidence.
+Public compatibility consequences are governed by ADR 0006, format maturity by ADR 0011, parser
+backend admission by ADR 0004, and target tiers by ADR 0034.
 
 ## Context
 
-Baozi is currently an empty Rust crate, but the architecture already calls for a multi-crate
-workspace with a public facade, core IR, import registry, post-processing, format crates, tests, and
-optional tools. If the crate graph and feature policy are left implicit, early implementation will
-create accidental dependencies that are hard to undo.
+Baozi's format breadth requires optional dependencies, but Cargo features are additive and easily
+drift from documentation. An `all-formats` feature that omits experimental first-party formats is
+not "all". A default set that automatically grows with every new parser is equally misleading.
+Backend selector features in the facade would also leak implementation choices into public API.
 
-The workspace must also preserve Baozi's project goals:
-
-- Rust-native public API
-- clean-room default licensing
-- replaceable parser backends
-- sync core with optional async/parallel layers
-- deterministic tests with nextest where possible
-- format support that can grow without pulling every dependency into every user build
+Crate boundaries have the same problem: workspace visibility can become an accidental dependency
+cycle or publish contract unless ownership and direction are explicit. CI must derive checks from
+the declared graph rather than rely on a few hand-maintained feature combinations.
 
 ## Decision
 
-Baozi will be a Cargo workspace with explicit dependency direction, stable feature naming, a documented
-minimum supported Rust version (MSRV), and CI gates that protect crate boundaries before format count
-grows.
+Baozi uses a focused Cargo workspace with resolver `3`, Rust edition `2024`, and workspace MSRV
+`1.95`. The workspace may contain only implemented production responsibilities and development
+tools; future shells are not created to reserve names.
 
-The workspace root will use:
-
-- Cargo resolver `3`
-- Rust edition `2024`
-- workspace-inherited package metadata
-- `MIT OR Apache-2.0` for clean-room Baozi crates
-- MSRV `1.95` initially for parser-tooling and ecosystem flexibility; edition 2024 requires Rust
-  1.85 or newer, but the project accepts a newer pre-1.0 floor
-
-Before `1.0`, MSRV may be raised in minor releases when the benefit is meaningful and documented in
-the changelog. After `1.0`, MSRV changes are release-noted compatibility changes.
-
-## Architecture
+### Production Dependency Direction
 
 ```mermaid
 flowchart TD
     Facade[baozi facade] --> Core[baozi-core]
+    Facade --> IO[baozi-io]
     Facade --> Import[baozi-import]
+    Facade -. allowed when directly consumed; not required .-> Operation[baozi-operation]
     Facade --> Post[baozi-postprocess]
-    Facade --> Obj[baozi-format-obj]
-    Facade --> Stl[baozi-format-stl]
-    Facade --> Ply[baozi-format-ply]
-    Facade --> Gltf[baozi-format-gltf]
-
+    Facade --> Formats[enabled baozi-format-* crates]
+    Core --> Operation
     Import --> Core
-    Import --> Io[baozi-io]
+    Import --> IO
+    Import --> Operation
     Post --> Core
-    Io --> Core
-
-    Obj --> Core
-    Obj --> Import
-    Stl --> Core
-    Stl --> Import
-    Ply --> Core
-    Ply --> Import
-    Gltf --> Core
-    Gltf --> Import
-    Gltf --> Io
-
-    Cli[baozi-cli] --> Facade
+    Post --> Operation
+    Formats --> Core
+    Formats --> Import
+    Formats -. only when required .-> IO
+    Xtask[baozi-xtask] -. data checks .-> Workspace[Cargo metadata and dependency baselines]
     Test[baozi-test-support] --> Core
-    Test --> Facade
+    Test --> Import
 ```
-
-```mermaid
-flowchart LR
-    Change[Code change] --> Fmt[cargo fmt]
-    Fmt --> Check[cargo check workspace]
-    Check --> Clippy[cargo clippy]
-    Clippy --> Tests[cargo nextest run]
-    Tests --> Features[feature matrix smoke tests]
-    Features --> Licenses[cargo-deny license/advisory audit]
-    Licenses --> Docs[docs and ADR checks]
-```
-
-## Workspace Layout
-
-The initial workspace should be:
-
-```text
-baozi/
-├── Cargo.toml
-├── crates/
-│   ├── baozi/                 # public facade
-│   ├── baozi-core/            # scene IR, math, errors, diagnostics, metadata
-│   ├── baozi-io/              # AssetIo, virtual filesystem, URI/archive adapters
-│   ├── baozi-import/          # registry, detection, import context, options
-│   ├── baozi-postprocess/     # validation and post-process pipeline
-│   ├── baozi-format-obj/
-│   ├── baozi-format-stl/
-│   ├── baozi-format-ply/
-│   ├── baozi-format-gltf/
-│   ├── baozi-test-support/    # scene differ, snapshots, fixtures
-│   └── baozi-cli/             # optional developer/user CLI
-├── tests/
-├── fuzz/
-├── benches/
-└── docs/
-```
-
-`baozi-export` should not be created until an exporter ADR is accepted or an exporter milestone is
-active. The import-first architecture may reserve exporter traits, but it should not publish an empty
-crate.
-
-## Dependency Direction Rules
 
 Hard rules:
 
-- `baozi-core` must not depend on `baozi-import`, format crates, CLI, async runtimes, Rayon, or parser
-  crates.
-- `baozi-io` may depend on `baozi-core`, but not on format crates.
-- `baozi-import` may depend on `baozi-core` and `baozi-io`.
-- `baozi-postprocess` may depend on `baozi-core`; optional algorithm backends are feature-gated.
-- format crates may depend on `baozi-core`, `baozi-import`, and `baozi-io` only as needed.
-- the facade crate depends on stable format crates through features.
-- `baozi-cli` owns `tracing-subscriber`, terminal output, and any async runtime setup.
-- `baozi-test-support` may depend widely but must not become a production dependency of core crates.
+- `baozi-operation` is a runtime-neutral dependency leaf. It owns control, coordinator, checked
+  reservation, and ledger state-machine mechanisms; it depends on no upward Baozi production crate
+  and owns no domain phase, policy, dimension, report, outcome, Scene, IO, scheduler, or worker pool.
+- `baozi-core` directly depends on `baozi-operation` for shared checked-capacity mechanisms and may
+  depend on no other Baozi production crate; it has no dependency on IO, import, postprocess, format,
+  runtime, or parser crates and owns only canonical/domain errors.
+- `baozi-io` owns portable asset identities, IO contracts, memory backends, and bounded IO errors; it has no production Baozi-crate
+  dependency and must not reuse a core or facade aggregate error as its error type.
+- `baozi-import` depends on core, IO, and operation, maps their distinct errors into import causes,
+  supplies import-owned ledger semantics to the shared mechanism, and does not depend on concrete
+  format crates.
+- `baozi-postprocess` depends on core, operation, and private algorithm backends; it supplies its own
+  ledger semantics and does not depend on import, IO, or formats.
+- each `baozi-format-*` crate depends only on core/import and IO when its source contract requires
+  dependency access; it never depends directly on operation, the facade, or postprocess. Shared
+  parser-facing operation mechanisms are exposed through the capability-limited import boundary.
+- the facade composes core, IO, import, postprocess, and enabled first-party formats. A direct
+  facade-to-operation edge is an allowed direction only when facade code directly consumes a shared
+  mechanism; it is not a required graph edge and must not be added merely to mirror the diagram.
+- production crates never depend on `baozi-test-support`, fuzz packages, xtask, examples, or CLI
+  tools.
+- `baozi-xtask` is a non-production checker with no `baozi-io` edge or native filesystem backend
+  dependency. Its dependency checks inspect Cargo metadata, lockfile data, and reviewed dependency
+  baselines. Its single, featureless normal/build dependency closure must exclude `baozi-io`,
+  `cap-std`, `cap-primitives`, `cap-fs-ext`, and `rustix`. Declaration checks reject every package's
+  candidate dependency or forwarding of retired native features, including renamed, development,
+  and build dependencies. xtask does not capture repository source trees or own source-hashing policy.
+- the unpublished `baozi-native-io-candidate` is an explicitly excluded standalone workspace under
+  `candidates/baozi-native-io`. Its production Baozi edge is only to portable `baozi-io`; its native
+  dependencies and optional `repository-capture` capability have their own locked target profiles.
+  No production root-workspace package depends on it. Candidate integration tests may depend on
+  the facade, using the same public `AssetIo` composition available to other adapters.
+- no workspace production dependency cycle is allowed.
 
-There must be no dependency cycle between workspace crates.
+Removing the unused `repository-input-candidate` feature and optional IO edge is a tool architecture
+change. ADR 0010 retains one candidate-owned native/repository mechanism; candidate target membership,
+Windows fail-closed behavior, and release registration remain governed by ADR 0034 and its evidence.
 
-## Feature Flag Policy
+The graph checker distinguishes three facts that must not be conflated:
 
-Feature names are part of the user contract. Use capability names, not backend implementation names,
-in the facade crate.
+1. **Allowed direction:** core, import, postprocess, and the facade are the only crates permitted to
+   depend directly on operation.
+2. **Required actual edge:** core, import, and postprocess must each have one non-optional,
+   unconditional production edge because their accepted contracts directly consume operation
+   mechanisms. The facade is not in this set.
+3. **Forbidden direction:** every format crate and every other production crate is rejected if it
+   depends directly on operation, including optional, target-specific, and build dependencies.
 
-Recommended facade features:
+Changing a required edge to merely allowed requires updating the owning ADR and implementation in
+the same reviewed change; an architectural direction diagram alone never manufactures a dependency.
+
+Archive/container and exporter crates are not created until their own accepted ADR and
+implementation tracer make the responsibility active. Workspace decomposition does not by itself
+authorize publication; ADR 0006 owns package stability and publication.
+
+### First-Party Format Inventory
+
+A first-party format is a Baozi-owned production format crate present in the structured format
+inventory and registered by the facade through a corresponding `format-<id>` feature. Parser shells
+without real import behavior are deleted and do not qualify as inventory entries.
+
+First-party inventory admission precedes maturity classification. A parser or backend known to fail
+ADR 0004/0014 baseline hostile-data safety must be disabled and unregistered, rejected, or isolated
+outside the first-party inventory. Labeling that path Experimental does not admit it. Experimental is
+a state for safely admitted behavior that still lacks non-safety maturity evidence.
+
+The inventory, facade manifest, built-in registration, format descriptor, support evidence, and CI
+matrix must be machine-checked as one relation. Adding or removing a first-party format updates all
+of them in the same change.
+
+### Feature Algebra
+
+Let `F` be the set of every first-party `format-<id>` feature in the structured inventory and `D`
+the curated default-format subset.
+
+The facade must satisfy:
 
 ```text
-default = ["std", "default-formats"]
-std
-native-fs
-default-formats
-all-formats
-format-obj
-format-stl
-format-ply
-format-gltf
-format-3mf
-format-collada
-format-fbx
-format-usd
-parallel
-simd
-async
-serde
-tracing
+all-formats     = F
+default-formats = D
+D               subset-of F
 ```
 
-Rules:
+Normative consequences:
 
-- Capability flags are added only when they have behavior, tests, and dependency semantics. Planned
-  async, SIMD, and parallel support must not be published as empty facade features.
-- `default-formats` includes only implemented, CI-gated, low-surprise formats. Planned stubs must
-  stay opt-in through their explicit `format-*` feature until they import real assets.
-- `all-formats` includes supported pure-Rust non-FFI formats, not experimental or heavyweight native
-  dependencies by default.
-- FFI-backed importers must be opt-in with explicit feature names.
-- Backend-specific feature names can exist inside format crates, but the facade should avoid exposing
-  them unless users need control.
-- Feature flags must not silently change public scene semantics.
-- `std` is default. `no_std` is not promised yet; avoid unnecessary `std` use in `baozi-core` when it
-  costs little, but do not design around `no_std` prematurely.
-- Filesystem convenience APIs are controlled by `native-fs` in the facade. The feature should expand
-  to `std` plus the underlying `baozi-io/fs` filesystem adapter feature; browser-oriented builds can
-  use bytes and memory IO with `--no-default-features --features format-stl`.
-- WASM support starts as byte-buffer import on `wasm32-unknown-unknown`. `wasm32-wasip1` may use
-  `native-fs` when the target runtime provides filesystem capabilities.
+- `all-formats` literally enables every admitted first-party format, including safely admitted
+  Experimental and Beta formats; maturity never changes the meaning of "all"
+- a disabled, rejected, or process-isolated backend that fails baseline safety is not a member of
+  `F`; excluding it is an admission decision, not a maturity-based omission from `all-formats`
+- `default-formats` is curated independently and changes only when ADR 0011 evidence and release
+  review justify membership
+- `default-formats` must not alias `all-formats`
+- each format feature enables exactly its matching optional format dependency and built-in
+  registration path; it does not silently enable another format
+- aggregate format features do not implicitly enable filesystem, tracing, serialization, runtime,
+  SIMD, or backend-selection capabilities
+- backend implementation features are private to an unpublished format crate when unavoidable and
+  are never forwarded by the facade
+- a public capability feature exists only when it has observable dependency, API, or behavior
+  impact plus an isolated test; empty/planned features are deleted
+- no feature may silently change canonical scene semantics
 
-## MSRV Policy
+`all-features` is Cargo's mechanical union of every facade feature and is not an alias for
+`all-formats`. CI exercises both because integration capabilities can interact with format
+features.
 
-Initial MSRV:
+Baozi always requires the Rust standard library. The facade and core have no `std` feature;
+`default-features = false` on the facade disables built-in formats, not standard-library use.
+`tracing` enables instrumentation in import/postprocess, with no unused core forwarding.
+`mint` enables the implemented core math conversions. Native filesystem development is isolated in
+the standalone candidate workspace: the facade and `baozi-io` have no native candidate feature,
+path helper, or dependency. Their complete public feature union remains portable.
+Core's unconditional hidden `__scene_integration` namespace serves import/postprocess without an
+empty Cargo feature. Private constructors, linear values, validation, and paired handoff enforce
+authority; feature selection does not. ADR 0045 owns that integration contract.
+
+Facade registry methods use `builtin_formats` to mean every enabled first-party format:
+`ImporterBuilder::with_builtin_formats()` and `Importer::builder_with_builtin_formats()`.
+The Cargo `default-formats` aggregate continues to mean only the curated subset.
+
+### Feature and Target Separation
+
+Format membership is independent of platform support. `all-formats` stays complete on every target;
+unsupported platform behavior must be expressed by an explicit target-tier decision, compile gate,
+or a separate non-first-party integration package, not by quietly omitting a format from the
+aggregate feature.
+
+Filesystem convenience is a capability separate from byte/memory import. Browser-WASM builds use
+the byte path without native filesystem assumptions. Target-specific APIs and gates are owned by
+ADR 0034.
+
+### MSRV
+
+The workspace declares:
 
 ```text
-Rust 1.95
-Edition 2024
+edition = 2024
+rust-version = 1.95
 ```
 
-Policy:
+- every production and development dependency is checked against the declared MSRV
+- stable Rust and the declared MSRV are both CI inputs once they differ
+- before `1.0`, an MSRV raise requires a concrete benefit and changelog/release note
+- after `1.0`, an MSRV raise is a reviewed compatibility change under ADR 0006
+- a dependency must not raise the effective MSRV without manifest and CI changes in the same commit
 
-- Before `1.0`, MSRV may be raised with a changelog note; the user has explicitly accepted raises
-  up to Rust 1.95 for this early architecture phase.
-- After `1.0`, MSRV raises require release notes and should be tied to a concrete benefit.
-- CI should test stable Rust and the documented MSRV when practical.
-- Dependencies should not be allowed to raise MSRV accidentally without review.
+### CI Contract
 
-## CI and Local Verification Gates
+Fast pull-request gates cover formatting, all targets in the workspace, strict linting, default and
+all-feature tests, doctests/rustdoc, no-default facade, each individual format feature, aggregate
+features, declared target tiers, dependency/license policy, and ADR/feature graph checks.
 
-Required early gates:
+Long-running powerset, sanitizer, scale, and package campaigns may be partitioned into scheduled or
+promotion workflows, but their evidence remains mandatory for the maturity/release decision that
+claims it. Moving a gate to a slower workflow does not delete the contract.
 
-```powershell
-cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace
-```
+The feature checker must prove negative cases in tests, including:
 
-Additional gates once dependencies and features exist:
-
-```powershell
-cargo check --workspace --no-default-features
-cargo check -p baozi --features default-formats
-cargo check -p baozi --features all-formats
-cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features format-stl,format-obj
-cargo check -p baozi --target wasm32-wasip1 --no-default-features --features format-stl,format-obj,native-fs
-cargo deny check
-cargo test --doc --workspace
-```
-
-Optional maturity gates:
-
-- feature powerset smoke tests for facade features
-- `cargo-semver-checks` once APIs approach stabilization
-- fuzz smoke run for parser crates
-- Criterion benchmarks for parser/post-process hotspots
+- a first-party format missing from `all-formats`
+- an aggregate feature naming a nonexistent or non-format member
+- a format feature missing its optional dependency or registration
+- `default-formats` containing a non-inventory member
+- a public empty feature
+- a facade backend-selector feature
 
 ## Alternatives Considered
 
-### Option A: Single crate until format count grows
+### Option A: Hand-maintain default and all-format lists without a checked inventory
 
 Pros:
 
-- Fastest initial setup.
-- Fewer manifests and less boilerplate.
-- Easy local examples.
+- minimal tooling
+- ordinary Cargo syntax remains the only input
 
 Cons:
 
-- Parser dependencies leak into all users.
-- Core/postprocess/import boundaries become informal.
-- Feature flags become harder to reason about later.
-- Refactoring into crates after users depend on the API is expensive.
+- manifests, registration, docs, and CI drift independently
+- omissions remain invisible when existing tests are green
 
-Decision: rejected because Baozi's goal is Assimp-class breadth.
+Decision: rejected.
 
-### Option B: Many crates immediately, including empty future crates
+### Option B: Define `all-formats` as only mature or portable formats
 
 Pros:
 
-- Shows the full intended architecture.
-- Makes future ownership areas visible.
-- Encourages modular design.
+- aggregate builds remain smaller and less risky
+- users avoid experimental dependencies
 
 Cons:
 
-- Empty crates create maintenance noise.
-- Public package names can become premature commitments.
-- Encourages architecture theater before behavior exists.
+- contradicts the name and makes maturity changes alter feature meaning
+- leaves some first-party combinations untested
+- conflates target support, defaults, and complete inventory
 
-Decision: rejected in its extreme form. Create crates needed by the first import pipeline; reserve
-future crates in docs.
+Decision: rejected. Curated behavior belongs to `default-formats`.
 
-### Option C: Focused workspace with explicit dependency direction and feature policy
+### Option C: Expose parser backend selectors through facade features
 
 Pros:
 
-- Preserves modularity without publishing empty promises.
-- Keeps parser dependencies isolated.
-- Gives CI enforceable boundaries from the start.
-- Fits Cargo's workspace and feature model.
+- advanced users can choose implementation trade-offs
+- backend comparisons are easy to invoke
 
 Cons:
 
-- More setup than a single crate.
-- Requires feature documentation discipline.
-- CI matrix grows with format count.
+- leaks private architecture into the public feature contract
+- multiplies the feature powerset and permits semantic drift
+
+Decision: rejected. A future user-selectable backend needs a separate accepted public contract.
+
+### Option D: Checked feature algebra over an explicit first-party inventory
+
+Pros:
+
+- gives aggregate names literal, testable meaning
+- keeps defaults curated without hiding formats
+- aligns manifests, registration, evidence, and CI
+- catches drift before release
+
+Cons:
+
+- requires xtask metadata and negative tests
+- every first-party format change touches several checked artifacts
 
 Decision: chosen.
-
-## Success Metrics
-
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Workspace shape | Initial crates match this ADR or explicitly supersede it | `cargo metadata` review |
-| Dependency direction | No core-to-format or core-to-runtime dependency | `cargo tree` and CI audit |
-| Feature clarity | Facade features are documented and capability-oriented | crate docs feature table |
-| MSRV visibility | MSRV is declared in manifests and docs | manifest review |
-| CI baseline | fmt, check, clippy, and nextest pass | CI run |
-| License hygiene | dependency licenses are reviewed | `cargo deny check` |
-| Parser isolation | disabling a format removes its parser dependencies | `cargo tree -e features` |
-
-## Risks and Mitigations
-
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Feature matrix becomes too expensive | Medium | Medium | Run full matrix nightly and smoke matrix on PRs |
-| `baozi-core` accidentally pulls heavy dependencies | High | Medium | Audit `cargo tree -p baozi-core` in CI/release checklist |
-| MSRV is raised by transitive dependencies | Medium | Medium | Use `cargo deny`/metadata review and changelog MSRV policy |
-| Empty crates confuse users | Low | Medium | Create crates only when implementation is active |
-| Clippy `-D warnings` blocks early experimentation | Low | Medium | Allow targeted lints with comments; do not disable globally |
-| Default features pull too much | Medium | Medium | Keep `default-formats` conservative and document dependency cost |
-
-## Implementation Plan
-
-### Phase 0: Workspace Scaffold
-
-- Convert root manifest to a workspace manifest.
-- Create core, IO, import, postprocess, facade, and first format crates.
-- Add workspace package metadata and shared dependencies.
-- Add MSRV metadata.
-
-### Phase 1: CI Baseline
-
-- Add fmt, check, clippy, and nextest commands.
-- Add cargo-deny configuration.
-- Add feature smoke checks once features exist.
-
-### Phase 2: Publication Readiness
-
-- Mark internal crates `publish = false` until publishing is intentional.
-- Add crate-level docs with stability tiers.
-- Add public feature matrix to facade docs.
 
 ## Consequences
 
 Positive:
 
-- Crate boundaries match the architecture before code grows.
-- Users can opt into formats and performance features intentionally.
-- CI protects against dependency and feature drift.
+- crate ownership is mechanically reviewable
+- every first-party format is reachable and exercised through `all-formats`
+- default membership remains an intentional product/reliability choice
+- parser backend swaps do not become facade features
+- MSRV and feature costs are visible before release
 
 Negative:
 
-- More manifests and CI configuration.
-- Feature naming must be maintained as part of the public contract.
-- MSRV decisions become explicit project policy.
+- aggregate all-format builds grow with the first-party inventory
+- feature/registration/evidence changes must land atomically
+- CI requires both fast representative gates and slower complete campaigns
 
-## Open Questions
+## Risks and Mitigations
 
-1. Should `baozi-cli` be in the first scaffold?
-   Recommendation: yes if it helps manual verification, but mark it unpublished.
-2. Should `serde` be a core feature immediately?
-   Recommendation: no. Add only when scene serialization policy is defined.
-3. Should `no_std` be a supported goal?
-   Recommendation: not yet. Keep `baozi-core` disciplined, but do not promise `no_std`.
+| Risk | Severity | Likelihood | Mitigation |
+| --- | --- | --- | --- |
+| `all-formats` silently omits a new crate | High | High | derive exact set equality from structured inventory in xtask |
+| Experimental is mistaken for a safety waiver | Critical | Medium | admit baseline-safe paths before assigning maturity; disable, reject, or isolate a failed path instead of retaining it in `F` |
+| Safely admitted Experimental format breaks aggregate builds | Medium | Medium | keep it out of defaults, not out of all; require compile and isolated tests before entering inventory |
+| Feature powerset becomes too expensive | Medium | High | bounded PR pairs plus scheduled cargo-hack powersets; never skip promotion evidence |
+| Optional dependency leaks into disabled builds | Medium | Medium | isolated `cargo tree`/package checks for no-default and single features |
+| Crate graph develops a cycle or reverse dependency | High | Low | metadata graph gate enforces the direction table |
+| An allowed edge is mistaken for a mandatory dependency | High | Medium | checker keeps allowed consumers separate from required actual consumers and tests facade presence/absence independently |
+| A repository tool duplicates native filesystem ownership | High | Medium | keep xtask free of IO/native dependencies; keep native mechanisms in one excluded unpublished candidate; reject candidate dependency edges and retired native feature forwarding in the root workspace |
+| Transitive dependency raises MSRV | High | Medium | MSRV job and dependency admission review |
+| Platform exception corrupts feature meaning | High | Low | keep target support in ADR 0034 and require complete membership independently |
+
+## Acceptance Criteria
+
+| Contract | Measurable evidence |
+| --- | --- |
+| Aggregate exactness | xtask proves `all-formats` set-equals every first-party format feature |
+| Admission exactness | xtask rejects an inventory/feature entry whose structured evidence does not pass ADR 0004/0014 baseline safety |
+| Default subset | xtask proves `default-formats` is a deliberate subset with ADR 0011 evidence for every member |
+| One-to-one wiring | each format feature maps to one optional dependency, registration path, descriptor, support entry, and isolated test |
+| No empty/leaky features | negative fixtures reject public empty features, backend selectors, and silent semantic switches |
+| Dependency direction | Cargo metadata proves `baozi-operation` has no upward Baozi edge; core/import/postprocess have their required direct edges; formats cannot directly depend on operation; portable IO does not depend on core; postprocess does not depend on import; xtask's featureless closure excludes IO/native backends; root packages cannot activate the excluded candidate or retired native features; candidate backend dependencies use their separate locked target profiles; and no forbidden edge or production cycle exists |
+| MSRV | workspace and every declared feature compile on Rust 1.95 |
+| Complete behavior surface | default, no-default, individual formats, `all-formats`, and `all-features` gates pass at their declared target tiers |
+
+## Implementation Evidence
+
+These are implementation/evidence locations, not assertions that every acceptance criterion already
+passes:
+
+- [Workspace manifest](../../Cargo.toml)
+- [Facade manifest](../../crates/baozi/Cargo.toml)
+- [CI workflow](../../.github/workflows/ci.yml)
+- [Crate graph checker](../../crates/baozi-xtask/src/crate_graph.rs)
+- [Crate graph checker tests](../../crates/baozi-xtask/tests/crate_graph.rs)
+- [Native dependency checker](../../crates/baozi-xtask/src/native_fs.rs)
+- [Native dependency fixtures](../../crates/baozi-xtask/tests/native_fs.rs)
+- [Canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
+- [Format support matrix](../formats/support-matrix.md)

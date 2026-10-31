@@ -1,68 +1,101 @@
-use baozi_core::{BaoziError, Result};
-use baozi_import::{ReadConfidence, ReadHint};
-use baozi_io::ReadSeek;
-use std::io::{ErrorKind, SeekFrom};
+use baozi_import::{
+    DetectionInconclusive, DetectionOutcome, DetectionResult, DetectionScope, Probe,
+    ReadConfidence, ReadHint,
+};
 
-pub(crate) fn can_read(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence> {
-    let original = input
-        .stream_position()
-        .map_err(|error| BaoziError::io(hint.display_hint(), error.to_string()))?;
-    input
-        .seek(SeekFrom::Start(0))
-        .map_err(|error| BaoziError::io(hint.display_hint(), error.to_string()))?;
-
-    let result = detect_stream(input, hint);
-
-    input
-        .seek(SeekFrom::Start(original))
-        .map_err(|error| BaoziError::io(hint.display_hint(), error.to_string()))?;
-
-    result
-}
-
-fn detect_stream(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<ReadConfidence> {
-    let bytes = read_probe_bytes(input, hint)?;
-
-    let extension_match = hint.extension.as_deref().is_some_and(|extension| {
+pub(crate) fn can_read(
+    probe: &Probe<'_>,
+    hint: &ReadHint,
+    scope: &DetectionScope<'_>,
+) -> DetectionResult<DetectionOutcome> {
+    let bytes = probe.bytes();
+    let extension_match = hint.extension().is_some_and(|extension| {
         extension.eq_ignore_ascii_case("gltf") || extension.eq_ignore_ascii_case("glb")
     });
 
-    if bytes.starts_with(b"glTF") {
-        Ok(ReadConfidence::Certain)
-    } else if looks_like_gltf_json(&bytes) {
-        Ok(ReadConfidence::Likely)
+    if starts_with_accounted(scope, bytes, b"glTF")? {
+        Ok(DetectionOutcome::Match(ReadConfidence::Certain))
+    } else if looks_like_gltf_json(bytes, scope)? {
+        Ok(DetectionOutcome::Match(ReadConfidence::Likely))
     } else if extension_match {
-        Ok(ReadConfidence::Maybe)
+        Ok(DetectionOutcome::Match(ReadConfidence::Maybe))
+    } else if !probe.is_complete() {
+        Ok(DetectionOutcome::Inconclusive(
+            DetectionInconclusive::ProbeExhausted,
+        ))
     } else {
-        Ok(ReadConfidence::No)
+        Ok(DetectionOutcome::NoMatch)
     }
 }
 
-fn read_probe_bytes(input: &mut dyn ReadSeek, hint: &ReadHint) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        match input.read(&mut buffer) {
-            Ok(0) => return Ok(bytes),
-            Ok(read) => bytes.extend_from_slice(&buffer[..read]),
-            Err(error) if is_probe_limit_error(&error) => return Ok(bytes),
-            Err(error) => return Err(BaoziError::io(hint.display_hint(), error.to_string())),
+fn looks_like_gltf_json(bytes: &[u8], scope: &DetectionScope<'_>) -> DetectionResult<bool> {
+    let Some(text) = valid_utf8_prefix(bytes, scope)? else {
+        return Ok(false);
+    };
+    let text = strip_bom_accounted(text, scope)?;
+    let text = account_detection_work(scope, text.len(), || text.trim_start())?;
+    if !starts_with_accounted(scope, text.as_bytes(), b"{")? {
+        return Ok(false);
+    }
+    for needle in ["\"asset\"", "\"version\"", "\"2.0\""] {
+        let contains = account_detection_work(scope, text.len(), || text.contains(needle))?;
+        if !contains {
+            return Ok(false);
         }
     }
+    Ok(true)
 }
 
-fn is_probe_limit_error(error: &std::io::Error) -> bool {
-    error.kind() == ErrorKind::InvalidData
-        && error.to_string() == "format probe byte limit exceeded"
+fn valid_utf8_prefix<'bytes>(
+    bytes: &'bytes [u8],
+    scope: &DetectionScope<'_>,
+) -> DetectionResult<Option<&'bytes str>> {
+    let decoded = account_detection_work(scope, bytes.len(), || std::str::from_utf8(bytes))?;
+    Ok(match decoded {
+        Ok(text) => Some(text),
+        Err(error) if error.error_len().is_none() => {
+            let prefix = &bytes[..error.valid_up_to()];
+            account_detection_work(scope, prefix.len(), || std::str::from_utf8(prefix))?.ok()
+        }
+        Err(_) => None,
+    })
 }
 
-fn looks_like_gltf_json(bytes: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return false;
+fn strip_bom_accounted<'text>(
+    text: &'text str,
+    scope: &DetectionScope<'_>,
+) -> DetectionResult<&'text str> {
+    const UTF8_BOM: &str = "\u{feff}";
+    let inspected = if text.len() >= UTF8_BOM.len() {
+        UTF8_BOM.len()
+    } else {
+        0
     };
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text).trim_start();
-    text.starts_with('{')
-        && text.contains("\"asset\"")
-        && text.contains("\"version\"")
-        && text.contains("\"2.0\"")
+    account_detection_work(scope, inspected, || {
+        text.strip_prefix(UTF8_BOM).unwrap_or(text)
+    })
+}
+
+fn starts_with_accounted(
+    scope: &DetectionScope<'_>,
+    bytes: &[u8],
+    prefix: &[u8],
+) -> DetectionResult<bool> {
+    let inspected = if bytes.len() >= prefix.len() {
+        prefix.len()
+    } else {
+        0
+    };
+    account_detection_work(scope, inspected, || bytes.starts_with(prefix))
+}
+
+fn account_detection_work<T>(
+    scope: &DetectionScope<'_>,
+    byte_count: usize,
+    work: impl FnOnce() -> T,
+) -> DetectionResult<T> {
+    if byte_count == 0 {
+        return Ok(work());
+    }
+    scope.with_work(byte_count as u64, || Ok(work()))
 }

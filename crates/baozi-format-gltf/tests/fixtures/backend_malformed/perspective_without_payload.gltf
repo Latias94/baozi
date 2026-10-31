@@ -1,0 +1,1 @@
+{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"camera":0}],"cameras":[{"type":"perspective","orthographic":{"xmag":1,"ymag":1,"znear":0.1,"zfar":10}}]}

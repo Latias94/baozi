@@ -6,15 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/baozi-format-ply"
 authors.workspace = true
-description.workspace = true
+description = "PLY 1.0 ASCII and binary geometry importer backend for Baozi"
+readme = "README.md"
 publish = false
 
 [dependencies]
-baozi-core.workspace = true
 baozi-import.workspace = true
-baozi-io.workspace = true
 
 [dev-dependencies]
+baozi-io.workspace = true
+baozi-operation.workspace = true
 baozi-test-support.workspace = true

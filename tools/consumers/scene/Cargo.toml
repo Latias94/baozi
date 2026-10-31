@@ -1,0 +1,25 @@
+[package]
+name = "baozi-scene-consumer"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+baozi = { path = "../../../crates/baozi", default-features = false }
+baozi-import = { path = "../../../crates/baozi-import", default-features = false }
+
+[features]
+default = ["baozi/default"]
+default-formats = ["baozi/default-formats"]
+all-formats = ["baozi/all-formats"]
+format-stl = ["baozi/format-stl"]
+format-obj = ["baozi/format-obj"]
+format-ply = ["baozi/format-ply"]
+format-gltf = ["baozi/format-gltf"]
+postprocess = ["baozi/postprocess"]
+tracing = ["baozi/tracing"]
+mint = ["baozi/mint"]

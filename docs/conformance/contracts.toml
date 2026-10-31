@@ -1,0 +1,310 @@
+# Historical catalog, superseded by the 2026-10-29 library delivery plan.
+# Current executable coverage: docs/testing/behavior-gates.md. No active receipt checker consumes this file.
+
+schema_version = 1
+
+# A `conforming` value is only a declaration. Repository checks reject it until a separate trusted
+# receipt adapter admits immutable, externally produced gate receipts.
+
+[[contracts]]
+contract_id = "u4-canonical-scene-lifecycle"
+authority_adr = "docs/adr/0045-canonical-scene-ownership-construction-and-generation.md"
+conformance_status = "partial"
+evidence_subject = "baozi.u4.canonical-scene-lifecycle"
+evidence_revision = 6
+implementation_tracers = [
+  "crates/baozi-core/Cargo.toml",
+  "crates/baozi-core/src/canonical_scene/store/api/integration.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/materialization.rs",
+  "crates/baozi-core/src/canonical_scene/store/api/scene.rs",
+  "crates/baozi-import/src/store.rs",
+  "crates/baozi-import/src/store/scene_activation.rs",
+  "crates/baozi-import/src/session.rs",
+  "crates/baozi-import/Cargo.toml",
+]
+test_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests.rs",
+  "crates/baozi-import/tests/session_contract.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "canonical-scene-behavior-tests",
+  "core-scene-integration-boundary-ci",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
+contract_id = "u4-private-producer-consumer-proof"
+authority_adr = "docs/adr/0045-canonical-scene-ownership-construction-and-generation.md"
+conformance_status = "partial"
+evidence_subject = "baozi.u4.private-producer-consumer-proof"
+evidence_revision = 8
+implementation_tracers = [
+  "crates/baozi-core/Cargo.toml",
+  "crates/baozi-core/src/canonical_scene/store/api/authoring.rs",
+  "crates/baozi-core/src/canonical_scene/store/api/integration.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/materialization.rs",
+  "crates/baozi-core/src/canonical_scene/store/production.rs",
+  "crates/baozi-import/src/store.rs",
+  "crates/baozi-import/src/store/scene_activation.rs",
+  "crates/baozi-import/Cargo.toml",
+]
+test_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests/profile_closure.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs",
+  "crates/baozi-format-gltf/tests/static_mesh.rs",
+  "crates/baozi-format-obj/tests/geometry.rs",
+  "crates/baozi-import/tests/authoring_api.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "canonical-scene-behavior-tests",
+  "core-scene-integration-boundary-ci",
+  "import-authoring-boundary-tests",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
+contract_id = "u4-retained-physical-ownership"
+authority_adr = "docs/adr/0044-retained-physical-storage-ownership-and-account-lineage.md"
+conformance_status = "partial"
+evidence_subject = "baozi.u4.retained-physical-ownership"
+evidence_revision = 3
+implementation_tracers = [
+  "crates/baozi-operation/src/concrete_store/activation.rs",
+  "crates/baozi-operation/src/concrete_store/activation/preflight.rs",
+  "crates/baozi-operation/src/retained.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/materialization.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction.rs",
+  "crates/baozi-import/src/store.rs",
+]
+test_tracers = [
+  "crates/baozi-operation/src/retained/tests.rs",
+  "crates/baozi-operation/tests/concrete_store/activation/scoped_plan.rs",
+  "crates/baozi-operation/tests/concrete_store/activation/central_validation.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "retained-store-behavior-tests",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
+contract_id = "import-lifecycle-outcome"
+authority_adr = "docs/adr/0046-import-session-lifecycle-and-outcome-ownership.md"
+conformance_status = "partial"
+evidence_subject = "baozi.import.lifecycle-outcome"
+evidence_revision = 5
+implementation_tracers = [
+  "crates/baozi-core/Cargo.toml",
+  "crates/baozi-import/src/format.rs",
+  "crates/baozi-import/src/session.rs",
+  "crates/baozi-import/src/store.rs",
+  "crates/baozi-import/src/store/scene_activation.rs",
+  "crates/baozi-core/src/canonical_scene/store/api/integration.rs",
+  "crates/baozi-import/Cargo.toml",
+]
+test_tracers = [
+  "crates/baozi-import/tests/session_contract.rs",
+  "crates/baozi-import/tests/cancellation_stage_contract.rs",
+  "crates/baozi-import/tests/source_scope_outcome.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "core-scene-integration-boundary-ci",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
+contract_id = "resource-ledger-budget-accounting"
+authority_adr = "docs/adr/0047-operation-ledger-evidence-and-resource-accounting.md"
+conformance_status = "partial"
+evidence_subject = "baozi.resource-ledger.budget-accounting"
+evidence_revision = 3
+implementation_tracers = [
+  "crates/baozi-operation/src/ledger.rs",
+  "crates/baozi-operation/src/concrete_store/activation.rs",
+  "crates/baozi-operation/src/concrete_store/activation/preflight.rs",
+  "crates/baozi-operation/src/retained/operation.rs",
+  "crates/baozi-import/src/store.rs",
+  "crates/baozi-import/src/store/scene_activation.rs",
+]
+test_tracers = [
+  "crates/baozi-operation/tests/ledger.rs",
+  "crates/baozi-operation/tests/concrete_store/activation/central_validation.rs",
+  "crates/baozi-import/tests/session_contract.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "retained-store-behavior-tests",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
+contract_id = "u4-legacy-scene-deletion"
+authority_adr = "docs/adr/0045-canonical-scene-ownership-construction-and-generation.md"
+conformance_status = "partial"
+evidence_subject = "baozi.u4.legacy-scene-deletion"
+evidence_revision = 3
+implementation_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/api/scene.rs",
+  "crates/baozi-import/src/config.rs",
+]
+test_tracers = [
+  "crates/baozi/tests/importer_api.rs",
+  "crates/baozi/tests/importer_boundary.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "canonical-scene-behavior-tests",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
+contract_id = "u4-request-wire-deletion"
+authority_adr = "docs/adr/0016-import-options-presets-and-configuration-precedence.md"
+conformance_status = "partial"
+evidence_subject = "baozi.u4.request-wire-deletion"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-import/src/lib.rs",
+  "crates/baozi-import/src/config.rs",
+  "crates/baozi-import/src/options.rs",
+  "crates/baozi-import/src/request.rs",
+]
+test_tracers = [
+  "crates/baozi-import/tests/config_contract.rs",
+  "crates/baozi-import/tests/registry_options.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "import-request-contract-tests",
+  "import-public-api-docs-ci",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
+contract_id = "repository-architecture-conformance"
+authority_adr = "docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md"
+conformance_status = "partial"
+evidence_subject = "baozi.repository.architecture-conformance"
+evidence_revision = 2
+implementation_tracers = [
+  "crates/baozi-xtask/src/conformance.rs",
+  "crates/baozi-xtask/src/conformance/evidence.rs",
+  "crates/baozi-xtask/src/main.rs",
+]
+test_tracers = [
+  "crates/baozi-xtask/tests/conformance.rs",
+  "crates/baozi-xtask/tests/conformance_evidence.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "repository-conformance-tests",
+  "repository-conformance-ci",
+]
+
+[[contracts]]
+contract_id = "postprocess-pipeline-semantics"
+authority_adr = "docs/adr/0013-post-process-pipeline-semantics-presets-and-mutation-model.md"
+conformance_status = "nonconforming"
+evidence_subject = "baozi.postprocess.pipeline-semantics"
+evidence_revision = 2
+implementation_tracers = [
+  "crates/baozi-import/src/outcome.rs",
+  "crates/baozi-postprocess/src/error.rs",
+  "crates/baozi-postprocess/src/pipeline.rs",
+  "crates/baozi-postprocess/src/operation.rs",
+]
+test_tracers = [
+  "crates/baozi-postprocess/tests/operation_boundary.rs",
+  "crates/baozi-postprocess/tests/tracing.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "postprocess-current-behavior-tests",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
+contract_id = "validation-snapshot-fuzz-evidence"
+authority_adr = "docs/adr/0026-validation-snapshot-and-fuzz-gates.md"
+conformance_status = "partial"
+evidence_subject = "baozi.validation.snapshot-fuzz-evidence"
+evidence_revision = 1
+implementation_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs",
+]
+test_tracers = [
+  "fuzz/fuzz_targets/stl_import.rs",
+  "fuzz/fuzz_targets/obj_import.rs",
+  "fuzz/fuzz_targets/ply_import.rs",
+  "fuzz/fuzz_targets/gltf_import.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "canonical-scene-behavior-tests",
+  "format-fuzz-smoke-ci",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
+contract_id = "source-identity-provenance-metadata"
+authority_adr = "docs/adr/0036-source-identity-provenance-and-metadata.md"
+conformance_status = "partial"
+evidence_subject = "baozi.source-identity-provenance-metadata"
+evidence_revision = 2
+implementation_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/profile_provenance.rs",
+  "crates/baozi-core/src/canonical_scene/store/typed_storage/profile.rs",
+  "crates/baozi-core/src/canonical_scene/store/typed_storage/profile/validation.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/semantic/profile.rs",
+]
+test_tracers = [
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/tests/profile_closure.rs",
+  "crates/baozi-core/src/canonical_scene/store/construction/node_scene/snapshot/tests.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "canonical-scene-behavior-tests",
+  "workspace-tests-ci",
+]
+
+[[contracts]]
+contract_id = "resource-dependency-graph-manifest"
+authority_adr = "docs/adr/0041-resource-dependency-graph-and-successful-input-manifest.md"
+conformance_status = "nonconforming"
+evidence_subject = "baozi.resource-dependency-graph-manifest"
+evidence_revision = 4
+implementation_tracers = [
+  "crates/baozi-io/src/immutable_memory.rs",
+  "crates/baozi-io/src/semantic_identity.rs",
+  "crates/baozi-import/src/dependency.rs",
+  "crates/baozi-import/src/limits.rs",
+  "crates/baozi-import/src/ledger.rs",
+  "crates/baozi-import/src/resource_graph/mod.rs",
+  "crates/baozi-import/src/resource_graph/manifest.rs",
+  "crates/baozi-import/src/resource_graph/manifest/encoding.rs",
+  "crates/baozi-import/src/scope.rs",
+  "crates/baozi-import/src/session.rs",
+  "crates/baozi-import/src/outcome.rs",
+  "crates/baozi-import/src/store.rs",
+  "crates/baozi-format-obj/src/mtl.rs",
+]
+test_tracers = [
+  "crates/baozi-import/src/resource_graph/mod.rs",
+  "crates/baozi-import/src/resource_graph/manifest.rs",
+  "crates/baozi-import/src/resource_graph/manifest/encoding.rs",
+  "crates/baozi-import/tests/authority_cache_contract.rs",
+  "crates/baozi-import/tests/session_contract.rs",
+  "crates/baozi/tests/obj_facade.rs",
+]
+ci_tracers = [".github/workflows/ci.yml"]
+gate_ids = [
+  "import-resource-graph-tests",
+  "obj-resource-current-behavior-tests",
+  "workspace-tests-ci",
+]

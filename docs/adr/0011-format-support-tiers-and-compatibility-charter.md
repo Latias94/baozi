@@ -1,249 +1,404 @@
 ---
 status: accepted
 date: 2026-07-09
+updated: 2026-07-16
 authors:
   - Codex
 decision_type: architecture
-related:
+depends_on:
   - docs/adr/0004-parser-backend-and-format-coverage-policy.md
   - docs/adr/0005-testing-fuzzing-and-differential-oracle-strategy.md
+  - docs/adr/0021-extension-registry-and-format-descriptor-governance.md
+  - docs/adr/0026-validation-snapshot-and-fuzz-gates.md
+  - docs/adr/0034-supported-targets-and-portability.md
+related:
+  - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
+  - docs/adr/0007-workspace-crate-graph-feature-flags-msrv-and-ci-gates.md
   - docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md
+evidence:
+  - crates/baozi-import/tests/maturity_authority.rs
+  - crates/baozi-test-support/src/support_matrix.rs
+  - docs/formats/_template.md
+  - docs/formats/support-matrix.md
+  - docs/plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md
 ---
 
-# ADR 0011: Format Support Tiers and Compatibility Charter
+# ADR 0011: Format Maturity and Evidence Charter
+
+## Status and Authority
+
+This accepted ADR is the sole authority for format maturity levels, capability statuses, evidence
+requirements, promotion/demotion, and user-facing format support claims.
+
+`Accepted` means the charter governs format work; it does not promote any current format. Actual
+maturity is declared by structured evidence and checked against code, docs, fixtures, and CI.
+Transient test counts and work-unit status stay in verification records.
+
+In this ADR, compatibility means conformance to Baozi's declared source-semantic contract. It does
+not mean byte-for-byte output, memory-layout compatibility, API compatibility, or behavioral
+identity with Assimp. Public API compatibility belongs solely to ADR 0006.
 
 ## Context
 
-Baozi aims for Assimp-class model loading. The phrase "supports OBJ" or "supports glTF" is not precise enough for a serious importer. A format can parse one mesh but fail materials, sidecar files, encodings, animation, diagnostics, post-processing, or malformed input. Without a support charter, format crates will drift into different quality bars.
+"Supports OBJ" or "supports glTF" is not a useful engineering claim. One implementation may parse a
+triangle while silently dropping materials, hierarchy, sidecars, typed ranges, or required
+extensions. Another may handle common files but panic or allocate without bounds on malformed data.
+Crate existence, sample success, test count, and parser-backend reputation therefore cannot define
+maturity.
 
-ADR 0004 defines format maturity labels. This ADR defines what those labels mean in tests, docs, and user promises.
+Baozi needs support claims tied to a declared semantic subset and independent, executable evidence.
+The same evidence must expose silent degradation, not merely prove that an importer produced an
+object with plausible counts.
 
 ## Decision
 
-Baozi will treat format support as a documented contract with tiers, capability matrices, known limitations, and test evidence. A format is not "stable" because it opens a sample file; it is stable when the supported subset is documented, validated, fuzzed, and covered by compatibility checks.
+Every first-party format inventory entry joins ADR 0021's declaration-authority state with this ADR's
+managed verification state, a complete capability matrix, a durable support page, structured
+machine-readable evidence, and code-side `FormatDescriptor`. Every active Baozi maturity claim has
+exactly one level and requires a current `BaoziVerified` record. A subject without that record has no
+Baozi maturity level. Those views must agree before promotion or release.
 
-Every format crate must publish:
+ADR 0004 owns parser/backend admission. ADR 0005 and ADR 0026 own test and snapshot mechanisms. ADR
+0007 owns feature membership. ADR 0034 owns targets. This ADR composes their evidence into a format
+maturity decision without redefining those underlying contracts.
 
-- `FormatInfo` with maturity, extensions, media types, and known limitations
-- `docs/formats/<format>.md` using the format template
-- valid and invalid fixtures
-- golden normalized scene snapshots
-- resource-limit tests
-- fuzz targets for public parsers
-- optional oracle comparison against Assimp where practical
+### Managed Verification and Joined Support View
 
-## Architecture
+Maturity answers how mature one exact declared profile is. Declaration authority and Baozi-managed
+verification are separate axes with separate owners:
+
+| Axis | States | Sole owner |
+| --- | --- | --- |
+| Registry declaration authority | `Unverified` or issuer-scoped `SelfAttested` | ADR 0021 owns schema, issuer identity, evidence-reference validation, constructors, and registry lifetime |
+| Managed maturity verification | no current record or `BaoziVerified` | ADR 0011 owns exact subject matching, managed issuer/inventory, gate validity, withdrawal, maturity, and release eligibility |
+
+This ADR does not redefine or construct `Unverified` or `SelfAttested`. Its joined support view shows
+`BaoziVerified` only when the current managed snapshot contains an exact passing record. Otherwise it
+falls back to ADR 0021's declaration state, which is discovery/display metadata and never a Baozi
+maturity claim. A self-attested level remains visibly bound to its named issuer and evidence reference.
+
+An evidence profile has two canonical, machine-comparable identities. Its subject identity includes
+ADR 0021's `ImplementationDeclarationIdentity`, the evidence profile's recovery/loss/conformance
+predicate and target tier, and the managed inventory's exact tested implementation/build subject.
+That tested subject binds the reviewed source or artifact, resolved dependency and generated/native
+inputs, behavior-changing feature/cfg/build profile, target, and toolchain evidence used by the
+gates. A descriptor, package version, plugin filename, display label, or commit name alone cannot
+substitute for that managed evidence.
+
+The tested implementation/build subject is maturity evidence owned by this charter. It is not a
+runtime producer attestation, closed-input qualification, cache key, cooker identity, or claim that
+trusted extension code used no ambient input. Its separate verification-record identity includes the
+evidence manifest and corpus digests plus gate, harness, and oracle versions.
+
+`BaoziVerified` exists only in an immutable, versioned managed evidence snapshot. A support query
+joins that snapshot to ADR 0021's registry declaration identity and the effective request profile;
+the registry descriptor/snapshot never stores, accepts, or issues the verified state. Replacing the
+managed evidence snapshot can withdraw, expire, or revise a claim without mutating a live registry
+snapshot. Runtime import success never depends on maturity state, and a historical evidence snapshot
+cannot be presented as the current Baozi support view.
+
+Support and maturity claims are keyed by `(format ID, evidence-profile subject identity)`, never by
+format ID alone. Any subject change that can alter accepted input, canonical output, diagnostics,
+dependency behavior, resource/safety behavior, or loss semantics creates a new unverified subject.
+Adding evidence revises the verification record for the same subject; changing gate semantics
+invalidates the old record until that exact subject passes the new gate. A runtime request outside
+every verified subject falls back to its ADR 0021 declaration state and cannot inherit the default
+profile's claim.
+
+Loss of exact identity, an evidence withdrawal/expiry, or a failing required gate atomically removes
+the subject from the next current `BaoziVerified` evidence snapshot and makes the joined support view
+fall back to its ADR 0021 declaration state; the old record remains historical evidence only. The
+public Baozi maturity claim is removed in the same change. If baseline
+safety still holds, the implementation may remain discoverable without a Baozi maturity level while
+verification is rebuilt; a baseline-safety failure follows the disable/unregister rule below.
+
+An external implementation is not permanently barred from `BaoziVerified`, but only Baozi's managed
+inventory can bind one exact subject and verification record to that authority. A runtime descriptor,
+registry snapshot, or plugin cannot issue, retain, or revoke `BaoziVerified`.
+
+### Evidence Flow
 
 ```mermaid
 flowchart TD
-    FormatCrate[baozi-format-*] --> FormatInfo[FormatInfo]
-    FormatCrate --> FormatDoc[docs/formats/<format>.md]
-    FormatCrate --> Fixtures[valid and invalid fixtures]
-    FormatCrate --> Fuzz[Fuzz target]
-    FormatCrate --> Snapshots[Golden snapshots]
-    FormatCrate --> Oracle[Optional oracle comparison]
-
-    FormatInfo --> Matrix[Support matrix]
-    FormatDoc --> Matrix
-    Fixtures --> Gate[Maturity gate]
-    Fuzz --> Gate
-    Snapshots --> Gate
-    Oracle --> Gate
+    Descriptor[FormatDescriptor] --> Checker[Maturity checker]
+    Declaration[ADR 0021 declaration authority and issuer] --> Checker
+    Managed[Managed Baozi verification snapshot] --> Checker
+    Support[Format support page] --> Checker
+    Structured[Structured evidence manifest] --> Checker
+    Fixtures[Provenanced valid and malformed fixtures] --> Tests[Executable gates]
+    Golden[Versioned full-value digest and bounded preview] --> Tests
+    Facade[Facade/session contract tests] --> Tests
+    Limits[Limit and failure tests] --> Tests
+    Fuzz[Fuzz and sanitizer evidence] --> Tests
+    Oracle[Independent semantic oracle or justified alternative] --> Tests
+    Targets[Target and package evidence] --> Tests
+    Tests --> Checker
+    Checker --> Promotion{Promote, retain, or demote}
+    Promotion --> Matrix[Generated or checked support matrix]
+    Promotion --> Release[Default/release eligibility review]
 ```
 
-```mermaid
-sequenceDiagram
-    participant Maintainer
-    participant FormatDoc
-    participant Tests
-    participant Matrix
-    participant Release
+Importer-generated output is never its own only oracle. Shape/count assertions and self-generated
+snapshots are useful regression signals but cannot independently prove semantic correctness.
 
-    Maintainer->>FormatDoc: declare supported subset
-    Maintainer->>Tests: add fixtures, fuzz, diagnostics, snapshots
-    Tests-->>Maintainer: evidence for declared subset
-    Maintainer->>Matrix: update maturity and limitations
-    Matrix-->>Release: release notes reflect support contract
-```
+### Admission Safety Before Maturity
 
-## Support Tiers
+Maturity classifies only a parser path already admitted to the first-party inventory. ADR 0004 owns
+backend admission and ADR 0014 owns baseline hostile-data safety. At every maturity level, an admitted
+path must bound attacker-controlled work and allocation, contain admitted malformed input as a typed
+failure rather than panic or abort, route IO through the session, and prevent invalid validated
+success.
 
-| Tier | Meaning | Required evidence |
+A known baseline-safety failure is not an Experimental limitation. The affected path must be disabled
+and unregistered, rejected, replaced, or isolated outside the in-process first-party inventory until
+it passes admission again. Missing non-safety evidence such as semantic breadth, an independent
+oracle, sustained campaign history, target promotion, or packaged-consumer proof may keep an admitted
+format Experimental without weakening that baseline.
+
+### Maturity Levels
+
+| Level | Meaning | Minimum claim |
 | --- | --- | --- |
-| Experimental | Parser exists for selected files and may change behavior | at least one valid fixture, documented limits |
-| Beta | Common assets work, diagnostics are usable, known gaps are documented | valid/invalid fixtures, snapshots, resource limits |
-| Stable | Supported subset is reliable and compatibility-tested | beta evidence plus fuzz, support matrix, oracle/differential where useful |
-| Deprecated | Still present but no longer recommended | migration or replacement note |
+| Experimental | safely admitted real import behavior exists for a narrow, changing slice | baseline admission safety, opt-in behavior, explicit unknowns/limits, no silent known loss, and baseline fixture/failure evidence |
+| Beta | the declared common subset is usable and bounded through production paths | complete capability declaration plus facade, golden, malformed, limit, target, and sanitizer evidence for that subset |
+| Stable | the declared subset is independently validated, portable on its target tier, packageable, and release-gated | all Beta evidence plus independent conformance/differential evidence, tolerated-difference records, sustained fuzz/security evidence, and packaged-consumer proof |
+| Deprecated | a previously released support contract is intentionally being retired | reason, replacement or removal plan, release note, and continued truthfulness until removal |
 
-The tier applies to a supported subset, not to the entire file format specification. A stable OBJ importer can still document unsupported vendor extensions.
+The tier applies to the declared supported subset, not to the entire file-format specification. A
+Stable importer can explicitly reject unsupported extensions. It cannot label unknown or silently
+ignored semantics as Stable support.
 
-## Capability Dimensions
+Because Baozi has no released compatibility contract during the canonical v1 reset, obsolete
+prototype parsers are deleted rather than placed in Deprecated. Deprecation exists for a future
+released contract, not as storage for unfinished code.
 
-Each format document must classify support by capability:
+### Capability Statuses
 
-- geometry
-- hierarchy and transforms
-- materials
-- textures and sidecars
-- cameras and lights
-- animation
-- skinning
-- morph targets
-- metadata
-- compression or containers
-- coordinate and unit metadata
-- malformed input diagnostics
-- resource limits
+Each format classifies every capability dimension using exactly one status:
 
-Use these statuses:
-
-| Status | Meaning |
+| Status | Contract |
 | --- | --- |
-| Supported | Intended to work and covered by tests |
-| Partial | Some features work, limitations documented |
-| ParsedLossy | Accepted but converted with known data loss |
-| IgnoredWithDiagnostic | Ignored and surfaced to caller |
-| Unsupported | Expected to fail or be unavailable |
-| Unknown | Not investigated yet; allowed only for experimental formats |
+| `Supported` | intended to preserve the declared semantics and covered by direct plus facade evidence |
+| `Partial` | supported subcases and rejected/unsupported subcases are enumerated and tested |
+| `ParsedLossy` | accepted only with an explicit structured loss diagnostic/report and strict fail-on-loss behavior |
+| `IgnoredWithDiagnostic` | skipped intentionally with a stable diagnostic; never silent |
+| `Unsupported` | rejected or unavailable through an explicit, tested outcome |
+| `Unknown` | not yet investigated; allowed only at Experimental maturity |
 
-## Compatibility Charter
+The required dimensions are:
 
-Baozi does not promise byte-for-byte or memory-layout compatibility with Assimp. Compatibility means:
+- geometry topology, logical meshes, primitives, and attribute domains
+- hierarchy, transforms, instancing, and scene selection
+- materials, images, textures, samplers, and external references
+- cameras and lights
+- animation, skinning, morph targets, and other deformers
+- metadata and source provenance
+- compression, containers, coordinate systems, and units
+- malformed-input diagnostics and required-extension handling
+- resource, graph, allocation, and external-resource limits
+- declared target and platform behavior
 
-- equivalent scene semantics for declared supported features
-- documented differences for normalization, material approximation, triangulation, coordinate conversion, and diagnostics
-- no silent data loss for known unsupported features
-- importer behavior is stable enough for snapshots and downstream tests
+Format-specific dimensions are added when the generic list cannot express a source-semantic
+contract. Adding detail never permits omitting a generic dimension.
 
-Oracle comparison should classify differences:
+### Evidence Record
 
-- match
-- tolerated difference
-- Baozi bug
-- oracle limitation
-- unsupported feature
-- out of declared support scope
+Each format evidence record identifies exact test targets/artifacts rather than prose such as
+"covered". At minimum it records:
 
-## Stable Format Gate
+1. format ID, crate/implementation identity, feature, maturity, evidence authority and issuer,
+   backend, dependency/license, supported spec/profile versions, targets, and gate/tool versions
+2. a support page with complete capability statuses and known limitations
+3. Baozi-owned or explicitly licensed fixture provenance for each declared semantic slice
+4. parser-local grammar tests and facade/session success/failure tests
+5. versioned, domain-separated stable digests of complete canonical values with bounded human
+   previews; counts, key lists, or substrings alone are insufficient
+6. malformed, truncation, overflow, invalid-reference, sidecar, required-extension, and exact-limit
+   boundary cases applicable to the format
+7. resource-ledger assertions and scale/work evidence for parser-specific structures
+8. a public fuzz target, corpus provenance, sanitizer execution status, and crash-to-regression links
+9. target-tier compile/test results and package-consumer evidence required for the claimed level
+10. an independent normalized oracle or differential suite, plus explicit tolerated-difference
+    records; if a comparison is inapplicable, a reviewed alternative must validate the semantics
 
-A format can become stable only when:
+Optional Assimp comparison runs only as a sandboxed external oracle over trusted, licensed fixtures.
+It is non-authoritative, never linked into production, never the sole oracle, and never receives
+arbitrary fuzz input. A backend parser and snapshots produced by that same backend do not count as
+independent evidence.
 
-1. `docs/formats/<format>.md` is complete.
-2. Support matrix lists every capability dimension.
-3. Valid fixtures cover the declared supported subset.
-4. Invalid fixtures cover malformed headers, truncated data, invalid references, oversized counts, and sidecar failures where applicable.
-5. Fuzz target exists and has at least smoke CI coverage.
-6. Diagnostics include source identity and location when the format can provide them.
-7. Resource limits are enforced.
-8. Public parser behavior is independent of backend crate types.
-9. Differential comparison exists or the format doc explains why it is not useful yet.
+### Promotion and Demotion
+
+A maturity change is one reviewed change across descriptor, structured evidence, support page,
+matrix, feature/release implications, and tests.
+
+Promotion rules:
+
+- every requirement of the target level is present and passing; waivers are explicit, scoped,
+  expiring evidence records rather than untracked prose
+- `Unknown` capability status blocks promotion beyond Experimental
+- missing non-safety maturity evidence retains Experimental status and cannot be relabeled as an
+  admission exception
+- a known silent loss or required-extension drop must become an explicit rejection, supported
+  recovery, or structured loss before any maturity claim; a panic, abort, unbounded allocation, or
+  validation bypass invokes baseline-safety removal rather than merely blocking Beta/Stable
+- Stable requires semantic evidence independent from the implementation under test
+- Baozi Beta/Stable and every first-party maturity claim require `BaoziVerified`; a
+  `SelfAttested` level remains visibly issuer-scoped even when its evidence is extensive
+- Stable makes a format eligible for a released support promise; it does not automatically place it
+  in `default-formats`, which ADR 0007 governs
+
+Demotion rules:
+
+- a newly discovered violation updates the evidence and user-facing claim in the same change
+- a stale, expired, withdrawn, or failing required verification record removes the exact subject's
+  `BaoziVerified` state and Baozi maturity claim atomically, then the joined view falls back to its
+  registry declaration state; a previous level is history only
+- a baseline-safety failure disables and unregisters the affected path or moves it behind an admitted
+  process boundary; maturity demotion alone is insufficient
+- a non-safety semantic or evidence regression may demote immediately without a compatibility shim
+- a temporary CI outage does not rewrite durable maturity, but the affected release/promotion is
+  blocked until evidence is restored
+- removal of a released Stable/Beta contract follows ADR 0006; removal of an unpublished prototype
+  is direct
+
+### Support Matrix
+
+The support matrix is derived from or mechanically checked against structured evidence and
+`FormatDescriptor`. It is a human-readable view, not an independent authority. Hand-editing a maturity
+cell without matching evidence must fail the checker.
 
 ## Alternatives Considered
 
-### Option A: Treat extension presence as support
+### Option A: Treat file-extension recognition as support
 
 Pros:
 
-- Easy marketing and README table.
-- Minimal process overhead.
-- Fast to add many formats.
+- easy to market and maintain
+- maximizes apparent format count
 
 Cons:
 
-- Misleads users.
-- Encourages shallow parsers.
-- Makes testing and release notes meaningless.
+- hides semantic loss and malformed-input failures
+- gives users no actionable contract
+- rewards shallow parser shells
 
 Decision: rejected.
 
-### Option B: Require full specification coverage before stable
+### Option B: Require complete specification coverage for Stable
 
 Pros:
 
-- Very high quality bar.
-- Simple claim: stable means complete.
-- Avoids many caveats.
+- simple interpretation of the Stable label
+- avoids partial-support caveats
 
 Cons:
 
-- Unrealistic for broad formats such as FBX, Collada, USD, and IFC.
-- Blocks useful subsets from being stable.
-- Assimp-level breadth depends on pragmatic partial support.
+- unrealistic for extensible or historically broad formats
+- prevents reliable, useful subsets from earning stability
+- conflates unsupported explicit rejection with incorrect behavior
 
 Decision: rejected.
 
-### Option C: Stable documented subsets with evidence
+### Option C: Let test count or backend maturity determine the tier
 
 Pros:
 
-- Honest to users.
-- Lets Baozi ship useful support incrementally.
-- Keeps testing aligned with promises.
+- cheap to automate
+- leverages ecosystem reputation
 
 Cons:
 
-- Requires support matrix maintenance.
-- Users must read limitations for complex formats.
-- Some features remain partial for a long time.
+- counts do not prove semantic coverage
+- backend tests do not prove Baozi conversion, policy, or facade behavior
+- self-generated snapshots can preserve the same bug indefinitely
+
+Decision: rejected.
+
+### Option D: Stable declared subsets backed by structured independent evidence
+
+Pros:
+
+- produces honest, machine-checkable user promises
+- supports incremental breadth without silent loss
+- keeps promotion tied to source semantics and production paths
+- permits backend replacement without redefining maturity
+
+Cons:
+
+- requires fixtures, goldens, fuzzing, docs, and independent oracles per format
+- some formats remain Experimental longer
 
 Decision: chosen.
-
-## Success Metrics
-
-| Metric | Target | Measurement |
-| --- | --- | --- |
-| Format honesty | Every non-experimental format has support matrix rows for all capability dimensions | docs check |
-| Test alignment | Supported capabilities have fixtures and snapshots | test inventory |
-| Diagnostic quality | Unsupported known features emit diagnostics rather than silent loss | fixture tests |
-| Compatibility clarity | Assimp/oracle differences are classified | differential reports |
-| Release confidence | Stable promotion checklist is completed before default feature inclusion | release checklist |
-
-## Risks and Mitigations
-
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Support docs drift from behavior | High | Medium | Treat format docs as release-gated artifacts |
-| Quality bar slows format count | Medium | High | Allow experimental and beta tiers without overselling |
-| Oracle differences become noisy | Medium | Medium | Classify differences and compare normalized scenes |
-| Users misunderstand partial support | Medium | Medium | Surface known limitations through `FormatInfo` and docs |
-| Stable gates become too heavy for simple formats | Low | Medium | Keep fixtures small and right-sized |
-
-## Implementation Plan
-
-### Phase 0: Templates
-
-- Add `docs/formats/_template.md`.
-- Add `docs/formats/support-matrix.md`.
-- Add `FormatMaturity` and capability status types.
-
-### Phase 1: First Formats
-
-- Fill docs for STL, OBJ, PLY, and glTF as they are implemented.
-- Add golden and malformed fixtures alongside each parser.
-- Keep initial formats experimental until evidence exists.
-
-### Phase 2: Stable Promotion
-
-- Add release checklist item for support tier changes.
-- Add tests that compare `FormatInfo` with docs where practical.
 
 ## Consequences
 
 Positive:
 
-- Users can trust format claims.
-- Baozi can grow format breadth without lowering quality.
-- Tests and docs become part of the same contract.
+- users can distinguish parser existence from trustworthy support
+- known unsupported semantics become explicit outcomes rather than silent drops
+- maturity survives private backend replacement only when semantics still conform
+- default and release decisions consume one structured source of evidence
 
 Negative:
 
-- More documentation work per format.
-- Some early formats will remain experimental longer.
-- Support matrices need maintenance.
+- every format carries ongoing evidence and documentation cost
+- Stable promotion requires independent validation beyond regression snapshots
+- newly discovered correctness issues may require visible demotion
 
-## Open Questions
+## Risks and Mitigations
 
-1. Should support tier be compiled into `FormatInfo` at build time from docs?
-   Recommendation: no initially; keep manual but audited.
-2. Should stable promotion require oracle comparison?
-   Recommendation: require it when useful and available, but allow documented exceptions.
+| Risk | Severity | Likelihood | Mitigation |
+| --- | --- | --- | --- |
+| Support docs drift from code | High | High | checker joins descriptor, evidence, matrix, feature, and tests by stable format ID |
+| Third-party self-attestation appears to be a Baozi guarantee | High | Medium | store maturity level and evidence authority separately; reserve `BaoziVerified` construction for the managed inventory checker |
+| Evidence is reused across behavior-changing profiles | Critical | Medium | key claims by canonical subject identity including compiled defaults, recovery/loss modes, backend/features, and targets |
+| Managed evidence tests a different implementation than the declared subject | Critical | Medium | bind ADR 0021's declaration identity to exact source/artifact/build/dependency/target/toolchain evidence in the managed inventory and reject missing or stale components |
+| A long-lived registry snapshot retains a withdrawn maturity claim | Critical | Medium | keep `BaoziVerified` only in the replaceable managed evidence snapshot and join it to immutable registry declarations at query/release time |
+| Snapshot proves only shape/counts | High | Medium | require complete canonical-value digest and mutation tests beyond bounded preview |
+| Oracle reproduces importer/backend assumptions | High | Medium | require independent normalized source expectations and classify tolerated differences |
+| Assimp is treated as ground truth | Medium | Medium | sandbox it externally, keep it optional/non-authoritative, and record oracle limitations |
+| Stable gate becomes checkbox theater | High | Medium | evidence entries point to executable artifacts and negative checker tests |
+| Simple formats face disproportionate overhead | Low | Medium | right-size fixtures while preserving every evidence category |
+| Safety regression remains hidden behind Experimental maturity | Critical | Low | disable/unregister or process-isolate the path and remove it from first-party inventory until admission passes again |
+
+## Acceptance Criteria
+
+| Contract | Measurable evidence |
+| --- | --- |
+| Single maturity authority | Direct review confirms maturity definitions live only here and references from backend/feature ADRs point here |
+| Admission before maturity | checker fixtures reject assigning any maturity, including Experimental, to a first-party path that fails baseline admission safety |
+| Complete declaration | every first-party format declares every required capability dimension; each verified Baozi claim has exactly one maturity, while an unverified candidate has none |
+| Evidence authority | ADR 0021 exclusively validates declaration `Unverified`/issuer-scoped `SelfAttested`; only an exact passing current ADR 0011 managed-inventory entry can construct the joined `BaoziVerified` support view |
+| Profile identity | changing any declaration identity, tested source/artifact/dependency/config/generated/native/toolchain evidence, default, recovery/loss mode, target, or semantic option prevents reuse of the prior verified token; adding corpus evidence revises only the verification record |
+| Evidence reachability | every structured evidence pointer resolves to a test, fixture, golden, fuzz target, provenance record, or reviewed exception |
+| Semantic golden | mutation beyond the bounded preview changes the versioned full-value digest; count-only snapshots fail negative tests |
+| Independent confidence | Beta/Stable gates reject importer-generated snapshots as the sole oracle; Stable has differential/conformance evidence or reviewed equivalent |
+| Failure truthfulness | known unsupported/lossy semantics are explicit errors or structured diagnostics under strict policy |
+| Atomic promotion | mismatched descriptor, evidence, matrix, feature/release status, or maturity value fails xtask |
+
+## Implementation Evidence
+
+These links locate evolving evidence; they do not themselves assert a maturity level:
+
+- [Format support template](../formats/_template.md)
+- [Format support matrix](../formats/support-matrix.md)
+- [Canonical architecture refactor plan](../plans/2026-07-10-001-refactor-baozi-canonical-architecture-plan.md)
+- [Testing and differential strategy](0005-testing-fuzzing-and-differential-oracle-strategy.md)
+- [Validation, snapshot, and fuzz gates](0026-validation-snapshot-and-fuzz-gates.md)
+
+## Amendment History
+
+### 2026-07-16: Separate registry declaration from managed execution evidence
+
+- Affected: `Evidence Authority`, `Risks and Mitigations`, and `Acceptance Criteria`.
+- Previous: this ADR repeated descriptor-owned fields while leaving the exact tested implementation
+  and build evidence insufficiently distinguished from registry declaration.
+- New: maturity subjects compose ADR 0021's declaration identity with exact tested implementation,
+  dependency, configuration, generated/native input, target, and toolchain evidence owned by the
+  managed maturity inventory.
+- Impact: execution/build drift invalidates maturity evidence without inventing a runtime producer,
+  closed-input, cache, or build-identity authority, and evidence withdrawal never mutates a registry
+  snapshot.
+- Review: 2026-07-16 producer-identity and evidence-authority architecture review.
+- Rationale: registry declarations and verified execution evidence answer different questions, but
+  one maturity subject must bind both before Baozi makes a support claim.

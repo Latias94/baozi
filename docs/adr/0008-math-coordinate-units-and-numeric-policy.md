@@ -1,329 +1,275 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-09
+updated: 2026-10-31
 authors:
   - Codex
 decision_type: architecture
+depends_on:
+  - docs/adr/0045-canonical-scene-ownership-construction-and-generation.md
 related:
-  - docs/adr/0002-runtime-concurrency-observability.md
-  - docs/adr/0003-core-scene-ir-and-material-model.md
+  - docs/adr/0006-public-api-versioning-and-crate-stability-policy.md
+  - docs/adr/0011-format-support-tiers-and-compatibility-charter.md
+  - docs/adr/0031-animation-skin-morph-and-deformer-contract.md
+  - docs/adr/0032-postprocess-remap-and-derived-data-contract.md
+  - docs/adr/0039-source-document-scene-selection-and-import-closure.md
 ---
 
-# ADR 0008: Math Types, Coordinate Systems, Units, and Numeric Policy
+# ADR 0008: Math Types, Scene Space, Units, and Numeric Policy
 
 ## Context
 
-Model importers are math-heavy. A seemingly small decision such as using `glam::Vec3` in public
-fields or silently converting every import to one coordinate system can force large API churn later.
-
-Baozi needs to interoperate with common Rust math libraries while keeping its core IR independent.
-Users should be able to load assets into applications that use `glam`, `nalgebra`, `cgmath`, game
-engine math types, or custom types. Baozi also needs deterministic post-processing and snapshot
-tests across platforms.
+Coordinate conventions are part of the asset's meaning. A model can have numerically valid
+positions and still render incorrectly when handedness, front-face winding, UV origin, tangent
+basis, units, or matrix conventions are implicit. Animation time also needs more precision than
+renderer-oriented geometry buffers.
 
 ## Decision
 
-Baozi will expose Baozi-owned lightweight math types in `baozi-core`, with optional `mint`
-interoperability as the primary bridge to ecosystem math libraries.
+Baozi exposes small Baozi-owned math types. Public IR types do not expose a parser backend, SIMD
+type, `glam`, `nalgebra`, or `cgmath`. Optional ecosystem adapters are conversions, not IR owners.
 
-The public IR will not expose `glam`, `nalgebra`, `cgmath`, SIMD vector types, or parser backend math
-types.
+Public math semantics are fixed independently from memory layout:
 
-Core numeric policy:
+| Topic | Canonical meaning |
+| --- | --- |
+| vectors | right/left handedness comes from `SceneSpace`, not the vector type |
+| matrices | column vectors; indexed accessors name row and column; a matrix's domain defines its source and destination spaces |
+| authored node transforms | local-to-parent; `p_parent = M_local_to_parent * p_local`; TRS composes as `T * R * S` |
+| quaternion | `(x, y, z, w)` component meaning, finite unit rotation within documented tolerance; named constructors avoid positional ambiguity |
+| angles | radians |
+| normals | inverse-transpose under non-uniform scale |
+| bounds | closed axis-aligned minimum/maximum in the declared owner space |
 
-- canonical geometry scalar is `f32`
-- no generic scalar parameter in the public scene IR
-- parser backends may use `f64` internally when needed, then convert with diagnostics if precision
-  loss is material
-- floating-point equality in tests uses documented epsilon rules
-- SIMD acceleration must be behaviorally equivalent to scalar backends within tolerance
+No `repr(C)`, SIMD alignment, column-major byte storage, or binary ABI follows from these semantic
+rules; ADR 0009 keeps memory layout private.
 
-Coordinate policy:
+Numeric storage is deliberate:
 
-- raw imports preserve source coordinate data by default
-- `Scene` records source coordinate metadata when known
-- normalization is an explicit post-process step
-- the default normalized target is right-handed, Y-up, meters
-- transforms use column-vector math and local-to-parent matrices
+| Value class | Canonical scalar | Rule |
+| --- | --- | --- |
+| positions, normals, tangents, transforms, and material/color factors | `f32` | reject non-finite values; diagnose material narrowing during import |
+| encoded UV, color, and custom attribute storage | ADR 0030 `ComponentType` | preserve admitted width/normalization; built-in evaluated UV/color views use `f32` |
+| animation key time and clip duration | `f64` | preserve authored time domain; do not silently resample |
+| animation TRS samples, morph weights, and morph deltas | `f32` | retain renderer-independent values while keeping source time in `f64` |
+| source unit scale and timing rates | `f64` | finite and positive when known |
+| metadata numeric value | typed `i64`, `u64`, or `f64` | no string coercion |
 
-## Architecture
+The raw scene preserves source numbers and records a complete `SceneSpace`:
+
+- handedness
+- signed up and front axes
+- unit scale to meters
+- clockwise or counter-clockwise front-face winding
+- upper-left or lower-left UV origin, or unknown
+- tangent basis convention and handedness encoding, or unknown
+
+Column vectors and local-to-parent authored node transforms are fixed canonical API semantics,
+not source facts or target options. `SceneSpace` does not carry a duplicate transform-convention
+tag. Inverse bind, correction, and other matrices retain their domain-specific source/destination
+spaces; their meaning is not redefined as a node transform. Removing the redundant tag changes the
+deterministic snapshot schema to revision 4.
+
+Unknown is an explicit value, never a guessed default. The standard spatial target is right-handed,
+positive Y up, negative Z front, meters, and counter-clockwise front faces. `TargetSpace` requires
+these five known spatial facts together. Coordinate conversion preserves UV origin and tangent
+basis declarations. A separate implemented operation is required to change those conventions;
+generated tangents use the documented Baozi basis. Reaching any target requires an explicit
+postprocess operation.
+
+Validation rejects signed up/front axes on the same underlying axis. When both are known, they and
+the declared handedness must derive one finite orthonormal side axis; a complete-space claim cannot
+retain `Unknown`. Front-face winding remains an explicit independent convention, while tangent-basis
+orientation must agree with its declared normal/UV axes and handedness encoding. Every Baozi
+quaternion field, including future static TRS fields, obeys the same finite-unit rule; normalization
+outside tolerance is an explicit diagnosed recovery, not a constructor side effect.
+
+The canonical node base transform preserves one of two authored forms:
+
+- `Matrix`: a finite affine local-to-parent matrix in the convention above; and
+- `Trs`: finite translation, finite unit rotation, and finite scale, with format-defined omitted
+  components materialized as translation zero, rotation identity, and scale one.
+
+For `Trs`, the canonical local matrix is derived as `T * R * S` under the column-vector convention.
+For a conforming `Matrix`, it is the preserved authored matrix. Neither form is silently rewritten
+into the other: format rules decide whether a source matrix must be decomposable or exclude shear,
+and a conversion from matrix to TRS requires an explicit format contract plus provenance and
+authorized representation loss. A derived matrix view never changes which form the source authored.
+
+The canonical `Matrix` invariant is format-independent: every cell is finite and the affine bottom
+row compares exactly to `[0, 0, 0, 1]` under the convention above. Signed zero compares equal to zero
+and its authored bit remains preserved. Canonical construction never stores a near-affine bottom row.
+Format-owned numeric predicates may impose stricter decomposition, orthogonality, singular-scale,
+reflection, or reconstruction rules, but their tolerances cannot relax this canonical affine
+invariant.
+
+A non-glTF format may define an explicit recovery that accepts a near-affine source value only when
+it normalizes the bottom row before canonical construction and records the original source values,
+recovery provenance, and policy-authorized loss. Such output is a recovered canonical matrix, not a
+bit-preserved authored matrix. A conforming admission path never clamps, rewrites, or changes the
+stored authored matrix bits. ADR 0027 rejects the corresponding invalid glTF input instead of
+recovering it.
+
+The unit-quaternion rule applies to rotation sample values, not cubic interpolation derivatives.
+Rotation cubic tangents are finite `Vec4<f32>` derivatives in authored component order and are not
+normalized or interpreted as rotations. ADR 0031 owns channel cardinality and tangent layout.
 
 ```mermaid
-flowchart TD
-    Format[Format parser] --> SourceSpace[Source coordinate metadata]
-    Format --> Builder[SceneBuilder with Baozi math types]
-    Builder --> Scene[Scene]
-    Scene --> Post[Optional coordinate normalization]
-    Post --> Target[Right-handed Y-up meters]
-
-    Scene --> Mint[mint conversions]
-    Mint --> Glam[glam]
-    Mint --> Nalgebra[nalgebra]
-    Mint --> Cgmath[cgmath]
-    Scene --> Custom[User custom math]
+flowchart LR
+    Source[Source numeric values and conventions] --> Raw[Validated raw scene]
+    Raw -->|inspect| Caller[Source-preserving consumer]
+    Raw -->|explicit conversion| Plan[Coordinate and unit operation]
+    Plan --> Geometry[Geometry and topology]
+    Plan --> Hierarchy[Nodes, cameras, lights]
+    Plan --> Deform[Skins, morphs, animation]
+    Plan --> Derived[Invalidate or recompute bounds, normals, tangents]
+    Derived --> Normalized[Validated normalized scene]
 ```
 
-```mermaid
-sequenceDiagram
-    participant Parser
-    participant Builder
-    participant Validator
-    participant Post
-    participant User
+Coordinate conversion is atomic across every affected domain. It updates base positions, normals,
+tangents, morph position/normal/tangent deltas, spatial mesh-instance attributes, winding, node
+transforms, inverse bind and correction matrices, cameras, lights, animation values, material
+displacement strengths, material thickness factors, every other explicitly Scene-unit material or
+binding parameter, and scene-space metadata together. The conversion preserves each value's physical
+meaning before and after the unit-scale change and invalidates derived data it cannot recompute. An
+operation that cannot convert a present semantic fails or reports policy-approved loss; it never
+returns a scene whose metadata claims a conversion that only base geometry received.
 
-    Parser->>Builder: push f32 Baozi math values
-    Parser->>Builder: record units, axes, handedness if known
-    Builder->>Validator: validate finite values and transforms
-    Validator-->>Post: raw source-preserving Scene
-    Post->>Post: optional normalize coordinates and units
-    Post-->>User: Scene with Baozi math, mint conversions available
-```
+A basis transform with negative determinant reverses topology winding when required to preserve the
+declared front face and updates tangent handedness consistently. The operation validates the output
+space descriptor and geometric orientation together before commit.
 
-## Public Math Types
+For signed cardinal axes, define the basis columns as `(side, up, front)`, where
+`side = handedness_sign * cross(front, up)`. Conversion from source to target uses the signed
+permutation `Q = B_target * transpose(B_source)` and positive unit ratio
+`s = source_units / target_units`. Positions and translations use `s * Q`, normals and tangent
+directions use `Q`, tangent `w` uses `det(Q)`, and a local-to-parent matrix uses
+`H * M * inverse(H)` with `H = diag(s * Q, 1)`. TRS scale components are permuted without the
+basis signs or unit factor; quaternion vector components use `det(Q) * Q` and retain `w`.
+Matrix/TRS authored form is preserved, including shear and singular affine matrices.
 
-`baozi-core` should define small types such as:
+Inverse binds and optional skin corrections use the same `H * M * inverse(H)` map without
+changing their declared source/destination spaces. Position morph deltas use `s * Q`; Normal
+and Tangent morph deltas use `Q`. Sparse omissions and explicit entries keep their representation.
+Animation values and cubic derivatives use the linear map of their target: `s * Q` for translation,
+unsigned axis permutation for scale, and `(det(Q) * Q * xyz, w)` for quaternion components.
+Quaternion derivatives remain arbitrary finite Vec4 values, including zero/nonunit derivatives;
+neither samples nor derivatives receive sign canonicalization or normalization. Key times and
+time-domain rates are unchanged.
 
-```text
-Vec2
-Vec3
-Vec4
-Quat
-Mat4
-Transform
-Aabb
-Color
-```
+Camera/light reference coordinates retain a complete `LocalAxes` signed permutation, with
+reference-to-node matrix `B = [right, up, -forward]`. Conversion composes `B' = Q B` while nodes
+continue to use `H M H^-1`. It does not append compensation nodes or derive one intrinsic axis
+from a fixed-handedness cross product. Camera lengths and finite light ranges scale by `s`;
+photometric intensity remains independent of Scene length units. ADR 0040 owns the complete
+projection/emission reference contract and post-rounding plane constraints.
 
-Design rules:
+Triangle lanes reverse exactly when `(det(Q) < 0) XOR (source_winding != target_winding)`.
+Index and every Corner tuple follow the same `[0, 2, 1]` permutation. A winding-only change does
+not multiply tangent `w` again. Transported normals retain their physical direction; independently
+generating normals from index-order cross products follows that operation's numeric-basis contract.
 
-- types are plain, copyable where appropriate, and documented
-- no public dependency on a large math crate
-- no promise of stable ABI or binary layout unless explicitly marked in a later FFI ADR
-- conversion helpers are cheap and explicit
-- constructors validate or document finite-value expectations
+Unknown source facts require explicit source assumptions. A complete assumption may fill unknown
+fields and repeat matching known fields, but cannot override any known field. The target never
+supplies implicit source facts. A changed conversion reports exactly which fields were assumed.
+Numeric conversion uses F64 intermediates for the uniform scale and one final F32 rounding;
+non-finite output or a nonzero component rounding to zero rejects the transaction.
 
-`mint` support should be optional:
+Floating-point snapshots use deterministic ordering and per-field documented absolute/relative or
+angular tolerances. Tolerances are test comparison policy, not permission to clamp imported data.
 
-```text
-feature = "mint"
-```
+When a format contract uses a numeric predicate beyond the exact canonical affine check, that format
+ADR must freeze the predicate, promotion precision, operation order, inclusive/exclusive
+comparisons, absolute/relative tolerances, zero-scale behavior, and reflection/negative-scale
+behavior. The predicate is Baozi-owned and runs before canonical construction. A backend
+decomposition routine or its test epsilon is not normative. A conforming predicate never rewrites or
+clamps the authored matrix; an explicit recovery follows the separate loss/provenance rule above.
+ADR 0027 supplies the concrete glTF predicate.
 
-When enabled, Baozi math types implement conversions to and from compatible `mint` types. Users can
-then bridge into `glam`, `nalgebra`, `cgmath`, or engine math crates through existing ecosystem
-support.
+### High-Precision CAD Scope
 
-Direct integration features may be added later only if user demand justifies the dependency:
+High-precision computer-aided design (CAD) and engineering geometry are explicitly excluded from
+Baozi's long-term product scope under this accepted decision. “Assimp-class format breadth” means
+broad source ingestion for the canonical graphics/asset IR; it does not imply STEP/IGES/B-rep,
+manufacturing tolerance, exact topology, or source-coordinate precision beyond the declared `f32`
+geometry contract. A format path that requires those guarantees must be rejected or report explicit
+policy-governed precision loss; it cannot claim source-preserving support by storing narrowed values.
 
-```text
-glam-interop
-nalgebra-interop
-cgmath-interop
-```
+That exclusion may change only by reopening this ADR before admitting or implementing a CAD-oriented
+format or workflow. The review must define and provide evidence for all of the following together:
 
-These must stay adapters, not core IR dependencies.
+- target domains and formats, dimensional/unit semantics, model extents, and an explicit absolute,
+  relative, and topology-sensitive error budget;
+- one canonical scalar/storage strategy (`f64`, a distinct CAD IR, or another reviewed model) and the
+  compatibility/migration boundary with the graphics IR;
+- robust-predicate and tolerance semantics for validation, topology, triangulation, transforms,
+  derived data, snapshot/digest, serialization, and postprocess;
+- measured memory, throughput, and cross-platform determinism costs; and
+- independent precision, round-trip, adversarial, and large-coordinate fixtures proving that values
+  which matter to the declared CAD contract do not collapse or change topology.
 
-## Coordinate and Transform Conventions
+Adding a generic scalar parameter, silently widening selected fields, or relying on parser-backend
+`f64` values does not satisfy this gate. Until an accepted amendment lands, roadmap, format maturity,
+facade, and release claims must treat high-precision CAD as out of scope.
 
-Baozi uses these internal conventions for math APIs and post-processing:
+## Considered Options
 
-| Topic | Decision |
-| --- | --- |
-| Vector convention | column vectors |
-| Matrix application | `p_world = M * p_local` |
-| Node transform | local-to-parent |
-| Matrix storage documentation | column-major semantic order |
-| Quaternion | unit quaternion for rotation |
-| Normal transform | inverse-transpose of model matrix when non-uniform scale exists |
-| Default normalized target | right-handed, Y-up, meters |
-| Raw import default | preserve source coordinates |
+### Option A: Expose one ecosystem math crate
 
-The raw imported `Scene` should include metadata:
+This gives rich operators and SIMD quickly, but turns that crate's versions and feature choices into
+Baozi's public compatibility burden. Rejected.
 
-```text
-SceneSpace
-├── handedness: known/unknown/right/left
-├── up_axis: known/unknown/x/y/z/-x/-y/-z
-├── front_axis: known/unknown/x/y/z/-x/-y/-z
-├── unit_scale_to_meters: known/unknown/f32
-└── source_format_notes
-```
+### Option B: Normalize every format while parsing
 
-Importers must not silently normalize unless the import options request it. Baozi deliberately does
-not make the raw unified IR always Y-up, right-handed, and meters. That target is the normalized
-post-process output, not the default parser output.
+This simplifies renderer examples, but loses source truth and duplicates conversion logic across
+importers, especially for skins and tangent bases. Rejected.
 
-## Units Policy
+### Option C: Baozi math, explicit source space, explicit conversion
 
-Unit handling:
+This keeps parser output auditable and lets tools choose source-preserving or normalized workflows.
+Chosen.
 
-- store source unit metadata when known
-- expose `GlobalScale` / `NormalizeUnits` post-process
-- default normalized unit is meter
-- do not guess units for formats that do not specify them
-- emit diagnostics for ambiguous or conflicting unit declarations
+## Consequences
 
-Examples:
+- Geometry remains efficient for common graphics consumers while animation retains `f64` timing.
+- Importers must populate known space fields and leave unknown fields explicit.
+- Matrix and tangent conventions become normative and tested rather than comments on individual
+  importers.
+- High-precision CAD geometry is outside this canonical IR; supporting it requires a separate
+  reopening of this decision and complete precision evidence, not a generic scalar parameter.
 
-- glTF: meters by convention
-- STL: unitless unless caller supplies an option
-- OBJ: unitless unless side metadata or caller option exists
-- 3MF: unit metadata exists and should be preserved
-- FBX/Collada/USD: preserve declared unit metadata and normalize only on request
+## Risks and Mitigations
 
-## Numeric Policy
-
-Canonical scene geometry uses `f32`, matching common real-time graphics pipelines and Assimp-like
-behavior. Baozi is an asset importer, not an exact CAD kernel.
-
-Rules:
-
-- reject or diagnose NaN and infinity in scene data unless a field explicitly allows sentinel values
-- clamp only in documented post-process steps, not silently during parsing
-- preserve original scalar strings or high-precision metadata only when a format needs loss-aware
-  round-trip support
-- use deterministic ordering before floating-point snapshot output
-- document epsilon per comparison type
-
-Suggested tolerances:
-
-| Comparison | Initial tolerance |
-| --- | --- |
-| positions after import | exact parsed f32 or format-specific |
-| transformed positions | `1e-5` relative/absolute baseline |
-| normals/tangents | angular tolerance |
-| bounding boxes | contains all vertices plus epsilon |
-| SIMD vs scalar | same tolerance as scalar algorithm tests |
-
-## Alternatives Considered
-
-### Option A: Expose `glam` in public IR
-
-Pros:
-
-- Excellent performance and ergonomics for game/graphics users.
-- Widely used in Rust graphics stacks.
-- Good SIMD story.
-
-Cons:
-
-- Forces all Baozi users onto one math crate.
-- Makes `nalgebra` and engine-specific integrations second-class.
-- Future `glam` API or feature changes become Baozi API concerns.
-
-Decision: rejected for core public IR. Direct `glam` adapters can be added later.
-
-### Option B: Expose `nalgebra` in public IR
-
-Pros:
-
-- Strong general linear algebra model.
-- Useful for robotics, CAD-like, and scientific users.
-- Mature ecosystem.
-
-Cons:
-
-- Heavier API than Baozi needs for common asset import.
-- Generic dimensions and scalar patterns can complicate public scene types.
-- Less ideal as the default for game/editor loading.
-
-Decision: rejected for core public IR. Adapters can be added later.
-
-### Option C: Baozi-owned math types plus `mint` interoperability
-
-Pros:
-
-- Keeps core IR stable and lightweight.
-- Lets users bridge to common math crates.
-- Avoids locking public scene model to one ecosystem.
-- Keeps SIMD and backend math internal.
-
-Cons:
-
-- Baozi must maintain small math types and conversions.
-- Users may write one extra conversion step.
-- `mint` does not cover every advanced math operation.
-
-Decision: chosen.
-
-### Option D: Always normalize during parsing
-
-Pros:
-
-- Renderer-oriented users get consistently oriented assets by default.
-- Simple examples have fewer visible options.
-
-Cons:
-
-- Tooling, conversion, and diagnostics lose the source-authored coordinate data.
-- STL, OBJ, and other unitless formats require guesses that can be wrong.
-- Cameras, lights, skins, animations, tangents, normal maps, and winding must be converted together;
-  doing this format-by-format inside parsers risks inconsistent behavior.
-- Users cannot compare raw importer output against source files or external oracles cleanly.
-
-Decision: rejected as the default. Keep raw import source-preserving; provide explicit coordinate and
-unit normalization post-process steps targeting right-handed, Y-up, meters.
+| Risk | Severity | Mitigation |
+| --- | --- | --- |
+| `f32` narrows large or precise source geometry | High | Check conversion range/precision, diagnose material loss, and reject non-finite results. |
+| Partial coordinate conversion corrupts animation or skinning | High | Use operation read/write sets and integration fixtures containing all spatial domains. |
+| Unknown source conventions invite caller guesses | Medium | Preserve `Unknown`, allow explicit caller-supplied source overrides, and record them in provenance. |
+| Platform float behavior changes snapshots | Medium | Use scalar reference tests, deterministic ordering, and field-specific tolerances. |
+| Format breadth language silently expands into CAD guarantees | Critical | Keep CAD explicitly excluded from roadmap/maturity/release claims until this ADR is reopened with scalar, tolerance, topology, migration, and conformance evidence. |
 
 ## Success Metrics
 
 | Metric | Target | Measurement |
 | --- | --- | --- |
-| Core independence | `baozi-core` public API exposes no `glam`, `nalgebra`, or `cgmath` types | public API review |
-| Interop | Users can convert common vector/matrix values through `mint` | compile tests |
-| Coordinate clarity | Raw import and normalized output conventions are documented | docs and snapshot tests |
-| Unit correctness | Known unit formats preserve unit metadata | format integration tests |
-| Determinism | scalar and SIMD/parallel math outputs match within tolerance | backend equivalence tests |
-| Error quality | NaN, infinity, and precision-loss cases produce diagnostics | malformed fixture tests |
+| Time fidelity | Distinct authored `f64` times never collapse through `f32` conversion | long-time and close-key fixtures |
+| Space completeness | A complete-space claim has no unknown or contradictory convention | exact/excess field validation tests |
+| Conversion completeness | Every declared spatial domain is converted or the transaction fails | all-domain coordinate fixture and invalidation report |
+| Scope truthfulness | No support or release claim implies high-precision CAD under the `f32` canonical geometry contract | roadmap, format-matrix, facade-doc, and release-doc checks |
 
-## Risks and Mitigations
+## Acceptance Criteria
 
-| Risk | Severity | Likelihood | Mitigation |
-| --- | --- | --- | --- |
-| Baozi math types become underpowered | Medium | Medium | Keep them small and add adapters, not full algebra APIs |
-| Users dislike conversion overhead | Medium | Medium | Provide `mint` conversions and optional direct adapters later |
-| `f32` loses CAD/BIM precision | High | Medium | Document scope, preserve unit/metadata, and revisit precision crate if CAD becomes priority |
-| Coordinate normalization surprises users | High | Medium | Preserve raw coordinates by default; normalize only when requested |
-| Matrix convention mismatch causes bugs | High | Medium | Add explicit tests and examples for transform composition |
-| SIMD output differs across platforms | Medium | Medium | Keep scalar oracle and tolerance-based equivalence tests |
-
-## Implementation Plan
-
-### Phase 0: Core Types
-
-- Define Baozi-owned vector, quaternion, matrix, transform, color, and AABB types.
-- Add finite-value validation helpers.
-- Add `SceneSpace` metadata.
-
-### Phase 1: Interop
-
-- Add optional `mint` feature.
-- Add compile tests for conversions with representative ecosystem math types.
-- Keep direct math crate adapters outside core until needed.
-
-### Phase 2: Coordinate Processing
-
-- Implement coordinate metadata in importers.
-- Add explicit coordinate and unit normalization post-process steps.
-- Add snapshot tests for raw versus normalized scenes.
-
-## Consequences
-
-Positive:
-
-- Baozi remains math-library neutral.
-- Users can integrate with common Rust math ecosystems.
-- Coordinate and unit conversion becomes explicit and testable.
-
-Negative:
-
-- Baozi owns a small math surface.
-- Users may need conversions at API boundaries.
-- Exact high-precision CAD workflows are not the initial canonical target.
-
-## Open Questions
-
-1. Should direct `glam` adapters be part of the first release?
-   Recommendation: not initially. Start with `mint`; add direct adapters when examples show friction.
-2. Should `f64` mesh buffers be supported in core?
-   Recommendation: no for the initial Assimp-like importer. Revisit with a CAD/BIM-specific ADR.
-3. Should matrix memory layout be ABI-stable?
-   Recommendation: no until an FFI ADR exists.
+- Public API inspection finds no third-party math types.
+- Raw fixtures preserve declared handedness, axes, units, winding, UV origin, and tangent basis.
+- Coordinate conversion fixtures cover nodes, geometry, topology, skins, animation, cameras, lights,
+  material/binding Scene-unit parameters, and derived-data invalidation in one transaction, proving
+  equal physical meaning before and after the unit-scale change.
+- Animation times that differ below `f32` precision remain distinct after import.
+- NaN, infinity, invalid unit scales, and invalid quaternions fail validation deterministically.
+- Matrix-authored and TRS-authored nodes retain distinct authored forms while producing the same
+  documented local-matrix view where their numeric transforms are equivalent.
+- Every canonical Matrix has an exact affine bottom row; format-owned stricter admission publishes
+  one backend-independent numeric predicate with fixed orthogonality/decomposition, zero-scale, and
+  reflection fixtures, while explicit non-glTF recovery records normalized source loss/provenance.
+- CAD-oriented format/workflow admission fails governance review unless an accepted update to this
+  ADR supplies the complete precision and migration evidence above.

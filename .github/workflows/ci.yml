@@ -14,21 +14,26 @@ permissions:
   contents: read
 
 env:
-  RUST_FUZZ_NIGHTLY: nightly-2026-05-27
+  RUST_FUZZ_NIGHTLY: nightly-2026-10-28
   CARGO_FUZZ_VERSION: 0.13.2
   ACTIONLINT_VERSION: v1.7.12
   GO_VERSION: 1.26.x
 
 jobs:
   actionlint:
-    name: Workflow lint
-    runs-on: ubuntu-latest
+    name: Workflow and runner contracts
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Check scale runner syntax and CLI
+        run: |
+          python3 -m py_compile scripts/run_scale_profile.py
+          python3 scripts/run_scale_profile.py --help
 
       - name: Install Go
         uses: actions/setup-go@v6
@@ -47,13 +52,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Rust 1.95
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy, rustfmt
-          targets: wasm32-unknown-unknown, wasm32-wasip1
+          targets: wasm32-unknown-unknown, wasm32-wasip1, x86_64-apple-darwin, x86_64-unknown-freebsd, x86_64-unknown-linux-gnux32
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -61,45 +67,312 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,cargo-deny
+          tool: cargo-nextest,cargo-deny@0.20.2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Check workspace
-        run: cargo check --workspace --all-targets
+        run: cargo check --locked --workspace --all-targets
+
+      - name: Check standalone core Scene boundary
+        run: |
+          cargo nextest run --locked -p baozi-core --no-default-features --test public_api
+          cargo test --locked --doc -p baozi-core --no-default-features
 
       - name: Lint workspace
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Test workspace
-        run: cargo nextest run --workspace
+        run: cargo nextest run --locked --workspace --exclude baozi-xtask
+
+      - name: Test all workspace features
+        run: cargo nextest run --locked --workspace --all-features --exclude baozi-xtask
 
       - name: Test documentation examples
-        run: cargo test --doc --workspace --all-features
+        run: cargo test --locked --doc --workspace --all-features
 
       - name: Check documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --all-features --no-deps
+        run: cargo doc --locked --workspace --all-features --no-deps
 
       - name: Check no-default facade
-        run: cargo check -p baozi --no-default-features
+        run: cargo check --locked -p baozi --no-default-features
 
-      - name: Check all format features
-        run: cargo check -p baozi --features all-formats,native-fs
+      - name: Run independent public consumer feature matrix
+        run: python3 scripts/check_features.py --toolchain 1.95.0
+
+      - name: Check exact Linux native filesystem candidate
+        run: cargo check --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-unknown-linux-gnu
 
       - name: Check browser WASM bytes path
-        run: cargo check -p baozi --target wasm32-unknown-unknown --no-default-features --features format-stl,format-obj,format-ply
+        run: cargo check --locked -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats
 
-      - name: Check WASI native-fs path
-        run: cargo check -p baozi --target wasm32-wasip1 --no-default-features --features format-stl,format-obj,native-fs
+      - name: Check WASI bytes and custom-IO path
+        run: cargo check --locked -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
+
+      - name: Check independent browser consumer
+        run: python3 scripts/check_features.py --toolchain 1.95.0 --check --target wasm32-unknown-unknown --case empty --case all
+
+      - name: Install Wasmtime 50.0.0
+        uses: bytecodealliance/actions/wasmtime/setup@9152e710e9f7182e4c29ad218e4f335a7b203613 # v1
+        with:
+          version: "50.0.0"
+
+      - name: Run independent WASI consumers
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run
+        run: |
+          wasmtime --version
+          python3 scripts/check_features.py --toolchain 1.95.0 --release --target wasm32-wasip1 --case empty --case all
+
+      - name: Prove non-candidate native filesystem targets fail closed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedDiagnostic = 'baozi-native-io-candidate is available only on exact runtime candidate targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin; use memory or custom IO'
+          $negativeTargets = @(
+            'wasm32-unknown-unknown'
+            'wasm32-wasip1'
+            'x86_64-apple-darwin'
+            'x86_64-unknown-freebsd'
+            'x86_64-unknown-linux-gnux32'
+          )
+          $installedTargets = @(rustup target list --installed)
+          if ($LASTEXITCODE -ne 0) {
+            throw 'failed to list installed Rust targets'
+          }
+          foreach ($targetTriple in $negativeTargets) {
+            if ($installedTargets -notcontains $targetTriple) {
+              throw "negative target is not installed: $targetTriple"
+            }
+            $cargoOutput = cargo check --locked --color never --manifest-path candidates/baozi-native-io/Cargo.toml --target $targetTriple 2>&1 | Out-String
+            $cargoStatus = $LASTEXITCODE
+            if ($cargoStatus -eq 0) {
+              throw "native IO candidate unexpectedly compiled for $targetTriple"
+            }
+            if ($cargoOutput.Contains("can't find crate for")) {
+              Write-Host $cargoOutput
+              throw "native IO candidate failed because target $targetTriple was not installed"
+            }
+            if (-not $cargoOutput.Contains($expectedDiagnostic)) {
+              Write-Host $cargoOutput
+              throw "native IO candidate failed for $targetTriple without the fail-closed diagnostic"
+            }
+          }
+          # Every nonzero Cargo status above was expected and its diagnostic verified.
+          exit 0
+
+      - name: Check crate dependency architecture
+        run: cargo run --locked -p baozi-xtask -- crate-graph-check
+
+      - name: Check runtime neutrality and host admission
+        run: cargo run --locked -p baozi-xtask -- runtime-admission-check
+
+      - name: Check native filesystem dependency admission
+        run: cargo run --locked -p baozi-xtask -- native-fs-check
+
+      - name: Test baozi-xtask
+        run: cargo nextest run --locked -p baozi-xtask
 
       - name: Check dependency policy
-        run: cargo deny check
+        run: cargo deny --locked check
 
-      - name: Package root publish crate
-        run: cargo package -p baozi-core --no-verify
+      - name: Check fuzz dependency policy
+        run: cargo deny --locked --manifest-path fuzz/Cargo.toml check
+
+      - name: Check standalone native candidate dependency policy
+        run: cargo deny --locked --all-features --manifest-path candidates/baozi-native-io/Cargo.toml --config deny.toml check
+
+      - name: Package release leaf crates
+        run: |
+          cargo package --locked -p baozi-operation
+          cargo package --locked -p baozi-io
+
+  stable:
+    name: Current stable Rust checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install current stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Record Rust toolchain
+        run: rustc -Vv
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Lint current stable workspace
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test current stable workspace
+        run: cargo nextest run --locked --workspace --all-features
+
+      - name: Test current stable documentation examples
+        run: cargo test --locked --doc --workspace --all-features
+
+  package-consumers:
+    name: ${{ matrix.target }} packaged consumers (${{ matrix.toolchain }}, ${{ matrix.profile }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            toolchain: "1.95.0"
+            profile: debug
+            profile_args: ""
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            toolchain: stable
+            profile: release
+            profile_args: --release
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            toolchain: "1.95.0"
+            profile: debug
+            profile_args: ""
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            toolchain: stable
+            profile: release
+            profile_args: --release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - name: Record Rust toolchain and verify exact runner host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rustcVersion = @(rustc -vV)
+          if ($LASTEXITCODE -ne 0) {
+            throw 'rustc -vV failed'
+          }
+          $rustcVersion | Write-Output
+          $rustcHostLines = @($rustcVersion | Where-Object { $_ -like 'host: *' })
+          if ($rustcHostLines.Count -ne 1) {
+            throw 'rustc -vV did not report exactly one host triple'
+          }
+          $rustcHostTriple = $rustcHostLines[0].Substring('host: '.Length)
+          if ($rustcHostTriple -ne '${{ matrix.target }}') {
+            throw "runner host $rustcHostTriple does not match matrix target ${{ matrix.target }}"
+          }
+
+      - name: Build and execute all fixed packaged-consumer cases
+        run: python scripts/check_packages.py --toolchain "${{ matrix.toolchain }}" ${{ matrix.profile_args }}
+
+  native-fs-candidate:
+    name: Native filesystem candidate (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Python for Windows native fixtures
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Rust 1.95
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      - name: Verify exact runner host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rustcHostLines = @(rustc -vV | Where-Object { $_ -like 'host: *' })
+          if ($LASTEXITCODE -ne 0 -or $rustcHostLines.Count -ne 1) {
+            throw 'rustc -vV did not report exactly one host triple'
+          }
+          $rustcHostTriple = $rustcHostLines[0].Substring('host: '.Length)
+          if ($rustcHostTriple -ne '${{ matrix.target }}') {
+            throw "runner host $rustcHostTriple does not match matrix target ${{ matrix.target }}"
+          }
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Check native filesystem dependency admission
+        run: cargo run --locked -p baozi-xtask --target "${{ matrix.target }}" -- native-fs-check
+
+      - name: Check native filesystem candidate formatting
+        run: cargo fmt --manifest-path candidates/baozi-native-io/Cargo.toml -- --check
+
+      - name: Check bounded native backend formatting
+        run: cargo fmt --manifest-path candidates/baozi-native-io/vendor/cap-primitives/Cargo.toml -- --check
+
+      - name: Lint native filesystem candidate
+        run: cargo clippy --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" --all-features --all-targets -- -D warnings
+
+      - name: Test capability-bound native filesystem candidate without skipped fixtures
+        run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}"
+
+      - name: Test bounded native backend and reparse decoding
+        run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" -p cap-primitives --lib
+
+      - name: Test repository filesystem candidate operational and fail-closed contracts
+        run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" --features repository-capture
+
+      - name: Test Apple portable workspace on the actual ARM64 host
+        if: runner.os == 'macOS'
+        run: cargo nextest run --locked --workspace --all-features --exclude baozi-xtask --target "${{ matrix.target }}" --build-jobs 1 --test-threads 2
+
+      - name: Test Apple workspace documentation examples
+        if: runner.os == 'macOS'
+        run: cargo test --locked --workspace --all-features --doc --target "${{ matrix.target }}" --jobs 1
 
   fuzz:
     name: ${{ matrix.target }} sanitizer fuzz smoke
@@ -111,8 +384,9 @@ jobs:
         target:
           - stl_import
           - obj_import
-          - obj_postprocess
           - ply_import
+          - gltf_import
+          - registry_detection
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -133,38 +407,24 @@ jobs:
         run: cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
 
       - name: Check fuzz target
-        run: cargo fuzz check "${{ matrix.target }}"
+        run: |
+          cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
+          cargo fuzz check "${{ matrix.target }}"
 
       - name: Run fuzz smoke
-        run: cargo fuzz run "${{ matrix.target }}" -- -runs=256
+        run: |
+          mkdir -p "fuzz/artifacts/${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}"
+          set -o pipefail
+          cargo fuzz run --sanitizer address "${{ matrix.target }}" -- -runs=256 2>&1 | tee "fuzz/artifacts/${{ matrix.target }}/fuzz.log"
+          git diff --exit-code -- fuzz/Cargo.lock
 
-  experimental-fuzz-check:
-    name: ${{ matrix.target }} experimental fuzz check
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - gltf_import
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - name: Retain fuzz smoke corpus and logs
+        if: always()
+        uses: actions/upload-artifact@v7
         with:
-          persist-credentials: false
-
-      - name: Install pinned nightly Rust
-        # Dated nightly toolchains use the action's explicit toolchain input path.
-        # glTF remains check-only until the bootstrap backend no longer aborts under fuzz.
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_FUZZ_NIGHTLY }}
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
-
-      - name: Check fuzz target
-        run: cargo fuzz check "${{ matrix.target }}"
+          name: ${{ matrix.target }}-smoke-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            fuzz/artifacts/${{ matrix.target }}/**
+            fuzz/corpus/${{ matrix.target }}/**
+          if-no-files-found: ignore
+          retention-days: 30

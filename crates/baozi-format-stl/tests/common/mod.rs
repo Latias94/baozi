@@ -1,9 +1,16 @@
 #![allow(dead_code)]
 
-use baozi_core::{BaoziError, Diagnostic, Result, Scene};
-use baozi_format_stl::StlImporter;
-use baozi_import::{FormatImporter, ImportContext, ImportOptions};
+use baozi_format_stl::{FORMAT_ID, StlImporter};
+use baozi_import::authoring::FormatId;
+use baozi_import::{
+    FormatFailureDetailValue, FormatFailureEnvelope, FormatSelection, ImportCause,
+    ImportConfigOverlay, ImportFailure, ImportOperationControl, ImportReport, ImportRequest,
+    ImportRequestLayer, ImportResult, OptionCompileLimits, PreparedImportRequest,
+    RegistryBuildLimits, RegistryBuilder, ResourceLimits, ResourceLimitsOverlay, SceneSnapshot,
+    SceneSnapshotError, SceneSnapshotLimits, import_asset,
+};
 use baozi_io::{AssetPath, MemoryAssetIo};
+use std::error::Error;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
@@ -45,34 +52,169 @@ pub fn ascii_triangle(name: &str) -> String {
     )
 }
 
-pub fn import_bytes(source: &str, bytes: &[u8]) -> Result<(Scene, Vec<Diagnostic>)> {
-    let (scene, diagnostics) = import_bytes_result(source, bytes, ImportOptions::memory())?;
-    Ok((scene?, diagnostics))
-}
-
-pub fn import_bytes_result(
+pub fn import_bytes(
     source: &str,
     bytes: &[u8],
-    options: ImportOptions,
-) -> Result<(Result<Scene>, Vec<Diagnostic>)> {
-    let path = AssetPath::new(source)?;
-    let mut io = MemoryAssetIo::new();
-    io.insert(path.clone(), Arc::<[u8]>::from(bytes));
-    let mut ctx = ImportContext::with_options(&io, path, options);
-    let result = StlImporter.read(&mut ctx);
-    let diagnostics = ctx.into_diagnostics();
-    Ok((result, diagnostics))
+) -> Result<ImportReport, Box<dyn Error + Send + Sync>> {
+    match import_bytes_with_limits(source, bytes, ResourceLimits::default()).result {
+        Ok(report) => Ok(report),
+        Err(failure) => Err(Box::new(failure)),
+    }
 }
 
-pub fn expected_error(result: Result<Scene>) -> Result<BaoziError> {
-    match result {
-        Ok(_) => Err(BaoziError::parse(
-            "test",
-            None,
-            "expected STL import to fail",
-        )),
-        Err(error) => Ok(error),
+pub fn scene_snapshot(report: &ImportReport) -> Result<SceneSnapshot, SceneSnapshotError> {
+    let limits = SceneSnapshotLimits::try_new(16 * 1024, 64, 1_000_000)?;
+    let snapshot = report.scene().capture_snapshot(limits)?;
+    assert!(!snapshot.preview_bytes_truncated());
+    assert!(!snapshot.preview_items_truncated());
+    Ok(snapshot)
+}
+
+pub fn snapshot_line<'snapshot>(
+    snapshot: &'snapshot SceneSnapshot,
+    prefix: &str,
+) -> &'snapshot str {
+    snapshot
+        .preview()
+        .lines()
+        .find(|line| line.trim_start().starts_with(prefix))
+        .unwrap_or_else(|| panic!("missing canonical snapshot line: {prefix}"))
+}
+
+pub struct TestImportOutcome<T> {
+    result: Result<T, ImportFailure>,
+}
+
+impl<T> TestImportOutcome<T> {
+    pub fn new(result: ImportResult<T>) -> Self {
+        let result = result.map_err(|error| {
+            error.into_operation_failure().unwrap_or_else(|source| {
+                panic!("test import operation could not initialize: {source}")
+            })
+        });
+        Self { result }
     }
+
+    pub fn expect(self, message: &str) -> T {
+        match self.result {
+            Ok(value) => value,
+            Err(failure) => panic!("{message}: {failure:?}"),
+        }
+    }
+
+    pub fn expect_err(self, message: &str) -> ImportFailure {
+        match self.result {
+            Ok(_) => panic!("{message}"),
+            Err(failure) => failure,
+        }
+    }
+}
+
+pub fn import_bytes_with_limits(
+    source: &str,
+    bytes: &[u8],
+    limits: ResourceLimits,
+) -> TestImportOutcome<ImportReport> {
+    let path = AssetPath::new(source).expect("test source path must be valid");
+    let io = MemoryAssetIo::new();
+    io.try_insert(path.clone(), Arc::<[u8]>::from(bytes))
+        .expect("test asset insertion must succeed");
+    let request = request(limits, false);
+    TestImportOutcome::new(import_asset(
+        &request,
+        &io,
+        path,
+        ImportOperationControl::default(),
+    ))
+}
+
+pub fn import_bytes_forced_with_limits(
+    source: &str,
+    bytes: &[u8],
+    limits: ResourceLimits,
+) -> TestImportOutcome<ImportReport> {
+    import_bytes_forced_with_limits_and_control(
+        source,
+        bytes,
+        limits,
+        ImportOperationControl::default(),
+    )
+}
+
+pub fn import_bytes_forced_with_limits_and_control(
+    source: &str,
+    bytes: &[u8],
+    limits: ResourceLimits,
+    control: ImportOperationControl,
+) -> TestImportOutcome<ImportReport> {
+    let path = AssetPath::new(source).expect("test source path must be valid");
+    let io = MemoryAssetIo::new();
+    io.try_insert(path.clone(), Arc::<[u8]>::from(bytes))
+        .expect("test asset insertion must succeed");
+    let request = request(limits, true);
+    TestImportOutcome::new(import_asset(&request, &io, path, control))
+}
+
+pub fn expected_stl_failure(failure: &ImportFailure) -> &FormatFailureEnvelope {
+    match failure.cause() {
+        ImportCause::Format(envelope) if envelope.format().as_str() == "org.baozi.stl" => envelope,
+        cause => panic!("expected an STL-owned format failure, got {cause:?}"),
+    }
+}
+
+pub fn stl_unsigned_detail(envelope: &FormatFailureEnvelope, key: &str) -> Option<u64> {
+    envelope.details().iter().find_map(|detail| {
+        if detail.key() == key {
+            match detail.value() {
+                FormatFailureDetailValue::Unsigned(value) => Some(value),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
+}
+
+pub fn stl_string_detail<'failure>(
+    envelope: &'failure FormatFailureEnvelope,
+    key: &str,
+) -> Option<&'failure str> {
+    envelope.details().iter().find_map(|detail| {
+        if detail.key() == key {
+            match detail.value() {
+                FormatFailureDetailValue::String(value) => Some(value.as_str()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
+}
+
+fn request(limits: ResourceLimits, forced: bool) -> PreparedImportRequest {
+    let mut builder = RegistryBuilder::new();
+    builder
+        .register(StlImporter)
+        .expect("STL registration must be valid");
+    let snapshot = builder
+        .freeze(RegistryBuildLimits::default())
+        .expect("STL registry must freeze");
+    let mut config = ImportConfigOverlay::default()
+        .with_resource_limits(ResourceLimitsOverlay::from_limits(limits));
+    if forced {
+        config = config.with_format_selection(FormatSelection::Forced(
+            FormatId::new(FORMAT_ID).expect("static STL format id must be valid"),
+        ));
+    }
+    snapshot
+        .compile_request(
+            &ImportRequest::from_layers(
+                ImportRequestLayer::default(),
+                ImportRequestLayer::new(config),
+            ),
+            OptionCompileLimits::default(),
+        )
+        .expect("STL request must compile")
 }
 
 fn push_vec3(bytes: &mut Vec<u8>, values: [f32; 3]) {
