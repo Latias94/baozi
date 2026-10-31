@@ -10,6 +10,14 @@ keeps their output, and writes a short report; timing and RSS have no pass thres
 by repeated triangle records, with 256 faces at 1x. `import_scale_contract` checks 1x, 10x, and 100x.
 `import_baseline` and `import_scale_probe` also exercise 1000x.
 
+The separate `unique_vertex_growth_contract` imports 256, 1,024, and 4,096 triangles with three
+distinct, nonreused vertices each. Public typed reads check every position and index as well as
+the complete geometry counts. Real `WorkUnits` must fit fourfold prior work plus the larger
+input's heap-sort upper bound: `2m * (floor(log2(m)) + 1)` comparisons, rounded up to the existing
+64-unit work block. The input uses fixed-width records, so bytes grow exactly fourfold. This
+allows the actual position-normalization sort without a timing tolerance or a quadratic scan.
+Terminal resource/vertex/topology counters and zero live bytes/reservations remain required.
+
 The deterministic test checks affine primary-byte, record, token, and face counters, the expected
 scene shape and index count, and a terminal ledger with no retained live bytes or reservations.
 Consumed work must not exceed attempted work. Declared peak-live memory must fit the reviewed affine
@@ -23,6 +31,7 @@ Run that test independently with the OBJ feature set:
 
 ```text
 cargo nextest run --locked -p baozi --no-default-features --features format-obj --test import_scale_contract
+cargo nextest run --locked -p baozi --no-default-features --features format-obj --test unique_vertex_growth_contract
 ```
 
 The existing probe also checks terminal ledger state, scene shape, and the declared-memory envelope.
@@ -46,7 +55,7 @@ earlier measurements. The default creates a timestamped directory below `target/
 Commands run sequentially in the repository and reuse Cargo's normal target directory.
 `CARGO_BUILD_JOBS` defaults to 1 when unset.
 
-The driver runs the deterministic nextest target, the `obj_face_import_scale` Criterion group, and a
+The driver runs both deterministic nextest targets, the `obj_face_import_scale` Criterion group, and a
 build of the existing `import_scale_probe` benchmark. Every Cargo invocation uses `--locked`,
 `--no-default-features`, and `--features format-obj`. Criterion uses a one-second warm-up, three-second
 measurement, 20 samples, and 2,000 resamples. Cargo's JSON build output supplies the probe executable

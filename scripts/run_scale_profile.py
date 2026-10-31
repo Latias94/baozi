@@ -94,6 +94,7 @@ def collect(artifact_root: Path, report: dict) -> None:
 
     run("contract", [
         "cargo", "nextest", "run", *CARGO_FLAGS, "--test", "import_scale_contract",
+        "--test", "unique_vertex_growth_contract",
     ], 900)
     run("criterion", [
         "cargo", "bench", *CARGO_FLAGS, "--bench", "import_baseline", "--",
