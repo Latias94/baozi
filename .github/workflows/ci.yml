@@ -224,17 +224,31 @@ jobs:
         run: cargo test --locked --doc --workspace --all-features
 
   package-consumers:
-    name: Windows packaged consumers (${{ matrix.toolchain }}, ${{ matrix.profile }})
-    runs-on: windows-2025
+    name: ${{ matrix.target }} packaged consumers (${{ matrix.toolchain }}, ${{ matrix.profile }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - toolchain: "1.95.0"
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            toolchain: "1.95.0"
             profile: debug
             profile_args: ""
-          - toolchain: stable
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            toolchain: stable
+            profile: release
+            profile_args: --release
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            toolchain: "1.95.0"
+            profile: debug
+            profile_args: ""
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            toolchain: stable
             profile: release
             profile_args: --release
     steps:
@@ -253,8 +267,23 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
 
-      - name: Record Rust toolchain
-        run: rustc -Vv
+      - name: Record Rust toolchain and verify exact runner host
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rustcVersion = @(rustc -vV)
+          if ($LASTEXITCODE -ne 0) {
+            throw 'rustc -vV failed'
+          }
+          $rustcVersion | Write-Output
+          $rustcHostLines = @($rustcVersion | Where-Object { $_ -like 'host: *' })
+          if ($rustcHostLines.Count -ne 1) {
+            throw 'rustc -vV did not report exactly one host triple'
+          }
+          $rustcHostTriple = $rustcHostLines[0].Substring('host: '.Length)
+          if ($rustcHostTriple -ne '${{ matrix.target }}') {
+            throw "runner host $rustcHostTriple does not match matrix target ${{ matrix.target }}"
+          }
 
       - name: Build and execute all fixed packaged-consumer cases
         run: python scripts/check_packages.py --toolchain "${{ matrix.toolchain }}" ${{ matrix.profile_args }}
@@ -262,7 +291,9 @@ jobs:
   native-fs-candidate:
     name: Native filesystem candidate (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -332,6 +363,14 @@ jobs:
 
       - name: Test repository filesystem candidate operational and fail-closed contracts
         run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" --features repository-capture
+
+      - name: Test Apple portable workspace on the actual ARM64 host
+        if: runner.os == 'macOS'
+        run: cargo nextest run --locked --workspace --all-features --exclude baozi-xtask --target "${{ matrix.target }}" --build-jobs 1 --test-threads 2
+
+      - name: Test Apple workspace documentation examples
+        if: runner.os == 'macOS'
+        run: cargo test --locked --workspace --all-features --doc --target "${{ matrix.target }}" --jobs 1
 
   fuzz:
     name: ${{ matrix.target }} sanitizer fuzz smoke

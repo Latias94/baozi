@@ -1881,6 +1881,29 @@ results, exact fallback traces, and current immutable ASan evidence now cover th
 cutovers. Apple ARM64 runtime/permission execution remains the concrete outstanding native
 platform item; candidate registration is unchanged and the A–H goal is not marked complete.
 
+## Apple ARM64 Acceptance Wiring (2026-10-31)
+
+A further completion audit found that Apple CI exercised the native candidate but did not run
+the standalone packaged semantic consumer. The existing `package-consumers` job now has four
+explicit native-host cases: Windows x86_64 and Apple ARM64 each execute all twelve cases in
+MSRV/debug and current-stable/release. Each job records the compiler identity and rejects a
+host/target mismatch before packaging. The Apple native candidate job additionally executes the
+portable all-feature workspace tests and doctests on its verified ARM64 host, with one Cargo build
+job and two workspace test threads. Existing read-only PR/main triggers remain unchanged.
+
+All three workflow files pass local actionlint. The new host-check script was executed locally:
+it accepts the actual Windows host and rejects the Apple triple on that host. Independent read-only
+configuration review found no actionable defect. These are configuration and host-check results,
+not Apple execution evidence; no broad Rust rerun is inferred or required for the workflow-only
+change.
+
+Read-only GitHub API inspection found only old-main results in the five most recent runs, all at
+`2743f0028c37e5790538eb319997e11ab3f3ea37`, and no remote
+`refactor/baozi-canonical-architecture` branch. Those results cannot qualify current local source.
+Running the updated Apple jobs requires publishing the current branch and opening a PR (or a
+separately authorized real-host runner). No branch push, PR creation or hosted workflow execution
+is claimed by this wiring change. Actual Apple runtime/permission and artifact results remain open.
+
 ## A–H Acceptance Audit (2026-10-31)
 
 Earlier entries describe their own increments and source revisions. This audit replaces the stale

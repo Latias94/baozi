@@ -37,8 +37,8 @@ Review these pins when changing CI, investigating tooling failures, or promoting
 
 The dated fuzz nightly intentionally uses `dtolnay/rust-toolchain@master` with a `toolchain` input.
 The workspace job tests MSRV through `dtolnay/rust-toolchain@1.95.0`. A separate current-stable
-job runs strict workspace Clippy, all-feature tests, and doctests. The Windows packaged-consumer
-matrix additionally tests current stable in release mode. Both stable jobs record `rustc -Vv`,
+job runs strict workspace Clippy, all-feature tests, and doctests. The Windows and Apple ARM64
+packaged-consumer matrix additionally tests current stable in release mode. Stable jobs record `rustc -Vv`,
 so a rolling stable result has an exact compiler identity.
 
 ## Local Checks
@@ -76,8 +76,9 @@ each package's normalized metadata, README and licenses, and resolves local depe
 their extracted contents. It builds and executes all twelve fixed consumer cases in a fresh
 artifact build directory: no features, curated defaults, each format independently, postprocessing,
 all formats, tracing, mint, and all features. The MSRV/debug and current-stable/release Windows
-jobs execute the same maintained semantic consumer, including the ordinary main-stack import and
-application-buffer workflow.
+and Apple ARM64 jobs execute the same maintained semantic consumer, including the ordinary
+main-stack import and application-buffer workflow. Each checks the actual compiler host against
+its exact target before building; the artifact matrix is not a cross-compile substitute.
 
 There is currently no release-registered `native-fs` or low-level `fs` feature. The unpublished
 `baozi-native-io-candidate` package has its own workspace/lockfile and an optional
@@ -92,6 +93,11 @@ GitHub Actions binds each runtime candidate to one fixed runner and exact target
 nextest command. Candidate fixture setup is fail-closed; the suite contains no `SKIP` path.
 Unix candidate tests require an unprivileged runner so the search-permission fixture can verify
 an actual host denial. Root or another DAC bypass fails that fixture rather than passing it silently.
+The Apple candidate job also executes the portable all-feature workspace tests and doctests on
+that actual ARM64 host. It uses one Cargo build job and two workspace test threads. Its 45-minute
+ceiling includes those checks; the separate packaged-consumer jobs retain their own 45-minute
+ceilings. Workflow wiring is not execution evidence: Apple qualification requires completed
+current-source jobs and their recorded host/toolchain identities.
 
 Browser WASM remains compile-only. WASI executes the independent no-feature and all-feature release
 consumers under Wasmtime 50.0.0, including byte/custom-IO imports, typed semantic value assertions,

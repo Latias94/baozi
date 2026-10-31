@@ -12,6 +12,9 @@ python scripts/check_packages.py --toolchain 1.95.0 --case all --target x86_64-p
 ```
 
 Without `--case`, the script runs the fixed matrix from `scripts/check_features.py`.
+CI executes that complete matrix on Windows x86_64 and Apple ARM64, using MSRV/debug and
+current-stable/release jobs on each actual host. Each job verifies the compiler host before
+packaging and running the consumer. A configured job alone does not establish target qualification.
 Repeat `--case` to select a subset of the twelve maintained cases. Fixed cases retain that matrix's handwritten
 expected format sets; the driver does not infer expectations from feature wiring.
 The maintained consumer forwards every public facade feature exactly once, so its
