@@ -322,9 +322,14 @@ then reject an escaping final-link replacement. Linux checks a real `/proc/self/
 whose outside contents are first verified through a host read. These fixtures improve the
 executable matrix without proving every thread schedule or backend retry/fallback path.
 
-Complete promotion still needs platform-local evidence for the remaining matrix, including
-search-permission failure, Windows case/8.3 aliases and unknown/volume-mount reparse points, and
-actual Apple ARM64 execution. Candidate membership and release registration remain distinct.
+A Unix search-permission fixture now removes execute/search permission from an intermediate
+directory, verifies actual host `PermissionDenied`, and requires the capability open to return
+the same typed class. It restores the permissions before asserting and rechecks successful reads.
+The fixture requires an unprivileged runner; a privileged bypass fails setup instead of skipping.
+It executed on Linux under UID 1000. Actual Apple ARM64 execution, including this permission case,
+Windows case/8.3 aliases and unknown/volume-mount reparse points, and the remaining backend
+retry/fallback evidence still precede complete promotion. Candidate membership and release
+registration remain distinct.
 
 ## Residual Risks
 

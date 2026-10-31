@@ -685,6 +685,46 @@ mod tests {
         assert!(io.open(&request).is_err(), "the full chain must not escape");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn missing_directory_search_permission_returns_a_typed_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempRoot::new("search-permission");
+        let restricted = root.path().join("restricted");
+        fs::create_dir(&restricted).expect("create the restricted directory");
+        let file = restricted.join("payload.bin");
+        fs::write(&file, b"authorized immutable payload").expect("write permission fixture");
+        let io = FileSystemAssetIo::from_capability(
+            NativeDirectoryCapability::open_ambient(root.path()).expect("open root capability"),
+        );
+        let request = AssetPath::new("restricted/payload.bin").unwrap();
+        assert_eq!(
+            read_all(io.open(&request).unwrap()),
+            b"authorized immutable payload"
+        );
+        let permissions = fs::metadata(&restricted).unwrap().permissions();
+        fs::set_permissions(&restricted, fs::Permissions::from_mode(0o600))
+            .expect("remove directory search permission");
+        let host_result = fs::File::open(&file);
+        let result = io.open(&request);
+        // Restore the fixture before asserting; privileged runners must fail setup, never skip.
+        fs::set_permissions(&restricted, permissions).expect("restore directory permissions");
+        assert_eq!(
+            host_result
+                .expect_err("candidate runner must enforce search denial; use an unprivileged user")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let error = result.expect_err("capability resolution must preserve search denial");
+        assert_eq!(error.stage(), AssetOpenStage::Open);
+        assert_eq!(error.kind(), AssetOpenErrorKind::PermissionDenied);
+        assert_eq!(
+            read_all(io.open(&request).unwrap()),
+            b"authorized immutable payload"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_firewall_rejects_ads_device_and_namespace_forms_before_open() {

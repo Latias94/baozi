@@ -1251,9 +1251,9 @@ On Ubuntu 26.04 x86_64 under WSL2, candidate runtime IO passed **43/43**, operat
 **61/61**, and the candidate facade **55/55**, all without skips. The locked native dependency check
 passed all 14 profiles. Strict IO all-target/all-feature Clippy, formatting, and diff checks passed.
 
-These are candidate development results. Search-permission failure, Windows case/8.3 alias
-oracles and unknown/volume-mount reparse fixtures, exact backend retry/fallback evidence, and
-actual Apple ARM64 execution remain required before the complete promotion matrix can close.
+These are candidate development results. Windows case/8.3 alias oracles and unknown/volume-mount
+reparse fixtures, exact backend retry/fallback evidence, and actual Apple ARM64 execution remain
+required before the complete promotion matrix can close.
 The race schedules are bounded samples rather than a proof of every interleaving. Release
 registration remains empty.
 
@@ -1261,6 +1261,16 @@ Logs are `target/review/h-windows-native-runtime.log`, `h-windows-native-reposit
 `h-windows-native-facade.log`, `h-linux-native-admission.log`, `h-linux-native-runtime.log`,
 `h-linux-native-repository.log`, `h-linux-native-facade.log`, `h-native-clippy.log`, and
 `h-native-fmt.log`.
+
+The subsequent Unix permission fixture first verifies authorized reads, removes search permission
+from an intermediate directory, and requires both actual host denial and typed capability
+`PermissionDenied`. It restores permissions before assertions and verifies a final positive read.
+An account that bypasses the restriction fails fixture setup rather than skipping. This executed
+under Linux UID/GID 1000 after the current-stable API migration. The complete Linux rerun passed
+**44/44 runtime IO, 62/62 repository IO, and 55/55 facade tests**, without skips, plus strict IO
+all-target/all-feature Clippy and all 14 locked native dependency profiles. The current
+`h-linux-native-*.log` files contain that newer run; `h-linux-native-environment.log` records the
+actual user, kernel, and Rust 1.95.0 identity. The permission fixture still needs Apple execution.
 
 ## MSRV and Current-Stable Integration (2026-10-31)
 
@@ -1285,6 +1295,34 @@ Logs are `target/review/h-stable-toolchain.log`, `h-msrv-workspace.log`,
 retained as `h-stable-workspace-before-api-rename.log` and
 `h-stable-clippy-before-api-rename.log`; it is not the final lint result. Final packaged-consumer
 and target execution evidence remains separate below.
+
+## Complete Packaged-Consumer Matrix (2026-10-31)
+
+The maintained consumer built and executed all twelve fixed cases from freshly unpacked archives
+on the ordinary Windows main stack under both required toolchain/profile combinations:
+
+| Toolchain / profile | Retained artifacts | Result |
+| --- | --- | --- |
+| Rust 1.95.0 / debug | `target/package-check-rxbi7xjg/` | 12/12 built and executed |
+| Rust 1.99.1 / release | `target/package-check-psw5mj6c/` | 12/12 built and executed |
+
+Cases are empty, default, default-formats, OBJ, PLY, STL, glTF, postprocess, all-formats,
+tracing, mint, and all. Each run creates all twelve production package archives, validates their
+normalized identity/README/licenses, and resolves local dependencies only from extracted contents.
+Fresh artifact build directories prevent checkout build products from satisfying these checks.
+The unchanged maintained consumer lockfile and `--locked` apply to resolution, build, and execution.
+There is no unlocked retry, generated Rust consumer, or checkout-source substitution.
+
+These cases execute typed geometry/appearance/hierarchy, custom IO/plugin behavior, selected glTF
+deformation/animation, and the complete postprocess/application-buffer workflow where enabled.
+The stable archives additionally contain the subsequently added Unix-only permission test. A
+bounded comparison of 553 packaged Rust files found that test's `fs.rs` to be the sole source
+difference between the two runs; production paths are unchanged. This local artifact simulation
+uses the documented dirty/no-verify archive phase and does not establish exact-tag registry
+packaging, package ownership, authentication, publication, or target promotion.
+
+Logs are `target/review/h-package-msrv-debug-final.log`,
+`h-package-stable-release-final.log`, and `h-package-source-comparison.log`.
 
 ## Remaining acceptance
 
