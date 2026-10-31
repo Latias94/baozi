@@ -8,10 +8,11 @@ object-bound asset IO; ADR 0014 owns parser, panic, unsafe, and FFI policy.
 
 The objectives below are normative acceptance targets, not a blanket assertion that every current
 tracer already conforms. Parser and byte-import claims require their executable parser, facade, and
-resource gates. Object-bound native filesystem claims take effect only after U3 replaces the
-path-based prototype and passes the platform-local admission matrix. Target-profile claims require
-the U9 release matrix. ADR 0037 and ADR 0038 remain non-authoritative proposals regardless of this
-document.
+resource gates. The native filesystem candidate now uses retained capabilities and same-handle
+reads; release claims still require the complete platform-local admission matrix and registration
+under ADR 0034. The old path-based prototype is removed. Target-profile claims require their exact
+executed release matrix and durable qualification; local artifact checks do not imply publication.
+ADR 0037 and ADR 0038 remain non-authoritative proposals regardless of this document.
 
 For first-party parsers, baseline safety admission precedes maturity. A known panic, abort, unbounded
 attacker-controlled allocation/recursion, ambient-IO bypass, or invalid-success path is disabled and

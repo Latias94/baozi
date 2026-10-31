@@ -36,7 +36,10 @@ Review these pins when changing CI, investigating tooling failures, or promoting
 - `RUST_FUZZ_NIGHTLY` in `.github/workflows/ci.yml` and `.github/workflows/fuzz.yml`
 
 The dated fuzz nightly intentionally uses `dtolnay/rust-toolchain@master` with a `toolchain` input.
-The main Stable Rust job uses the `dtolnay/rust-toolchain@1.95.0` action ref.
+The workspace job tests MSRV through `dtolnay/rust-toolchain@1.95.0`. A separate current-stable
+job runs strict workspace Clippy, all-feature tests, and doctests. The Windows packaged-consumer
+matrix additionally tests current stable in release mode. Both stable jobs record `rustc -Vv`,
+so a rolling stable result has an exact compiler identity.
 
 ## Local Checks
 
@@ -63,7 +66,17 @@ cargo nextest run --locked -p baozi-xtask
 cargo nextest run --locked -p baozi-xtask --all-features
 cargo run --locked -p baozi-xtask -- runtime-admission-check
 python scripts/check_features.py --toolchain 1.95.0
+python scripts/check_packages.py --toolchain 1.95.0
+python scripts/check_packages.py --toolchain stable --release
 ```
+
+The package matrix creates fresh archives for the complete production dependency closure, checks
+each package's normalized metadata, README and licenses, and resolves local dependencies only from
+their extracted contents. It builds and executes all twelve fixed consumer cases in a fresh
+artifact build directory: no features, curated defaults, each format independently, postprocessing,
+all formats, tracing, mint, and all features. The MSRV/debug and current-stable/release Windows
+jobs execute the same maintained semantic consumer, including the ordinary main-stack import and
+application-buffer workflow.
 
 There is currently no release-registered `native-fs` or low-level `fs` feature. The explicitly
 non-release `native-fs-candidate`/`fs-candidate` features preserve implementation and test access
@@ -76,12 +89,15 @@ GitHub Actions binds each runtime candidate to one fixed runner and exact target
 `x86_64-pc-windows-msvc`, and `macos-15` / `aarch64-apple-darwin`. Each job first compares the
 `rustc -vV` host with its matrix target, then passes that target explicitly to every Cargo and
 nextest command. Candidate fixture setup is fail-closed; the suite contains no `SKIP` path.
+Unix candidate tests require an unprivileged runner so the search-permission fixture can verify
+an actual host denial. Root or another DAC bypass fails that fixture rather than passing it silently.
 
-Browser WASM and WASI jobs are compile-only today. They prove that the byte/custom-IO feature graph
-builds without enabling the native-filesystem candidate, but they do not execute an import, snapshot,
-or digest golden and therefore cannot satisfy ADR 0034 Portable Byte promotion or release evidence.
-U9 must select and pin executable browser-WASM and WASI runners, then run representative byte and
-custom-IO facade imports plus canonical digest goldens before either target is promoted. CI also
+Browser WASM remains compile-only. WASI executes the independent no-feature and all-feature release
+consumers under Wasmtime 50.0.0, including byte/custom-IO imports, typed semantic value assertions,
+and the application-buffer workflow where compiled in. The workflow pins the
+Wasmtime setup action by commit and its runtime by version. These executed WASI cases do not
+establish browser runtime support or promote any native-filesystem candidate. Portable Byte release
+promotion still follows ADR 0034 and the exact executed target/profile evidence. CI also
 requires the candidate feature to fail with the same explicit Baozi diagnostic on
 `wasm32-unknown-unknown`, `wasm32-wasip1`, Build Monitored `x86_64-apple-darwin`, and audit-only
 `x86_64-unknown-freebsd`, plus ABI-distinct `x86_64-unknown-linux-gnux32`, after first proving each
@@ -137,4 +153,5 @@ format admission, and a historical successful source state does not prove a late
 
 Windows fuzzing is useful for local parser work, but Windows sanitizer setup failures are toolchain
 evidence, not parser evidence. Linux GitHub Actions remains the promotion gate for sanitizer fuzz
-smoke results.
+smoke results. Both PR smoke and scheduled campaigns retain successful or failed corpus/log
+artifacts; their presence preserves progress without implying sustained coverage.

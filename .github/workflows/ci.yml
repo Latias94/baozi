@@ -112,10 +112,20 @@ jobs:
       - name: Check WASI bytes and custom-IO path
         run: cargo check --locked -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
 
-      - name: Check independent browser and WASI consumers
+      - name: Check independent browser consumer
+        run: python3 scripts/check_features.py --toolchain 1.95.0 --check --target wasm32-unknown-unknown --case empty --case all
+
+      - name: Install Wasmtime 50.0.0
+        uses: bytecodealliance/actions/wasmtime/setup@9152e710e9f7182e4c29ad218e4f335a7b203613 # v1
+        with:
+          version: "50.0.0"
+
+      - name: Run independent WASI consumers
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run
         run: |
-          python3 scripts/check_features.py --toolchain 1.95.0 --check --target wasm32-unknown-unknown --case empty --case all
-          python3 scripts/check_features.py --toolchain 1.95.0 --check --target wasm32-wasip1 --case empty --case all
+          wasmtime --version
+          python3 scripts/check_features.py --toolchain 1.95.0 --release --target wasm32-wasip1 --case empty --case all
 
       - name: Prove non-candidate native filesystem targets fail closed
         shell: pwsh
@@ -174,6 +184,77 @@ jobs:
         run: |
           cargo package --locked -p baozi-operation
           cargo package --locked -p baozi-io
+
+  stable:
+    name: Current stable Rust checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install current stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Record Rust toolchain
+        run: rustc -Vv
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Lint current stable workspace
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test current stable workspace
+        run: cargo nextest run --locked --workspace --all-features
+
+      - name: Test current stable documentation examples
+        run: cargo test --locked --doc --workspace --all-features
+
+  package-consumers:
+    name: Windows packaged consumers (${{ matrix.toolchain }}, ${{ matrix.profile }})
+    runs-on: windows-2025
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: "1.95.0"
+            profile: debug
+            profile_args: ""
+          - toolchain: stable
+            profile: release
+            profile_args: --release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - name: Record Rust toolchain
+        run: rustc -Vv
+
+      - name: Build and execute all fixed packaged-consumer cases
+        run: python scripts/check_packages.py --toolchain "${{ matrix.toolchain }}" ${{ matrix.profile_args }}
 
   native-fs-candidate:
     name: Native filesystem candidate (${{ matrix.target }})
@@ -278,5 +359,18 @@ jobs:
 
       - name: Run fuzz smoke
         run: |
-          cargo fuzz run --sanitizer address "${{ matrix.target }}" -- -runs=256
+          mkdir -p "fuzz/artifacts/${{ matrix.target }}" "fuzz/corpus/${{ matrix.target }}"
+          set -o pipefail
+          cargo fuzz run --sanitizer address "${{ matrix.target }}" -- -runs=256 2>&1 | tee "fuzz/artifacts/${{ matrix.target }}/fuzz.log"
           git diff --exit-code -- fuzz/Cargo.lock
+
+      - name: Retain fuzz smoke corpus and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}-smoke-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            fuzz/artifacts/${{ matrix.target }}/**
+            fuzz/corpus/${{ matrix.target }}/**
+          if-no-files-found: ignore
+          retention-days: 30
