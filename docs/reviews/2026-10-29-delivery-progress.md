@@ -1904,6 +1904,23 @@ Running the updated Apple jobs requires publishing the current branch and openin
 separately authorized real-host runner). No branch push, PR creation or hosted workflow execution
 is claimed by this wiring change. Actual Apple runtime/permission and artifact results remain open.
 
+Before remote execution, a Windows-hosted Rust 1.95.0 cross-check of `e1dd050` installed the actual
+`aarch64-apple-darwin` standard-library component and checked the workspace library/binary targets
+with all features. The standalone native candidate also passed all-feature/all-target checks and
+strict Clippy for that Apple target, covering the Darwin production branches and candidate test
+compilation. All twelve standalone consumer feature cases passed target checks outside workspace
+feature unification. These operations reuse `target`, use one Cargo job and `--locked`, and leave
+all maintained lockfiles unchanged. No Rust source change was required.
+
+The broader workspace `--all-targets` cross-check reached an external toolchain limitation:
+dev dependency `alloca` needs a Darwin C compiler, while the available MinGW `cc` rejects `-arch`
+and `-mmacosx-version-min=11.0`. That rejected run remains `target/review/h-apple-workspace-check.log`.
+The positive results are `h-apple-production-check.log`, `h-apple-candidate-check.log`,
+`h-apple-candidate-clippy.log` and `h-apple-independent-consumers-check.log`. They prove compilation
+only: no Apple binary was linked or executed, no permission/race fixture ran, and no cross-check is
+counted as native Apple qualification. Publishing the prepared branch/PR or providing a real host
+is still required to complete the pending runtime jobs.
+
 ## A–H Acceptance Audit (2026-10-31)
 
 Earlier entries describe their own increments and source revisions. This audit replaces the stale
