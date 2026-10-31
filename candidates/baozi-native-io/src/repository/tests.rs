@@ -810,13 +810,25 @@ fn rejects_trailing_slash_symlink_targets_during_root_and_child_traversal() {
 #[cfg(unix)]
 #[test]
 fn unix_special_files_fail_closed_without_blocking() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::DirBuilderExt;
     use std::os::unix::net::UnixListener;
     use std::process::Command;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
-    let fixture = TempRoot::new("special-files");
+    // macOS's default temp directory can make Unix socket paths exceed sun_path.
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after the Unix epoch")
+        .as_nanos();
+    let path = Path::new("/tmp").join(format!("baozi-special-{}-{nonce:x}", std::process::id()));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&path)
+        .expect("create exclusive special-file fixture root");
+    let fixture = TempRoot { path };
     fs::create_dir(fixture.path().join("fifo-root")).expect("create FIFO tree root");
     let fifo_path = fixture.path().join("fifo-root/input.fifo");
     let status = Command::new("mkfifo")
@@ -851,6 +863,11 @@ fn unix_special_files_fail_closed_without_blocking() {
 
     fs::create_dir(fixture.path().join("socket-root")).expect("create socket tree root");
     let socket_path = fixture.path().join("socket-root/input.socket");
+    // A u32 PID and a u128 hex nonce bound this ASCII path to at most 87 bytes.
+    assert!(
+        socket_path.as_os_str().as_bytes().len() < 104,
+        "Unix socket fixture path must fit Darwin's sun_path"
+    );
     let _listener = UnixListener::bind(&socket_path).expect("bind Unix socket fixture");
     let repository =
         RepositoryRoot::open_ambient(fixture.path()).expect("open special-file repository root");

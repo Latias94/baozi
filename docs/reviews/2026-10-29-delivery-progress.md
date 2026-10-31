@@ -2002,3 +2002,15 @@ The corrected vendored backend's Apple library/tests cross-check passes; this re
 evidence only. Six controlled PowerShell subprocess probes preserve success and each rejection
 route, and actionlint, formatting and `git diff --check` pass. Actual hosted negative-target Cargo
 checks and the remaining Apple execution still belong to the following run.
+
+The second hosted [run 41197892544](https://github.com/Latias94/baozi/actions/runs/41197892544),
+at `514861b`, confirms the repaired Windows candidate (runtime/backend/repository 20/21/30,
+zero skipped), stable workspace 2,438/2,438 and the new twelve-case Apple MSRV consumer assertions.
+The large cancellation case takes 10.570 seconds on that stable runner, demonstrating why its
+previous ten-second ceiling rejected valid completed-prefix work. Apple runtime 20/20 and backend
+18/18 now pass. Its repository suite reaches an additional fixture defect: the runner's long
+temporary path plus `socket-root/input.socket` exceeds Darwin's `sun_path` before binding a socket.
+That one test now creates an exclusive `0700` directory under `/tmp`; the complete ASCII socket
+path is at most 87 bytes. Existing socket/type rejection and FIFO deadlines remain intact. Its
+all-feature Apple test cross-check and formatting pass locally; actual completion still requires
+the next native run. The final hosted result below must establish that execution independently.
