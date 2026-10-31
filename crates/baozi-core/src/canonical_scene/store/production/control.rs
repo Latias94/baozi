@@ -9,10 +9,7 @@ use baozi_operation::__retained_store_integration::activation::{
     CanonicalReservation, CanonicalSemanticWorkSession,
 };
 use baozi_operation::__retained_store_integration::authority::FreshStoreLineage;
-use baozi_operation::{
-    ControlCause, OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError,
-};
-use thiserror::Error;
+use baozi_operation::{OperationOwner, ProgressPhase, ProgressUnit, StoreRuntimeError};
 
 use crate::SceneValidationWork;
 
@@ -43,14 +40,6 @@ pub(in crate::canonical_scene::store) trait CanonicalAuthoringControl {
         reservation: &mut Self::Reservation,
         required_bytes: u64,
     ) -> Result<(), Self::Error>;
-}
-
-#[derive(Debug, Error)]
-pub(in crate::canonical_scene::store) enum OperationAuthoringControlError {
-    #[error("canonical node authoring was cancelled or reached its deadline")]
-    Control(#[source] ControlCause),
-    #[error("canonical node authoring accounting failed")]
-    Store(#[source] StoreRuntimeError),
 }
 
 /// Action-scoped adapter used by the import-bound activation transaction.

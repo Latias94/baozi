@@ -10,7 +10,9 @@ use super::required_record_view;
 use crate::canonical_scene::store::schema::{
     CanonicalBlockRef, SCENE_DIRECTORY_FIELD_COUNT, SCENE_SCHEMA_REVISION, SceneDirectorySchema,
 };
-use crate::canonical_scene::store::typed_storage::{SceneTables, build::NodeStoragePlan};
+use crate::canonical_scene::store::typed_storage::SceneTables;
+#[cfg(test)]
+use crate::canonical_scene::store::typed_storage::build::NodeStoragePlan;
 
 pub(super) struct RewrittenNodeSceneGraph {
     pub(super) directory: CanonicalBlockRef<SceneDirectorySchema>,
@@ -30,6 +32,7 @@ where
     lane.try_bind_canonical_source(&pending.input.canonical)?;
 
     let (nodes, geometry) = match &pending.program {
+        #[cfg(test)]
         NodeSceneEditProgram::NodeTransform(rewrite) => {
             let source_nodes = pending.input.read_nodes();
             let plan =

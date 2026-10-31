@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 pub(super) const BASELINE_PATH: &str = "docs/research/native-filesystem-resolved-closure.json";
 pub(super) const REPOSITORY_BASELINE_PATH: &str =
     "docs/research/native-filesystem-repository-resolved-closure.json";
-pub(super) const FACADE_MANIFEST_PATH: &str = "crates/baozi/Cargo.toml";
-pub(super) const FACADE_PACKAGE: &str = "baozi";
+pub(super) const CANDIDATE_MANIFEST_PATH: &str = "candidates/baozi-native-io/Cargo.toml";
+pub(super) const CANDIDATE_LOCK_PATH: &str = "candidates/baozi-native-io/Cargo.lock";
+pub(super) const CANDIDATE_PACKAGE: &str = "baozi-native-io-candidate";
 pub(super) const XTASK_PACKAGE: &str = "baozi-xtask";
 pub(super) const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 pub(super) const CAP_STD_TARGET: &str = concat!(
@@ -116,15 +117,15 @@ pub struct NativeFsReport {
     pub violations: Vec<String>,
 }
 
-/// Resolved metadata profiles required by the repository capability admission fixture.
+/// Independent root-workspace and candidate-workspace metadata, loaded once per profile.
 #[doc(hidden)]
-pub struct RepositoryMetadataProfiles<'a> {
-    /// Complete all-feature metadata used to inspect every local/path declaration.
-    pub local_declarations: &'a Value,
-    /// Repository-feature profiles for every dependency-audit target.
+pub struct NativeFsMetadataProfiles<'a> {
+    /// Root workspace, all features, Linux: local declarations and xtask reachability.
+    pub root: &'a Value,
+    /// Candidate workspace, no defaults, for every dependency-audit target.
+    pub runtime: &'a BTreeMap<String, Value>,
+    /// Candidate workspace with repository-capture, for every dependency-audit target.
     pub repository: &'a BTreeMap<String, Value>,
-    /// Facade runtime-candidate profiles for every exact candidate target.
-    pub facade: &'a BTreeMap<String, Value>,
-    /// The featureless xtask profile, which must not reach asset IO or native backends.
-    pub xtask: &'a Value,
+    /// Root workspace, all features, for each portable byte target.
+    pub portable: &'a BTreeMap<String, Value>,
 }

@@ -51,7 +51,7 @@ mod text_input;
 ///     draft.clone()
 /// }
 /// ```
-pub use baozi_core::scene::integration::SceneDraft;
+pub use baozi_core::__scene_integration::integration::SceneDraft;
 pub use baozi_core::{
     AnimationInterpolation, AnimationTarget, AppearanceBuildResource, AppearanceLimitDimension,
     EntityNameError, MaterialFactorGroup, SceneAnimationRateKind, SceneAnimationSamplePart,

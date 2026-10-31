@@ -1,6 +1,6 @@
 use std::fmt;
 
-use baozi_core::scene::integration::SceneEditEvidenceTag;
+use baozi_core::__scene_integration::integration::SceneEditEvidenceTag;
 use baozi_core::{SceneLookupError, TopologyKind};
 use baozi_operation::__retained_store_integration::activation::StoreActivationContainment;
 use baozi_operation::__retained_store_integration::authority::RetainedStoreStartError;

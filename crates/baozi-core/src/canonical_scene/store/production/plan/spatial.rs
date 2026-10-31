@@ -120,8 +120,8 @@ struct SpatialValidationStorage<R> {
     retained_scratch_bytes: u64,
     tangent_basis_schema_name_bytes: u32,
     tangent_encoding_schema_name_bytes: u32,
-    // The zero-sized reservation keeps this proof coupled to its operation owner.
-    reservation: R,
+    // Held solely to keep this proof coupled to its operation owner, even at zero bytes.
+    _reservation: R,
 }
 
 impl<'input, R> ValidatedSpatialBatch<'input, R> {
@@ -219,7 +219,7 @@ impl<'input, R> ValidatedSpatialBatch<'input, R> {
             light_count,
             edge_count,
             reference_count,
-            reservation,
+            _reservation: reservation,
             ..
         } = self.compiled;
         (
@@ -731,7 +731,7 @@ where
         retained_scratch_bytes,
         tangent_basis_schema_name_bytes,
         tangent_encoding_schema_name_bytes,
-        reservation,
+        _reservation: reservation,
     };
     Ok(ValidatedSpatialBatch::new(input, nodes, compiled))
 }

@@ -149,9 +149,8 @@ fn scene_terminal_slots_cover_only_the_directory_and_terminal_for_empty_and_popu
     // The directory and terminal each occupy one attribution slot. Every typed owner has its
     // own physical admission and contributes no record-store member.
     assert_eq!(empty, 2);
-    #[cfg(feature = "_scene-integration")]
     assert_eq!(
-        crate::scene::integration::maximum_scene_canonical_blocks(),
+        crate::__scene_integration::integration::maximum_scene_canonical_blocks(),
         1
     );
 

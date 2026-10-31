@@ -3,14 +3,13 @@ use std::num::NonZeroU64;
 
 #[cfg(test)]
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalCentralValidationOutcome,
-    CanonicalValidationProgress, RetainedStoreSessionOutcomeOwner,
+    CanonicalActivationOutcome, CanonicalActivationSeal, CanonicalActivationSessionPolicy,
+    CanonicalCentralValidationOutcome, CanonicalMaterializationRole, CanonicalValidationProgress,
+    CanonicalValidationRole, RetainedStoreSessionOutcomeOwner, RetainedStoreWriterRole,
 };
 use baozi_operation::__retained_store_integration::activation::{
-    CanonicalActivationSessionPolicy, CanonicalFailureRequirements, CanonicalLane,
-    CanonicalMaterialization, CanonicalMaterializationRole, CanonicalReservation,
+    CanonicalFailureRequirements, CanonicalLane, CanonicalMaterialization, CanonicalReservation,
     CanonicalSemanticWorkSession, CanonicalValidationDecision, CanonicalValidationPlanning,
-    CanonicalValidationRole, RetainedStoreWriterRole,
 };
 use baozi_operation::__retained_store_integration::producer::{
     CanonicalActivationDescription, CanonicalActivationPlanSealer, CanonicalActivationRequest,
@@ -20,9 +19,11 @@ use baozi_operation::__retained_store_integration::producer::{
 use baozi_operation::FinalProgress;
 use baozi_operation::{
     CapacityPlan, OperationOwner, OutcomeEvidenceRecordRowWriter, ProgressPhase, ProgressUnit,
-    RecordBlock, RecordPlan, RetainedStoreBatchLimits, StoreBuildError, StoreDimensionKey,
-    StorePhaseKey, StorePlanError, StoreRuntimeError, StoreWorkError,
+    RecordBlock, RecordPlan, RetainedStoreBatchLimits, StoreBuildError, StorePlanError,
+    StoreRuntimeError, StoreWorkError,
 };
+#[cfg(test)]
+use baozi_operation::{StoreDimensionKey, StorePhaseKey};
 
 use crate::SceneValidationLimits;
 #[cfg(test)]
@@ -54,9 +55,9 @@ use crate::provenance::{OperationKind, OptionsDigest};
 #[cfg(test)]
 use crate::scene_space::SceneSpace;
 
+use super::super::SceneConstructionStartError;
 #[cfg(test)]
-use super::super::SceneConstructionError;
-use super::super::{SceneConstructionStartError, SceneStoreKeys};
+use super::super::{SceneConstructionError, SceneStoreKeys};
 use super::geometry::{retain_geometry, retain_nodes};
 use super::profile::{ProfileMaterializationPlans, retain_profile};
 use super::scratch::{
@@ -185,6 +186,7 @@ pub struct NodeSceneSessionActivationBootstrap {
     evidence: NodeSceneEvidenceRecipe,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) struct NodeSceneWriterRoles {
     phase: StorePhaseKey,
@@ -192,6 +194,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneWriterRoles {
     attribution_dimension: StoreDimensionKey,
 }
 
+#[cfg(test)]
 impl NodeSceneWriterRoles {
     pub(in crate::canonical_scene::store) const fn new(
         phase: StorePhaseKey,
@@ -214,6 +217,7 @@ impl NodeSceneWriterRoles {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) struct NodeSceneActivationRoles {
     canonical_writer: NodeSceneWriterRoles,
@@ -228,6 +232,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneActivationRoles {
     canonical_string_dimension: Option<StoreDimensionKey>,
 }
 
+#[cfg(test)]
 impl NodeSceneActivationRoles {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::canonical_scene::store) const fn new(
@@ -346,10 +351,6 @@ pub struct NodeSceneLaneOutput(NodeSceneActivationOutput);
 pub struct NodeSceneLaneValidationProof(super::NodeSceneValidationProof);
 
 impl NodeSceneLaneValidationProof {
-    pub(super) const fn from_inner(proof: super::NodeSceneValidationProof) -> Self {
-        Self(proof)
-    }
-
     pub(in crate::canonical_scene::store) const fn into_inner(
         self,
     ) -> super::NodeSceneValidationProof {
@@ -419,6 +420,7 @@ impl NodeSceneLaneRejection {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn into_inner(self) -> NodeSceneConstructionRejection<StoreRuntimeError> {
         self.0
     }
@@ -765,6 +767,7 @@ impl NodeSceneEvidenceRecipe {
 }
 
 impl NodeSceneActivationPostflight {
+    #[cfg(test)]
     pub(super) const fn from_parts(
         brand: super::super::ConstructionBrand,
         failure_evidence: NodeSceneFailureEvidencePlan,
@@ -1054,6 +1057,7 @@ impl NodeSceneFailureEvidencePlan {
         )?))
     }
 
+    #[cfg(test)]
     pub(super) fn requirements_for(
         self,
         brand: super::super::ConstructionBrand,
@@ -1312,6 +1316,7 @@ fn record_validation_work(plan: RecordPlan) -> Result<u64, StorePlanError> {
     u64::try_from(cells).map_err(|_| StorePlanError::SizeOverflow)
 }
 
+#[cfg(test)]
 pub(super) fn node_scene_activation_roles(keys: SceneStoreKeys) -> NodeSceneActivationRoles {
     NodeSceneActivationRoles::new(
         NodeSceneWriterRoles::new(keys.phase, keys.dimension, keys.dimension),
@@ -1325,34 +1330,6 @@ pub(super) fn node_scene_activation_roles(keys: SceneStoreKeys) -> NodeSceneActi
         keys.dimension,
     )
     .with_canonical_string_dimension(keys.dimension)
-}
-
-fn materialize_node_scene<'lane, R, O, PP, U, L>(
-    lane: CanonicalLane<'lane, O, PP, U, L>,
-    plan: &NodeSceneExecutionPlan<'_, R>,
-    brand: super::super::ConstructionBrand,
-    #[cfg(test)] faults: NodeSceneBuildFaults,
-) -> CanonicalMaterialization<
-    'lane,
-    NodeSceneActivationOutput,
-    NodeSceneConstructionRejection<StoreRuntimeError>,
-    RecordBlock,
-    SceneDirectorySchema,
->
-where
-    O: OperationOwner,
-    PP: ProgressPhase,
-    U: ProgressUnit,
-{
-    materialize_node_scene_mapped(
-        lane,
-        plan,
-        brand,
-        #[cfg(test)]
-        faults,
-        |output| output,
-        |rejection| rejection,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -39,17 +39,8 @@ pub(super) mod field {
     pub(crate) const OUTCOME: usize = 1;
     pub(crate) const SEMANTIC_VERSION: usize = 2;
     pub(crate) const OPERATION_KIND: usize = 3;
-    pub(crate) const TARGET_MESH: usize = 4;
-    pub(crate) const TARGET_PRIMITIVE: usize = 5;
-    pub(crate) const SOURCE_PRIMITIVE_ROW: usize = 6;
     pub(crate) const VERTEX_COUNT: usize = 7;
     pub(crate) const SOURCE_CORNER_COUNT: usize = 8;
-    pub(crate) const SOURCE_FACE_COUNT: usize = 9;
-    pub(crate) const OUTPUT_CORNER_COUNT: usize = 10;
-    pub(crate) const OUTPUT_FACE_COUNT: usize = 11;
-    pub(crate) const ATTRIBUTE_COUNT: usize = 12;
-    pub(crate) const PRESERVATION_RULES: usize = 13;
-    pub(crate) const INVALIDATIONS: usize = 14;
     pub(crate) const OPTIONS_ALGORITHM: usize = 15;
     pub(crate) const OPTIONS_DIGEST_FIRST: usize = 16;
     pub(crate) const SOURCE_UNIT_BITS: usize = 20;

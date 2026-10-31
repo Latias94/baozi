@@ -10,278 +10,165 @@ use std::process::Command;
 mod contract;
 
 use contract::*;
-pub use contract::{NativeFsReport, RepositoryMetadataProfiles};
+pub use contract::{NativeFsMetadataProfiles, NativeFsReport};
 
-/// Checks manifests, target-filtered dependency closures, and reviewed package identities.
+/// Checks the portable root workspace and the standalone native candidate workspace.
 ///
 /// Compiler target checks and native behavior tests cover adapter availability and behavior;
 /// this check does not inspect Rust sources or promote candidate targets to release support.
+/// Every Cargo query is locked. Native checksums come only from the candidate's own lockfile.
 pub fn check_repository(repository_root: &Path) -> NativeFsReport {
-    let baseline = match read_json(&repository_root.join(BASELINE_PATH), "native-fs baseline") {
-        Ok(value) => value,
-        Err(violation) => {
-            return NativeFsReport {
-                profiles_checked: 0,
-                violations: vec![violation],
-            };
-        }
-    };
-    let repository_baseline = match read_json(
-        &repository_root.join(REPOSITORY_BASELINE_PATH),
-        "native-fs repository baseline",
-    ) {
-        Ok(value) => value,
-        Err(violation) => {
-            return NativeFsReport {
-                profiles_checked: 0,
-                violations: vec![violation],
-            };
-        }
-    };
-    let manifest_metadata = match load_metadata(
-        repository_root,
-        "crates/baozi-io/Cargo.toml",
-        None,
-        None,
-        true,
-    ) {
-        Ok(value) => value,
-        Err(violation) => {
-            return NativeFsReport {
-                profiles_checked: 0,
-                violations: vec![violation],
-            };
-        }
-    };
-    let local_declaration_metadata =
-        match load_metadata_all_features(repository_root, "Cargo.toml", None, false) {
-            Ok(value) => value,
-            Err(violation) => {
-                return NativeFsReport {
-                    profiles_checked: 0,
-                    violations: vec![violation],
-                };
-            }
-        };
-    let lockfile = match read_lockfile(repository_root) {
-        Ok(value) => value,
-        Err(violation) => {
-            return NativeFsReport {
-                profiles_checked: 0,
-                violations: vec![violation],
-            };
-        }
-    };
-
-    let mut target_metadata = BTreeMap::new();
-    let mut repository_target_metadata = BTreeMap::new();
-    let mut facade_candidate_target_metadata = BTreeMap::new();
-    let mut xtask_metadata = None;
-    let mut violations = Vec::new();
-    for profile in DEPENDENCY_AUDIT_PROFILES {
-        match load_metadata(
+    let result = (|| {
+        let baseline = read_json(&repository_root.join(BASELINE_PATH), "native-fs baseline")?;
+        let repository_baseline = read_json(
+            &repository_root.join(REPOSITORY_BASELINE_PATH),
+            "native-fs repository baseline",
+        )?;
+        let lock_path = repository_root.join(CANDIDATE_LOCK_PATH);
+        let lockfile = fs::read_to_string(&lock_path).map_err(|error| {
+            format!("native-fs lockfile: failed to read {lock_path:?}: {error}")
+        })?;
+        let root = load_metadata(
             repository_root,
-            "crates/baozi-io/Cargo.toml",
-            Some(profile.target),
-            Some("fs-candidate"),
-            false,
-        ) {
-            Ok(value) => {
-                target_metadata.insert(profile.target.to_owned(), value);
-            }
-            Err(violation) => violations.push(violation),
+            "Cargo.toml",
+            XTASK_RESOLUTION_TARGET,
+            true,
+            None,
+        )?;
+        let mut runtime = BTreeMap::new();
+        let mut repository = BTreeMap::new();
+        let mut portable = BTreeMap::new();
+        for profile in DEPENDENCY_AUDIT_PROFILES {
+            runtime.insert(
+                profile.target.to_owned(),
+                load_metadata(
+                    repository_root,
+                    CANDIDATE_MANIFEST_PATH,
+                    profile.target,
+                    false,
+                    None,
+                )?,
+            );
+            repository.insert(
+                profile.target.to_owned(),
+                load_metadata(
+                    repository_root,
+                    CANDIDATE_MANIFEST_PATH,
+                    profile.target,
+                    false,
+                    Some("repository-capture"),
+                )?,
+            );
         }
-    }
-    for target in REPOSITORY_CANDIDATE_TARGETS {
-        match load_metadata(
-            repository_root,
-            FACADE_MANIFEST_PATH,
-            Some(target),
-            Some("native-fs-candidate"),
-            false,
-        ) {
-            Ok(value) => {
-                facade_candidate_target_metadata.insert((*target).to_owned(), value);
-            }
-            Err(violation) => violations.push(violation),
+        for target in PORTABLE_TARGETS {
+            portable.insert(
+                (*target).to_owned(),
+                load_metadata(repository_root, "Cargo.toml", target, true, None)?,
+            );
         }
-    }
-    match load_metadata(
-        repository_root,
-        "crates/baozi-xtask/Cargo.toml",
-        Some(XTASK_RESOLUTION_TARGET),
-        None,
-        false,
-    ) {
-        Ok(value) => xtask_metadata = Some(value),
-        Err(violation) => violations.push(violation),
-    }
-    for profile in DEPENDENCY_AUDIT_PROFILES {
-        match load_metadata(
-            repository_root,
-            "crates/baozi-io/Cargo.toml",
-            Some(profile.target),
-            Some("repository-fs-candidate"),
-            false,
-        ) {
-            Ok(value) => {
-                repository_target_metadata.insert(profile.target.to_owned(), value);
-            }
-            Err(violation) => violations.push(violation),
-        }
-    }
-    for target in PORTABLE_TARGETS {
-        match load_metadata(
-            repository_root,
-            "crates/baozi/Cargo.toml",
-            Some(target),
-            Some("all-formats"),
-            false,
-        ) {
-            Ok(value) => {
-                target_metadata.insert((*target).to_owned(), value);
-            }
-            Err(violation) => violations.push(violation),
-        }
-    }
-
-    if !violations.is_empty() {
-        violations.sort_unstable();
-        return NativeFsReport {
-            profiles_checked: target_metadata.len()
-                + repository_target_metadata.len()
-                + facade_candidate_target_metadata.len()
-                + usize::from(xtask_metadata.is_some()),
-            violations,
-        };
-    }
-
-    let xtask_metadata =
-        xtask_metadata.expect("successful metadata load must populate the xtask profile");
-    check_metadata_fixture_with_repository(
-        &manifest_metadata,
-        &lockfile,
-        &baseline,
-        &repository_baseline,
-        &target_metadata,
-        RepositoryMetadataProfiles {
-            local_declarations: &local_declaration_metadata,
-            repository: &repository_target_metadata,
-            facade: &facade_candidate_target_metadata,
-            xtask: &xtask_metadata,
-        },
-    )
+        Ok(check_metadata_fixture(
+            &lockfile,
+            &baseline,
+            &repository_baseline,
+            NativeFsMetadataProfiles {
+                root: &root,
+                runtime: &runtime,
+                repository: &repository,
+                portable: &portable,
+            },
+        ))
+    })();
+    result.unwrap_or_else(|violation| NativeFsReport {
+        profiles_checked: 0,
+        violations: vec![violation],
+    })
 }
 
-/// Checks already-loaded Cargo metadata documents. This is public for adversarial fixture tests.
+/// Checks already-loaded metadata without invoking Cargo or reading either workspace.
 #[doc(hidden)]
 pub fn check_metadata_fixture(
-    manifest_metadata: &Value,
-    lockfile: &str,
+    candidate_lockfile: &str,
     baseline: &Value,
-    target_metadata: &BTreeMap<String, Value>,
+    repository_baseline: &Value,
+    profiles: NativeFsMetadataProfiles<'_>,
 ) -> NativeFsReport {
     let mut violations = Vec::new();
-    check_manifest(manifest_metadata, &mut violations);
-    let checksums = match parse_lockfile_checksums(lockfile) {
-        Ok(checksums) => checksums,
-        Err(violation) => {
-            violations.push(violation);
-            return NativeFsReport {
-                profiles_checked: target_metadata.len(),
-                violations,
-            };
-        }
-    };
-
-    let snapshot = build_snapshot(target_metadata, &checksums, &mut violations);
-    if let Some(snapshot) = &snapshot {
-        check_baseline_shape(baseline, &mut violations);
-        let difference_start = violations.len();
-        collect_differences(
-            baseline,
-            snapshot,
-            "baseline",
-            difference_start,
-            &mut violations,
-        );
+    check_root_manifest(profiles.root, &mut violations);
+    if let Some(candidate) = profiles.runtime.get(XTASK_RESOLUTION_TARGET) {
+        check_candidate_manifest(profiles.root, candidate, &mut violations);
     }
-
+    if let Err(violation) = check_xtask_profile(XTASK_RESOLUTION_TARGET, profiles.root) {
+        violations.push(violation);
+    }
+    let checksums = parse_lockfile_checksums(candidate_lockfile);
+    match checksums {
+        Ok(checksums) => {
+            if let Some(snapshot) = build_snapshot(
+                profiles.runtime,
+                profiles.portable,
+                &checksums,
+                &mut violations,
+            ) {
+                check_baseline_shape(baseline, &mut violations);
+                let difference_start = violations.len();
+                collect_differences(
+                    baseline,
+                    &snapshot,
+                    "baseline",
+                    difference_start,
+                    &mut violations,
+                );
+            }
+            if let Some(snapshot) = build_repository_delta_snapshot(
+                baseline,
+                profiles.repository,
+                &checksums,
+                &mut violations,
+            ) {
+                check_repository_baseline_shape(repository_baseline, &mut violations);
+                let difference_start = violations.len();
+                collect_differences(
+                    repository_baseline,
+                    &snapshot,
+                    "repository baseline",
+                    difference_start,
+                    &mut violations,
+                );
+            }
+        }
+        Err(violation) => violations.push(violation),
+    }
     violations.sort_unstable();
     violations.dedup();
     NativeFsReport {
-        profiles_checked: target_metadata.len(),
+        profiles_checked: profiles.runtime.len()
+            + profiles.repository.len()
+            + profiles.portable.len()
+            + 1,
         violations,
     }
-}
-
-/// Checks independent runtime and repository native-filesystem closure fixtures.
-#[doc(hidden)]
-pub fn check_metadata_fixture_with_repository(
-    manifest_metadata: &Value,
-    lockfile: &str,
-    baseline: &Value,
-    repository_baseline: &Value,
-    target_metadata: &BTreeMap<String, Value>,
-    profiles: RepositoryMetadataProfiles<'_>,
-) -> NativeFsReport {
-    let mut report = check_metadata_fixture(manifest_metadata, lockfile, baseline, target_metadata);
-    check_complete_local_repository_declarations(
-        profiles.local_declarations,
-        &mut report.violations,
-    );
-    check_facade_candidate_profiles(profiles.facade, &mut report.violations);
-    if let Err(violation) = check_xtask_profile(XTASK_RESOLUTION_TARGET, profiles.xtask) {
-        report.violations.push(violation);
-    }
-    let checksums = match parse_lockfile_checksums(lockfile) {
-        Ok(checksums) => checksums,
-        Err(violation) => {
-            report.violations.push(violation);
-            report.profiles_checked += profiles.repository.len() + profiles.facade.len() + 1;
-            report.violations.sort_unstable();
-            report.violations.dedup();
-            return report;
-        }
-    };
-
-    if let Some(snapshot) = build_repository_delta_snapshot(
-        baseline,
-        profiles.repository,
-        &checksums,
-        &mut report.violations,
-    ) {
-        check_repository_baseline_shape(repository_baseline, &mut report.violations);
-        let difference_start = report.violations.len();
-        collect_differences(
-            repository_baseline,
-            &snapshot,
-            "repository baseline",
-            difference_start,
-            &mut report.violations,
-        );
-    }
-
-    report.profiles_checked += profiles.repository.len() + profiles.facade.len() + 1;
-    report.violations.sort_unstable();
-    report.violations.dedup();
-    report
 }
 
 /// Builds the canonical resolved-closure document for fixture and maintenance tooling.
 #[doc(hidden)]
 pub fn resolved_closure_snapshot(
-    target_metadata: &BTreeMap<String, Value>,
-    lockfile: &str,
+    runtime_metadata: &BTreeMap<String, Value>,
+    portable_metadata: &BTreeMap<String, Value>,
+    candidate_lockfile: &str,
 ) -> Result<Value, Vec<String>> {
     let mut violations = Vec::new();
-    let checksums = match parse_lockfile_checksums(lockfile) {
+    let checksums = match parse_lockfile_checksums(candidate_lockfile) {
         Ok(checksums) => checksums,
         Err(violation) => {
             return Err(vec![violation]);
         }
     };
-    let snapshot = build_snapshot(target_metadata, &checksums, &mut violations);
+    let snapshot = build_snapshot(
+        runtime_metadata,
+        portable_metadata,
+        &checksums,
+        &mut violations,
+    );
     violations.sort_unstable();
     violations.dedup();
     match (snapshot, violations.is_empty()) {
@@ -321,39 +208,11 @@ pub fn repository_resolved_closure_snapshot(
 fn load_metadata(
     repository_root: &Path,
     manifest_path: &str,
-    target: Option<&str>,
-    features: Option<&str>,
-    no_deps: bool,
-) -> Result<Value, String> {
-    load_metadata_inner(
-        repository_root,
-        manifest_path,
-        target,
-        features,
-        false,
-        no_deps,
-    )
-}
-
-fn load_metadata_all_features(
-    repository_root: &Path,
-    manifest_path: &str,
-    target: Option<&str>,
-    no_deps: bool,
-) -> Result<Value, String> {
-    load_metadata_inner(repository_root, manifest_path, target, None, true, no_deps)
-}
-
-fn load_metadata_inner(
-    repository_root: &Path,
-    manifest_path: &str,
-    target: Option<&str>,
-    features: Option<&str>,
+    target: &str,
     all_features: bool,
-    no_deps: bool,
+    features: Option<&str>,
 ) -> Result<Value, String> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let manifest = repository_root.join(manifest_path);
     let mut command = Command::new(cargo);
     command
         .args([
@@ -363,51 +222,35 @@ fn load_metadata_inner(
             "--locked",
             "--manifest-path",
         ])
-        .arg(manifest)
+        .arg(repository_root.join(manifest_path))
+        .args(["--filter-platform", target])
+        .arg(if all_features {
+            "--all-features"
+        } else {
+            "--no-default-features"
+        })
         .current_dir(repository_root);
-    if all_features {
-        command.arg("--all-features");
-    } else {
-        command.arg("--no-default-features");
-    }
-    if no_deps {
-        command.arg("--no-deps");
-    }
-    if let Some(target) = target {
-        command.args(["--filter-platform", target]);
-    }
     if let Some(features) = features {
         command.args(["--features", features]);
     }
-
-    let output = command.output().map_err(|error| {
-        let target = target.unwrap_or("manifest");
-        format!("native-fs metadata {target}: failed to run cargo metadata: {error}")
-    })?;
+    let label = format!("native-fs metadata {manifest_path} {target} features={features:?}");
+    let output = command
+        .output()
+        .map_err(|error| format!("{label}: failed to run cargo metadata: {error}"))?;
     if !output.status.success() {
-        let target = target.unwrap_or("manifest");
-        let diagnostic = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "native-fs metadata {target}: cargo metadata --locked failed: {}",
-            diagnostic.trim()
+            "{label}: cargo metadata --locked failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    serde_json::from_slice(&output.stdout).map_err(|error| {
-        let target = target.unwrap_or("manifest");
-        format!("native-fs metadata {target}: cargo returned invalid JSON: {error}")
-    })
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("{label}: cargo returned invalid JSON: {error}"))
 }
 
 fn read_json(path: &Path, label: &str) -> Result<Value, String> {
     let bytes =
         fs::read(path).map_err(|error| format!("{label}: failed to read {path:?}: {error}"))?;
     serde_json::from_slice(&bytes).map_err(|error| format!("{label}: invalid JSON: {error}"))
-}
-
-fn read_lockfile(repository_root: &Path) -> Result<String, String> {
-    let path = repository_root.join("Cargo.lock");
-    fs::read_to_string(&path)
-        .map_err(|error| format!("native-fs lockfile: failed to read {path:?}: {error}"))
 }
 
 type ChecksumKey = (String, String, String);
@@ -448,52 +291,70 @@ fn parse_lockfile_checksums(lockfile: &str) -> Result<BTreeMap<ChecksumKey, Stri
     Ok(checksums)
 }
 
-fn check_complete_local_repository_declarations(metadata: &Value, violations: &mut Vec<String>) {
-    const LABEL: &str = "native-fs complete local declarations";
-
-    let Some(packages) = metadata.get("packages").and_then(Value::as_array) else {
-        violations.push(format!("{LABEL}: metadata omitted packages"));
-        return;
-    };
-
-    for package in packages {
-        let Some(owner) = string_field(package, "name") else {
-            violations.push(format!("{LABEL}: package omitted its name"));
+fn check_root_manifest(metadata: &Value, violations: &mut Vec<String>) {
+    check_portable_declarations(metadata, violations);
+    for (name, relative_manifest) in [
+        ("baozi", "crates/baozi/Cargo.toml"),
+        ("baozi-io", "crates/baozi-io/Cargo.toml"),
+        (XTASK_PACKAGE, "crates/baozi-xtask/Cargo.toml"),
+    ] {
+        let Some(package) = find_unique_package(metadata, name, "root manifest", violations) else {
             continue;
         };
-        let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
-            if package.get("source") == Some(&Value::Null) {
-                violations.push(format!(
-                    "{LABEL}: local package {owner} omitted dependencies"
-                ));
-            }
+        let Some(id) = string_field(package, "id") else {
+            violations.push(format!("native-fs root manifest: {name} omitted id"));
             continue;
         };
-        check_repository_feature_requests(owner, package, dependencies, violations);
+        if let Err(violation) = check_workspace_package(
+            metadata,
+            package,
+            id,
+            name,
+            relative_manifest,
+            "native-fs root manifest",
+        ) {
+            violations.push(violation);
+        }
     }
 }
 
-fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
-    let Some(workspace_packages) = metadata.get("packages").and_then(Value::as_array) else {
+fn check_portable_declarations(metadata: &Value, violations: &mut Vec<String>) {
+    let Some(packages) = metadata.get("packages").and_then(Value::as_array) else {
         violations.push("native-fs manifest: metadata omitted packages".to_owned());
         return;
     };
-    for workspace_package in workspace_packages {
-        let Some(owner) = string_field(workspace_package, "name") else {
-            violations.push("native-fs manifest: workspace package omitted its name".to_owned());
+    for package in packages
+        .iter()
+        .filter(|package| package.get("source") == Some(&Value::Null))
+    {
+        let Some(owner) = string_field(package, "name") else {
+            violations.push("native-fs manifest: local package omitted name".to_owned());
             continue;
         };
-        if owner == "baozi-io" {
-            continue;
+        if owner == CANDIDATE_PACKAGE {
+            violations.push(format!("native-fs root manifest: {CANDIDATE_PACKAGE} must stay outside the portable workspace"));
         }
-        let Some(dependencies) = workspace_package
-            .get("dependencies")
-            .and_then(Value::as_array)
-        else {
+        let Some(features) = package.get("features").and_then(Value::as_object) else {
+            violations.push(format!(
+                "native-fs manifest: {owner} omitted its feature table"
+            ));
+            continue;
+        };
+        if owner == XTASK_PACKAGE && !features.is_empty() {
+            violations.push("native-fs manifest: baozi-xtask must remain featureless".to_owned());
+        }
+        for feature in features.keys() {
+            if retired_native_feature(owner, feature) {
+                violations.push(format!(
+                    "native-fs manifest: {owner}/{feature} must be removed without an alias"
+                ));
+            }
+        }
+        let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
             violations.push(format!("native-fs manifest: {owner} omitted dependencies"));
             continue;
         };
-        check_repository_feature_requests(owner, workspace_package, dependencies, violations);
+        // Inspect all declarations, including inactive optional, target, build, and dev edges.
         for dependency in dependencies {
             let Some(name) = string_field(dependency, "name") else {
                 violations.push(format!(
@@ -501,405 +362,183 @@ fn check_manifest(metadata: &Value, violations: &mut Vec<String>) {
                 ));
                 continue;
             };
-            if NATIVE_FILESYSTEM_PACKAGES.contains(&name) {
-                violations.push(format!(
-                    "native-fs manifest: {owner} must not depend directly on {name}; native filesystem dependencies are private to baozi-io"
-                ));
+            if name == CANDIDATE_PACKAGE || NATIVE_FILESYSTEM_PACKAGES.contains(&name) {
+                violations.push(format!("native-fs manifest: {owner} must not depend on {name}; native dependencies belong to the standalone candidate"));
+            }
+            if owner == XTASK_PACKAGE && name == "baozi-io" {
+                violations
+                    .push("native-fs manifest: baozi-xtask must not depend on baozi-io".to_owned());
+            }
+            let key = string_field(dependency, "rename").unwrap_or(name);
+            if let Some(requests) = dependency.get("features").and_then(Value::as_array) {
+                for request in requests.iter().filter_map(Value::as_str) {
+                    if retired_native_feature(name, request) {
+                        violations.push(format!(
+                            "native-fs manifest: {owner} must not request removed {name}/{request}"
+                        ));
+                    }
+                }
+            }
+            for (feature, values) in features {
+                for value in values
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    if let Some((forwarded_key, request)) = value.split_once('/')
+                        && forwarded_key.trim_end_matches('?') == key
+                        && retired_native_feature(name, request)
+                    {
+                        violations.push(format!("native-fs manifest: {owner}/{feature} must not forward removed {name}/{request}"));
+                    }
+                }
             }
         }
     }
+}
 
-    let Some(package) = find_unique_package(metadata, "baozi-io", "manifest", violations) else {
-        return;
-    };
+fn retired_native_feature(package: &str, feature: &str) -> bool {
+    match package {
+        "baozi-io" => matches!(feature, "fs" | "fs-candidate" | "repository-fs-candidate"),
+        "baozi" => matches!(feature, "native-fs" | "native-fs-candidate"),
+        XTASK_PACKAGE => feature == "repository-input-candidate",
+        _ => false,
+    }
+}
 
-    let Some(features) = package.get("features").and_then(Value::as_object) else {
-        violations.push("native-fs manifest: baozi-io omitted its feature table".to_owned());
-        return;
-    };
-    let actual_default_features = features
-        .get("default")
-        .and_then(Value::as_array)
-        .and_then(|values| sorted_strings(values).ok());
-    if actual_default_features.as_deref() != Some(&[]) {
-        violations.push(format!(
-            "native-fs manifest: baozi-io/default must be empty, found {actual_default_features:?}"
-        ));
-    }
-    if features.contains_key("fs") {
-        violations.push(
-            "native-fs manifest: baozi-io/fs must remain unregistered until conformance promotion"
-                .to_owned(),
-        );
-    }
-    let actual_fs_features = features
-        .get("fs-candidate")
-        .and_then(Value::as_array)
-        .and_then(|values| sorted_strings(values).ok());
-    let expected_fs_features = vec!["dep:cap-std".to_owned(), "dep:rustix".to_owned()];
-    if actual_fs_features.as_ref() != Some(&expected_fs_features) {
-        violations.push(format!(
-            "native-fs manifest: baozi-io/fs-candidate must be exactly {expected_fs_features:?}, found {actual_fs_features:?}"
-        ));
-    }
-    let actual_repository_features = features
-        .get("repository-fs-candidate")
-        .and_then(Value::as_array)
-        .and_then(|values| sorted_strings(values).ok());
-    let expected_repository_features = vec!["dep:cap-fs-ext".to_owned(), "fs-candidate".to_owned()];
-    if actual_repository_features.as_ref() != Some(&expected_repository_features) {
-        violations.push(format!(
-            "native-fs manifest: baozi-io/repository-fs-candidate must be exactly {expected_repository_features:?}, found {actual_repository_features:?}"
-        ));
-    }
-
-    let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
-        violations.push("native-fs manifest: baozi-io omitted dependencies".to_owned());
-        return;
-    };
-    check_baozi_io_production_dependency_set(dependencies, violations);
-
-    if dependencies
-        .iter()
-        .any(|dependency| string_field(dependency, "name") == Some("cap-primitives"))
-    {
-        violations.push(
-            "native-fs manifest: baozi-io must not depend directly on cap-primitives".to_owned(),
-        );
-    }
-
-    check_manifest_dependency(
-        dependencies,
-        ManifestDependency {
-            name: "cap-fs-ext",
-            requirement: "=4.0.3",
-            target: CAP_STD_TARGET,
-            features: &["std"],
-        },
+fn check_candidate_manifest(root: &Value, metadata: &Value, violations: &mut Vec<String>) {
+    let Some(package) = find_unique_package(
+        metadata,
+        CANDIDATE_PACKAGE,
+        "candidate manifest",
         violations,
-    );
-    check_manifest_dependency(
-        dependencies,
+    ) else {
+        return;
+    };
+    let identity = (|| {
+        let id = required_string(package, "id", CANDIDATE_PACKAGE)?;
+        check_candidate_workspace(metadata, package, id, "native-fs candidate manifest")?;
+        let repository_root = required_string(root, "workspace_root", "root metadata")?;
+        let expected_root = Path::new(repository_root).join("candidates/baozi-native-io");
+        let actual_root = required_string(metadata, "workspace_root", "candidate metadata")?;
+        if Path::new(actual_root) != expected_root {
+            return Err(format!(
+                "native-fs candidate manifest: workspace_root must be {}, found {actual_root}",
+                expected_root.display()
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(violation) = identity {
+        violations.push(violation);
+    }
+    if package.get("publish") != Some(&Value::Array(Vec::new())) {
+        violations.push(format!(
+            "native-fs manifest: {CANDIDATE_PACKAGE} must set publish = false"
+        ));
+    }
+    let expected_features =
+        serde_json::json!({"default": [], "repository-capture": ["dep:cap-fs-ext"]});
+    if package.get("features") != Some(&expected_features) {
+        violations.push(format!(
+            "native-fs manifest: {CANDIDATE_PACKAGE} features must be exactly {expected_features}"
+        ));
+    }
+    let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
+        violations.push(format!(
+            "native-fs manifest: {CANDIDATE_PACKAGE} omitted dependencies"
+        ));
+        return;
+    };
+    let actual = dependencies
+        .iter()
+        .filter(|dependency| string_field(dependency, "kind") != Some("dev"))
+        .filter_map(|dependency| string_field(dependency, "name"))
+        .collect::<Vec<_>>();
+    let actual_set = actual.iter().copied().collect::<BTreeSet<_>>();
+    let expected = BTreeSet::from(["baozi-io", "thiserror", "cap-std", "rustix", "cap-fs-ext"]);
+    if actual_set != expected || actual.len() != expected.len() {
+        violations.push(format!("native-fs manifest: {CANDIDATE_PACKAGE} production dependencies must be exactly {expected:?} without duplicates, found {actual:?}"));
+    }
+    for expected in [
         ManifestDependency {
             name: "cap-std",
             requirement: "=4.0.3",
             target: CAP_STD_TARGET,
+            optional: false,
             features: &[],
         },
-        violations,
-    );
-
-    let Some(facade) = find_unique_package(metadata, "baozi", "manifest", violations) else {
-        return;
-    };
-    let Some(facade_features) = facade.get("features").and_then(Value::as_object) else {
-        violations.push("native-fs manifest: baozi omitted its feature table".to_owned());
-        return;
-    };
-    if facade_features.contains_key("native-fs") {
-        violations.push(
-            "native-fs manifest: baozi/native-fs must remain unregistered until conformance promotion"
-                .to_owned(),
-        );
-    }
-    let facade_native_fs = facade_features
-        .get("native-fs-candidate")
-        .and_then(Value::as_array)
-        .and_then(|values| sorted_strings(values).ok());
-    let expected_facade_native_fs = vec!["baozi-io/fs-candidate".to_owned()];
-    if facade_native_fs.as_ref() != Some(&expected_facade_native_fs) {
-        violations.push(format!(
-            "native-fs manifest: baozi/native-fs-candidate must be exactly {expected_facade_native_fs:?}, found {facade_native_fs:?}"
-        ));
-    }
-    match feature_reaches_repository_fs(facade_features, "native-fs-candidate") {
-        Ok(false) => {}
-        Ok(true) => violations.push(
-            "native-fs manifest: baozi/native-fs-candidate must not reach baozi-io/repository-fs-candidate"
-                .to_owned(),
-        ),
-        Err(violation) => violations.push(violation),
-    }
-    for portable_feature in ["default", "all-formats"] {
-        match feature_reaches_native_fs(facade_features, portable_feature) {
-            Ok(false) => {}
-            Ok(true) => violations.push(format!(
-                "native-fs manifest: baozi/{portable_feature} must not enable the native filesystem adapter"
-            )),
-            Err(violation) => violations.push(violation),
-        }
-    }
-    check_manifest_dependency(
-        dependencies,
         ManifestDependency {
             name: "rustix",
             requirement: "=1.1.4",
             target: RUSTIX_TARGET,
+            optional: false,
             features: &["fs", "std"],
         },
-        violations,
-    );
-}
-
-fn check_baozi_io_production_dependency_set(dependencies: &[Value], violations: &mut Vec<String>) {
-    let expected = BTreeSet::from([
-        "cap-fs-ext".to_owned(),
-        "cap-std".to_owned(),
-        "rustix".to_owned(),
-        "sha2".to_owned(),
-        "thiserror".to_owned(),
-    ]);
-    let mut actual = BTreeSet::new();
-    let mut duplicate = BTreeSet::new();
-    for dependency in dependencies {
-        match dependency.get("kind") {
-            None | Some(Value::Null) => {}
-            Some(Value::String(kind)) if kind == "build" => {}
-            Some(Value::String(kind)) if kind == "dev" => continue,
-            _ => {
-                violations.push(
-                    "native-fs manifest: baozi-io has a dependency with an unsupported kind"
-                        .to_owned(),
-                );
-                continue;
-            }
-        }
-        let Some(name) = string_field(dependency, "name") else {
-            violations.push(
-                "native-fs manifest: baozi-io has a production dependency without a name"
-                    .to_owned(),
-            );
-            continue;
-        };
-        if !actual.insert(name.to_owned()) {
-            duplicate.insert(name.to_owned());
-        }
+        ManifestDependency {
+            name: "cap-fs-ext",
+            requirement: "=4.0.3",
+            target: CAP_STD_TARGET,
+            optional: true,
+            features: &["std"],
+        },
+    ] {
+        check_manifest_dependency(dependencies, expected, violations);
     }
-    if actual != expected || !duplicate.is_empty() {
-        violations.push(format!(
-            "native-fs manifest: baozi-io production dependency set must be exactly {expected:?} with no duplicates, found {actual:?}, duplicates {duplicate:?}"
-        ));
+    let io = dependencies
+        .iter()
+        .find(|dependency| string_field(dependency, "name") == Some("baozi-io"));
+    let repository_root = string_field(root, "workspace_root").unwrap_or("");
+    let expected_io_path = Path::new(repository_root).join("crates/baozi-io");
+    let valid_io = io.is_some_and(|dependency| {
+        dependency.get("source") == Some(&Value::Null)
+            && string_field(dependency, "path")
+                .is_some_and(|path| Path::new(path) == expected_io_path)
+            && dependency.get("kind") == Some(&Value::Null)
+            && dependency.get("rename") == Some(&Value::Null)
+            && dependency.get("target") == Some(&Value::Null)
+            && dependency.get("optional") == Some(&Value::Bool(false))
+            && dependency.get("uses_default_features") == Some(&Value::Bool(false))
+            && dependency.get("features") == Some(&serde_json::json!([]))
+    });
+    if !valid_io {
+        violations.push(format!("native-fs manifest: {CANDIDATE_PACKAGE} must depend unconditionally on portable baozi-io at {} without features", expected_io_path.display()));
     }
 }
 
-fn check_repository_feature_requests(
-    owner: &str,
+fn check_candidate_workspace(
+    metadata: &Value,
     package: &Value,
-    dependencies: &[Value],
-    violations: &mut Vec<String>,
-) {
-    let mut dependency_keys = BTreeSet::new();
-    for dependency in dependencies {
-        if string_field(dependency, "name") != Some("baozi-io") {
-            continue;
-        }
-        let key = string_field(dependency, "rename").unwrap_or("baozi-io");
-        dependency_keys.insert(key.to_owned());
-        let requested = dependency
-            .get("features")
-            .and_then(Value::as_array)
-            .and_then(|values| sorted_strings(values).ok());
-        if requested.as_ref().is_some_and(|features| {
-            features
-                .iter()
-                .any(|feature| feature == "repository-fs-candidate")
-        }) {
-            violations.push(format!(
-                "native-fs manifest: {owner} must not request baozi-io/repository-fs-candidate on a dependency edge"
-            ));
-        }
-    }
-    if dependency_keys.is_empty() {
-        return;
-    }
-
-    let Some(features) = package.get("features").and_then(Value::as_object) else {
-        violations.push(format!(
-            "native-fs manifest: {owner} omitted its feature table while depending on baozi-io"
-        ));
-        return;
-    };
-    for (feature, values) in features {
-        let Some(values) = values.as_array() else {
-            violations.push(format!(
-                "native-fs manifest: {owner}/{feature} omitted a string feature list"
-            ));
-            continue;
-        };
-        for value in values {
-            let Some(value) = value.as_str() else {
-                violations.push(format!(
-                    "native-fs manifest: {owner}/{feature} contains a non-string feature"
-                ));
-                continue;
-            };
-            let forwarded_dependency = value
-                .strip_suffix("/repository-fs-candidate")
-                .map(|key| key.strip_suffix('?').unwrap_or(key));
-            if forwarded_dependency.is_some_and(|key| dependency_keys.contains(key)) {
-                violations.push(format!(
-                    "native-fs manifest: {owner}/{feature} must not forward baozi-io/repository-fs-candidate"
-                ));
-            }
-        }
-    }
-}
-
-fn feature_reaches_native_fs(features: &Map<String, Value>, root: &str) -> Result<bool, String> {
-    feature_reaches_any(
-        features,
-        root,
-        &[
-            "native-fs",
-            "native-fs-candidate",
-            "baozi-io/fs",
-            "baozi-io?/fs",
-            "baozi-io/fs-candidate",
-            "baozi-io?/fs-candidate",
-            "baozi-io/repository-fs-candidate",
-            "baozi-io?/repository-fs-candidate",
-        ],
-    )
-}
-
-fn feature_reaches_repository_fs(
-    features: &Map<String, Value>,
-    root: &str,
-) -> Result<bool, String> {
-    feature_reaches_any(
-        features,
-        root,
-        &[
-            "baozi-io/repository-fs-candidate",
-            "baozi-io?/repository-fs-candidate",
-        ],
-    )
-}
-
-fn feature_reaches_any(
-    features: &Map<String, Value>,
-    root: &str,
-    forbidden: &[&str],
-) -> Result<bool, String> {
-    let mut pending = VecDeque::from([root.to_owned()]);
-    let mut visited = BTreeSet::new();
-    while let Some(feature) = pending.pop_front() {
-        if !visited.insert(feature.clone()) {
-            continue;
-        }
-        let values = features
-            .get(&feature)
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                format!("native-fs manifest: baozi/{feature} omitted a string feature list")
-            })?;
-        for value in values {
-            let value = value.as_str().ok_or_else(|| {
-                format!("native-fs manifest: baozi/{feature} contains a non-string feature")
-            })?;
-            if forbidden.contains(&value) {
-                return Ok(true);
-            }
-            if !value.starts_with("dep:") && !value.contains('/') {
-                pending.push_back(value.to_owned());
-            }
-        }
-    }
-    Ok(false)
-}
-
-fn check_facade_candidate_profiles(
-    profiles: &BTreeMap<String, Value>,
-    violations: &mut Vec<String>,
-) {
-    let expected = string_set(REPOSITORY_CANDIDATE_TARGETS);
-    let actual = profiles.keys().cloned().collect::<BTreeSet<_>>();
-    if actual != expected {
-        violations.push(format!(
-            "native-fs facade candidate profiles: target set must be {expected:?}, found {actual:?}"
+    id: &str,
+    label: &str,
+) -> Result<(), String> {
+    let workspace_root = required_string(metadata, "workspace_root", "candidate metadata")?;
+    if !Path::new(workspace_root).ends_with("candidates/baozi-native-io") {
+        return Err(format!(
+            "{label}: workspace_root must be the standalone candidates/baozi-native-io directory"
         ));
     }
-    for target in REPOSITORY_CANDIDATE_TARGETS {
-        let Some(metadata) = profiles.get(*target) else {
-            continue;
-        };
-        if let Err(violation) = check_facade_candidate_profile(target, metadata) {
-            violations.push(violation);
-        }
-    }
-}
-
-fn check_facade_candidate_profile(target: &str, metadata: &Value) -> Result<(), String> {
-    let label = format!("native-fs facade candidate profile {target}");
-    let document = MetadataDocument::parse(metadata, target)?;
-    let root = document.unique_package_id(FACADE_PACKAGE)?;
     check_workspace_package(
         metadata,
-        document.package(root)?,
-        root,
-        FACADE_PACKAGE,
-        "crates/baozi/Cargo.toml",
-        &label,
+        package,
+        id,
+        CANDIDATE_PACKAGE,
+        "Cargo.toml",
+        label,
     )?;
-    let root_node = document.node(root)?;
-    let root_features = root_node
-        .get("features")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("{label}: {FACADE_PACKAGE} omitted resolved features"))?;
-    let root_features = sorted_strings(root_features)?;
-    if !root_features
-        .iter()
-        .any(|feature| feature == "native-fs-candidate")
+    if metadata.get("workspace_members") != Some(&serde_json::json!([id])) {
+        return Err(format!(
+            "{label}: candidate must be the only member of its own workspace"
+        ));
+    }
+    if metadata
+        .get("resolve")
+        .and_then(|resolve| string_field(resolve, "root"))
+        != Some(id)
     {
         return Err(format!(
-            "{label}: {FACADE_PACKAGE} must resolve native-fs-candidate"
-        ));
-    }
-
-    let reachable = document.production_closure(&[root.to_owned()])?;
-    let mut io_packages = Vec::new();
-    let mut cap_fs_ext = 0;
-    for id in &reachable {
-        let package = document.package(id)?;
-        match string_field(package, "name") {
-            Some("baozi-io") => io_packages.push(id.as_str()),
-            Some("cap-fs-ext") => cap_fs_ext += 1,
-            _ => {}
-        }
-    }
-    let io_id = match io_packages.as_slice() {
-        [id] => *id,
-        _ => {
-            return Err(format!(
-                "{label}: expected exactly one reachable baozi-io package, found {}",
-                io_packages.len()
-            ));
-        }
-    };
-    check_workspace_package(
-        metadata,
-        document.package(io_id)?,
-        io_id,
-        "baozi-io",
-        "crates/baozi-io/Cargo.toml",
-        &label,
-    )?;
-    let io_features = document
-        .node(io_id)?
-        .get("features")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("{label}: baozi-io omitted resolved features"))?;
-    let io_features = sorted_nondefault_features(io_features)?;
-    let expected_io_features = vec!["fs-candidate".to_owned()];
-    if io_features != expected_io_features {
-        return Err(format!(
-            "{label}: baozi-io resolved features must be exactly {expected_io_features:?}, found {io_features:?}"
-        ));
-    }
-
-    if cap_fs_ext != 0 {
-        return Err(format!(
-            "{label}: cap-fs-ext is forbidden in the resolved facade candidate closure"
+            "{label}: candidate must be the resolve root of its own workspace"
         ));
     }
     Ok(())
@@ -917,10 +556,16 @@ fn check_xtask_profile(target: &str, metadata: &Value) -> Result<(), String> {
         "crates/baozi-xtask/Cargo.toml",
         &label,
     )?;
+    if document.node(xtask_id)?.get("features") != Some(&serde_json::json!([])) {
+        return Err(format!("{label}: xtask must resolve no features"));
+    }
     let reachable = document.production_closure(&[xtask_id.to_owned()])?;
     for id in reachable {
         let name = required_string(document.package(&id)?, "name", "package")?;
-        if name == "baozi-io" || NATIVE_FILESYSTEM_PACKAGES.contains(&name) {
+        if name == "baozi-io"
+            || name == CANDIDATE_PACKAGE
+            || NATIVE_FILESYSTEM_PACKAGES.contains(&name)
+        {
             return Err(format!("{label}: xtask must not reach {name}"));
         }
     }
@@ -1001,6 +646,7 @@ struct ManifestDependency<'a> {
     requirement: &'a str,
     target: &'a str,
     features: &'a [&'a str],
+    optional: bool,
 }
 
 fn check_manifest_dependency(
@@ -1038,7 +684,7 @@ fn check_manifest_dependency(
         && string_field(dependency, "req") == Some(expected.requirement)
         && dependency.get("kind") == Some(&Value::Null)
         && dependency.get("rename") == Some(&Value::Null)
-        && dependency.get("optional").and_then(Value::as_bool) == Some(true)
+        && dependency.get("optional").and_then(Value::as_bool) == Some(expected.optional)
         && dependency
             .get("uses_default_features")
             .and_then(Value::as_bool)
@@ -1047,14 +693,15 @@ fn check_manifest_dependency(
         && actual_features.as_ref() == Some(&expected_features);
     if !exact {
         violations.push(format!(
-            "native-fs manifest: direct {} edge drifted from source={CRATES_IO_SOURCE}, req={}, optional=true, default-features=false, features={expected_features:?}, target={}",
-            expected.name, expected.requirement, expected.target
+            "native-fs manifest: direct {} edge drifted from source={CRATES_IO_SOURCE}, req={}, optional={}, default-features=false, features={expected_features:?}, target={}",
+            expected.name, expected.requirement, expected.optional, expected.target
         ));
     }
 }
 
 fn build_snapshot(
     target_metadata: &BTreeMap<String, Value>,
+    portable_metadata: &BTreeMap<String, Value>,
     checksums: &BTreeMap<ChecksumKey, String>,
     violations: &mut Vec<String>,
 ) -> Option<Value> {
@@ -1090,7 +737,7 @@ fn build_snapshot(
     }
 
     for target in PORTABLE_TARGETS {
-        let Some(metadata) = target_metadata.get(*target) else {
+        let Some(metadata) = portable_metadata.get(*target) else {
             violations.push(format!(
                 "native-fs portable profile {target}: missing cargo metadata"
             ));
@@ -1108,13 +755,21 @@ fn build_snapshot(
 
     let identities = identities.into_iter().collect::<Map<_, _>>();
     Some(Value::Object(Map::from_iter([
-        ("schema".to_owned(), Value::from(3)),
+        ("schema".to_owned(), Value::from(4)),
         ("review_basis".to_owned(), review_basis()),
         (
             "metadata_semantics".to_owned(),
             Value::String(
                 "cargo metadata --locked --filter-platform; normal/build closure only".to_owned(),
             ),
+        ),
+        (
+            "manifest_path".to_owned(),
+            Value::String(CANDIDATE_MANIFEST_PATH.to_owned()),
+        ),
+        (
+            "lockfile_path".to_owned(),
+            Value::String(CANDIDATE_LOCK_PATH.to_owned()),
         ),
         ("package_identities".to_owned(), Value::Object(identities)),
         (
@@ -1290,7 +945,7 @@ fn build_repository_delta_snapshot(
     }
 
     Some(Value::Object(Map::from_iter([
-        ("schema".to_owned(), Value::from(2)),
+        ("schema".to_owned(), Value::from(3)),
         (
             "runtime_baseline".to_owned(),
             Value::String(BASELINE_PATH.to_owned()),
@@ -1311,7 +966,7 @@ fn build_repository_delta_snapshot(
         (
             "metadata_semantics".to_owned(),
             Value::String(
-                "cargo metadata --locked --filter-platform; repository-fs-candidate normal/build closure delta from the frozen runtime baseline"
+                "cargo metadata --locked --filter-platform; repository-capture normal/build closure delta from the frozen runtime baseline"
                     .to_owned(),
             ),
         ),
@@ -1443,10 +1098,50 @@ fn build_dependency_audit_profile(
     violations: &mut Vec<String>,
 ) -> Result<Value, String> {
     let document = MetadataDocument::parse(metadata, profile.target)?;
-    let root = document.unique_package_id("baozi-io")?;
+    let profile_label = dependency_audit_profile_label(kind, profile.name);
+    let root = document.unique_package_id(CANDIDATE_PACKAGE)?;
+    check_candidate_workspace(metadata, document.package(root)?, root, &profile_label)?;
+    let workspace_root = Path::new(required_string(
+        metadata,
+        "workspace_root",
+        "candidate metadata",
+    )?);
+    let repository_root = workspace_root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| format!("{profile_label}: candidate workspace omitted repository parent"))?;
+    let expected_io_manifest = repository_root.join("crates/baozi-io/Cargo.toml");
+    let io_id = document.unique_package_id("baozi-io")?;
+    let io_package = document.package(io_id)?;
+    if io_package.get("source") != Some(&Value::Null)
+        || string_field(io_package, "manifest_path")
+            .is_none_or(|path| Path::new(path) != expected_io_manifest)
+    {
+        return Err(format!(
+            "{profile_label}: baozi-io must be the portable path package at {}",
+            expected_io_manifest.display()
+        ));
+    }
+    let io_features = document
+        .node(io_id)?
+        .get("features")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{profile_label}: baozi-io omitted resolved features"))?;
+    if !sorted_nondefault_features(io_features)?.is_empty() {
+        violations.push(format!(
+            "{profile_label}: portable baozi-io must resolve no nondefault features"
+        ));
+    }
     let root_node = document.node(root)?;
     let full_reachable = document.production_closure(&[root.to_owned()])?;
-    let profile_label = dependency_audit_profile_label(kind, profile.name);
+    if !production_dependencies(root_node, profile.target)?
+        .iter()
+        .any(|dependency| dependency.package == io_id && dependency.kinds.contains(&"normal"))
+    {
+        violations.push(format!(
+            "{profile_label}: candidate must depend directly on portable baozi-io"
+        ));
+    }
     let mut full_package_keys = BTreeSet::new();
     for id in &full_reachable {
         if id == root {
@@ -1459,7 +1154,7 @@ fn build_dependency_audit_profile(
                 "{profile_label}: duplicate full-closure package key {key}"
             ));
         }
-        if string_field(package, "source") != Some(CRATES_IO_SOURCE) {
+        if id != io_id && string_field(package, "source") != Some(CRATES_IO_SOURCE) {
             violations.push(format!(
                 "{profile_label}: full-closure package {key} must come from {CRATES_IO_SOURCE}"
             ));
@@ -1468,20 +1163,15 @@ fn build_dependency_audit_profile(
     let root_features = root_node
         .get("features")
         .and_then(Value::as_array)
-        .ok_or_else(|| format!("{profile_label}: baozi-io omitted resolved features"))?;
+        .ok_or_else(|| format!("{profile_label}: {CANDIDATE_PACKAGE} omitted resolved features"))?;
     let actual_root_features = sorted_nondefault_features(root_features)?;
     let expected_root_features = match kind {
-        DependencyAuditKind::Runtime => vec!["fs-candidate".to_owned()],
-        DependencyAuditKind::Repository => {
-            vec![
-                "fs-candidate".to_owned(),
-                "repository-fs-candidate".to_owned(),
-            ]
-        }
+        DependencyAuditKind::Runtime => vec![],
+        DependencyAuditKind::Repository => vec!["repository-capture".to_owned()],
     };
     if actual_root_features != expected_root_features {
         violations.push(format!(
-            "{profile_label}: baozi-io resolved features must be exactly {expected_root_features:?}, found {actual_root_features:?}"
+            "{profile_label}: {CANDIDATE_PACKAGE} resolved features must be exactly {expected_root_features:?}, found {actual_root_features:?}"
         ));
     }
 
@@ -1709,33 +1399,42 @@ fn check_critical_packages(
 
 fn check_portable_profile(target: &str, metadata: &Value) -> Result<(), String> {
     let document = MetadataDocument::parse(metadata, target)?;
-    let root = document.unique_package_id("baozi")?;
-    let reachable = document.production_closure(&[root.to_owned()])?;
+    let members = metadata
+        .get("workspace_members")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!("native-fs portable profile {target}: metadata omitted workspace_members")
+        })?;
+    let roots = sorted_strings(members)?;
+    if roots.is_empty()
+        || !roots.iter().any(|id| {
+            document
+                .package(id)
+                .is_ok_and(|package| string_field(package, "name") == Some("baozi"))
+        })
+    {
+        return Err(format!(
+            "native-fs portable profile {target}: expected the portable root workspace including baozi"
+        ));
+    }
+    let reachable = document.production_closure(&roots)?;
     let mut forbidden_packages = BTreeSet::new();
     let mut forbidden_features = BTreeSet::new();
     for id in reachable {
-        let package = document.package(&id)?;
-        let name = required_string(package, "name", "package")?;
-        if NATIVE_FILESYSTEM_PACKAGES.contains(&name) {
+        let name = required_string(document.package(&id)?, "name", "package")?;
+        if name == CANDIDATE_PACKAGE || NATIVE_FILESYSTEM_PACKAGES.contains(&name) {
             forbidden_packages.insert(name.to_owned());
         }
-
-        let node = document.node(&id)?;
-        let features = node
+        let features = document
+            .node(&id)?
             .get("features")
             .and_then(Value::as_array)
             .ok_or_else(|| {
                 format!("native-fs portable profile {target}: {name} omitted resolved features")
             })?;
-        for feature in features {
-            let feature = feature.as_str().ok_or_else(|| {
-                format!(
-                    "native-fs portable profile {target}: {name} has a non-string resolved feature"
-                )
-            })?;
-            if (name == "baozi" && matches!(feature, "native-fs" | "native-fs-candidate"))
-                || (name == "baozi-io"
-                    && matches!(feature, "fs" | "fs-candidate" | "repository-fs-candidate"))
+        for feature in sorted_strings(features)? {
+            if retired_native_feature(name, &feature)
+                || (name == XTASK_PACKAGE && !feature.is_empty())
             {
                 forbidden_features.insert(format!("{name}/{feature}"));
             }
@@ -1743,17 +1442,9 @@ fn check_portable_profile(target: &str, metadata: &Value) -> Result<(), String> 
     }
     if forbidden_packages.is_empty() && forbidden_features.is_empty() {
         Ok(())
-    } else if forbidden_features.is_empty() {
-        Err(format!(
-            "native-fs portable profile {target}: byte-only graph contains forbidden packages {forbidden_packages:?}"
-        ))
-    } else if forbidden_packages.is_empty() {
-        Err(format!(
-            "native-fs portable profile {target}: byte-only graph enables forbidden features {forbidden_features:?}"
-        ))
     } else {
         Err(format!(
-            "native-fs portable profile {target}: byte-only graph contains forbidden packages {forbidden_packages:?} and enables forbidden features {forbidden_features:?}"
+            "native-fs portable profile {target}: portable workspace contains forbidden packages {forbidden_packages:?} and features {forbidden_features:?}"
         ))
     }
 }
@@ -1943,8 +1634,8 @@ fn package_checksum<'a>(
 }
 
 fn check_baseline_shape(baseline: &Value, violations: &mut Vec<String>) {
-    if baseline.get("schema").and_then(Value::as_u64) != Some(3) {
-        violations.push("native-fs baseline: schema must be 3".to_owned());
+    if baseline.get("schema").and_then(Value::as_u64) != Some(4) {
+        violations.push("native-fs baseline: schema must be 4".to_owned());
     }
     let expected_profiles: BTreeSet<_> = DEPENDENCY_AUDIT_PROFILES
         .iter()
@@ -2012,8 +1703,8 @@ fn check_repository_target_partition(violations: &mut Vec<String>) {
 
 fn check_repository_baseline_shape(baseline: &Value, violations: &mut Vec<String>) {
     check_repository_target_partition(violations);
-    if baseline.get("schema").and_then(Value::as_u64) != Some(2) {
-        violations.push("native-fs repository baseline: schema must be 2".to_owned());
+    if baseline.get("schema").and_then(Value::as_u64) != Some(3) {
+        violations.push("native-fs repository baseline: schema must be 3".to_owned());
     }
     if string_field(baseline, "runtime_baseline") != Some(BASELINE_PATH) {
         violations.push(format!(
@@ -2023,10 +1714,10 @@ fn check_repository_baseline_shape(baseline: &Value, violations: &mut Vec<String
     if baseline
         .get("runtime_baseline_schema")
         .and_then(Value::as_u64)
-        != Some(3)
+        != Some(4)
     {
         violations
-            .push("native-fs repository baseline: runtime_baseline_schema must be 3".to_owned());
+            .push("native-fs repository baseline: runtime_baseline_schema must be 4".to_owned());
     }
 
     let expected_profiles: BTreeSet<_> = DEPENDENCY_AUDIT_PROFILES

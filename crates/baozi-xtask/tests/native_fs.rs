@@ -10,6 +10,8 @@ const CAP_FS_EXT_ID: &str =
 const CAP_PRIMITIVES_ID: &str =
     "registry+https://github.com/rust-lang/crates.io-index#cap-primitives@4.0.3";
 const RUSTIX_ID: &str = "registry+https://github.com/rust-lang/crates.io-index#rustix@1.1.4";
+const FIXTURE_CANDIDATE_ID: &str =
+    "path+file:///fixture/candidates/baozi-native-io#baozi-native-io-candidate@0.1.0";
 const FIXTURE_IO_ID: &str = "path+file:///fixture/baozi-io#0.1.0";
 const FIXTURE_FACADE_ID: &str = "path+file:///fixture/baozi#0.1.0";
 const FIXTURE_XTASK_ID: &str = "path+file:///fixture/baozi-xtask#0.1.0";
@@ -59,9 +61,9 @@ fn canonical_target_filtered_fixture_passes() {
     let report = fixture.check();
 
     assert!(report.violations.is_empty(), "{:#?}", report.violations);
-    assert_eq!(report.profiles_checked, 14);
-    assert_eq!(fixture.baseline["schema"], json!(3));
-    assert_eq!(fixture.repository_baseline["schema"], json!(2));
+    assert_eq!(report.profiles_checked, 11);
+    assert_eq!(fixture.baseline["schema"], json!(4));
+    assert_eq!(fixture.repository_baseline["schema"], json!(3));
     assert_eq!(
         fixture.baseline["runtime_candidate_targets"],
         json!(RUNTIME_CANDIDATE_TARGETS)
@@ -209,550 +211,6 @@ fn dependency_target_predicates_must_bind_empty_target_abi() {
 }
 
 #[test]
-fn direct_hidden_backend_edges_are_rejected() {
-    let mut fixture = Fixture::canonical();
-    fixture
-        .manifest_dependencies_mut()
-        .push(json!({ "name": "cap-primitives" }));
-
-    let report = fixture.check();
-
-    assert!(
-        report.violations.iter().any(|violation| violation
-            == "native-fs manifest: baozi-io must not depend directly on cap-primitives"),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn native_backend_packages_are_private_to_baozi_io() {
-    for dependency in ["cap-std", "cap-primitives", "rustix", "cap-fs-ext"] {
-        let mut fixture = Fixture::canonical();
-        fixture.manifest["packages"]
-            .as_array_mut()
-            .expect("fixture manifest packages")
-            .push(json!({
-                "name": "baozi-import",
-                "features": {},
-                "dependencies": [{ "name": dependency }]
-            }));
-
-        let report = fixture.check();
-
-        assert!(
-            report.violations.iter().any(|violation| violation
-                == &format!(
-                    "native-fs manifest: baozi-import must not depend directly on {dependency}; native filesystem dependencies are private to baozi-io"
-                )),
-            "{:#?}",
-            report.violations
-        );
-    }
-}
-
-#[test]
-fn facade_candidate_feature_must_delegate_to_baozi_io() {
-    let mut fixture = Fixture::canonical();
-    fixture.manifest["packages"][1]["features"]["native-fs-candidate"] = json!([]);
-
-    let report = fixture.check();
-
-    assert!(
-        report
-            .violations
-            .iter()
-            .any(|violation| violation.contains("baozi/native-fs-candidate must be exactly")),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn repository_feature_and_backend_dependency_are_exact() {
-    let mut missing_dependency = Fixture::canonical();
-    missing_dependency
-        .manifest_dependencies_mut()
-        .retain(|dependency| dependency["name"] != "cap-fs-ext");
-    let missing_dependency_report = missing_dependency.check();
-    assert!(
-        missing_dependency_report
-            .violations
-            .iter()
-            .any(|violation| violation
-                == "native-fs manifest: expected exactly one direct cap-fs-ext edge, found 0"),
-        "{:#?}",
-        missing_dependency_report.violations
-    );
-
-    let mut missing_feature = Fixture::canonical();
-    missing_feature.manifest["packages"][0]["features"]["repository-fs-candidate"] =
-        json!(["fs-candidate"]);
-    let missing_feature_report = missing_feature.check();
-    assert!(
-        missing_feature_report.violations.iter().any(|violation| violation
-            .contains("baozi-io/repository-fs-candidate must be exactly")),
-        "{:#?}",
-        missing_feature_report.violations
-    );
-}
-
-#[test]
-fn xtask_and_other_crates_cannot_own_native_backend_dependencies() {
-    let mut xtask_fixture = Fixture::canonical();
-    xtask_fixture.manifest["packages"][2]["dependencies"]
-        .as_array_mut()
-        .expect("xtask dependencies")
-        .push(json!({ "name": "cap-std" }));
-    let xtask_report = xtask_fixture.check();
-    assert!(
-        xtask_report.violations.iter().any(|violation| violation
-            == "native-fs manifest: baozi-xtask must not depend directly on cap-std; native filesystem dependencies are private to baozi-io"),
-        "{:#?}",
-        xtask_report.violations
-    );
-
-    let mut other_fixture = Fixture::canonical();
-    other_fixture.manifest["packages"]
-        .as_array_mut()
-        .expect("fixture manifest packages")
-        .push(json!({
-            "name": "baozi-core",
-            "features": {},
-            "dependencies": [{ "name": "cap-fs-ext" }]
-        }));
-    let other_report = other_fixture.check();
-    assert!(
-        other_report.violations.iter().any(|violation| violation
-            == "native-fs manifest: baozi-core must not depend directly on cap-fs-ext; native filesystem dependencies are private to baozi-io"),
-        "{:#?}",
-        other_report.violations
-    );
-}
-
-#[test]
-fn dependency_declarations_cannot_request_repository_io() {
-    let mut direct = Fixture::canonical();
-    direct.manifest["packages"]
-        .as_array_mut()
-        .expect("fixture manifest packages")
-        .push(json!({
-            "name": "baozi-format-gltf",
-            "features": {},
-            "dependencies": [{
-                "name": "baozi-io",
-                "kind": "dev",
-                "rename": null,
-                "features": ["repository-fs-candidate"]
-            }]
-        }));
-    let report = direct.check();
-    assert!(
-        report.violations.iter().any(|violation| violation
-            == "native-fs manifest: baozi-format-gltf must not request baozi-io/repository-fs-candidate on a dependency edge"),
-        "{:#?}",
-        report.violations
-    );
-
-    let mut forwarded = Fixture::canonical();
-    forwarded.manifest["packages"]
-        .as_array_mut()
-        .expect("fixture manifest packages")
-        .push(json!({
-            "name": "baozi-test-support",
-            "features": {
-                "repository": ["asset_io/repository-fs-candidate"]
-            },
-            "dependencies": [{
-                "name": "baozi-io",
-                "kind": "dev",
-                "rename": "asset_io",
-                "features": []
-            }]
-        }));
-    let report = forwarded.check();
-    assert!(
-        report.violations.iter().any(|violation| violation
-            == "native-fs manifest: baozi-test-support/repository must not forward baozi-io/repository-fs-candidate"),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn complete_local_declarations_reject_excluded_dev_helper_forwarding() {
-    const GLTF_ID: &str = "path+file:///fixture/baozi-format-gltf#0.1.0";
-    const HELPER_ID: &str = "path+file:///fixture/repository-leak-helper#0.1.0";
-    let mut fixture = Fixture::canonical();
-    fixture.local_declaration_metadata["packages"]
-        .as_array_mut()
-        .expect("complete declaration packages")
-        .extend([
-            json!({
-                "id": GLTF_ID,
-                "name": "baozi-format-gltf",
-                "version": "0.1.0",
-                "source": null,
-                "manifest_path": "/fixture/crates/baozi-format-gltf/Cargo.toml",
-                "features": {
-                    "default": []
-                },
-                "dependencies": [{
-                    "name": "repository-leak-helper",
-                    "source": null,
-                    "req": "*",
-                    "kind": "dev",
-                    "rename": "helper",
-                    "optional": false,
-                    "uses_default_features": false,
-                    "features": ["leak"],
-                    "target": null
-                }]
-            }),
-            json!({
-                "id": HELPER_ID,
-                "name": "repository-leak-helper",
-                "version": "0.1.0",
-                "source": null,
-                "manifest_path": "/fixture/vendor/repository-leak-helper/Cargo.toml",
-                "features": {
-                    "default": [],
-                    "leak": ["nested"],
-                    "nested": ["asset_io?/repository-fs-candidate"]
-                },
-                "dependencies": [{
-                    "name": "baozi-io",
-                    "source": null,
-                    "req": "*",
-                    "kind": null,
-                    "rename": "asset_io",
-                    "optional": true,
-                    "uses_default_features": false,
-                    "features": [],
-                    "target": null
-                }]
-            }),
-        ]);
-    fixture.local_declaration_metadata["workspace_members"]
-        .as_array_mut()
-        .expect("workspace members")
-        .push(json!(GLTF_ID));
-
-    let report = fixture.check();
-
-    assert!(
-        report.violations.iter().any(|violation| violation
-            == "native-fs manifest: repository-leak-helper/nested must not forward baozi-io/repository-fs-candidate"),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn complete_local_declarations_scan_build_and_target_specific_edges() {
-    const BUILD_ID: &str = "path+file:///fixture/baozi-format-build#0.1.0";
-    let mut fixture = Fixture::canonical();
-    fixture.local_declaration_metadata["packages"]
-        .as_array_mut()
-        .expect("complete declaration packages")
-        .push(json!({
-            "id": BUILD_ID,
-            "name": "baozi-format-build",
-            "version": "0.1.0",
-            "source": null,
-            "manifest_path": "/fixture/crates/baozi-format-build/Cargo.toml",
-            "features": {
-                "default": []
-            },
-            "dependencies": [{
-                "name": "baozi-io",
-                "source": null,
-                "req": "*",
-                "kind": "build",
-                "rename": null,
-                "optional": true,
-                "uses_default_features": false,
-                "features": ["repository-fs-candidate"],
-                "target": "cfg(target_os = \"windows\")"
-            }]
-        }));
-    fixture.local_declaration_metadata["workspace_members"]
-        .as_array_mut()
-        .expect("workspace members")
-        .push(json!(BUILD_ID));
-
-    let report = fixture.check();
-
-    assert!(
-        report.violations.iter().any(|violation| violation
-            == "native-fs manifest: baozi-format-build must not request baozi-io/repository-fs-candidate on a dependency edge"),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn facade_candidate_cannot_reach_repository_feature() {
-    let mut fixture = Fixture::canonical();
-    fixture.manifest["packages"][1]["features"]["repository-helper"] =
-        json!(["baozi-io/repository-fs-candidate"]);
-    fixture.manifest["packages"][1]["features"]["native-fs-candidate"] =
-        json!(["baozi-io/fs-candidate", "repository-helper"]);
-
-    let report = fixture.check();
-
-    assert!(
-        report.violations.iter().any(|violation| violation
-            == "native-fs manifest: baozi/native-fs-candidate must not reach baozi-io/repository-fs-candidate"),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn resolved_facade_candidate_rejects_indirect_repository_activation() {
-    let mut fixture = Fixture::canonical();
-    let metadata = fixture
-        .facade_candidate_target_metadata
-        .get_mut("x86_64-unknown-linux-gnu")
-        .expect("linux facade candidate profile");
-    add_cap_fs_ext(metadata, true);
-
-    let report = fixture.check();
-
-    assert!(
-        report.violations.iter().any(|violation| violation.contains(
-            "facade candidate profile x86_64-unknown-linux-gnu: baozi-io resolved features must be exactly"
-        )),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn resolved_facade_candidate_binds_workspace_baozi_io_identity() {
-    let mut fixture = Fixture::canonical();
-    fixture
-        .facade_candidate_target_metadata
-        .get_mut("x86_64-unknown-linux-gnu")
-        .expect("linux facade candidate profile")["packages"]
-        .as_array_mut()
-        .expect("fixture packages")
-        .iter_mut()
-        .find(|package| package["name"] == "baozi-io")
-        .expect("baozi-io package")["manifest_path"] = json!("/fixture/vendor/baozi-io/Cargo.toml");
-
-    let report = fixture.check();
-
-    assert!(
-        report
-            .violations
-            .iter()
-            .any(|violation| violation.contains("manifest_path must be")),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn xtask_cannot_request_or_forward_repository_io() {
-    for forwarded in [false, true] {
-        let mut fixture = Fixture::canonical();
-        let xtask = &mut fixture.manifest["packages"][2];
-        xtask["dependencies"] = json!([{
-            "name": "baozi-io",
-            "kind": "dev",
-            "rename": "asset_io",
-            "features": if forwarded { vec![] } else { vec!["repository-fs-candidate"] }
-        }]);
-        let expected = if forwarded {
-            xtask["features"]["repository"] = json!(["asset_io?/repository-fs-candidate"]);
-            "native-fs manifest: baozi-xtask/repository must not forward baozi-io/repository-fs-candidate"
-        } else {
-            "native-fs manifest: baozi-xtask must not request baozi-io/repository-fs-candidate on a dependency edge"
-        };
-
-        let report = fixture.check();
-
-        assert!(
-            report
-                .violations
-                .iter()
-                .any(|violation| violation == expected),
-            "{:#?}",
-            report.violations
-        );
-    }
-}
-
-#[test]
-fn xtask_resolved_profile_rejects_direct_asset_io() {
-    let mut fixture = Fixture::canonical();
-    let nodes = fixture.xtask_metadata["resolve"]["nodes"]
-        .as_array_mut()
-        .expect("fixture nodes");
-    nodes
-        .iter_mut()
-        .find(|node| node["id"] == FIXTURE_XTASK_ID)
-        .expect("fixture xtask node")["deps"] = json!([dependency("asset_io", FIXTURE_IO_ID)]);
-    let io = nodes
-        .iter_mut()
-        .find(|node| node["id"] == FIXTURE_IO_ID)
-        .expect("fixture IO node");
-    io["features"] = json!([]);
-    io["deps"] = json!([]);
-
-    let report = fixture.check();
-
-    assert!(
-        report
-            .violations
-            .iter()
-            .any(|violation| violation.contains("xtask must not reach baozi-io")),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn xtask_resolved_profile_rejects_indirect_repository_io() {
-    const HELPER_ID: &str = "path+file:///fixture/xtask-helper#0.1.0";
-    let mut fixture = Fixture::canonical();
-    let metadata = &mut fixture.xtask_metadata;
-    metadata["packages"]
-        .as_array_mut()
-        .expect("fixture packages")
-        .push(package(HELPER_ID, "xtask-helper", "0.1.0"));
-    let nodes = metadata["resolve"]["nodes"]
-        .as_array_mut()
-        .expect("fixture nodes");
-    nodes
-        .iter_mut()
-        .find(|node| node["id"] == FIXTURE_XTASK_ID)
-        .expect("fixture xtask node")["deps"] = json!([dependency("helper", HELPER_ID)]);
-    nodes.push(node(
-        HELPER_ID,
-        vec![dependency("asset_io", FIXTURE_IO_ID)],
-        vec![],
-    ));
-
-    let report = fixture.check();
-
-    assert!(
-        report
-            .violations
-            .iter()
-            .any(|violation| violation.contains("xtask must not reach baozi-io")),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn xtask_native_backend_closure_includes_normal_and_build_but_not_dev_edges() {
-    for kind in ["normal", "build", "dev"] {
-        let mut fixture = Fixture::canonical();
-        fixture.xtask_metadata["resolve"]["nodes"]
-            .as_array_mut()
-            .expect("fixture nodes")
-            .iter_mut()
-            .find(|node| node["id"] == FIXTURE_XTASK_ID)
-            .expect("fixture xtask node")["deps"] =
-            json!([dependency_with_kind("backend", CAP_FS_EXT_ID, kind)]);
-
-        let report = fixture.check();
-
-        if kind == "dev" {
-            assert!(report.violations.is_empty(), "{:#?}", report.violations);
-        } else {
-            assert!(
-                report
-                    .violations
-                    .iter()
-                    .any(|violation| violation.contains("xtask must not reach cap-fs-ext")),
-                "{:#?}",
-                report.violations
-            );
-        }
-    }
-}
-
-#[test]
-fn release_native_fs_features_must_remain_unregistered() {
-    let mut io_fixture = Fixture::canonical();
-    io_fixture.manifest["packages"][0]["features"]["fs"] = json!([]);
-    let io_report = io_fixture.check();
-    assert!(
-        io_report
-            .violations
-            .iter()
-            .any(|violation| violation.contains("baozi-io/fs must remain unregistered")),
-        "{:#?}",
-        io_report.violations
-    );
-
-    let mut facade_fixture = Fixture::canonical();
-    facade_fixture.manifest["packages"][1]["features"]["native-fs"] =
-        json!(["baozi-io/fs-candidate"]);
-    let facade_report = facade_fixture.check();
-    assert!(
-        facade_report
-            .violations
-            .iter()
-            .any(|violation| violation.contains("baozi/native-fs must remain unregistered")),
-        "{:#?}",
-        facade_report.violations
-    );
-}
-
-#[test]
-fn default_features_must_not_enable_the_native_adapter() {
-    let mut fixture = Fixture::canonical();
-    fixture.manifest["packages"][0]["features"]["default"] = json!(["fs-candidate"]);
-
-    let report = fixture.check();
-
-    assert!(
-        report
-            .violations
-            .iter()
-            .any(|violation| violation.contains("baozi-io/default must be empty")),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn facade_portable_feature_sets_must_not_reach_native_fs() {
-    let mut fixture = Fixture::canonical();
-    fixture.manifest["packages"][1]["features"]["portable-helper"] = json!(["native-fs-candidate"]);
-    fixture.manifest["packages"][1]["features"]["all-formats"] = json!(["portable-helper"]);
-
-    let report = fixture.check();
-
-    assert!(
-        report.violations.iter().any(|violation| violation
-            .contains("baozi/all-formats must not enable the native filesystem adapter")),
-        "{:#?}",
-        report.violations
-    );
-
-    let mut weak_dependency_fixture = Fixture::canonical();
-    weak_dependency_fixture.manifest["packages"][1]["features"]["all-formats"] =
-        json!(["baozi-io?/fs-candidate"]);
-    let weak_dependency_report = weak_dependency_fixture.check();
-    assert!(
-        weak_dependency_report
-            .violations
-            .iter()
-            .any(|violation| violation
-                .contains("baozi/all-formats must not enable the native filesystem adapter")),
-        "{:#?}",
-        weak_dependency_report.violations
-    );
-}
-
-#[test]
 fn checksum_and_resolved_feature_drift_are_rejected() {
     let canonical = Fixture::canonical();
     let baseline = canonical.baseline.clone();
@@ -775,7 +233,7 @@ fn checksum_and_resolved_feature_drift_are_rejected() {
     let mut feature_drift = Fixture::canonical();
     feature_drift.baseline = baseline;
     feature_drift
-        .target_metadata
+        .runtime
         .get_mut("x86_64-unknown-linux-gnu")
         .expect("fixture Linux metadata")["resolve"]["nodes"]
         .as_array_mut()
@@ -798,7 +256,7 @@ fn checksum_and_resolved_feature_drift_are_rejected() {
 fn runtime_candidate_closure_must_not_reach_cap_fs_ext() {
     let mut fixture = Fixture::canonical();
     let linux = fixture
-        .target_metadata
+        .runtime
         .get_mut("x86_64-unknown-linux-gnu")
         .expect("fixture Linux metadata");
     add_cap_fs_ext(linux, false);
@@ -820,7 +278,7 @@ fn native_packages_cannot_hide_behind_a_sibling_helper_dependency() {
         "registry+https://github.com/rust-lang/crates.io-index#cap-std@4.0.1";
     let mut fixture = Fixture::canonical();
     let linux = fixture
-        .target_metadata
+        .runtime
         .get_mut("x86_64-unknown-linux-gnu")
         .expect("fixture Linux metadata");
     linux["packages"]
@@ -835,7 +293,7 @@ fn native_packages_cannot_hide_behind_a_sibling_helper_dependency() {
         .expect("fixture nodes");
     nodes
         .iter_mut()
-        .find(|node| node["id"] == "path+file:///fixture/baozi-io#0.1.0")
+        .find(|node| node["id"] == FIXTURE_CANDIDATE_ID)
         .expect("fixture root node")["deps"]
         .as_array_mut()
         .expect("fixture root dependencies")
@@ -872,14 +330,14 @@ fn native_packages_cannot_hide_behind_a_sibling_helper_dependency() {
 fn repository_closure_feature_checksum_and_baseline_drift_are_rejected() {
     let mut missing_dependency = Fixture::canonical();
     let missing_linux = missing_dependency
-        .repository_target_metadata
+        .repository
         .get_mut("x86_64-unknown-linux-gnu")
         .expect("fixture repository Linux metadata");
     missing_linux["resolve"]["nodes"]
         .as_array_mut()
         .expect("fixture nodes")
         .iter_mut()
-        .find(|node| node["id"] == "path+file:///fixture/baozi-io#0.1.0")
+        .find(|node| node["id"] == FIXTURE_CANDIDATE_ID)
         .expect("fixture root node")["deps"]
         .as_array_mut()
         .expect("fixture root dependencies")
@@ -894,7 +352,7 @@ fn repository_closure_feature_checksum_and_baseline_drift_are_rejected() {
 
     let mut feature_drift = Fixture::canonical();
     feature_drift
-        .repository_target_metadata
+        .repository
         .get_mut("x86_64-unknown-linux-gnu")
         .expect("fixture repository Linux metadata")["resolve"]["nodes"]
         .as_array_mut()
@@ -959,7 +417,7 @@ fn reviewed_unsafe_boundary_semantics_are_bound_to_the_baseline() {
 fn source_and_target_root_drift_are_rejected() {
     let mut source_drift = Fixture::canonical();
     let linux = source_drift
-        .target_metadata
+        .runtime
         .get_mut("x86_64-unknown-linux-gnu")
         .expect("fixture Linux metadata");
     linux["packages"]
@@ -982,7 +440,7 @@ fn source_and_target_root_drift_are_rejected() {
     let mut windows_rustix = Fixture::canonical();
     add_direct_rustix(
         windows_rustix
-            .target_metadata
+            .runtime
             .get_mut("x86_64-pc-windows-msvc")
             .expect("fixture Windows metadata"),
     );
@@ -1013,7 +471,7 @@ checksum = "1111111111111111111111111111111111111111111111111111111111111111"
     let mut build_fixture = Fixture::canonical();
     build_fixture.lockfile.push_str(HELPER_LOCK);
     let build_linux = build_fixture
-        .target_metadata
+        .runtime
         .get_mut("x86_64-unknown-linux-gnu")
         .expect("fixture Linux metadata");
     build_linux["packages"]
@@ -1047,7 +505,7 @@ checksum = "1111111111111111111111111111111111111111111111111111111111111111"
     let mut dev_fixture = Fixture::canonical();
     dev_fixture.lockfile.push_str(HELPER_LOCK);
     let dev_linux = dev_fixture
-        .target_metadata
+        .runtime
         .get_mut("x86_64-unknown-linux-gnu")
         .expect("fixture Linux metadata");
     dev_linux["packages"]
@@ -1077,98 +535,6 @@ checksum = "1111111111111111111111111111111111111111111111111111111111111111"
 }
 
 #[test]
-fn portable_byte_graph_rejects_native_filesystem_packages() {
-    let mut fixture = Fixture::canonical();
-    let wasm = fixture
-        .target_metadata
-        .get_mut("wasm32-unknown-unknown")
-        .expect("fixture WASM metadata");
-    wasm["packages"]
-        .as_array_mut()
-        .expect("fixture packages")
-        .push(package(CAP_STD_ID, "cap-std", "4.0.3"));
-    wasm["resolve"]["nodes"]
-        .as_array_mut()
-        .expect("fixture nodes")
-        .push(node(CAP_STD_ID, vec![], vec![]));
-    wasm["resolve"]["nodes"][0]["deps"] = json!([dependency("cap_std", CAP_STD_ID)]);
-
-    let report = fixture.check();
-
-    assert!(
-        report.violations.iter().any(|violation| violation.contains(
-            "portable profile wasm32-unknown-unknown: byte-only graph contains forbidden packages"
-        )),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn portable_byte_graph_rejects_native_filesystem_feature_activation() {
-    let mut fixture = Fixture::canonical();
-    let wasm = fixture
-        .target_metadata
-        .get_mut("wasm32-wasip1")
-        .expect("fixture WASI metadata");
-    let io_id = "path+file:///fixture/baozi-io#0.1.0";
-    wasm["packages"]
-        .as_array_mut()
-        .expect("fixture packages")
-        .push(package(io_id, "baozi-io", "0.1.0"));
-    wasm["resolve"]["nodes"]
-        .as_array_mut()
-        .expect("fixture nodes")
-        .push(node(io_id, vec![], vec!["fs-candidate"]));
-    wasm["resolve"]["nodes"][0]["features"] = json!(["all-formats", "native-fs-candidate"]);
-    wasm["resolve"]["nodes"][0]["deps"] = json!([dependency("baozi_io", io_id)]);
-
-    let report = fixture.check();
-
-    assert!(
-        report.violations.iter().any(|violation| violation.contains(
-            "portable profile wasm32-wasip1: byte-only graph enables forbidden features"
-        )),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
-fn portable_byte_graph_rejects_repository_feature_activation() {
-    let mut fixture = Fixture::canonical();
-    let wasm = fixture
-        .target_metadata
-        .get_mut("wasm32-unknown-unknown")
-        .expect("fixture WASM metadata");
-    let io_id = "path+file:///fixture/baozi-io#0.1.0";
-    wasm["packages"]
-        .as_array_mut()
-        .expect("fixture packages")
-        .push(package(io_id, "baozi-io", "0.1.0"));
-    wasm["resolve"]["nodes"]
-        .as_array_mut()
-        .expect("fixture nodes")
-        .push(node(
-            io_id,
-            vec![],
-            vec!["fs-candidate", "repository-fs-candidate"],
-        ));
-    wasm["resolve"]["nodes"][0]["deps"] = json!([dependency("baozi_io", io_id)]);
-
-    let report = fixture.check();
-
-    assert!(
-        report
-            .violations
-            .iter()
-            .any(|violation| violation.contains("baozi-io/repository-fs-candidate")),
-        "{:#?}",
-        report.violations
-    );
-}
-
-#[test]
 fn native_fs_cli_rejects_extra_arguments_with_usage_exit() {
     let output = Command::new(env!("CARGO_BIN_EXE_baozi-xtask"))
         .args(["native-fs-check", "unexpected"])
@@ -1184,271 +550,498 @@ fn native_fs_cli_rejects_extra_arguments_with_usage_exit() {
     );
 }
 
+#[test]
+fn checked_in_manifests_keep_the_candidate_in_an_excluded_unpublished_workspace() {
+    let root = repository_root();
+    let manifest: toml::Value =
+        toml::from_str(&std::fs::read_to_string(root.join("Cargo.toml")).expect("root manifest"))
+            .expect("root TOML");
+    assert!(
+        manifest["workspace"]["exclude"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path.as_str() == Some("candidates/baozi-native-io"))
+    );
+    let candidate: toml::Value = toml::from_str(
+        &std::fs::read_to_string(root.join("candidates/baozi-native-io/Cargo.toml"))
+            .expect("candidate manifest"),
+    )
+    .expect("candidate TOML");
+    assert_eq!(
+        candidate["package"]["name"].as_str(),
+        Some("baozi-native-io-candidate")
+    );
+    assert_eq!(candidate["package"]["publish"].as_bool(), Some(false));
+    assert_eq!(candidate["workspace"]["resolver"].as_str(), Some("3"));
+    assert!(
+        !candidate["dependencies"]
+            .as_table()
+            .unwrap()
+            .contains_key("baozi")
+    );
+}
+
+#[test]
+fn removed_switches_are_rejected_even_as_empty_or_forwarding_aliases() {
+    for (owner, feature) in [
+        ("baozi-io", "fs"),
+        ("baozi-io", "fs-candidate"),
+        ("baozi-io", "repository-fs-candidate"),
+        ("baozi", "native-fs"),
+        ("baozi", "native-fs-candidate"),
+        ("baozi-xtask", "repository-input-candidate"),
+    ] {
+        for values in [json!([]), json!(["default"])] {
+            let mut fixture = Fixture::canonical();
+            local_package_mut(&mut fixture.root, owner)["features"][feature] = values;
+            assert_violation(
+                &fixture,
+                &format!("{owner}/{feature} must be removed without an alias"),
+            );
+        }
+    }
+    let mut candidate = Fixture::canonical();
+    candidate.candidate_mut()["features"]["fs-candidate"] = json!([]);
+    assert_violation(&candidate, "features must be exactly");
+}
+
+#[test]
+fn candidate_features_and_direct_backend_edges_are_exact() {
+    let mut feature = Fixture::canonical();
+    feature.candidate_mut()["features"]["repository-capture"] = json!([]);
+    assert_violation(&feature, "features must be exactly");
+
+    for (name, field, value) in [
+        ("cap-std", "optional", json!(true)),
+        ("rustix", "uses_default_features", json!(true)),
+        ("cap-fs-ext", "optional", json!(false)),
+        ("cap-std", "req", json!("^4")),
+        ("rustix", "features", json!(["fs", "std", "net"])),
+        (
+            "cap-fs-ext",
+            "source",
+            json!("git+https://example.invalid/cap-fs-ext"),
+        ),
+    ] {
+        let mut fixture = Fixture::canonical();
+        fixture
+            .manifest_dependencies_mut()
+            .iter_mut()
+            .find(|dep| dep["name"] == name)
+            .expect("backend declaration")[field] = value;
+        assert_violation(&fixture, &format!("direct {name} edge drifted"));
+    }
+    let mut extra = Fixture::canonical();
+    extra
+        .manifest_dependencies_mut()
+        .push(json!({"name": "cap-primitives", "kind": null}));
+    assert_violation(&extra, "production dependencies must be exactly");
+}
+
+#[test]
+fn root_declarations_reject_native_edges_of_every_kind_even_when_renamed_or_inactive() {
+    for owner in ["baozi", "baozi-io", "baozi-xtask", "dev-helper"] {
+        for name in [
+            "cap-std",
+            "cap-primitives",
+            "cap-fs-ext",
+            "rustix",
+            "baozi-native-io-candidate",
+        ] {
+            for kind in [Value::Null, json!("build"), json!("dev")] {
+                let mut fixture = Fixture::canonical();
+                fixture.root["packages"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({
+                        "name": owner, "source": null, "features": {},
+                        "dependencies": [{"name": name, "rename": "hidden", "optional": true,
+                            "kind": kind, "target": "cfg(target_os = \"freebsd\")"}]
+                    }));
+                assert_violation(&fixture, &format!("{owner} must not depend on {name}"));
+            }
+        }
+    }
+}
+
+#[test]
+fn root_declarations_reject_requests_and_weak_forwards_for_removed_io_features() {
+    for feature in ["fs", "fs-candidate", "repository-fs-candidate"] {
+        let mut fixture = Fixture::canonical();
+        fixture.root["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "name": "excluded-helper", "source": null,
+                "features": {"hidden": [format!("asset_io?/{feature}")]},
+                "dependencies": [{"name": "baozi-io", "rename": "asset_io", "kind": "dev",
+                    "optional": true, "features": [feature]}]
+            }));
+        assert_violation(
+            &fixture,
+            &format!("must not request removed baozi-io/{feature}"),
+        );
+        assert_violation(
+            &fixture,
+            &format!("must not forward removed baozi-io/{feature}"),
+        );
+    }
+}
+
+#[test]
+fn xtask_remains_featureless_and_cannot_declare_asset_io_even_for_tests() {
+    let mut feature = Fixture::canonical();
+    local_package_mut(&mut feature.root, "baozi-xtask")["features"]["helper"] = json!([]);
+    assert_violation(&feature, "baozi-xtask must remain featureless");
+    for kind in [Value::Null, json!("build"), json!("dev")] {
+        let mut fixture = Fixture::canonical();
+        local_package_mut(&mut fixture.root, "baozi-xtask")["dependencies"] = json!([
+            {"name": "baozi-io", "rename": "asset_io", "kind": kind, "features": []}
+        ]);
+        assert_violation(&fixture, "baozi-xtask must not depend on baozi-io");
+    }
+}
+
+#[test]
+fn xtask_reachability_includes_normal_and_build_edges_and_excludes_dev_edges() {
+    const HELPER: &str = "path+file:///fixture/helper#0.1.0";
+    for kind in ["normal", "build", "dev"] {
+        let mut fixture = Fixture::canonical();
+        fixture.root["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(package(HELPER, "helper", "0.1.0"));
+        resolved_node_mut(&mut fixture.root, FIXTURE_XTASK_ID)["deps"] =
+            json!([dependency_with_kind("helper", HELPER, kind)]);
+        fixture.root["resolve"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(node(
+                HELPER,
+                vec![dependency("asset_io", FIXTURE_IO_ID)],
+                vec![],
+            ));
+        let report = fixture.check();
+        if kind == "dev" {
+            assert!(report.violations.is_empty(), "{:#?}", report.violations);
+        } else {
+            assert!(
+                report
+                    .violations
+                    .iter()
+                    .any(|v| v.contains("xtask must not reach baozi-io")),
+                "{:#?}",
+                report.violations
+            );
+        }
+    }
+}
+
+#[test]
+fn candidate_identity_requires_its_own_unpublished_workspace_and_the_real_portable_io() {
+    for field in [
+        "workspace_root",
+        "workspace_members",
+        "resolve_root",
+        "manifest_path",
+        "publish",
+        "io_path",
+        "io_source",
+    ] {
+        let mut fixture = Fixture::canonical();
+        let metadata = fixture.runtime.get_mut("x86_64-unknown-linux-gnu").unwrap();
+        let expected = match field {
+            "workspace_root" => {
+                metadata["workspace_root"] = json!("/fixture");
+                "workspace_root must be the standalone"
+            }
+            "workspace_members" => {
+                metadata["workspace_members"] = json!([FIXTURE_CANDIDATE_ID, FIXTURE_IO_ID]);
+                "candidate must be the only member"
+            }
+            "resolve_root" => {
+                metadata["resolve"]["root"] = json!(FIXTURE_IO_ID);
+                "candidate must be the resolve root"
+            }
+            "manifest_path" => {
+                local_package_mut(metadata, "baozi-native-io-candidate")["manifest_path"] =
+                    json!("/fixture/Cargo.toml");
+                "manifest_path must be"
+            }
+            "publish" => {
+                local_package_mut(metadata, "baozi-native-io-candidate")["publish"] = Value::Null;
+                "must set publish = false"
+            }
+            "io_path" => {
+                local_package_mut(metadata, "baozi-io")["manifest_path"] =
+                    json!("/fixture/vendor/baozi-io/Cargo.toml");
+                "baozi-io must be the portable path package"
+            }
+            "io_source" => {
+                local_package_mut(metadata, "baozi-io")["source"] = json!(SOURCE);
+                "baozi-io must be the portable path package"
+            }
+            _ => unreachable!(),
+        };
+        assert_violation(&fixture, expected);
+    }
+    let mut fixture = Fixture::canonical();
+    fixture
+        .manifest_dependencies_mut()
+        .iter_mut()
+        .find(|dep| dep["name"] == "baozi-io")
+        .unwrap()["path"] = json!("/fixture/vendor/baozi-io");
+    assert_violation(&fixture, "must depend unconditionally on portable baozi-io");
+}
+
+#[test]
+fn candidate_runtime_and_repository_features_cannot_unify() {
+    let mut runtime = Fixture::canonical();
+    resolved_node_mut(
+        runtime.runtime.get_mut("x86_64-unknown-linux-gnu").unwrap(),
+        FIXTURE_CANDIDATE_ID,
+    )["features"] = json!(["repository-capture"]);
+    assert_violation(
+        &runtime,
+        "baozi-native-io-candidate resolved features must be exactly []",
+    );
+    let mut repository = Fixture::canonical();
+    resolved_node_mut(
+        repository
+            .repository
+            .get_mut("x86_64-unknown-linux-gnu")
+            .unwrap(),
+        FIXTURE_CANDIDATE_ID,
+    )["features"] = json!([]);
+    assert_violation(
+        &repository,
+        "baozi-native-io-candidate resolved features must be exactly [\"repository-capture\"]",
+    );
+}
+
+#[test]
+fn portable_audit_starts_at_all_workspace_members_and_rejects_native_normal_and_build_edges() {
+    for kind in ["normal", "build", "dev"] {
+        let mut fixture = Fixture::canonical();
+        let wasm = fixture.portable.get_mut("wasm32-unknown-unknown").unwrap();
+        wasm["packages"]
+            .as_array_mut()
+            .unwrap()
+            .push(package(CAP_STD_ID, "cap-std", "4.0.3"));
+        wasm["resolve"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(node(CAP_STD_ID, vec![], vec![]));
+        // IO is a workspace member even when the facade does not reach it.
+        resolved_node_mut(wasm, FIXTURE_FACADE_ID)["deps"] = json!([]);
+        resolved_node_mut(wasm, FIXTURE_IO_ID)["deps"] =
+            json!([dependency_with_kind("cap_std", CAP_STD_ID, kind)]);
+        let report = fixture.check();
+        if kind == "dev" {
+            assert!(report.violations.is_empty(), "{:#?}", report.violations);
+        } else {
+            assert!(
+                report
+                    .violations
+                    .iter()
+                    .any(|v| v
+                        .contains("portable workspace contains forbidden packages {\"cap-std\"}")),
+                "{:#?}",
+                report.violations
+            );
+        }
+    }
+    let mut fixture = Fixture::canonical();
+    let wasi = fixture.portable.get_mut("wasm32-wasip1").unwrap();
+    resolved_node_mut(wasi, FIXTURE_IO_ID)["features"] = json!(["repository-fs-candidate"]);
+    assert_violation(&fixture, "baozi-io/repository-fs-candidate");
+}
+
+#[test]
+fn missing_targets_and_lock_checksums_fail_closed() {
+    let mut fixture = Fixture::canonical();
+    fixture.runtime.remove("x86_64-unknown-freebsd");
+    fixture.repository.remove("aarch64-apple-darwin");
+    fixture.portable.remove("wasm32-wasip1");
+    for expected in [
+        "profile freebsd: missing cargo metadata",
+        "repository profile macos: missing cargo metadata",
+        "portable profile wasm32-wasip1: missing cargo metadata",
+    ] {
+        assert_violation(&fixture, expected);
+    }
+    let mut fixture = Fixture::canonical();
+    fixture.lockfile =
+        "version = 4\n[[package]]\nname = 'unrelated'\nversion = '1.0.0'\n".to_owned();
+    assert_violation(&fixture, "missing checksum for cap-");
+}
+
 struct Fixture {
-    manifest: Value,
-    local_declaration_metadata: Value,
+    root: Value,
     lockfile: String,
     baseline: Value,
     repository_baseline: Value,
-    target_metadata: BTreeMap<String, Value>,
-    repository_target_metadata: BTreeMap<String, Value>,
-    facade_candidate_target_metadata: BTreeMap<String, Value>,
-    xtask_metadata: Value,
+    runtime: BTreeMap<String, Value>,
+    repository: BTreeMap<String, Value>,
+    portable: BTreeMap<String, Value>,
 }
 
 impl Fixture {
     fn canonical() -> Self {
-        let manifest = manifest_metadata();
-        let local_declaration_metadata = manifest.clone();
+        let root = root_metadata();
         let lockfile = LOCKFILE.to_owned();
-        let target_metadata = target_metadata();
+        let runtime = DEPENDENCY_AUDIT_TARGETS
+            .iter()
+            .map(|(target, rustix)| ((*target).to_owned(), native_metadata(*rustix)))
+            .collect();
+        let portable = PORTABLE_TARGETS
+            .iter()
+            .map(|target| ((*target).to_owned(), root.clone()))
+            .collect();
         let baseline =
-            baozi_xtask::native_fs::resolved_closure_snapshot(&target_metadata, &lockfile)
-                .expect("canonical fixture snapshot");
-        let repository_target_metadata = repository_target_metadata();
+            baozi_xtask::native_fs::resolved_closure_snapshot(&runtime, &portable, &lockfile)
+                .expect("canonical runtime snapshot");
+        let repository = DEPENDENCY_AUDIT_TARGETS
+            .iter()
+            .map(|(target, rustix)| {
+                let mut metadata = native_metadata(*rustix);
+                add_cap_fs_ext(&mut metadata, true);
+                ((*target).to_owned(), metadata)
+            })
+            .collect();
         let repository_baseline = baozi_xtask::native_fs::repository_resolved_closure_snapshot(
             &baseline,
-            &repository_target_metadata,
+            &repository,
             &lockfile,
         )
-        .expect("canonical repository fixture snapshot");
-        let facade_candidate_target_metadata = facade_candidate_target_metadata();
-        let xtask_metadata = xtask_metadata();
+        .expect("canonical repository snapshot");
         Self {
-            manifest,
-            local_declaration_metadata,
+            root,
             lockfile,
             baseline,
             repository_baseline,
-            target_metadata,
-            repository_target_metadata,
-            facade_candidate_target_metadata,
-            xtask_metadata,
+            runtime,
+            repository,
+            portable,
         }
     }
 
     fn check(&self) -> baozi_xtask::native_fs::NativeFsReport {
-        baozi_xtask::native_fs::check_metadata_fixture_with_repository(
-            &self.manifest,
+        baozi_xtask::native_fs::check_metadata_fixture(
             &self.lockfile,
             &self.baseline,
             &self.repository_baseline,
-            &self.target_metadata,
-            baozi_xtask::native_fs::RepositoryMetadataProfiles {
-                local_declarations: &self.local_declaration_metadata,
-                repository: &self.repository_target_metadata,
-                facade: &self.facade_candidate_target_metadata,
-                xtask: &self.xtask_metadata,
+            baozi_xtask::native_fs::NativeFsMetadataProfiles {
+                root: &self.root,
+                runtime: &self.runtime,
+                repository: &self.repository,
+                portable: &self.portable,
             },
         )
     }
 
+    fn candidate_mut(&mut self) -> &mut Value {
+        local_package_mut(
+            self.runtime.get_mut("x86_64-unknown-linux-gnu").unwrap(),
+            "baozi-native-io-candidate",
+        )
+    }
+
     fn manifest_dependencies_mut(&mut self) -> &mut Vec<Value> {
-        self.manifest["packages"][0]["dependencies"]
-            .as_array_mut()
-            .expect("fixture manifest dependencies")
+        self.candidate_mut()["dependencies"].as_array_mut().unwrap()
     }
 }
 
-fn manifest_metadata() -> Value {
+fn assert_violation(fixture: &Fixture, expected: &str) {
+    let report = fixture.check();
+    assert!(
+        report.violations.iter().any(|v| v.contains(expected)),
+        "missing {expected:?}: {:#?}",
+        report.violations
+    );
+}
+
+fn local_package_mut<'a>(metadata: &'a mut Value, name: &str) -> &'a mut Value {
+    metadata["packages"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|package| package["name"] == name)
+        .expect("local package")
+}
+
+fn resolved_node_mut<'a>(metadata: &'a mut Value, id: &str) -> &'a mut Value {
+    metadata["resolve"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == id)
+        .expect("resolved node")
+}
+
+fn root_metadata() -> Value {
+    let mut io = package(FIXTURE_IO_ID, "baozi-io", "0.1.0");
+    io["manifest_path"] = json!("/fixture/crates/baozi-io/Cargo.toml");
+    io["features"] = json!({"default": []});
+    let mut facade = package(FIXTURE_FACADE_ID, "baozi", "0.1.0");
+    facade["manifest_path"] = json!("/fixture/crates/baozi/Cargo.toml");
+    facade["features"] = json!({"default": ["all-formats"], "all-formats": []});
+    facade["dependencies"] = json!([{"name": "baozi-io", "features": [], "rename": null}]);
+    let mut xtask = package(FIXTURE_XTASK_ID, "baozi-xtask", "0.1.0");
+    xtask["manifest_path"] = json!("/fixture/crates/baozi-xtask/Cargo.toml");
     json!({
         "workspace_root": "/fixture",
-        "workspace_members": [
-            FIXTURE_IO_ID,
-            FIXTURE_FACADE_ID,
-            FIXTURE_XTASK_ID
-        ],
-        "packages": [
-            {
-                "id": FIXTURE_IO_ID,
-                "name": "baozi-io",
-                "version": "0.1.0",
-                "source": null,
-                "manifest_path": "/fixture/crates/baozi-io/Cargo.toml",
-                "features": {
-                    "default": [],
-                    "fs-candidate": ["dep:cap-std", "dep:rustix"],
-                    "repository-fs-candidate": ["fs-candidate", "dep:cap-fs-ext"]
-                },
-                "dependencies": [
-                    {
-                        "name": "sha2",
-                        "source": SOURCE,
-                        "req": "^0.10",
-                        "kind": null,
-                        "rename": null,
-                        "optional": false,
-                        "uses_default_features": true,
-                        "features": [],
-                        "target": null
-                    },
-                    {
-                        "name": "thiserror",
-                        "source": SOURCE,
-                        "req": "^2",
-                        "kind": null,
-                        "rename": null,
-                        "optional": false,
-                        "uses_default_features": true,
-                        "features": [],
-                        "target": null
-                    },
-                    {
-                        "name": "cap-fs-ext",
-                        "source": SOURCE,
-                        "req": "=4.0.3",
-                        "kind": null,
-                        "rename": null,
-                        "optional": true,
-                        "uses_default_features": false,
-                        "features": ["std"],
-                        "target": "cfg(any(all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"linux\", target_env = \"gnu\", target_abi = \"\"), all(target_arch = \"x86_64\", target_vendor = \"pc\", target_os = \"windows\", target_env = \"msvc\", target_abi = \"\"), all(target_arch = \"aarch64\", target_vendor = \"apple\", target_os = \"macos\", target_env = \"\", target_abi = \"\"), all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"freebsd\", target_env = \"\", target_abi = \"\")))"
-                    },
-                    {
-                        "name": "cap-std",
-                        "source": SOURCE,
-                        "req": "=4.0.3",
-                        "kind": null,
-                        "rename": null,
-                        "optional": true,
-                        "uses_default_features": false,
-                        "features": [],
-                        "target": "cfg(any(all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"linux\", target_env = \"gnu\", target_abi = \"\"), all(target_arch = \"x86_64\", target_vendor = \"pc\", target_os = \"windows\", target_env = \"msvc\", target_abi = \"\"), all(target_arch = \"aarch64\", target_vendor = \"apple\", target_os = \"macos\", target_env = \"\", target_abi = \"\"), all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"freebsd\", target_env = \"\", target_abi = \"\")))"
-                    },
-                    {
-                        "name": "rustix",
-                        "source": SOURCE,
-                        "req": "=1.1.4",
-                        "kind": null,
-                        "rename": null,
-                        "optional": true,
-                        "uses_default_features": false,
-                        "features": ["std", "fs"],
-                        "target": "cfg(any(all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"linux\", target_env = \"gnu\", target_abi = \"\"), all(target_arch = \"aarch64\", target_vendor = \"apple\", target_os = \"macos\", target_env = \"\", target_abi = \"\"), all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"freebsd\", target_env = \"\", target_abi = \"\")))"
-                    }
-                ]
-            },
-            {
-                "id": FIXTURE_FACADE_ID,
-                "name": "baozi",
-                "version": "0.1.0",
-                "source": null,
-                "manifest_path": "/fixture/crates/baozi/Cargo.toml",
-                "features": {
-                    "default": ["default-formats"],
-                    "default-formats": [],
-                    "all-formats": [],
-                    "native-fs-candidate": ["baozi-io/fs-candidate"]
-                },
-                "dependencies": []
-            },
-            {
-                "id": FIXTURE_XTASK_ID,
-                "name": "baozi-xtask",
-                "version": "0.1.0",
-                "source": null,
-                "manifest_path": "/fixture/crates/baozi-xtask/Cargo.toml",
-                "features": {},
-                "dependencies": []
-            }
-        ]
+        "workspace_members": [FIXTURE_IO_ID, FIXTURE_FACADE_ID, FIXTURE_XTASK_ID],
+        "packages": [io, facade, xtask],
+        "resolve": {"root": null, "nodes": [
+            node(FIXTURE_FACADE_ID, vec![dependency("baozi_io", FIXTURE_IO_ID)], vec!["all-formats"]),
+            node(FIXTURE_IO_ID, vec![], vec![]),
+            node(FIXTURE_XTASK_ID, vec![], vec![])
+        ]}
     })
 }
 
-fn target_metadata() -> BTreeMap<String, Value> {
-    let mut targets = BTreeMap::new();
-    for (target, direct_rustix) in DEPENDENCY_AUDIT_TARGETS {
-        targets.insert(
-            (*target).to_owned(),
-            native_metadata(target, *direct_rustix),
-        );
-    }
-    for target in PORTABLE_TARGETS {
-        targets.insert((*target).to_owned(), portable_metadata());
-    }
-    targets
-}
-
-fn repository_target_metadata() -> BTreeMap<String, Value> {
-    DEPENDENCY_AUDIT_TARGETS
-        .iter()
-        .map(|(target, direct_rustix)| {
-            let mut metadata = native_metadata(target, *direct_rustix);
-            add_cap_fs_ext(&mut metadata, true);
-            ((*target).to_owned(), metadata)
-        })
-        .collect()
-}
-
-fn facade_candidate_target_metadata() -> BTreeMap<String, Value> {
-    DEPENDENCY_AUDIT_TARGETS
-        .iter()
-        .filter(|(target, _)| RUNTIME_CANDIDATE_TARGETS.contains(target))
-        .map(|(target, direct_rustix)| {
-            (
-                (*target).to_owned(),
-                facade_candidate_metadata(target, *direct_rustix),
-            )
-        })
-        .collect()
-}
-
-fn facade_candidate_metadata(target: &str, direct_rustix: bool) -> Value {
-    const FACADE_ID: &str = "path+file:///fixture/baozi#0.1.0";
-    const IO_ID: &str = "path+file:///fixture/baozi-io#0.1.0";
-    let mut metadata = native_metadata(target, direct_rustix);
-    let packages = metadata["packages"]
-        .as_array_mut()
-        .expect("fixture packages");
-    packages
-        .iter_mut()
-        .find(|package| package["id"] == IO_ID)
-        .expect("fixture baozi-io package")["manifest_path"] =
-        json!("/fixture/crates/baozi-io/Cargo.toml");
-    let mut facade = package(FACADE_ID, "baozi", "0.1.0");
-    facade["manifest_path"] = json!("/fixture/crates/baozi/Cargo.toml");
-    packages.push(facade);
-    metadata["resolve"]["nodes"]
-        .as_array_mut()
-        .expect("fixture nodes")
-        .push(node(
-            FACADE_ID,
-            vec![dependency("baozi_io", IO_ID)],
-            vec!["all-formats", "native-fs-candidate"],
-        ));
-    metadata["workspace_root"] = json!("/fixture");
-    metadata["workspace_members"] = json!([FACADE_ID, IO_ID]);
-    metadata
-}
-
-fn xtask_metadata() -> Value {
-    // Workspace IO may be present in metadata without being reachable from xtask.
-    let mut metadata = native_metadata("x86_64-unknown-linux-gnu", true);
-    add_cap_fs_ext(&mut metadata, true);
-    let mut xtask_package = package(FIXTURE_XTASK_ID, "baozi-xtask", "0.1.0");
-    xtask_package["manifest_path"] = json!("/fixture/crates/baozi-xtask/Cargo.toml");
-    metadata["packages"]
-        .as_array_mut()
-        .expect("fixture packages")
-        .push(xtask_package);
-    metadata["resolve"]["nodes"]
-        .as_array_mut()
-        .expect("fixture nodes")
-        .push(node(FIXTURE_XTASK_ID, vec![], vec![]));
-    metadata["workspace_root"] = json!("/fixture");
-    metadata["workspace_members"] = json!([FIXTURE_IO_ID, FIXTURE_XTASK_ID]);
-    metadata
-}
-
-fn native_metadata(target: &str, direct_rustix: bool) -> Value {
-    let root_id = "path+file:///fixture/baozi-io#0.1.0";
+fn native_metadata(direct_rustix: bool) -> Value {
+    let cap_target = concat!(
+        "cfg(any(",
+        "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"linux\", target_env = \"gnu\", target_abi = \"\"), ",
+        "all(target_arch = \"x86_64\", target_vendor = \"pc\", target_os = \"windows\", target_env = \"msvc\", target_abi = \"\"), ",
+        "all(target_arch = \"aarch64\", target_vendor = \"apple\", target_os = \"macos\", target_env = \"\", target_abi = \"\"), ",
+        "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"freebsd\", target_env = \"\", target_abi = \"\")))"
+    );
+    let rustix_target = concat!(
+        "cfg(any(",
+        "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"linux\", target_env = \"gnu\", target_abi = \"\"), ",
+        "all(target_arch = \"aarch64\", target_vendor = \"apple\", target_os = \"macos\", target_env = \"\", target_abi = \"\"), ",
+        "all(target_arch = \"x86_64\", target_vendor = \"unknown\", target_os = \"freebsd\", target_env = \"\", target_abi = \"\")))"
+    );
+    let mut candidate = package(FIXTURE_CANDIDATE_ID, "baozi-native-io-candidate", "0.1.0");
+    candidate["manifest_path"] = json!("/fixture/candidates/baozi-native-io/Cargo.toml");
+    candidate["publish"] = json!([]);
+    candidate["features"] = json!({"default": [], "repository-capture": ["dep:cap-fs-ext"]});
+    candidate["dependencies"] = json!([
+        {"name": "baozi-io", "path": "/fixture/crates/baozi-io", "source": null,
+            "kind": null, "rename": null, "target": null, "optional": false,
+            "uses_default_features": false, "features": []},
+        {"name": "thiserror", "kind": null},
+        backend_declaration("cap-std", "=4.0.3", cap_target, false, vec![]),
+        backend_declaration("cap-fs-ext", "=4.0.3", cap_target, true, vec!["std"]),
+        backend_declaration("rustix", "=1.1.4", rustix_target, false, vec!["fs", "std"])
+    ]);
+    let io = root_metadata()["packages"][0].clone();
     let mut packages = vec![
-        package(root_id, "baozi-io", "0.1.0"),
+        candidate,
+        io,
         package(CAP_STD_ID, "cap-std", "4.0.3"),
         package(CAP_PRIMITIVES_ID, "cap-primitives", "4.0.3"),
     ];
-    let mut root_dependencies = vec![dependency("cap_std", CAP_STD_ID)];
+    let mut root_deps = vec![
+        dependency("baozi_io", FIXTURE_IO_ID),
+        dependency("cap_std", CAP_STD_ID),
+    ];
     let mut nodes = vec![
+        node(FIXTURE_IO_ID, vec![], vec![]),
         node(
             CAP_STD_ID,
             vec![dependency("cap_primitives", CAP_PRIMITIVES_ID)],
@@ -1458,87 +1051,78 @@ fn native_metadata(target: &str, direct_rustix: bool) -> Value {
     ];
     if direct_rustix {
         packages.push(package(RUSTIX_ID, "rustix", "1.1.4"));
-        root_dependencies.push(dependency("rustix", RUSTIX_ID));
+        root_deps.push(dependency("rustix", RUSTIX_ID));
         nodes.push(node(RUSTIX_ID, vec![], vec!["fs", "std"]));
     }
-    nodes.push(node(root_id, root_dependencies, vec!["fs-candidate"]));
-    json!({
-        "packages": packages,
-        "resolve": { "nodes": nodes },
-        "target": target
-    })
+    nodes.push(node(FIXTURE_CANDIDATE_ID, root_deps, vec![]));
+    json!({"workspace_root": "/fixture/candidates/baozi-native-io",
+        "workspace_members": [FIXTURE_CANDIDATE_ID], "packages": packages,
+        "resolve": {"root": FIXTURE_CANDIDATE_ID, "nodes": nodes}})
+}
+
+fn backend_declaration(
+    name: &str,
+    req: &str,
+    target: &str,
+    optional: bool,
+    features: Vec<&str>,
+) -> Value {
+    json!({"name": name, "source": SOURCE, "req": req, "target": target,
+        "optional": optional, "features": features, "uses_default_features": false,
+        "kind": null, "rename": null})
 }
 
 fn add_cap_fs_ext(metadata: &mut Value, repository_feature: bool) {
-    metadata["packages"]
-        .as_array_mut()
-        .expect("fixture packages")
-        .push(package(CAP_FS_EXT_ID, "cap-fs-ext", "4.0.3"));
-    let nodes = metadata["resolve"]["nodes"]
-        .as_array_mut()
-        .expect("fixture nodes");
-    let root = nodes
-        .iter_mut()
-        .find(|node| node["id"] == "path+file:///fixture/baozi-io#0.1.0")
-        .expect("fixture root node");
+    metadata["packages"].as_array_mut().unwrap().push(package(
+        CAP_FS_EXT_ID,
+        "cap-fs-ext",
+        "4.0.3",
+    ));
+    let root = resolved_node_mut(metadata, FIXTURE_CANDIDATE_ID);
     root["deps"]
         .as_array_mut()
-        .expect("fixture root deps")
+        .unwrap()
         .push(dependency("cap_fs_ext", CAP_FS_EXT_ID));
     if repository_feature {
-        root["features"] = json!(["fs-candidate", "repository-fs-candidate"]);
+        root["features"] = json!(["repository-capture"]);
     }
-    nodes
-        .iter_mut()
-        .find(|node| node["id"] == CAP_STD_ID)
-        .expect("fixture cap-std node")["features"] = json!(["default"]);
-    nodes.push(node(
-        CAP_FS_EXT_ID,
-        vec![
-            dependency("cap_primitives", CAP_PRIMITIVES_ID),
-            dependency("cap_std", CAP_STD_ID),
-        ],
-        vec!["cap-std", "std"],
-    ));
-}
-
-fn portable_metadata() -> Value {
-    let root_id = "path+file:///fixture/baozi#0.1.0";
-    json!({
-        "packages": [package(root_id, "baozi", "0.1.0")],
-        "resolve": { "nodes": [node(root_id, vec![], vec![])] }
-    })
+    resolved_node_mut(metadata, CAP_STD_ID)["features"] = json!(["default"]);
+    metadata["resolve"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(node(
+            CAP_FS_EXT_ID,
+            vec![
+                dependency("cap_primitives", CAP_PRIMITIVES_ID),
+                dependency("cap_std", CAP_STD_ID),
+            ],
+            vec!["cap-std", "std"],
+        ));
 }
 
 fn add_direct_rustix(metadata: &mut Value) {
     metadata["packages"]
         .as_array_mut()
-        .expect("fixture packages")
+        .unwrap()
         .push(package(RUSTIX_ID, "rustix", "1.1.4"));
-    let nodes = metadata["resolve"]["nodes"]
+    resolved_node_mut(metadata, FIXTURE_CANDIDATE_ID)["deps"]
         .as_array_mut()
-        .expect("fixture nodes");
-    nodes
-        .iter_mut()
-        .find(|node| node["id"] == "path+file:///fixture/baozi-io#0.1.0")
-        .expect("fixture root node")["deps"]
-        .as_array_mut()
-        .expect("fixture root deps")
+        .unwrap()
         .push(dependency("rustix", RUSTIX_ID));
-    nodes.push(node(RUSTIX_ID, vec![], vec!["fs", "std"]));
+    metadata["resolve"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(node(RUSTIX_ID, vec![], vec!["fs", "std"]));
 }
 
 fn package(id: &str, name: &str, version: &str) -> Value {
-    json!({
-        "id": id,
-        "name": name,
-        "version": version,
-        "source": if id.starts_with("registry+") { Some(SOURCE) } else { None::<&str> }
-    })
+    json!({"id": id, "name": name, "version": version,
+        "source": if id.starts_with("registry+") { Some(SOURCE) } else { None::<&str> },
+        "features": {}, "dependencies": []})
 }
 
-fn node(id: &str, dependencies: Vec<Value>, features: Vec<&str>) -> Value {
-    json!({ "id": id, "deps": dependencies, "features": features })
+fn node(id: &str, deps: Vec<Value>, features: Vec<&str>) -> Value {
+    json!({"id": id, "deps": deps, "features": features})
 }
 
 fn dependency(name: &str, package: &str) -> Value {
@@ -1546,21 +1130,15 @@ fn dependency(name: &str, package: &str) -> Value {
 }
 
 fn dependency_with_kind(name: &str, package: &str, kind: &str) -> Value {
-    let kind = match kind {
-        "normal" => Value::Null,
-        other => Value::String(other.to_owned()),
-    };
-    json!({
-        "name": name,
-        "pkg": package,
-        "dep_kinds": [{ "kind": kind, "target": null }]
-    })
+    json!({"name": name, "pkg": package, "dep_kinds": [{
+        "kind": if kind == "normal" { Value::Null } else { json!(kind) }, "target": null
+    }]})
 }
 
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("xtask crate must be under the workspace root")
+        .expect("xtask crate under workspace")
         .to_path_buf()
 }

@@ -20,7 +20,7 @@ use crate::{
     PostProcessControl, PostProcessReport, PostProcessResourceEvidence, PostProcessRunError,
     PostProcessRunFailure, PostProcessRunOutcome,
 };
-use baozi_core::scene::integration::{
+use baozi_core::__scene_integration::integration::{
     SceneEditBootstrap, SceneEditEvidence, try_start_scene_edit_operation,
 };
 use baozi_core::{PrimitiveId, ValidatedScene};

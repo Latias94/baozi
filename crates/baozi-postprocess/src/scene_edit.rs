@@ -9,7 +9,7 @@ use crate::direct_error::FailureOwner;
 use crate::operation::runtime::{REJECTION_CODE, final_progress};
 use crate::operation::{PostProcessOwner, PostProcessProgressPhase, PostProcessProgressUnit};
 use crate::{PostProcessControlCause, PostProcessResourceEvidence};
-use baozi_core::scene::integration::{
+use baozi_core::__scene_integration::integration::{
     ResolvedSceneSpaceConversion, SceneCanonicalRootTag, SceneEditAdmission, SceneEditEvidence,
     SceneEditEvidenceTag, SceneEditOutput, SceneEditPostflight, SceneEditRejection,
     SceneEditTransaction, SceneEditValidationProof, SceneNormalReplacement,
@@ -51,7 +51,7 @@ impl PreparedEdit<'_> {
         &'a self,
         input: &'a ValidatedScene,
         admission: SceneEditAdmission,
-    ) -> baozi_core::scene::integration::SceneEditTransaction<'a> {
+    ) -> baozi_core::__scene_integration::integration::SceneEditTransaction<'a> {
         match self {
             Self::Triangulation { target, origins } => admission.into_transaction(
                 input,
@@ -449,7 +449,7 @@ fn publish_fallback(prepared: PreparedStoreFallback, cause: EditCause) -> EditFa
 fn publish_rich_failure(
     prepared: PreparedStoreFailure<
         RecordBlock,
-        baozi_core::scene::integration::SceneEditEvidenceTag,
+        baozi_core::__scene_integration::integration::SceneEditEvidenceTag,
     >,
     cause: EditCause,
 ) -> EditFailure {

@@ -32,10 +32,3 @@ fn io_contract_types_are_send_sync() {
     assert_send_sync::<ImmutableMemoryAssetIo>();
     assert_send_sync::<MemoryAssetIo>();
 }
-
-#[cfg(feature = "native-fs-candidate")]
-#[test]
-fn native_filesystem_capability_types_are_send_sync() {
-    assert_send_sync::<baozi::NativeDirectoryCapability>();
-    assert_send_sync::<baozi::FileSystemAssetIo>();
-}

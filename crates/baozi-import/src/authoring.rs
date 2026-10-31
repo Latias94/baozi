@@ -11,7 +11,7 @@
 //! use baozi_import::SceneAuthoringBatch;
 //! ```
 
-pub use baozi_core::scene::authoring::*;
+pub use baozi_core::__scene_integration::authoring::*;
 
 pub(crate) mod static_scene;
 

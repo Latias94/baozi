@@ -56,14 +56,15 @@ $env:RUSTDOCFLAGS = '-D warnings'
 cargo doc --locked --workspace --all-features --no-deps
 cargo deny --locked check
 cargo deny --locked --manifest-path fuzz/Cargo.toml check
-cargo check --locked -p baozi --target x86_64-pc-windows-msvc --no-default-features --features all-formats,native-fs-candidate
-cargo nextest run --locked --target x86_64-pc-windows-msvc -p baozi-io --features fs-candidate
+cargo deny --locked --all-features --manifest-path candidates/baozi-native-io/Cargo.toml check --config deny.toml
+cargo check --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc
+cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc
+cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-pc-windows-msvc --features repository-capture
 cargo check --locked -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats
 cargo check --locked -p baozi --target wasm32-wasip1 --no-default-features --features all-formats
 cargo run --locked -p baozi-xtask -- crate-graph-check
 cargo run --locked -p baozi-xtask -- native-fs-check
 cargo nextest run --locked -p baozi-xtask
-cargo nextest run --locked -p baozi-xtask --all-features
 cargo run --locked -p baozi-xtask -- runtime-admission-check
 python scripts/check_features.py --toolchain 1.95.0
 python scripts/check_packages.py --toolchain 1.95.0
@@ -78,11 +79,11 @@ all formats, tracing, mint, and all features. The MSRV/debug and current-stable/
 jobs execute the same maintained semantic consumer, including the ordinary main-stack import and
 application-buffer workflow.
 
-There is currently no release-registered `native-fs` or low-level `fs` feature. The explicitly
-non-release `native-fs-candidate`/`fs-candidate` features preserve implementation and test access
-while `NATIVE_FS_REGISTERED_TARGETS` remains empty. This is a breaking migration: callers must not
-replace `native-fs` with the candidate feature in production or treat successful candidate tests as
-a support promise.
+There is currently no release-registered `native-fs` or low-level `fs` feature. The unpublished
+`baozi-native-io-candidate` package has its own workspace/lockfile and an optional
+`repository-capture` capability. The portable facade and IO crate expose no candidate switches
+or path helpers. Native tests compose the adapter through public `read_asset` and retain an empty
+`NATIVE_FS_REGISTERED_TARGETS`; successful candidate tests do not establish a support promise.
 
 GitHub Actions binds each runtime candidate to one fixed runner and exact target:
 `ubuntu-24.04` / `x86_64-unknown-linux-gnu`, `windows-2025` /
@@ -98,17 +99,17 @@ and the application-buffer workflow where compiled in. The workflow pins the
 Wasmtime setup action by commit and its runtime by version. These executed WASI cases do not
 establish browser runtime support or promote any native-filesystem candidate. Portable Byte release
 promotion still follows ADR 0034 and the exact executed target/profile evidence. CI also
-requires the candidate feature to fail with the same explicit Baozi diagnostic on
+requires the candidate package to fail with the same explicit Baozi diagnostic on
 `wasm32-unknown-unknown`, `wasm32-wasip1`, Build Monitored `x86_64-apple-darwin`, and audit-only
 `x86_64-unknown-freebsd`, plus ABI-distinct `x86_64-unknown-linux-gnux32`, after first proving each
 target is installed. The `native-fs-check` command separately compares normal/build dependency
-closures for the three runtime candidates plus the FreeBSD audit profile against schema 3 of
+closures for the three runtime candidates plus the FreeBSD audit profile against schema 4 of
 [`native-filesystem-resolved-closure.json`](../research/native-filesystem-resolved-closure.json),
 whose `runtime_candidate_targets`, `dependency_audit_profiles`, and
 `release_registered_targets` fields keep those universes distinct. It also checks package sources,
 lockfile checksums, resolved features, direct target edges, and the version-bound review basis for
 the Windows directory share-mode boundary. Native filesystem
-dependencies remain private to `baozi-io`. The checker also rejects `cap-std`, `cap-primitives`,
+dependencies remain private to the standalone candidate workspace. The checker also rejects `cap-std`, `cap-primitives`,
 `rustix`, or `cap-fs-ext`, and rejects activation of either registered or candidate native filesystem
 features in byte-only WebAssembly graphs. The separate `crate-graph-check` traverses every workspace
 normal/build dependency edge, including optional, renamed, and target-conditional declarations. It

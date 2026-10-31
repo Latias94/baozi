@@ -13,7 +13,35 @@ behavior. Runtime candidate code is limited to `x86_64-unknown-linux-gnu`,
 dependency audit and future implementation research only; its candidate adapter must fail closed.
 Do not retain or fall back to `canonicalize + starts_with + File::open`.
 
-## Current Pin Status (2026-10-30)
+## Standalone Candidate Cutover (2026-10-31)
+
+The implementation and all native/repository fixtures now live in the unpublished standalone
+[`baozi-native-io-candidate`](../../candidates/baozi-native-io/Cargo.toml) workspace. It depends on
+portable `baozi-io` through the public `AssetIo` seam; no production root-workspace package
+depends on the candidate. The facade's native feature/path helpers and the old IO candidate
+features are removed without aliases. Candidate status constants move with the implementation.
+The optional `repository-capture` feature continues to select the actual `cap-fs-ext` dependency.
+
+`native-fs-check` now reads the candidate's own lockfile and checks eight candidate profiles plus
+the root Linux/WASM/WASI all-feature graphs, eleven locked metadata queries in total. The
+native version/source/checksum/target/review basis is preserved. Resolved feature isolation removes
+the workspace-only `libc/default` alias (its `std` feature remains) on Unix and the unrelated
+`windows-sys@0.61.2` Console/SystemInformation features on Windows. The full candidate closure
+now includes its explicit local `baozi-io` dependency. These precise changes are recorded in the
+existing two snapshots; extraction alone does not requalify platform behavior or register support.
+Runtime snapshot schema 4 records the new manifest/lockfile ownership; repository delta schema 3
+binds that exact runtime schema. Prior schema versions remain historical rather than accepted as
+the new two-workspace contract.
+CI scans the independent workspace with the same advisory/license/ban/source policy as the root.
+The first complete candidate license scan exposed `winx@0.36.4`'s single
+`Apache-2.0 WITH LLVM-exception` expression, which the previous root/default scan did not reach.
+Its checksum-qualified package manifest and complete `LICENSE` were inspected; `deny.toml` now
+allows that exact expression only for that exact package version. No native checksum changes or
+global license-policy relaxation accompany this explicit exception. Advisory/source checks remain
+active independently of the frozen dependency identity.
+Historical sections below retain their original source layout and feature names as dated evidence.
+
+## Pin Status Before Extraction (2026-10-30)
 
 The root `Cargo.lock` now resolves `cap-std`, `cap-primitives`, and `cap-fs-ext` to 4.0.3.
 `crates/baozi-xtask/src/native_fs/contract.rs` and its behavioral fixtures pin these exact versions
@@ -171,7 +199,8 @@ Linux acceptance:
 - root is an open directory capability
 - absolute and escaping references fail
 - in-root relative symlinks may work; absolute, magic, and escaping links fail
-- Baozi charges a conservative worst-case resolution-work amount before the backend call because the
+- required before native qualification: charge a conservative resolution-work bound before the
+  backend call because the
   exact count of the backend's bounded internal retries is not observable
 - the final capability-relative open uses `O_RDONLY | O_NONBLOCK`; the returned handle is checked
   as a regular file and read directly
@@ -374,6 +403,15 @@ deadline, or every platform's work bound. Build selection and all four logs are 
 qualification evidence, not a newly maintained resolver or hosted CI result.
 
 ## Residual Risks
+
+The current importer charges `AssetOpen` attempted/consumed counts around primary and fresh
+dependency opens; it does not precharge native path components, link traversal, or retry work in
+`WorkUnits`. Dependency acquisition's one work unit is admitted after open. The portable
+`AssetIo::open` interface has no cost/admission seam, and the standalone native adapter delegates
+directly to the capability backend. Thus the pre-open native bound remains an implementation
+requirement, not an established guarantee. The forced errno/fallback runs above prove behavior
+only. Preserve the normative requirement and implement a justified pre-open bound at both import
+entry paths before qualification; merely relabeling one open count as all backend work is not a fix.
 
 | Risk | Impact | Treatment |
 | --- | --- | --- |

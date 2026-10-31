@@ -1651,9 +1651,6 @@ fn fresh_segment_nonce_is_excluded_from_the_semantic_snapshot() {
 }
 
 pub(in crate::canonical_scene::store) struct SegmentPartitionSnapshotObservation {
-    pub(in crate::canonical_scene::store) domain: &'static str,
-    pub(in crate::canonical_scene::store) draft_schema_revision: u32,
-    pub(in crate::canonical_scene::store) algorithm: NodeSceneSnapshotAlgorithm,
     pub(in crate::canonical_scene::store) direct: SegmentPartitionSnapshotReceipt,
     pub(in crate::canonical_scene::store) edited: SegmentPartitionSnapshotReceipt,
 }
@@ -1800,9 +1797,6 @@ pub(in crate::canonical_scene::store) fn collect_segment_partition_snapshot_obse
     edited_totals.work_units = 0;
 
     let observation = SegmentPartitionSnapshotObservation {
-        domain: direct_snapshot.domain,
-        draft_schema_revision: direct_snapshot.schema_revision,
-        algorithm: direct_snapshot.algorithm,
         direct: SegmentPartitionSnapshotReceipt {
             segment_count: direct_segment_count,
             digest: direct_snapshot.digest,
@@ -2354,36 +2348,6 @@ fn spatial_known_vector_pins_scene_space_cameras_lights_and_attachments() {
             .kind(),
         light_kind
     );
-    let mut spatial_placements = view.spatial_placements();
-    let placement = spatial_placements
-        .next()
-        .expect("spatial placement")
-        .expect("source-node placement");
-    assert_eq!(placement.source_node(), 0);
-    assert_eq!(placement.camera(), Some(0));
-    assert_eq!(placement.light(), Some(0));
-    assert_eq!(
-        spatial_placements.next().expect("spatial placement end"),
-        None
-    );
-    spatial_placements
-        .finish()
-        .expect("complete spatial placement scan");
-    let mut camera_placements = view.camera_placements(0).expect("camera placements");
-    assert_eq!(camera_placements.next().expect("camera placement"), Some(0));
-    assert_eq!(
-        camera_placements.next().expect("camera placement end"),
-        None
-    );
-    camera_placements
-        .finish()
-        .expect("complete camera placement scan");
-    let mut light_placements = view.light_placements(0).expect("light placements");
-    assert_eq!(light_placements.next().expect("light placement"), Some(0));
-    assert_eq!(light_placements.next().expect("light placement end"), None);
-    light_placements
-        .finish()
-        .expect("complete light placement scan");
     let mut cursor = view.into_cursor().expect("spatial node cursor");
     let mut root_cursor = cursor.take_roots().expect("spatial roots");
     assert_eq!(root_cursor.next().expect("spatial root"), Some(0));

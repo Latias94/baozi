@@ -40,7 +40,7 @@ pub struct NormalOptions {
 }
 
 impl NormalOptions {
-    pub(crate) fn digest(self) -> baozi_core::scene::authoring::OptionsDigest {
+    pub(crate) fn digest(self) -> baozi_core::__scene_integration::authoring::OptionsDigest {
         // SHA-256 of the exact durable instruction strings listed in this table's order.
         const DIGESTS: [[u8; 32]; 8] = [
             // baozi.generate_normals/v1;mode=flat;existing=preserve;tangents=reject;smooth=area-weighted-vertex-group
@@ -95,6 +95,6 @@ impl NormalOptions {
         let index = usize::from(self.mode == NormalMode::Smooth) * 4
             + usize::from(self.existing == ExistingNormals::Replace) * 2
             + usize::from(self.tangents == TangentHandling::Remove);
-        baozi_core::scene::authoring::OptionsDigest::sha256(DIGESTS[index])
+        baozi_core::__scene_integration::authoring::OptionsDigest::sha256(DIGESTS[index])
     }
 }

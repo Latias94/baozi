@@ -76,9 +76,9 @@ jobs:
         run: cargo check --locked --workspace --all-targets
 
       - name: Check standalone core Scene boundary
-        env:
-          RUSTFLAGS: -A dead-code
-        run: cargo test --locked --doc -p baozi-core
+        run: |
+          cargo nextest run --locked -p baozi-core --no-default-features --test public_api
+          cargo test --locked --doc -p baozi-core --no-default-features
 
       - name: Lint workspace
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -103,8 +103,8 @@ jobs:
       - name: Run independent public consumer feature matrix
         run: python3 scripts/check_features.py --toolchain 1.95.0
 
-      - name: Check exact Linux native filesystem candidate facade
-        run: cargo check --locked -p baozi --target x86_64-unknown-linux-gnu --no-default-features --features all-formats,native-fs-candidate
+      - name: Check exact Linux native filesystem candidate
+        run: cargo check --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target x86_64-unknown-linux-gnu
 
       - name: Check browser WASM bytes path
         run: cargo check --locked -p baozi --target wasm32-unknown-unknown --no-default-features --features all-formats
@@ -131,7 +131,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $expectedDiagnostic = 'baozi-io/fs-candidate is available only on exact runtime candidate targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin; use memory or custom IO'
+          $expectedDiagnostic = 'baozi-native-io-candidate is available only on exact runtime candidate targets: x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin; use memory or custom IO'
           $negativeTargets = @(
             'wasm32-unknown-unknown'
             'wasm32-wasip1'
@@ -147,18 +147,18 @@ jobs:
             if ($installedTargets -notcontains $targetTriple) {
               throw "negative target is not installed: $targetTriple"
             }
-            $cargoOutput = cargo check --locked --color never -p baozi --target $targetTriple --no-default-features --features all-formats,native-fs-candidate 2>&1 | Out-String
+            $cargoOutput = cargo check --locked --color never --manifest-path candidates/baozi-native-io/Cargo.toml --target $targetTriple 2>&1 | Out-String
             $cargoStatus = $LASTEXITCODE
             if ($cargoStatus -eq 0) {
-              throw "native-fs-candidate unexpectedly compiled for $targetTriple"
+              throw "native IO candidate unexpectedly compiled for $targetTriple"
             }
             if ($cargoOutput.Contains("can't find crate for")) {
               Write-Host $cargoOutput
-              throw "native-fs-candidate failed because target $targetTriple was not installed"
+              throw "native IO candidate failed because target $targetTriple was not installed"
             }
             if (-not $cargoOutput.Contains($expectedDiagnostic)) {
               Write-Host $cargoOutput
-              throw "native-fs-candidate failed for $targetTriple without the fail-closed diagnostic"
+              throw "native IO candidate failed for $targetTriple without the fail-closed diagnostic"
             }
           }
 
@@ -179,6 +179,9 @@ jobs:
 
       - name: Check fuzz dependency policy
         run: cargo deny --locked --manifest-path fuzz/Cargo.toml check
+
+      - name: Check standalone native candidate dependency policy
+        run: cargo deny --locked --all-features --manifest-path candidates/baozi-native-io/Cargo.toml check --config deny.toml
 
       - name: Package release leaf crates
         run: |
@@ -286,6 +289,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
+          components: clippy, rustfmt
 
       - name: Verify exact runner host
         shell: pwsh
@@ -311,20 +315,17 @@ jobs:
       - name: Check native filesystem dependency admission
         run: cargo run --locked -p baozi-xtask --target "${{ matrix.target }}" -- native-fs-check
 
-      - name: Check native filesystem candidate facade wiring
-        run: cargo check --locked -p baozi --target "${{ matrix.target }}" --no-default-features --features all-formats,native-fs-candidate
+      - name: Check native filesystem candidate formatting
+        run: cargo fmt --manifest-path candidates/baozi-native-io/Cargo.toml -- --check
 
-      - name: Test native filesystem candidate facade
-        run: cargo nextest run --locked --target "${{ matrix.target }}" -p baozi --no-default-features --features all-formats,native-fs-candidate
+      - name: Lint native filesystem candidate
+        run: cargo clippy --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" --all-features --all-targets -- -D warnings
 
       - name: Test capability-bound native filesystem candidate without skipped fixtures
-        run: cargo nextest run --locked --target "${{ matrix.target }}" -p baozi-io --features fs-candidate
-
-      - name: Check capability-bound repository filesystem candidate
-        run: cargo check --locked --target "${{ matrix.target }}" -p baozi-io --no-default-features --features repository-fs-candidate
+        run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}"
 
       - name: Test repository filesystem candidate operational and fail-closed contracts
-        run: cargo nextest run --locked --target "${{ matrix.target }}" -p baozi-io --no-default-features --features repository-fs-candidate
+        run: cargo nextest run --locked --manifest-path candidates/baozi-native-io/Cargo.toml --target "${{ matrix.target }}" --features repository-capture
 
   fuzz:
     name: ${{ matrix.target }} sanitizer fuzz smoke

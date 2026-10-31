@@ -1,27 +1,39 @@
 use baozi_operation::{CanonicalRecordView, RecordBlock, StoreRuntimeError};
 use thiserror::Error;
 
+#[cfg(test)]
 use crate::canonical_scene::store::api::scene::ValidatedScene;
 use crate::canonical_scene::store::schema::{CanonicalBlockRef, CanonicalSchema};
+#[cfg(test)]
 use crate::entity::AuthoredTransform;
+#[cfg(test)]
 use crate::identity::{NodeId, SceneGenerationId};
+#[cfg(test)]
 use crate::provenance::OptionsDigest;
 
 use super::SceneStorage;
 
+// The standalone transform rail exercises failure, accounting, and source-sharing regressions.
+#[cfg(test)]
 mod execution;
 mod graph;
 mod plan;
 mod profile;
+#[cfg(test)]
 mod publication;
+#[cfg(test)]
 mod report;
+#[cfg(test)]
 mod source;
 pub(in crate::canonical_scene::store) mod transaction;
 
+#[cfg(test)]
 use plan::PendingNodeSceneEdit;
+#[cfg(test)]
 use source::NodeTransformEditStartError;
 
 /// A typed, generation-local node transform request for the hidden Scene integration boundary.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SceneNodeTransformEditRequest {
     node_index: u32,
@@ -29,6 +41,7 @@ pub struct SceneNodeTransformEditRequest {
     options_digest: OptionsDigest,
 }
 
+#[cfg(test)]
 impl SceneNodeTransformEditRequest {
     /// Creates a request addressed by the source node's zero-based index.
     pub const fn new(
@@ -60,6 +73,7 @@ impl SceneNodeTransformEditRequest {
 }
 
 /// The allocation-free result of compiling one typed node transform request.
+#[cfg(test)]
 #[must_use = "a compiled Scene edit must be executed or deliberately dropped"]
 #[allow(
     clippy::large_enum_variant,
@@ -72,6 +86,7 @@ pub enum SceneEditCompilation {
     Changed(SceneNodeTransformEditPlan),
 }
 
+#[cfg(test)]
 impl std::fmt::Debug for SceneEditCompilation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -85,9 +100,11 @@ impl std::fmt::Debug for SceneEditCompilation {
 }
 
 /// An opaque node-transform edit plan that can be executed only by the core edit rail.
+#[cfg(test)]
 #[must_use = "a compiled Scene edit plan must be executed or deliberately dropped"]
 pub struct SceneNodeTransformEditPlan(PendingNodeSceneEdit);
 
+#[cfg(test)]
 impl std::fmt::Debug for SceneNodeTransformEditPlan {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -97,6 +114,7 @@ impl std::fmt::Debug for SceneNodeTransformEditPlan {
     }
 }
 
+#[cfg(test)]
 impl SceneNodeTransformEditPlan {
     /// Returns the exact generation against which the plan was compiled.
     pub const fn input_generation(&self) -> SceneGenerationId {
@@ -121,6 +139,7 @@ pub enum SceneEditCompileError {
     SizeOverflow,
 }
 
+#[cfg(test)]
 impl From<NodeTransformEditStartError> for SceneEditCompileError {
     fn from(error: NodeTransformEditStartError) -> Self {
         match error {
@@ -134,6 +153,7 @@ impl From<NodeTransformEditStartError> for SceneEditCompileError {
 
 /// Compiles one typed node transform request without starting retained work or reserving a
 /// destination generation.
+#[cfg(test)]
 pub fn compile_node_transform_edit(
     input: &ValidatedScene,
     request: SceneNodeTransformEditRequest,

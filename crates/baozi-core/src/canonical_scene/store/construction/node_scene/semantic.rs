@@ -34,9 +34,8 @@ pub(in crate::canonical_scene::store) use profile::{
     NodeSceneProfileStep,
 };
 pub(in crate::canonical_scene::store) use spatial::{
-    NodeSceneSpatialCamera, NodeSceneSpatialLight, NodeSceneSpatialPlacementCursor,
-    NodeSceneSpatialPlacementsCursor, NodeSceneSpatialSceneSpace, NodeSceneSpatialTangentBasis,
-    NodeSceneSpatialTangentEncoding,
+    NodeSceneSpatialCamera, NodeSceneSpatialLight, NodeSceneSpatialSceneSpace,
+    NodeSceneSpatialTangentBasis, NodeSceneSpatialTangentEncoding,
 };
 
 pub(in crate::canonical_scene::store) type NodeSceneSemanticResult<T> =
@@ -85,11 +84,13 @@ pub(in crate::canonical_scene::store) struct NodeSceneSemanticView<'scene> {
 }
 
 /// One proof-qualified authored transform resolved by source-node index.
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct NodeSceneSemanticAuthoredTransform {
     authored_transform: AuthoredTransform,
 }
 
+#[cfg(test)]
 impl NodeSceneSemanticAuthoredTransform {
     pub(in crate::canonical_scene::store) const fn authored_transform(self) -> AuthoredTransform {
         self.authored_transform
@@ -105,6 +106,7 @@ impl SceneStorage {
     }
 
     /// Reads one source-node transform without projecting unrelated Scene domains.
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn semantic_authored_transform_at(
         &self,
         source_index: usize,
@@ -252,29 +254,6 @@ impl<'scene> NodeSceneSemanticView<'scene> {
         source_index: usize,
     ) -> NodeSceneSemanticResult<Option<NodeSceneSpatialLight>> {
         self.spatial.light_at(source_index)
-    }
-
-    /// Scans all spatial attachments once in source-node order.
-    pub(in crate::canonical_scene::store) fn spatial_placements(
-        &self,
-    ) -> NodeSceneSpatialPlacementsCursor<'scene> {
-        NodeSceneSpatialPlacementsCursor::new(self.nodes, self.proof)
-    }
-
-    /// Scans at most every source node for placements of one camera.
-    pub(in crate::canonical_scene::store) fn camera_placements(
-        &self,
-        camera: usize,
-    ) -> NodeSceneSemanticResult<NodeSceneSpatialPlacementCursor<'scene>> {
-        NodeSceneSpatialPlacementCursor::camera(self.nodes, camera, self.proof)
-    }
-
-    /// Scans at most every source node for placements of one light.
-    pub(in crate::canonical_scene::store) fn light_placements(
-        &self,
-        light: usize,
-    ) -> NodeSceneSemanticResult<NodeSceneSpatialPlacementCursor<'scene>> {
-        NodeSceneSpatialPlacementCursor::light(self.nodes, light, self.proof)
     }
 
     pub(in crate::canonical_scene::store) fn image_count(&self) -> usize {

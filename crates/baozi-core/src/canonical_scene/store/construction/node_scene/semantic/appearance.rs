@@ -243,10 +243,6 @@ impl<'scene> NodeSceneAppearanceBinding<'scene> {
         self.stored.role
     }
 
-    pub(in crate::canonical_scene::store) const fn role_semantics(&self) -> &'scene TextureRole {
-        &self.stored.role
-    }
-
     pub(in crate::canonical_scene::store) const fn uv_set(&self) -> u16 {
         self.stored.uv_set
     }

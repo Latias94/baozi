@@ -102,8 +102,8 @@ Baozi does not create a broader operating-system promise than Rust's own target 
 ### Native Filesystem
 
 The release `native-fs` capability is currently unregistered on every target. Cargo therefore has no
-`native-fs` or low-level `fs` feature. Candidate implementations use the explicitly non-release
-`native-fs-candidate` and `fs-candidate` features only on `x86_64-unknown-linux-gnu`,
+`native-fs` or low-level `fs` feature. Candidate implementations live in the unpublished standalone
+`baozi-native-io-candidate` workspace, which compiles only on `x86_64-unknown-linux-gnu`,
 `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin`; all other targets fail to compile the candidate
 adapter with one stable diagnostic. In particular, Build Monitored `x86_64-apple-darwin` and
 dependency-audit-only `x86_64-unknown-freebsd` must fail closed. No candidate may substitute
@@ -111,10 +111,12 @@ dependency-audit-only `x86_64-unknown-freebsd` must fail closed. No candidate ma
 The predicates also bind an empty `target_abi`, so `x86_64-unknown-linux-gnux32` is not accidentally
 treated as `x86_64-unknown-linux-gnu`.
 
-`NATIVE_FS_SUPPORT_STATUS`, `NATIVE_FS_REGISTERED_TARGETS`, and
-`NATIVE_FS_CANDIDATE_TARGETS` expose this distinction to code. Repository governance rejects a
-release feature while the registered-target set is empty and keeps the candidate dependency closure
-separate from runtime conformance evidence.
+The candidate's `NATIVE_FS_SUPPORT_STATUS`, `NATIVE_FS_REGISTERED_TARGETS`, and
+`NATIVE_FS_CANDIDATE_TARGETS` expose this distinction to code. The portable facade and `baozi-io`
+have no candidate features, status exports, native path helpers, or dependency edge to that package.
+Repository governance checks the two real workspaces separately and keeps dependency closure
+separate from runtime conformance evidence. Candidate callers pass the adapter to the public
+`Importer::read_asset` interface; this does not register native support.
 
 Native-filesystem registration is platform-local and no-skip. A target may enter the registered set
 only after it passes ADR 0010's complete object-bound opening and adversarial platform matrix plus ADR

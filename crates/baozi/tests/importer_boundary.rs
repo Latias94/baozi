@@ -12,8 +12,6 @@ use baozi_import::{
 };
 use baozi_io::OpenedAsset;
 use std::io::Cursor;
-#[cfg(feature = "native-fs-candidate")]
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ONCE_ID: &str = "org.example.open-once";
@@ -109,6 +107,7 @@ impl FormatImporter for GeometryImporter {
 
 struct ChangingAssetIo {
     domain: AuthorityDomain,
+    domain_lookups: AtomicUsize,
     opens: AtomicUsize,
 }
 
@@ -116,8 +115,13 @@ impl ChangingAssetIo {
     fn new() -> Self {
         Self {
             domain: AuthorityDomain::new(),
+            domain_lookups: AtomicUsize::new(0),
             opens: AtomicUsize::new(0),
         }
+    }
+
+    fn domain_lookup_count(&self) -> usize {
+        self.domain_lookups.load(Ordering::Acquire)
     }
 
     fn open_count(&self) -> usize {
@@ -127,6 +131,7 @@ impl ChangingAssetIo {
 
 impl AssetIo for ChangingAssetIo {
     fn authority_domain(&self) -> AuthorityDomain {
+        self.domain_lookups.fetch_add(1, Ordering::AcqRel);
         self.domain.clone()
     }
 
@@ -144,32 +149,6 @@ impl AssetIo for ChangingAssetIo {
             Cursor::new(bytes),
             Some(AssetLength::Exact(length)),
         ))
-    }
-}
-
-#[cfg(feature = "native-fs-candidate")]
-struct ObservedSensitivePath {
-    resolutions: AtomicUsize,
-}
-
-#[cfg(feature = "native-fs-candidate")]
-impl ObservedSensitivePath {
-    fn new() -> Self {
-        Self {
-            resolutions: AtomicUsize::new(0),
-        }
-    }
-
-    fn resolution_count(&self) -> usize {
-        self.resolutions.load(Ordering::Acquire)
-    }
-}
-
-#[cfg(feature = "native-fs-candidate")]
-impl AsRef<Path> for ObservedSensitivePath {
-    fn as_ref(&self) -> &Path {
-        self.resolutions.fetch_add(1, Ordering::AcqRel);
-        Path::new("../__baozi_foreign_request_nonexistent__/sensitive.once")
     }
 }
 
@@ -224,6 +203,7 @@ fn foreign_prepared_request_is_rejected_before_io_or_session() {
         )
         .expect_err("foreign request must fail before asset IO");
     assert_registry_snapshot_mismatch(asset_error);
+    assert_eq!(asset_io.domain_lookup_count(), 0);
     assert_eq!(asset_io.open_count(), 0);
 
     let resolver_io = ChangingAssetIo::new();
@@ -237,25 +217,8 @@ fn foreign_prepared_request_is_rejected_before_io_or_session() {
         )
         .expect_err("foreign request must fail before resolver or asset IO");
     assert_registry_snapshot_mismatch(resolver_error);
+    assert_eq!(resolver_io.domain_lookup_count(), 0);
     assert_eq!(resolver_io.open_count(), 0);
-}
-
-#[cfg(feature = "native-fs-candidate")]
-#[test]
-fn foreign_prepared_request_is_rejected_before_native_path_resolution() {
-    let owner = importer_with(OpenOnceImporter);
-    let foreign = importer_with(OpenOnceImporter);
-    let request = owner
-        .prepare_default_request()
-        .expect("owner request must compile");
-    let path = ObservedSensitivePath::new();
-
-    let error = foreign
-        .read_path_with_request(&path, &request, ImportOperationControl::default())
-        .expect_err("foreign request must fail before resolving a native path");
-
-    assert_registry_snapshot_mismatch(error);
-    assert_eq!(path.resolution_count(), 0);
 }
 
 #[test]

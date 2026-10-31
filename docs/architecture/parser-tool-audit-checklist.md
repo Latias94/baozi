@@ -60,7 +60,7 @@ The decision remains per format. Passing this checklist does not make a tool a p
 - [ ] `wasm32-unknown-unknown` bytes import compiles with the relevant feature set.
 - [ ] Default parser path does not require filesystem access, threads, sockets, process globals, or
   native dynamic libraries.
-- [ ] Native filesystem candidate work, if needed, remains behind `native-fs-candidate`; release
+- [ ] Native filesystem candidate work, if needed, remains in the unpublished standalone candidate workspace; release
       `native-fs` stays absent until a platform completes its no-skip promotion matrix.
 - [ ] The tool does not assume platform endianness, pointer layouts, or locale-specific number
   parsing.

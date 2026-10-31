@@ -6,6 +6,7 @@ import argparse
 import os
 from pathlib import Path
 import subprocess
+import tomllib
 
 
 CASES: dict[str, tuple[list[str], str]] = {
@@ -24,6 +25,20 @@ CASES: dict[str, tuple[list[str], str]] = {
 }
 
 
+def validate_consumer_features(root: Path) -> None:
+    """Keep --all-features equal to the complete public facade feature union."""
+    facade = tomllib.loads((root / "crates/baozi/Cargo.toml").read_text(encoding="utf-8"))
+    consumer = tomllib.loads(
+        (root / "tools/consumers/scene/Cargo.toml").read_text(encoding="utf-8")
+    )
+    expected = {name: [f"baozi/{name}"] for name in facade["features"]}
+    if consumer["features"] != expected:
+        raise ValueError(
+            "The scene consumer must forward every public facade feature exactly once "
+            "under the same name; no exceptions to the all-features case are allowed"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", choices=CASES, action="append", dest="cases")
@@ -33,6 +48,10 @@ def main() -> None:
     parser.add_argument("--check", action="store_true", help="Compile only; no runtime claim")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
+    try:
+        validate_consumer_features(root)
+    except ValueError as error:
+        parser.error(str(error))
     environment = os.environ.copy()
     environment["CARGO_BUILD_JOBS"] = "1"
 

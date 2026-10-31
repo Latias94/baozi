@@ -50,6 +50,8 @@ static PROFILE_SEGMENT_NONCES: ProfileSegmentNonceSource = ProfileSegmentNonceSo
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(in crate::canonical_scene::store) struct ProfileSegmentNonce(NonZeroU64);
 
+// Nonce decoding and scalar inspection support corruption and exhaustion fixtures only.
+#[cfg(test)]
 impl ProfileSegmentNonce {
     pub(in crate::canonical_scene::store) const fn from_stored(value: u64) -> Option<Self> {
         match NonZeroU64::new(value) {
@@ -187,10 +189,6 @@ impl ProfileSegmentAddressDomain {
             provenance_base,
             provenance_count,
         }
-    }
-
-    pub(in crate::canonical_scene::store) const fn nonce(self) -> ProfileSegmentNonce {
-        self.nonce
     }
 
     pub(in crate::canonical_scene::store) fn reference(

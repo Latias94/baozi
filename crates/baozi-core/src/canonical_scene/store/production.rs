@@ -12,9 +12,7 @@ mod tests;
 pub(super) use crate::animation::{
     AnimationExtrapolation, AnimationInterpolation, AnimationTimeDomain,
 };
-pub(super) use control::{
-    CanonicalAuthoringControl, OperationAuthoringControlError, ScopedAuthoringControl,
-};
+pub(super) use control::{CanonicalAuthoringControl, ScopedAuthoringControl};
 #[cfg(test)]
 pub(super) use input::NodeAuthoringBatch;
 #[cfg(test)]

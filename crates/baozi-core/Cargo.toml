@@ -14,7 +14,6 @@ readme = "README.md"
 [features]
 default = []
 mint = ["dep:mint"]
-_scene-integration = []
 
 [dependencies]
 baozi-operation.workspace = true

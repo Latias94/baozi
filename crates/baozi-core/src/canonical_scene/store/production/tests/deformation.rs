@@ -372,7 +372,10 @@ fn compiled_deformation_facts_do_not_borrow_authored_storage() {
     };
 
     assert_eq!(compiled.0, 1);
-    assert_eq!(compiled.1, [1, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(compiled.1, [0; 6]);
+    // Skin joint-count plans are transient, but the proof keeps its operation token alive.
+    assert_eq!(control.current_bytes.get(), 0);
+    assert_eq!(control.live.get(), 1);
 
     drop(compiled);
     assert_eq!(control.live.get(), 0);

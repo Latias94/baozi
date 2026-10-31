@@ -880,9 +880,6 @@ fn write_metadata_array(
     work: &mut SnapshotWorkMeter<'_>,
 ) -> Result<(), NodeSceneSnapshotError> {
     match values {
-        NodeSceneProfileMetadataArray::None => Err(NodeSceneSnapshotError::InconsistentView {
-            reason: "dense profile metadata array has no typed storage lane",
-        }),
         NodeSceneProfileMetadataArray::Bool(values) => {
             write_u8_field(transcript, work, METADATA_ARRAY_STORAGE_KIND, 1)?;
             write_u8_sequence_field(transcript, work, METADATA_VALUE, values)

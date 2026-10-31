@@ -5,13 +5,11 @@ reads, and mutable and immutable memory-backed implementations. Applications
 normally use the [baozi facade](https://github.com/Latias94/baozi/blob/main/crates/baozi/README.md); custom `AssetIo` implementations
 use the experimental extension contract.
 
-Native filesystem IO is opt-in through `fs-candidate` (facade
-`native-fs-candidate`). Runtime candidates are limited to
-`x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and `aarch64-apple-darwin`.
-The status is `CandidateUnregistered`: no target has release-registered native
-filesystem support. FreeBSD dependency auditing does not enable a runtime adapter.
-`repository-fs-candidate` separately exposes experimental repository capture; it
-does not promote filesystem support. Use memory or custom IO on other targets.
+Native filesystem experiments live in the separate, unpublished
+[`baozi-native-io-candidate` workspace](https://github.com/Latias94/baozi/tree/main/candidates/baozi-native-io).
+It implements these public IO contracts without adding native dependencies or
+features to this crate. Native filesystem support remains unregistered for
+release use. Use memory or custom IO on other targets.
 
 See the [native IO admission boundary](https://github.com/Latias94/baozi/blob/main/docs/research/native-filesystem-bound-handle-admission.md),
 [asset IO policy](https://github.com/Latias94/baozi/blob/main/docs/adr/0010-asset-io-virtual-filesystem-uri-archive-and-path-security.md),

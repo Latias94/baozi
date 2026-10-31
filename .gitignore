@@ -2,4 +2,5 @@
 /repo-ref
 /fuzz/target
 /fuzz/artifacts
+/candidates/baozi-native-io/target
 __pycache__/

@@ -22,10 +22,13 @@ Material thickness and signed displacement strength scale with units while image
 remain shared. The allocation-free `triangle_vertices` reader exposes complete draw-Corner tuples
 for application-owned vertex/index buffers, preserving attribute domains without deduplication.
 
-Use memory or custom asset IO for portable imports. `native-fs-candidate` is opt-in
-and limited to `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, and
-`aarch64-apple-darwin`; no target has release-registered native filesystem support.
+Use memory or custom asset IO with `Importer::read_asset` for portable imports.
 Byte-only imports deny dependencies; sidecars require an asset IO/resolver path.
+Repository native IO experiments live in the unpublished, standalone
+[`baozi-native-io-candidate`](https://github.com/Latias94/baozi/tree/main/candidates/baozi-native-io)
+package. Its callers explicitly open a `NativeDirectoryCapability`, construct a
+`FileSystemAssetIo`, and pass that backend and a relative `AssetPath` to
+`Importer::read_asset`. No target has release-registered native filesystem support.
 
 Start with the [repository quickstart](https://github.com/Latias94/baozi/blob/main/README.md#quick-start) and
 [Scene reading guide](https://github.com/Latias94/baozi/blob/main/docs/model/reading-scenes.md). See the

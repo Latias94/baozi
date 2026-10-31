@@ -126,12 +126,10 @@ pub(in crate::canonical_scene::store) const OBJ_SOURCE_VECTOR_SCHEMA_ID: &str =
 
 pub(in crate::canonical_scene::store) struct ObjCapabilityMutationObservation {
     pub(in crate::canonical_scene::store) field_class: &'static str,
-    pub(in crate::canonical_scene::store) source_vector: Vec<u8>,
     pub(in crate::canonical_scene::store) snapshot_digest: [u8; 32],
 }
 
 pub(in crate::canonical_scene::store) struct ObjCapabilityVectorObservations {
-    pub(in crate::canonical_scene::store) source_shape: ObjCapabilitySourceShapeObservation,
     pub(in crate::canonical_scene::store) source_vector: Vec<u8>,
     pub(in crate::canonical_scene::store) baseline_snapshot_digest: [u8; 32],
     pub(in crate::canonical_scene::store) equivalent_source_vector: Vec<u8>,
@@ -140,24 +138,11 @@ pub(in crate::canonical_scene::store) struct ObjCapabilityVectorObservations {
 }
 
 #[derive(Clone, Copy)]
-pub(in crate::canonical_scene::store) struct ObjCapabilitySourceShapeObservation {
-    pub(in crate::canonical_scene::store) position_count: usize,
-    pub(in crate::canonical_scene::store) texcoord_count: usize,
-    pub(in crate::canonical_scene::store) normal_count: usize,
-    pub(in crate::canonical_scene::store) face_count: usize,
-    pub(in crate::canonical_scene::store) corner_count: usize,
-}
-
-#[derive(Clone, Copy)]
 pub(in crate::canonical_scene::store) struct ObjCapabilityCanonicalShapeObservation {
     pub(in crate::canonical_scene::store) topology: &'static str,
     pub(in crate::canonical_scene::store) vertex_count: u32,
     pub(in crate::canonical_scene::store) corner_count: u32,
     pub(in crate::canonical_scene::store) face_count: u32,
-    pub(in crate::canonical_scene::store) vertex_position_elements: u32,
-    pub(in crate::canonical_scene::store) corner_normal_elements: u32,
-    pub(in crate::canonical_scene::store) corner_texcoord_elements: u32,
-    pub(in crate::canonical_scene::store) face_smoothing_group_elements: u32,
 }
 
 impl ObjCanonicalProjection<'_> {
@@ -396,43 +381,18 @@ fn build_published_obj_scene_with_generation_source(
     build_obj_scene_with_generation_source(account, projection, reserve_generation)
 }
 
-pub(in crate::canonical_scene::store) fn build_obj_capability_scene_for_probe(
-    account: &PhysicalStorageAccount,
-    generation_source: &AtomicU64,
-) -> NodeSceneSuccessParts {
-    let projection = project_obj_source(obj_source(&OBJ_TEXCOORDS, &OBJ_NORMALS, &OBJ_FACES));
-    build_published_obj_scene_with_generation_source(account, &projection, || {
-        SceneGenerationId::reserve_from(generation_source)
-    })
-}
-
 pub(in crate::canonical_scene::store) fn collect_obj_capability_vectors_for_probe()
 -> ObjCapabilityVectorObservations {
-    fn observe(
-        account: &PhysicalStorageAccount,
-        source: NormalizedObjSource<'_>,
-    ) -> (Vec<u8>, [u8; 32]) {
-        let source_vector = encode_obj_source(source);
+    fn observe(account: &PhysicalStorageAccount, source: NormalizedObjSource<'_>) -> [u8; 32] {
         let projection = project_obj_source(source);
-        let snapshot = snapshot_projection(account, &projection);
-        (source_vector, snapshot.digest)
+        snapshot_projection(account, &projection).digest
     }
 
     let factory = test_factory();
     let account = test_account(&factory, 256);
     let baseline_source = obj_source(&OBJ_TEXCOORDS, &OBJ_NORMALS, &OBJ_FACES);
-    let source_shape = ObjCapabilitySourceShapeObservation {
-        position_count: baseline_source.positions.len(),
-        texcoord_count: baseline_source.texcoords.len(),
-        normal_count: baseline_source.normals.len(),
-        face_count: baseline_source.faces.len(),
-        corner_count: baseline_source
-            .faces
-            .iter()
-            .map(|face| face.corners.len())
-            .sum(),
-    };
-    let (source_vector, baseline_snapshot_digest) = observe(&account, baseline_source);
+    let source_vector = encode_obj_source(baseline_source);
+    let baseline_snapshot_digest = observe(&account, baseline_source);
 
     let mut reordered_texcoords = OBJ_TEXCOORDS;
     reordered_texcoords.swap(0, 3);
@@ -446,35 +406,34 @@ pub(in crate::canonical_scene::store) fn collect_obj_capability_vectors_for_prob
             };
         }
     }
-    let (equivalent_source_vector, equivalent_snapshot_digest) = observe(
-        &account,
-        obj_source(&reordered_texcoords, &OBJ_NORMALS, &remapped_faces),
-    );
+    let equivalent_source = obj_source(&reordered_texcoords, &OBJ_NORMALS, &remapped_faces);
+    let equivalent_source_vector = encode_obj_source(equivalent_source);
+    let equivalent_snapshot_digest = observe(&account, equivalent_source);
 
     let mut position_faces = OBJ_FACES;
     position_faces[1].corners[0].position = 1;
-    let (position_source, position_digest) = observe(
+    let position_digest = observe(
         &account,
         obj_source(&OBJ_TEXCOORDS, &OBJ_NORMALS, &position_faces),
     );
 
     let mut texcoord_faces = OBJ_FACES;
     texcoord_faces[1].corners[0].texcoord = Some(0);
-    let (texcoord_source, texcoord_digest) = observe(
+    let texcoord_digest = observe(
         &account,
         obj_source(&OBJ_TEXCOORDS, &OBJ_NORMALS, &texcoord_faces),
     );
 
     let mut normal_faces = OBJ_FACES;
     normal_faces[1].corners[0].normal = Some(0);
-    let (normal_source, normal_digest) = observe(
+    let normal_digest = observe(
         &account,
         obj_source(&OBJ_TEXCOORDS, &OBJ_NORMALS, &normal_faces),
     );
 
     let mut smoothing_faces = OBJ_FACES;
     smoothing_faces[0].smoothing = ObjSmoothing::Group(8);
-    let (smoothing_source, smoothing_digest) = observe(
+    let smoothing_digest = observe(
         &account,
         obj_source(&OBJ_TEXCOORDS, &OBJ_NORMALS, &smoothing_faces),
     );
@@ -485,7 +444,6 @@ pub(in crate::canonical_scene::store) fn collect_obj_capability_vectors_for_prob
     assert_eq!(factory.snapshot().live_accounts(), 0);
 
     ObjCapabilityVectorObservations {
-        source_shape,
         source_vector,
         baseline_snapshot_digest,
         equivalent_source_vector,
@@ -493,22 +451,18 @@ pub(in crate::canonical_scene::store) fn collect_obj_capability_vectors_for_prob
         mutations: [
             ObjCapabilityMutationObservation {
                 field_class: "position_index",
-                source_vector: position_source,
                 snapshot_digest: position_digest,
             },
             ObjCapabilityMutationObservation {
                 field_class: "texcoord_index",
-                source_vector: texcoord_source,
                 snapshot_digest: texcoord_digest,
             },
             ObjCapabilityMutationObservation {
                 field_class: "normal_index",
-                source_vector: normal_source,
                 snapshot_digest: normal_digest,
             },
             ObjCapabilityMutationObservation {
                 field_class: "smoothing_group",
-                source_vector: smoothing_source,
                 snapshot_digest: smoothing_digest,
             },
         ],
@@ -678,8 +632,7 @@ pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_pr
         NodeSceneGeometryAttributeSemantic::Position
     );
     assert_eq!(position.domain(), AttributeDomain::Vertex);
-    let vertex_position_elements = position.element_count();
-    assert_eq!(vertex_position_elements, 3);
+    assert_eq!(position.element_count(), 3);
     match position.into_payload() {
         NodeSceneGeometryAttributePayload::DenseF32 { values } => {
             assert_f32_values(values, &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
@@ -696,8 +649,7 @@ pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_pr
         NodeSceneGeometryAttributeSemantic::Normal
     );
     assert_eq!(normal.domain(), AttributeDomain::Corner);
-    let corner_normal_elements = normal.element_count();
-    assert_eq!(corner_normal_elements, 6);
+    assert_eq!(normal.element_count(), 6);
     match normal.into_payload() {
         NodeSceneGeometryAttributePayload::DenseF32 { values } => assert_f32_values(
             values,
@@ -718,8 +670,7 @@ pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_pr
         NodeSceneGeometryAttributeSemantic::Texcoord(0)
     );
     assert_eq!(texcoord.domain(), AttributeDomain::Corner);
-    let corner_texcoord_elements = texcoord.element_count();
-    assert_eq!(corner_texcoord_elements, 6);
+    assert_eq!(texcoord.element_count(), 6);
     match texcoord.into_payload() {
         NodeSceneGeometryAttributePayload::DenseF32 { values } => assert_f32_values(
             values,
@@ -737,8 +688,7 @@ pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_pr
         NodeSceneGeometryAttributeSemantic::SmoothingGroup
     );
     assert_eq!(smoothing.domain(), AttributeDomain::Face);
-    let face_smoothing_group_elements = smoothing.element_count();
-    assert_eq!(face_smoothing_group_elements, 2);
+    assert_eq!(smoothing.element_count(), 2);
     match smoothing.into_payload() {
         NodeSceneGeometryAttributePayload::DenseU32 { values } => {
             assert_u32_values(values, &[7, 0]);
@@ -863,10 +813,6 @@ pub(in crate::canonical_scene::store) fn inspect_obj_capability_semantics_for_pr
         vertex_count,
         corner_count,
         face_count,
-        vertex_position_elements,
-        corner_normal_elements,
-        corner_texcoord_elements,
-        face_smoothing_group_elements,
     }
 }
 

@@ -5,10 +5,6 @@
 mod animation;
 mod appearance;
 mod attribute;
-#[allow(
-    dead_code,
-    reason = "sealed canonical storage is reached through feature-scoped crate adapters"
-)]
 mod canonical_scene;
 mod deform;
 pub mod diagnostic;
@@ -43,22 +39,43 @@ mod scene_space;
 mod space_conversion;
 mod validation_control;
 
-#[cfg(not(feature = "_scene-integration"))]
-/// The Scene authoring and transaction boundary is absent from ordinary `baozi-core` builds.
+/// Internal Scene construction and edit integration used by the workspace adapters.
 ///
-/// ```compile_fail,E0432
-/// use baozi_core::scene::integration::SceneDraft;
+/// Cargo feature selection does not grant publication authority. These names are always
+/// available; private fields, single-use values, central validation, and paired handoff enforce
+/// the protocol. Format plugins use `baozi_import::authoring` instead of this internal namespace.
+///
+/// A materialized draft cannot expose or forge its canonical descriptor:
+///
+/// ```compile_fail,E0616
+/// use baozi_core::__scene_integration::integration::SceneDraft;
+/// fn extract(draft: SceneDraft) { let _ = draft.0; }
 /// ```
 ///
-/// ```compile_fail,E0432
-/// use baozi_core::scene::authoring::SceneAuthoringBatch;
+/// Construction keeps its branded execution request private:
+///
+/// ```compile_fail,E0616
+/// use baozi_core::__scene_integration::integration::SceneConstruction;
+/// fn extract(construction: SceneConstruction<'_>) { let _ = construction.0; }
 /// ```
-mod scene_integration_visibility_contract {}
-
-/// Canonical Scene vocabulary consumed by the importer extension tier.
-#[cfg(feature = "_scene-integration")]
+///
+/// Semantic validation proofs remain unforgeable despite being nameable:
+///
+/// ```compile_fail,E0616
+/// use baozi_core::__scene_integration::integration::SceneValidationProof;
+/// fn extract(proof: SceneValidationProof) { let _ = proof.0; }
+/// ```
+///
+/// The handoff token carries actual table ownership and cannot publish twice:
+///
+/// ```compile_fail,E0382
+/// use baozi_core::__scene_integration::integration::SceneHandoffToken;
+/// fn duplicate(token: SceneHandoffToken) -> (SceneHandoffToken, SceneHandoffToken) {
+///     (token, token)
+/// }
+/// ```
 #[doc(hidden)]
-pub mod scene {
+pub mod __scene_integration {
     /// Authority-free values used to describe one complete canonical Scene input.
     ///
     /// Custom format importers should use the re-export at `baozi_import::authoring` so they do not
@@ -67,7 +84,7 @@ pub mod scene {
         pub use crate::canonical_scene::store::api::authoring::*;
     }
 
-    /// Canonical Scene transaction boundary consumed only by `baozi-import`.
+    /// Canonical Scene construction and edit transactions consumed by workspace adapters.
     ///
     /// Rust has no workspace-private visibility, so this module is nameable but intentionally
     /// hidden from generated documentation and ordinary importer APIs.

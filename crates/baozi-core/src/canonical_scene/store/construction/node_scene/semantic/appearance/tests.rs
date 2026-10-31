@@ -253,10 +253,6 @@ fn selected_views_borrow_actual_rows_bytes_and_text_without_allocating() {
         assert!(std::ptr::eq(binding.stored, &storage.rows.bindings[0]));
         assert_eq!(binding.texture(), 1);
         assert_eq!(binding.role(), TextureRole::BaseColor);
-        assert!(std::ptr::eq(
-            binding.role_semantics(),
-            &storage.rows.bindings[0].role
-        ));
         assert_eq!(binding.uv_set(), 2);
         assert_eq!(binding.channel_mapping(), TextureChannelSwizzle::RGBA);
         assert_eq!(

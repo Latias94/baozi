@@ -236,6 +236,7 @@ impl<'a> ResourceSnapshotAuthoringTable<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn empty() -> Self {
         Self::new(0, &[])
     }

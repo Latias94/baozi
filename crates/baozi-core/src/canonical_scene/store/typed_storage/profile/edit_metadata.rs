@@ -126,10 +126,12 @@ impl MetadataEditPlan {
         self.removed_entries != 0
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn output_entries(self) -> u32 {
         self.output_entries
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn removed_entries(self) -> u32 {
         self.removed_entries
     }

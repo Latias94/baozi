@@ -1,5 +1,3 @@
-#[cfg(feature = "native-fs-candidate")]
-use crate::error::Error;
 use crate::error::Result;
 use baozi_core::FormatId;
 use baozi_import::{
@@ -9,10 +7,6 @@ use baozi_import::{
     import_asset, import_asset_with_resolver, import_bytes,
 };
 use baozi_io::{AssetIo, AssetPath};
-#[cfg(feature = "native-fs-candidate")]
-use baozi_io::{FileSystemAssetIo, NativeDirectoryCapability};
-#[cfg(feature = "native-fs-candidate")]
-use std::path::Path;
 
 /// Mutable registry proposal that can publish one immutable [`Importer`].
 pub struct ImporterBuilder {
@@ -205,35 +199,6 @@ impl Importer {
         } else {
             Err(RequestError::RegistrySnapshotMismatch.into())
         }
-    }
-
-    #[cfg(feature = "native-fs-candidate")]
-    /// Imports from a native path through the unregistered candidate adapter.
-    pub fn read_path(&self, path: impl AsRef<Path>) -> Result<ImportReport> {
-        let request = self.prepare_default_request()?;
-        self.read_path_with_request(path, &request, ImportOperationControl::default())
-    }
-
-    #[cfg(feature = "native-fs-candidate")]
-    /// Imports from a native path with an explicit request through the candidate adapter.
-    pub fn read_path_with_request(
-        &self,
-        path: impl AsRef<Path>,
-        request: &PreparedImportRequest,
-        control: ImportOperationControl,
-    ) -> Result<ImportReport> {
-        self.validate_request(request)?;
-        let path = path.as_ref();
-        let file_name = path.file_name().ok_or(Error::MissingFileName)?;
-        let file_name = file_name.to_str().ok_or(Error::NonUtf8FileName)?;
-        let root = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let capability =
-            NativeDirectoryCapability::open_ambient(root).map_err(Error::NativeRoot)?;
-        let io = FileSystemAssetIo::from_capability(capability);
-        self.read_asset_with_request(&io, AssetPath::new(file_name)?, request, control)
     }
 }
 

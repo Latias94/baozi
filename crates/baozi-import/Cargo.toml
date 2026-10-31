@@ -16,7 +16,7 @@ default = []
 tracing = ["dep:tracing"]
 
 [dependencies]
-baozi-core = { workspace = true, features = ["_scene-integration"] }
+baozi-core.workspace = true
 baozi-io.workspace = true
 baozi-operation.workspace = true
 sha2.workspace = true

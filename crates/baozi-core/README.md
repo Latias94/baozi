@@ -7,8 +7,9 @@ Bounded snapshots support test and debug evidence.
 
 This is the canonical-model layer. Applications normally use its types through
 the [baozi facade](https://github.com/Latias94/baozi/blob/main/crates/baozi/README.md). Scene construction, validation proofs, and
-storage machinery are internal; the `_scene-integration` feature serves workspace
-adapters. Model vocabulary does not imply that every importer supports that data.
+storage machinery are internal. Workspace adapters use the hidden `__scene_integration`
+namespace; private constructors and linear capabilities enforce ownership independently
+of Cargo features. Model vocabulary does not imply that every importer supports that data.
 The crate requires the Rust standard library; optional `mint` support currently
 provides `Vec3` conversions.
 

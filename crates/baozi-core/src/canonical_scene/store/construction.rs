@@ -3,25 +3,33 @@
     reason = "retained construction errors preserve bounded fail-closed evidence inline without an unmetered failure-path allocation"
 )]
 
+#[cfg(test)]
 use std::num::{NonZeroU32, NonZeroU64};
 
-use baozi_operation::__retained_store_integration::activation::{
-    CanonicalFailureTerminalWorkPlan, StoreActivationContainment,
-};
+#[cfg(test)]
+use baozi_operation::__retained_store_integration::activation::CanonicalFailureTerminalWorkPlan;
+use baozi_operation::__retained_store_integration::activation::StoreActivationContainment;
+use baozi_operation::__retained_store_integration::authority::RetainedStoreStartError;
+#[cfg(test)]
 use baozi_operation::__retained_store_integration::authority::{
-    FreshStoreLineage, RetainedStoreOperation, RetainedStoreSharePlan, RetainedStoreStartError,
-    RetainedStoreStartPlan, RetainedStoreWriterPlan,
+    FreshStoreLineage, RetainedStoreOperation, RetainedStoreSharePlan, RetainedStoreStartPlan,
+    RetainedStoreWriterPlan,
+};
+#[cfg(test)]
+use baozi_operation::{
+    DimensionPolicy, FinalProgress, LedgerLimits, OperationControl, OperationOwner, ProgressPhase,
+    ProgressUnit, RetainedStoreBatchLimits, StoreDimensionSemanticId, StoreKeyDomain,
+    StoreLedgerPlan, StorePhaseKey, StorePhaseSemanticId, StorePrepareError, StoreRuntimeError,
+    StoreSemanticCatalogId,
 };
 use baozi_operation::{
-    DimensionPolicy, FinalProgress, LedgerLimits, LedgerLimitsError, OperationControl,
-    OperationOwner, ProgressPhase, ProgressUnit, RetainedStoreBatchLimits,
-    RetainedStoreFailureTerminalWorkPlan, RetainedStoreFailureTerminalWorkRequirement,
-    StoreDimensionKey, StoreDimensionSemanticId, StoreKeyDomain, StoreKeyDomainCreateError,
-    StoreLedgerPlan, StoreLedgerPlanError, StorePhaseKey, StorePhaseSemanticId, StorePlanError,
-    StorePrepareError, StoreRuntimeError, StoreSemanticCatalogId,
+    LedgerLimitsError, RetainedStoreFailureTerminalWorkPlan,
+    RetainedStoreFailureTerminalWorkRequirement, StoreDimensionKey, StoreKeyDomainCreateError,
+    StoreLedgerPlanError, StorePlanError,
 };
 use thiserror::Error;
 
+#[cfg(test)]
 use crate::identity::ReservedSceneGeneration;
 
 use super::production::SceneInputEnvelopeError;
@@ -29,15 +37,21 @@ use super::schema::NODE_SCENE_EVIDENCE_FIELD_COUNT;
 
 pub(super) mod node_scene;
 
+#[cfg(test)]
 const STORE_CATALOG: StoreSemanticCatalogId =
     StoreSemanticCatalogId::new(*b"baozi-core-scene", NonZeroU32::MIN);
+#[cfg(test)]
 const STORE_PHASE: StorePhaseSemanticId = StorePhaseSemanticId::new(STORE_CATALOG, NonZeroU64::MIN);
+#[cfg(test)]
 pub(super) const STORE_DIMENSION: StoreDimensionSemanticId =
     StoreDimensionSemanticId::new(STORE_CATALOG, NonZeroU64::MIN);
+#[cfg(test)]
 pub(super) const FAILURE_TERMINAL_WORK_DIMENSION: StoreDimensionSemanticId =
     StoreDimensionSemanticId::new(STORE_CATALOG, NonZeroU64::new(2).unwrap());
+#[cfg(test)]
 const FALLBACK_CODE: u32 = 0x5343_0001;
 const GENERATION_EXHAUSTED_CODE: u32 = 0x5343_0003;
+#[cfg(test)]
 const TERMINAL_COMMITMENT_SLOTS: usize = 8;
 pub(in crate::canonical_scene::store) const FAILURE_TERMINAL_EVIDENCE_MEMBERS: usize = 1;
 
@@ -50,12 +64,14 @@ pub(in crate::canonical_scene::store) fn failure_terminal_work_requirement()
     )
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::canonical_scene::store) enum SceneConstructionPhase {
     Validation,
     Publication,
 }
 
+#[cfg(test)]
 impl ProgressPhase for SceneConstructionPhase {
     fn order(self) -> u32 {
         self as u32
@@ -69,12 +85,14 @@ impl ProgressPhase for SceneConstructionPhase {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::canonical_scene::store) enum SceneConstructionUnit {
     WorkUnits,
     Scene,
 }
 
+#[cfg(test)]
 impl ProgressUnit for SceneConstructionUnit {
     fn stable_id(self) -> &'static str {
         match self {
@@ -84,10 +102,13 @@ impl ProgressUnit for SceneConstructionUnit {
     }
 }
 
+#[cfg(test)]
 pub(in crate::canonical_scene::store) struct SceneConstructionOwner;
 
+#[cfg(test)]
 impl OperationOwner for SceneConstructionOwner {}
 
+#[cfg(test)]
 type SceneStoreOperation<L = FreshStoreLineage> = RetainedStoreOperation<
     SceneConstructionOwner,
     SceneConstructionPhase,
@@ -95,6 +116,7 @@ type SceneStoreOperation<L = FreshStoreLineage> = RetainedStoreOperation<
     L,
 >;
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SceneConstructionLimits {
     pub(crate) operation_live_bytes: u64,
@@ -113,8 +135,10 @@ pub(crate) enum SceneConstructionStartError {
     BrandExhausted,
     #[error("the canonical Scene store key domain could not be created")]
     KeyDomain(#[from] StoreKeyDomainCreateError),
+    #[cfg(test)]
     #[error("the canonical Scene store semantic key could not be admitted")]
     KeyAdmissionInvariant,
+    #[cfg(test)]
     #[error("the canonical Scene work budget cannot cover its bounded terminal reserve")]
     TerminalWorkBudget,
     #[error("canonical Scene ledger limits are invalid")]
@@ -129,6 +153,7 @@ pub(crate) enum SceneConstructionStartError {
     Activation(#[from] StoreActivationContainment),
 }
 
+#[cfg(test)]
 #[derive(Debug, Error)]
 pub(crate) enum SceneConstructionError {
     #[error("the canonical Scene retained-store publication plan is invalid")]
@@ -139,13 +164,12 @@ pub(crate) enum SceneConstructionError {
     Prepare(#[from] StorePrepareError),
     #[error("canonical Scene activation failed closed")]
     Activation(#[from] StoreActivationContainment),
-    #[error("the canonical Scene validation proof does not match its output descriptor")]
-    JointCommitInvariant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ConstructionBrand(node_scene::ConstructionRequestIdentity);
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct SceneStoreKeys {
     phase: StorePhaseKey,
@@ -153,6 +177,7 @@ struct SceneStoreKeys {
     failure_terminal_work_dimension: StoreDimensionKey,
 }
 
+#[cfg(test)]
 struct SceneOperationStart {
     keys: SceneStoreKeys,
     control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
@@ -160,6 +185,7 @@ struct SceneOperationStart {
     start_plan: RetainedStoreStartPlan,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct SceneFailureEvidenceWork {
     max_evidence_members: usize,
@@ -167,6 +193,7 @@ struct SceneFailureEvidenceWork {
     validation_work_limit: u64,
 }
 
+#[cfg(test)]
 impl SceneFailureEvidenceWork {
     const fn exact_single_record(fields: usize) -> Self {
         Self {
@@ -177,6 +204,7 @@ impl SceneFailureEvidenceWork {
     }
 }
 
+#[cfg(test)]
 fn try_plan_scene_operation(
     limits: SceneConstructionLimits,
     control: OperationControl<SceneConstructionPhase, SceneConstructionUnit>,
@@ -249,8 +277,10 @@ fn try_plan_scene_operation(
     })
 }
 
+#[cfg(test)]
 fn burn_generation_reservation(_reservation: ReservedSceneGeneration) {}
 
+#[cfg(test)]
 const fn final_progress() -> FinalProgress<SceneConstructionPhase, SceneConstructionUnit> {
     FinalProgress::new(
         SceneConstructionPhase::Publication,

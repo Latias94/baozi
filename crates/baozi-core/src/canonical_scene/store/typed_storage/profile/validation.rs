@@ -41,6 +41,7 @@ pub(in crate::canonical_scene::store) struct ProfileMeteredCounts {
 }
 
 impl ProfileMeteredCounts {
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn scratch_bytes(self) -> Option<u64> {
         u64::from(self.provenance_count)
             .checked_mul(u64::try_from(std::mem::size_of::<u32>()).ok()?)

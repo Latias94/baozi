@@ -1,6 +1,6 @@
 use super::NormalMode;
+use baozi_core::__scene_integration::integration::SceneNormalGenerationEvidence;
 use baozi_core::PrimitiveId;
-use baozi_core::scene::integration::SceneNormalGenerationEvidence;
 
 /// Published normal-generation effects, retained independently of the Scene owner.
 pub struct NormalGenerationReport {

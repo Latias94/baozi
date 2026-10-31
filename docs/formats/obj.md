@@ -100,7 +100,7 @@ OBJ/MTL keywords, numeric fields, smoothing values, face references, `map_Kd` op
 
 - `Importer::read_bytes` admits only the caller-owned primary byte snapshot and uses `baozi_import::DenyDependencies`; it cannot load MTL sidecars.
 - `Importer::read_asset` uses Baozi's registered same-authority resolver profile, so MTL sidecars are authorized against the same `AssetIo` authority as the primary OBJ and receive registered manifest identity evidence.
-- `Importer::read_path` is available only with `native-fs-candidate`. It opens a native-directory capability rooted at the OBJ file's parent directory, then uses the same-authority behavior of `read_asset` for sidecars.
+- Native candidate callers create `NativeDirectoryCapability` and `FileSystemAssetIo` from the unpublished `baozi-native-io-candidate` package, then pass that adapter and a relative primary path to `Importer::read_asset`. Sidecars use that same authority; no facade path helper or native feature is required.
 - `Importer::read_asset_with_resolver` accepts a prepared request and an explicit `DependencyResolver`. Use it when dependencies need a caller-defined authority policy, including `baozi_import::DenyDependencies` when every sidecar must be rejected before backend IO.
 
 | MTL field | Baozi mapping |

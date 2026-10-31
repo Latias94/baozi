@@ -212,10 +212,6 @@ impl<'scene> NodeSceneDeformationSparseDeltaCursor<'scene> {
         })
     }
 
-    pub(in crate::canonical_scene::store) const fn logical_count(&self) -> usize {
-        self.logical_count
-    }
-
     pub(in crate::canonical_scene::store) const fn declared_count(&self) -> usize {
         self.indices.len()
     }

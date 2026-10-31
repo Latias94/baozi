@@ -47,7 +47,7 @@ use crate::text_input::{
     ConformedTextInput, TextConformanceResult, TextInputOptions, TextInputRecoveryTracker,
 };
 use crate::{SceneDraft as CanonicalSceneDraft, authoring::SceneAuthoringBatch};
-use baozi_core::scene::integration::SceneConstruction;
+use baozi_core::__scene_integration::integration::SceneConstruction;
 use baozi_core::{OrderedMap, OrderedMapError};
 use baozi_io::{
     __semantic_identity::{

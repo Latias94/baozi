@@ -18,7 +18,7 @@ another toolchain is named. Commands use one Cargo build job and reuse `target`.
 | C reading | One immutable Scene exposes borrowed nodes/roots, geometry, scalar payloads, placements, materials/bindings, encoded images/samplers/textures, space declarations, cameras/lights, and checked typed IDs. | Dense/sparse/presence/spatial tests passed, including zero counted allocations during repeated reads. Facade geometry and appearance tests passed in 182/182. Independent default OBJ/STL consumer passed outside workspace feature unification. |
 | C authoring/errors | Static plugins use a borrowed builder with metered default alignment and primary-document provenance. Node, geometry, appearance, deformation, animation, spatial, profile, and aggregate errors preserve bounded semantic detail through finalization. | Nine static-plugin and eight submission-error tests passed, including domain/rule/value cases, later terminal cancellation, nested material rules, and digest reuse. Required-dependency context retains the declaring origin, role, original reference, normalized path, and resolver-authorized target. Nested missing/denied/redirected/rejected-reference tests passed in the integrated workspace run. |
 | F application workflow | Triangulation, normal generation, complete admitted Scene-space conversion, and borrowed draw-order tuples compose without a second Scene model or owning layout runtime. Applications select their concrete fields and own the final buffers. | Six typed-element and nine public tuple tests pass. The independent consumer builds vertex/index buffers after the geometry operations, checks them after dropping the Scene, and executes in native debug/release, fresh packages, and WASI. See the final increment evidence below. |
-| G feature/modules | Empty `std` and unused tracing forwarding are removed. Facade errors and importer workflows have separate modules; compiled-in registration is named `builtin`. Typed readers have private domain modules. | Existing facade/tracing tests and the independent source feature matrix pass, including the selected glTF profile. Native candidate extraction and hidden integration bridge migration remain separate future cutovers. |
+| G feature/modules | Empty `std` and unused tracing forwarding are removed. Facade errors and importer workflows have separate modules; compiled-in registration is named `builtin`. Typed readers have private domain modules. The later cutover extracts native IO into its own unpublished workspace and replaces the core bridge feature with actual private/linear contracts. | The earlier portable feature matrix and the newer focused core/candidate checks have distinct evidence below. Candidate extraction and hidden integration are implemented; their final integrated target/package qualification follows their changed source. |
 
 ## Independent consumer
 
@@ -1614,6 +1614,89 @@ Evidence is `target/review/a2-native-fallback-build.jsonl`, `a2-native-fallback-
 `a2-native-fallback-eperm.log`, `a2-native-fallback-eagain.log`, and
 `a2-final-linux-followup.log`. These complement rather than replace the native candidate matrix.
 
+## Native Package and Core Integration Cutover (2026-10-31)
+
+A further requirement audit found two explicitly selected source cutovers missing from the prior
+acceptance summary: standalone native IO development and the actual core/import integration seam.
+They are implemented together with their dependency/compiler boundaries, rather than treating
+previously passing portable behavior as proof that those units had been completed.
+
+The unpublished `baozi-native-io-candidate` now owns its own excluded workspace and lockfile,
+runtime adapter, optional `repository-capture`, status constants, and all former filesystem and
+repository fixtures. Its only production Baozi edge is portable `baozi-io`. Facade native features,
+path helpers, error variants, status exports, and IO feature aliases are deleted. Native integration
+tests construct a capability and pass the adapter to the same public `read_asset` seam as other IO;
+they read typed triangle data and exact nested-sidecar image bytes. A deliberately different
+primary-relative decoy cannot satisfy the expected image. The maintained public consumer forwards
+the facade's entire real feature set, so its `all` case has no native exception.
+
+The candidate's four target runtime/repository graphs and root Linux/WASM/WASI graphs use eleven
+locked metadata queries. Native package versions, sources, checksums, runtime/audit target sets,
+and the Windows reviewed share-mode basis are unchanged. Feature isolation removes only the
+workspace-inherited Unix `libc/default` alias and Windows Console/SystemInformation flags; the
+new full closure adds the explicit local IO dependency. Runtime schema 4 and repository-delta
+schema 3 record the new manifest/lockfile ownership. The root/fuzz/consumer locks are reconciled
+offline without upgrading registry packages. The candidate remains unregistered and its Windows
+repository API continues to reject before traversal.
+
+Core now exposes one unconditional hidden `__scene_integration` namespace. Before changing it,
+an actual enabled packaged core library passed a positive naming compile and four independent
+negative compiles for private draft/construction/proof fields and moved handoff ownership
+(`E0616` / `E0382`, with missing-import errors forbidden). Those same guarantees are maintained
+as default-core public API tests and compile-fail examples. The obsolete bridge feature/module
+and the compile-only node-transform plan exports are deleted; plugin authoring keeps its existing
+`baozi_import::authoring` interface.
+
+Removing the blanket canonical-module dead-code allowance exposed unused production projections,
+duplicate metadata/count accessors, retired collector-only observations, and a standalone test
+execution rail. Unused values are deleted; the meaningful standalone fault harness is now
+`cfg(test)`. Current production triangulation/normal/space transactions keep one path. RAII tokens
+remain after their payload allocations, including zero-byte tokens. Deformation's skin-plan table
+is still used for palette validation, then destroyed with uniqueness scratch before the live
+reservation shrinks to the actual retained materialization plans. Stable identity semantics retain
+their explicit sealed-authority restriction; no constructor becomes public merely to suppress a
+warning. Read-only correctness review found no changed production capability, control-cause,
+storage-release-order, or retained-reservation defect.
+
+The Windows focused checks passed **558/558 core tests**, with four manual pilots skipped;
+strict core Clippy covers production and tests without the blanket allowance. The moved candidate
+passed **18/18 default/runtime** and **28/28 repository-enabled** tests, including four public
+facade integration tests in each run, and strict all-target/all-feature Clippy. Those counts exclude
+portable IO tests, which remain in the root workspace. All five installed negative targets fail
+with the candidate's own compiler diagnostic, not a missing standard library. The initial migrated
+xtask selection passed **56/56** and strict Clippy; the final suites also verify the updated snapshot
+schema. No hosted CI execution or platform promotion is implied.
+
+The integrated Windows workspace passed **2,419/2,419 tests on both Rust 1.95.0 and stable
+1.99.1**, with four manual pilots skipped in each broad run. Strict stable all-target/all-feature
+workspace Clippy, MSRV workspace doctests, default-core public API tests, and default-core
+compile-fail doctests all pass. These checks exercise the actual standalone-candidate/core-bridge
+cutover; they do not borrow qualification from an older packaged source archive.
+The subsequent serial scale selection passed all six storage pilots and admission/cancellation
+controls with no selected test skipped. It covers the changed scratch-release lifetime as well
+as independent primitive buffers, hierarchy shape, and retained-owner sharing. Requested allocator
+bytes and deterministic work remain the measured quantities; process RSS is not inferred.
+
+Security review caught an independent dependency-policy gap: moving the package would remove its
+native dependencies from both old `cargo deny` roots. CI now scans the complete candidate workspace
+with `deny.toml` as well. That actual scan exposed the checksum-pinned `winx@0.36.4` package's single
+`Apache-2.0 WITH LLVM-exception` license. After inspecting its full package license and manifest,
+an exact package/version exception was added; no global license allow-list expansion or checksum
+change was used. The candidate advisory/ban/license/source checks all pass. Existing duplicate
+dependency warnings remain visible.
+
+Evidence includes `target/review/h-bridge-before.log`, `h-bridge-public-api.log`,
+`h-bridge-default-doctests.log`, `h-extraction-core-clippy.log`, `h-extraction-core.log`,
+`h-extraction-candidate-runtime.log`, `h-extraction-candidate-repository.log`,
+`h-extraction-candidate-clippy.log`, `h-native-extraction-negative-*.log`,
+`h-native-extraction-xtask.log`, `h-native-extraction-xtask-clippy.log`, and
+`h-native-extraction-deny.log`. The integrated checks add `h-extraction-workspace-msrv.log`,
+`h-extraction-workspace-stable.log`, `h-extraction-workspace-clippy.log`,
+`h-extraction-doctests.log`, `h-extraction-core-public.log`, and
+`h-extraction-core-default-doc.log`, with manual-scale output in `h-extraction-pilots.log`.
+Earlier rejected lint/license/source states are retained
+separately.
+
 ## A–H Acceptance Audit (2026-10-31)
 
 Earlier entries describe their own increments and source revisions. This audit replaces the stale
@@ -1629,12 +1712,17 @@ candidate qualification, rather than another Scene representation or a speculati
 | D | All seven semantic domains use typed retained owners; obsolete record codecs/projections are removed; validation borrows actual storage; unchanged tables/payloads share owners; structural edits remap final owner provenance. | Corruption, interruption, source-first destruction, and sharing remain covered. The latest six-case pilot/control selection preserves measured allocation/work results. Earlier Linux process RSS is explicitly scoped to its immutable archive and remains advisory. No domain migration remains. |
 | E | Maintained glTF/GLB backend, exact selected PBR/deformation/animation profile, normalized source ownership and explicit unsupported-profile rejection. | Typed artifact consumers and the newer immutable ownership ASan archive pass. The six historical backend reproducers remain committed corpus. This does not admit additional formats/extensions or claim sustained fuzz coverage. |
 | F | Triangulation, Flat/Smooth normals, complete admitted target-space conversion, and borrowed triangle tuples into application-owned buffers. | The independent artifact/WASI workflow checks actual values and buffers after Scene destruction. Corner/Face semantics, seams, deformation, animation, camera/light axes, and material lengths retain focused regression coverage. Global tuple deduplication and removed undefined generated-coordinate sources are not unfinished requirements. |
-| G | Compiler/behavior boundaries replace source-hash/AST governance; metadata checks stay locked; the scale driver is thin Python; Rust owns fixtures/assertions; fuzz logs/corpus are retained. | The deliberate quadratic growth regression was rejected and precisely removed. Distinct buffers, depth/width, resource sharing, and unique vertices have executed work checks. Windows MSRV/stable and Linux's OBJ-only boundary pass the new unique-vertex test. Driver timing/RSS stay advisory. |
+| G | Compiler/behavior boundaries replace source-hash/AST governance; metadata checks stay locked; the scale driver is thin Python; Rust owns fixtures/assertions; fuzz logs/corpus are retained. Native development is an excluded workspace; the core integration uses actual privacy/linearity rather than a feature gate. | The deliberate quadratic growth regression was rejected and precisely removed. Distinct buffers, depth/width, resource sharing, and unique vertices have executed work checks. The newer core/candidate cutover has separate focused and integrated evidence; earlier package/ASan archives do not cover later source by implication. Driver timing/RSS stay advisory. |
 | H | Updated dependencies/MSRV checks, package-local documentation/licenses, extracted-only twelve-case consumer matrix, executable WASI and current-stable CI wiring. | Both fresh ownership-boundary artifact matrices and verified leaf packages pass; the newer native repair also passes all-feature package verification. Browser-WASM is compile-only. Linux forced fallback passes all three backend-error states. No hosted CI dispatch, upload, or registry publication is claimed. Native candidates retain the concrete remaining platform matrix below. |
 
 Native release registration remains empty. Actual Apple ARM64 runtime/permission execution,
 Windows volume-mount behavior, and the outstanding exact backend retry/work evidence still govern
-promotion. The local volume-mount fixture attempt returned access denied before creating a mount;
+promotion. The later accounting trace also confirms an implementation gap: both import open paths
+charge one `AssetOpen`, but neither precharges native resolution/retry `WorkUnits`; dependency
+acquisition's one unit is admitted only after open. `AssetIo` currently exposes no pre-open work
+bound/admission seam. This requirement remains open and must be implemented with a justified
+bound, not inferred from passing fallback tests or weakened to an open counter.
+The local volume-mount fixture attempt returned access denied before creating a mount;
 it is not adapter acceptance. Unknown-tag payload handling is a demonstrated defect with a concrete
 candidate-only repair, fixture, and separate regression gate. Windows repository capture continues
 to return `UnsupportedIdentityBackend` before traversal; passing that test does not claim working

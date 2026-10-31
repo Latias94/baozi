@@ -6,6 +6,7 @@ use baozi_operation::{
     RetainedStoreFailureTerminalWorkRequirement, StoreLedgerEvidence,
 };
 
+pub use super::super::construction::node_scene::edit::SceneEditCompileError;
 pub use super::super::construction::node_scene::edit::transaction::{
     ResolvedSceneSpaceConversion, SceneEditAdmission, SceneEditBootstrap, SceneEditBootstrapError,
     SceneEditEvidence, SceneEditEvidenceTag, SceneEditFailureEvidence, SceneEditFreezePermit,
@@ -17,10 +18,6 @@ pub use super::super::construction::node_scene::edit::transaction::{
     SceneSpaceConversionEvidence, SceneSpaceConversionIssue, SceneTriangulationEvidence,
     SceneTriangulationReplacement, consume_scene_edit_freeze_permit,
     resolve_scene_space_conversion, try_start_scene_edit_operation,
-};
-pub use super::super::construction::node_scene::edit::{
-    SceneEditCompilation, SceneEditCompileError, SceneNodeTransformEditPlan,
-    SceneNodeTransformEditRequest, compile_node_transform_edit,
 };
 pub use super::super::construction::node_scene::{
     NodeSceneActivationPostflight as SceneActivationPostflight,
@@ -189,9 +186,5 @@ mod tests {
             SceneHandoffToken,
             TestPreparedSceneSuccess,
         ) -> Result<ScenePublishedSuccess, SceneHandoffPairingError> = SceneHandoffToken::handoff;
-        let _: fn(
-            &ValidatedScene,
-            SceneNodeTransformEditRequest,
-        ) -> Result<SceneEditCompilation, SceneEditCompileError> = compile_node_transform_edit;
     }
 }

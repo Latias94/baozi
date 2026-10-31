@@ -1,4 +1,4 @@
-use crate::{
+use baozi_io::{
     AssetIo, AssetLength, AssetObjectKind, AssetOpenError, AssetOpenErrorKind, AssetOpenStage,
     AssetPath, AuthorityDomain, OpenedAsset,
 };
@@ -41,7 +41,7 @@ impl NativeDirectoryCapability {
         &self.domain
     }
 
-    #[cfg(feature = "repository-fs-candidate")]
+    #[cfg(feature = "repository-capture")]
     pub(crate) fn directory(&self) -> &Dir {
         &self.directory
     }
@@ -794,24 +794,27 @@ mod tests {
         let cases = [
             (
                 "payload.bin:stream",
-                crate::PathErrorCode::AlternateDataStream,
+                baozi_io::PathErrorCode::AlternateDataStream,
             ),
-            ("NUL.txt", crate::PathErrorCode::ReservedDevice),
-            ("cOn.TxT", crate::PathErrorCode::ReservedDevice),
-            ("COM1.log", crate::PathErrorCode::ReservedDevice),
-            ("LPT\u{00b2}.bin", crate::PathErrorCode::ReservedDevice),
-            ("CONIN$.txt", crate::PathErrorCode::ReservedDevice),
-            ("PROGRA~1/asset.bin", crate::PathErrorCode::ShortNameAlias),
-            ("ambiguous. ", crate::PathErrorCode::TrailingDotOrSpace),
-            (r"C:relative", crate::PathErrorCode::DriveQualified),
-            (r"C:\absolute", crate::PathErrorCode::DriveQualified),
-            (r"\\server\share", crate::PathErrorCode::Absolute),
-            (r"\\?\C:\secret", crate::PathErrorCode::Namespace),
-            (r"\\.\NUL", crate::PathErrorCode::Namespace),
-            (r"\??\C:\secret", crate::PathErrorCode::Namespace),
+            ("NUL.txt", baozi_io::PathErrorCode::ReservedDevice),
+            ("cOn.TxT", baozi_io::PathErrorCode::ReservedDevice),
+            ("COM1.log", baozi_io::PathErrorCode::ReservedDevice),
+            ("LPT\u{00b2}.bin", baozi_io::PathErrorCode::ReservedDevice),
+            ("CONIN$.txt", baozi_io::PathErrorCode::ReservedDevice),
+            (
+                "PROGRA~1/asset.bin",
+                baozi_io::PathErrorCode::ShortNameAlias,
+            ),
+            ("ambiguous. ", baozi_io::PathErrorCode::TrailingDotOrSpace),
+            (r"C:relative", baozi_io::PathErrorCode::DriveQualified),
+            (r"C:\absolute", baozi_io::PathErrorCode::DriveQualified),
+            (r"\\server\share", baozi_io::PathErrorCode::Absolute),
+            (r"\\?\C:\secret", baozi_io::PathErrorCode::Namespace),
+            (r"\\.\NUL", baozi_io::PathErrorCode::Namespace),
+            (r"\??\C:\secret", baozi_io::PathErrorCode::Namespace),
             (
                 r"\Device\HarddiskVolume1\secret",
-                crate::PathErrorCode::Namespace,
+                baozi_io::PathErrorCode::Namespace,
             ),
         ];
 

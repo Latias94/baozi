@@ -1,3 +1,4 @@
+#[cfg(test)]
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalCandidateStoreSession, CentrallyRejectedCanonicalStoreSession,
     InterruptedCanonicalStoreSession, NeverActivatedStoreSession, PendingMinimalFallback,
@@ -5,6 +6,7 @@ use baozi_operation::__retained_store_integration::activation::{
 };
 #[cfg(test)]
 use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccess;
+#[cfg(test)]
 use baozi_operation::__retained_store_integration::authority::{
     FreshStoreLineage, PreparedStoreFailure, PreparedStoreFallback,
 };
@@ -13,30 +15,27 @@ use baozi_operation::__retained_store_integration::producer::{
     mint_canonical_activation_request,
 };
 #[cfg(test)]
-use baozi_operation::PublishedOutcomeEvidenceStore;
 use baozi_operation::{
-    FinalProgress, OperationOwner, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
-    PublishedRichFailureStore, PublishedStoreFallbackOutput, RecordBlock, RecordPlan,
-    StoreLedgerEvidence, StorePlanError, StoreRuntimeError,
+    FinalProgress, OperationOwner, ProgressPhase, ProgressUnit, PublishedOutcomeEvidenceStore,
+    PublishedRichFailureStore, PublishedStoreFallbackOutput, RecordPlan, StoreLedgerEvidence,
 };
+use baozi_operation::{PublishedCanonicalStore, RecordBlock, StorePlanError, StoreRuntimeError};
 use thiserror::Error;
 
 use crate::identity::SceneGenerationId;
 
 use super::super::production::{
     AnimationAuthoringFailure, AppearanceAuthoringFailure, DeformationAuthoringFailure,
-    GeometryAuthoringFailure, NodeAuthoringFailure, OperationAuthoringControlError,
-    ProfileAuthoringFailure, ProfileOwnerCatalogError, SceneAuthoringAggregateError,
-    SpatialAuthoringFailure,
+    GeometryAuthoringFailure, NodeAuthoringFailure, ProfileAuthoringFailure,
+    ProfileOwnerCatalogError, SceneAuthoringAggregateError, SpatialAuthoringFailure,
 };
-use super::super::schema::{
-    CanonicalBlockRef, NodeSceneOutcomeEvidenceSchema, SceneDirectorySchema,
-};
+#[cfg(test)]
+use super::super::schema::NodeSceneOutcomeEvidenceSchema;
+use super::super::schema::{CanonicalBlockRef, SceneDirectorySchema};
 use super::super::validation::NodeSceneValidationProof;
-use super::{
-    ConstructionBrand, SceneConstructionOwner, SceneConstructionPhase, SceneConstructionStartError,
-    SceneConstructionUnit,
-};
+use super::{ConstructionBrand, SceneConstructionStartError};
+#[cfg(test)]
+use super::{SceneConstructionOwner, SceneConstructionPhase, SceneConstructionUnit};
 
 pub(super) type ConstructionRequestIdentity = CanonicalActivationRequestIdentity;
 
@@ -58,11 +57,9 @@ mod geometry;
 mod materialization;
 pub(in crate::canonical_scene::store) use materialization::NodeSceneActivationRequest;
 pub(in crate::canonical_scene::store) use materialization::NodeSceneMaterializedRefs;
-#[cfg(feature = "_scene-integration")]
 pub(in crate::canonical_scene::store) use materialization::maximum_node_scene_structural_work;
 #[cfg(test)]
 pub(in crate::canonical_scene::store) use materialization::validate_node_scene_batches_for_test;
-#[cfg(feature = "_scene-integration")]
 pub use materialization::{
     NodeSceneActivationPostflight, NodeSceneActivationTransaction, NodeSceneEvidenceRecipe,
     NodeSceneLaneOutput, NodeSceneLanePlan, NodeSceneLaneRejection, NodeSceneLaneValidationProof,
@@ -70,7 +67,6 @@ pub use materialization::{
 };
 mod profile;
 mod publication;
-#[cfg(feature = "_scene-integration")]
 pub use publication::{
     NodeSceneFrozenGenerationRejection, NodeSceneHandoffPairingError, NodeSceneHandoffToken,
     NodeSceneLaneFreezePermit, NodeSceneLaneGenerationRejection, NodeSceneLaneJointCommit,
@@ -79,7 +75,6 @@ pub use publication::{
 mod scratch;
 pub(in crate::canonical_scene::store) use scratch::{
     NodeSceneCentralValidationPlan, NodeSceneMeteredValidationScratch,
-    NodeSceneValidationScratchPlan,
 };
 pub(in crate::canonical_scene::store) mod semantic;
 pub(in crate::canonical_scene::store) mod snapshot;
@@ -93,9 +88,6 @@ mod view;
 mod tests;
 
 const NODE_SCENE_BUILD_INVARIANT_CODE: u32 = 0x5343_1001;
-const NODE_SCENE_CONTROL_INTERRUPTION_CODE: u32 = 0x5343_1002;
-const NODE_SCENE_WORK_INTERRUPTION_CODE: u32 = 0x5343_1003;
-const NODE_SCENE_COMMITMENT_REJECTION_CODE: u32 = 0x5343_1004;
 const NODE_SCENE_STORAGE_REJECTION_CODE: u32 = 0x5343_1005;
 const NODE_SCENE_NODE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1101;
 const NODE_SCENE_APPEARANCE_AUTHORING_REJECTION_CODE: u32 = 0x5343_1102;
@@ -202,7 +194,9 @@ type PreparedNodeStoreSuccess = PreparedStoreSuccess<
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
+#[cfg(test)]
 type PreparedNodeStoreFailure = PreparedStoreFailure<RecordBlock, NodeSceneOutcomeEvidenceSchema>;
+#[cfg(test)]
 type ActivatedNodeSceneCandidate<
     O = SceneConstructionOwner,
     PP = SceneConstructionPhase,
@@ -218,10 +212,13 @@ type ActivatedNodeSceneCandidate<
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
+#[cfg(test)]
 type RejectedNodeSceneActivation<O, PP, U> =
     RejectedCanonicalStoreSession<O, PP, U, materialization::NodeSceneLaneRejection>;
+#[cfg(test)]
 type NeverActivatedNodeScene<O, PP, U, L = FreshStoreLineage> =
     NeverActivatedStoreSession<O, PP, U, materialization::NodeSceneLaneRejection, L>;
+#[cfg(test)]
 type CentrallyRejectedNodeScene<O, PP, U> = CentrallyRejectedCanonicalStoreSession<
     O,
     PP,
@@ -230,12 +227,12 @@ type CentrallyRejectedNodeScene<O, PP, U> = CentrallyRejectedCanonicalStoreSessi
     RecordBlock,
     NodeSceneOutcomeEvidenceSchema,
 >;
+#[cfg(test)]
 type InterruptedNodeScene<O, PP, U> =
     InterruptedCanonicalStoreSession<O, PP, U, RecordBlock, NodeSceneOutcomeEvidenceSchema>;
 #[derive(Debug, Error)]
-pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection<
-    E = OperationAuthoringControlError,
-> where
+pub(in crate::canonical_scene::store) enum NodeSceneConstructionRejection<E = StoreRuntimeError>
+where
     E: std::error::Error + Send + Sync + 'static,
 {
     #[error("spatial authoring validation rejected the Scene batch")]
@@ -338,6 +335,7 @@ pub(in crate::canonical_scene::store) enum NodeSceneDraftBuild<
 
 /// Failure continuation retained by the import session until every parser-owned reservation has
 /// been released. No terminal ledger snapshot is frozen while this owner is pending.
+#[cfg(test)]
 #[must_use = "a pending Scene failure must be prepared after parser storage is released"]
 #[allow(
     clippy::large_enum_variant,
@@ -476,25 +474,30 @@ impl SceneEvidenceCounts {
     }
 }
 
+#[cfg(test)]
 pub(in crate::canonical_scene::store) struct PreparedNodeSceneRichFailure {
     store: PreparedNodeStoreFailure,
 }
 
+#[cfg(test)]
 pub(in crate::canonical_scene::store) struct PreparedNodeSceneFallback {
     store: PreparedStoreFallback,
 }
 
+#[cfg(test)]
 pub(in crate::canonical_scene::store) struct NodeSceneFallback {
-    fallback: PublishedStoreFallbackOutput,
+    _fallback: PublishedStoreFallbackOutput,
     ledger_evidence: StoreLedgerEvidence,
 }
 
+#[cfg(test)]
 impl NodeSceneFallback {
     pub(in crate::canonical_scene::store) const fn ledger_evidence(&self) -> &StoreLedgerEvidence {
         &self.ledger_evidence
     }
 }
 
+#[cfg(test)]
 #[must_use = "every prepared node Scene failure owns an exact frozen publication"]
 #[allow(
     clippy::large_enum_variant,
@@ -577,12 +580,6 @@ impl SceneStorage {
     pub(in crate::canonical_scene::store) const fn read_proof(&self) -> &NodeSceneValidationProof {
         &self.proof
     }
-
-    pub(in crate::canonical_scene::store) const fn read_canonical(
-        &self,
-    ) -> &PublishedCanonicalStore<RecordBlock, SceneDirectorySchema> {
-        &self.canonical
-    }
 }
 
 #[cfg(test)]
@@ -597,6 +594,7 @@ pub(in crate::canonical_scene::store) struct NodeSceneSuccessParts {
     pub(in crate::canonical_scene::store) report: NodeSceneSuccessReport,
 }
 
+#[cfg(test)]
 pub(in crate::canonical_scene::store) struct NodeSceneRichFailure {
     outcome_evidence: PublishedRichFailureStore<RecordBlock, NodeSceneOutcomeEvidenceSchema>,
     ledger_evidence: StoreLedgerEvidence,

@@ -26,90 +26,7 @@ use super::input::{NodeAuthoringBatch, NodeAuthoringNode, NodeLocalId, Presence}
 
 const MATRIX_SCALARS_PER_NODE: u64 = NODE_SCENE_MATRIX_SCALAR_COUNT as u64;
 const TRS_SCALARS_PER_NODE: u64 = NODE_SCENE_TRS_SCALAR_COUNT as u64;
-#[derive(Clone, Copy)]
-pub(super) struct NodeShapeScratchEnvelope {
-    peak_bytes: u64,
-    retained_bytes: u64,
-}
 
-impl NodeShapeScratchEnvelope {
-    pub(super) const fn peak_bytes(self) -> u64 {
-        self.peak_bytes
-    }
-
-    pub(super) const fn retained_bytes(self) -> u64 {
-        self.retained_bytes
-    }
-}
-
-pub(super) fn node_shape_scratch_envelope(
-    input: NodeAuthoringBatch<'_>,
-) -> Result<NodeShapeScratchEnvelope, NodeAuthoringSemanticError> {
-    let count = input.nodes().len();
-    let canonical_order = scratch_envelope(
-        CapacityPlan::for_type::<usize>(0, 0, count).map_err(|cause| {
-            NodeAuthoringSemanticError::ScratchCapacity {
-                resource: "canonical node order",
-                cause,
-            }
-        })?,
-        "canonical node order",
-    )?;
-    let canonical_index = scratch_envelope(
-        CapacityPlan::for_type::<u32>(0, 0, count).map_err(|cause| {
-            NodeAuthoringSemanticError::ScratchCapacity {
-                resource: "canonical index by local node",
-                cause,
-            }
-        })?,
-        "canonical index by local node",
-    )?;
-    let visit_state = scratch_envelope(
-        CapacityPlan::for_type::<VisitState>(0, 0, count).map_err(|cause| {
-            NodeAuthoringSemanticError::ScratchCapacity {
-                resource: "node graph visit state",
-                cause,
-            }
-        })?,
-        "node graph visit state",
-    )?;
-    let child_ranges = scratch_envelope(
-        CapacityPlan::for_type::<ChildRange>(0, 0, count).map_err(|cause| {
-            NodeAuthoringSemanticError::ScratchCapacity {
-                resource: "child ranges by local node",
-                cause,
-            }
-        })?,
-        "child ranges by local node",
-    )?;
-    let ordered_children = scratch_envelope(
-        CapacityPlan::for_type::<usize>(0, 0, count).map_err(|cause| {
-            NodeAuthoringSemanticError::ScratchCapacity {
-                resource: "ordered child table",
-                cause,
-            }
-        })?,
-        "ordered child table",
-    )?;
-    let peak_bytes = checked_sum_bytes(
-        [
-            canonical_order,
-            canonical_index,
-            visit_state,
-            child_ranges,
-            ordered_children,
-        ],
-        "node shape scratch envelope",
-    )?;
-    let retained_bytes = checked_sum_bytes(
-        [canonical_order, canonical_index, child_ranges],
-        "retained node shape scratch envelope",
-    )?;
-    Ok(NodeShapeScratchEnvelope {
-        peak_bytes,
-        retained_bytes,
-    })
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) enum NodeAuthoringLimit {
     Nodes,
@@ -235,7 +152,6 @@ struct NodeValidationStorage<R> {
     matrix_scalar_count: u64,
     trs_scalar_count: u64,
     node_name_byte_count: u64,
-    node_name_reference_count: u64,
     canonical_bytes: u64,
     validation_work: u64,
     scratch_bytes: u64,
@@ -283,10 +199,6 @@ impl<'input, R> ValidatedNodeBatch<'input, R> {
 
     pub(in crate::canonical_scene::store) const fn node_name_byte_count(&self) -> u64 {
         self.compiled.node_name_byte_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn node_name_reference_count(&self) -> u64 {
-        self.compiled.node_name_reference_count
     }
 
     pub(in crate::canonical_scene::store) const fn canonical_bytes(&self) -> u64 {
@@ -360,7 +272,6 @@ impl<R> fmt::Debug for NodeValidationStorage<R> {
             .field("matrix_scalar_count", &self.matrix_scalar_count)
             .field("trs_scalar_count", &self.trs_scalar_count)
             .field("node_name_byte_count", &self.node_name_byte_count)
-            .field("node_name_reference_count", &self.node_name_reference_count)
             .field("canonical_order", &self.canonical_order)
             .field("canonical_index_by_local", &self.canonical_index_by_local)
             .field("child_ranges_by_local", &self.child_ranges_by_local)
@@ -808,7 +719,6 @@ where
     }
 
     let mut node_name_byte_count = 0_u64;
-    let mut node_name_reference_count = 0_u64;
     for (node_index, node) in nodes.iter().copied().enumerate() {
         let name_byte_count = context.run_semantic_unit(SceneValidationWork::Entity, || {
             let Presence::Present(name) = node.name() else {
@@ -824,13 +734,6 @@ where
                 dimension: "node name bytes",
             })
         })?;
-        if name_byte_count != 0 {
-            node_name_reference_count = node_name_reference_count.checked_add(1).ok_or(
-                NodeAuthoringSemanticError::AccountingOverflow {
-                    dimension: "node name references",
-                },
-            )?;
-        }
         node_name_byte_count = node_name_byte_count.checked_add(name_byte_count).ok_or(
             NodeAuthoringSemanticError::AccountingOverflow {
                 dimension: "node name bytes",
@@ -989,7 +892,6 @@ where
         matrix_scalar_count: context.matrix_scalars,
         trs_scalar_count: context.trs_scalars,
         node_name_byte_count,
-        node_name_reference_count,
         canonical_bytes,
         validation_work: context.work,
         scratch_bytes: retained_bytes,

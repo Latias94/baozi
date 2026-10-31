@@ -1,72 +1,9 @@
 {
-  "metadata_semantics": "cargo metadata --locked --filter-platform; normal/build closure only",
-  "review_basis": {
-    "authority": "docs/research/native-filesystem-bound-handle-admission.md",
-    "windows_directory_share_mode": {
-      "identity_binding": "package_identities.cap-primitives@4.0.3",
-      "package": "cap-primitives@4.0.3",
-      "reviewed_path": "src/windows/fs/dir_utils.rs",
-      "semantic_contract": "root and descendant directory opens use FILE_FLAG_BACKUP_SEMANTICS and share only FILE_SHARE_READ | FILE_SHARE_WRITE, excluding FILE_SHARE_DELETE"
-    }
-  },
   "dependency_audit_profiles": {
     "freebsd": {
-      "nodes": {
-        "ambient-authority@0.0.2": { "dependencies": [], "features": [] },
-        "bitflags@2.13.1": { "dependencies": [], "features": ["std"] },
-        "cap-primitives@4.0.3": {
-          "dependencies": [
-            "normal:ambient_authority=ambient-authority@0.0.2",
-            "normal:fs_set_times=fs-set-times@0.20.3",
-            "normal:io_extras=io-extras@0.19.0",
-            "normal:io_lifetimes=io-lifetimes@3.0.1",
-            "normal:ipnet=ipnet@2.12.0",
-            "normal:maybe_owned=maybe-owned@0.3.4",
-            "normal:rustix=rustix@1.1.4"
-          ],
-          "features": []
-        },
-        "cap-std@4.0.3": {
-          "dependencies": [
-            "normal:cap_primitives=cap-primitives@4.0.3",
-            "normal:io_extras=io-extras@0.19.0",
-            "normal:io_lifetimes=io-lifetimes@3.0.1",
-            "normal:rustix=rustix@1.1.4"
-          ],
-          "features": []
-        },
-        "errno@0.3.14": {
-          "dependencies": ["normal:libc=libc@0.2.186"],
-          "features": ["std"]
-        },
-        "fs-set-times@0.20.3": {
-          "dependencies": [
-            "normal:io_lifetimes=io-lifetimes@2.0.4",
-            "normal:rustix=rustix@1.1.4"
-          ],
-          "features": []
-        },
-        "io-extras@0.19.0": {
-          "dependencies": ["normal:io_lifetimes=io-lifetimes@3.0.1"],
-          "features": ["default"]
-        },
-        "io-lifetimes@2.0.4": { "dependencies": [], "features": [] },
-        "io-lifetimes@3.0.1": { "dependencies": [], "features": ["default"] },
-        "ipnet@2.12.0": { "dependencies": [], "features": ["default", "std"] },
-        "libc@0.2.186": { "dependencies": [], "features": ["default", "std"] },
-        "maybe-owned@0.3.4": { "dependencies": [], "features": [] },
-        "rustix@1.1.4": {
-          "dependencies": [
-            "normal:bitflags=bitflags@2.13.1",
-            "normal:libc=libc@0.2.186",
-            "normal:libc_errno=errno@0.3.14"
-          ],
-          "features": ["alloc", "default", "fs", "process", "std", "termios", "time"]
-        }
-      },
-      "roots": ["cap-std@4.0.3", "rustix@1.1.4"],
       "full_package_keys": [
         "ambient-authority@0.0.2",
+        "baozi-io@0.1.0",
         "bitflags@2.13.1",
         "block-buffer@0.12.1",
         "cap-primitives@4.0.3",
@@ -95,12 +32,17 @@
         "typenum@1.20.1",
         "unicode-ident@1.0.24"
       ],
-      "target": "x86_64-unknown-freebsd"
-    },
-    "linux": {
       "nodes": {
-        "ambient-authority@0.0.2": { "dependencies": [], "features": [] },
-        "bitflags@2.13.1": { "dependencies": [], "features": ["std"] },
+        "ambient-authority@0.0.2": {
+          "dependencies": [],
+          "features": []
+        },
+        "bitflags@2.13.1": {
+          "dependencies": [],
+          "features": [
+            "std"
+          ]
+        },
         "cap-primitives@4.0.3": {
           "dependencies": [
             "normal:ambient_authority=ambient-authority@0.0.2",
@@ -109,8 +51,7 @@
             "normal:io_lifetimes=io-lifetimes@3.0.1",
             "normal:ipnet=ipnet@2.12.0",
             "normal:maybe_owned=maybe-owned@0.3.4",
-            "normal:rustix=rustix@1.1.4",
-            "normal:rustix_linux_procfs=rustix-linux-procfs@0.1.1"
+            "normal:rustix=rustix@1.1.4"
           ],
           "features": []
         },
@@ -124,8 +65,12 @@
           "features": []
         },
         "errno@0.3.14": {
-          "dependencies": ["normal:libc=libc@0.2.186"],
-          "features": ["std"]
+          "dependencies": [
+            "normal:libc=libc@0.2.186"
+          ],
+          "features": [
+            "std"
+          ]
         },
         "fs-set-times@0.20.3": {
           "dependencies": [
@@ -135,42 +80,67 @@
           "features": []
         },
         "io-extras@0.19.0": {
-          "dependencies": ["normal:io_lifetimes=io-lifetimes@3.0.1"],
-          "features": ["default"]
-        },
-        "io-lifetimes@2.0.4": { "dependencies": [], "features": [] },
-        "io-lifetimes@3.0.1": { "dependencies": [], "features": ["default"] },
-        "ipnet@2.12.0": { "dependencies": [], "features": ["default", "std"] },
-        "libc@0.2.186": { "dependencies": [], "features": ["default", "std"] },
-        "linux-raw-sys@0.12.1": {
-          "dependencies": [],
-          "features": ["auxvec", "elf", "errno", "general", "ioctl", "no_std", "prctl"]
-        },
-        "maybe-owned@0.3.4": { "dependencies": [], "features": [] },
-        "once_cell@1.21.4": {
-          "dependencies": [],
-          "features": ["alloc", "default", "race", "std"]
-        },
-        "rustix-linux-procfs@0.1.1": {
           "dependencies": [
-            "normal:once_cell=once_cell@1.21.4",
-            "normal:rustix=rustix@1.1.4"
+            "normal:io_lifetimes=io-lifetimes@3.0.1"
           ],
-          "features": ["default", "std"]
+          "features": [
+            "default"
+          ]
+        },
+        "io-lifetimes@2.0.4": {
+          "dependencies": [],
+          "features": []
+        },
+        "io-lifetimes@3.0.1": {
+          "dependencies": [],
+          "features": [
+            "default"
+          ]
+        },
+        "ipnet@2.12.0": {
+          "dependencies": [],
+          "features": [
+            "default",
+            "std"
+          ]
+        },
+        "libc@0.2.186": {
+          "dependencies": [],
+          "features": [
+            "std"
+          ]
+        },
+        "maybe-owned@0.3.4": {
+          "dependencies": [],
+          "features": []
         },
         "rustix@1.1.4": {
           "dependencies": [
             "normal:bitflags=bitflags@2.13.1",
             "normal:libc=libc@0.2.186",
-            "normal:libc_errno=errno@0.3.14",
-            "normal:linux_raw_sys=linux-raw-sys@0.12.1"
+            "normal:libc_errno=errno@0.3.14"
           ],
-          "features": ["alloc", "default", "fs", "process", "std", "termios", "time"]
+          "features": [
+            "alloc",
+            "default",
+            "fs",
+            "process",
+            "std",
+            "termios",
+            "time"
+          ]
         }
       },
-      "roots": ["cap-std@4.0.3", "rustix@1.1.4"],
+      "roots": [
+        "cap-std@4.0.3",
+        "rustix@1.1.4"
+      ],
+      "target": "x86_64-unknown-freebsd"
+    },
+    "linux": {
       "full_package_keys": [
         "ambient-authority@0.0.2",
+        "baozi-io@0.1.0",
         "bitflags@2.13.1",
         "block-buffer@0.12.1",
         "cap-primitives@4.0.3",
@@ -202,12 +172,17 @@
         "typenum@1.20.1",
         "unicode-ident@1.0.24"
       ],
-      "target": "x86_64-unknown-linux-gnu"
-    },
-    "macos": {
       "nodes": {
-        "ambient-authority@0.0.2": { "dependencies": [], "features": [] },
-        "bitflags@2.13.1": { "dependencies": [], "features": ["std"] },
+        "ambient-authority@0.0.2": {
+          "dependencies": [],
+          "features": []
+        },
+        "bitflags@2.13.1": {
+          "dependencies": [],
+          "features": [
+            "std"
+          ]
+        },
         "cap-primitives@4.0.3": {
           "dependencies": [
             "normal:ambient_authority=ambient-authority@0.0.2",
@@ -216,7 +191,8 @@
             "normal:io_lifetimes=io-lifetimes@3.0.1",
             "normal:ipnet=ipnet@2.12.0",
             "normal:maybe_owned=maybe-owned@0.3.4",
-            "normal:rustix=rustix@1.1.4"
+            "normal:rustix=rustix@1.1.4",
+            "normal:rustix_linux_procfs=rustix-linux-procfs@0.1.1"
           ],
           "features": []
         },
@@ -230,8 +206,12 @@
           "features": []
         },
         "errno@0.3.14": {
-          "dependencies": ["normal:libc=libc@0.2.186"],
-          "features": ["std"]
+          "dependencies": [
+            "normal:libc=libc@0.2.186"
+          ],
+          "features": [
+            "std"
+          ]
         },
         "fs-set-times@0.20.3": {
           "dependencies": [
@@ -241,26 +221,99 @@
           "features": []
         },
         "io-extras@0.19.0": {
-          "dependencies": ["normal:io_lifetimes=io-lifetimes@3.0.1"],
-          "features": ["default"]
+          "dependencies": [
+            "normal:io_lifetimes=io-lifetimes@3.0.1"
+          ],
+          "features": [
+            "default"
+          ]
         },
-        "io-lifetimes@2.0.4": { "dependencies": [], "features": [] },
-        "io-lifetimes@3.0.1": { "dependencies": [], "features": ["default"] },
-        "ipnet@2.12.0": { "dependencies": [], "features": ["default", "std"] },
-        "libc@0.2.186": { "dependencies": [], "features": ["default", "std"] },
-        "maybe-owned@0.3.4": { "dependencies": [], "features": [] },
+        "io-lifetimes@2.0.4": {
+          "dependencies": [],
+          "features": []
+        },
+        "io-lifetimes@3.0.1": {
+          "dependencies": [],
+          "features": [
+            "default"
+          ]
+        },
+        "ipnet@2.12.0": {
+          "dependencies": [],
+          "features": [
+            "default",
+            "std"
+          ]
+        },
+        "libc@0.2.186": {
+          "dependencies": [],
+          "features": [
+            "std"
+          ]
+        },
+        "linux-raw-sys@0.12.1": {
+          "dependencies": [],
+          "features": [
+            "auxvec",
+            "elf",
+            "errno",
+            "general",
+            "ioctl",
+            "no_std",
+            "prctl"
+          ]
+        },
+        "maybe-owned@0.3.4": {
+          "dependencies": [],
+          "features": []
+        },
+        "once_cell@1.21.4": {
+          "dependencies": [],
+          "features": [
+            "alloc",
+            "default",
+            "race",
+            "std"
+          ]
+        },
+        "rustix-linux-procfs@0.1.1": {
+          "dependencies": [
+            "normal:once_cell=once_cell@1.21.4",
+            "normal:rustix=rustix@1.1.4"
+          ],
+          "features": [
+            "default",
+            "std"
+          ]
+        },
         "rustix@1.1.4": {
           "dependencies": [
             "normal:bitflags=bitflags@2.13.1",
             "normal:libc=libc@0.2.186",
-            "normal:libc_errno=errno@0.3.14"
+            "normal:libc_errno=errno@0.3.14",
+            "normal:linux_raw_sys=linux-raw-sys@0.12.1"
           ],
-          "features": ["alloc", "default", "fs", "process", "std", "termios", "time"]
+          "features": [
+            "alloc",
+            "default",
+            "fs",
+            "process",
+            "std",
+            "termios",
+            "time"
+          ]
         }
       },
-      "roots": ["cap-std@4.0.3", "rustix@1.1.4"],
+      "roots": [
+        "cap-std@4.0.3",
+        "rustix@1.1.4"
+      ],
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "macos": {
       "full_package_keys": [
         "ambient-authority@0.0.2",
+        "baozi-io@0.1.0",
         "bitflags@2.13.1",
         "block-buffer@0.12.1",
         "cap-primitives@4.0.3",
@@ -289,12 +342,17 @@
         "typenum@1.20.1",
         "unicode-ident@1.0.24"
       ],
-      "target": "aarch64-apple-darwin"
-    },
-    "windows-msvc": {
       "nodes": {
-        "ambient-authority@0.0.2": { "dependencies": [], "features": [] },
-        "bitflags@2.13.1": { "dependencies": [], "features": ["std"] },
+        "ambient-authority@0.0.2": {
+          "dependencies": [],
+          "features": []
+        },
+        "bitflags@2.13.1": {
+          "dependencies": [],
+          "features": [
+            "std"
+          ]
+        },
         "cap-primitives@4.0.3": {
           "dependencies": [
             "normal:ambient_authority=ambient-authority@0.0.2",
@@ -303,8 +361,7 @@
             "normal:io_lifetimes=io-lifetimes@3.0.1",
             "normal:ipnet=ipnet@2.12.0",
             "normal:maybe_owned=maybe-owned@0.3.4",
-            "normal:windows_sys=windows-sys@0.61.2",
-            "normal:winx=winx@0.36.4"
+            "normal:rustix=rustix@1.1.4"
           ],
           "features": []
         },
@@ -312,103 +369,88 @@
           "dependencies": [
             "normal:cap_primitives=cap-primitives@4.0.3",
             "normal:io_extras=io-extras@0.19.0",
-            "normal:io_lifetimes=io-lifetimes@3.0.1"
+            "normal:io_lifetimes=io-lifetimes@3.0.1",
+            "normal:rustix=rustix@1.1.4"
           ],
           "features": []
+        },
+        "errno@0.3.14": {
+          "dependencies": [
+            "normal:libc=libc@0.2.186"
+          ],
+          "features": [
+            "std"
+          ]
         },
         "fs-set-times@0.20.3": {
           "dependencies": [
             "normal:io_lifetimes=io-lifetimes@2.0.4",
-            "normal:windows_sys=windows-sys@0.59.0"
+            "normal:rustix=rustix@1.1.4"
           ],
           "features": []
         },
         "io-extras@0.19.0": {
           "dependencies": [
-            "normal:io_lifetimes=io-lifetimes@3.0.1",
-            "normal:windows_sys=windows-sys@0.60.2"
+            "normal:io_lifetimes=io-lifetimes@3.0.1"
           ],
-          "features": ["default"]
-        },
-        "io-lifetimes@2.0.4": { "dependencies": [], "features": [] },
-        "io-lifetimes@3.0.1": { "dependencies": [], "features": ["default"] },
-        "ipnet@2.12.0": { "dependencies": [], "features": ["default", "std"] },
-        "maybe-owned@0.3.4": { "dependencies": [], "features": [] },
-        "windows-link@0.2.1": { "dependencies": [], "features": [] },
-        "windows-sys@0.59.0": {
-          "dependencies": ["normal:windows_targets=windows-targets@0.52.6"],
           "features": [
-            "Win32",
-            "Win32_Foundation",
-            "Win32_Storage",
-            "Win32_Storage_FileSystem",
-            "Win32_System",
-            "Win32_System_IO",
-            "Win32_System_Ioctl",
-            "Win32_System_LibraryLoader",
-            "Win32_System_Performance",
-            "Win32_System_SystemServices",
             "default"
           ]
         },
-        "windows-sys@0.60.2": {
-          "dependencies": ["normal:windows_targets=windows-targets@0.53.5"],
-          "features": [
-            "Win32",
-            "Win32_Foundation",
-            "Win32_Networking",
-            "Win32_Networking_WinSock",
-            "Win32_System",
-            "Win32_System_Console",
-            "default"
-          ]
-        },
-        "windows-sys@0.61.2": {
-          "dependencies": ["normal:windows_link=windows-link@0.2.1"],
-          "features": [
-            "Wdk",
-            "Wdk_Foundation",
-            "Wdk_Storage",
-            "Wdk_Storage_FileSystem",
-            "Win32",
-            "Win32_Foundation",
-            "Win32_Networking",
-            "Win32_Networking_WinSock",
-            "Win32_Security",
-            "Win32_Storage",
-            "Win32_Storage_FileSystem",
-            "Win32_System",
-            "Win32_System_Console",
-            "Win32_System_Diagnostics",
-            "Win32_System_Diagnostics_Debug",
-            "Win32_System_IO",
-            "Win32_System_Kernel",
-            "Win32_System_SystemInformation",
-            "Win32_System_WindowsProgramming",
-            "default"
-          ]
-        },
-        "windows-targets@0.52.6": {
-          "dependencies": ["normal:windows_x86_64_msvc=windows_x86_64_msvc@0.52.6"],
+        "io-lifetimes@2.0.4": {
+          "dependencies": [],
           "features": []
         },
-        "windows-targets@0.53.5": {
-          "dependencies": ["normal:windows_x86_64_msvc=windows_x86_64_msvc@0.53.1"],
+        "io-lifetimes@3.0.1": {
+          "dependencies": [],
+          "features": [
+            "default"
+          ]
+        },
+        "ipnet@2.12.0": {
+          "dependencies": [],
+          "features": [
+            "default",
+            "std"
+          ]
+        },
+        "libc@0.2.186": {
+          "dependencies": [],
+          "features": [
+            "std"
+          ]
+        },
+        "maybe-owned@0.3.4": {
+          "dependencies": [],
           "features": []
         },
-        "windows_x86_64_msvc@0.52.6": { "dependencies": [], "features": [] },
-        "windows_x86_64_msvc@0.53.1": { "dependencies": [], "features": [] },
-        "winx@0.36.4": {
+        "rustix@1.1.4": {
           "dependencies": [
             "normal:bitflags=bitflags@2.13.1",
-            "normal:windows_sys=windows-sys@0.59.0"
+            "normal:libc=libc@0.2.186",
+            "normal:libc_errno=errno@0.3.14"
           ],
-          "features": []
+          "features": [
+            "alloc",
+            "default",
+            "fs",
+            "process",
+            "std",
+            "termios",
+            "time"
+          ]
         }
       },
-      "roots": ["cap-std@4.0.3"],
+      "roots": [
+        "cap-std@4.0.3",
+        "rustix@1.1.4"
+      ],
+      "target": "aarch64-apple-darwin"
+    },
+    "windows-msvc": {
       "full_package_keys": [
         "ambient-authority@0.0.2",
+        "baozi-io@0.1.0",
         "bitflags@2.13.1",
         "block-buffer@0.12.1",
         "cap-primitives@4.0.3",
@@ -443,9 +485,173 @@
         "windows_x86_64_msvc@0.53.1",
         "winx@0.36.4"
       ],
+      "nodes": {
+        "ambient-authority@0.0.2": {
+          "dependencies": [],
+          "features": []
+        },
+        "bitflags@2.13.1": {
+          "dependencies": [],
+          "features": [
+            "std"
+          ]
+        },
+        "cap-primitives@4.0.3": {
+          "dependencies": [
+            "normal:ambient_authority=ambient-authority@0.0.2",
+            "normal:fs_set_times=fs-set-times@0.20.3",
+            "normal:io_extras=io-extras@0.19.0",
+            "normal:io_lifetimes=io-lifetimes@3.0.1",
+            "normal:ipnet=ipnet@2.12.0",
+            "normal:maybe_owned=maybe-owned@0.3.4",
+            "normal:windows_sys=windows-sys@0.61.2",
+            "normal:winx=winx@0.36.4"
+          ],
+          "features": []
+        },
+        "cap-std@4.0.3": {
+          "dependencies": [
+            "normal:cap_primitives=cap-primitives@4.0.3",
+            "normal:io_extras=io-extras@0.19.0",
+            "normal:io_lifetimes=io-lifetimes@3.0.1"
+          ],
+          "features": []
+        },
+        "fs-set-times@0.20.3": {
+          "dependencies": [
+            "normal:io_lifetimes=io-lifetimes@2.0.4",
+            "normal:windows_sys=windows-sys@0.59.0"
+          ],
+          "features": []
+        },
+        "io-extras@0.19.0": {
+          "dependencies": [
+            "normal:io_lifetimes=io-lifetimes@3.0.1",
+            "normal:windows_sys=windows-sys@0.60.2"
+          ],
+          "features": [
+            "default"
+          ]
+        },
+        "io-lifetimes@2.0.4": {
+          "dependencies": [],
+          "features": []
+        },
+        "io-lifetimes@3.0.1": {
+          "dependencies": [],
+          "features": [
+            "default"
+          ]
+        },
+        "ipnet@2.12.0": {
+          "dependencies": [],
+          "features": [
+            "default",
+            "std"
+          ]
+        },
+        "maybe-owned@0.3.4": {
+          "dependencies": [],
+          "features": []
+        },
+        "windows-link@0.2.1": {
+          "dependencies": [],
+          "features": []
+        },
+        "windows-sys@0.59.0": {
+          "dependencies": [
+            "normal:windows_targets=windows-targets@0.52.6"
+          ],
+          "features": [
+            "Win32",
+            "Win32_Foundation",
+            "Win32_Storage",
+            "Win32_Storage_FileSystem",
+            "Win32_System",
+            "Win32_System_IO",
+            "Win32_System_Ioctl",
+            "Win32_System_LibraryLoader",
+            "Win32_System_Performance",
+            "Win32_System_SystemServices",
+            "default"
+          ]
+        },
+        "windows-sys@0.60.2": {
+          "dependencies": [
+            "normal:windows_targets=windows-targets@0.53.5"
+          ],
+          "features": [
+            "Win32",
+            "Win32_Foundation",
+            "Win32_Networking",
+            "Win32_Networking_WinSock",
+            "Win32_System",
+            "Win32_System_Console",
+            "default"
+          ]
+        },
+        "windows-sys@0.61.2": {
+          "dependencies": [
+            "normal:windows_link=windows-link@0.2.1"
+          ],
+          "features": [
+            "Wdk",
+            "Wdk_Foundation",
+            "Wdk_Storage",
+            "Wdk_Storage_FileSystem",
+            "Win32",
+            "Win32_Foundation",
+            "Win32_Networking",
+            "Win32_Networking_WinSock",
+            "Win32_Security",
+            "Win32_Storage",
+            "Win32_Storage_FileSystem",
+            "Win32_System",
+            "Win32_System_Diagnostics",
+            "Win32_System_Diagnostics_Debug",
+            "Win32_System_IO",
+            "Win32_System_Kernel",
+            "Win32_System_WindowsProgramming",
+            "default"
+          ]
+        },
+        "windows-targets@0.52.6": {
+          "dependencies": [
+            "normal:windows_x86_64_msvc=windows_x86_64_msvc@0.52.6"
+          ],
+          "features": []
+        },
+        "windows-targets@0.53.5": {
+          "dependencies": [
+            "normal:windows_x86_64_msvc=windows_x86_64_msvc@0.53.1"
+          ],
+          "features": []
+        },
+        "windows_x86_64_msvc@0.52.6": {
+          "dependencies": [],
+          "features": []
+        },
+        "windows_x86_64_msvc@0.53.1": {
+          "dependencies": [],
+          "features": []
+        },
+        "winx@0.36.4": {
+          "dependencies": [
+            "normal:bitflags=bitflags@2.13.1",
+            "normal:windows_sys=windows-sys@0.59.0"
+          ],
+          "features": []
+        }
+      },
+      "roots": [
+        "cap-std@4.0.3"
+      ],
       "target": "x86_64-pc-windows-msvc"
     }
   },
+  "lockfile_path": "candidates/baozi-native-io/Cargo.lock",
+  "manifest_path": "candidates/baozi-native-io/Cargo.toml",
+  "metadata_semantics": "cargo metadata --locked --filter-platform; normal/build closure only",
   "package_identities": {
     "ambient-authority@0.0.2": {
       "checksum": "e9d4ee0d472d1cd2e28c97dfa124b3d8d992e10eb0a035f33f5d12e3a177ba3b",
@@ -548,12 +754,24 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index"
     }
   },
-  "portable_byte_targets": ["wasm32-unknown-unknown", "wasm32-wasip1"],
+  "portable_byte_targets": [
+    "wasm32-unknown-unknown",
+    "wasm32-wasip1"
+  ],
   "release_registered_targets": [],
+  "review_basis": {
+    "authority": "docs/research/native-filesystem-bound-handle-admission.md",
+    "windows_directory_share_mode": {
+      "identity_binding": "package_identities.cap-primitives@4.0.3",
+      "package": "cap-primitives@4.0.3",
+      "reviewed_path": "src/windows/fs/dir_utils.rs",
+      "semantic_contract": "root and descendant directory opens use FILE_FLAG_BACKUP_SEMANTICS and share only FILE_SHARE_READ | FILE_SHARE_WRITE, excluding FILE_SHARE_DELETE"
+    }
+  },
   "runtime_candidate_targets": [
     "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
     "aarch64-apple-darwin"
   ],
-  "schema": 3
+  "schema": 4
 }

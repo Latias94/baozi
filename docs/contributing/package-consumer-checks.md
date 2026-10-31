@@ -6,15 +6,17 @@ handwritten semantic assertions and its checked-in `Cargo.lock`.
 
 ```text
 python scripts/check_packages.py --toolchain 1.95.0 --case default
-python scripts/check_packages.py --toolchain 1.95.0 --case empty --case obj --case obj,ply --case all
+python scripts/check_packages.py --toolchain 1.95.0 --case empty --case obj --case ply --case all
 python scripts/check_packages.py --toolchain 1.95.0 --release
 python scripts/check_packages.py --toolchain 1.95.0 --case all --target x86_64-pc-windows-msvc --check
 ```
 
 Without `--case`, the script runs the fixed matrix from `scripts/check_features.py`.
-Repeat `--case` to select a subset. A comma-separated format combination enables
-those formats without default features. Fixed cases retain that matrix's handwritten
+Repeat `--case` to select a subset of the twelve maintained cases. Fixed cases retain that matrix's handwritten
 expected format sets; the driver does not infer expectations from feature wiring.
+The maintained consumer forwards every public facade feature exactly once, so its
+`--all-features` case is the facade's complete public feature union. Native IO development lives
+in a separate unpublished candidate workspace and cannot be activated by the portable matrix.
 
 The driver runs serially with `CARGO_BUILD_JOBS=1`. Archive creation reuses `target`;
 artifact compilation uses a fresh `build` directory within that run's staging area.
@@ -65,8 +67,9 @@ python scripts/check_packages.py --toolchain 1.95.0 --case postprocess
 The postprocess case imports an OBJ quad with Corner UVs and authored normals, triangulates it,
 checks preservation before explicitly replacing normals, and converts the full static Scene to
 left-handed centimeters. Handwritten assertions check positions, normals, index/UV lane pairing,
-assumed source units, and evidence lifetime after Scene teardown. Application vertex unification
-and unimplemented spatial domains are not claimed by this case.
+assumed source units, and evidence lifetime after Scene teardown. It builds application-owned
+vertex/index buffers from complete borrowed draw tuples and checks them after dropping the Scene.
+Global vertex deduplication is a separate caller policy.
 
 The glTF feature's complete local production closure includes
 the maintained `baozi-gltf` and `baozi-gltf-json` packages as actual `.crate` artifacts.

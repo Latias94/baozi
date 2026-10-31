@@ -1,4 +1,4 @@
-use baozi_core::scene::integration::SceneSpaceConversionEvidence;
+use baozi_core::__scene_integration::integration::SceneSpaceConversionEvidence;
 use baozi_core::{SceneGenerationId, SceneSpaceField, TargetSpace};
 
 /// Source/target declarations and effects retained independently of either Scene generation.

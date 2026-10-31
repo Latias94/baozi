@@ -351,7 +351,7 @@ fn edit_success_requirements(
     .map(|requirements| {
         requirements
             .with_request_identity(brand.activation_request_identity())
-            .with_semantic_bytes(pending.input().read_nodes().names.len() as u64)
+            .with_semantic_bytes(pending.input.read_nodes().names.len() as u64)
     })
 }
 

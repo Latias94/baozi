@@ -23,6 +23,13 @@ pub enum SessionOpaqueReason {
 /// A read-only replay-stability classification attached to an observed identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(in crate::canonical_scene::store) enum ResourceIdentityStability {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "stable identity semantics remain available, but only the sealed fixture authority currently issues evidence"
+        )
+    )]
     Stable {
         owner: NamespacedName,
         schema: NamespacedName,
@@ -52,6 +59,7 @@ const fn session_opaque_stability(
 }
 
 /// Sealed authority evidence that binds one exact observed resource identity.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 pub(in crate::canonical_scene::store) struct StableResourceIdentityEvidence<'input> {
     identity: &'input ResourceIdentity,
@@ -121,6 +129,7 @@ pub struct ObservedResourceAuthoring<'input> {
 }
 
 impl<'input> ObservedResourceAuthoring<'input> {
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn stable(
         evidence: StableResourceIdentityEvidence<'input>,
     ) -> Self {

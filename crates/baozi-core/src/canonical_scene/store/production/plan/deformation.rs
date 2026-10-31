@@ -581,7 +581,6 @@ struct DeformationValidationStorage<R> {
     validation_work: u64,
     scratch_bytes: u64,
     maximum_uniqueness_capacity: usize,
-    skin_plans: Vec<ValidatedSkinPlan>,
     logical_morph_plans: Vec<ValidatedLogicalMorphPlan>,
     morph_definition_plans: Vec<ValidatedMorphTargetDefinitionPlan>,
     primitive_plans: Vec<ValidatedPrimitiveDeformationPlan>,
@@ -784,10 +783,9 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
     #[cfg(test)]
     pub(in crate::canonical_scene::store::production) fn into_compiled_facts_for_test(
         self,
-    ) -> (u32, [usize; 7], R) {
+    ) -> (u32, [usize; 6], R) {
         let DeformationValidationStorage {
             skin_count,
-            skin_plans,
             logical_morph_plans,
             morph_definition_plans,
             primitive_plans,
@@ -800,7 +798,6 @@ impl<'input, R> ValidatedDeformationBatch<'input, R> {
         (
             skin_count,
             [
-                skin_plans.len(),
                 logical_morph_plans.len(),
                 morph_definition_plans.len(),
                 primitive_plans.len(),
@@ -1491,11 +1488,16 @@ where
         storage.uniqueness.capacity(),
         "deformation uniqueness allocation",
     )?;
-    let retained_scratch_bytes = storage.scratch_bytes.checked_sub(uniqueness_bytes).ok_or(
-        DeformationAuthoringSemanticError::AccountingOverflow {
-            dimension: "retained deformation scratch allocation",
-        },
+    let transient_scratch_bytes = checked_sum_bytes(
+        [skin_bytes, uniqueness_bytes],
+        "transient deformation scratch allocation",
     )?;
+    let retained_scratch_bytes = storage
+        .scratch_bytes
+        .checked_sub(transient_scratch_bytes)
+        .ok_or(DeformationAuthoringSemanticError::AccountingOverflow {
+            dimension: "retained deformation scratch allocation",
+        })?;
     let DeformationValidationScratch {
         skin_plans,
         logical_morph_plans,
@@ -1509,6 +1511,9 @@ where
         maximum_uniqueness_capacity,
         reservation,
     } = storage;
+    // Joint counts are needed only while validating palette references. Release this table
+    // and uniqueness scratch before shrinking their reservation to the materialization plans.
+    drop(skin_plans);
     drop(uniqueness);
     let compiled = DeformationValidationStorage {
         skin_count,
@@ -1539,7 +1544,6 @@ where
         validation_work,
         scratch_bytes: retained_scratch_bytes,
         maximum_uniqueness_capacity,
-        skin_plans,
         logical_morph_plans,
         morph_definition_plans,
         primitive_plans,

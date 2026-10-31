@@ -24,30 +24,6 @@ use super::super::input::geometry::{
     GeometryAuthoringBatch, GeometryPrimitiveAuthoring, GeometryTopologyAuthoring,
 };
 
-pub(in crate::canonical_scene::store) fn geometry_shape_scratch_envelope(
-    input: GeometryAuthoringBatch<'_>,
-) -> Result<u64, GeometryAuthoringSemanticError> {
-    let primitive_plan =
-        CapacityPlan::for_type::<ValidatedGeometryPrimitivePlan>(0, 0, input.primitives().len())
-            .map_err(|cause| GeometryAuthoringSemanticError::ScratchCapacity {
-                resource: "validated primitive plans",
-                cause,
-            })?;
-    let attribute_plan =
-        CapacityPlan::for_type::<ValidatedGeometryAttribute>(0, 0, input.attributes().len())
-            .map_err(|cause| GeometryAuthoringSemanticError::ScratchCapacity {
-                resource: "validated attribute plans",
-                cause,
-            })?;
-    checked_sum_bytes(
-        [
-            scratch_envelope(primitive_plan, "validated primitive plans")?,
-            scratch_envelope(attribute_plan, "validated attribute plans")?,
-        ],
-        "geometry shape scratch envelope",
-    )
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) enum GeometryAuthoringLimit {
     Entities,
@@ -265,6 +241,7 @@ pub(in crate::canonical_scene::store) enum GeometryAttributeScalarKind {
     I32,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) enum GeometryAttributePayloadKind {
     Dense,
@@ -273,60 +250,26 @@ pub(in crate::canonical_scene::store) enum GeometryAttributePayloadKind {
 
 pub(in crate::canonical_scene::store) struct ValidatedGeometryAttribute {
     input_index: usize,
-    scalar_kind: GeometryAttributeScalarKind,
-    payload_kind: GeometryAttributePayloadKind,
-    source_element_count: u32,
     element_count: u32,
+    // Semantic tests inspect the validator's decisions for projection and scalar accounting.
+    // Materialization consumes the borrowed payload directly and needs no duplicate tags.
+    #[cfg(test)]
+    scalar_kind: GeometryAttributeScalarKind,
+    #[cfg(test)]
+    payload_kind: GeometryAttributePayloadKind,
+    #[cfg(test)]
+    source_element_count: u32,
+    #[cfg(test)]
     explicit_element_count: u32,
+    #[cfg(test)]
     canonical_scalar_count: u64,
+    #[cfg(test)]
     payload_block_count: u32,
-    semantic_name_offset: u32,
-    semantic_name_count: u32,
 }
 
 impl ValidatedGeometryAttribute {
-    pub(in crate::canonical_scene::store) const fn input_index(&self) -> usize {
-        self.input_index
-    }
-
-    pub(in crate::canonical_scene::store) const fn scalar_kind(
-        &self,
-    ) -> GeometryAttributeScalarKind {
-        self.scalar_kind
-    }
-
-    pub(in crate::canonical_scene::store) const fn payload_kind(
-        &self,
-    ) -> GeometryAttributePayloadKind {
-        self.payload_kind
-    }
-
-    pub(in crate::canonical_scene::store) const fn source_element_count(&self) -> u32 {
-        self.source_element_count
-    }
-
     pub(in crate::canonical_scene::store) const fn element_count(&self) -> u32 {
         self.element_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn explicit_element_count(&self) -> u32 {
-        self.explicit_element_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn canonical_scalar_count(&self) -> u64 {
-        self.canonical_scalar_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
-        self.payload_block_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn semantic_name_offset(&self) -> u32 {
-        self.semantic_name_offset
-    }
-
-    pub(in crate::canonical_scene::store) const fn semantic_name_count(&self) -> u32 {
-        self.semantic_name_count
     }
 }
 
@@ -336,22 +279,19 @@ struct ValidatedGeometryPrimitivePlan {
     vertex_count: u32,
     corner_count: u32,
     face_count: u32,
-    index_count: u32,
     attribute_plans: AuthoringRange,
 }
 
 pub(in crate::canonical_scene::store) struct ValidatedGeometryPrimitive<'batch, 'input> {
     input: GeometryPrimitiveAuthoring<'input>,
     plan: &'batch ValidatedGeometryPrimitivePlan,
+    #[cfg(test)]
     attributes: &'batch [ValidatedGeometryAttribute],
+    #[cfg(test)]
     input_attributes: &'input [GeometryAttributeAuthoring<'input>],
 }
 
 impl<'batch, 'input> ValidatedGeometryPrimitive<'batch, 'input> {
-    pub(in crate::canonical_scene::store) const fn input_index(&self) -> usize {
-        self.plan.input_index
-    }
-
     pub(in crate::canonical_scene::store) const fn authored_topology(
         &self,
     ) -> GeometryTopologyAuthoring<'input> {
@@ -384,17 +324,6 @@ impl<'batch, 'input> ValidatedGeometryPrimitive<'batch, 'input> {
         self.plan.face_count
     }
 
-    pub(in crate::canonical_scene::store) const fn index_offset(&self) -> Option<u32> {
-        match self.input.indices() {
-            Presence::Absent => None,
-            Presence::Present(_) => Some(0),
-        }
-    }
-
-    pub(in crate::canonical_scene::store) const fn index_count(&self) -> u32 {
-        self.plan.index_count
-    }
-
     pub(in crate::canonical_scene::store) const fn material(&self) -> Option<MaterialLocalId> {
         match self.input.material() {
             Presence::Absent => None,
@@ -402,6 +331,7 @@ impl<'batch, 'input> ValidatedGeometryPrimitive<'batch, 'input> {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn attributes(
         &self,
     ) -> impl ExactSizeIterator<Item = ValidatedGeometryAttributeView<'_, 'input>> + '_ {
@@ -411,6 +341,7 @@ impl<'batch, 'input> ValidatedGeometryPrimitive<'batch, 'input> {
         })
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn attribute(
         &self,
         index: usize,
@@ -435,44 +366,42 @@ impl<'input> ValidatedGeometryAttributeView<'_, 'input> {
         self.input.domain()
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn source_element_count(&self) -> u32 {
-        self.plan.source_element_count()
+        self.plan.source_element_count
     }
 
     pub(in crate::canonical_scene::store) const fn element_count(&self) -> u32 {
         self.plan.element_count()
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn scalar_kind(
         &self,
     ) -> GeometryAttributeScalarKind {
-        self.plan.scalar_kind()
+        self.plan.scalar_kind
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn payload_kind(
         &self,
     ) -> GeometryAttributePayloadKind {
-        self.plan.payload_kind()
+        self.plan.payload_kind
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn explicit_element_count(&self) -> u32 {
-        self.plan.explicit_element_count()
+        self.plan.explicit_element_count
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn canonical_scalar_count(&self) -> u64 {
-        self.plan.canonical_scalar_count()
+        self.plan.canonical_scalar_count
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
-        self.plan.payload_block_count()
-    }
-
-    pub(in crate::canonical_scene::store) const fn semantic_name_offset(&self) -> u32 {
-        self.plan.semantic_name_offset()
-    }
-
-    pub(in crate::canonical_scene::store) const fn semantic_name_count(&self) -> u32 {
-        self.plan.semantic_name_count()
+        self.plan.payload_block_count
     }
 
     pub(in crate::canonical_scene::store) const fn authored_payload(
@@ -523,8 +452,8 @@ struct GeometryValidationStorage<R> {
     attribute_plans: Vec<ValidatedGeometryAttribute>,
     #[cfg(test)]
     storage_drop_probe: Option<GeometryStorageDropProbe>,
-    // Every compiled-plan allocation above must drop before its accounting token.
-    reservation: R,
+    // Held solely to cover compiled plans; all allocations above must drop before this token.
+    _reservation: R,
 }
 
 impl<'input, R> ValidatedGeometryBatch<'input, R> {
@@ -581,6 +510,7 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
         self.compiled.i32_scalar_count
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn payload_block_count(&self) -> u32 {
         self.compiled.payload_block_count
     }
@@ -619,12 +549,15 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
     ) -> Option<ValidatedGeometryPrimitive<'_, 'input>> {
         let plan = self.compiled.primitive_plans.get(index)?;
         let input = *self.input.primitives().get(plan.input_index)?;
+        #[cfg(test)]
         let range =
             checked_range(plan.attribute_plans, self.compiled.attribute_plans.len()).ok()?;
         Some(ValidatedGeometryPrimitive {
             input,
             plan,
-            attributes: self.compiled.attribute_plans.get(range.clone())?,
+            #[cfg(test)]
+            attributes: self.compiled.attribute_plans.get(range)?,
+            #[cfg(test)]
             input_attributes: self.input.attributes(),
         })
     }
@@ -657,7 +590,7 @@ impl<'input, R> ValidatedGeometryBatch<'input, R> {
             attribute_count,
             primitive_plans,
             attribute_plans,
-            reservation,
+            _reservation: reservation,
             ..
         } = self.compiled;
         (
@@ -1368,7 +1301,7 @@ where
         attribute_plans,
         #[cfg(test)]
         storage_drop_probe: None,
-        reservation,
+        _reservation: reservation,
     };
     let validated = ValidatedGeometryBatch::new(input, compiled);
     context.finish()?;
@@ -1456,7 +1389,7 @@ where
         Ok(())
     })??;
 
-    let (corner_count, index_count) =
+    let corner_count =
         validate_index_stream(primitive_index, primitive.indices(), vertex_count, context)?;
     let (topology, face_count) =
         validate_topology(primitive_index, primitive.topology(), corner_count, context)?;
@@ -1504,7 +1437,6 @@ where
         vertex_count,
         corner_count,
         face_count,
-        index_count,
         attribute_plans: primitive.attributes(),
     })
 }
@@ -1554,12 +1486,12 @@ fn validate_index_stream<C>(
     indices: Presence<&[u32]>,
     vertex_count: u32,
     context: &mut GeometryValidationContext<'_, C>,
-) -> GeometryValidationResult<(u32, u32), C>
+) -> GeometryValidationResult<u32, C>
 where
     C: CanonicalAuthoringControl,
 {
     match indices {
-        Presence::Absent => Ok((vertex_count, 0)),
+        Presence::Absent => Ok(vertex_count),
         Presence::Present(indices) => {
             let index_count = collection_count(indices.len(), "primitive indices")?;
             context.add_payload(
@@ -1582,7 +1514,7 @@ where
                     Ok(())
                 })??;
             }
-            Ok((index_count, index_count))
+            Ok(index_count)
         }
     }
 }
@@ -1719,25 +1651,20 @@ fn validate_attribute<C>(
 where
     C: CanonicalAuthoringControl,
 {
-    let semantic_name_offset = *attribute_semantic_name_offset;
-    let semantic_name_count = match attribute.semantic() {
-        AttributeSemantic::Custom(custom) => {
-            let name = custom.as_str();
-            let count = collection_count(name.len(), "attribute semantic name bytes")?;
-            let next = semantic_name_offset.checked_add(count).ok_or(
-                GeometryAuthoringSemanticError::AccountingOverflow {
-                    dimension: "attribute semantic name byte offset",
-                },
-            )?;
-            for byte in name.as_bytes() {
-                context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
-            }
-            context.add_utf8_payload(usize_to_u64(name.len(), "attribute semantic name bytes")?)?;
-            *attribute_semantic_name_offset = next;
-            count
+    if let AttributeSemantic::Custom(custom) = attribute.semantic() {
+        let name = custom.as_str();
+        let count = collection_count(name.len(), "attribute semantic name bytes")?;
+        let next = attribute_semantic_name_offset.checked_add(count).ok_or(
+            GeometryAuthoringSemanticError::AccountingOverflow {
+                dimension: "attribute semantic name byte offset",
+            },
+        )?;
+        for byte in name.as_bytes() {
+            context.run_unit(SceneValidationWork::PayloadCell, || *byte)?;
         }
-        _ => 0,
-    };
+        context.add_utf8_payload(usize_to_u64(name.len(), "attribute semantic name bytes")?)?;
+        *attribute_semantic_name_offset = next;
+    }
     match attribute.payload() {
         GeometryAttributePayloadAuthoring::DenseF32 {
             lanes,
@@ -1811,15 +1738,19 @@ where
             }
             Ok(ValidatedGeometryAttribute {
                 input_index: attribute_index,
+                #[cfg(test)]
                 scalar_kind: GeometryAttributeScalarKind::F32,
+                #[cfg(test)]
                 payload_kind: GeometryAttributePayloadKind::Dense,
+                #[cfg(test)]
                 source_element_count,
                 element_count,
+                #[cfg(test)]
                 explicit_element_count: element_count,
+                #[cfg(test)]
                 canonical_scalar_count,
+                #[cfg(test)]
                 payload_block_count,
-                semantic_name_offset,
-                semantic_name_count,
             })
         }
         GeometryAttributePayloadAuthoring::DenseF64 { lanes, values } => {
@@ -1847,15 +1778,19 @@ where
             inspect_f64_values(attribute_index, values, context)?;
             Ok(ValidatedGeometryAttribute {
                 input_index: attribute_index,
+                #[cfg(test)]
                 scalar_kind: GeometryAttributeScalarKind::F64,
+                #[cfg(test)]
                 payload_kind: GeometryAttributePayloadKind::Dense,
+                #[cfg(test)]
                 source_element_count: element_count,
                 element_count,
+                #[cfg(test)]
                 explicit_element_count: element_count,
+                #[cfg(test)]
                 canonical_scalar_count,
+                #[cfg(test)]
                 payload_block_count,
-                semantic_name_offset,
-                semantic_name_count,
             })
         }
         GeometryAttributePayloadAuthoring::DenseU32 { lanes, values } => {
@@ -1883,15 +1818,19 @@ where
             inspect_u32_values(values, context)?;
             Ok(ValidatedGeometryAttribute {
                 input_index: attribute_index,
+                #[cfg(test)]
                 scalar_kind: GeometryAttributeScalarKind::U32,
+                #[cfg(test)]
                 payload_kind: GeometryAttributePayloadKind::Dense,
+                #[cfg(test)]
                 source_element_count: element_count,
                 element_count,
+                #[cfg(test)]
                 explicit_element_count: element_count,
+                #[cfg(test)]
                 canonical_scalar_count,
+                #[cfg(test)]
                 payload_block_count,
-                semantic_name_offset,
-                semantic_name_count,
             })
         }
         GeometryAttributePayloadAuthoring::DenseI32 { lanes, values } => {
@@ -1919,15 +1858,19 @@ where
             inspect_i32_values(values, context)?;
             Ok(ValidatedGeometryAttribute {
                 input_index: attribute_index,
+                #[cfg(test)]
                 scalar_kind: GeometryAttributeScalarKind::I32,
+                #[cfg(test)]
                 payload_kind: GeometryAttributePayloadKind::Dense,
+                #[cfg(test)]
                 source_element_count: element_count,
                 element_count,
+                #[cfg(test)]
                 explicit_element_count: element_count,
+                #[cfg(test)]
                 canonical_scalar_count,
+                #[cfg(test)]
                 payload_block_count,
-                semantic_name_offset,
-                semantic_name_count,
             })
         }
         GeometryAttributePayloadAuthoring::SparseF32 {
@@ -1945,8 +1888,6 @@ where
             values,
             default,
             expected_cardinality,
-            semantic_name_offset,
-            semantic_name_count,
             context,
         ),
         GeometryAttributePayloadAuthoring::SparseU32 {
@@ -1964,8 +1905,6 @@ where
             values,
             default,
             expected_cardinality,
-            semantic_name_offset,
-            semantic_name_count,
             context,
         ),
         GeometryAttributePayloadAuthoring::SparseI32 {
@@ -1983,8 +1922,6 @@ where
             values,
             default,
             expected_cardinality,
-            semantic_name_offset,
-            semantic_name_count,
             context,
         ),
     }
@@ -2050,8 +1987,6 @@ fn validate_sparse_attribute<C, T>(
     values: &[T],
     default: &[T],
     expected_cardinality: Option<u32>,
-    semantic_name_offset: u32,
-    semantic_name_count: u32,
     context: &mut GeometryValidationContext<'_, C>,
 ) -> GeometryValidationResult<ValidatedGeometryAttribute, C>
 where
@@ -2166,15 +2101,19 @@ where
     }
     Ok(ValidatedGeometryAttribute {
         input_index: attribute_index,
+        #[cfg(test)]
         scalar_kind,
+        #[cfg(test)]
         payload_kind: GeometryAttributePayloadKind::Sparse,
+        #[cfg(test)]
         source_element_count: explicit_element_count,
         element_count: logical_count,
+        #[cfg(test)]
         explicit_element_count,
+        #[cfg(test)]
         canonical_scalar_count,
+        #[cfg(test)]
         payload_block_count,
-        semantic_name_offset,
-        semantic_name_count,
     })
 }
 

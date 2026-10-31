@@ -1456,10 +1456,9 @@ mod tests {
         assert!(std::ptr::eq(binding.source_key().unwrap(), &source_key));
     }
 
-    #[cfg(feature = "_scene-integration")]
     #[test]
     fn public_authoring_constructors_borrow_only_names_and_source_keys() {
-        use crate::scene::authoring::{
+        use crate::__scene_integration::authoring::{
             AuthoringRange, MaterialAuthoring, MaterialBindingAuthoring, Presence, TextureLocalId,
         };
 

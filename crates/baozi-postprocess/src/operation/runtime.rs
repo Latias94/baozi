@@ -2,7 +2,7 @@
 
 use std::num::{NonZeroU32, NonZeroU64};
 
-use baozi_core::scene::integration::SceneEditBootstrap;
+use baozi_core::__scene_integration::integration::SceneEditBootstrap;
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalActivationSessionPolicy, CanonicalMaterializationRole, CanonicalValidationRole,
     RetainedStoreWriterRole,

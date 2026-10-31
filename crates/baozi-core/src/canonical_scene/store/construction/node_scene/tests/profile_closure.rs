@@ -99,11 +99,6 @@ pub(in crate::canonical_scene::store) struct ProfileClosureCanonicalShapeObserva
     pub(in crate::canonical_scene::store) profile_metadata_entry_count: usize,
 }
 
-pub(in crate::canonical_scene::store) struct ProfileClosureDigestVectors {
-    pub(in crate::canonical_scene::store) baseline: [u8; 32],
-    pub(in crate::canonical_scene::store) metadata_u64_mutation: [u8; 32],
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::canonical_scene::store) struct ProfileClosureNegativeCaseObservation {
     pub(in crate::canonical_scene::store) scenario_id: &'static str,
@@ -269,18 +264,6 @@ fn profile_scene_space(variant: ProfileClosureInputVariant) -> SceneSpace {
         ))
         .expect("profile-closure tangent encoding convention"),
     }
-}
-
-fn with_profile_closure_input<R>(
-    use_mutated_metadata: bool,
-    inspect: impl FnOnce(SceneAuthoringBatch<'_>) -> R,
-) -> R {
-    let variant = if use_mutated_metadata {
-        ProfileClosureInputVariant::MetadataMutation
-    } else {
-        ProfileClosureInputVariant::Baseline
-    };
-    with_profile_closure_input_variant(variant, inspect)
 }
 
 fn with_profile_closure_input_variant<R>(
@@ -495,24 +478,6 @@ pub(in crate::canonical_scene::store) fn inspect_profile_closure_semantics_for_p
         .expect("profile-closure light");
     assert_eq!(camera.source_index(), 0);
     assert_eq!(light.source_index(), 0);
-
-    let mut placements = view.spatial_placements();
-    let placement = placements
-        .next()
-        .expect("profile-closure placement read")
-        .expect("profile-closure placement");
-    assert_eq!(placement.source_node(), 0);
-    assert_eq!(placement.camera(), Some(0));
-    assert_eq!(placement.light(), Some(0));
-    assert!(
-        placements
-            .next()
-            .expect("profile-closure placement end")
-            .is_none()
-    );
-    placements
-        .finish()
-        .expect("profile-closure placements finish");
 
     let mut cursor = view.into_cursor().expect("profile-closure semantic cursor");
     let mut roots = cursor.take_roots().expect("profile-closure roots");
@@ -805,37 +770,6 @@ pub(in crate::canonical_scene::store) fn capture_profile_closure_snapshots_for_p
         )
         .expect("profile-closure bounded snapshot");
     (full, bounded)
-}
-
-pub(in crate::canonical_scene::store) fn collect_profile_closure_digest_vectors_for_probe()
--> ProfileClosureDigestVectors {
-    let factory = super::test_factory();
-    let account = super::test_account(&factory, 512);
-    let generation_source = AtomicU64::new(0);
-    let baseline = build_profile_closure_scene(&account, &generation_source, false);
-    let mutation = build_profile_closure_scene(&account, &generation_source, true);
-    let digest_limits =
-        NodeSceneSnapshotLimits::try_new(0, 0, 1_000_000).expect("profile-closure digest limits");
-    let baseline_digest = baseline
-        .scene
-        .capture_snapshot(digest_limits, None)
-        .expect("profile-closure baseline digest")
-        .digest;
-    let metadata_u64_mutation = mutation
-        .scene
-        .capture_snapshot(digest_limits, None)
-        .expect("profile-closure metadata mutation digest")
-        .digest;
-    drop(mutation);
-    drop(baseline);
-    assert_eq!(account.snapshot().live_retained_bytes(), 0);
-    assert_eq!(account.snapshot().live_retained_allocations(), 0);
-    drop(account);
-    assert_eq!(factory.snapshot().live_accounts(), 0);
-    ProfileClosureDigestVectors {
-        baseline: baseline_digest,
-        metadata_u64_mutation,
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -13,7 +13,6 @@ readme = "README.md"
 
 [features]
 default = ["default-formats"]
-native-fs-candidate = ["baozi-io/fs-candidate"]
 default-formats = ["format-stl", "format-obj"]
 all-formats = ["format-stl", "format-obj", "format-ply", "format-gltf"]
 format-stl = ["dep:baozi-format-stl"]

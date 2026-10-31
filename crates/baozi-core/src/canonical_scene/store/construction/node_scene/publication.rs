@@ -1,20 +1,23 @@
-#[cfg(test)]
-use baozi_operation::__retained_store_integration::activation::CanonicalFreezePermitIssue;
 use baozi_operation::__retained_store_integration::activation::{
     CanonicalFreezePermit, CanonicalJointCommit, CanonicalJointSeal,
-    CentrallyRejectedCanonicalStoreSession, FailureEvidenceMember, FailureEvidenceOutcome,
-    FailureEvidenceValidationSession, FrozenFailureState, RootedFailureValidation,
-    StoreActivationContainment, StoreCanonicalRejection, StoreNeverActivatedCause,
+    CentrallyRejectedCanonicalStoreSession, FailureEvidenceMember,
+    FailureEvidenceValidationSession, FrozenFailureState, StoreActivationContainment,
 };
 #[cfg(test)]
-use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccessOutcome;
-use baozi_operation::__retained_store_integration::authority::{
-    PreparedStoreFailureOutcome, PreparedStoreSuccess,
+use baozi_operation::__retained_store_integration::activation::{
+    CanonicalFreezePermitIssue, FailureEvidenceOutcome, RootedFailureValidation,
+    StoreCanonicalRejection, StoreNeverActivatedCause,
 };
+use baozi_operation::__retained_store_integration::authority::PreparedStoreSuccess;
+#[cfg(test)]
+use baozi_operation::__retained_store_integration::authority::{
+    PreparedStoreFailureOutcome, PreparedStoreSuccessOutcome,
+};
+#[cfg(test)]
+use baozi_operation::{ControlCause, FinalProgress, StoreBuildFailureClass, StoreRuntimeError};
 use baozi_operation::{
-    ControlCause, FinalProgress, OperationOwner, ProgressPhase, ProgressUnit,
-    PublishedCanonicalStore, PublishedOutcomeEvidenceStore, RecordBlock, StoreBuildFailureClass,
-    StoreLedgerEvidence, StoreRuntimeError,
+    OperationOwner, ProgressPhase, ProgressUnit, PublishedCanonicalStore,
+    PublishedOutcomeEvidenceStore, RecordBlock, StoreLedgerEvidence,
 };
 use thiserror::Error;
 
@@ -27,18 +30,21 @@ use crate::canonical_scene::store::schema::{
 use crate::identity::SceneGenerationId;
 use crate::identity::{ReservedSceneGeneration, SceneGenerationError};
 
-use super::super::{GENERATION_EXHAUSTED_CODE, SceneConstructionError};
+use super::super::GENERATION_EXHAUSTED_CODE;
+#[cfg(test)]
+use super::super::SceneConstructionError;
 #[cfg(test)]
 use super::NodeSceneDraftBuild;
 use super::materialization::{
-    NodeSceneEvidenceRecipe, NodeSceneLaneOutput, NodeSceneLaneRejection,
-    NodeSceneLaneValidationProof, write_node_scene_evidence_row,
+    NodeSceneEvidenceRecipe, NodeSceneLaneOutput, NodeSceneLaneValidationProof,
 };
+#[cfg(test)]
+use super::materialization::{NodeSceneLaneRejection, write_node_scene_evidence_row};
+use super::{NODE_SCENE_BUILD_INVARIANT_CODE, NodeSceneDraft, SceneEvidenceCounts, SceneStorage};
+#[cfg(test)]
 use super::{
-    NODE_SCENE_BUILD_INVARIANT_CODE, NODE_SCENE_STORAGE_REJECTION_CODE,
-    NodeSceneConstructionRejection, NodeSceneDraft, PendingNodeSceneFailure,
+    NODE_SCENE_STORAGE_REJECTION_CODE, NodeSceneConstructionRejection, PendingNodeSceneFailure,
     PreparedNodeSceneFailure, PreparedNodeSceneFallback, PreparedNodeSceneRichFailure,
-    SceneEvidenceCounts, SceneStorage,
 };
 #[cfg(test)]
 use super::{
@@ -436,23 +442,15 @@ fn node_scene_draft_matches(parser: NodeSceneDraft, activated: NodeSceneDraft) -
     parser.brand == activated.brand && parser.directory == activated.directory
 }
 
+#[cfg(test)]
 pub(super) trait NodeActivationFailureCause {
-    fn is_authoring_rejection(&self) -> bool;
-
     fn control_cause(&self) -> Option<&ControlCause>;
 
     fn into_authoring_rejection(self) -> Option<NodeSceneConstructionRejection<StoreRuntimeError>>;
 }
 
+#[cfg(test)]
 impl NodeActivationFailureCause for StoreNeverActivatedCause<NodeSceneLaneRejection> {
-    fn is_authoring_rejection(&self) -> bool {
-        matches!(
-            self,
-            StoreNeverActivatedCause::Requested(rejection)
-                if rejection.is_authoring_rejection()
-        )
-    }
-
     fn control_cause(&self) -> Option<&ControlCause> {
         match self {
             StoreNeverActivatedCause::Runtime(StoreRuntimeError::Control(cause)) => Some(cause),
@@ -470,15 +468,8 @@ impl NodeActivationFailureCause for StoreNeverActivatedCause<NodeSceneLaneReject
     }
 }
 
+#[cfg(test)]
 impl NodeActivationFailureCause for StoreCanonicalRejection<NodeSceneLaneRejection> {
-    fn is_authoring_rejection(&self) -> bool {
-        matches!(
-            self,
-            StoreCanonicalRejection::Requested(rejection)
-                if rejection.is_authoring_rejection()
-        )
-    }
-
     fn control_cause(&self) -> Option<&ControlCause> {
         match self {
             StoreCanonicalRejection::Runtime(StoreRuntimeError::Control(cause)) => Some(cause),
@@ -496,12 +487,14 @@ impl NodeActivationFailureCause for StoreCanonicalRejection<NodeSceneLaneRejecti
     }
 }
 
+#[cfg(test)]
 type PreparedNodeSceneFailureParts = (
     PreparedNodeSceneFailure,
     Option<NodeSceneConstructionRejection<StoreRuntimeError>>,
     Option<ControlCause>,
 );
 
+#[cfg(test)]
 impl<O, PP, U, L> PendingNodeSceneFailure<O, PP, U, L>
 where
     O: OperationOwner,
@@ -619,6 +612,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn retain_node_authoring_rejection(
     rejection: NodeSceneConstructionRejection<StoreRuntimeError>,
 ) -> Option<NodeSceneConstructionRejection<StoreRuntimeError>> {
@@ -629,6 +623,7 @@ fn retain_node_authoring_rejection(
 }
 
 /// Prepares a rejected or never-activated scoped outcome after its one-shot evidence lane closes.
+#[cfg(test)]
 pub(super) fn prepare_node_activation_failure<O, PP, U, Cause>(
     outcome: Result<
         FailureEvidenceOutcome<O, PP, U, Cause, RecordBlock, NodeSceneOutcomeEvidenceSchema>,
@@ -673,6 +668,7 @@ where
 /// Prepares an ordinary central-validation failure. The caller retains the concrete rejected or
 /// interrupted owner long enough to invoke its rich-evidence validator, then passes the typed
 /// validation result here without recovering any writable store state.
+#[cfg(test)]
 pub(super) fn prepare_node_central_failure<O, PP, U, Cause>(
     validation: Result<
         RootedFailureValidation<O, PP, U, Cause, RecordBlock, NodeSceneOutcomeEvidenceSchema>,
@@ -710,6 +706,7 @@ where
     Ok(prepared.into())
 }
 
+#[cfg(test)]
 fn prepare_node_ordinary_failure_validation<O, PP, U, Cause>(
     validation: RootedFailureValidation<
         O,
@@ -748,6 +745,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn map_node_prepared_failure(
     prepared: PreparedStoreFailureOutcome<RecordBlock, NodeSceneOutcomeEvidenceSchema>,
 ) -> PreparedNodeSceneFailure {
@@ -847,6 +845,7 @@ fn node_scene_evidence_values(
     values
 }
 
+#[cfg(test)]
 pub(super) const fn post_evidence_build_failure_code(class: StoreBuildFailureClass) -> Option<u32> {
     match class {
         StoreBuildFailureClass::AllocationFailed => Some(NODE_SCENE_STORAGE_REJECTION_CODE),
@@ -892,7 +891,7 @@ impl PreparedNodeSceneFailure {
             Self::MinimalFallback(prepared) => {
                 let published = prepared.store.handoff();
                 NodeSceneConstructionTerminal::MinimalFallback(NodeSceneFallback {
-                    fallback: published.fallback,
+                    _fallback: published.fallback,
                     ledger_evidence: published.ledger_evidence,
                 })
             }

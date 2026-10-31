@@ -964,7 +964,8 @@ impl<O: OperationOwner> SceneEditExecutionPlan<'_, '_, O> {
                 EditStoragePlan::Normals(*geometry)
             }
             NodeSceneEditProgram::ConvertSpace(plan) => EditStoragePlan::ConvertSpace(*plan),
-            _ => {
+            #[cfg(test)]
+            NodeSceneEditProgram::NodeTransform(_) => {
                 let rejection = SceneEditRejection::construction_invariant();
                 let code = rejection.stable_code();
                 return lane.reject(rejection, code);

@@ -86,6 +86,7 @@ impl NodeStoragePlan {
         })
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn rewrite<C: TypedStorageBuildControl>(
         self,
         source: &NodeStorage,

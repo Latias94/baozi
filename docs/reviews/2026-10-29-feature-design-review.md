@@ -15,6 +15,12 @@ changing; references are not a verified release revision. The root task owns the
 
 ## Bounded Implementation Status
 
+The later 2026-10-31 cutover implements the separately reviewed native package and core bridge
+changes below. Native code/tests now live in the excluded unpublished candidate workspace, and
+core uses an unconditional hidden `__scene_integration` namespace with actual constructor/privacy
+and linear-ownership checks. The earlier bounded-patch description remains historical; current
+integration evidence belongs in the [delivery progress](2026-10-29-delivery-progress.md).
+
 Ready for root validation: removed facade/core `std`, unused core tracing and forwarding; moved the
 facade's direct tracing dependency to dev-dependencies; declared OBJ requirements for all four examples
 and both benches; extracted private `error.rs` and `importer.rs` with unchanged public type exports;

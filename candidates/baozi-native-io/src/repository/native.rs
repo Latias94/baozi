@@ -4,7 +4,9 @@ use std::path::Path;
 
 use cap_std::fs::{Dir, File};
 
-use crate::{AssetOpenError, AuthorityDomain, NativeDirectoryCapability};
+use baozi_io::{AssetOpenError, AuthorityDomain};
+
+use crate::NativeDirectoryCapability;
 
 use super::{
     RepositoryCaptureError, RepositoryLimits, RepositoryObjectKind, RepositoryPath,

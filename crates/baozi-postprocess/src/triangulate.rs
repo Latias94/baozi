@@ -3,9 +3,11 @@
 pub(crate) mod input;
 
 use baozi_core::{
+    __scene_integration::authoring::OptionsDigest,
+    __scene_integration::integration::{
+        SceneEditBootstrap, SceneEditEvidence, try_start_scene_edit_operation,
+    },
     PrimitiveId, ValidatedScene,
-    scene::authoring::OptionsDigest,
-    scene::integration::{SceneEditBootstrap, SceneEditEvidence, try_start_scene_edit_operation},
 };
 use baozi_operation::__retained_store_integration::authority::{
     PreparedStoreEvidenceOnlyOutcome, PreparedStoreFallback,

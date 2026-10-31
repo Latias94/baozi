@@ -7,6 +7,8 @@ allow = [
 confidence-threshold = 0.8
 exceptions = [
     { allow = ["NCSA"], crate = "libfuzzer-sys@0.4.13" },
+    # The checksum-pinned native Windows helper ships Apache-2.0 plus its LLVM exception.
+    { allow = ["Apache-2.0 WITH LLVM-exception"], crate = "winx@0.36.4" },
 ]
 
 [advisories]

@@ -8,7 +8,6 @@ mod profile;
 use super::super::construction::node_scene::SceneEvidenceCounts;
 use super::super::construction::node_scene::{
     NodeSceneCentralValidationPlan, NodeSceneMaterializedRefs, NodeSceneMeteredValidationScratch,
-    NodeSceneValidationScratchPlan,
 };
 use super::super::schema::{
     CanonicalBlockRef, NODE_SCENE_EVIDENCE_FIELD_COUNT, NODE_SCENE_EVIDENCE_OUTCOME_CANDIDATE,
@@ -64,46 +63,6 @@ impl NodeSceneValidationProof {
         self.maximum_provenance_depth
     }
 
-    pub(in crate::canonical_scene::store) fn profile_segment_count(&self) -> usize {
-        count_as_usize(self.profile.segment_count)
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_resource_count(&self) -> u32 {
-        self.profile.resource_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_source_count(&self) -> u32 {
-        self.profile.source_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_provenance_count(&self) -> u32 {
-        self.profile.provenance_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_operation_count(&self) -> u32 {
-        self.profile.operation_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_evidence_count(&self) -> u32 {
-        self.profile.evidence_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_parent_count(&self) -> u32 {
-        self.profile.parent_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_wide_count(&self) -> u32 {
-        self.profile.wide_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_lineage_text_bytes(&self) -> u32 {
-        self.profile.lineage_text_bytes
-    }
-
-    pub(in crate::canonical_scene::store) const fn profile_lineage_digest_bytes(&self) -> u32 {
-        self.profile.lineage_digest_bytes
-    }
-
     pub(in crate::canonical_scene::store) const fn source_node_count(&self) -> usize {
         self.source_node_count
     }
@@ -118,12 +77,6 @@ impl NodeSceneValidationProof {
 
     pub(in crate::canonical_scene::store) const fn counts(&self) -> SceneEvidenceCounts {
         self.counts
-    }
-
-    pub(in crate::canonical_scene::store) const fn validation_scratch_plan(
-        &self,
-    ) -> NodeSceneValidationScratchPlan {
-        self.central_validation_plan.scratch_plan()
     }
 
     pub(in crate::canonical_scene::store) const fn central_validation_plan(

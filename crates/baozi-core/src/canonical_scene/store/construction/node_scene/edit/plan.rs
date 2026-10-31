@@ -1,14 +1,18 @@
 use baozi_operation::StorePlanError;
 use thiserror::Error;
 
+#[cfg(test)]
 use crate::canonical_scene::store::schema::{CanonicalBlockRef, SceneDirectorySchema};
+#[cfg(test)]
 use crate::entity::AuthoredTransform;
+#[cfg(test)]
 use crate::identity::SceneGenerationId;
 use crate::provenance::{OperationIdentity, OperationKind};
 
 use super::super::scratch::NodeSceneCentralValidationPlan;
 use super::super::{SceneEvidenceCounts, SceneStorage};
 use super::profile::{NodeSceneEditProfilePlan, ProfileEditTargets};
+#[cfg(test)]
 use super::report::CanonicalInvalidations;
 use crate::canonical_scene::store::typed_storage::edit::space::SceneSpacePlan;
 
@@ -56,12 +60,14 @@ impl CheckedCount {
 /// Logical target coordinates in the actual typed node table.
 ///
 /// `canonical_row` is a logical node-table row, not a retained-store slot identity.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct NodeTransformEditTarget {
     pub(super) source_index: CheckedCount,
     pub(super) canonical_row: CheckedCount,
 }
 
+#[cfg(test)]
 impl NodeTransformEditTarget {
     fn try_new(source_index: usize, canonical_row: usize) -> Result<Self, NodeSceneEditPlanError> {
         let expected_row =
@@ -96,6 +102,7 @@ impl NodeTransformEditTarget {
     reason = "the source-bound geometry plan lives in an admitted execution cell; unbound transform edits retain only their small rewrite"
 )]
 pub(super) enum NodeSceneEditProgram<'scene> {
+    #[cfg(test)]
     NodeTransform(NodeTransformRewrite),
     TriangulatePrimitive(
         crate::canonical_scene::store::typed_storage::edit::GeometryTriangulationPlan<'scene>,
@@ -109,12 +116,14 @@ pub(super) enum NodeSceneEditProgram<'scene> {
     ConvertSpace(SceneSpacePlan<'scene>),
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 pub(super) struct NodeTransformRewrite {
     target: NodeTransformEditTarget,
     replacement: AuthoredTransform,
 }
 
+#[cfg(test)]
 impl NodeTransformRewrite {
     pub(super) const fn new(
         target: NodeTransformEditTarget,
@@ -135,6 +144,7 @@ impl NodeTransformRewrite {
     }
 }
 
+#[cfg(test)]
 impl NodeSceneEditProgram<'_> {
     pub(super) const fn node_transform(
         target: NodeTransformEditTarget,
@@ -162,8 +172,9 @@ pub(super) struct NodeSceneEditFixedCounts {
     pub(super) evidence: SceneEvidenceCounts,
     pub(super) central_validation_plan: NodeSceneCentralValidationPlan,
     pub(super) canonical_blocks: CheckedCount,
+    #[cfg(test)]
     pub(super) canonical_attribution_slots: CheckedCount,
-    pub(super) outcome_evidence_blocks: CheckedCount,
+    #[cfg(test)]
     pub(super) outcome_evidence_attribution_slots: CheckedCount,
     pub(super) canonical_node_rows: CheckedCount,
     pub(super) source_root_rows: CheckedCount,
@@ -175,6 +186,7 @@ pub(super) struct NodeSceneEditFixedCounts {
 }
 
 impl NodeSceneEditFixedCounts {
+    #[cfg(test)]
     fn try_new_node_transform(
         input: &SceneStorage,
         program: &NodeSceneEditProgram<'_>,
@@ -201,6 +213,7 @@ impl NodeSceneEditFixedCounts {
         poll: &mut impl FnMut() -> Result<(), NodeSceneEditPlanError>,
     ) -> Result<Self, NodeSceneEditPlanError> {
         let targets = match program {
+            #[cfg(test)]
             NodeSceneEditProgram::NodeTransform(rewrite) => {
                 ProfileEditTargets::Node(rewrite.target().canonical_row.as_u32())
             }
@@ -243,6 +256,7 @@ impl NodeSceneEditFixedCounts {
             profile.maximum_depth,
         )?;
         let geometry_work = match program {
+            #[cfg(test)]
             NodeSceneEditProgram::NodeTransform(_) => None,
             NodeSceneEditProgram::TriangulatePrimitive(geometry) => {
                 Some(geometry.validation_work())
@@ -312,6 +326,7 @@ impl NodeSceneEditFixedCounts {
 
         // The sole canonical record is the destination's new count directory.
         // Semantic payload sharing is handled by the typed owners, never record leaves.
+        #[cfg(test)]
         let canonical_attribution_slots = CheckedCount::try_from_usize(
             canonical_blocks.as_usize().checked_add(1).ok_or(
                 NodeSceneEditPlanError::SizeOverflow {
@@ -325,8 +340,9 @@ impl NodeSceneEditFixedCounts {
             evidence,
             central_validation_plan,
             canonical_blocks,
+            #[cfg(test)]
             canonical_attribution_slots,
-            outcome_evidence_blocks: CheckedCount::try_from_u32(1, "outcome-evidence block count")?,
+            #[cfg(test)]
             outcome_evidence_attribution_slots: CheckedCount::try_from_u32(
                 2,
                 "outcome-evidence attribution slot count",
@@ -361,6 +377,7 @@ impl NodeSceneEditFixedCounts {
 /// back to that exact retained root before an operation, allocation, or provenance nonce is
 /// created. The generation remains diagnostic identity; the destination-qualified root is the
 /// storage identity.
+#[cfg(test)]
 #[must_use = "a changed node Scene edit must be materialized or deliberately dropped"]
 pub(in crate::canonical_scene::store) struct PendingNodeSceneEdit {
     input_generation: SceneGenerationId,
@@ -378,11 +395,13 @@ pub(super) struct BoundPendingNodeSceneEdit<'scene> {
     pub(super) program: NodeSceneEditProgram<'scene>,
     pub(super) operation: OperationIdentity,
     pub(super) counts: NodeSceneEditFixedCounts,
+    #[cfg(test)]
     pub(super) invalidations: CanonicalInvalidations,
 }
 
 struct BoundSourceSeal;
 
+#[cfg(test)]
 impl PendingNodeSceneEdit {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_new_node_transform(
@@ -427,10 +446,6 @@ impl PendingNodeSceneEdit {
 
     pub(in crate::canonical_scene::store) const fn input_generation(&self) -> SceneGenerationId {
         self.input_generation
-    }
-
-    pub(in crate::canonical_scene::store) const fn invalidations(&self) -> CanonicalInvalidations {
-        self.invalidations
     }
 
     pub(super) fn bind(
@@ -483,6 +498,7 @@ impl<'scene> BoundPendingNodeSceneEdit<'scene> {
             program,
             operation: OperationIdentity::new(OperationKind::Transform, options),
             counts,
+            #[cfg(test)]
             invalidations: CanonicalInvalidations::scene_bounds_invalidated(),
         })
     }
@@ -512,6 +528,7 @@ impl<'scene> BoundPendingNodeSceneEdit<'scene> {
             program,
             operation: OperationIdentity::new(OperationKind::Generated, options),
             counts,
+            #[cfg(test)]
             invalidations: CanonicalInvalidations::scene_bounds_invalidated(),
         })
     }
@@ -542,31 +559,15 @@ impl<'scene> BoundPendingNodeSceneEdit<'scene> {
             program,
             operation: OperationIdentity::new(OperationKind::Split, options),
             counts,
+            #[cfg(test)]
             invalidations: CanonicalInvalidations::scene_bounds_invalidated(),
         })
     }
 }
 
-impl<'scene> BoundPendingNodeSceneEdit<'scene> {
-    pub(super) const fn input(&self) -> &'scene SceneStorage {
-        self.input
-    }
-
-    pub(super) const fn operation(&self) -> &OperationIdentity {
-        &self.operation
-    }
-
-    pub(super) const fn counts(&self) -> NodeSceneEditFixedCounts {
-        self.counts
-    }
-
-    pub(super) const fn invalidations(&self) -> CanonicalInvalidations {
-        self.invalidations
-    }
-}
-
 #[derive(Debug, Error)]
 pub(in crate::canonical_scene::store) enum NodeSceneEditPlanError {
+    #[cfg(test)]
     #[error(
         "node Scene edit plan targets source generation {expected:?}, but execution received a different retained source at generation {actual:?}"
     )]

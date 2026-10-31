@@ -87,7 +87,7 @@ Hard rules:
 - `baozi-core` directly depends on `baozi-operation` for shared checked-capacity mechanisms and may
   depend on no other Baozi production crate; it has no dependency on IO, import, postprocess, format,
   runtime, or parser crates and owns only canonical/domain errors.
-- `baozi-io` owns asset identities, IO capabilities, and `IoError`; it has no production Baozi-crate
+- `baozi-io` owns portable asset identities, IO contracts, memory backends, and bounded IO errors; it has no production Baozi-crate
   dependency and must not reuse a core or facade aggregate error as its error type.
 - `baozi-import` depends on core, IO, and operation, maps their distinct errors into import causes,
   supplies import-owned ledger semantics to the shared mechanism, and does not depend on concrete
@@ -106,12 +106,17 @@ Hard rules:
   dependency. Its dependency checks inspect Cargo metadata, lockfile data, and reviewed dependency
   baselines. Its single, featureless normal/build dependency closure must exclude `baozi-io`,
   `cap-std`, `cap-primitives`, `cap-fs-ext`, and `rustix`. Declaration checks reject every package's
-  request or forwarding of `baozi-io/repository-fs-candidate`, including renamed, development, and
-  build dependencies. xtask does not capture repository source trees or own source-hashing policy.
+  candidate dependency or forwarding of retired native features, including renamed, development,
+  and build dependencies. xtask does not capture repository source trees or own source-hashing policy.
+- the unpublished `baozi-native-io-candidate` is an explicitly excluded standalone workspace under
+  `candidates/baozi-native-io`. Its production Baozi edge is only to portable `baozi-io`; its native
+  dependencies and optional `repository-capture` capability have their own locked target profiles.
+  No production root-workspace package depends on it. Candidate integration tests may depend on
+  the facade, using the same public `AssetIo` composition available to other adapters.
 - no workspace production dependency cycle is allowed.
 
 Removing the unused `repository-input-candidate` feature and optional IO edge is a tool architecture
-change. ADR 0010 retains the IO-owned repository candidate mechanism; candidate target membership,
+change. ADR 0010 retains one candidate-owned native/repository mechanism; candidate target membership,
 Windows fail-closed behavior, and release registration remain governed by ADR 0034 and its evidence.
 
 The graph checker distinguishes three facts that must not be conflated:
@@ -185,8 +190,12 @@ features.
 Baozi always requires the Rust standard library. The facade and core have no `std` feature;
 `default-features = false` on the facade disables built-in formats, not standard-library use.
 `tracing` enables instrumentation in import/postprocess, with no unused core forwarding.
-`mint` enables the implemented core math conversions. Native filesystem candidate features and the
-core `_scene-integration` bridge remain in place pending separately reviewed boundary changes.
+`mint` enables the implemented core math conversions. Native filesystem development is isolated in
+the standalone candidate workspace: the facade and `baozi-io` have no native candidate feature,
+path helper, or dependency. Their complete public feature union remains portable.
+Core's unconditional hidden `__scene_integration` namespace serves import/postprocess without an
+empty Cargo feature. Private constructors, linear values, validation, and paired handoff enforce
+authority; feature selection does not. ADR 0045 owns that integration contract.
 
 Facade registry methods use `builtin_formats` to mean every enabled first-party format:
 `ImporterBuilder::with_builtin_formats()` and `Importer::builder_with_builtin_formats()`.
@@ -325,7 +334,7 @@ Negative:
 | Optional dependency leaks into disabled builds | Medium | Medium | isolated `cargo tree`/package checks for no-default and single features |
 | Crate graph develops a cycle or reverse dependency | High | Low | metadata graph gate enforces the direction table |
 | An allowed edge is mistaken for a mandatory dependency | High | Medium | checker keeps allowed consumers separate from required actual consumers and tests facade presence/absence independently |
-| A repository tool duplicates native filesystem ownership | High | Medium | keep xtask free of IO and native backend dependencies; reject repository-feature requests and forwarding by every package; retain native mechanisms under `baozi-io` |
+| A repository tool duplicates native filesystem ownership | High | Medium | keep xtask free of IO/native dependencies; keep native mechanisms in one excluded unpublished candidate; reject candidate dependency edges and retired native feature forwarding in the root workspace |
 | Transitive dependency raises MSRV | High | Medium | MSRV job and dependency admission review |
 | Platform exception corrupts feature meaning | High | Low | keep target support in ADR 0034 and require complete membership independently |
 
@@ -338,7 +347,7 @@ Negative:
 | Default subset | xtask proves `default-formats` is a deliberate subset with ADR 0011 evidence for every member |
 | One-to-one wiring | each format feature maps to one optional dependency, registration path, descriptor, support entry, and isolated test |
 | No empty/leaky features | negative fixtures reject public empty features, backend selectors, and silent semantic switches |
-| Dependency direction | Cargo metadata proves `baozi-operation` has no upward Baozi edge; core/import/postprocess have their required direct edges; the facade passes with or without a canonical direct edge; formats cannot directly depend on operation; IO does not depend on core; postprocess does not depend on import; xtask's single featureless normal/build closure excludes IO and native backends; no package requests or forwards the repository candidate; no other crate directly owns native filesystem dependencies; and no forbidden edge or production cycle exists |
+| Dependency direction | Cargo metadata proves `baozi-operation` has no upward Baozi edge; core/import/postprocess have their required direct edges; formats cannot directly depend on operation; portable IO does not depend on core; postprocess does not depend on import; xtask's featureless closure excludes IO/native backends; root packages cannot activate the excluded candidate or retired native features; candidate backend dependencies use their separate locked target profiles; and no forbidden edge or production cycle exists |
 | MSRV | workspace and every declared feature compile on Rust 1.95 |
 | Complete behavior surface | default, no-default, individual formats, `all-formats`, and `all-features` gates pass at their declared target tiers |
 

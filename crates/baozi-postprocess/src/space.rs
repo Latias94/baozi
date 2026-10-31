@@ -5,11 +5,11 @@ mod report;
 #[cfg(test)]
 mod tests;
 
-pub use baozi_core::scene::integration::SceneSpaceConversionIssue as SpaceConversionIssue;
+pub use baozi_core::__scene_integration::integration::SceneSpaceConversionIssue as SpaceConversionIssue;
 pub use error::{SpaceConversionCause, SpaceConversionFailure};
 pub use report::SpaceConversionReport;
 
-use baozi_core::scene::integration::{
+use baozi_core::__scene_integration::integration::{
     SceneEditBootstrap, SceneEditEvidence, resolve_scene_space_conversion,
     try_start_scene_edit_operation,
 };

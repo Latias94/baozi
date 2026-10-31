@@ -8,7 +8,6 @@ use super::super::{NodeSceneSemanticResult, invariant};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(in crate::canonical_scene::store) enum NodeSceneProfileMetadataArray<'scene> {
-    None,
     Bool(&'scene [u8]),
     I64(&'scene [i64]),
     U64(&'scene [u64]),

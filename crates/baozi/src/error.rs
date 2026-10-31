@@ -2,8 +2,6 @@ use baozi_import::{
     ImportFailure, ImportInitializationError, ImportRunError, RegistryBuildError,
     RegistryRegistrationError, RequestError,
 };
-#[cfg(feature = "native-fs-candidate")]
-use baozi_io::AssetOpenError;
 use baozi_io::{ImmutableMemoryAssetBuildError, MemoryAssetInsertError, PathError};
 use thiserror::Error;
 
@@ -32,18 +30,6 @@ pub enum Error {
 
     #[error(transparent)]
     ImmutableMemoryAssetBuild(#[from] ImmutableMemoryAssetBuildError),
-
-    #[cfg(feature = "native-fs-candidate")]
-    #[error("native directory capability could not be opened")]
-    NativeRoot(#[source] AssetOpenError),
-
-    #[cfg(feature = "native-fs-candidate")]
-    #[error("native source path has no terminal file name")]
-    MissingFileName,
-
-    #[cfg(feature = "native-fs-candidate")]
-    #[error("native source file name is not valid UTF-8")]
-    NonUtf8FileName,
 
     #[error("import operation initialization failed: {0}")]
     ImportInitialization(#[source] ImportInitializationError),

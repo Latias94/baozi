@@ -173,6 +173,7 @@ pub(super) struct NodeStorage {
 }
 
 impl NodeStorage {
+    #[cfg(test)]
     pub(super) fn source_node(&self, index: usize) -> Option<&StoredNode> {
         self.nodes.get(index.checked_add(1)?)
     }

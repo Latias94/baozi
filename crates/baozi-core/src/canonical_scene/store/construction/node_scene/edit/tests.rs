@@ -1045,22 +1045,6 @@ fn shape_changing_edit_preserves_spatial_values_and_attachment_closure() {
     assert_eq!(light.tint(), emission.tint());
     assert_eq!(light.intensity().to_bits(), emission.intensity().to_bits());
 
-    let mut camera_placements = view.camera_placements(0).expect("edited camera placements");
-    assert_eq!(camera_placements.next().expect("camera placement"), Some(0));
-    assert_eq!(
-        camera_placements.next().expect("camera placement end"),
-        None,
-    );
-    camera_placements
-        .finish()
-        .expect("complete edited camera placement scan");
-    let mut light_placements = view.light_placements(0).expect("edited light placements");
-    assert_eq!(light_placements.next().expect("light placement"), Some(0));
-    assert_eq!(light_placements.next().expect("light placement end"), None,);
-    light_placements
-        .finish()
-        .expect("complete edited light placement scan");
-
     let mut cursor = view.into_cursor().expect("edited node cursor");
     let mut roots = cursor.take_roots().expect("edited roots cursor");
     assert_eq!(roots.next().expect("edited root"), Some(0));

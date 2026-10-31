@@ -83,6 +83,10 @@ This one-time reset is not permission to bypass review, evidence, or crate owner
 
 An item is not promoted merely because Rust requires it to be `pub` across workspace crate
 boundaries. Stability is an explicit documented property, not a visibility inference.
+The unconditional hidden `baozi_core::__scene_integration` namespace remains Internal/backend:
+nameability grants no proof constructor or publication authority, and Cargo features do not
+enforce friend visibility. The standalone `baozi-native-io-candidate` package remains unpublished;
+its adapter/status types are not facade exports or part of the first release unit.
 
 ### Public Facade Boundary
 

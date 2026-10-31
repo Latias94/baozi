@@ -40,6 +40,7 @@ use super::plan::{CheckedCount, NodeSceneEditPlanError};
 /// Each changed owner retains its own parent set.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ProfileEditTargets {
+    #[cfg(test)]
     Node(u32),
     Triangulation {
         primitive: usize,
@@ -170,6 +171,7 @@ impl ProfileEditTargets {
                             && primitive.corner_count != 0
                     })
             }
+            #[cfg(test)]
             (Self::Node(target), CanonicalProfileOwner::Node(node)) => target == node,
             (Self::Triangulation { primitive }, CanonicalProfileOwner::Primitive(index)) => {
                 primitive == index as usize
@@ -382,7 +384,9 @@ pub(super) struct NodeSceneEditProfilePlan {
     selection_work: u64,
     pub(super) source_segment_count: CheckedCount,
     pub(super) target_count: CheckedCount,
+    #[cfg(test)]
     pub(super) target_attachment_count: CheckedCount,
+    #[cfg(test)]
     pub(super) output_attachment_count: CheckedCount,
     pub(super) output_counts: ProfileMeteredCounts,
     pub(super) maximum_depth: u32,
@@ -509,10 +513,12 @@ impl NodeSceneEditProfilePlan {
                 "source segments",
             )?,
             target_count: CheckedCount::try_from_u32(targets_count, "changed profile owners")?,
+            #[cfg(test)]
             target_attachment_count: CheckedCount::try_from_u32(
                 parents,
                 "changed owners' parents",
             )?,
+            #[cfg(test)]
             output_attachment_count: CheckedCount::try_from_u32(attachments, "output attachments")?,
             output_counts: counts,
             maximum_depth,

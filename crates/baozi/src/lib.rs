@@ -2,9 +2,6 @@
 
 //! Public Baozi facade.
 //!
-//! Native filesystem helpers are candidate-only under `native-fs-candidate`; no release
-//! `native-fs` capability is currently registered.
-//!
 //! Custom [`AssetIo`] backends and [`DependencyResolver`] policies use the types re-exported
 //! here. Implementing format parsers additionally requires `baozi_import` for parser scopes,
 //! option codecs, descriptor construction, and Scene authoring contracts.
@@ -96,12 +93,8 @@ pub use baozi_io::{
     AssetIo, AssetLength, AssetObjectKind, AssetOpenError, AssetOpenErrorKind, AssetOpenStage,
     AssetPath, AssetReadContractViolation, AssetReadError, AssetReadErrorKind, AssetReader,
     AuthorityDomain, ImmutableMemoryAssetBuildError, ImmutableMemoryAssetIo,
-    MemoryAssetInsertError, MemoryAssetIo, NATIVE_FS_CANDIDATE_TARGETS,
-    NATIVE_FS_REGISTERED_TARGETS, NATIVE_FS_SUPPORT_STATUS, NativeFsSupportStatus, OpenedAsset,
-    PathError, PathErrorCode,
+    MemoryAssetInsertError, MemoryAssetIo, OpenedAsset, PathError, PathErrorCode,
 };
-#[cfg(feature = "native-fs-candidate")]
-pub use baozi_io::{FileSystemAssetIo, NativeDirectoryCapability};
 pub use baozi_operation::{
     CancellationOrigin, CancellationSignal, CancellationToken, ControlCause, LedgerLimitsError,
     ProgressDecision, ProgressDeliveryLimits, ProgressEvent, ProgressObserver,

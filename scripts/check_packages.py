@@ -13,10 +13,9 @@ import tarfile
 import tempfile
 import tomllib
 
-from check_features import CASES
+from check_features import CASES, validate_consumer_features
 
 
-FORMATS = {"gltf", "obj", "ply", "stl"}
 CONSUMER_DEPENDENCIES = ("baozi", "baozi-import")
 
 
@@ -56,22 +55,10 @@ def package_order(metadata: dict) -> list[dict]:
 def select_cases(names: list[str]) -> list[tuple[str, list[str], str]]:
     cases = []
     for name in dict.fromkeys(names):
-        if name in CASES:
-            flags, expected = CASES[name]
-            flags = list(flags)
-        else:
-            formats = name.split(",")
-            if not all(formats) or len(set(formats)) != len(formats):
-                raise ValueError(f"Invalid format combination: {name}")
-            flags = ["--no-default-features", "--features",
-                     ",".join(f"format-{format_name}" for format_name in formats)]
-            expected = ",".join(sorted(formats))
-        unadmitted = set(filter(None, expected.split(","))) - FORMATS
-        if unadmitted:
-            raise ValueError(
-                f"Case {name} contains unsupported formats: {','.join(sorted(unadmitted))}"
-            )
-        cases.append((name, flags, expected))
+        if name not in CASES:
+            raise ValueError(f"Unknown fixed consumer case: {name}")
+        flags, expected = CASES[name]
+        cases.append((name, list(flags), expected))
     return cases
 
 
@@ -158,8 +145,8 @@ def run(command: list[str], label: str, root: Path, environment: dict[str, str],
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--case", action="append", dest="cases",
-        help=f"Repeat a fixed case ({', '.join(CASES)}) or a format combination, e.g. obj,ply",
+        "--case", choices=CASES, action="append", dest="cases",
+        help="Repeat to select cases from the maintained consumer matrix",
     )
     parser.add_argument("--toolchain", help="Rust toolchain name, for example 1.95.0")
     parser.add_argument("--release", action="store_true")
@@ -168,6 +155,7 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     source = root / "tools/consumers/scene"
+    validate_consumer_features(root)
     try:
         cases = select_cases(args.cases or list(CASES))
     except ValueError as error:

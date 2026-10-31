@@ -22,6 +22,8 @@ evidence:
   - crates/baozi-core/src/canonical_scene/store/typed_storage/deformation.rs
   - crates/baozi-core/src/canonical_scene/store/typed_storage/animation.rs
   - crates/baozi-core/src/canonical_scene/store/typed_storage/appearance.rs
+  - crates/baozi-core/src/lib.rs
+  - crates/baozi-core/tests/public_api.rs
 related:
   - docs/adr/0008-math-coordinate-units-and-numeric-policy.md
   - docs/adr/0009-data-ownership-zero-copy-lifetimes-and-memory-layout.md
@@ -113,6 +115,19 @@ transition needs to allocate a replacement plan or require a larger host stack.
 owner. It contains no public canonical storage, generation, validation proof, or publication
 authority. Only the matching owner may consume it. Missing, duplicate, stale, or foreign descriptors
 cannot publish.
+
+Cross-crate construction and edit adapters use one unconditional, documentation-hidden
+`baozi_core::__scene_integration` namespace. It exposes the authority-free authoring vocabulary
+and the opaque transaction values required by import and postprocess; ordinary format plugins
+use `baozi_import::authoring`. The former `_scene-integration` Cargo feature and `scene` module
+are removed. Feature union is not a visibility or authority mechanism, and core no longer needs
+two compilation modes to decide whether its adapters can name the same transaction.
+
+Private fields prevent extraction or forgery of construction requests, drafts, and semantic
+validation proofs. The handoff token owns the actual tables and remains single-use. Positive
+external API tests establish that these names exist even in a default core build; compile-fail
+examples exercise actual field privacy and moved ownership through that available namespace.
+An absent-module import failure is not evidence for those constructor or publication guarantees.
 
 `ValidatedScene` is the opaque owner of one centrally validated canonical generation. It owns the
 retained storage transitively, exposes only bounded semantic observation, and releases its ownership

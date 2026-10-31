@@ -483,8 +483,10 @@ fn obj_corner_domains_preserve_shared_positions_without_tuple_vertex_expansion()
     assert_eq!(primitive.vertex_count(), 3);
     assert_eq!(primitive.corner_count(), 6);
     assert_eq!(primitive.face_count(), 2);
-    assert_eq!(primitive.index_offset(), Some(0));
-    assert_eq!(primitive.index_count(), 6);
+    assert_eq!(
+        primitive.authored_indices(),
+        Presence::Present(position_indices.as_slice())
+    );
     assert_eq!(primitive.material(), None::<MaterialLocalId>);
 
     assert_eq!(primitive.attributes().len(), 4);
@@ -582,16 +584,20 @@ fn custom_dense_and_sparse_i32_attributes_preserve_signed_values_and_exact_accou
     let dense = primitive.attribute(1).expect("dense I32 attribute");
     assert_eq!(dense.scalar_kind(), GeometryAttributeScalarKind::I32);
     assert_eq!(dense.payload_kind(), GeometryAttributePayloadKind::Dense);
-    assert_eq!(dense.semantic_name_offset(), 0);
-    assert_eq!(dense.semantic_name_count(), 16);
+    assert!(matches!(
+        dense.semantic(),
+        AttributeSemantic::Custom(name) if name.as_str() == "ply:dense_signed"
+    ));
     assert_eq!(dense.canonical_scalar_count(), 3);
     assert_eq!(dense.payload_block_count(), 1);
 
     let sparse = primitive.attribute(2).expect("sparse I32 attribute");
     assert_eq!(sparse.scalar_kind(), GeometryAttributeScalarKind::I32);
     assert_eq!(sparse.payload_kind(), GeometryAttributePayloadKind::Sparse);
-    assert_eq!(sparse.semantic_name_offset(), 16);
-    assert_eq!(sparse.semantic_name_count(), 17);
+    assert!(matches!(
+        sparse.semantic(),
+        AttributeSemantic::Custom(name) if name.as_str() == "ply:sparse_signed"
+    ));
     assert_eq!(sparse.explicit_element_count(), 1);
     assert_eq!(sparse.canonical_scalar_count(), 2);
     assert_eq!(sparse.payload_block_count(), 3);
@@ -626,8 +632,7 @@ fn absent_and_present_empty_index_streams_remain_distinct() {
     )
     .expect("absent indices describe a non-indexed point");
     let absent_primitive = absent.primitive(0).expect("absent-index primitive");
-    assert_eq!(absent_primitive.index_offset(), None);
-    assert_eq!(absent_primitive.index_count(), 0);
+    assert_eq!(absent_primitive.authored_indices(), Presence::Absent);
     assert_eq!(absent_primitive.corner_count(), 1);
     assert_eq!(absent_primitive.face_count(), 1);
 
@@ -649,8 +654,10 @@ fn absent_and_present_empty_index_streams_remain_distinct() {
     let empty_primitive = present_empty
         .primitive(0)
         .expect("present-empty-index primitive");
-    assert_eq!(empty_primitive.index_offset(), Some(0));
-    assert_eq!(empty_primitive.index_count(), 0);
+    assert_eq!(
+        empty_primitive.authored_indices(),
+        Presence::Present(empty_indices.as_slice())
+    );
     assert_eq!(empty_primitive.corner_count(), 0);
     assert_eq!(empty_primitive.face_count(), 0);
     assert_eq!(present_empty.payload_block_count(), 1);

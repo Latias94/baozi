@@ -47,6 +47,7 @@ pub(in crate::canonical_scene::store) struct NormalAttributeMapping {
 }
 
 impl NormalAttributeMapping {
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn source_attribute_count(self) -> u32 {
         self.source_attributes
     }
@@ -382,6 +383,7 @@ impl<'a> GeometryNormalsPlan<'a> {
         self.mapping
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn source_attribute_count(&self) -> u32 {
         self.mapping.source_attribute_count()
     }
@@ -394,18 +396,22 @@ impl<'a> GeometryNormalsPlan<'a> {
         self.mapping.normal_attribute()
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn source_normal(&self) -> Option<u32> {
         self.mapping.source_normal()
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn source_tangent(&self) -> Option<u32> {
         self.mapping.source_tangent()
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn source_position(&self) -> u32 {
         self.mapping.source_position()
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn source_smoothing_group(&self) -> Option<u32> {
         self.mapping.source_smoothing_group()
     }
@@ -415,11 +421,13 @@ impl<'a> GeometryNormalsPlan<'a> {
         self.normals.len() as u32
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn output_face_count(&self) -> u32 {
         self.output_corner_count() / 3
     }
 
     /// Global attribute mapping, including the replaced Normal and excluding a removed Tangent.
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn output_attribute(&self, source: u32) -> Option<u32> {
         self.mapping.output_attribute(source)
     }

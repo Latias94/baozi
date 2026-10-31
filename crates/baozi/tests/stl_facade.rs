@@ -119,24 +119,3 @@ fn malformed_stl_bytes_preserve_the_stable_format_envelope() {
     assert_eq!(envelope.code(), "stl.invalid_structure");
     assert!(has_expected_structure_reason(envelope));
 }
-
-#[cfg(feature = "native-fs-candidate")]
-#[test]
-fn facade_reads_stl_from_native_path() {
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should follow the Unix epoch")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("baozi-facade-{suffix}.stl"));
-    fs::write(&path, ascii_triangle()).expect("temporary STL should be writable");
-    let report = Importer::new()
-        .expect("default registry should freeze")
-        .read_path(&path)
-        .expect("native STL import should succeed");
-    fs::remove_file(&path).expect("temporary STL should be removable");
-
-    assert_eq!(scene_snapshot(&report).logical_mesh_count(), 1);
-}

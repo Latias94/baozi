@@ -84,7 +84,10 @@ pub(in crate::canonical_scene::store) struct NodeSceneEditSuccessParts {
 pub(in crate::canonical_scene::store) enum NodeSceneEditTerminal {
     Success(NodeSceneEditSuccessParts),
     RichFailure(NodeSceneRichFailure),
-    MinimalFallback(NodeSceneFallback),
+    MinimalFallback {
+        // The test terminal retains this physical owner until the terminal itself is dropped.
+        _owner: NodeSceneFallback,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -366,10 +369,12 @@ impl PreparedNodeSceneEdit {
             }
             PreparedNodeSceneEditState::MinimalFallback(prepared) => {
                 let published = prepared.store.handoff();
-                NodeSceneEditTerminal::MinimalFallback(NodeSceneFallback {
-                    fallback: published.fallback,
-                    ledger_evidence: published.ledger_evidence,
-                })
+                NodeSceneEditTerminal::MinimalFallback {
+                    _owner: NodeSceneFallback {
+                        _fallback: published.fallback,
+                        ledger_evidence: published.ledger_evidence,
+                    },
+                }
             }
         }
     }

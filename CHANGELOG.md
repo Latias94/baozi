@@ -6,6 +6,18 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Moved native filesystem and repository capture development into the excluded, unpublished
+  `baozi-native-io-candidate` workspace. Removed facade/portable-IO candidate features, native
+  path helpers, status exports, and native-only facade errors. Native callers compose the adapter
+  through public `Importer::read_asset`; `repository-capture` selects the real optional backend.
+  The complete public facade feature union is portable. Native dependency admission, advisory,
+  license, and target checks use the candidate's own lockfile; release registration stays empty.
+- Removed core's empty `_scene-integration` feature and replaced its ordinary `scene` module with
+  the unconditional hidden `__scene_integration` namespace. Actual private-field and linear-move
+  compile checks replace absent-module checks. Deleted unused projections/collector helpers and
+  restricted standalone fault-test execution rails to tests, removing the blanket storage-module
+  dead-code allowance. Deformation validation now drops obsolete skin-plan scratch before reducing
+  its live reservation; immutable payload and lease ownership remain coupled.
 - Rejected unresolved Windows reparse objects using metadata from the exact returned file handle.
   Unknown tags can report ordinary file types; they now return a typed reparse-object rejection
   before any payload reaches the importer. Runtime and repository IO share the same object check.

@@ -91,6 +91,14 @@ identity require a real distribution consumer; they do not precede basic library
 Formats gain maturity only through their exact tested profiles. Neither an ADR, a parser crate, nor
 a passing snapshot alone constitutes supported format behavior.
 
+Public facade features now describe only portable library capabilities. Native runtime IO and
+repository capture live together in an excluded unpublished candidate workspace and compose through
+the public `AssetIo` interface. Core adapters share an unconditional hidden integration namespace;
+private constructors and single-use ownership enforce publication instead of Cargo feature union.
+Historical internal execution rails that serve fault tests are compiled only for tests, and unused
+projection/collector helpers are removed. The delivery progress records the corresponding source
+and behavior qualification; this structural separation does not promote native support.
+
 ## Format Priorities
 
 Format work begins only when it strengthens a current architecture or product goal.

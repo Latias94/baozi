@@ -201,11 +201,12 @@ struct AppearanceValidationStorage<'input, R> {
     image_payloads: Vec<&'input [u8]>,
     #[cfg(test)]
     storage_drop_probe: Option<AppearanceStorageDropProbe>,
-    // Storage must be released before its accounting token, including unwind.
-    reservation: R,
+    // Held solely to cover image_payloads; storage must drop first, including unwind.
+    _reservation: R,
 }
 
 impl<'input, R> ValidatedAppearanceBatch<'input, R> {
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn input(
         &self,
     ) -> AppearanceAuthoringBatch<'input> {
@@ -242,6 +243,7 @@ impl<'input, R> ValidatedAppearanceBatch<'input, R> {
         self.compiled.payloads
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn image_payload_byte_count(&self) -> u64 {
         self.compiled.payloads[0]
     }
@@ -289,6 +291,7 @@ impl<'input, R> ValidatedAppearanceBatch<'input, R> {
             .map(|(input, payload)| ValidatedAppearanceImage { input, payload })
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn image(
         &self,
         index: usize,
@@ -780,7 +783,7 @@ where
             image_payloads,
             #[cfg(test)]
             storage_drop_probe: None,
-            reservation,
+            _reservation: reservation,
         },
     })
 }

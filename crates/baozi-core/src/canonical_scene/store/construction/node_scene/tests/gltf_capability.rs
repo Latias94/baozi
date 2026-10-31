@@ -121,43 +121,14 @@ struct GltfSourceImage<'source> {
 }
 
 pub(in crate::canonical_scene::store) struct GltfCapabilityMutationObservation {
-    pub(in crate::canonical_scene::store) field_class: &'static str,
     pub(in crate::canonical_scene::store) source_vector: Vec<u8>,
     pub(in crate::canonical_scene::store) snapshot_digest: [u8; 32],
 }
 
 pub(in crate::canonical_scene::store) struct GltfCapabilityVectorObservations {
-    pub(in crate::canonical_scene::store) source_shape: GltfCapabilitySourceShapeObservation,
     pub(in crate::canonical_scene::store) source_vector: Vec<u8>,
     pub(in crate::canonical_scene::store) baseline_snapshot_digest: [u8; 32],
     pub(in crate::canonical_scene::store) mutations: [GltfCapabilityMutationObservation; 9],
-}
-
-#[derive(Clone, Copy)]
-pub(in crate::canonical_scene::store) struct GltfCapabilitySourceShapeObservation {
-    pub(in crate::canonical_scene::store) node_count: usize,
-    pub(in crate::canonical_scene::store) root_count: usize,
-    pub(in crate::canonical_scene::store) image_count: usize,
-    pub(in crate::canonical_scene::store) image_payload_bytes: usize,
-    pub(in crate::canonical_scene::store) media_type_bytes: usize,
-    pub(in crate::canonical_scene::store) sampler_count: usize,
-    pub(in crate::canonical_scene::store) texture_count: usize,
-    pub(in crate::canonical_scene::store) material_count: usize,
-    pub(in crate::canonical_scene::store) material_binding_count: usize,
-    pub(in crate::canonical_scene::store) logical_mesh_count: usize,
-    pub(in crate::canonical_scene::store) primitive_count: usize,
-    pub(in crate::canonical_scene::store) attribute_count: usize,
-    pub(in crate::canonical_scene::store) mesh_instance_count: usize,
-    pub(in crate::canonical_scene::store) skin_count: usize,
-    pub(in crate::canonical_scene::store) skin_joint_count: usize,
-    pub(in crate::canonical_scene::store) morph_definition_count: usize,
-    pub(in crate::canonical_scene::store) morph_target_count: usize,
-    pub(in crate::canonical_scene::store) morph_delta_count: usize,
-    pub(in crate::canonical_scene::store) influence_row_count: usize,
-    pub(in crate::canonical_scene::store) influence_count: usize,
-    pub(in crate::canonical_scene::store) animation_clip_count: usize,
-    pub(in crate::canonical_scene::store) animation_channel_count: usize,
-    pub(in crate::canonical_scene::store) animation_key_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -960,91 +931,6 @@ fn encode_gltf_source(
     });
 
     encoder.finish()
-}
-
-fn gltf_source_shape(
-    input: SceneAuthoringBatch<'_>,
-    source_images: &[GltfSourceImage<'_>],
-) -> GltfCapabilitySourceShapeObservation {
-    let nodes = input.nodes();
-    let appearance = input.appearance();
-    let geometry = input.geometry();
-    let deformation = input.deformation();
-    let animations = input.animations();
-    let root_count = match nodes.roots() {
-        Presence::Absent => 0,
-        Presence::Present(roots) => roots.len(),
-    };
-    let image_payload_bytes = source_images.iter().map(|image| image.bytes.len()).sum();
-    let media_type_bytes = source_images
-        .iter()
-        .map(|image| match image.media_type {
-            Presence::Absent => 0,
-            Presence::Present(media_type) => media_type.as_str().len(),
-        })
-        .sum();
-    let skin_joint_count = deformation
-        .skins()
-        .iter()
-        .map(|skin| skin.joints().len())
-        .sum();
-    let morph_target_count = deformation
-        .primitives()
-        .iter()
-        .map(|primitive| primitive.morph_targets().len())
-        .sum();
-    let morph_delta_count = deformation
-        .primitives()
-        .iter()
-        .flat_map(|primitive| primitive.morph_targets())
-        .map(|target| target.deltas().len())
-        .sum();
-    let influence_row_count = deformation
-        .primitives()
-        .iter()
-        .map(|primitive| match primitive.influences() {
-            Presence::Absent => 0,
-            Presence::Present(rows) => rows.vertex_offsets().len().saturating_sub(1),
-        })
-        .sum();
-    let influence_count = deformation
-        .primitives()
-        .iter()
-        .map(|primitive| match primitive.influences() {
-            Presence::Absent => 0,
-            Presence::Present(rows) => rows.influences().len(),
-        })
-        .sum();
-    let animation_key_count = animations
-        .channels()
-        .iter()
-        .map(|channel| channel.times().len())
-        .sum();
-    GltfCapabilitySourceShapeObservation {
-        node_count: nodes.nodes().len(),
-        root_count,
-        image_count: appearance.images().len(),
-        image_payload_bytes,
-        media_type_bytes,
-        sampler_count: appearance.samplers().len(),
-        texture_count: appearance.textures().len(),
-        material_count: appearance.materials().len(),
-        material_binding_count: appearance.bindings().len(),
-        logical_mesh_count: geometry.logical_meshes().len(),
-        primitive_count: geometry.primitives().len(),
-        attribute_count: geometry.attributes().len(),
-        mesh_instance_count: geometry.mesh_instances().len(),
-        skin_count: deformation.skins().len(),
-        skin_joint_count,
-        morph_definition_count: deformation.morph_target_definitions().len(),
-        morph_target_count,
-        morph_delta_count,
-        influence_row_count,
-        influence_count,
-        animation_clip_count: animations.clips().len(),
-        animation_channel_count: animations.channels().len(),
-        animation_key_count,
-    }
 }
 
 fn with_gltf_capability_input<R>(
@@ -1921,9 +1807,8 @@ pub(in crate::canonical_scene::store) fn collect_gltf_capability_vectors_for_pro
     fn observe(
         account: &PhysicalStorageAccount,
         mutation: GltfCapabilityMutation,
-    ) -> (GltfCapabilitySourceShapeObservation, Vec<u8>, [u8; 32]) {
+    ) -> (Vec<u8>, [u8; 32]) {
         with_gltf_capability_input(GltfCapabilityScope::All, mutation, |input, images| {
-            let source_shape = gltf_source_shape(input, images);
             let source_vector = encode_gltf_source(input, images);
             let parts = build_gltf_scene_input_with_generation_source(
                 account,
@@ -1937,53 +1822,28 @@ pub(in crate::canonical_scene::store) fn collect_gltf_capability_vectors_for_pro
                 .capture_snapshot(snapshot_limits(0, 0), None)
                 .expect("complete glTF capability mutation digest");
             drop(parts);
-            (source_shape, source_vector, snapshot.digest)
+            (source_vector, snapshot.digest)
         })
     }
 
     let factory = test_factory();
     let account = test_account(&factory, 512);
-    let (source_shape, source_vector, baseline_snapshot_digest) =
+    let (source_vector, baseline_snapshot_digest) =
         observe(&account, GltfCapabilityMutation::Baseline);
     let mutations = [
-        (
-            "node_transform_float_bits",
-            GltfCapabilityMutation::NodeTranslation,
-        ),
-        ("image_payload_bytes", GltfCapabilityMutation::ImagePayload),
-        (
-            "material_binding_semantics",
-            GltfCapabilityMutation::MaterialBindingSemantics,
-        ),
-        (
-            "material_semantics",
-            GltfCapabilityMutation::MaterialSemantics,
-        ),
-        (
-            "primitive_material_reference",
-            GltfCapabilityMutation::PrimitiveMaterial,
-        ),
-        (
-            "skin_inverse_bind_float_bits",
-            GltfCapabilityMutation::SkinInverseBind,
-        ),
-        (
-            "influence_weight_float_bits",
-            GltfCapabilityMutation::InfluenceWeight,
-        ),
-        (
-            "morph_sparse_index",
-            GltfCapabilityMutation::MorphSparseIndex,
-        ),
-        (
-            "animation_value_float_bits",
-            GltfCapabilityMutation::AnimationValue,
-        ),
+        GltfCapabilityMutation::NodeTranslation,
+        GltfCapabilityMutation::ImagePayload,
+        GltfCapabilityMutation::MaterialBindingSemantics,
+        GltfCapabilityMutation::MaterialSemantics,
+        GltfCapabilityMutation::PrimitiveMaterial,
+        GltfCapabilityMutation::SkinInverseBind,
+        GltfCapabilityMutation::InfluenceWeight,
+        GltfCapabilityMutation::MorphSparseIndex,
+        GltfCapabilityMutation::AnimationValue,
     ]
-    .map(|(field_class, mutation)| {
-        let (_, mutation_source_vector, snapshot_digest) = observe(&account, mutation);
+    .map(|mutation| {
+        let (mutation_source_vector, snapshot_digest) = observe(&account, mutation);
         GltfCapabilityMutationObservation {
-            field_class,
             source_vector: mutation_source_vector,
             snapshot_digest,
         }
@@ -1995,7 +1855,6 @@ pub(in crate::canonical_scene::store) fn collect_gltf_capability_vectors_for_pro
     assert_eq!(factory.snapshot().live_accounts(), 0);
 
     GltfCapabilityVectorObservations {
-        source_shape,
         source_vector,
         baseline_snapshot_digest,
         mutations,
@@ -2279,7 +2138,7 @@ pub(in crate::canonical_scene::store) fn inspect_gltf_capability_semantics_with_
                 .expect("declared glTF material binding");
             assert_eq!(binding.source_index(), source_index);
             assert_eq!(binding.texture(), texture);
-            assert_eq!(binding.role_semantics(), &role);
+            assert_eq!(binding.role(), role);
             assert_eq!(binding.uv_set(), uv_set);
             assert_eq!(binding.channel_mapping(), channel_mapping);
             assert_eq!(binding.color_interpretation(), &interpretation);
@@ -2851,12 +2710,6 @@ fn observe_facade_typed_view(
     for index in 0..view.light_count() {
         transcript.debug("light", &view.light_at(index)?);
     }
-    let mut placements = view.spatial_placements();
-    while let Some(placement) = placements.next()? {
-        transcript.debug("spatial-placement", &placement);
-    }
-    placements.finish()?;
-
     let mut cursor = view.into_cursor()?;
     let mut roots = cursor.take_roots()?;
     while let Some(root) = roots.next()? {
@@ -2869,7 +2722,15 @@ fn observe_facade_typed_view(
     roots.finish()?;
 
     while let Some(node) = cursor.next_node()? {
-        transcript.debug("node", &(node.source_index(), node.authored_transform()));
+        transcript.debug(
+            "node",
+            &(
+                node.source_index(),
+                node.authored_transform(),
+                node.camera(),
+                node.light(),
+            ),
+        );
         let mut children = node.into_children();
         while let Some(child) = children.next()? {
             transcript.debug("node-child", &child);
@@ -2943,7 +2804,7 @@ fn observe_facade_typed_view(
                 &(
                     binding.source_index(),
                     binding.texture(),
-                    binding.role_semantics(),
+                    binding.role(),
                     binding.uv_set(),
                     binding.channel_mapping(),
                     binding.color_interpretation(),

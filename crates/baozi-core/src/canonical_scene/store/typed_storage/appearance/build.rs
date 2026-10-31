@@ -133,6 +133,7 @@ impl AppearanceStoragePlan {
             })
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn work(self) -> Result<u64, StorePlanError> {
         self.rows_work()?
             .checked_add(self.payload_work()?)

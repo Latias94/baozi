@@ -1,6 +1,6 @@
 use std::{fmt, ops::Range};
 
-use baozi_core::{PrimitiveId, scene::integration::SceneTriangulationEvidence};
+use baozi_core::{__scene_integration::integration::SceneTriangulationEvidence, PrimitiveId};
 use thiserror::Error;
 
 /// A generation- and mesh-qualified source vertex endpoint.

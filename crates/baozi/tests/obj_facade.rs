@@ -207,30 +207,6 @@ fn repeated_oversized_mtl_references_preserve_non_refundable_terminal_budget() -
     Ok(())
 }
 
-#[cfg(feature = "native-fs-candidate")]
-#[test]
-fn facade_reads_obj_from_path() {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock should follow the Unix epoch")
-        .as_nanos();
-    let root =
-        std::env::temp_dir().join(format!("baozi-obj-facade-{}-{stamp}", std::process::id()));
-    let obj_path = root.join("path.obj");
-    std::fs::create_dir(&root).expect("temporary OBJ directory should be creatable");
-    std::fs::write(&obj_path, triangle_obj()).expect("temporary OBJ should be writable");
-
-    let report = Importer::new()
-        .expect("default registry should freeze")
-        .read_path(&obj_path)
-        .expect("native OBJ import should succeed");
-    std::fs::remove_file(&obj_path).expect("temporary OBJ should be removable");
-    std::fs::remove_dir(&root).expect("temporary OBJ directory should be removable");
-
-    assert_eq!(report.format().id().as_str(), "org.baozi.obj");
-    assert_eq!(scene_snapshot(&report).logical_mesh_count(), 1);
-}
-
 #[test]
 fn facade_reads_obj_with_memory_mtl_sidecar() -> Result<()> {
     let obj_path = AssetPath::new("models/cube.obj")?;

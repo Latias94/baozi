@@ -23,10 +23,10 @@ evidence:
   - docs/research/u4c-repository-input-capability.md
 tracers:
   - crates/baozi-io/src/lib.rs
-  - crates/baozi-io/src/fs.rs
-  - crates/baozi-io/src/repository/native.rs
-  - crates/baozi-io/src/repository/walk.rs
-  - crates/baozi-io/src/repository/tests.rs
+  - candidates/baozi-native-io/src/fs.rs
+  - candidates/baozi-native-io/src/repository/native.rs
+  - candidates/baozi-native-io/src/repository/walk.rs
+  - candidates/baozi-native-io/src/repository/tests.rs
   - crates/baozi-io/src/immutable_memory.rs
   - crates/baozi-io/src/semantic_identity.rs
   - crates/baozi-import/src/dependency.rs
@@ -272,7 +272,8 @@ Defaults:
 
 - direct-byte imports deny external references; callers needing sidecars use an explicit memory
   bundle or custom `AssetIo` plus resolver entry path
-- native path helpers scope sidecars to the primary asset directory
+- native candidate callers choose the trusted root capability before passing a relative primary
+  path to `read_asset`; that same authority resolves sidecars
 - absolute source references and references that escape their logical base are denied
 - optional dependency denial produces bounded evidence and may preserve geometry
 - a required structural dependency failure is fatal
@@ -326,8 +327,8 @@ into an unproven successful omission.
 
 ## Native Filesystem Admission
 
-The admitted runtime-asset implementation direction is `cap-std` 4.0.3 behind
-`baozi-io/fs-candidate`, with an exact direct `rustix` 1.1.4 dependency used only for the portable
+The admitted runtime-asset implementation direction is `cap-std` 4.0.3 inside the unpublished
+standalone `baozi-native-io-candidate` workspace, with an exact direct `rustix` 1.1.4 dependency used only for the portable
 `OFlags::NONBLOCK` value on Unix-like targets. The runtime adapter passes that value through
 `cap_std::fs::OpenOptionsExt`; it does not use a numeric flag, a documentation-hidden dependency
 API, or an additional filesystem extension crate. The detailed blocking review is recorded in
@@ -389,7 +390,7 @@ component and every hard-link alias, and compares a complete recapture against t
 runtime `AssetIo` adapter intentionally permits an in-root symlink and therefore cannot implement
 this contract without changing its accepted semantics.
 
-`baozi-io` remains the sole owner of native filesystem dependencies. Its `repository-fs-candidate`
+`baozi-native-io-candidate` is the sole owner of native filesystem dependencies. Its `repository-capture`
 feature exposes `RepositoryRoot`, `RepositoryCapture`, and the bounded capture/verification API as
 a public Internal/backend-tier candidate mechanism under ADR 0006. This mechanism exists separately
 from the runtime adapter and remains subject to its platform qualification and fail-closed rules.
@@ -407,13 +408,13 @@ The repository candidate uses exact `cap-std` 4.0.3 plus exact `cap-fs-ext` 4.0.
 nonblocking interfaces. Direct `cap-primitives`, documentation-hidden hooks, and Baozi-owned
 platform `unsafe` are forbidden. `cap-fs-ext` controls only the final path component, so Baozi walks
 one validated normal component at a time, retains each opened directory capability, and applies
-no-follow to every step. The runtime `fs-candidate` dependency closure remains independently frozen
+no-follow to every step. The default runtime candidate dependency closure remains independently frozen
 and must not acquire `cap-fs-ext` transitively.
 
 ```mermaid
 flowchart LR
     Spec[Explicit roots and limits] --> Path[Strict RepositoryPath values]
-    Path --> Walk[baozi-io component-wise no-follow walk]
+    Path --> Walk[Native candidate component-wise no-follow walk]
     Walk --> Handle[Same-handle type, identity, and bounded read]
     Handle --> Capture[RepositoryCapture]
     Capture --> Verify[RepositoryRoot.verify_unchanged]
@@ -563,7 +564,7 @@ Cons:
 - bypasses the native dependency, target, checksum, and unsafe-boundary gate
 - permits repository evidence and runtime IO to drift onto incompatible backend versions
 
-Decision: rejected. Native dependencies remain private to `baozi-io`; xtask inspects dependency data
+Decision: rejected. Native dependencies remain private to `baozi-native-io-candidate`; xtask inspects dependency data
 and has no IO dependency or repository collector.
 
 ### Option E: Reuse runtime `AssetIo` for repository closure discovery
@@ -616,7 +617,7 @@ contract. Reconsider only after a measured blocker and a separate unsafe/depende
 | Special-file availability | directory, FIFO, socket, and device inputs fail by deadline without a blocking pathname preflight | same-handle type and deadline tests |
 | Root capability integrity | only Baozi-constructed, directory-validated roots enter the adapter; Windows roots exclude `FILE_SHARE_DELETE` | API-shape, root-type, and replacement tests |
 | Dependency identity | the resolved `cap-std`, `cap-primitives`, and direct `rustix` security-sensitive closure matches the admitted versions, checksums, features, and sources | target-filtered lockfile admission checker |
-| Repository mechanism ownership | no crate other than `baozi-io` directly depends on native filesystem backends; xtask reaches neither IO nor native backends; no dependency requests or forwards the repository feature | manifest and resolved metadata negative fixtures |
+| Repository mechanism ownership | only the standalone candidate directly depends on native filesystem backends; xtask reaches neither IO nor native backends; root packages cannot depend on the candidate or request/forward retired native features | manifest and resolved metadata negative fixtures |
 | Repository closure completeness | additions, deletions, same-content replacements, raw-byte changes, hard-link aliases, overlapping roots, and every symlink/reparse component fail the before/after closure gate | Linux/macOS platform-local no-skip capture and recapture matrix; Windows typed pre-traversal fail-closed test |
 | Repository resource bounds | exact limit succeeds and one-over root/file/directory/depth/path/single-file/total-byte/work cases fail before excess retention or read | boundary, allocation-failure, and hostile-size fixtures |
 | Portable bytes | memory imports compile without native filesystem dependencies | WASM feature checks |
@@ -638,7 +639,7 @@ contract. Reconsider only after a measured blocker and a separate unsafe/depende
 | Mutable host policy is mislabeled deterministic | Critical | Medium | require the registered frozen-policy basis; classify mutable policy/callback/process-state omission as session-dependent |
 | Writable roots change during import | High | Medium | handle-relative open, immutable snapshots, and host guidance to use read-only roots |
 | Capability abstraction is mistaken for process sandboxing | Critical | Medium | threat model states trusted-code boundary and process-isolation requirement |
-| Repository snapshot code becomes a second IO stack | High | Medium | keep native capture in `baozi-io`, keep xtask limited to dependency data checks, and reject IO activation from xtask and direct backend dependencies elsewhere |
+| Repository snapshot code becomes a second IO stack | High | Medium | keep native capture beside the runtime adapter in one standalone candidate, keep xtask limited to dependency data checks, and reject native dependencies in the root workspace |
 | Endpoint recapture is mistaken for continuous immutability | Critical | Medium | freeze the static-worktree premise in the evidence schema or run from a captured isolated tree; never infer the stronger claim |
 | Platform file identity is truncated or unavailable | High | Low | use identity only as a fail-closed ephemeral comparison, pair it with raw-byte closure equality, and reject an unqualified identity backend |
 
@@ -683,7 +684,7 @@ contract. Reconsider only after a measured blocker and a separate unsafe/depende
 - Replace path-based `AssetScope::resolve_existing` with a directory-capability-backed adapter.
 - Introduce `NativeDirectoryCapability` as a Baozi-owned opaque type whose constructors validate the
   root object; the native adapter's root-taking constructor accepts only this type.
-- Put path-based ambient setup on the opaque capability (with facade path helpers delegating to it);
+- Put path-based ambient setup on the opaque candidate capability;
   do not expose raw/std-handle ingestion in the public native API.
 - On Windows, construct root and descendant directory handles without `FILE_SHARE_DELETE` and test
   that textual root replacement cannot redirect the retained capability.
@@ -713,9 +714,10 @@ contract. Reconsider only after a measured blocker and a separate unsafe/depende
 - Charge path-component work and the admitted backend's conservative retry allowance before opening.
 - Add deterministic path, non-regular-file deadline, and concurrent replacement tests from the
   admission record.
-- Keep `cap-std` and direct `rustix` behind `baozi-io/fs-candidate` and facade
-  `native-fs-candidate`; verify them and transitive `cap-primitives` are absent from byte-only/WASM
-  dependency trees. Keep release features `fs` and `native-fs` absent until promotion.
+- Keep `cap-std` and direct `rustix` inside the unpublished standalone candidate workspace;
+  verify them and transitive `cap-primitives` are absent from every public facade feature union,
+  including byte-only/WASM dependency trees. Keep all native feature aliases out of the facade
+  and portable `baozi-io`; support promotion is a separate decision.
 - Pin direct `rustix` to exactly 1.1.4 and verify its crates.io checksum
   `b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190`.
 - Resolve `cap-std` with default features disabled for every runtime-candidate and audit-only target
@@ -724,12 +726,12 @@ contract. Reconsider only after a measured blocker and a separate unsafe/depende
 - Check the complete resolved native-filesystem dependency closure for every target in that baseline
   against the admitted versions, features, sources, and checksums; any
   path-resolution-, open-flag-, special-file-, or target-relevant change reopens admission.
-- Retain `baozi-io/repository-fs-candidate` as a separately audited internal feature using exact
+- Retain the candidate's `repository-capture` as a separately audited capability using exact
   `cap-fs-ext` 4.0.3 with `default-features = false, features = ["std"]`; preserve the existing
-  runtime `fs-candidate` closure unchanged.
+  independently reviewed default runtime closure.
 - Implement strict repository paths, component-wise public no-follow traversal, bounded iterative
   enumeration, same-handle regular-file reads, opaque alias identity, and full-root recapture in
-  `baozi-io`. Root specifications and limits are caller inputs; evidence policy and digests remain
+  `baozi-native-io-candidate`. Root specifications and limits are caller inputs; evidence policy and digests remain
   outside IO. xtask has no capture consumer or repository-feature activation edge.
 - Extend native dependency gates with a distinct repository profile, exact checksums/features/source
   closure, unsupported-target failures, and platform-local no-skip alias/reparse/resource tests.

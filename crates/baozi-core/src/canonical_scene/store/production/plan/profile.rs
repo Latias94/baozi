@@ -21,10 +21,11 @@ use crate::{SCENE_VALIDATION_POLL_INTERVAL, SceneValidationLimits, SceneValidati
 use super::super::control::CanonicalAuthoringControl;
 use super::super::input::ProfileAuthoringBatch;
 use super::super::input::lineage::{
-    LineageAuthoringBatch, ObservedResourceAuthoring, ProfileOwner, ProvenanceLocalId,
-    ProvenanceNodeAuthoring, ProvenanceOperationAuthoring, ResourceIdentityStability,
-    SourceIdentityAuthoring, SourceIdentityLocalId,
+    LineageAuthoringBatch, ProfileOwner, ProvenanceLocalId, ProvenanceNodeAuthoring,
+    ProvenanceOperationAuthoring, ResourceIdentityStability, SourceIdentityAuthoring,
 };
+#[cfg(test)]
+use super::super::input::lineage::{ObservedResourceAuthoring, SourceIdentityLocalId};
 use super::super::input::metadata::{MetadataAuthoringBatch, MetadataAuthoringEntry};
 use super::ValidatedNodeBatch;
 use super::animation::ValidatedAnimationBatch;
@@ -703,6 +704,7 @@ struct ProfileValidationScratch<R> {
 }
 
 /// One validated source identity joined to its separately authored observed resource.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 pub(in crate::canonical_scene::store) struct ValidatedSourceIdentity<'view, 'input> {
     source: SourceIdentityAuthoring<'input>,
@@ -710,6 +712,7 @@ pub(in crate::canonical_scene::store) struct ValidatedSourceIdentity<'view, 'inp
     _view: std::marker::PhantomData<&'view ()>,
 }
 
+#[cfg(test)]
 impl<'input> ValidatedSourceIdentity<'_, 'input> {
     pub(in crate::canonical_scene::store) const fn resource(
         self,
@@ -755,7 +758,6 @@ struct ProfileValidationStorage<R> {
     source_count: u32,
     provenance_node_count: u32,
     operation_count: u32,
-    parent_edge_count: u64,
     owner_count: u32,
     owner_attachment_count: u64,
     metadata_entry_count: u32,
@@ -763,7 +765,6 @@ struct ProfileValidationStorage<R> {
     edge_count: u64,
     reference_count: u64,
     payload_cell_count: u64,
-    metadata_bytes: u64,
     retention_shape: ProfileRetentionShape,
     validation_work: u64,
     scratch_bytes: u64,
@@ -785,20 +786,8 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         Self { compiled, input }
     }
 
-    /// Fresh producer construction always emits one lineage segment.
-    /// Derived operations append later segments through the retained edit path.
-    pub(in crate::canonical_scene::store) const fn segment_count(&self) -> u32 {
-        1
-    }
-
     pub(in crate::canonical_scene::store) const fn lineage(&self) -> LineageAuthoringBatch<'input> {
         self.input.lineage()
-    }
-
-    pub(in crate::canonical_scene::store) const fn metadata(
-        &self,
-    ) -> MetadataAuthoringBatch<'input> {
-        self.input.metadata()
     }
 
     pub(in crate::canonical_scene::store) const fn resource_count(&self) -> u32 {
@@ -817,8 +806,9 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         self.compiled.provenance_node_count
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) const fn parent_edge_count(&self) -> u64 {
-        self.compiled.parent_edge_count
+        self.compiled.retention_shape.parent_count() as u64
     }
 
     pub(in crate::canonical_scene::store) const fn owner_attachment_count(&self) -> u64 {
@@ -827,16 +817,6 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
 
     pub(in crate::canonical_scene::store) fn owner_count(&self) -> u64 {
         u64::from(self.compiled.owner_count)
-    }
-
-    pub(in crate::canonical_scene::store) fn owner_at(
-        &self,
-        ordinal: u64,
-    ) -> Option<CanonicalProfileOwner> {
-        self.compiled
-            .owner_plans
-            .get(usize::try_from(ordinal).ok()?)
-            .map(|plan| plan.owner)
     }
 
     pub(in crate::canonical_scene::store) const fn metadata_entry_count(&self) -> u32 {
@@ -857,10 +837,6 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
 
     pub(in crate::canonical_scene::store) const fn payload_cell_count(&self) -> u64 {
         self.compiled.payload_cell_count
-    }
-
-    pub(in crate::canonical_scene::store) const fn metadata_bytes(&self) -> u64 {
-        self.compiled.metadata_bytes
     }
 
     /// Initialized typed storage bytes for the target ABI, including headers and payloads.
@@ -885,6 +861,7 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         self.compiled.maximum_depth
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn source_identity(
         &self,
         source: SourceIdentityLocalId,
@@ -903,6 +880,7 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         })
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn source_leaf(
         &self,
         node: ProvenanceLocalId,
@@ -918,6 +896,7 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn operation(
         &self,
         node: ProvenanceLocalId,
@@ -943,6 +922,7 @@ impl<'input, R> ValidatedProfileBatch<'input, R> {
             .copied()
     }
 
+    #[cfg(test)]
     pub(in crate::canonical_scene::store) fn owner_provenance(
         &self,
         owner: CanonicalProfileOwner,
@@ -1641,7 +1621,6 @@ where
         source_count,
         provenance_node_count,
         operation_count: metrics.operation_count,
-        parent_edge_count: metrics.parent_edges,
         owner_count,
         owner_attachment_count: metrics.owner_attachments,
         metadata_entry_count,
@@ -1649,7 +1628,6 @@ where
         edge_count: metrics.edges,
         reference_count: metrics.references,
         payload_cell_count: metrics.payload_cells,
-        metadata_bytes: metrics.metadata_bytes,
         retention_shape,
         validation_work: context.work,
         scratch_bytes: retained_scratch_bytes,
