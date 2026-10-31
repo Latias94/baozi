@@ -266,6 +266,12 @@ pub(crate) struct PendingResourceRelation {
     prepared_revision: u64,
 }
 
+impl PendingResourceRelation {
+    pub(crate) const fn requirement(&self) -> DependencyRequirement {
+        self.requirement
+    }
+}
+
 pub(crate) struct AvailableResourceIdentity<'a> {
     exact: &'a DependencyIdentity,
     normalized: &'a AssetPath,
@@ -332,10 +338,13 @@ impl ResourceGraph {
 
     pub(crate) fn acquisition_state(
         &self,
+        host: ImportStoreHost<'_>,
         identity: &DependencyIdentity,
-    ) -> Option<ResourceAcquisitionState> {
-        self.cache
-            .get(identity)
+    ) -> Result<Option<ResourceAcquisitionState>, ResourceGraphError> {
+        Ok(self
+            .cache
+            .get(host, identity)
+            .map_err(ResourceGraphError::Scope)?
             .map(|(cache_index, entry)| match entry {
                 DependencyCacheEntry::Available(snapshot) => ResourceAcquisitionState::Available {
                     cache_index,
@@ -347,7 +356,7 @@ impl ResourceGraph {
                     stable_identity_schema: failure.stable_identity_schema(),
                 },
                 DependencyCacheEntry::Resolving => ResourceAcquisitionState::Resolving,
-            })
+            }))
     }
 
     pub(crate) fn reserve_acquisition_capacity(
@@ -410,7 +419,7 @@ impl ResourceGraph {
             return Err(ResourceGraphError::Scope(cause));
         }
 
-        let actual = match self.cache.apply_capacity_plan(plan) {
+        let actual = match self.cache.apply_capacity_plan(host, plan) {
             Ok(actual) => actual,
             Err(cause) => {
                 restore_acquisition_reservations(
@@ -455,46 +464,50 @@ impl ResourceGraph {
 
     pub(crate) fn begin_acquisition(
         &mut self,
+        host: ImportStoreHost<'_>,
         identity: DependencyIdentity,
         identity_path_reservation: ImportStoreReservation,
     ) -> Result<bool, ResourceGraphError> {
         self.cache
-            .mark_resolving(identity, identity_path_reservation)
-            .map_err(|()| ResourceGraphError::Allocation {
-                resource: "dependency-cache-entry",
-            })
+            .mark_resolving(host, identity, identity_path_reservation)
+            .map_err(ResourceGraphError::Scope)
     }
 
     pub(crate) fn complete_acquisition(
         &mut self,
+        host: ImportStoreHost<'_>,
         identity: &DependencyIdentity,
         bytes: Arc<SharedDependencySnapshot>,
         stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
     ) -> Result<usize, ResourceGraphError> {
         self.cache
-            .store_available(identity, bytes, stable_identity_schema)
+            .store_available(host, identity, bytes, stable_identity_schema)
+            .map_err(ResourceGraphError::Scope)?
             .ok_or(ResourceGraphError::DanglingNode)
     }
 
     pub(crate) fn abandon_acquisition(
         &mut self,
+        host: ImportStoreHost<'_>,
         identity: &DependencyIdentity,
     ) -> Result<(), ResourceGraphError> {
         self.cache
-            .remove_resolving(identity)
+            .remove_resolving(host, identity)
+            .map_err(ResourceGraphError::Scope)?
             .then_some(())
             .ok_or(ResourceGraphError::DanglingNode)
     }
 
     pub(crate) fn complete_failed_acquisition(
         &mut self,
+        host: ImportStoreHost<'_>,
         identity: &DependencyIdentity,
         cause: ScopeAbortCause,
         stable_identity_schema: Option<&'static StableResourceIdentitySchema>,
         observation: PendingNegativeObservation<'_>,
     ) -> Result<usize, ScopeAbortCause> {
         self.cache
-            .store_failed(identity, cause, stable_identity_schema, observation)
+            .store_failed(host, identity, cause, stable_identity_schema, observation)
     }
 
     pub(crate) fn cached_failure(
@@ -1970,6 +1983,7 @@ fn dependency_cache_error(cause: DependencyCacheCapacityError) -> ResourceGraphE
         DependencyCacheCapacityError::IndexContract => ScopeAbortCause::DescriptorContract {
             code: "dependency-cache-index-contract-failed",
         },
+        DependencyCacheCapacityError::Work(cause) => cause,
     };
     ResourceGraphError::Scope(cause)
 }
@@ -2332,7 +2346,7 @@ mod tests {
             cache_index,
             bytes: snapshot,
             ..
-        }) = graph.acquisition_state(identity)
+        }) = graph.acquisition_state(host, identity).unwrap()
         {
             assert_eq!(snapshot.bytes(), bytes);
             return (cache_index, snapshot);
@@ -2341,6 +2355,7 @@ mod tests {
         assert!(
             graph
                 .begin_acquisition(
+                    host,
                     identity.try_clone().unwrap(),
                     reserve_graph_storage(host, identity.path().as_str().len() as u64).unwrap(),
                 )
@@ -2365,7 +2380,7 @@ mod tests {
         .unwrap();
         let snapshot = Arc::new(SharedDependencySnapshot::new(payload, sharing));
         let cache_index = graph
-            .complete_acquisition(identity, Arc::clone(&snapshot), None)
+            .complete_acquisition(host, identity, Arc::clone(&snapshot), None)
             .unwrap();
         (cache_index, snapshot)
     }

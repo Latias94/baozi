@@ -136,6 +136,23 @@ control and charges `ResourceGraphWork` before examining each candidate slot. A 
 operation over one bounded resource identity is a bounded action, not byte-by-byte hashing work;
 the raw authored reference and payload digest keep their separate byte accounting.
 
+All production physical-cache lookups, resolving insertion, available/failed transitions, and
+resolving removal use the same controlled probe loop. State lookup can fail with the exact graph
+work or control cause; absence is distinct from rejected work. The scope preserves that distinction
+through required and optional failure handling. A denied cleanup does not trigger an unmetered
+fallback scan or erase the session-owned resolving record before terminal destruction.
+The first terminal control/ledger failure remains the operation cause. Acquisition-local budget
+failures enter failed-cache processing only when the request is Optional and its loss policy
+authorizes unavailable-input fallback; otherwise further probe admission cannot replace that cause.
+
+Cache replacement storage is admitted before construction. Candidate index initialization polls
+and charges at most 256 slots per action; every old record slot examined and every reinsertion
+probe is charged separately. Entry replacement qualifies the known-length bulk move and final
+control before moving records. Candidate construction never mutates the live entries, index,
+free-list, or tombstones. A failed allocation, capacity qualification, work admission, or control
+check drops candidates and restores the prior reservations; the final swap has no failure path.
+The old duplicate index initialization pass is removed rather than included in a larger budget.
+
 Committed available edges obey `depth[target] >= depth[source] + 1`, with depth equal to the longest
 root path. Before planning an existing target, a self-edge is rejected. If the new path cannot
 increase the target depth, this invariant proves the edge cannot close a cycle and no descendant

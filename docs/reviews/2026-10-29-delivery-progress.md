@@ -1152,6 +1152,57 @@ Logs are `target/review/g-resource-focused-final.log`, `g-resource-import-final.
 `g-node-growth.log`, `g-resource-workspace-final.log`, `g-resource-clippy-final.log`,
 `g-resource-doctests-final.log`, `g-resource-rustdoc-final.log`, and `g-resource-native-debug.log`.
 
+## Complete Physical Dependency-Cache Work Accounting (2026-10-31)
+
+Every production cache operation now uses the same controlled identity-probe loop: acquisition
+state lookup, resolving insertion, available/failed transition, removal, and graph target lookup.
+The cache methods accept the concrete import host and return work/control errors separately from
+missing or unusable records. Constant-time index-addressed views remain host-free. No second map,
+work dimension, or cache-control framework is introduced.
+
+Capacity planning remains constant time. Applying a replacement admits and initializes candidate
+index storage in at most 256-slot controlled chunks, charges every scanned record slot and
+reinsertion probe, and qualifies the known-length bulk record move before its final control check.
+The previous duplicate sentinel fill is removed. Live entries/index/free-list/tombstones remain
+unchanged throughout fallible construction; successful completion swaps the qualified candidates.
+The graph wrapper restores the prior reservations on candidate failure.
+
+Scope handling preserves the first terminal ledger/control cause. A failed available transition
+ends its mutable graph borrow before cleanup. Further cleanup and unavailable-relation attempts
+cannot replace the original operation error, and terminal non-optional acquisition failures skip
+failed-cache insertion instead of letting another probe overwrite that cause. Optional
+acquisition-local budgets keep their existing unavailable-input contract. Graph work errors cannot
+be relabeled as a missing transition or consumed by optional-input fallback. Refused cleanup leaves
+the resolving row owned by the session until terminal destruction, without an unmetered scan.
+
+Growth evidence now separates physical-cache warm-up from graph connections. For 64/256/1,024
+fixed-size identities, warm-up accounts for initializations, moves, rebuild scans and all miss,
+insertion, and transition probes. Independently bounded acquisition lookups then determine the
+expected query component: unique graph connections use `12N + 2 * sum(probes)`, and N references to
+one existing leaf use `12N + 2N * hot_key_probes`. Logical nodes, relation occurrences, multiplicity,
+maximum depth, and release are checked independently. The finite randomized-table budgets are
+regression thresholds, not universal worst-case complexity claims. These supersede the preceding
+increment's graph-only work formulae.
+
+The final all-feature workspace suite passed **2,441/2,441 tests**, with four manual pilots
+skipped. Strict all-target/all-feature Clippy, workspace doctests, rustdoc with `-D warnings`,
+formatting, and diff checks passed. The all-format independent consumer executed the full typed
+read and application-buffer workflow on the ordinary Windows debug main stack.
+
+The completion regression covers available and unavailable cache transitions, a real
+snapshot-sharing live `ScratchBytes` rejection, and acquisition rejection on Required and strict
+Optional requests, each followed by exhausted graph work. Every case retains
+the original dimension, counter class, value, and limit, publishes no optional/loss evidence or
+Scene, and releases all owned storage without poisoning. Cache tests also interrupt candidate
+initialization/rebuild and reject the final commit checkpoint without modifying live cache state.
+These results qualify the integrated cache change; final package, current-stable, and Linux
+sanitizer checks remain separate H work.
+
+Logs are `target/review/g-cache-first-cause-final.log`, `g-cache-workspace-final.log`,
+`g-cache-clippy-final.log`, `g-cache-doctests-final.log`, `g-cache-rustdoc-final.log`, and
+`g-cache-native-debug-final.log`. The focused cache/growth run is retained in
+`target/review/g-cache-scope-growth.log`.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
@@ -1167,7 +1218,7 @@ Logs are `target/review/g-resource-focused-final.log`, `g-resource-import-final.
   authored nodes, skin matrices, morph deltas, animation curves, and camera/light definitions
   and material lengths together with the borrowed application-buffer workflow. Generated texture coordinates
   without a sampling contract are removed, rather than treated as a pending conversion capability.
-- Finish G's complete cache-work accounting and final integration, and H's current-stable/release package matrix,
+- Finish G's final integrated qualification, and H's current-stable/release package matrix,
   CI execution wiring, and native candidate acceptance. Dependency upgrades, package-content fixes,
   and the recorded fixed artifact matrix already have their distinct implementation/evidence above.
 

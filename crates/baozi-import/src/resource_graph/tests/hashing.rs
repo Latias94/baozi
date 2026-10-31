@@ -281,7 +281,7 @@ fn repeated_available_references_reuse_the_snapshot_digest() {
             cache_index: reused_index,
             bytes: reused,
             ..
-        }) = graph.acquisition_state(&identity)
+        }) = graph.acquisition_state(host, &identity).unwrap()
         else {
             panic!("an available acquisition must remain cached");
         };
@@ -335,13 +335,14 @@ fn digest_follows_the_shared_snapshot_across_distinct_cache_entries() {
     assert!(
         graph
             .begin_acquisition(
+                host,
                 alias.try_clone().unwrap(),
                 reserve_graph_storage(host, alias.path().as_str().len() as u64).unwrap(),
             )
             .unwrap()
     );
     graph
-        .complete_acquisition(&alias, Arc::clone(&snapshot), None)
+        .complete_acquisition(host, &alias, Arc::clone(&snapshot), None)
         .unwrap();
     let before_reuse = host.dimension_state(ImportDimension::WorkUnits).unwrap();
     let reuse_budget = HASH_CHUNK_BYTES as u64 - 1;

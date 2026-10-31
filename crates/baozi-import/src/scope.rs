@@ -2641,16 +2641,16 @@ impl<'session> ParseScope<'session> {
         }
         let cached = {
             let graph = self.resource_graph.borrow();
-            match graph.acquisition_state(&identity) {
-                Some(ResourceAcquisitionState::Available {
+            match graph.acquisition_state(self.host, &identity) {
+                Ok(Some(ResourceAcquisitionState::Available {
                     cache_index,
                     bytes,
                     stable_identity_schema,
-                }) => Some((cache_index, bytes, stable_identity_schema)),
-                Some(ResourceAcquisitionState::Failed {
+                })) => Some((cache_index, bytes, stable_identity_schema)),
+                Ok(Some(ResourceAcquisitionState::Failed {
                     cache_index,
                     stable_identity_schema: cached_stable_identity_schema,
-                }) => {
+                })) => {
                     if !stable_identity_matches(
                         stable_identity_schema,
                         cached_stable_identity_schema,
@@ -2672,7 +2672,7 @@ impl<'session> ParseScope<'session> {
                         DependencyCacheDisposition::Reused,
                     ));
                 }
-                Some(ResourceAcquisitionState::Resolving) => {
+                Ok(Some(ResourceAcquisitionState::Resolving)) => {
                     return Err(self.dependency_failure(
                         Some(pending),
                         Some(identity),
@@ -2682,7 +2682,15 @@ impl<'session> ParseScope<'session> {
                         },
                     ));
                 }
-                None => None,
+                Ok(None) => None,
+                Err(cause) => {
+                    return Err(self.dependency_failure(
+                        Some(pending),
+                        Some(identity),
+                        normalized,
+                        cause.into_scope_cause(),
+                    ));
+                }
             }
         };
         if let Some((origin_node, bytes, cached_stable_identity_schema)) = cached {
@@ -2765,11 +2773,11 @@ impl<'session> ParseScope<'session> {
                 ));
             }
         };
-        let marked = match self
-            .resource_graph
-            .borrow_mut()
-            .begin_acquisition(cache_identity, cache_identity_path_reservation)
-        {
+        let marked = match self.resource_graph.borrow_mut().begin_acquisition(
+            self.host,
+            cache_identity,
+            cache_identity_path_reservation,
+        ) {
             Ok(marked) => marked,
             Err(cause) => {
                 return Err(self.dependency_failure(
@@ -2801,24 +2809,26 @@ impl<'session> ParseScope<'session> {
             });
         match acquired {
             Ok((snapshot_bytes, snapshot_identity)) => {
-                let origin_node = match self.resource_graph.borrow_mut().complete_acquisition(
+                let completed = self.resource_graph.borrow_mut().complete_acquisition(
+                    self.host,
                     &identity,
                     Arc::clone(&snapshot_bytes),
                     stable_identity_schema,
-                ) {
+                );
+                let origin_node = match completed {
                     Ok(origin_node) => origin_node,
-                    Err(_) => {
+                    Err(cause) => {
+                        // Preserve the original admission/control failure. Cleanup is metered too;
+                        // a denied cleanup leaves the session-owned resolving row for terminal drop.
                         let _ = self
                             .resource_graph
                             .borrow_mut()
-                            .abandon_acquisition(&identity);
+                            .abandon_acquisition(self.host, &identity);
                         return Err(self.dependency_failure(
                             Some(pending),
                             Some(identity),
                             normalized,
-                            ScopeAbortCause::DescriptorContract {
-                                code: "dependency-cache-transition-missing",
-                            },
+                            cause.into_scope_cause(),
                         ));
                     }
                 };
@@ -2858,6 +2868,23 @@ impl<'session> ParseScope<'session> {
         normalized: MeteredDependencyPath,
         cause: ScopeAbortCause,
     ) -> DependencyResolutionFailure {
+        // Operation-terminal failures must not be replaced by another probe admission while
+        // trying to cache an unavailable input. Only acquisition-local budgets with authorized
+        // optional fallback keep the cache/evidence path; refused cleanup stays session-owned.
+        let optional_fallback = pending.requirement() == DependencyRequirement::Optional
+            && self
+                .loss_policy
+                .allows(ImportLossKind::OptionalDependencyUnavailable)
+            && optional_eligible(&cause);
+        if matches!(&cause, ScopeAbortCause::Control(_))
+            || (matches!(&cause, ScopeAbortCause::Ledger(_)) && !optional_fallback)
+        {
+            let _ = self
+                .resource_graph
+                .borrow_mut()
+                .abandon_acquisition(self.host, &identity);
+            return self.dependency_failure(Some(pending), Some(identity), normalized, cause);
+        }
         let observation = match self.registered_negative_observation(
             observation_context.registered_resolver,
             observation_context.io,
@@ -2867,21 +2894,10 @@ impl<'session> ParseScope<'session> {
         ) {
             Ok(observation) => observation,
             Err(proof_cause) => {
-                if self
+                let _ = self
                     .resource_graph
                     .borrow_mut()
-                    .abandon_acquisition(&identity)
-                    .is_err()
-                {
-                    return self.dependency_failure(
-                        Some(pending),
-                        Some(identity),
-                        normalized,
-                        ScopeAbortCause::DescriptorContract {
-                            code: "dependency-cache-transition-missing",
-                        },
-                    );
-                }
+                    .abandon_acquisition(self.host, &identity);
                 return self.dependency_failure(
                     Some(pending),
                     Some(identity),
@@ -2894,6 +2910,7 @@ impl<'session> ParseScope<'session> {
             .resource_graph
             .borrow_mut()
             .complete_failed_acquisition(
+                self.host,
                 &identity,
                 cause,
                 observation_context.stable_identity_schema,
@@ -2908,21 +2925,10 @@ impl<'session> ParseScope<'session> {
                 DependencyCacheDisposition::Fresh,
             ),
             Err(cause) => {
-                if self
+                let _ = self
                     .resource_graph
                     .borrow_mut()
-                    .abandon_acquisition(&identity)
-                    .is_err()
-                {
-                    return self.dependency_failure(
-                        Some(pending),
-                        Some(identity),
-                        normalized,
-                        ScopeAbortCause::DescriptorContract {
-                            code: "dependency-cache-transition-missing",
-                        },
-                    );
-                }
+                    .abandon_acquisition(self.host, &identity);
                 self.dependency_failure(Some(pending), Some(identity), normalized, cause)
             }
         }
@@ -3334,7 +3340,14 @@ impl<'session> ParseScope<'session> {
                 disposition,
             )
         {
-            cause = graph_cause.into_scope_cause();
+            // A terminal control/ledger cause already identifies the failed admission.
+            // Further best-effort graph accounting must not replace it with a later excess.
+            if !matches!(
+                &cause,
+                ScopeAbortCause::Control(_) | ScopeAbortCause::Ledger(_)
+            ) {
+                cause = graph_cause.into_scope_cause();
+            }
         }
         drop(graph);
         drop(identity);
@@ -4875,6 +4888,351 @@ mod tests {
                 },
             ),
         )));
+    }
+
+    #[test]
+    fn dependency_cache_completion_budget_failure_is_not_an_optional_input_failure() {
+        #[derive(Clone, Copy)]
+        enum FailurePoint {
+            AvailableTransition,
+            FailedTransition,
+            SnapshotSharing,
+            Acquisition,
+        }
+
+        struct BudgetImporter;
+
+        impl crate::FormatImporter for BudgetImporter {
+            fn descriptor(&self) -> crate::FormatDescriptor {
+                crate::FormatDescriptor::builder(
+                    baozi_core::FormatId::new("org.baozi.test.cache-completion").unwrap(),
+                    "Cache completion regression",
+                )
+                .extensions(["bin"])
+                .encoding(crate::FormatEncoding::Binary)
+                .dependency_roles([
+                    (
+                        DependencyRoleId::new("optional").unwrap(),
+                        DependencyRequirement::Optional,
+                    ),
+                    (
+                        DependencyRoleId::new("required").unwrap(),
+                        DependencyRequirement::Required,
+                    ),
+                ])
+                .build()
+                .unwrap()
+            }
+
+            fn detect(
+                &self,
+                _probe: &crate::Probe<'_>,
+                _hint: &crate::ReadHint,
+                _scope: &crate::DetectionScope<'_>,
+            ) -> crate::DetectionResult<crate::DetectionOutcome> {
+                Ok(crate::DetectionOutcome::NoMatch)
+            }
+
+            fn parse(&self, _scope: &mut ParseScope<'_>) -> ParseResult<CanonicalSceneDraft> {
+                unreachable!("this test exercises the selected ParseScope directly")
+            }
+        }
+
+        let mut registry = crate::RegistryBuilder::new();
+        registry.register(BudgetImporter).unwrap();
+        let registry = registry
+            .freeze(crate::RegistryBuildLimits::default())
+            .unwrap();
+        let entry = registry.entries().next().unwrap();
+        for (failure_point, requirement, allow_optional) in [
+            (
+                FailurePoint::AvailableTransition,
+                DependencyRequirement::Optional,
+                true,
+            ),
+            (
+                FailurePoint::FailedTransition,
+                DependencyRequirement::Optional,
+                true,
+            ),
+            (
+                FailurePoint::SnapshotSharing,
+                DependencyRequirement::Optional,
+                true,
+            ),
+            (
+                FailurePoint::Acquisition,
+                DependencyRequirement::Required,
+                true,
+            ),
+            (
+                FailurePoint::Acquisition,
+                DependencyRequirement::Optional,
+                false,
+            ),
+        ] {
+            let available = !matches!(failure_point, FailurePoint::FailedTransition);
+            let acquisition_denied = matches!(failure_point, FailurePoint::Acquisition);
+            let mut limits = ResourceLimits::default();
+            if acquisition_denied {
+                limits.max_dependency_acquisition_work = 0;
+            }
+            let store = test_store(&limits);
+            let host = store.host();
+            let baseline = current_live_bytes(host);
+            {
+                let io = baozi_io::MemoryAssetIo::new();
+                let dependency_path = AssetPath::new("dependency.bin").unwrap();
+                let payload = b"complete dependency snapshot";
+                if available {
+                    io.try_insert(dependency_path, Arc::<[u8]>::from(payload.as_slice()))
+                        .unwrap();
+                }
+                let authority = io.authority_domain();
+                let source = AssetPath::new("primary.bin").unwrap();
+                let issuer = DependencyOriginIssuer::new();
+                let diagnostics = RefCell::new(DiagnosticSink::new(16, 4096, 512, 8192));
+                let graph = RefCell::new(ResourceGraph::new(limits.clone()));
+                graph
+                    .borrow_mut()
+                    .bind_primary(host, &authority, &source, b"primary")
+                    .unwrap();
+                let optional_evidence = RefCell::new(AccountedVec::new());
+                let loss_evidence = RefCell::new(AccountedVec::new());
+                let source_scope = RefCell::new(None);
+                let format_failure_storage = RefCell::new(FailureEvidenceStorage::default());
+                let terminal = RefCell::new(None);
+                let loss_policy = if allow_optional {
+                    LossPolicy::preserve_or_fail()
+                        .allow(ImportLossKind::OptionalDependencyUnavailable)
+                } else {
+                    LossPolicy::preserve_or_fail()
+                };
+                let scope = ParseScope::new(ParseScopeParts {
+                    entry: entry.clone(),
+                    options: entry.default_options(),
+                    primary_io: &io,
+                    primary_authority: &authority,
+                    primary_source: &source,
+                    primary_bytes: b"primary",
+                    resolver: ResolverBinding::registered(
+                        baozi_io::__semantic_identity::same_authority_resolver_v1(),
+                    ),
+                    dependency_origin_issuer: &issuer,
+                    conformance_policy: ConformancePolicy::Strict,
+                    loss_policy,
+                    limits: &limits,
+                    store_owner: &store.owner,
+                    host,
+                    diagnostics: &diagnostics,
+                    resource_graph: &graph,
+                    optional_dependency_evidence: &optional_evidence,
+                    loss_evidence: &loss_evidence,
+                    source_scope_record: &source_scope,
+                    format_failure_storage: &format_failure_storage,
+                    terminal: &terminal,
+                });
+                let role = DependencyRoleId::new(match requirement {
+                    DependencyRequirement::Required => "required",
+                    DependencyRequirement::Optional => "optional",
+                })
+                .unwrap();
+                assert_eq!(
+                    scope.frozen_dependency_requirement(&role).unwrap(),
+                    requirement
+                );
+                scope.charge_logical_reference().unwrap_or_else(|_| {
+                    panic!("logical reference must fit before the injected limit")
+                });
+                let source_node = graph.borrow().source_for_primary().unwrap();
+                let pending = graph
+                    .borrow_mut()
+                    .begin_relation(host, source_node, &role, requirement, "dependency.bin")
+                    .unwrap();
+                let (pending, normalized, authorized) = scope
+                    .authorize_dependency(
+                        pending,
+                        &io,
+                        &authority,
+                        &source,
+                        &role,
+                        "dependency.bin",
+                    )
+                    .unwrap_or_else(|_| panic!("dependency authorization must succeed"));
+                let (pending, normalized, authorized) = scope
+                    .prepare_authorized_target(pending, normalized, authorized)
+                    .unwrap_or_else(|_| panic!("dependency target planning must succeed"));
+                graph
+                    .borrow_mut()
+                    .reserve_acquisition_capacity(host)
+                    .unwrap();
+                let (failure, dimension, class, value, limit) =
+                    if matches!(failure_point, FailurePoint::SnapshotSharing) {
+                        let (io, identity, stable_identity_schema, registered_resolver) =
+                            authorized.into_parts();
+                        let identity_storage = scope
+                            .reserve_dependency_storage_cause(identity.path().as_str().len() as u64)
+                            .unwrap();
+                        assert!(
+                            graph
+                                .borrow_mut()
+                                .begin_acquisition(
+                                    host,
+                                    identity.try_clone().unwrap(),
+                                    identity_storage
+                                )
+                                .unwrap()
+                        );
+                        let bytes = scope.open_and_read_dependency(io, &identity).unwrap();
+                        assert_eq!(&*bytes, payload.as_slice());
+                        let scratch = host.dimension_state(ImportDimension::ScratchBytes).unwrap();
+                        host.tighten_dimension_policy(
+                            ImportDimension::ScratchBytes,
+                            DimensionPolicy::reservable_bytes(
+                                u64::MAX,
+                                u64::MAX,
+                                0,
+                                scratch.live_bytes(),
+                            ),
+                        )
+                        .unwrap();
+                        let cause = match scope.share_dependency_snapshot(bytes) {
+                            Err(cause) => cause,
+                            Ok(_) => panic!("snapshot sharing must exceed the live scratch limit"),
+                        };
+                        let graph_work = host
+                            .dimension_state(ImportDimension::ResourceGraphWork)
+                            .unwrap();
+                        host.tighten_dimension_policy(
+                            ImportDimension::ResourceGraphWork,
+                            DimensionPolicy::counter(u64::MAX, graph_work.consumed(), 0),
+                        )
+                        .unwrap();
+                        let failure = scope.finish_dependency_resolution_failure(
+                            pending,
+                            identity,
+                            DependencyFailureObservationContext {
+                                stable_identity_schema,
+                                registered_resolver,
+                                io,
+                            },
+                            normalized,
+                            cause,
+                        );
+                        (
+                            failure,
+                            ImportDimension::ScratchBytes,
+                            CounterClass::Live,
+                            scratch.live_bytes()
+                                + shared_dependency_snapshot_allocation_bytes().unwrap() as u64,
+                            scratch.live_bytes(),
+                        )
+                    } else {
+                        let before = host
+                            .dimension_state(ImportDimension::ResourceGraphWork)
+                            .unwrap();
+                        // Get and mark_resolving examine one slot each; the completion probe must fail.
+                        let limit = before.consumed() + 2;
+                        host.tighten_dimension_policy(
+                            ImportDimension::ResourceGraphWork,
+                            DimensionPolicy::counter(u64::MAX, limit, 0),
+                        )
+                        .unwrap();
+                        let failure =
+                            match scope.acquire_authorized(pending, normalized, authorized) {
+                                Err(failure) => failure,
+                                Ok(_) => panic!(
+                                    "cache completion must reject its first unadmitted probe"
+                                ),
+                            };
+                        if acquisition_denied {
+                            (
+                                failure,
+                                ImportDimension::DependencyAcquisitionWork,
+                                CounterClass::Consumed,
+                                1,
+                                0,
+                            )
+                        } else {
+                            (
+                                failure,
+                                ImportDimension::ResourceGraphWork,
+                                CounterClass::Consumed,
+                                limit + 1,
+                                limit,
+                            )
+                        }
+                    };
+                let is_original_cause = |cause: &ScopeAbortCause| {
+                    matches!(
+                        cause,
+                        ScopeAbortCause::Ledger(LedgerCause::LimitExceeded {
+                            class: actual_class,
+                            dimension: actual_dimension,
+                            value: actual_value,
+                            limit: actual_limit,
+                        }) if *actual_dimension == dimension && *actual_class == class
+                            && *actual_value == value && *actual_limit == limit
+                    )
+                };
+                assert!(is_original_cause(
+                    scope
+                        .dependency_failure
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .cause(&graph.borrow())
+                        .unwrap()
+                ));
+                let opened = host.dimension_state(ImportDimension::AssetOpen).unwrap();
+                assert_eq!(opened.attempted(), 1);
+                assert_eq!(opened.consumed(), u64::from(available));
+                assert_eq!(
+                    host.dimension_state(ImportDimension::DependencyBytes)
+                        .unwrap()
+                        .consumed(),
+                    if available && !acquisition_denied {
+                        payload.len() as u64
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(
+                    host.dimension_state(ImportDimension::DependencyAcquisitionWork)
+                        .unwrap()
+                        .consumed(),
+                    u64::from(available && !acquisition_denied)
+                );
+                match requirement {
+                    DependencyRequirement::Required => {
+                        let origin = scope.root_origin();
+                        let _ = scope.abort_required_dependency_failure(
+                            &origin,
+                            &role,
+                            "dependency.bin",
+                            failure,
+                        );
+                    }
+                    DependencyRequirement::Optional => {
+                        assert!(scope.resolve_optional_failure(&role, failure).is_err());
+                    }
+                }
+                let abort = scope.take_terminal_abort().unwrap();
+                assert!(is_original_cause(abort.cause()));
+                assert!(optional_evidence.borrow().is_empty());
+                assert!(loss_evidence.borrow().is_empty());
+                assert!(store.owner.completed_scene_boundary().unwrap().is_none());
+                assert_eq!(
+                    host.dimension_state(ImportDimension::CanonicalOutputBytes)
+                        .unwrap()
+                        .live_bytes(),
+                    0
+                );
+                assert!(!store.account.snapshot().poisoned());
+            }
+            assert_eq!(current_live_bytes(host), baseline);
+            store.assert_released();
+        }
     }
 
     #[test]

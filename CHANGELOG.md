@@ -6,6 +6,10 @@ Baozi currently publishes no stable compatibility promise. The project may make 
 
 ## Unreleased
 
+- Metered every dependency-cache probe and candidate index initialization, record scan, reinsertion,
+  and replacement move through the existing resource-graph work budget. Cache work/control errors
+  propagate distinctly from absent records; optional-input fallback cannot hide them. Replacement
+  failure preserves live cache storage and its reservations, with no unmetered cleanup scan.
 - Reused the dependency cache's identity index for resource-graph lookup and replaced per-reference
   full-graph depth scratch with constant-work unchanged-depth admission and a reachable-region
   planner. Graph commits now validate prepared-plan freshness and finish control, allocation,

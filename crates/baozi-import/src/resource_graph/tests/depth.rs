@@ -333,43 +333,50 @@ fn prepared_target_rejects_interleaved_commits_that_change_depth_or_create_a_bac
 
 #[test]
 fn cancellation_after_cached_target_preparation_cannot_commit_the_edge_or_depths() {
-    let limits = ResourceLimits::default();
-    let cancellation = baozi_operation::CancellationToken::new();
-    let (owner, account) = store_owner_and_account(
-        &limits,
-        ImportOperationControl::default().with_cancellation(cancellation.clone()),
-    );
-    let host = owner.host();
-    let (mut graph, role, target, source) = shared_depth_prefix(host, 3);
-    let mut pending = graph
-        .begin_relation(
-            host,
-            source,
-            &role,
-            DependencyRequirement::Required,
-            target.path().as_str(),
-        )
-        .unwrap();
-    graph.prepare_target(host, &mut pending, &target).unwrap();
-    let (cache, snapshot) = cache_snapshot(&mut graph, host, &target, b"a");
-    // Ensure completion can reuse an already calculated digest rather than polling in hashing.
-    snapshot.content_digest(host).unwrap();
-    let before = committed(&graph);
-    cancellation.cancel();
-    assert!(matches!(
-        graph.complete_available(
-            host,
-            pending,
-            cache,
-            snapshot.bytes(),
-            AvailableResourceIdentity::new(&target, target.path(), None)
-        ),
-        Err(ResourceGraphError::Scope(ScopeAbortCause::Control(_)))
-    ));
-    assert_eq!(committed(&graph), before);
-    drop(snapshot);
-    drop(graph);
-    assert_store_released(owner, account);
+    for changes_depth in [false, true] {
+        let limits = ResourceLimits::default();
+        let cancellation = baozi_operation::CancellationToken::new();
+        let (owner, account) = store_owner_and_account(
+            &limits,
+            ImportOperationControl::default().with_cancellation(cancellation.clone()),
+        );
+        let host = owner.host();
+        let (mut graph, role, target, source) = shared_depth_prefix(host, 3);
+        let source = if changes_depth { source } else { 0 };
+        let mut pending = graph
+            .begin_relation(
+                host,
+                source,
+                &role,
+                DependencyRequirement::Required,
+                target.path().as_str(),
+            )
+            .unwrap();
+        graph.prepare_target(host, &mut pending, &target).unwrap();
+        let Some(TargetAdmission::Existing { depth_updates, .. }) = &pending.target else {
+            panic!("cached graph target must already exist");
+        };
+        assert_eq!(depth_updates.is_empty(), !changes_depth);
+        let (cache, snapshot) = cache_snapshot(&mut graph, host, &target, b"a");
+        // Ensure completion can reuse an already calculated digest rather than polling in hashing.
+        snapshot.content_digest(host).unwrap();
+        let before = committed(&graph);
+        cancellation.cancel();
+        assert!(matches!(
+            graph.complete_available(
+                host,
+                pending,
+                cache,
+                snapshot.bytes(),
+                AvailableResourceIdentity::new(&target, target.path(), None)
+            ),
+            Err(ResourceGraphError::Scope(ScopeAbortCause::Control(_)))
+        ));
+        assert_eq!(committed(&graph), before);
+        drop(snapshot);
+        drop(graph);
+        assert_store_released(owner, account);
+    }
 }
 
 #[test]
