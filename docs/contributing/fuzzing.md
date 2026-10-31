@@ -35,31 +35,26 @@ cargo +nightly-2026-10-28 fuzz check gltf_import
 
 ## Windows MSVC Setup
 
-On Windows, `cargo +nightly-2026-05-27 fuzz run` may fail before executing the target if the
-AddressSanitizer runtime DLL is missing. Match the LLVM major/minor version from
-the active nightly:
+On Windows, a sanitizer run may fail before executing the target if the
+AddressSanitizer runtime DLL is missing. Inspect the active nightly before selecting a
+local compiler-rt runtime:
 
 ```powershell
-rustc +nightly-2026-05-27 -Vv
+rustc +nightly-2026-10-28 -Vv
 ```
 
-The CI fuzz job currently pins `nightly-2026-05-27` and `cargo-fuzz` 0.13.2.
-That nightly reports LLVM 22.1.6. A matching local LLVM install can be placed
-outside the repo:
+The CI fuzz job pins `nightly-2026-10-28` and `cargo-fuzz` 0.13.2. Keep any local LLVM
+installation outside the repository, and put its matching compiler-rt DLL directory on
+the process `PATH` before running the targets. An older LLVM installation is not qualified
+for a newer Rust nightly merely because its DLL names match. Use the pinned Linux job when
+a compatible Windows runtime is unavailable.
 
 ```powershell
-$installRoot = 'F:\MySoftware\LLVM-22.1.6'
-$installerPath = 'F:\MySoftware\LLVM-22.1.6-win64.exe'
-$downloadUrl = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.6/LLVM-22.1.6-win64.exe'
-
-Invoke-WebRequest -Uri $downloadUrl -OutFile $installerPath
-Start-Process -FilePath $installerPath -ArgumentList @('/S', "/D=$installRoot") -Wait -WindowStyle Hidden
-
-$env:PATH = "$installRoot\bin;$installRoot\lib\clang\22\lib\windows;$env:PATH"
-cargo +nightly-2026-05-27 fuzz run stl_import -- -runs=256
-cargo +nightly-2026-05-27 fuzz run obj_import -- -runs=256
-cargo +nightly-2026-05-27 fuzz run ply_import -- -runs=256
-cargo +nightly-2026-05-27 fuzz run registry_detection -- -runs=256 -max_len=4106
+cargo +nightly-2026-10-28 fuzz run --sanitizer address stl_import -- -runs=256
+cargo +nightly-2026-10-28 fuzz run --sanitizer address obj_import -- -runs=256
+cargo +nightly-2026-10-28 fuzz run --sanitizer address ply_import -- -runs=256
+cargo +nightly-2026-10-28 fuzz run --sanitizer address registry_detection -- -runs=256 -max_len=4106
+cargo +nightly-2026-10-28 fuzz run --sanitizer address gltf_import -- -runs=256
 ```
 
 Known Windows outcomes:
@@ -91,7 +86,11 @@ baseline Linux sanitizer gate.
 maintained backend rejects the demonstrated POSITION and camera defects before reader entry.
 The immutable `2dc2fc8` archive passed six malformed JSON/GLB reproducers and a bounded 256-run
 Linux ASan campaign; the [delivery progress](../reviews/2026-10-29-delivery-progress.md) records
-the exact source/toolchain scope. This short campaign does not establish sustained fuzz coverage.
+the exact source/toolchain scope. The later immutable `34b12dd` archive passed all five current
+targets at 256 runs each on Linux, exercising the parser, validation, and snapshot paths after the
+typed storage and controlled dependency-cache changes. That execution used Rust nightly `92ffebece` (2026-10-28),
+LLVM 23.1.4, and cargo-fuzz 0.13.2; its retained corpus/logs and unchanged lockfile are recorded in
+the same progress document. These short runs do not establish sustained fuzz coverage.
 Known backend hazards and unsupported slices remain in [glTF Backend Notes](../research/gltf-rs-backend-notes.md).
 
 ## CI Tool Pinning

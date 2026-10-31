@@ -1203,6 +1203,31 @@ Logs are `target/review/g-cache-first-cause-final.log`, `g-cache-workspace-final
 `g-cache-native-debug-final.log`. The focused cache/growth run is retained in
 `target/review/g-cache-scope-growth.log`.
 
+## Final Integrated Linux ASan Smoke (2026-10-31)
+
+The immutable `34b12dd5a9bb40c9e719badbae42f071b1485deb` Git archive executed all five
+current targets on Ubuntu 26.04 x86_64 under WSL2: `stl_import`, `obj_import`, `ply_import`,
+`gltf_import`, and `registry_detection`. Each completed **256 runs**, with a 10-second input
+timeout, 4,096 MiB RSS limit, and 120-second campaign limit. Format inputs used a 65,536-byte
+maximum; registry detection used 4,106 bytes. Format targets started from the archive's committed
+seeds; registry detection started from an empty corpus. All resulting corpus entries and logs are
+retained separately from the tracked seeds.
+
+The actual compiler was `rustc 1.101.0-nightly (92ffebece 2026-10-28)`, LLVM 23.1.4,
+with cargo-fuzz 0.13.2. Locked offline metadata succeeded before execution, and the archive's
+fuzz lockfile remained byte-identical afterward. All five executed binaries contain `__asan_init`
+and `__asan_report_load1`. There was no parser panic, abort, or sanitizer finding in these bounded
+runs. This qualifies the exercised parser, validation, and snapshot paths in the completed typed
+domain and integrated graph/cache source state. It does not exercise every postprocessing operation
+or establish sustained fuzz coverage or native-filesystem promotion.
+
+The local verification helper initially stopped before registry startup because that target has no
+committed corpus directory. Registry execution then completed from an explicitly empty corpus
+against the same archive, without repeating or replacing the four successful format results.
+The source/toolchain, instrumentation, individual target logs, and resulting corpus are retained
+in `target/review/h-linux-asan-34b12dd5a9bb-jpoh52qb/`; orchestration logs are
+`target/review/h-linux-asan-final.log` and `h-linux-asan-registry.log`.
+
 ## Remaining acceptance
 
 - Complete final acceptance after the remaining architectural units. The current combined suite
