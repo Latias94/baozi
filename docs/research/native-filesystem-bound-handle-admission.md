@@ -363,6 +363,16 @@ A separate local `SetVolumeMountPointW` attempt against a new, verified-empty di
 volume mapping changed. This is an actual fixture-setup limitation, not adapter rejection or
 volume-mount acceptance; the retained result is `target/review/h-windows-volume-fixture.json`.
 
+The current-source Linux Rust 1.95.0 IO test executable subsequently passed all **62/62** cases in
+its ordinary environment and in each child-local `openat2` error state: `ENOSYS`, `EPERM`, and
+persistent `EAGAIN`. A temporary seccomp fixture first verifies the actual syscall result, then
+executes the same complete binary with one test thread; it affects only that child and allows
+other syscalls. All four modes ran without skips, including actual link/permission/race and Unix
+repository cases. This demonstrates fallback behavior without establishing an exact retry count,
+deadline, or every platform's work bound. Build selection and all four logs are retained as
+`target/review/a2-native-fallback-*.log` and `a2-native-fallback-build.jsonl`. It is local
+qualification evidence, not a newly maintained resolver or hosted CI result.
+
 ## Residual Risks
 
 | Risk | Impact | Treatment |

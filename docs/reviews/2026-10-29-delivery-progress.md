@@ -1453,23 +1453,196 @@ Logs are `target/review/a2-owner-workspace-msrv.log`, `a2-owner-workspace-stable
 `a2-owner-rustdoc.log`. Package and sanitizer verification for this newer owner boundary remains
 separate from the preceding archive evidence.
 
-## Remaining acceptance
+## Packaged and Sanitized Ownership Boundary (2026-10-31)
 
-- Complete final acceptance after the remaining architectural units. The current combined suite
-  closes the B/D1/E integration checks recorded above; later changes need their own validation.
-- Preserve B's verified retained manifest/evidence ownership and fidelity behavior through the
-  remaining storage and postprocessing cutovers.
-- Preserve C's verified typed reads and required-dependency context through the storage cutover; retain the single Scene owner.
-- Preserve all seven completed typed domain cutovers and normal generation's concrete
-  attribute-owner mapping. Keep validation borrowed and unchanged owner sharing intact through the
-  remaining postprocessing work; do not reintroduce retired record/projection paths.
-- Retain E's exact selected-profile restrictions and sanitizer coverage through later storage changes.
-- Preserve F's triangulation, normal generation, and target-space conversion for geometry,
-  authored nodes, skin matrices, morph deltas, animation curves, and camera/light definitions
-  and material lengths together with the borrowed application-buffer workflow. Generated texture coordinates
-  without a sampling contract are removed, rather than treated as a pending conversion capability.
-- Finish G's final integrated qualification, and H's current-stable/release package matrix,
-  CI execution wiring, and native candidate acceptance. Dependency upgrades, package-content fixes,
-  and the recorded fixed artifact matrix already have their distinct implementation/evidence above.
+The committed `59cf026f9fc9` ownership implementation completed both fresh extracted-artifact
+consumer matrices on the ordinary Windows main stack: **12/12 under Rust 1.95.0 debug** and
+**12/12 under Rust 1.99.1 release**. Each matrix builds and executes the maintained public consumer
+against all twelve extracted production packages. A bounded comparison found all **555 Rust
+files** in both staging trees equal to the committed source. No checkout dependency or unlocked
+retry substitutes for those artifacts. The operation and IO leaf packages additionally passed
+ordinary `cargo +1.95.0 package --locked` verification without dirty/no-verify flags.
 
-No change here asserts exact RSS from ledger counters, sustained fuzz coverage, or publication readiness.
+The empty/all release consumers also executed under Wasmtime 50.0.0 on `wasm32-wasip1`; their
+handwritten semantic assertions passed. The corresponding browser-WASM empty/all consumers
+compiled successfully. Browser execution is not claimed.
+
+Five Linux ASan targets then executed **256 runs each** from an immutable Git archive of the
+same commit: STL, OBJ, PLY, selected glTF, and registry detection. The locked fuzz metadata and
+execution used the existing checksum-qualified offline dependency cache. All five binaries
+contain `__asan_init` and `__asan_report_load1`; the fuzz lockfile digest remained unchanged.
+Per-input timeout, memory cap, campaign cap, seeds, logs, resulting corpus, and artifacts follow
+the bounded settings recorded above. This is sanitizer smoke for the ownership boundary, not
+sustained fuzz coverage or native-filesystem qualification. Native candidate IO is not enabled
+in these portable parser targets.
+
+Artifact directories are `target/package-check-oh8pc0oc/` and
+`target/package-check-_p23czn6/`. Logs are `target/review/a2-owner-packages-msrv-debug.log`,
+`a2-owner-packages-stable-release.log`, `a2-owner-package-source-comparison.log`,
+`a2-owner-package-operation-verify.log`, `a2-owner-package-io-verify.log`,
+`a2-owner-wasi.log`, and `a2-owner-browser.log`. Sanitizer evidence is retained in
+`target/review/h-linux-asan-59cf026f9fc9-xjy_l8lk/`, with orchestration in
+`target/review/a2-owner-linux-asan.log`. The subsequently discovered Windows reparse defect and
+its candidate-only fix have their own behavioral qualification.
+
+The actual Ubuntu 26.04 x86_64 host then passed **2,465/2,465 all-feature workspace tests** under
+Rust 1.95.0, with four manual pilots skipped in that ordinary invocation. Strict workspace
+all-target/all-feature Clippy and workspace doctests also passed. The workspace test binaries
+were built before the separate unique-vertex target was added; that new workload and the latest
+native predicate receive their own Linux follow-up below. The newer predicate preserves Unix
+symlink semantics. These Linux commands used the existing target directory and locked offline
+dependencies; no networking or system configuration change was made. Logs are
+`a2-owner-linux-workspace.log`, `a2-owner-linux-clippy.log`, and `a2-owner-linux-doctests.log`.
+
+## Actual Windows Reparse Rejection and Rename Controls (2026-10-31)
+
+An actual non-Microsoft reparse fixture exposed a runtime defect beyond the lexical path firewall.
+For file tag `0x42`, the capability backend returned a handle whose metadata reported a regular
+file, even though ordinary host reading rejected the object with Windows error 1920. A temporary
+native consumer first failed its required rejection assertion. Runtime IO now checks the returned
+handle's reparse attribute before accepting its ordinary file type or constructing an `OpenedAsset`.
+The same crate-private predicate replaces repository capture's duplicate check. No pathname
+preflight/reopen, unsafe Rust, new dependency, or alternate resolver is introduced.
+
+The maintained regression uses Python/Win32 only to create and read back the actual tag/GUID
+fixtures. Both root and nested file objects require exact `InspectObject` /
+`NonRegularFile(SymlinkOrReparsePoint)` errors. A directory object is rejected; an ordinary file
+inside the nonredirecting directory tag `0x10000042` must return its complete authorized bytes or
+an open error. The direct ordinary file remains a positive control. This preserves the runtime
+contract's in-root link semantics; repository capture has the separately stricter no-reparse
+component contract. Test fixture failures cannot skip the gate, and the Windows candidate CI job
+now explicitly installs its Python prerequisite.
+
+The integrated rerun also exposed a false error-code restriction in the earlier replacement
+fixture: a directory containing the reader's still-open child can reject rename with error 5,
+while holding the directory itself produces error 32. A controlled local `MoveFileExW` fixture
+confirmed both observations and immediate success after the corresponding handle was closed.
+The race now accepts only those two exact codes while a read is in flight; the same exchange
+must still succeed immediately after release. A deterministic held-child control requires one
+of those exact denial codes, complete original bytes, then successful rename and restoration.
+There is no blanket permission-error acceptance or retry loop. The failing round-12 log is
+retained separately.
+
+Rust 1.95.0 passed **42/42 runtime IO and 52/52 repository-candidate tests**. Rust 1.99.1 passed
+**52/52 all-feature IO tests**. All executed without skips, including the new actual-tag and
+held-child controls. Read-only correctness review found no predicate or storage/handle-lifetime
+regression. Actual helper creation succeeded on the workspace F: volume and system-temp C:
+volume; maintained tests left no `baozi-io-unknown-reparse-*` directory behind. These observations
+do not qualify every filter driver or volume mount.
+
+The separate real-volume mount attempt failed in fixture setup with `ERROR_ACCESS_DENIED` (5);
+no mount was created. Apple ARM64 execution is still outstanding. Release registration remains
+empty and Windows repository capture retains its typed pre-traversal rejection.
+
+Logs are `target/review/h-windows-unknown-reparse-runtime.log` (before),
+`h-windows-unknown-reparse-after.log`, `a2-final-windows-directory-rename-before.log`,
+`h-windows-rename-denial.json`, `a2-final-windows-msrv-runtime.log`,
+`a2-final-windows-msrv-repository.log`, and `a2-final-windows-stable-repository.log`.
+Fixture reports include `h-windows-unknown-reparse-fixture.json`,
+`h-windows-unknown-reparse-fixture-directory.json`, and `h-windows-volume-fixture.json`.
+
+## Unique Vertices and Final Growth Coverage (2026-10-31)
+
+The older OBJ scale fixture repeats faces over only three vertices. The new independent
+`unique_vertex_growth_contract` complements it with 256/1,024/4,096 triangles and three distinct,
+nonreused positions per triangle. Public typed reads verify all coordinates, all indices, exact
+geometry counts, terminal counter values, and zero live bytes/reservations. Fixed-width OBJ
+records make input bytes grow exactly fourfold. Actual consumed pipeline work is bounded by
+fourfold previous work plus the larger input's deterministic position-sort comparison bound;
+the gate has no timing threshold or inferred RSS claim.
+
+The Windows Rust 1.95.0 run passed this new case together with the existing repeated-face scale
+and one-MiB stack controls (**3/3**):
+
+| Distinct vertices | Input bytes | Consumed work | Peak declared bytes |
+| ---: | ---: | ---: | ---: |
+| 768 | 14,336 | 41,907 | 251,110 |
+| 3,072 | 57,344 | 178,739 | 945,382 |
+| 12,288 | 229,376 | 763,059 | 3,722,470 |
+
+The maintained thin Python scale driver now runs both Rust contract targets. Fixture generation,
+semantic expectations, and the work bound remain in Rust; the driver adds only the fixed test
+target argument. Syntax/CLI checks and Actionlint passed locally. Distinct primitive buffers,
+node depth/width, and repeated resource sharing retain their separate existing Rust growth
+checks. The log is `target/review/a2-final-windows-msrv-growth-stack.log`.
+
+Current-stable Clippy then required the new test's fixed-width position traversal to borrow
+`as_chunks::<3>()` arrays. The MSRV already supports this API. Both Rust 1.95.0 and 1.99.1 reran
+the affected test successfully with identical semantic/work/allocation observations. The actual
+Linux MSRV run used only `--no-default-features --features format-obj`, matching the scale driver's
+feature boundary, and passed the unique-vertex, repeated-face, and one-MiB stack cases (**3/3**).
+Linux consumed exactly the same work totals; its declared peaks were 250,624 / 944,896 / 3,721,984
+bytes. These are ledger observations rather than RSS comparisons between hosts.
+
+The final Windows current-stable all-feature workspace suite passed **2,456/2,456**, with the four
+manual pilots skipped as before. After the fixed-array adjustment, both targeted toolchains and
+strict all-target/all-feature workspace Clippy passed. The current-source MSRV all-feature IO suite
+also passed **52/52**. All four public examples executed successfully again, and formatting,
+Python syntax/CLI, Actionlint, and diff checks passed.
+
+The committed `aa44f81` IO package additionally passed `cargo +1.95.0 package --locked -p baozi-io
+--all-features --jobs 1` without dirty/no-verify flags. The archive contains the committed native
+object check, repository predicate use, and Python fixture. The earlier complete portable
+artifact matrices remain scoped to the ownership commit; this newer native-only repair has its
+own executed candidate and verified-package evidence.
+
+Logs are `a2-final-windows-msrv-growth-final.log`, `a2-final-windows-stable-growth-final.log`,
+`a2-final-linux-growth-stack.log`, `a2-final-windows-stable-workspace.log`,
+`a2-final-windows-msrv-io-final.log`, `a2-final-windows-stable-clippy.log`,
+`a2-final-windows-integration-resumed.log`, `a2-final-windows-example-*.log`,
+`h-owner-native-actionlint.log`, and `a2-final-package-io-all-features.log` under `target/review/`.
+The initial lint failure is retained as `a2-final-windows-stable-clippy-before-typed-chunks.log`.
+
+## Forced Linux Backend Fallback (2026-10-31)
+
+The current-source Rust 1.95.0 all-feature IO libtest binary passed **62/62 without skips** in its
+ordinary environment and in each of three forced backend states: `openat2` returns `ENOSYS` (38),
+`EPERM` (1), or persistent `EAGAIN` (11). Each isolated child first installs a process-local seccomp
+filter under `NO_NEW_PRIVS`, verifies the actual syscall result, and then executes that same binary
+with one test thread. The fixture's filter allows every other syscall; no parent filter, machine
+configuration, networking change, or root privilege is involved. The native tests include authorized reads,
+escaping/magic links, replacement races, permission failures, special objects, and operational
+repository capture. All three child processes returned zero.
+
+This is actual fallback behavior under backend rejection. It does not count the internal retry
+attempts, measure a backend deadline, or establish every platform's retry/work bound. The fixture
+is a temporary local qualification helper, not another maintained resolver or mutation framework.
+Cargo JSON supplies the actual built executable; no artifact filename is guessed.
+
+Evidence is `target/review/a2-native-fallback-build.jsonl`, `a2-native-fallback-build.log`,
+`a2-native-fallback-baseline.log`, `a2-native-fallback-enosys.log`,
+`a2-native-fallback-eperm.log`, `a2-native-fallback-eagain.log`, and
+`a2-final-linux-followup.log`. These complement rather than replace the native candidate matrix.
+
+## A–H Acceptance Audit (2026-10-31)
+
+Earlier entries describe their own increments and source revisions. This audit replaces the stale
+list of unfinished typed-domain and postprocess migrations; it does not turn historical execution
+into qualification of later changes. The active remaining work is behavioral acceptance and native
+candidate qualification, rather than another Scene representation or a speculative release system.
+
+| Unit | Delivered implementation | Acceptance and remaining scope |
+| --- | --- | --- |
+| A | Startup-admitted session state; normal-stack import; static proof-scheme identities; healthy published/unpublished cleanup; explicit callback-destructor containment; repaired examples. | Both Windows toolchains, ordinary-stack extracted consumers, the full Linux suite, current-source one-MiB controls, and all four executable examples pass. Real poison/destructor failures retain their distinct containment behavior. |
+| B | OBJ partial-channel/color loss decisions and homogeneous positions; exact PLY F64 values; STL names; single snapshot hashing; retained manifest/evidence; bounded short reads; complete cache/graph work and original-cause propagation. | Existing semantic, budget, cancellation, growth, and lifetime regressions run in the integrated suites. No separate fidelity/storage implementation remains from this unit. |
+| C | Borrowed typed readers, checked IDs/counts, simple static-plugin construction with default provenance, bounded semantic errors and dependency context, and one independent public consumer. | Fresh extracted consumers execute the supported workflows without snapshots or private ownership/account APIs. No second public Scene or compatibility facade remains. |
+| D | All seven semantic domains use typed retained owners; obsolete record codecs/projections are removed; validation borrows actual storage; unchanged tables/payloads share owners; structural edits remap final owner provenance. | Corruption, interruption, source-first destruction, and sharing remain covered. The latest six-case pilot/control selection preserves measured allocation/work results. Earlier Linux process RSS is explicitly scoped to its immutable archive and remains advisory. No domain migration remains. |
+| E | Maintained glTF/GLB backend, exact selected PBR/deformation/animation profile, normalized source ownership and explicit unsupported-profile rejection. | Typed artifact consumers and the newer immutable ownership ASan archive pass. The six historical backend reproducers remain committed corpus. This does not admit additional formats/extensions or claim sustained fuzz coverage. |
+| F | Triangulation, Flat/Smooth normals, complete admitted target-space conversion, and borrowed triangle tuples into application-owned buffers. | The independent artifact/WASI workflow checks actual values and buffers after Scene destruction. Corner/Face semantics, seams, deformation, animation, camera/light axes, and material lengths retain focused regression coverage. Global tuple deduplication and removed undefined generated-coordinate sources are not unfinished requirements. |
+| G | Compiler/behavior boundaries replace source-hash/AST governance; metadata checks stay locked; the scale driver is thin Python; Rust owns fixtures/assertions; fuzz logs/corpus are retained. | The deliberate quadratic growth regression was rejected and precisely removed. Distinct buffers, depth/width, resource sharing, and unique vertices have executed work checks. Windows MSRV/stable and Linux's OBJ-only boundary pass the new unique-vertex test. Driver timing/RSS stay advisory. |
+| H | Updated dependencies/MSRV checks, package-local documentation/licenses, extracted-only twelve-case consumer matrix, executable WASI and current-stable CI wiring. | Both fresh ownership-boundary artifact matrices and verified leaf packages pass; the newer native repair also passes all-feature package verification. Browser-WASM is compile-only. Linux forced fallback passes all three backend-error states. No hosted CI dispatch, upload, or registry publication is claimed. Native candidates retain the concrete remaining platform matrix below. |
+
+Native release registration remains empty. Actual Apple ARM64 runtime/permission execution,
+Windows volume-mount behavior, and the outstanding exact backend retry/work evidence still govern
+promotion. The local volume-mount fixture attempt returned access denied before creating a mount;
+it is not adapter acceptance. Unknown-tag payload handling is a demonstrated defect with a concrete
+candidate-only repair, fixture, and separate regression gate. Windows repository capture continues
+to return `UnsupportedIdentityBackend` before traversal; passing that test does not claim working
+Windows capture.
+
+The maintained [`scale-profile-policy.md`](../testing/scale-profile-policy.md) documents the Python
+driver and Rust workload boundaries. [`behavior-gates.md`](../testing/behavior-gates.md) maps the
+actual checks, and [native admission](../research/native-filesystem-bound-handle-admission.md)
+records the platform distinction. Exact RSS, sustained fuzz coverage, full target promotion, and
+registry publication readiness are not inferred from these local results. The delivery goal remains
+active until its required remaining behavior has actually been qualified.
